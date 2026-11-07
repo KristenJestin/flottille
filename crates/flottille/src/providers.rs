@@ -156,7 +156,7 @@ impl Provider {
         }
         names.push("wake");
         names.push("report");
-        names.push(if root { "ask_user" } else { "ask_parent" });
+        names.push("ask");
         // Only a root starts a session or is one: the sessions it writes to are those.
         if root {
             names.push("session_send");
@@ -1201,17 +1201,13 @@ pub fn pick_judge(daemon: &Daemon) -> Option<Judge> {
             document.insert("judge", toml_edit::value(provider::NO_JUDGE));
             return true;
         }
-        let Some(judge) = PROVIDERS.iter().find_map(|provider| {
-            let (_, model) = SMALLEST.iter().find(|(name, _)| *name == provider.name)?;
-            let check = Check::of(provider, before, Version::Skip);
-            let signed_in = check.login_present || check.api_key.is_some();
-            (check.program.is_some() && check.ready() && signed_in).then(|| Judge {
-                provider: provider.name.to_owned(),
-                model: Some((*model).to_owned()),
-                picked: true,
-            })
-        }) else {
+        let Some((provider, model)) = smallest_ready(before) else {
             return false;
+        };
+        let judge = Judge {
+            provider: provider.to_owned(),
+            model: Some(model.to_owned()),
+            picked: true,
         };
         let mut table = judge_table(&judge);
         if let Some(table) = table.as_table_mut() {
@@ -1236,6 +1232,19 @@ pub fn pick_judge(daemon: &Daemon) -> Option<Judge> {
             None
         }
     }
+}
+
+/// The smallest model (`SMALLEST`) of the first provider, in Flottille's order, that is enabled,
+/// installed (its program on `PATH`; a test override is not an install) and signed in where
+/// Flottille can see it (its login file present, never opened, or its sign-in variable set): what
+/// Flottille picks as the Auto judge and as the compactor for a user who never chose one.
+pub fn smallest_ready(settings: &Settings) -> Option<(&'static str, &'static str)> {
+    PROVIDERS.iter().find_map(|provider| {
+        let (_, model) = SMALLEST.iter().find(|(name, _)| *name == provider.name)?;
+        let check = Check::of(provider, settings, Version::Skip);
+        let signed_in = check.login_present || check.api_key.is_some();
+        (check.program.is_some() && check.ready() && signed_in).then_some((provider.name, *model))
+    })
 }
 
 /// Whether the last `provider.judge_changed` chose no judge: read once from the end of the store
@@ -1443,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn a_root_agent_gets_ask_user_the_agent_tools_and_approval_answer() {
+    fn a_root_agent_gets_ask_the_agent_tools_and_approval_answer() {
         let tools = short(claude::PROVIDER.tools(true, false, false, false, false));
         assert_eq!(
             tools,
@@ -1470,7 +1479,7 @@ mod tests {
                 "project",
                 "wake",
                 "report",
-                "ask_user",
+                "ask",
                 "session_send",
                 "session_read",
                 "approval_answer",
@@ -1482,17 +1491,17 @@ mod tests {
     fn the_tools_follow_what_the_agent_can_do() {
         let leaf = short(claude::PROVIDER.tools(false, true, false, false, false));
         assert_eq!(leaf.len(), 15);
-        assert!(leaf.contains(&"ask_parent".to_owned()));
+        assert!(leaf.contains(&"ask".to_owned()));
         assert!(
             !leaf
                 .iter()
-                .any(|t| t.starts_with("agent_") || t == "ask_user")
+                .any(|t| t.starts_with("agent_") || t == "session_send")
         );
         assert!(!leaf.contains(&"approval_answer".to_owned()));
         let lead_child = short(claude::PROVIDER.tools(false, false, false, false, false));
-        assert!(lead_child.contains(&"ask_parent".to_owned()));
+        assert!(lead_child.contains(&"ask".to_owned()));
         assert!(lead_child.contains(&"approval_answer".to_owned()));
-        assert!(!lead_child.contains(&"ask_user".to_owned()));
+        assert!(!lead_child.contains(&"session_send".to_owned()));
         // A child does its brief: the project's skills, commands, setup and settings are the
         // root's. It reads the tasks it runs and changes none of them, and reads the workspaces
         // and removes its own (the gate and the family refuse the rest).

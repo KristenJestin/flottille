@@ -83,7 +83,7 @@ fn scripts(user: &User, die: bool) {
         "claude",
         json!({"models": ["fake-small"], "turns": [
             {"when": "LEAD-DIES", "times": times, "do": [{"die": 3}]},
-            {"when": "LEAD", "do": [{"mcp": {"tool": "agent_launch", "arguments": {
+            {"when": "LEAD", "do": [{"mcp": {"tool": "agent_launch", "arguments": {"kind": "child",
                 "title": "other", "brief": "CHILD-DIES CHILD work", "provider": "opencode",
                 "model": "open/medium"}}}]}
         ]}),
@@ -375,7 +375,7 @@ fn a_lead_launches_a_child_on_a_model_id_without_its_date_suffix() {
     user.provider_script(
         "claude",
         json!({"models": ["fake-small"], "turns": [
-            {"when": "LEAD", "do": [{"mcp": {"tool": "agent_launch", "arguments": {
+            {"when": "LEAD", "do": [{"mcp": {"tool": "agent_launch", "arguments": {"kind": "child",
                 "title": "other", "brief": "CHILD work", "provider": "opencode",
                 "model": "open/medium"}}}]}
         ]}),
@@ -1189,7 +1189,7 @@ fn a_lead_on_claude_launches_a_child_on_codex() {
     user.provider_script(
         "claude",
         json!({"models": ["fake-small"], "turns": [
-            {"when": "LEAD", "do": [{"mcp": {"tool": "agent_launch", "arguments": {
+            {"when": "LEAD", "do": [{"mcp": {"tool": "agent_launch", "arguments": {"kind": "child",
                 "title": "other", "brief": "CHILD work", "provider": "codex",
                 "model": "gpt-fake-mini"}}}]}
         ]}),
@@ -1233,7 +1233,7 @@ fn a_lead_on_claude_launches_a_child_on_codex() {
         .map(|t| t.as_str().unwrap())
         .collect();
     assert!(tools.contains(&"mcp__flottille__report"), "{tools:?}");
-    assert!(tools.contains(&"mcp__flottille__ask_parent"), "{tools:?}");
+    assert!(tools.contains(&"mcp__flottille__ask"), "{tools:?}");
     // Codex's own folder of Flottille's, the user's login linked in it, never opened.
     let link = user.path("data/flottille/agents/codex/codex/auth.json");
     assert_eq!(

@@ -62,6 +62,7 @@ const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefN
     mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt";
 /// The ways `forge` `merge` merges a pull request, the first by default.
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
+pub(crate) use pipelines::{HIDDEN_EVERYWHERE, bitbucket_key, with_branch};
 /// What `forge review` posts: a comment, an approval or a request for changes.
 pub use review::VERDICTS as REVIEW_VERDICTS;
 pub(crate) use review::head_of as review_head;
@@ -1741,7 +1742,12 @@ fn remember(daemon: &Arc<Daemon>, project: &str, path: &str, forge: &Forge, pull
 
 /// `forge unsubscribe`: the agent's subscriptions to the workspace and repository it names, every
 /// one when it names none.
-fn forge_unsubscribe(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) -> Outcome {
+fn forge_unsubscribe(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    place: &Place,
+    asked: ForgeCall,
+) -> Outcome {
     if let Some(session) = &asked.session {
         if asked.workspace.is_some() || asked.repository.is_some() || asked.number.is_some() {
             return Outcome::Refused(
@@ -1757,7 +1763,9 @@ fn forge_unsubscribe(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCa
             ));
         }
         for subscription in &followed {
-            crate::subscriptions::end(daemon, subscription, "cancelled");
+            if crate::subscriptions::end(daemon, subscription, "cancelled") {
+                crate::tree::unfollowed(daemon, subscription);
+            }
         }
         return Outcome::Done(format!("You no longer follow {session}."));
     }

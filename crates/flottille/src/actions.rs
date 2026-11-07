@@ -321,6 +321,9 @@ pub async fn prepared(
     if tool == "session_send" {
         return session_says(daemon, grant, args);
     }
+    if tool == "agent_stop" {
+        return crate::tree::stop_says(daemon, grant, args);
+    }
     if tool == "session_read" {
         return crate::session_read::says(daemon, grant, args);
     }
@@ -335,6 +338,12 @@ pub async fn prepared(
             return Err(Outcome::Refused(why));
         }
         let mut says = posted_says(args);
+        // The time a worklog logs, and on which ticket; a vault entry that is not there is
+        // refused here, before the user is asked.
+        says.extend(
+            crate::tickets::worklog_says(daemon, &grant.place, &project, args)
+                .map_err(Outcome::Refused)?,
+        );
         // The labels, which the user reads whole; the sprint as the site names it.
         for (key, said) in [
             ("labels", "It adds the labels"),
@@ -363,6 +372,32 @@ pub async fn prepared(
         // What no forge could do is refused at once: the user is not asked for it.
         if let Ok(call) = serde_json::from_value::<crate::forge::ForgeCall>(args.clone())
             && let Some(why) = call.malformed()
+        {
+            return Err(Outcome::Refused(why));
+        }
+        // A Bitbucket variable's name is refused as it is, before the user is asked.
+        if args["action"] == "run"
+            && let Some((_, path)) = write_target(
+                daemon,
+                &grant.place,
+                args["workspace"].as_str(),
+                args["repository"].as_str(),
+            )
+            && let Ok(project) = projects::load_project(daemon, &grant.place.project)
+            && let Some(repository) = project.repositories.iter().find(|r| r.path == path)
+            && matches!(
+                repository.forge,
+                Some(
+                    RepositoryForge::BitbucketCloud { .. }
+                        | RepositoryForge::BitbucketDataCenter { .. }
+                )
+            )
+            && let Some(why) = args["variables"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|variable| variable["key"].as_str())
+                .find_map(crate::forge::bitbucket_key)
         {
             return Err(Outcome::Refused(why));
         }
@@ -406,7 +441,7 @@ pub async fn prepared(
             if family(tool, args).is_some() && !is_root(daemon, grant) {
                 return Err(Outcome::Refused(
                     "refused: a child reads the project's tasks and runs them; the agent the user \
-                     talks to changes them: ask your parent (ask_parent)"
+                     talks to changes them: ask your parent (ask)"
                         .into(),
                 ));
             }
@@ -582,7 +617,7 @@ pub async fn approved_losses(
 fn posted_says(args: &Value) -> Vec<String> {
     if matches!(
         args["action"].as_str(),
-        Some("list" | "search" | "show" | "types" | "link_types" | "sprints") | None
+        Some("list" | "search" | "show" | "types" | "link_types" | "sprints" | "time_spent") | None
     ) {
         return Vec::new();
     }
@@ -1693,7 +1728,7 @@ const WORKSPACE_ACTIONS: &str =
 /// What a child is told of the writes of the `workspace` family but `remove`, which are not its
 /// own.
 pub const CHILD_WORKSPACES: &str = "refused: the agent the user talks to manages the project's \
-    workspaces; you work in the place you were given: ask your parent (ask_parent)";
+    workspaces; you work in the place you were given: ask your parent (ask)";
 
 /// The setup steps a call plays without the gate, as the gate judges them: creating a workspace
 /// (`workspace create`, `agent_launch` with `new_workspace`) plays the project's setup, resuming
@@ -2016,14 +2051,14 @@ async fn create_says(
 
 /// What a child is told of `agent_launch` with `root`.
 pub const CHILD_ROOTS: &str = "refused: only the agent the user talks to starts a session for \
-    the user; a child's work stays in its tree, under its parent: ask your parent (ask_parent)";
+    the user; a child's work stays in its tree, under its parent: ask your parent (ask)";
 
 /// What `agent_launch` does, in words, when it is judged: with `new_workspace`, as `workspace
 /// create` says it, since it creates the workspace the same way; with `root`, the session it
 /// starts for the user and its first message whole. Nothing for any other launch. Only a root
 /// starts a root: a child doing so would leave its tree, its parent and its parent's sight.
 async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
-    let root = args["root"] == true;
+    let root = crate::tree::starts_session(args);
     if root && !is_root(daemon, grant) {
         return Err(Outcome::Refused(CHILD_ROOTS.into()));
     }
@@ -2047,9 +2082,10 @@ async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec
                 &bases,
             )
             .await?;
-            let whose = match root {
-                true => "a session of the user's",
-                false => "a child",
+            let whose = match args["kind"].as_str() {
+                Some("led") => "a session led by this agent",
+                Some("handed") => "a session of the user's, handed over",
+                _ => "a child",
             };
             says[0].push_str(&format!(", for {whose}: \"{title}\""));
             says
@@ -2064,10 +2100,16 @@ async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec
                 Some(name) if !main => format!("the workspace {name}"),
                 _ => "main, the project folder".to_owned(),
             };
-            vec![format!(
-                "Start a session for the user in {place}: \"{title}\", theirs, not a child of \
-                 this agent"
-            )]
+            vec![match args["kind"].as_str() {
+                Some("led") => format!(
+                    "Start a session led by this agent in {place}: \"{title}\", a session the user \
+                     sees under it and may talk to, not a child of this agent"
+                ),
+                _ => format!(
+                    "Start a session for the user, handed over, in {place}: \"{title}\", theirs, \
+                     not a child of this agent"
+                ),
+            }]
         }
         _ => return Ok(Vec::new()),
     };

@@ -323,7 +323,7 @@ fn started(user: &User, title: &str) -> String {
 fn launch_root(mcp: &Mcp, title: &str) -> Answer {
     mcp.call(
         "agent_launch",
-        json!({"title": title, "brief": "Write the docs.", "follow": false, "root": true}),
+        json!({"title": title, "brief": "Write the docs.", "kind": "handed"}),
     )
 }
 
@@ -431,7 +431,7 @@ fn in_full_a_child_s_call_is_allowed_without_asking_its_parent() {
     let opened = user.received_requests("session/new").len();
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);

@@ -429,7 +429,7 @@ fn a_child_inherits_its_parent_s_mode() {
 
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!launched.error, "{}", launched.text);
 
@@ -800,7 +800,7 @@ fn switching_the_root_to_ask_makes_a_child_s_next_call_a_card() {
     let opened = user.received_requests("session/new").len();
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);

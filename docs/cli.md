@@ -722,6 +722,19 @@ $ flottille agent reload-tools bd7ed8152969
 Reloading the tools of agent bd7ed8152969: they are given at its next message, which tells it what changed.
 ```
 
+### `flottille agent compact <agent>`
+
+Compacts an agent's conversation (`agent.compact`, `docs/protocol.md`; `docs/design.md` §5.8):
+the compactor chosen in Settings summarises it, and the agent goes on in a new session from its
+brief, the summary and its latest messages word for word. Between turns it starts at once, else
+once the turn that runs ended. `--json` prints `{"agent": {...}, "after_turn"}`. Refused when no
+compactor is chosen, and for an agent in a final state.
+
+```
+$ flottille agent compact bd7ed8152969
+Compacting agent bd7ed8152969 now: `flottille watch` says agent.compacted when its new session is ready, or agent.compaction_failed and why.
+```
+
 ### `flottille agent resume <agent>`
 
 Starts an ended root again on its own session (`agent.resume`, `docs/protocol.md`): it is idle,
@@ -734,6 +747,21 @@ process is still stopping (try again in a moment).
 ```
 $ flottille agent resume bd7ed8152969
 Resumed agent bd7ed8152969 on its own session; it is idle now. Its next message starts it.
+```
+
+### `flottille agent detach <agent>`
+
+Takes a session an agent started (led or handed) away from that agent (`agent.detach`,
+`docs/protocol.md`; the window's session menu has `Detach from <pilot>`): it becomes the user's
+alone, at once. The agent's subscription ends and it is told once; the session's questions come to
+the user, the two need the user's leave to write to each other, and the session may start
+sessions as its mode allows. There is no undo. `--json` prints `{"agent": {...}}`, with
+`detached_from`. Refused, saying why, for a session no agent started and for one already
+detached.
+
+```
+$ flottille agent detach bd7ed8152969
+Detached agent bd7ed8152969 from agent 3f9a1c0b7d2e: it is yours alone now, and its questions come to you.
 ```
 
 ### `flottille agent options <agent> [--model M] [--effort E]`
@@ -810,7 +838,7 @@ What your **root** agents sent you, oldest first. An entry is one of:
 | Kind | What it is | The event it comes from |
 |---|---|---|
 | `report` | the root called `report`: it is done, and says what it did | `agent.reported` |
-| `question` | the root called `ask_user`: it asks you something and goes on without waiting; answer it with `flottille agent send`, which ends its wait for you | `agent.asked` (`to` is `user`) |
+| `question` | the root called `ask`: it asks you something and goes on without waiting; answer it with `flottille agent send`, which ends its wait for you | `agent.asked` (`to` is `user`) |
 | `failure` | the root cannot go on: its process could not start, its session could not open, an option it was asked is not one it offers, it was replaced too often (twice in 30 minutes), or its new workspace could not be prepared (`docs/events.md` also lists "its parent failed", which only concerns a child) | `agent.failed` |
 
 A child's report, question or failure goes to its parent, never to the inbox. The requests a gate

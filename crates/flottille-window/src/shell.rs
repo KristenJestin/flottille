@@ -2,7 +2,7 @@
 //! showing the open page. It follows the daemon through the [`link`](crate::link) and draws
 //! again only the parts a change touches.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -176,6 +176,14 @@ pub struct Shell {
     /// The notice of the Auto judge Flottille picked was dismissed here, before the daemon says
     /// it was seen.
     judge_noticed: bool,
+    /// The compactor Flottille picked has not been seen yet (`compaction.show`).
+    compaction_picked: bool,
+    /// The user saw the notice of the compactor picked.
+    compaction_noticed: bool,
+    /// The compactor's provider and model, as `compaction.show` last said them.
+    compactor_shown: Option<(String, Option<String>)>,
+    /// The last texts of the judge's and the compactor's notices, drawn while they fold away.
+    notices: [Option<String>; 2],
     /// The number of the latest request about the appearance (see [`Shell::ask_appearance`]).
     appearance_asked: u64,
     /// The open project's settings page; made again for another project.
@@ -254,6 +262,7 @@ impl Shell {
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
+        let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
         let vault = cx.new(|_| VaultSection::new(this.clone()));
         let settings = cx.new(|_| {
@@ -261,6 +270,7 @@ impl Shell {
                 this.clone(),
                 rules.clone(),
                 judge_guidance.clone(),
+                compaction_guidance.clone(),
                 workspaces.clone(),
                 vault.clone(),
             )
@@ -333,6 +343,10 @@ impl Shell {
             services,
             rules,
             judge_noticed: false,
+            compaction_picked: false,
+            compaction_noticed: false,
+            compactor_shown: None,
+            notices: [None, None],
             appearance_asked: 0,
             project_settings: None,
             add_project,
@@ -520,7 +534,11 @@ impl Shell {
             return Some(open);
         }
         let session = self.snapshot.session(id)?;
-        let (project, started_by) = (session.project.clone(), session.started_by.clone());
+        let (project, started_by, led_by) = (
+            session.project.clone(),
+            session.started_by.clone(),
+            session.led_by.clone(),
+        );
         let folder = match place {
             None => self
                 .snapshot
@@ -542,6 +560,7 @@ impl Shell {
             place: place.clone(),
             folder: folder.map(Into::into),
             started_by,
+            led_by,
         };
         let this = cx.entity().downgrade();
         let reply = match self.replies.get(id) {
@@ -612,6 +631,43 @@ impl Shell {
         let (id, count) = (found.id.clone(), found.live);
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.ask_end(id, count, cx));
+    }
+
+    /// "Detach from …" in the row of a session an agent started: the session becomes the
+    /// user's alone, and the result is a toast.
+    pub fn detach_of(&mut self, session: &str, cx: &mut Context<Self>) {
+        let Some(from) = self
+            .snapshot
+            .session(session)
+            .and_then(|found| found.started_by.clone())
+        else {
+            return;
+        };
+        self.perform(Command::Detach {
+            session: session.to_owned(),
+            from,
+        });
+        cx.notify();
+    }
+
+    /// A row folded or unfolded the led sessions under it: its project's level is drawn again,
+    /// from what the daemon last said.
+    pub fn relist(&mut self, session: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.snapshot.session(session).map(|s| s.project.clone()) else {
+            return;
+        };
+        let live = self.snapshot.live_sessions_of(&project);
+        let rows: Vec<Entity<SessionRow>> = live
+            .iter()
+            .filter_map(|s| self.sessions.get(&s.id).cloned())
+            .collect();
+        if rows.len() != live.len() {
+            return;
+        }
+        let rows = nested(&live, &rows, cx);
+        if let Some(node) = self.projects.get(&project).cloned() {
+            node.update(cx, |node, cx| node.set_rows(rows, cx));
+        }
     }
 
     /// "Resume" in an ended session's row.
@@ -697,6 +753,7 @@ impl Shell {
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
+            Update::CompactionChanged => self.actions.send(Command::CompactionRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
             Update::VaultChanged => self.actions.send(Command::Vault),
             Update::ServicesChanged => {
@@ -893,6 +950,14 @@ impl Shell {
                     page.update(cx, |page, cx| page.resumed(refused, cx));
                 }
             }
+            Outcome::Detached { from, refused } => flottille_ui::toast(
+                match refused {
+                    None => flottille_ui::Toast::success(format!("Detached from {from}")),
+                    Some(why) => flottille_ui::Toast::failure(format!("Not detached from {from}"))
+                        .detail(why),
+                },
+                cx,
+            ),
             Outcome::ToolsReloaded {
                 session,
                 after_turn,
@@ -1185,6 +1250,53 @@ impl Shell {
                 self.settings
                     .update(cx, |page, cx| page.appearance_answered(shown, written, cx));
             }
+            Outcome::Compaction {
+                written,
+                guidance,
+                shown,
+            } => {
+                let compaction = shown
+                    .as_ref()
+                    .map(crate::settings::Compaction::of)
+                    .map_err(Clone::clone);
+                if let Ok(shown) = &compaction {
+                    self.compaction_picked = shown.picked;
+                    self.compactor_shown = shown
+                        .compactor
+                        .clone()
+                        .map(|(provider, model, _)| (provider, model));
+                }
+                if guidance || !written {
+                    let editor = self.settings.read(cx).compaction_guidance().clone();
+                    let said = shown
+                        .as_ref()
+                        .map(|shown| crate::rules::Shown::of(&shown["guidance"]))
+                        .map_err(Clone::clone);
+                    editor.update(cx, |editor, cx| editor.answered(said, guidance, window, cx));
+                }
+                if !guidance {
+                    self.settings.update(cx, |page, cx| {
+                        page.compaction_answered(compaction, written, cx)
+                    });
+                }
+                cx.notify();
+            }
+            Outcome::Compacting {
+                session,
+                after_turn,
+                refused,
+            } => {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.compacting(after_turn, refused, cx));
+                } else if let Some(why) = refused {
+                    flottille_ui::toast(
+                        flottille_ui::Toast::failure(crate::session::NOT_COMPACTED).detail(why),
+                        cx,
+                    );
+                }
+            }
             Outcome::JudgeGuidance { written, shown } => {
                 let editor = self.settings.read(cx).judge_guidance().clone();
                 editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
@@ -1457,6 +1569,11 @@ impl Shell {
             && let Some(card) = page.read(cx).card(&Some(name.to_owned()), cx)
         {
             card.update(cx, |card, cx| card.answered(refused, cx));
+        } else if let Some(page) = self.session_page.clone() {
+            // A removal asked from the session's rail.
+            page.update(cx, |page, cx| {
+                page.removal_answered(project, name, refused, cx)
+            });
         }
     }
 
@@ -1579,6 +1696,8 @@ impl Shell {
         self.providers_read = read;
         self.settings
             .update(cx, |page, cx| page.set_providers(&providers, cx));
+        // A provider ready since may be the compactor Flottille picks: the daemon says it.
+        self.actions.send(Command::CompactionRead);
         let chosen = providers.judge.is_some();
         for reply in self.replies.values() {
             let mode = reply.read(cx).mode.clone();
@@ -1702,7 +1821,15 @@ impl Shell {
                 row.set_scope(scope, cx);
                 row.set_place(&session.place, cx);
                 row.set_pull(pull.as_ref(), cx);
-                row.set_actions(session.ended, session.resumable, cx)
+                row.set_actions(
+                    session.ended,
+                    session.resumable,
+                    session.started_by.as_deref(),
+                    cx,
+                );
+                if session.ended {
+                    row.set_led_by(None, cx);
+                }
             });
             marks.extend(session.mark);
             shown.push(row.clone());
@@ -1725,7 +1852,8 @@ impl Shell {
         for project in &snapshot.projects {
             let mut marks = Vec::new();
             let live = snapshot.live_sessions_of(&project.name);
-            let rows = self.session_rows(live.into_iter(), &mut sessions, &mut marks, now, cx);
+            let rows = self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
+            let rows = nested(&live, &rows, cx);
             let node = self.projects.remove(&project.name).unwrap_or_else(|| {
                 let name = project.name.clone();
                 let this = this.clone();
@@ -1769,6 +1897,14 @@ impl Shell {
             .retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
         let edited = snapshot.project_changes != self.snapshot.project_changes;
         self.snapshot = snapshot;
+        // A session detached from its pilot: its open page stops saying who led it.
+        if let Some(page) = self.session_page.clone()
+            && let Some(found) = self.snapshot.session(page.read(cx).id())
+            && !page.read(cx).says_by(&found.started_by, &found.led_by)
+        {
+            let (started_by, led_by) = (found.started_by.clone(), found.led_by.clone());
+            page.update(cx, |page, cx| page.set_by(started_by, led_by, cx));
+        }
         self.switcher
             .update(cx, |switcher, cx| switcher.set_snapshot(&self.snapshot, cx));
         self.ring(cx);
@@ -1987,6 +2123,37 @@ impl Shell {
         ))
     }
 
+    /// The sentence of the notice that says which compactor Flottille picked, while the user has
+    /// not seen it. One notice at a time: the judge's first.
+    pub fn compaction_notice(&self) -> Option<String> {
+        if self.compaction_noticed || !self.compaction_picked || self.judge_notice().is_some() {
+            return None;
+        }
+        let (name, model) = self.compactor_shown.as_ref()?;
+        let title = self
+            .providers
+            .get(name)
+            .map_or(name.as_str(), |p| p.title.as_str());
+        let model = self
+            .providers
+            .model_said(name, model.as_deref())
+            .map_or_else(String::new, |model| format!(" {model}"));
+        Some(format!(
+            "Flottille chose {title}{model} as your compactor: when an agent's context fills up, it \
+             summarises the conversation and the agent goes on from the summary, on your quota. \
+             Change it, or choose none, in Settings."
+        ))
+    }
+
+    /// The notice of the compactor was seen: it goes, and the daemon is told.
+    pub fn dismiss_compaction_notice(&mut self, cx: &mut Context<Self>) {
+        if !self.compaction_noticed {
+            self.compaction_noticed = true;
+            self.actions.send(Command::CompactionNoticed);
+            cx.notify();
+        }
+    }
+
     /// The notice was seen: it goes, and the daemon is told, so that it never comes back.
     pub fn dismiss_judge_notice(&mut self, cx: &mut Context<Self>) {
         if !self.judge_noticed {
@@ -1996,7 +2163,22 @@ impl Shell {
         }
     }
 
-    fn judge_notice_card(&self, text: String, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A notice of what Flottille chose for the user, bottom right: the Auto judge (`judge`), or
+    /// the compactor. Its keys start with `judge-notice` or `compaction-notice`.
+    /// `present` false, it folds away and fades out with its last text.
+    fn notice_card(
+        &self,
+        judge: bool,
+        present: bool,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let key = if judge {
+            "judge-notice"
+        } else {
+            "compaction-notice"
+        };
+        let part = |part: &str| SharedString::from(format!("{key}{part}"));
         let p = palette(cx);
         let buttons = div()
             .flex()
@@ -2004,14 +2186,24 @@ impl Shell {
             .gap(space::SM)
             .child(div().flex_1())
             .child(
-                Button::secondary("judge-notice-dismiss", "Dismiss")
-                    .on_click(cx.listener(|this, _, _, cx| this.dismiss_judge_notice(cx))),
+                Button::secondary(part("-dismiss"), "Dismiss").on_click(cx.listener(
+                    move |this, _, _, cx| match judge {
+                        true => this.dismiss_judge_notice(cx),
+                        false => this.dismiss_compaction_notice(cx),
+                    },
+                )),
             )
             .child(
-                Button::primary("judge-notice-open", "Open Settings").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.dismiss_judge_notice(cx);
-                        this.open_settings_at(Reveal::Judge, window, cx);
+                Button::primary(part("-open"), "Open Settings").on_click(cx.listener(
+                    move |this, _, window, cx| match judge {
+                        true => {
+                            this.dismiss_judge_notice(cx);
+                            this.open_settings_at(Reveal::Judge, window, cx);
+                        }
+                        false => {
+                            this.dismiss_compaction_notice(cx);
+                            this.open_settings_at(Reveal::Compaction, window, cx);
+                        }
                     },
                 )),
             );
@@ -2023,7 +2215,7 @@ impl Shell {
             .gap(space::MD)
             .child(
                 div()
-                    .id("judge-notice-text")
+                    .id(part("-text"))
                     .aria_label(SharedString::from(text.clone()))
                     .text_size(px(12.5))
                     .text_color(p.mute)
@@ -2031,18 +2223,26 @@ impl Shell {
                     .test_support(),
             )
             .child(buttons);
+        let card = div()
+            .id(SharedString::from(key))
+            .child(enter(
+                part("-enter"),
+                0,
+                Card::new()
+                    .title(if judge {
+                        "Auto judge chosen"
+                    } else {
+                        "Compactor chosen"
+                    })
+                    .child(body),
+            ))
+            .test_support();
         div()
-            .id("judge-notice")
             .absolute()
             .bottom(px(16.))
             .right(px(16.))
             .w(px(380.))
-            .child(enter(
-                "judge-notice-enter",
-                0,
-                Card::new().title("Auto judge chosen").child(body),
-            ))
-            .test_support()
+            .child(presence(part("-presence"), present, card))
     }
 
     /// Opens a project's settings at a repository's row or at its tasks, from its page.
@@ -2137,6 +2337,7 @@ impl Shell {
             self.actions.send(Command::ReadProviders);
             self.actions.send(Command::RulesRead { project: None });
             self.actions.send(Command::JudgeRead);
+            self.actions.send(Command::CompactionRead);
             self.actions.send(Command::DeveloperRead);
             self.actions.send(Command::ToolResultsRead);
             self.actions.send(Command::SessionsRead);
@@ -2309,6 +2510,16 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A notice keeps its last text while it folds away.
+        let (judge_notice, compaction_notice) = (self.judge_notice(), self.compaction_notice());
+        for (at, text) in [&judge_notice, &compaction_notice].into_iter().enumerate() {
+            if let Some(text) = text {
+                self.notices[at] = Some(text.clone());
+            }
+        }
+        let notices = self.notices.clone();
+        let (judge_notice, compaction_notice) =
+            (judge_notice.is_some(), compaction_notice.is_some());
         let p = palette(cx);
         let now = cx.background_executor().now();
         if self.bell_shown.is_running(now) {
@@ -2403,8 +2614,11 @@ impl Render for Shell {
             }))
             .child(self.top.clone())
             .child(body)
-            .when_some(self.judge_notice(), |d, text| {
-                d.child(self.judge_notice_card(text, cx))
+            .when_some(notices[0].clone(), |d, text| {
+                d.child(self.notice_card(true, judge_notice, text, cx))
+            })
+            .when_some(notices[1].clone(), |d, text| {
+                d.child(self.notice_card(false, compaction_notice, text, cx))
             })
             .child(self.add_project.clone())
             .child(self.switcher.clone())
@@ -2787,4 +3001,52 @@ fn logo(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
             }
         },
     )
+}
+
+/// The rows of a project's live sessions as the tree draws them: a session led by another of
+/// them sits right under its pilot's row, indented, while that row is unfolded; the others keep
+/// their order. Each row learns who leads it and how many it leads.
+fn nested(
+    live: &[&crate::model::Session],
+    rows: &[Entity<SessionRow>],
+    cx: &mut Context<Shell>,
+) -> Vec<Entity<SessionRow>> {
+    // The place of each session's pilot among them, when it is one of them.
+    let pilots: Vec<Option<usize>> = live
+        .iter()
+        .map(|session| {
+            let pilot = session.pilot.as_deref().filter(|p| *p != session.id)?;
+            live.iter().position(|other| other.id == pilot)
+        })
+        .collect();
+    let mut out = Vec::new();
+    let mut placed = HashSet::new();
+    // Depth first from each session no other leads; `shown` is false under a folded row.
+    let mut stack: Vec<(usize, bool)> = (0..live.len())
+        .rev()
+        .filter(|&at| pilots[at].is_none())
+        .map(|at| (at, true))
+        .collect();
+    while let Some((at, shown)) = stack.pop() {
+        if !placed.insert(at) {
+            continue;
+        }
+        let row = &rows[at];
+        let led_by = pilots[at].and(live[at].led_by.as_deref());
+        if row.read(cx).led_by() != led_by {
+            row.update(cx, |row, cx| row.set_led_by(led_by, cx));
+        }
+        let led: Vec<usize> = (0..live.len())
+            .filter(|&other| pilots[other] == Some(at))
+            .collect();
+        if row.read(cx).leads() != led.len() {
+            row.update(cx, |row, cx| row.set_leads(led.len(), cx));
+        }
+        if shown {
+            out.push(row.clone());
+        }
+        let open = shown && row.read(cx).is_open();
+        stack.extend(led.into_iter().rev().map(|other| (other, open)));
+    }
+    out
 }

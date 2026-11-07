@@ -145,7 +145,8 @@ and the 2026 practice around it:
    or a tracker declared or gone, a new version: `docs/tools.md`, "When the tools change"):
    - a child gets no `agent_*` tools, whatever its role;
    - only a root gets `approval_answer`;
-   - a root gets `ask_user`, a child gets `ask_parent`.
+   - every agent gets `ask`, whose description says where its question goes for it (its
+     parent, its pilot or the user).
 
    - `forge` is listed to every agent whose project's repositories declare a forge, `tickets`
      to every agent whose project declares a tracker, in `main` as in a workspace, and
@@ -156,8 +157,8 @@ and the 2026 practice around it:
 
    - only a root gets `skills`, `commands`, `setup` and `project`, the project's skills,
      commands, setup and settings, writes its tasks and its workspaces, and starts sessions for
-     the user (`agent_launch` with `root`) (`docs/tools.md`, "The project", "The workspace",
-     "Sessions for the user"): a child does its brief and reads the workspaces.
+     the user (`agent_launch` with `kind` `led` or `handed`) (`docs/tools.md`, "The project", "The
+     workspace", "Sessions an agent starts"): a child does its brief and reads the workspaces.
      Every agent gets `tasks`, `run` and `run_status`, the names `commands_list`,
      `commands_run` and `commands_status` had until #131, and `forge`, `tickets` and
      `workspace` `remove`, the names `forge_read`, `forge_write`, `ticket_read` and

@@ -357,6 +357,39 @@ calls never do) nor of what its answer may be (`allow` or `ask`).
 
 Each emits `judge.changed`. The user's door alone reaches them: no tool of an agent does.
 
+### The compaction methods
+
+`compaction.show`, `compaction.set`, `compaction.set_guidance`, `compaction.reset_guidance` and
+`compaction.noticed` read and keep Flottille's own compaction (`docs/design.md` §5.8):
+`compaction.toml` of Flottille's configuration folder, and the compactor's guidance in
+`compaction.md` beside it, absent while Flottille's default (`crates/flottille/roles/compaction.md`)
+holds. The guidance sits inside a fixed text (`crates/flottille/roles/compactor-base.md`).
+
+- `compaction.show` answers `{"compactor", "automatic", "threshold", "maximum", "kept",
+  "guidance"}`: the compactor `{"provider", "model", "effort", "picked"}` (`model` and `effort`
+  only when chosen, `picked` only while the user has not seen the notice of a compactor Flottille
+  picked) or `null` for none, whether it compacts by itself (default `true`), the threshold in
+  percent of the context window (default 70), the maximum size in tokens (`null`, the default, is
+  no ceiling), the tokens kept word for word (default 20000), and the guidance as `judge.show`
+  gives the judge's (`{"text", "source", "error", "default"}`). A user who never chose gets a
+  compactor picked first, as the Auto judge is (`provider.set_judge`): the smallest model of the
+  first provider enabled, installed and signed in among those Flottille lists, written once with
+  `picked = true` and said once with `compaction.changed`. `invalid-config` when the file holds
+  an unknown key or a value out of its range.
+- `compaction.set` takes any of `compactor` (`{"provider", "model", "effort"}`, or `"none"`),
+  `automatic` (a boolean), `threshold` (50 to 95), `maximum` (a number of tokens from 20000, or
+  `"none"`) and `kept` (0 to 50000, and never more than a quarter of the size that compacts the
+  agent); what is left out stays. It answers as `compaction.show`;
+  `invalid-params` for anything else, `not-found` for an unknown provider. `compactor = "none"`
+  is a choice: no compactor is ever picked again.
+- `compaction.set_guidance {text}` writes the guidance (`refused` above 4,000 characters; an
+  empty text resets it); `compaction.reset_guidance` removes it. Both answer as
+  `compaction.show`.
+- `compaction.noticed` drops `picked`: the user saw the notice.
+
+Each that changes something emits `compaction.changed` with what `compaction.show` answers. The
+user's door alone reaches them: no tool of an agent does.
+
 ### The developer methods
 
 `developer.show` and `developer.set` read and switch the developer mode (`docs/developer.md`): a
@@ -1004,6 +1037,9 @@ there. An agent in a result:
   "title": null,
   "brief": null,
   "launched_by": null,
+  "led": false,
+  "led_by": null,
+  "detached_from": null,
   "reported_at": null,
   "quiet_turns": 0,
   "waiting_on_answer": false,
@@ -1045,9 +1081,13 @@ runs an older list than that. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
 (each replacement adds one), `title` and `brief` a child's task, `launched_by` the id of the agent
 that started a root for the user (`null` for a root the user started, and for a child), whose
-`brief` is then that agent's first message, never the user's, `reported_at` when it reported,
+`brief` is then that agent's first message, never the user's, `led` whether that agent leads it
+(`led_by` its id, `null` for a session handed to the user, `docs/tools.md`, "Sessions an agent
+starts"), `detached_from` the agent the user detached it from (`agent.detach`; `launched_by` is
+then `null`), `reported_at` when it reported,
 `quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
-it waits for an answer: a child's from its parent, a root's from the user, until that one writes to
+it waits for an answer: a child's from its parent, a led session's from its pilot, any other
+root's from the user, until that one writes to
 it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask` or `auto`
 (`agent.mode`).
 
@@ -1174,6 +1214,29 @@ by tool, else `Your tools were reloaded: nothing changed.`, whatever its agent d
 is taken (`docs/events.md`). Its children keep their processes. `refused` for a child (the
 sentence names its root) and an agent in a final state.
 
+#### `agent.compact`
+
+`{"agent"}`. Compacts the agent's conversation (`docs/design.md` §5.8): the compactor summarises
+it and the agent goes on in a new session from its brief, the summary and its latest messages.
+`{"agent", "after_turn"}`: it starts at once between turns, or once the turn that runs ended
+(`after_turn` true); asked again before it starts, nothing more happens; asked while the
+compactor works, `refused` (a compaction runs). Its prompts wait while the compactor works, and a
+turn that started before is never cut: the new session follows its end. A compaction by hand
+needs no threshold, no margin and no notice seen. `agent.compacted` says it is done, `agent.compaction_failed` why it failed, in
+which case nothing changed. `refused` when there is no compactor (none chosen, or none could be
+picked), and for an agent in a final state.
+
+#### `agent.detach`
+
+`{"agent"}`. Takes a session an agent started (`launched_by`, led or handed) away from that agent,
+at once (`docs/tools.md`, "Detach"): the agent's `session` subscription ends and it is told once
+(a `detached` delivery, `the user detached the session "<title>" …`); `launched_by` and `led_by`
+become `null` and `detached_from` keeps that agent's id; its questions go to the user; the two
+need the user's leave to write to each other; the chain rule no longer holds; the session is told
+by a `detached` delivery that it is the user's alone. Its first message stays the agent's words.
+`agent.detached` is emitted. Answers `{"agent": {...}}`. Refused, saying why, for an agent no
+agent started (a root of the user's, a child) and for one already detached. There is no undo.
+
 #### `agent.mode`
 
 `{"agent", "mode"}`, `mode` `ask`, `auto` or `full`. Puts the agent's tree in that mode
@@ -1207,7 +1270,7 @@ does it with `agent_send` (`docs/tools.md`).
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user", "questions", "context", "context_tokens", "queued"}]}`. `agent` is the agent in short
-(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
+(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `detached_from`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the user changed to and
@@ -1217,8 +1280,8 @@ form; `tools_outdated`: whether its running session runs an older list of tools 
 has, which a restart replaces, `docs/tools.md`, "When the tools change"; `tools_reload`: whether
 a reload of its tools waits for its next process, `agent.reload_tools`); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
-`waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
-root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
+`waiting_on` `parent` for a child whose request or question waits for its parent, `pilot` for a
+led session whose question waits for its pilot, `user` for a root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
 says `waiting for #12: checks`, `#12 of api` when the project has several repositories, `waiting for its wake in 20 min`), else `null`; `needs_user`, for the root, whether a request of its tree or its
 own question waits for the user; `questions`, for a root, its questions to the user that wait for
 the answer, the oldest first, each `{"seq", "at", "question"}` (the number of its `agent.asked`

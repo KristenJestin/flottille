@@ -38,11 +38,12 @@ fn lead(user: &User) -> (String, Mcp) {
     (id, Mcp::initialize(&url, &authorization))
 }
 
-/// The session the lead starts for the user with `brief`, followed: its id.
-fn launched(user: &User, mcp: &Mcp, brief: &str) -> String {
+/// The session the lead starts with `brief`, of `kind` (`led`: its questions go to the lead,
+/// `handed`: to the user): its id.
+fn launched(user: &User, mcp: &Mcp, kind: &str, brief: &str) -> String {
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Charts", "brief": brief, "root": true, "follow": true}),
+        json!({"title": "Charts", "brief": brief, "kind": kind}),
     );
     assert!(!answer.error, "{}", answer.text);
     agent(user, |a| a["title"] == "Charts")["id"]
@@ -140,15 +141,15 @@ fn wakes(user: &User, lead: &str) -> Vec<String> {
 
 /// A session that asked mid-turn and still works: its id, and the lead's MCP session.
 fn asking(user: &User, mode: &str, questions: &[&str]) -> (String, Mcp) {
-    asking_for(user, mode, questions).1
+    asking_for(user, "handed", mode, questions).1
 }
 
 /// The same, with the lead's id.
-fn asking_for(user: &User, mode: &str, questions: &[&str]) -> (String, (String, Mcp)) {
+fn asking_for(user: &User, kind: &str, mode: &str, questions: &[&str]) -> (String, (String, Mcp)) {
     project(user);
     user.fake_script(asks_then_works(questions));
     let (lead, mcp) = lead(user);
-    let session = launched(user, &mcp, "Draw the charts.");
+    let session = launched(user, &mcp, kind, "Draw the charts.");
     // Each tree keeps its own mode: the user puts the session's in `mode`.
     user.call("agent.mode", json!({"agent": session, "mode": mode}))
         .unwrap();
@@ -265,9 +266,14 @@ fn session_read_says_the_open_questions_of_a_session() {
 }
 
 #[test]
-fn a_followed_session_s_question_reaches_its_starter_at_the_turn_s_end() {
+fn a_led_session_s_question_reaches_its_pilot_at_the_turn_s_end() {
     let user = User::with_fake_agent();
-    let (lead, (session, _)) = asking_for(&user, "full", &["POC charts: blocked by the minimum?"]);
+    let (lead, (session, _)) = asking_for(
+        &user,
+        "led",
+        "full",
+        &["POC charts: blocked by the minimum?"],
+    );
     // Asked mid-turn, the question wakes nobody before the turn's end.
     std::thread::sleep(Duration::from_millis(600));
     assert!(wakes(&user, &lead).is_empty(), "{:?}", wakes(&user, &lead));
@@ -278,7 +284,7 @@ fn a_followed_session_s_question_reaches_its_starter_at_the_turn_s_end() {
     });
 
     let woken = wakes(&user, &lead).remove(0);
-    assert!(woken.contains("asked the user"), "{woken}");
+    assert!(woken.contains("asked you"), "{woken}");
     assert!(
         woken.contains("POC charts: blocked by the minimum?"),
         "{woken}"
@@ -425,15 +431,11 @@ fn the_wake_carries_at_most_4000_characters_of_questions() {
     user.fake_script(json!({"turns": [{"when": "Ask a lot.", "do": [
         ask(&long(1)), ask(&long(2)), ask(&long(3)), ask(&long(4)), {"say": "Asked."}]}]}));
     let (lead, mcp) = lead(&user);
-    launched(&user, &mcp, "Ask a lot.");
+    launched(&user, &mcp, "led", "Ask a lot.");
     eventually("the wake", || wakes(&user, &lead).len() == 1);
 
     let woken = wakes(&user, &lead).remove(0);
-    assert_eq!(
-        woken.matches("Its open question to the user").count(),
-        2,
-        "{woken}"
-    );
+    assert_eq!(woken.matches("Its question to you").count(), 2, "{woken}");
     assert!(
         woken.contains("Question 1:") && woken.contains("Question 2:"),
         "{woken}"
@@ -454,7 +456,7 @@ fn session_read_cuts_each_question_and_counts_them_in_its_page() {
         ask(&long(1)), ask(&long(2)), ask(&long(3)), ask(&long(4)), ask(&long(5)),
         {"say": "z".repeat(3_000)}]}]}));
     let (_, mcp) = lead(&user);
-    let session = launched(&user, &mcp, "Ask a lot.");
+    let session = launched(&user, &mcp, "handed", "Ask a lot.");
     eventually("the session's turn", || {
         state(&user, &session) == "idle" && open_of(&user, &session).len() == 5
     });

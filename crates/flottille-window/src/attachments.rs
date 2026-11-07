@@ -18,12 +18,13 @@ use flottille_ui::{
 use gpui_kit::base::input::Paste;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, ElementId, InteractiveElement, IntoElement,
+    AnyElement, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, SharedString, StatefulInteractiveElement, Styled, StyledImage as _,
     TestSupportExt as _, Window, div, px,
 };
 
 use crate::actions::Picture;
+use crate::picture_viewer::PictureViewer;
 
 /// What a toast says of a picture the composer does not attach: its title, and why.
 pub const NOT_ATTACHED: &str = "The picture was not attached";
@@ -61,6 +62,8 @@ pub struct Attachments {
     scaling: Vec<u64>,
     places: Listing<()>,
     scaled: u64,
+    /// A thumbnail opened large; made when the strip is first drawn.
+    viewer: Option<Entity<PictureViewer>>,
 }
 
 impl Attachments {
@@ -312,6 +315,11 @@ impl Attachments {
         detach: fn(&mut T, usize, &mut Context<T>),
     ) -> AnyElement {
         let p = palette(cx);
+        let viewer = self
+            .viewer
+            .get_or_insert_with(|| cx.new(|_| PictureViewer::new()))
+            .clone();
+        let attached = self.images.clone();
         let now = cx.background_executor().now();
         self.thumbs.sync(
             self.images.iter().map(|i| (thumb_key(i), i.clone())),
@@ -361,10 +369,13 @@ impl Attachments {
                     .relative()
                     .flex_none()
                     .size(px(56.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(p.line2)
                     .child(
                         gpui_kit::img(image)
                             .size_full()
-                            .rounded(px(8.))
+                            .rounded(px(7.))
                             .object_fit(gpui_kit::ObjectFit::Cover),
                     )
                     .when(!gone, |d| {
@@ -384,7 +395,11 @@ impl Attachments {
                                 .justify_center()
                                 .cursor_pointer()
                                 .aria_label("Remove the picture")
-                                .on_click(cx.listener(move |this, _, _, cx| detach(this, at, cx))),
+                                // Removing is not opening: the click stays with the button.
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    detach(this, at, cx)
+                                })),
                             // An icon does not inherit the ink: it is drawn here, in the ink this frame.
                             move |d, t| {
                                 d.bg(mix(p.card2, p.hover, t)).child(
@@ -394,8 +409,20 @@ impl Attachments {
                                 )
                             },
                         ))
-                    })
-                    .test_support();
+                    });
+                let thumb = if gone {
+                    thumb.test_support().into_any_element()
+                } else {
+                    let (viewer, attached) = (viewer.clone(), attached.clone());
+                    // A click opens it large; its border fades in on the hover.
+                    hoverable(
+                        thumb.cursor_pointer().on_click(move |_, _, cx| {
+                            viewer.update(cx, |viewer, cx| viewer.show(attached.clone(), at, cx));
+                        }),
+                        move |d, t| d.border_color(mix(p.line2, p.mute, t)),
+                    )
+                    .into_any_element()
+                };
                 // The slot is as wide as the picture and the gap after it, narrowing as it leaves.
                 let slot = div()
                     .flex_none()
@@ -447,18 +474,20 @@ impl Attachments {
                 .into_any_element()
             })
             .collect();
-        presence(
-            "attachments",
-            !self.images.is_empty() || !self.places.is_empty(),
-            div()
-                .flex()
-                .flex_wrap()
-                .px(space::SM)
-                .pt(space::SM)
-                .pb(space::SM)
-                .children(thumbs)
-                .children(places),
-        )
-        .into_any_element()
+        div()
+            .child(presence(
+                "attachments",
+                !self.images.is_empty() || !self.places.is_empty(),
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .px(space::SM)
+                    .pt(space::SM)
+                    .pb(space::SM)
+                    .children(thumbs)
+                    .children(places),
+            ))
+            .child(viewer)
+            .into_any_element()
     }
 }

@@ -143,7 +143,7 @@ fn titled(user: &User, title: &str) -> Mcp {
 fn launch(parent: &Mcp, title: &str, brief: &str) -> String {
     let text = ok(parent.call(
         "agent_launch",
-        json!({"title": title, "brief": brief, "workspace": "w"}),
+        json!({"kind": "child", "title": title, "brief": brief, "workspace": "w"}),
     ));
     agent_id(&text).unwrap_or_else(|| panic!("no agent id in {text}"))
 }
@@ -557,7 +557,7 @@ fn a_parent_cannot_allow_its_child_s_request_nor_answer_one_it_does_not_hold() {
 }
 
 #[test]
-fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_none_of_them() {
+fn a_lead_lists_the_agent_tools_ask_and_approval_answer_and_a_worker_none_of_them() {
     let user = user();
     let (_, lead) = lead(&user);
     launch(&lead, "worker", "HANG and do it");
@@ -571,14 +571,14 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_none_o
         "agent_stop",
         "wake",
         "report",
-        "ask_user",
+        "ask",
         "session_send",
         "session_read",
         "approval_answer",
     ] {
         assert!(names.iter().any(|n| n == tool), "{tool} in {names:?}");
     }
-    assert!(!names.iter().any(|n| n == "ask_parent"));
+    assert!(!names.iter().any(|n| n == "ask_parent" || n == "ask_user"));
     // The project declares no forge nor tracker, so none of their tools is listed, in a workspace
     // as anywhere; removing a workspace needs neither, and the gate decides who may.
     assert!(!names.iter().any(|n| n == "forge"));
@@ -603,7 +603,7 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_none_o
             .iter()
             .any(|n| ["skills", "commands", "setup", "project"].contains(&n.as_str()))
     );
-    assert!(names.iter().any(|n| n == "ask_parent"));
+    assert!(names.iter().any(|n| n == "ask"));
     assert!(names.iter().any(|n| n == "report"));
 }
 
@@ -614,12 +614,7 @@ fn a_worker_s_question_reaches_the_lead_as_child_question_and_the_lead_answers_w
     let id = launch(&lead, "curious", "HANG and ask");
     let worker = titled(&user, "curious");
 
-    let text = refused(worker.call("ask_user", json!({"question": "may I?"})));
-    assert!(text.contains("has no tool ask_user"), "{text}");
-    ok(worker.call(
-        "ask_parent",
-        json!({"question": "Which branch is the base?"}),
-    ));
+    ok(worker.call("ask", json!({"question": "Which branch is the base?"})));
 
     let question = prompted(&user, &["[flottille:child-question]"]);
     assert!(question.contains("Which branch is the base?"), "{question}");
@@ -735,7 +730,7 @@ fn twelve_sub_agents_start_and_the_thirteenth_is_refused_with_its_reason() {
 
     let text = refused(lead.call(
         "agent_launch",
-        json!({"title": "w13", "brief": "one too many", "workspace": "w"}),
+        json!({"kind": "child", "title": "w13", "brief": "one too many", "workspace": "w"}),
     ));
     assert!(text.contains("12 children already run"), "{text}");
     assert!(text.contains("do the work yourself"), "{text}");
@@ -749,7 +744,7 @@ fn a_sub_agent_has_no_agent_launching_tool_whatever_its_role() {
         let title = format!("a {role}");
         ok(lead.call(
             "agent_launch",
-            json!({"title": title, "brief": "HANG and wait", "role": role}),
+            json!({"kind": "child", "title": title, "brief": "HANG and wait", "role": role}),
         ));
         let child = titled(&user, &title);
         let names = child.names();
@@ -762,10 +757,13 @@ fn a_sub_agent_has_no_agent_launching_tool_whatever_its_role() {
         );
         let text = refused(child.call(
             "agent_launch",
-            json!({"title": "deeper", "brief": "no", "follow": false, "root": true, "workspace": "w"}),
+            json!({"title": "deeper", "brief": "no", "kind": "handed", "workspace": "w"}),
         ));
         assert!(text.contains("has no tool agent_launch"), "{role}: {text}");
-        let text = refused(child.call("agent_launch", json!({"title": "e", "brief": "deep"})));
+        let text = refused(child.call(
+            "agent_launch",
+            json!({"kind": "child", "title": "e", "brief": "deep"}),
+        ));
         assert!(text.contains("has no tool agent_launch"), "{role}: {text}");
     }
 }
@@ -1065,8 +1063,7 @@ fn a_daemon_restarted_while_a_new_workspace_prepares_still_delivers_the_brief() 
     std::fs::write(&file, text).unwrap();
     let answer = ok(lead.call(
         "agent_launch",
-        json!({"title": "slow", "brief": "HANG once the workspace is ready", "new_workspace": "slow",
-            "follow": false, "root": true}),
+        json!({"title": "slow", "brief": "HANG once the workspace is ready", "new_workspace": "slow", "kind": "handed"}),
     ));
     let number = answer
         .strip_prefix("Waiting for the user's approval, request #")
@@ -1185,7 +1182,7 @@ fn agent_launch_refuses_a_mixed_workspace_with_a_sentence_naming_the_field() {
             "do not fit agent_launch",
         ),
     ] {
-        let mut call = json!({"title": "t", "brief": "HANG b"});
+        let mut call = json!({"kind": "led", "title": "t", "brief": "HANG b"});
         call.as_object_mut()
             .unwrap()
             .extend(arguments.as_object().unwrap().clone());
@@ -1210,7 +1207,7 @@ fn agent_launch_refuses_a_mixed_workspace_with_a_sentence_naming_the_field() {
     // once the user allows it.
     let text = ok(lead.call(
         "agent_launch",
-        json!({"title": "fresh", "brief": "HANG two", "new_workspace": "fresh", "follow": false, "root": true}),
+        json!({"title": "fresh", "brief": "HANG two", "new_workspace": "fresh", "kind": "handed"}),
     ));
     let number = text
         .strip_prefix("Waiting for the user's approval, request #")
@@ -1226,7 +1223,7 @@ fn agent_launch_refuses_a_mixed_workspace_with_a_sentence_naming_the_field() {
     });
     let text = ok(lead.call(
         "agent_launch",
-        json!({"title": "own", "brief": "HANG three"}),
+        json!({"kind": "child", "title": "own", "brief": "HANG three"}),
     ));
     let own = agent_id(&text).unwrap();
     assert_eq!(show(&user, &own)["agent"]["workspace"], "w");

@@ -374,7 +374,9 @@ pub fn decide(call: &Call) -> Verdict {
     match call.tool {
         "forge" => forge(call),
         "tickets" => tickets(call),
-        "agent_launch" if call.args["root"] == true => root_launch(call.grant, call.args),
+        "agent_launch" if crate::tree::starts_session(call.args) => {
+            root_launch(call.grant, call.args)
+        }
         "session_send" => session_send(call.grant, call.args),
         // Its own session (none named, or its id) is no other's conversation: the answer says the tree's mode.
         "session_read"
@@ -542,6 +544,24 @@ pub fn session_leave(grant: &Grant, args: &Value) -> Verdict {
         return refused;
     }
     found.verdict(Kind::Action)
+}
+
+/// Why `agent_stop` of a session that is not the caller's child comes to the user, every time:
+/// it ends the user's other conversation, and no leave is kept.
+pub const END_SESSION: &str = "it ends a session of the user's, not one of this agent's \
+    children: the user decides, every time, in every mode, Full included";
+
+/// `agent_stop` of a session that is not the caller's child: base, never judged, and held in
+/// Full (`asks_end`).
+pub fn end_session() -> Verdict {
+    let mut found = Found::default();
+    found.base(END_SESSION.into());
+    found.verdict(Kind::Action)
+}
+
+/// Whether a held call ends a session that is not the caller's child: only the user answers it.
+pub fn asks_end(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == END_SESSION)
 }
 
 /// Whether a held call asks the user's leave for a pair of sessions: only the user answers it.
@@ -753,11 +773,14 @@ pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, com
      reopen, pipelines, runs, run_view, run_logs, run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, sprints, subscribe, unsubscribe, create, comment, \
-     edit, close, reopen, status, link, unlink, comment_edit and comment_delete";
+     edit, close, reopen, status, link, unlink, comment_edit, comment_delete, log_time and \
+     time_spent";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
-const TICKET_ONLY: [(&str, &str); 4] = [
+const TICKET_ONLY: [(&str, &str); 6] = [
+    ("duration", "log_time"),
+    ("started", "log_time"),
     ("reason", "close"),
     ("remove_labels", "edit"),
     ("assignees", "edit"),
@@ -773,9 +796,18 @@ fn tickets(call: &Call) -> Verdict {
     let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
         "list" | "search" | "show" | "types" | "link_types" | "sprints" | "subscribe"
-        | "unsubscribe" => {
+        | "unsubscribe" | "time_spent" => {
             return Verdict::Allow;
         }
+        "log_time" => format!(
+            "it logs {} on {} on the tracker, started {}",
+            shown("duration"),
+            shown("ticket"),
+            call.args["started"].as_str().map_or_else(
+                || "that long before it is logged".to_owned(),
+                |_| shown("started")
+            )
+        ),
         // The link as the ticket named reads it, so that the card says its direction.
         "link" => format!(
             "it links two tickets on the tracker: {} {} {}",
@@ -818,7 +850,7 @@ fn tickets(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" | "comment_edit" => &["title"],
+        "comment" | "comment_edit" | "log_time" => &["title"],
         "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" => &["title", "body"],
         _ => &[],
     };
@@ -4566,7 +4598,7 @@ mod tests {
         let fixture = Fixture::main();
         let verdict = fixture.judge(
             "agent_launch",
-            json!({"title": "t", "brief": "b", "root": true}),
+            json!({"title": "t", "brief": "b", "kind": "handed"}),
             Some(&fixture.never),
         );
         assert!(to_judge(&verdict), "{verdict:?}");
@@ -4578,7 +4610,7 @@ mod tests {
         // A child launched is the caller's own work, as before.
         let child = fixture.judge(
             "agent_launch",
-            json!({"title": "t", "brief": "b"}),
+            json!({"kind": "child", "title": "t", "brief": "b"}),
             Some(&fixture.never),
         );
         assert_eq!(child, Verdict::Allow);
@@ -4590,7 +4622,7 @@ mod tests {
         fixture.grant.launched = true;
         let verdict = fixture.judge(
             "agent_launch",
-            json!({"title": "t", "brief": "b", "root": true}),
+            json!({"title": "t", "brief": "b", "kind": "handed"}),
             Some(&fixture.never),
         );
         assert!(base_class(&verdict), "{verdict:?}");
@@ -4670,7 +4702,7 @@ mod tests {
             ("forge", json!({"action": "create", "title": token})),
             (
                 "agent_launch",
-                json!({"title": "t", "brief": token, "root": true}),
+                json!({"title": "t", "brief": token, "kind": "handed"}),
             ),
         ] {
             let verdict = fixture.judge(tool, args, Some(&fixture.never));
@@ -4687,7 +4719,7 @@ mod tests {
             ),
             (
                 "agent_launch",
-                json!({"title": "t", "brief": long, "root": true}),
+                json!({"title": "t", "brief": long, "kind": "handed"}),
             ),
         ] {
             assert!(

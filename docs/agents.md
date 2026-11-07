@@ -279,11 +279,11 @@ bridge sets on `claude` ("The Claude bridge", below):
   `fs_list`, `search`, `fs_write`, `fs_edit`, `tasks`, `run`, `run_status`
   and `report`; a root, which alone has children, also
   `agent_launch`, `agent_send`, `agent_status`, `agent_stop` and
-  `approval_answer`; a root `ask_user`, a child `ask_parent`. Every agent has
+  `approval_answer`; every agent `ask`. Every agent has
   `workspace`; one of a project whose repositories declare a forge also has `forge`, and one of
   a project that declares a tracker `tickets`, in `main` as in a workspace. A root of a project
   with neither gets, in this order, the first eight, `skill_read`, `workspace`, the four
-  `agent_*`, `skills`, `commands`, `setup`, `project`, `report`, `ask_user`, `approval_answer`
+  `agent_*`, `skills`, `commands`, `setup`, `project`, `report`, `ask`, `approval_answer`
   (21). The list is
   kept with the agent and changes only when its role's does (the prompt cache depends on it):
   a forge or a tracker declared or gone, a new version (`docs/tools.md`, "When the tools
@@ -789,9 +789,11 @@ An agent launches children with `agent_launch` (`docs/tools.md`): each is an age
 with a parent, a depth (a root is at 0), a title and a brief, which is all it knows of its task.
 The user writes to and stops roots only: `agent.send` and `agent.stop` on a child are refused,
 naming its root. The tree is one project's: a child works in its parent's place, always. Work that
-belongs in another workspace is a session for the user (`agent_launch` with `root`, `docs/tools.md`
-"Sessions for the user"), in an existing workspace or a new one, made and prepared before it
-starts; the agent that started it and the session write to each other with `session_send`.
+belongs in another workspace is a session (`agent_launch` with `kind` `led` or `handed`,
+`docs/tools.md` "Sessions an agent starts"), in an existing workspace or a new one, made and
+prepared before it starts; the agent that started it and the session write to each other with
+`session_send`. A led session asks its pilot its questions and wakes it when it asks, reports or
+ends; a handed one is the user's.
 
 - **Caps**: at most `max_children` children of a project run at once (`docs/projects.md`, 1 to
   12, 12 by default), and a tree is 1 deep: a child, whatever its role, has no `agent_*` tool nor
@@ -833,7 +835,8 @@ Everything Flottille hands to an agent is a delivery: the user's messages (`user
 (`brief`), the first message of a session an agent started for the user (`launched`, under a first
 line naming that agent: it is the agent's words, never the user's), a message another session
 wrote with `session_send` (`session`, under a first line naming its sender, never the user's), the end of a turn of a session
-the agent follows (`session-turn-ended`, `docs/tools.md`, "Sessions for the user"), a
+the agent leads, when it asked or reported (`session-turn-ended`, `docs/tools.md`, "Following a
+session"), a led session's pilot that ended (`handed`), a
 parent's message (`parent`), what happens to a child (`child-report`,
 `child-question`, `child-asks`, `child-failed`, `child-stuck`, `child-idle`, `child-replaced`,
 `children-status`), an approval's answer (`approval`), a reminder (`reminder`), a session's
@@ -871,8 +874,9 @@ A child that ends a turn without reporting, with nothing to wait for (no request
 held), is reminded once (`reminder`); after a second such turn its parent is told it went idle
 (`child-idle`). A delivery other than a reminder starts the count again.
 
-A question waits for its answer from the call (`ask_parent`, or a root's `ask_user`) until the one
-asked writes to the agent: a child then waits on its parent, a root on the user, who sees it in
+A question waits for its answer from the call (`ask`) until the one asked writes to the agent: a
+child then waits on its parent, a led session on its pilot (`session_send`), any other root on the
+user, who sees it in
 `flottille status` and under the window's bell (`waiting_on_answer`, `docs/protocol.md`).
 
 ### Replacement
@@ -885,7 +889,42 @@ superseded. What else the old session was sent and had not finished is given bac
 so that its late calls are refused, saying it was replaced. The parent is told (`child-replaced`).
 Two replacements within 30 minutes are allowed: the third failure fails the agent and its tree.
 
-A child whose context is compacted is sent its brief again.
+A child whose context is compacted by its CLI is sent its brief again.
+
+### Compaction
+
+Flottille's own compaction (`docs/design.md` §5.8) starts the agent again the way a replacement
+does, with three differences: it is not counted against the limit of replacements, its parent is
+not told, and the word on why is the compactor's summary followed by the agent's latest messages
+word for word (`resume`, after its `brief`). Its id, its place in the tree, its children, its
+subscriptions, its requests and what waits for it are the agent's, not its session's: they stay.
+While the compactor works the agent's prompts wait (a delivery stays `queued`), and go to the new
+session after its first prompt. A failure changes nothing.
+
+With a compactor chosen, each CLI is left to compact as late as it allows, never turned off, so
+that its own compaction acts only when Flottille's could not:
+
+- **Claude Code**: its threshold is a share of the window (about 95 %, the window less a reserve
+  for the summary); `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` can only bring it down, never up (Claude
+  Code's environment variables; anthropics/claude-code issues #36381 and #31806). The provider
+  sets it to `100` in the bridge's environment, and so in `claude`'s, so that a lower value of the
+  user's own does not make it compact before Flottille. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is
+  capped at the model's window, so the default is already the largest. With no compactor nothing
+  is set, as before.
+- **Codex**: `model_auto_compact_token_limit` is clamped to 90 % of the model's window, its
+  default when unset (Codex's sample configuration, `config-sample.md`;
+  `protocol/src/openai_models.rs:527-538`). Flottille's Codex reads no configuration of the
+  user's (its own `CODEX_HOME`), so nothing lowers it: nothing is set.
+- **OpenCode**: `compaction.auto` is on by default and compacts when the context reaches the
+  model's limit less a reserve for its output (OpenCode's compaction documentation). Flottille's
+  OpenCode reads only the configuration Flottille gives it, which sets nothing of compaction:
+  nothing is set.
+
+What a new session needs is all in the store: its brief (the root's first message, or a child's),
+the summary, and its messages, word for word as they were recorded; its tools and instructions
+come from its role at the start of every session, its children and subscriptions are rows of the
+store keyed by the agent's id, and a session id is all the old session held of its own. Nothing of
+what Flottille holds lives only in the CLI's session.
 
 ### The sweep
 

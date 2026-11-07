@@ -247,6 +247,24 @@ fn an_action_of_an_agent_is_to_judge_and_a_change_of_the_tracker_is_base() {
 }
 
 #[test]
+fn a_tracker_change_says_the_worklog_entry() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (_, mcp) = root(&user, None);
+    let jira = json!({"kind": "jira", "site": "acme.atlassian.net", "projects": ["ABC"],
+        "worklog_token": "other-token"});
+
+    let number = held(mcp.call(
+        "project",
+        json!({"action": "set_settings", "tracker": jira}),
+    ));
+    // The user approves what is swapped, not only the site.
+    let says = request(&user, number)["says"].to_string();
+    assert!(says.contains("other-token"), "{says}");
+    assert!(says.contains("vault entry"), "{says}");
+}
+
+#[test]
 fn a_settings_change_says_what_changes_and_keeps_the_file_s_comments() {
     let user = User::with_fake_agent();
     project(&user);

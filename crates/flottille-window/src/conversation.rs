@@ -100,6 +100,11 @@ pub enum Block {
         seq: u64,
         text: String,
     },
+    /// A question a led session asked its pilot with `ask`: the pilot answers it; the card only
+    /// shows the user what was asked.
+    Asked {
+        text: String,
+    },
     /// A command's result.
     Command(CommandCard),
     /// A request whose answer came as a card below: the line that told it was asked and decided
@@ -237,9 +242,38 @@ pub fn in_sight(block: &Block) -> bool {
         | Block::Relayed { .. }
         | Block::SubAgents
         | Block::Links { .. } => true,
-        Block::Notice { kind, .. } => matches!(kind.as_str(), "failed" | "ended" | "resumed"),
+        Block::Notice { kind, .. } => {
+            matches!(
+                kind.as_str(),
+                "failed" | "ended" | "resumed" | COMPACTED_KIND
+            )
+        }
         _ => false,
     }
+}
+
+/// The kind of the line a compaction of the conversation is.
+pub const COMPACTED_KIND: &str = "compacted";
+
+/// A compaction's line, then the summary Flottille's compactor wrote: `Conversation compacted ·
+/// 150k → 9k tokens`. One by the agent's own CLI has no summary to show.
+pub fn compacted_text(data: &Value) -> String {
+    if data["by"] != "flottille" {
+        return "Conversation compacted by the agent's CLI".into();
+    }
+    let tokens = |key: &str| {
+        let n = data[key].as_u64().unwrap_or(0);
+        match n {
+            0..1_000 => n.to_string(),
+            _ => format!("{}k", (n + 500) / 1_000),
+        }
+    };
+    let summary = data["summary"].as_str().unwrap_or_default().trim();
+    format!(
+        "Conversation compacted · {} → {} tokens\n{summary}",
+        tokens("before"),
+        tokens("after")
+    )
 }
 
 /// What the line of a group of the agent's work says.
@@ -832,6 +866,13 @@ impl Conversation {
                 }));
                 changes
             }
+            "agent.asked" if data["to"] == "pilot" => {
+                let mut changes = self.close(Some(event.at));
+                changes.extend(self.push(Block::Asked {
+                    text: text("question"),
+                }));
+                changes
+            }
             "approval.requested" if data["held_by"] == "user" => {
                 let number = data["number"].as_u64().unwrap_or(0);
                 self.add_approval(number)
@@ -851,6 +892,11 @@ impl Conversation {
                 }));
                 changes
             }
+            // One line, its summary folded under it.
+            "agent.compacted" => self.push(Block::Notice {
+                kind: COMPACTED_KIND.into(),
+                text: compacted_text(data),
+            }),
             "agent.resumed" => self.push(Block::Notice {
                 kind: "resumed".into(),
                 text: "by you, on its own session".into(),
@@ -860,9 +906,10 @@ impl Conversation {
     }
 
     /// An `agent_launch` call, with its arguments when they came: a child of the agent, whose
-    /// list follows the calls, or a session for the user (`root`), which is not one.
+    /// list follows the calls, or a session (`led` or `handed`, `root` in a call made before
+    /// `kind`), which is not one.
     fn launch(&mut self, id: String, input: &Value) {
-        if input["root"] == true {
+        if input["root"] == true || matches!(input["kind"].as_str(), Some("led" | "handed")) {
             let title = input["title"].as_str().unwrap_or_default().to_owned();
             self.sessions.insert(id.clone(), title);
             if self.child_launches.remove(&id) && self.child_launches.is_empty() {
@@ -1524,9 +1571,15 @@ fn shown_args(value: &Value) -> String {
 /// A call's arguments as its line shows them: a page read or a search says its URL or its words,
 /// which are what it asks.
 fn args_of(tool: &str, input: &Value) -> String {
-    if let ("ask_user", Some(question)) = (tool, input["question"].as_str()) {
+    // `ask` goes where the daemon says for its caller, its parent, its pilot or the user: its
+    // line does not say who.
+    if let (tool @ ("ask_user" | "ask"), Some(question)) = (tool, input["question"].as_str()) {
         let first = question.lines().find(|line| !line.trim().is_empty());
-        return cut_args(format!("asked you: {}", first.unwrap_or_default().trim()));
+        let asked = match tool {
+            "ask" => "asks",
+            _ => "asked you",
+        };
+        return cut_args(format!("{asked}: {}", first.unwrap_or_default().trim()));
     }
     match (tool, input["url"].as_str().or(input["query"].as_str())) {
         ("web", Some(asked)) => cut_args(asked.to_owned()),
@@ -1656,6 +1709,24 @@ mod tests {
             name: name.into(),
             data,
         }
+    }
+
+    #[test]
+    fn a_compaction_says_its_sizes_and_holds_its_summary_and_one_by_the_cli_has_none() {
+        let flottille = json!({"by": "flottille", "before": 152_400, "after": 9_100,
+            "summary": "## Goal\nShip it."});
+        assert_eq!(
+            compacted_text(&flottille),
+            "Conversation compacted · 152k → 9k tokens\n## Goal\nShip it."
+        );
+        assert_eq!(
+            compacted_text(&json!({})),
+            "Conversation compacted by the agent's CLI"
+        );
+        assert!(in_sight(&Block::Notice {
+            kind: COMPACTED_KIND.into(),
+            text: String::new()
+        }));
     }
 
     #[test]
@@ -2007,6 +2078,35 @@ mod tests {
                 images: Vec::new(),
                 commands: None,
             }]
+        );
+    }
+
+    #[test]
+    fn a_led_session_s_question_to_its_pilot_is_shown_as_asked_of_it() {
+        let mut c = root();
+        c.apply(&event(
+            1,
+            "agent.asked",
+            json!({"agent": "r", "question": "Cover the logout too?", "to": "pilot",
+                "pilot": "0123456789ab"}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.asked",
+            json!({"agent": "r", "question": "Cover the logout too?", "to": "user",
+                "moved_from": "0123456789ab"}),
+        ));
+        assert_eq!(
+            c.blocks(),
+            [
+                Block::Asked {
+                    text: "Cover the logout too?".into()
+                },
+                Block::Question {
+                    seq: 2,
+                    text: "Cover the logout too?".into()
+                }
+            ]
         );
     }
 

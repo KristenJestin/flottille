@@ -84,6 +84,8 @@ pub enum Order {
     Stop,
     /// Its session is let go and a new one replaces it, for this reason. The parent was told.
     Replace(String),
+    /// Its conversation was summarised (`compaction`): a new session goes on from the summary.
+    Compact(Box<crate::compaction::Compacted>),
 }
 
 /// The prompt taken for the agent, kept across its processes, and whether one is being played.
@@ -241,6 +243,14 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             tell_resumed(daemon, &agent, ended_at);
             Ok(json!({"agent": agent.to_json()}))
         }
+        "agent.detach" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let mut agent = tree::detach(daemon, &asked.agent)?;
+            agent.gate_mode = crate::judge::mode(daemon, &agent.id);
+            let mut shown = agent.to_json();
+            shown["led_by"] = Value::Null;
+            Ok(json!({"agent": shown}))
+        }
         "agent.mode" => {
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -336,6 +346,13 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = find(daemon, &asked.agent)?;
             Ok(tree::status_of(daemon, &agent)?)
         }
+        "agent.compact" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            refuse_final(&agent)?;
+            let after_turn = crate::compaction::ask(daemon, &agent)?;
+            Ok(json!({"agent": agent.to_json(), "after_turn": after_turn}))
+        }
         "agent.cancel" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
@@ -369,6 +386,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let mut shown = agent.to_json();
             shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
             shown["tools_reload"] = reloading(daemon, &agent.id).into();
+            shown["led_by"] = json!(agent.launched_by.as_ref().filter(|_| agent.led));
             Ok(json!({"agent": shown, "events": events, "more": more}))
         }
         method => Err(Failure::new(
@@ -595,6 +613,7 @@ async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             effort: asked.effort,
             gate_mode: None,
             launched_by: None,
+            led: false,
         },
     )
     .inspect_err(|_| deliveries::forget_images(&daemon.paths, &id))?;
@@ -638,6 +657,8 @@ pub struct New {
     pub gate_mode: Option<GateMode>,
     /// The agent that starts this root for the user; `None` for a child or the user's own root.
     pub launched_by: Option<String>,
+    /// That agent leads it (`led`) rather than handing it over.
+    pub led: bool,
 }
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
@@ -765,6 +786,8 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         images: None,
         gate_mode: new.gate_mode.unwrap_or_default(),
         launched_by: new.launched_by,
+        led: new.led,
+        detached_from: None,
     };
     daemon.write(|store| {
         let event = store.create_agent(
@@ -1096,6 +1119,12 @@ async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
                         }
                         continue;
                     }
+                    Some(Order::Compact(compacted)) => {
+                        if !compacted_session(&daemon, &id, *compacted) {
+                            return;
+                        }
+                        continue;
+                    }
                 },
             }
         }
@@ -1265,6 +1294,13 @@ async fn process(
             turns.queued.clear();
             Ok(replace(daemon, &agent.id, &reason, true, false))
         }
+        Ok(Exit::Compact(compacted)) => {
+            stop(&mut child, pid).await;
+            mcp::retire(daemon, &agent.id);
+            turns.running = false;
+            turns.queued.clear();
+            Ok(compacted_session(daemon, &agent.id, *compacted))
+        }
         Err(reason) => {
             stop(&mut child, pid).await;
             Err(reason)
@@ -1310,6 +1346,53 @@ fn died(daemon: &Arc<Daemon>, id: &str, status: ExitStatus, turns: &mut Turns) -
 /// parent is told when `tell` (a stuck agent's was told already). Past the replacement limit it
 /// fails instead. Whether it goes on.
 pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell: bool) -> bool {
+    renew(daemon, id, reason, counted, tell, None)
+}
+
+/// The agent's conversation was summarised (`compaction`): its session is let go and a new one,
+/// not counted as a replacement nor told to its parent, goes on from its brief, the summary and
+/// its latest messages. Whether it goes on.
+fn compacted_session(
+    daemon: &Arc<Daemon>,
+    id: &str,
+    compacted: crate::compaction::Compacted,
+) -> bool {
+    let kept = crate::compaction::settings(daemon)
+        .map(|settings| crate::compaction::kept_now(daemon, id, &settings))
+        .unwrap_or(crate::compaction::KEPT);
+    // Read before the new session starts: what the old one said is what is kept.
+    let (resume, after) = crate::compaction::resumed(daemon, id, &compacted.summary, kept);
+    let goes_on = renew(
+        daemon,
+        id,
+        "its conversation was compacted",
+        false,
+        false,
+        Some(resume),
+    );
+    if goes_on {
+        record(
+            daemon,
+            id,
+            "agent.compacted",
+            json!({"by": "flottille", "before": compacted.before, "after": after,
+                "summary": compacted.summary}),
+            false,
+        );
+    }
+    crate::compaction::finish(daemon, id);
+    goes_on
+}
+
+/// `replace`, the new session sent `resume` in place of the word on why it starts again.
+fn renew(
+    daemon: &Arc<Daemon>,
+    id: &str,
+    reason: &str,
+    counted: bool,
+    tell: bool,
+    resume: Option<String>,
+) -> bool {
     let reason = secrets::mask(reason, &std::env::vars_os().collect());
     let since = now_ms().saturating_sub(REPLACEMENT_WINDOW_MS);
     let replaced = daemon
@@ -1384,10 +1467,12 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
         id,
         "resume",
         Some(format!("resume-{id}-{}", agent.epoch)),
-        &format!(
-            "A previous session of yours stopped: {reason}. You start again from your brief: \
-             check the real state of your place first, what it did may be there already."
-        ),
+        &resume.unwrap_or_else(|| {
+            format!(
+                "A previous session of yours stopped: {reason}. You start again from your brief: \
+                 check the real state of your place first, what it did may be there already."
+            )
+        }),
         approval::BETWEEN_TURNS,
     );
     if tell {
@@ -1873,6 +1958,8 @@ impl acp::Events for Recorder {
             )),
         );
         tree::after_turn(&self.daemon, &self.agent, stop_reason);
+        // Past its threshold, or asked during the turn: summarised before its next prompt.
+        crate::compaction::turn_ended(&self.daemon, &self.agent);
     }
 }
 

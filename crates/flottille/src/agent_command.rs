@@ -90,9 +90,24 @@ pub enum AgentAction {
         #[arg(long)]
         json: bool,
     },
+    /// Take a session an agent started away from that agent: it becomes yours alone, its
+    /// questions come to you, and there is no undo
+    Detach {
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Reload a root agent's tools: its process restarts on its conversation with the tools its
     /// role has now, once its turn ended, and it is told what changed
     ReloadTools {
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compact an agent's conversation now, or once its turn ended: the compactor chosen in
+    /// Settings summarises it, and it goes on in a new session from its brief, the summary and its
+    /// latest messages (`docs/design.md` §5.8)
+    Compact {
         agent: String,
         #[arg(long)]
         json: bool,
@@ -326,6 +341,23 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        AgentAction::Detach { agent, json } => {
+            let detached = Client::connect_or_start(paths)?.request(
+                "agent.detach",
+                serde_json::to_value(AgentName { agent, after: None })?,
+            )?;
+            if json {
+                println!("{detached}");
+            } else {
+                println!(
+                    "Detached agent {} from agent {}: it is yours alone now, and its questions \
+                     come to you.",
+                    text(&detached["agent"], "id"),
+                    text(&detached["agent"], "detached_from")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         AgentAction::ReloadTools { agent, json } => {
             let reloaded = Client::connect_or_start(paths)?.request(
                 "agent.reload_tools",
@@ -342,6 +374,26 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     "Reloading the tools of agent {}: they are given at its next message{after}, \
                      which tells it what changed.",
                     text(&reloaded["agent"], "id")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Compact { agent, json } => {
+            let asked = Client::connect_or_start(paths)?.request(
+                "agent.compact",
+                serde_json::to_value(AgentName { agent, after: None })?,
+            )?;
+            if json {
+                println!("{asked}");
+            } else {
+                let when = match asked["after_turn"] == true {
+                    true => "once its turn ended",
+                    false => "now",
+                };
+                println!(
+                    "Compacting agent {} {when}: `flottille watch` says agent.compacted when its \
+                     new session is ready, or agent.compaction_failed and why.",
+                    text(&asked["agent"], "id")
                 );
             }
             Ok(ExitCode::SUCCESS)

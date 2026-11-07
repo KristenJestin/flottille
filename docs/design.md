@@ -214,13 +214,15 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 
 Flottille's own tools:
 
-- `agent_launch {title, brief, model?, role?, root?, workspace? | new_workspace? + repositories?}`:
-  with `root`, a root only starts a session for the user, in a workspace (existing or new) or its
-  own place, judged, in the tree's mode, its first message the agent's and never the user's, base
-  when that root was itself started by an agent (`tools.md`, "Sessions for the user"); work that
-  belongs in a workspace is a session, and the tool's description leads with that form. Without
-  it, starts a child in the caller's own place, never another (a workspace named is refused,
-  naming `root: true`), and answers at once with its id. Refused (never queued) above the caps.
+- `agent_launch {kind, title, brief, model?, role?, workspace? | new_workspace? + repositories?}`:
+  `kind` is required and never guessed. `child` starts a child in the caller's own place, never
+  another (a workspace named is refused, naming `led`), refused (never queued) above the caps.
+  `led` and `handed`, for a root only, start a session in a workspace (existing or new) or its own
+  place, judged, in the tree's mode, its first message the agent's and never the user's, base when
+  that root was itself started by an agent (`tools.md`, "Sessions an agent starts"): a `led`
+  session is piloted by the caller, asks it its questions and wakes it when it asks, reports or
+  ends; a `handed` one is the user's, and the caller hears nothing more of it. It answers at once
+  with the id.
 - `session_send {session, text}` (a root): a message to a session the caller started, to the
   agent that started it, or to any other session of its project once the user gave their leave
   for that pair (asked with the first message, in every mode, §7.2), judged as a write is; it
@@ -241,14 +243,17 @@ Flottille's own tools:
 - `agent_stop {agent_id}`: stops the child and its own tree.
 - `report {text}`: the caller is done; its report goes to its parent at once and the session ends
   (see 5.3). A root agent's report goes to the user.
-- `ask_user {question}` (a root only): a question to the user, answered later as a delivery
-  (never blocks). It is open at once, whatever the agent does next: in the inbox, as "needs you"
+- `ask {question}`: a question, answered later as a delivery (never blocks), to whom the daemon
+  decides for the caller: a child's to its parent, delivered as `child-question` and answered with
+  `agent_send`; a led session's to its pilot, which is woken at the turn's end and answers with
+  `session_send` (the session shows as waiting on its pilot); any other root's to the user. A
+  question to the user is open at once, whatever the agent does next: in the inbox, as "needs you"
   on its session's row, as a card at its place in the conversation with the field that answers it
   (the call's own line says `asked you: <its first line>`), and in what `session_read` gives,
   until the agent takes a message of the user written after it (one message answers every question
   open then), or its session is replaced or resumed.
-- `ask_parent {question}` (a child only, in place of `ask_user`): a question to its parent,
-  delivered as `child-question`; the parent answers with `agent_send`.
+  `ask_user` and `ask_parent`, the names it replaced, are answered for one release, routed as
+  `ask` is.
 - `approval_answer {request_id, decision: forward | deny, why}`: answer a request held for the
   caller by one of its children (§7). `forward` passes it to the caller's parent, or to the user
   when the caller is a root. There is no way to allow a request.
@@ -257,8 +262,8 @@ The tool list of a session is its role's, and changes only when the role's does 
 `reference/hemera.md` §7): a project that declares or drops a forge or a tracker, a new version.
 A running session is then told (`notifications/tools/list_changed`) and served the new list, or
 said to run an older one until a restart (`docs/tools.md`, "When the tools change"). It depends
-on what the agent can do: a root gets `ask_user`, `session_send`, `session_read`, `skills`,
-`commands`, `setup` and `project`, a child `ask_parent`; a child, whatever its role, gets no `agent_*` tools
+on what the agent can do: every agent gets `ask`, a root `session_send`, `session_read`, `skills`,
+`commands`, `setup` and `project`; a child, whatever its role, gets no `agent_*` tools
 and no `approval_answer`. A root lead has 25 tools, a child 14; one more each when the
 project's repositories declare a forge (`forge`), one more when it declares a tracker
 (`tickets`), whatever the place (`reference/mcp.md` §4).
@@ -314,12 +319,14 @@ running, or ran past the call's wait) delivers `command-ended` to the agent that
 ends: the line, the exit code, the duration and the last lines of the output, masked
 (`docs/tools.md`, "Commands").
 
-An agent that starts a session for the user chooses, with `follow`, whether it hears of it: with
-`follow: true` it is woken, between turns, by `session-turn-ended` at each end of a turn of that
-session (and when the session ends), a delivery that names the session, says why the turn ended
-(turn done, a report, a question with `ask_user`, a failure) and holds its last message, masked and
-cut, after the questions to the user that turn asked and that still wait, whole. It is a following, a subscription that has no end of its own (§5.6, `docs/tools.md`, "Sessions
-for the user"). Two sessions that write to each other five times without the user pause it.
+An agent that pilots a session (`agent_launch` with `kind: led`) is woken, between turns, by
+`session-turn-ended` when a turn of that session asked it a question (`ask`) or reported, and when
+the session ends or fails; a plain turn's end wakes nobody. The delivery names the session, says
+why and holds its last message, masked and cut, after the questions to the pilot that turn asked
+and that still wait, whole. It is a following, a subscription that has no end of its own (§5.6,
+`docs/tools.md`, "Following a session"). Two sessions that write to each other five times
+without the user pause it. A pilot that ends leaves its led sessions going on, handed to the
+user.
 
 ### 5.3 What the parent is told
 
@@ -330,7 +337,7 @@ for the user"). Two sessions that write to each other five times without the use
 | fails (agent error, provider limit, replacement limit) | `child-failed`, with the reason and the last output lines. Urgent. |
 | is stuck (no sign of activity for 5 min in a turn, not waiting on the provider, no command of its own running) | `child-stuck`; Flottille replaces it once, and says so. |
 | has a call held by the gate (an "ask") | `child-asks`, with the request number, the call and the reasons. Urgent. The parent answers with `approval_answer` (forward or deny, §7). |
-| calls `ask_parent` | `child-question`, with the question. The parent answers with `agent_send`. |
+| calls `ask` | `child-question`, with the question. The parent answers with `agent_send`. |
 | sits idle with nothing queued while another launch waits for a slot | ended, and `child-ended` tells the parent. |
 
 ### 5.4 When nothing happens
@@ -378,11 +385,10 @@ review) subscribes to it instead of reading again and again. Four parts, each it
   subscription stored with a deadline keeps it. Nothing is delivered of what does not change: each
   delivery costs the agent a turn, so the deliveries of one round of the items ring the agent once,
   and those that come while it is in a turn are pumped together, in order, at its end (§5.2).
-- **A following** is a subscription whose source is a session the agent started for the user
-  (`agent_launch` with `root` and `follow: true`): it has no deadline, and ends
-  when the agent unsubscribes (`forge unsubscribe` with `session`), when the session ends or
-  fails, or when the agent ends. It wakes the agent at each end of a turn of the session, never
-  more than once for a turn. A run the agent started (`forge` `run`) is followed the same way
+- **A following** is a subscription whose source is a session the agent leads (`agent_launch`
+  with `kind: led`): it has no deadline, and ends when the agent unsubscribes (`forge unsubscribe`
+  with `session`), when the session ends or fails, or when the agent ends. It wakes the agent at
+  the end of a turn of the session that asked it or reported, never more than once for a turn. A run the agent started (`forge` `run`) is followed the same way
   unless it says `follow: false`: the rounds of the items read it, and it wakes the agent once
   when it waits on a manual step and when it ends, which ends the following (`docs/forges.md`,
   "Following a run").
@@ -429,6 +435,56 @@ is no second way to end a session.
 It is looked for when the daemon starts and then about once an hour, from the sweep that already
 runs: no timer of its own, nothing woken more often. The clock is the store's, which a test moves
 (`test.advance`).
+
+### 5.8 Compaction
+
+Each agent CLI compacts its own context, with its own model and rules. Flottille compacts it
+instead with **the compactor**, a model the user chooses in Settings, Compaction, as they choose the
+Auto judge (§7.1): provider, model and effort; **None** leaves each CLI to compact on its own, as
+before. A user who never chose gets one picked as the judge is: the smallest model of the first
+provider enabled, installed and signed in among those Flottille lists (Claude's Haiku), written
+once to `compaction.toml` and said once in a notice that opens Settings. It runs on the user's
+quota, as a session of one of their CLIs with no tool at all, one process per compaction, stopped
+after it (the judge's runner).
+
+The settings, global, beside it: **Automatic** (on: Flottille compacts by itself; off: only when
+the user asks), the **threshold** (70 % of the model's context window), a **maximum size** in
+tokens that compacts even when the window is larger (none by default), the tokens **kept word for
+word** (20,000), and the **guidance**, Flottille's default text (`roles/compaction.md`: fixed
+sections, goal, constraints, done and in progress, decisions with their reason, next steps, files,
+errors and fixes, critical context, and what only Flottille holds), editable with Reset to default,
+inside a fixed text (`roles/compactor-base.md`) that says what the compactor is and that what the
+agent wrote is data.
+
+1. **When**: at the end of a turn, never in it, once the context the agent used (`agent.usage`, a
+   report made since its last compaction) passes the threshold (50 % to 95 %) or the maximum size
+   (20,000 tokens at least), and has grown by a tenth of the window past the size its session
+   started at (what the first turn of a compacted session reported) and past the size its last
+   failed compaction started at: neither a session that starts past the threshold nor a compactor
+   that fails is run at every end of a turn. Not while the compactor was picked by Flottille and
+   its notice not seen yet. Or when the user asks (`agent.compact`, `flottille agent compact`, the
+   session's menu), at once between turns or once the turn ended, whatever the sizes; one asked
+   while the compactor works is refused. The tokens kept word for word (50,000 at most) are never
+   more than a quarter of the size that compacts the agent.
+2. **The summary**: the compactor is given the conversation since the last compaction as Flottille
+   recorded it, thinking left out and each tool's input and result cut to its first 500
+   characters; the previous summary, to update rather than start over; and what only Flottille
+   holds: the brief, the place and its branch, the children and their state, the subscriptions,
+   the messages waiting. The agent's prompts wait meanwhile.
+3. **The check**: a summary cut off by its length, one that tried to call a tool, an empty one, or
+   one not smaller than what it replaces (the previous summary and the conversation since) is
+   refused.
+4. **The new session**: the agent starts again in a new session of its CLI the way a replaced one
+   does (`docs/agents.md`, "Compaction"), uncounted and with nothing told to its parent: it is sent
+   its brief, the summary, then its latest messages word for word. The summary, masked of the
+   daemon's secrets, comes in a block of its own (`<earlier_conversation_summary>`, every `<`
+   escaped) under a line that says a model wrote it from the earlier conversation: data, not the
+   user's words nor Flottille's instructions. `agent.compacted` says it, with
+   the sizes before and after and the summary; the conversation shows it as one line,
+   `Conversation compacted · 152k → 9k tokens`, which unfolds to the summary.
+5. **A failure** changes nothing: the agent goes on in its session, `agent.compaction_failed` and
+   the developer log say why, and the CLI's own compaction stays the safety net. With a compactor
+   chosen, each CLI is set to compact as late as it allows (`docs/agents.md`, "Compaction").
 
 ## 6. Projects and workspaces
 
@@ -519,7 +575,7 @@ root's, stored with the root and read at each call: a switch reaches every agent
 once, children included. Only the user changes it, in the window or with
 `flottille agent mode <agent> ask|auto|full` (`agent.mode`, which switches the tree's root
 whatever agent of it is named); no tool of an agent does, and a session an agent starts for the
-user (`agent_launch` with `root`) takes the mode of the tree that started it, Full included, never
+user (`agent_launch` with `kind` `led` or `handed`) takes the mode of the tree that started it, Full included, never
 above it: an agent in Full can already do what the session would do, the session caps still apply,
 and the rules refused in every mode stay refused in it. Each tree keeps its own mode afterwards: a
 switch of the launcher's tree does not reach it. It is kept when the session resumes. An agent
@@ -558,7 +614,7 @@ What becomes of a call, by what the gate says of it and the tree's mode:
 **Refused**, in every mode, is a call that cannot be made as it is, or that bare mode does not
 have: shell syntax (in a line, a task's or a setup step's line, a `git rebase --exec`), a
 malformed call or an unknown action, a tool the agent does not have (a child's
-`agent_launch` with `root`, a child's `workspace`, a tool of its provider), a login printed (`gh
+`agent_launch` of a session, a child's `workspace`, a tool of its provider), a login printed (`gh
 auth token`, `aws configure get`, `kubectl config view --raw`, `gcloud auth print-access-token`,
 `git credential fill`, a password manager or a keyring: `pass`, `gopass`, `op`, `bw`, `rbw`,
 `secret-tool`, `docker-credential-*`),
@@ -683,6 +739,9 @@ who asked:
   from then on, one way, each message then judged as a write is, until either session ends or
   the user withdraws it where the session's rights are shown (`docs/tools.md`, "Sessions that
   talk to each other").
+  Ending a session that is not the agent's own child (`agent_stop`) is held for the user the same
+  way, in every mode, Full included, and every time: nothing is kept (`docs/tools.md`, "Ending
+  another session").
 - **A child's request is held by its parent**, as a `child-asks` delivery. The parent denies it or
   forwards it with one sentence of why (`approval_answer`); forwarding passes it to the parent's
   own parent, one level at a time, and from the root to the user, with every reason given on the
@@ -772,7 +831,17 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   page, and one with no session is not in the sidebar. A session is titled by the first line of
   its first message that says what the work is (a greeting or a single word does not: the session
   is `agent <id>` until a later message of the user does); a session an agent started says it in
-  its page's header, "started by <agent>", not in the sidebar. Each session takes **two lines**:
+  its page's header, "started by <agent>", not in the sidebar. A session an agent leads (`led`)
+  is the one exception to the flat list: its row sits right under its pilot's session's row,
+  indented, starting with a mark whose tooltip says "led by <pilot>"; the pilot's row gains a
+  chevron that folds its led rows away with it, and each led row keeps its own mark, unread dot
+  and draft pencil. Its page's header says "led by <pilot>", and a line above its composer says
+  that the user's messages reach it directly and the pilot is not asked. The row's "⋯" menu of a
+  session an agent started offers "Detach from <agent>" (`agent.detach`, a toast says the
+  result): the row slides back among the project's sessions, its indent and mark fade, and the
+  header's line and the note fold away. A question a led session asks its pilot shows in its
+  conversation as a card, "<session> asks its pilot", with no answer box. Each session takes
+  **two lines**:
   the first is its title and, at the right, **one mark**, chosen in this order: its state
   (running, needs the user, waiting) when it has one, else a small dot when something new was
   written in it since it was last opened (an agent's message, a report, a delivery that woke it, a
@@ -869,7 +938,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   about ten and then scrolls, and takes pictures (pasted from the clipboard, dropped from a file or
   picked with Attach: thumbnails with a remove button, sent with the message as ACP image blocks,
   stored in Flottille's data folder so the conversation shows them again; said in one sentence and
-  left out when the session's agent takes none); what the root does while a turn runs (`Thinking…`,
+  left out when the session's agent takes none). A click on a picture, in a message or in the
+  composer, opens it in the large modal: at its own size, scaled down to fit the window and never
+  up, with the arrows (keys and buttons, "2 of 3") through the message's pictures; what the root does while a turn runs (`Thinking…`,
   `Writing…`, `Running <tool>…`) is said in the same bar, where the words cross-fade as they change,
   and goes with the turn. A running agent is
   drawn by its icon alone, in the tree and in the rail: no text badge, nothing in the header. In the
@@ -887,7 +958,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   nothing under the bar), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
-  Link a ticket… and Unlink the ticket) and facts, its runs, then, pinned at the very bottom and
+  Link a ticket…, Unlink the ticket and, for a session in a workspace, Remove workspace…, which
+  asks as the card does and names the sessions living there; while it runs the section says it is
+  being removed, and once removed it folds away, the page staying) and facts, its runs, then, pinned at the very bottom and
   folding away when nothing waits, "Waiting for you", the one place of the page that says the user
   is needed (each request that reached the user is a compact card: the whole call, wrapping over
   as many lines as it takes, its class
@@ -997,8 +1070,8 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
    daemon, in [`items.md`](items.md).
 5. **Remote**: network transport, phone, other machines.
 
-Flottille's own features beyond its core (the Auto judge, the compaction, later specs, review and a
-handbook) are proposed to become extensions, declared and turned on by the user: a proposal,
+Flottille's own features beyond its core (the Auto judge, the compaction, built in today (§7.1,
+§5.8), later specs, review and a handbook) are proposed to become extensions, declared and turned on by the user: a proposal,
 nothing built, in [`extensions.md`](extensions.md).
 
 ## 14. Defaults taken, to confirm

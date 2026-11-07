@@ -167,6 +167,8 @@ pub struct Daemon {
     /// Whether the last `provider.judge_changed` chose no judge, once read from the store: kept
     /// with each one said since (`providers::judge_changed`).
     pub judge_chose_none: Mutex<Option<bool>>,
+    /// Where each agent's compaction by Flottille stands.
+    pub compactions: crate::compaction::Live,
     /// The slots launches took in each project's children cap, before their child exists.
     pub launching: Mutex<HashMap<String, usize>>,
     /// What the forges said of each workspace, and who watches them.
@@ -223,6 +225,7 @@ impl Daemon {
             notes: deliveries::Notes::default(),
             waiting_provider: Mutex::new(HashSet::new()),
             judge_chose_none: Mutex::new(None),
+            compactions: crate::compaction::Live::default(),
             launching: Mutex::new(HashMap::new()),
             forges: forge::Forges::default(),
             kept_tickets: crate::reads::Kept::default(),
@@ -694,7 +697,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let _ = writer.await;
 }
 
-fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) {
+fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscription>) {
     let id = request.id;
     match request.method.as_str() {
         "daemon.status" => (
@@ -781,6 +784,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         ),
         method if method.starts_with("developer.") => (
             match developer::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("compaction.") => (
+            match crate::compaction::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

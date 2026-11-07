@@ -1651,7 +1651,7 @@ fn worker(user: &User, lead: &Mcp, title: &str) -> (String, Mcp) {
 fn worker_doing(lead: &Mcp, what: &str, title: &str) -> String {
     let answer = lead.call(
         "agent_launch",
-        json!({"title": title, "brief": format!("{what} and {title}"), "workspace": "w"}),
+        json!({"kind": "child", "title": title, "brief": format!("{what} and {title}"), "workspace": "w"}),
     );
     assert!(!answer.error, "{}", answer.text);
     answer
@@ -1811,7 +1811,7 @@ fn a_root_agent_s_reply_has_no_label_while_a_child_s_has_its_name(cx: &mut TestA
     let (lead, mcp, _) = lead_in_w(&user);
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "draft the notes", "brief": "draft the notes", "workspace": "w"}),
+        json!({"kind": "child", "title": "draft the notes", "brief": "draft the notes", "workspace": "w"}),
     );
     assert!(!answer.error, "{}", answer.text);
     let child = answer
@@ -2818,8 +2818,13 @@ fn a_judge_flottille_picked_is_said_once_in_a_notice_that_opens_settings(cx: &mu
     until(&shell, cx, "the notice is gone", |cx| {
         shell.read_with(cx, |s, _| s.judge_notice().is_none())
     });
-    cx.update(|window, _| assert!(window.try_find("judge-notice").is_none()));
+    // It folds away and fades out: still drawn a frame after, gone once settled.
+    cx.executor().advance_clock(Duration::from_millis(16));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    cx.update(|window, _| assert!(window.try_find("judge-notice").is_some(), "folding away"));
     settle(cx);
+    cx.update(|window, _| assert!(window.try_find("judge-notice").is_none()));
     assert_eq!(
         settings_shown(cx),
         ["judge", "guidance"],
@@ -3663,7 +3668,7 @@ fn providers_user() -> User {
     user.provider_script(
         "opencode",
         json!({"models": ["open/small", "open/medium"], "efforts": ["low", "high"], "turns": [
-            {"when": "launch a helper", "do": [{"mcp": {"tool": "agent_launch", "arguments": {
+            {"when": "launch a helper", "do": [{"mcp": {"tool": "agent_launch", "arguments": {"kind": "child",
                 "title": "helper", "brief": "check the docs", "provider": "claude",
                 "model": "fake-large"}}}]}
         ]}),
@@ -3745,12 +3750,13 @@ fn opening_settings_shows_the_judge_and_its_guidance_alone(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn settings_has_eight_tabs_in_order(cx: &mut TestAppContext) {
+fn settings_has_nine_tabs_in_order(cx: &mut TestAppContext) {
     assert_eq!(
         flottille_window::settings::SECTIONS[..],
         [
             ("judge", "Judge"),
             ("providers", "Providers"),
+            ("compaction", "Compaction"),
             ("rules", "Rules"),
             ("workspaces", "Workspaces"),
             ("vault", "Vault"),
@@ -3771,7 +3777,7 @@ fn settings_has_eight_tabs_in_order(cx: &mut TestAppContext) {
             .iter()
             .map(|key| window.find(format!("settings-tabs-{key}")).bounds().left())
             .collect();
-        assert_eq!(lefts.len(), 8);
+        assert_eq!(lefts.len(), 9);
         assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
         assert!(
             window.try_find("settings-tabs-guidance").is_none(),
