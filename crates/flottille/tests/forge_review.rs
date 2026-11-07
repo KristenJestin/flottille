@@ -195,7 +195,7 @@ fn github_reviews(user: &User) -> Vec<Value> {
 fn github_pulls() -> Value {
     json!({"pulls": {"acme/app": {"app/login": {"number": 12, "title": "Login",
         "state": "OPEN", "isDraft": false, "baseRefName": "main", "headRefName": "app/login",
-        "isCrossRepository": false, "url": "https://github.com/acme/app/pull/12"}}}})
+        "headRefOid": HEAD, "isCrossRepository": false, "url": "https://github.com/acme/app/pull/12"}}}})
 }
 
 /// Bitbucket Cloud's pull request #12 of `app/login`, open.
@@ -205,8 +205,13 @@ fn cloud_script() -> Value {
             "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/app"}},
             "links": {"html": {"href": "https://bitbucket.org/acme/app/pull-requests/12"}}}]},
         "api": {"/repositories/acme/app/pullrequests/12":
-            {"id": 12, "state": "OPEN", "participants": []}}})
+            {"id": 12, "state": "OPEN", "participants": [],
+                "source": {"commit": {"hash": HEAD}}}}})
 }
+
+/// The commit the pull request's branch is at.
+const HEAD: &str = "0a1b2c3d4e5f60718293a4b5c6d7e8f901234567";
+const MOVED: &str = "ffffffffffffffffffffffffffffffffffffffff";
 
 const BODY: &str = "Good direction, two nits.";
 
@@ -263,28 +268,20 @@ fn an_approval_waits_for_the_user_even_in_full() {
     let (id, mcp) = agent(&user);
     set_mode(&user, &id, "full");
 
-    let mut asked = review("approve");
-    asked["comments"][0]["body"] = json!("Use ghp_0123456789abcdefghijklmnopqrstuvwxyz to try it.");
-    let number = held(&mcp.call("forge", asked));
+    let number = held(&mcp.call("forge", review("approve")));
 
-    // Held as base, with the verdict, the body and the inline comments on the card, masked.
+    // Held as base, with the verdict, the body, the inline comments and the head on the card.
     let held_request = request(&user, number);
     assert_eq!(held_request["class"], "base", "{held_request}");
     let card = says(&user, number);
     for said in [
         "Its body: Good direction, two nits.",
         "Its verdict: approve",
+        "Its inline comment on src/login.rs line 14: Rename this.",
         "Its inline comment on README.md line 2: Typo.",
     ] {
         assert!(card.contains(&said.to_owned()), "{said}: {card:?}");
     }
-    let leaked = card.iter().any(|said| said.contains("ghp_0123456789"));
-    assert!(!leaked, "a token on the card: {card:?}");
-    assert!(
-        card.iter()
-            .any(|said| said.starts_with("Its inline comment on src/login.rs line 14: Use ")),
-        "{card:?}"
-    );
     assert!(github_reviews(&user).is_empty(), "approved before the user");
 
     let answer = allowed(&user, number);
@@ -292,6 +289,29 @@ fn an_approval_waits_for_the_user_even_in_full() {
     let sent = github_reviews(&user);
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0]["event"], "APPROVE");
+}
+
+#[test]
+fn a_secret_in_an_inline_comment_is_masked_on_the_card() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    user.gh_script(github_pulls());
+    let (_, mcp) = agent(&user);
+
+    let mut asked = review("approve");
+    asked["comments"][0]["body"] = json!("Use ghp_0123456789abcdefghijklmnopqrstuvwxyz to try it.");
+    let number = held(&mcp.call("forge", asked));
+
+    let card = says(&user, number);
+    assert!(
+        card.iter().all(|said| !said.contains("ghp_0123456789")),
+        "a token on the card: {card:?}"
+    );
+    assert!(
+        card.iter()
+            .any(|said| said.starts_with("Its inline comment on src/login.rs line 14: Use ")),
+        "{card:?}"
+    );
 }
 
 #[test]
@@ -430,7 +450,7 @@ fn an_approval_with_no_body_is_held_and_posted_with_none() {
     assert!(!answer.error, "{}", answer.text);
     assert_eq!(
         github_reviews(&user),
-        [json!({"event": "APPROVE", "body": "", "comments": []})]
+        [json!({"event": "APPROVE", "body": "", "comments": [], "commit_id": HEAD})]
     );
 }
 
@@ -541,9 +561,9 @@ fn a_data_center_change_request_is_refused_saying_bkt_cannot() {
         "contexts": [{"name": "dc", "host": "bitbucket.example.com"}]}));
     let (_, mcp) = agent(&user);
 
-    let number = held(&mcp.call("forge", review("request_changes")));
-    let answer = allowed(&user, number);
+    let answer = mcp.call("forge", review("request_changes"));
 
+    // Refused at once: the user is not asked for what cannot be done.
     assert!(answer.error, "{}", answer.text);
     assert!(
         answer.text.contains("Data Center") && answer.text.contains("nothing was posted"),
@@ -551,4 +571,196 @@ fn a_data_center_change_request_is_refused_saying_bkt_cannot() {
         answer.text
     );
     assert!(bkt_starting(&user, "pr comment").is_empty());
+}
+
+#[test]
+fn an_approval_is_pinned_to_the_head_the_card_was_built_on() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    user.gh_script(github_pulls());
+    let (_, mcp) = agent(&user);
+
+    let number = held(&mcp.call("forge", review("request_changes")));
+    let card = says(&user, number);
+    assert!(card.contains(&format!("Its head: {HEAD}")), "{card:?}");
+    allowed(&user, number);
+
+    let sent = github_reviews(&user);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["commit_id"], HEAD);
+}
+
+#[test]
+fn an_approval_is_not_posted_when_new_commits_came_after_the_card_on_github() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    user.gh_script(github_pulls());
+    let (_, mcp) = agent(&user);
+    let number = held(&mcp.call("forge", review("approve")));
+
+    let mut moved = github_pulls();
+    moved["pulls"]["acme/app"]["app/login"]["headRefOid"] = json!(MOVED);
+    user.gh_script(moved);
+    let answer = allowed(&user, number);
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("new commits since you were allowed; ask again"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        github_reviews(&user).is_empty(),
+        "posted on a head nobody read"
+    );
+}
+
+#[test]
+fn an_approval_is_not_posted_when_new_commits_came_after_the_card_on_bitbucket() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user);
+    user.bkt_script(cloud_script());
+    let (_, mcp) = agent(&user);
+    let number = held(&mcp.call("forge", review("approve")));
+    let card = says(&user, number);
+    assert!(card.contains(&format!("Its head: {HEAD}")), "{card:?}");
+
+    let mut moved = cloud_script();
+    moved["api"]["/repositories/acme/app/pullrequests/12"]["source"]["commit"]["hash"] =
+        json!(MOVED);
+    user.bkt_script(moved);
+    let answer = allowed(&user, number);
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("new commits since you were allowed; ask again"),
+        "{}",
+        answer.text
+    );
+    assert!(bkt_starting(&user, "pr comment").is_empty());
+    assert!(bkt_starting(&user, "pr approve").is_empty());
+}
+
+#[test]
+fn an_approval_is_refused_when_the_pull_request_cannot_be_read() {
+    // Bitbucket: its page is not there, before the card and after it.
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user);
+    let mut unreadable = cloud_script();
+    unreadable["api"] = json!({});
+    user.bkt_script(unreadable.clone());
+    let (_, mcp) = agent(&user);
+
+    let answer = mcp.call("forge", review("approve"));
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.starts_with("refused"), "{}", answer.text);
+
+    user.bkt_script(cloud_script());
+    let number = held(&mcp.call("forge", review("approve")));
+    user.bkt_script(unreadable);
+    let answer = allowed(&user, number);
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("could not be read"), "{}", answer.text);
+    assert!(bkt_starting(&user, "pr approve").is_empty());
+
+    // GitHub: `gh pr view` fails.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    let mut failing = github_pulls();
+    failing["view_fail"] = json!({"acme/app": {"12": "HTTP 502: Bad Gateway"}});
+    user.gh_script(failing);
+    let (_, mcp) = agent(&user);
+    let answer = mcp.call("forge", review("approve"));
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.starts_with("refused"), "{}", answer.text);
+    assert!(github_reviews(&user).is_empty());
+}
+
+#[test]
+fn a_bitbucket_review_that_fails_half_way_records_and_counts_what_was_posted() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user);
+    let mut script = cloud_script();
+    script["comment_fail"] = json!({"acme/app": {"Typo.": "Error: 502 Bad Gateway"}});
+    user.bkt_script(script);
+    let (_, mcp) = agent(&user);
+
+    let number = held(&mcp.call("forge", review("comment")));
+    let answer = allowed(&user, number);
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("1 of 2 line comments"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        answer.text.contains("the review's comment"),
+        "{}",
+        answer.text
+    );
+    // The body and the line comment that did post are recorded as the agent's, not the other.
+    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let posts = store.posts("app", "bitbucket", ".", "12").unwrap();
+    assert_eq!(posts.len(), 2, "{posts:?}");
+}
+
+/// Every way a line can give a verdict on a pull request.
+const VERDICT_LINES: [&str; 8] = [
+    "gh pr review 12 --approve",
+    "gh pr review 12 -R github.com/acme/app -r -b nope",
+    "gh api repos/acme/app/pulls/12/reviews -f event=APPROVE",
+    "gh api repos/acme/app/pulls/12/reviews -f event=REQUEST_CHANGES -f body=nope",
+    "bkt pr approve 12",
+    "bkt pr request-changes 12",
+    "bkt api /repositories/acme/app/pullrequests/12/request-changes --method POST",
+    "env gh pr review 12 -a",
+];
+
+/// A session in `mode` asks each line of `VERDICT_LINES`: each is held for the user, as the base
+/// call it is, and none ran.
+fn verdict_lines_wait_for_the_user(user: User, mode: &str) {
+    on_github(&user);
+    user.gh_script(github_pulls());
+    let (id, mcp) = agent(&user);
+    set_mode(&user, &id, mode);
+    for line in VERDICT_LINES {
+        let number = held(&mcp.call("run", json!({"line": line})));
+        assert_eq!(request(&user, number)["class"], "base", "{line}");
+        user.call("approval.deny", json!({"number": number}))
+            .unwrap();
+    }
+    let judged = user
+        .judge_received()
+        .iter()
+        .filter(|e| e["received"]["method"] == "session/prompt")
+        .count();
+    assert_eq!(judged, 0, "the judge was asked");
+    assert!(
+        calls(user.gh_received())
+            .iter()
+            .all(|call| !call.starts_with("pr review") && !call.contains("/reviews")),
+        "a verdict ran: {:?}",
+        user.gh_received()
+    );
+    assert!(user.bkt_received().is_empty(), "bkt ran");
+}
+
+#[test]
+fn a_verdict_run_by_a_command_line_waits_for_the_user_even_in_full() {
+    let user = User::with_fake_agent().with_fake_gh().with_fake_bkt();
+    verdict_lines_wait_for_the_user(user, "full");
+}
+
+#[test]
+fn a_verdict_run_by_a_command_line_is_never_decided_by_the_judge_in_auto() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_gh()
+        .with_fake_bkt();
+    verdict_lines_wait_for_the_user(user, "auto");
 }

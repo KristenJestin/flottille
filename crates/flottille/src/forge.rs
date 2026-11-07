@@ -64,6 +64,7 @@ const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefN
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
 /// What `forge review` posts: a comment, an approval or a request for changes.
 pub use review::VERDICTS as REVIEW_VERDICTS;
+pub(crate) use review::head_of as review_head;
 
 /// The forge a repository's remote is on: GitHub, or Bitbucket (Cloud, or a Data Center host the
 /// project names).

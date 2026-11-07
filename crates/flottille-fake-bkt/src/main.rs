@@ -47,6 +47,8 @@
 //! the call started at, so that a test sees which calls ran together.
 //! `step_fail` (`{"acme/api": {"publish": "Error: 502 Bad Gateway"}}`) makes `pr comment`,
 //! `edit`, `decline`, `publish` or `approve` of that repository alone fail that way.
+//! `comment_fail` (`{"acme/api": {"Typo.": "Error: 502 Bad Gateway"}}`) makes `pr comment` fail
+//! that way when its `--text` holds the key, the other comments posting.
 //! `pr approve <id>` prints `✓ Approved pull request #N` for a pull request of `pulls`, and
 //! `bkt api /repositories/<w>/<r>/pullrequests/<id>/request-changes --method POST` answers the
 //! participant it made, as Bitbucket Cloud's API does (assumed shape, `docs/forges.md`).
@@ -334,6 +336,18 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 return 1;
             }
             if let Some(failure) = script["step_fail"][&key][*verb].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            if *verb == "comment"
+                && let Some(failure) = script["comment_fail"][&key].as_object().and_then(|fails| {
+                    let text = option("--text").unwrap_or_default();
+                    fails
+                        .iter()
+                        .find(|(needle, _)| text.contains(needle.as_str()))
+                        .and_then(|(_, failure)| failure.as_str())
+                })
+            {
                 eprintln!("{failure}");
                 return 1;
             }
