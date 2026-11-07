@@ -357,6 +357,38 @@ calls never do) nor of what its answer may be (`allow` or `ask`).
 
 Each emits `judge.changed`. The user's door alone reaches them: no tool of an agent does.
 
+### The compaction methods
+
+`compaction.show`, `compaction.set`, `compaction.set_guidance`, `compaction.reset_guidance` and
+`compaction.noticed` read and keep Flottille's own compaction (`docs/design.md` §5.8):
+`compaction.toml` of Flottille's configuration folder, and the compactor's guidance in
+`compaction.md` beside it, absent while Flottille's default (`crates/flottille/roles/compaction.md`)
+holds. The guidance sits inside a fixed text (`crates/flottille/roles/compactor-base.md`).
+
+- `compaction.show` answers `{"compactor", "automatic", "threshold", "maximum", "kept",
+  "guidance"}`: the compactor `{"provider", "model", "effort", "picked"}` (`model` and `effort`
+  only when chosen, `picked` only while the user has not seen the notice of a compactor Flottille
+  picked) or `null` for none, whether it compacts by itself (default `true`), the threshold in
+  percent of the context window (default 70), the maximum size in tokens (`null`, the default, is
+  no ceiling), the tokens kept word for word (default 20000), and the guidance as `judge.show`
+  gives the judge's (`{"text", "source", "error", "default"}`). A user who never chose gets a
+  compactor picked first, as the Auto judge is (`provider.set_judge`): the smallest model of the
+  first provider enabled, installed and signed in among those Flottille lists, written once with
+  `picked = true` and said once with `compaction.changed`. `invalid-config` when the file holds
+  an unknown key or a value out of its range.
+- `compaction.set` takes any of `compactor` (`{"provider", "model", "effort"}`, or `"none"`),
+  `automatic` (a boolean), `threshold` (10 to 95), `maximum` (a number of tokens from 1000, or
+  `"none"`) and `kept` (0 to 200000); what is left out stays. It answers as `compaction.show`;
+  `invalid-params` for anything else, `not-found` for an unknown provider. `compactor = "none"`
+  is a choice: no compactor is ever picked again.
+- `compaction.set_guidance {text}` writes the guidance (`refused` above 4,000 characters; an
+  empty text resets it); `compaction.reset_guidance` removes it. Both answer as
+  `compaction.show`.
+- `compaction.noticed` drops `picked`: the user saw the notice.
+
+Each that changes something emits `compaction.changed` with what `compaction.show` answers. The
+user's door alone reaches them: no tool of an agent does.
+
 ### The developer methods
 
 `developer.show` and `developer.set` read and switch the developer mode (`docs/developer.md`): a
@@ -1152,6 +1184,16 @@ by tool, else `Your tools were reloaded: nothing changed.`, whatever its agent d
 (`agent.show`, `agent.tree`) is true, and `agent.tools_reload` says when it is asked and when it
 is taken (`docs/events.md`). Its children keep their processes. `refused` for a child (the
 sentence names its root) and an agent in a final state.
+
+#### `agent.compact`
+
+`{"agent"}`. Compacts the agent's conversation (`docs/design.md` §5.8): the compactor summarises
+it and the agent goes on in a new session from its brief, the summary and its latest messages.
+`{"agent", "after_turn"}`: it starts at once between turns, or once the turn that runs ended
+(`after_turn` true); asked again meanwhile, nothing more happens. Its prompts wait while the
+compactor works. `agent.compacted` says it is done, `agent.compaction_failed` why it failed, in
+which case nothing changed. `refused` when there is no compactor (none chosen, or none could be
+picked), and for an agent in a final state.
 
 #### `agent.mode`
 

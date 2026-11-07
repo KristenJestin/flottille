@@ -885,7 +885,42 @@ superseded. What else the old session was sent and had not finished is given bac
 so that its late calls are refused, saying it was replaced. The parent is told (`child-replaced`).
 Two replacements within 30 minutes are allowed: the third failure fails the agent and its tree.
 
-A child whose context is compacted is sent its brief again.
+A child whose context is compacted by its CLI is sent its brief again.
+
+### Compaction
+
+Flottille's own compaction (`docs/design.md` §5.8) starts the agent again the way a replacement
+does, with three differences: it is not counted against the limit of replacements, its parent is
+not told, and the word on why is the compactor's summary followed by the agent's latest messages
+word for word (`resume`, after its `brief`). Its id, its place in the tree, its children, its
+subscriptions, its requests and what waits for it are the agent's, not its session's: they stay.
+While the compactor works the agent's prompts wait (a delivery stays `queued`), and go to the new
+session after its first prompt. A failure changes nothing.
+
+With a compactor chosen, each CLI is left to compact as late as it allows, never turned off, so
+that its own compaction acts only when Flottille's could not:
+
+- **Claude Code**: its threshold is a share of the window (about 95 %, the window less a reserve
+  for the summary); `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` can only bring it down, never up (Claude
+  Code's environment variables; anthropics/claude-code issues #36381 and #31806). The provider
+  sets it to `100` in the bridge's environment, and so in `claude`'s, so that a lower value of the
+  user's own does not make it compact before Flottille. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is
+  capped at the model's window, so the default is already the largest. With no compactor nothing
+  is set, as before.
+- **Codex**: `model_auto_compact_token_limit` is clamped to 90 % of the model's window, its
+  default when unset (Codex's sample configuration, `config-sample.md`;
+  `protocol/src/openai_models.rs:527-538`). Flottille's Codex reads no configuration of the
+  user's (its own `CODEX_HOME`), so nothing lowers it: nothing is set.
+- **OpenCode**: `compaction.auto` is on by default and compacts when the context reaches the
+  model's limit less a reserve for its output (OpenCode's compaction documentation). Flottille's
+  OpenCode reads only the configuration Flottille gives it, which sets nothing of compaction:
+  nothing is set.
+
+What a new session needs is all in the store: its brief (the root's first message, or a child's),
+the summary, and its messages, word for word as they were recorded; its tools and instructions
+come from its role at the start of every session, its children and subscriptions are rows of the
+store keyed by the agent's id, and a session id is all the old session held of its own. Nothing of
+what Flottille holds lives only in the CLI's session.
 
 ### The sweep
 

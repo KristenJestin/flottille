@@ -692,6 +692,19 @@ $ flottille agent reload-tools bd7ed8152969
 Reloading the tools of agent bd7ed8152969: they are given at its next message, which tells it what changed.
 ```
 
+### `flottille agent compact <agent>`
+
+Compacts an agent's conversation (`agent.compact`, `docs/protocol.md`; `docs/design.md` §5.8):
+the compactor chosen in Settings summarises it, and the agent goes on in a new session from its
+brief, the summary and its latest messages word for word. Between turns it starts at once, else
+once the turn that runs ended. `--json` prints `{"agent": {...}, "after_turn"}`. Refused when no
+compactor is chosen, and for an agent in a final state.
+
+```
+$ flottille agent compact bd7ed8152969
+Compacting agent bd7ed8152969 now: `flottille watch` says agent.compacted when its new session is ready, or agent.compaction_failed and why.
+```
+
 ### `flottille agent resume <agent>`
 
 Starts an ended root again on its own session (`agent.resume`, `docs/protocol.md`): it is idle,
