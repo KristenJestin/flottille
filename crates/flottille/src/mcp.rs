@@ -389,16 +389,15 @@ const SERVED: [Definition; 30] = [
         name: "tickets",
         title: "Tickets",
         description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh or acli \
-            (never run them). list: tickets by state (default open), label, assignee, updated_within, \
-            as last read; search asks the tracker: {\"action\": \"search\", \"query\": \"x\"}, \
+            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker: {\"action\": \"search\", \"query\": \"x\"}, \
             on Jira also in_comments, jql; show: a workspace's ticket (in \
-            main, name workspace) or ticket, read now, with its links; detail full adds the comments, \
-            with the id of yours; Jira images and files are named, not shown (the user can paste one); \
-            types: a Jira project's work item types (a guess is refused); link_types: link kinds. \
+            main, name workspace) or ticket, with its links; detail full adds the comments, \
+            with the id of yours; Jira images and files are named, not shown; \
+            types: a Jira project's work item types (never guess); link_types. \
             Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
             reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit and \
-            comment_delete (yours only); log_time (Jira: ticket, duration, optional started and body; \
-            time_spent says how long this session's agents worked, to propose as the duration). \
+            comment_delete (yours only); log_time (Jira: ticket, duration, started?, body?; \
+            time_spent: this session's work time, to propose). \
             Assign only when asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (sprints lists them). \
             subscribe: a ticket's events wake you until it is closed; unsubscribe.",
@@ -3044,7 +3043,7 @@ mod tests {
         assert!(
             tickets
                 .description
-                .contains("Jira images and files are named, not shown (the user can paste one)")
+                .contains("Jira images and files are named, not shown")
         );
     }
 
