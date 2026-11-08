@@ -469,7 +469,9 @@ run.
 approval each time an agent runs it) and `needs` (the services of the machine it needs, below). A setup step runs one with `task = "<name>"`; a task a step
 runs cannot be removed. The Tasks section of the project's Settings adds, edits and removes them
 (`task.*`, `docs/protocol.md`), and so does a root agent with `tasks`, each write judged
-(`docs/tools.md`).
+(`docs/tools.md`). A task's menu there has "Copy to…", which adds the task to another project
+(`task.copy`): the same name, line and flags, and where it runs when that project has a
+repository of that path, else the place's folder; a name the project already has is refused.
 
 A task may also say when a run of it is ready and where it answers; nothing is guessed:
 
