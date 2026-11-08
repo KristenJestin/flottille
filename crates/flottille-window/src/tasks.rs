@@ -1543,6 +1543,8 @@ impl ProjectTasks {
             };
             let time = seconds(row.elapsed_ms(now));
             let detail = match (&row.name, row.readiness()) {
+                // The dot says it is ready.
+                (Some(task), Some("ready")) => format!("task {task} · {time}"),
                 (Some(task), Some(ready)) => format!("task {task} · {ready} · {time}"),
                 (Some(task), None) => format!("task {task} · {who} · {time}"),
                 (None, _) => format!("{who} · {time}"),
