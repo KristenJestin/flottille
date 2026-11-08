@@ -473,6 +473,11 @@ pub enum Command {
     Resume {
         session: String,
     },
+    /// Names a session: the user's title, which its agent can no longer change.
+    Rename {
+        session: String,
+        title: String,
+    },
     /// Detaches a session from the agent that started it, named `from`.
     Detach {
         session: String,
@@ -1084,6 +1089,10 @@ pub enum Outcome {
     /// The session's root was resumed, or the daemon refused with why.
     Resumed {
         session: String,
+        refused: Option<String>,
+    },
+    /// The session was renamed, or the daemon refused with why.
+    Renamed {
         refused: Option<String>,
     },
     /// The session was detached from `from`, or the daemon refused with why.
@@ -2319,6 +2328,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 after_turn,
                 refused,
             }
+        }
+        Command::Rename { session, title } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.rename",
+                json!({"agent": session, "title": title}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::Renamed { refused }
         }
         Command::Detach { session, from } => {
             let refused = match ask_alone(

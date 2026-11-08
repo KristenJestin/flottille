@@ -335,6 +335,14 @@ pub struct AgentName {
     pub after: Option<u64>,
 }
 
+/// The parameters of `agent.rename`: the user names a session.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRename {
+    pub agent: String,
+    pub title: String,
+}
+
 impl Message {
     pub fn result(id: String, result: Value) -> Message {
         Message {

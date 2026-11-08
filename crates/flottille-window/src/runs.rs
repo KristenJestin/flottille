@@ -1531,15 +1531,8 @@ struct Fact {
     value: String,
 }
 
-/// A fact of the drawer: a label and its value, the value cut to `lines` lines when it has a
-/// limit.
-fn fact(
-    prefix: &str,
-    fact: &Fact,
-    value: impl IntoElement,
-    lines: Option<usize>,
-    p: &Palette,
-) -> AnyElement {
+/// A fact of the drawer: a label and its value.
+fn fact(prefix: &str, fact: &Fact, value: impl IntoElement, p: &Palette) -> AnyElement {
     div()
         .flex()
         .items_start()
@@ -1558,7 +1551,6 @@ fn fact(
                 .flex_1()
                 .min_w_0()
                 .mono(12.)
-                .when_some(lines, |d, lines| d.line_clamp(lines).text_ellipsis())
                 .aria_label(SharedString::from(fact.value.clone()))
                 .child(value)
                 .test_support(),
@@ -1566,9 +1558,9 @@ fn fact(
         .into_any_element()
 }
 
-/// A fact of the modal, which has the room: the label and the whole value, side by side, several
-/// to a line.
-fn inline_fact(fact: &Fact, p: &Palette) -> AnyElement {
+/// A fact of the modal, which has the room: the label and the value (`value`, or the fact's own
+/// text), side by side, several to a line.
+fn inline_fact(fact: &Fact, value: Option<AnyElement>, p: &Palette) -> AnyElement {
     div()
         .id(ElementId::Name(
             format!("run-modal-fact-{}", fact.id).into(),
@@ -1580,12 +1572,9 @@ fn inline_fact(fact: &Fact, p: &Palette) -> AnyElement {
         .text_size(px(12.5))
         .aria_label(SharedString::from(fact.value.clone()))
         .child(div().flex_none().text_color(p.faint).child(fact.key))
-        .child(
-            div()
-                .min_w_0()
-                .mono(12.)
-                .child(SharedString::from(fact.value.clone())),
-        )
+        .child(div().min_w_0().mono(12.).child(
+            value.unwrap_or_else(|| SharedString::from(fact.value.clone()).into_any_element()),
+        ))
         .test_support()
         .into_any_element()
 }
@@ -1899,9 +1888,11 @@ impl Render for CommandPanel {
                         .on_click(move |_, _, cx| page.close(cx)),
                 )
         };
-        let by = match row.agent.as_str() {
-            _ if row.step => "the workspace's setup".to_owned(),
-            "" => "you".to_owned(),
+        // Who started it: the agent's name and, quoted, the session it works in. The session's title
+        // is a line of its own, ellipsized to the room the name leaves (#589).
+        let (by, by_session) = match row.agent.as_str() {
+            _ if row.step => ("the workspace's setup".to_owned(), None),
+            "" => ("you".to_owned(), None),
             agent => {
                 let name = self
                     .names
@@ -1909,17 +1900,31 @@ impl Render for CommandPanel {
                     .cloned()
                     .unwrap_or_else(|| format!("agent {agent}"));
                 match &self.session {
-                    Some(session) => format!("{name}, in {session}"),
-                    None => name,
+                    Some(session) => (name, Some(session.clone())),
+                    None => (name, None),
                 }
             }
+        };
+        let by_sentence = |id: &'static str, window: &mut Window, cx: &mut App| match &by_session {
+            Some(session) => {
+                flottille_ui::quoted(id, &format!("{by}, in "), session, "", window, cx)
+            }
+            None => SharedString::from(by.clone()).into_any_element(),
+        };
+        let by_said = match &by_session {
+            Some(session) => format!(
+                "{by}, in {}",
+                session.lines().next().unwrap_or_default().trim()
+            ),
+            None => by.clone(),
         };
         let mut by_link = Some({
             let (page, agent) = (self.page.clone(), row.agent.clone());
             let link = div()
                 .id("run-fact-by-link")
+                .min_w_0()
                 .cursor_pointer()
-                .child(SharedString::from(by.clone()))
+                .child(by_sentence("run-fact-by-said", window, cx))
                 .on_click(move |_, window, cx| page.show_agent(&agent, window, cx));
             hoverable(link, move |d, t| {
                 d.underline().text_color(mix(p.mute, p.text, t))
@@ -1951,7 +1956,7 @@ impl Render for CommandPanel {
         facts.push(Fact {
             id: "by",
             key: "Started by",
-            value: by.clone(),
+            value: by_said.clone(),
         });
         facts.push(Fact {
             id: "since",
@@ -1972,27 +1977,17 @@ impl Render for CommandPanel {
             "run-fact",
             &command,
             SharedString::from(row.line.clone()),
-            None,
             &p,
         )];
         for entry in &facts {
-            // Who started it can be a whole first message: two lines in the drawer, which has the
-            // room of a column; the modal says it whole.
-            let (lines, element) = match (entry.id, row.agent.is_empty()) {
-                ("by", true) => (Some(2), SharedString::from(by.clone()).into_any_element()),
-                ("by", false) => (
-                    Some(2),
-                    by_link
-                        .take()
-                        .expect("the facts hold one \"by\"")
-                        .into_any_element(),
-                ),
-                _ => (
-                    None,
-                    SharedString::from(entry.value.clone()).into_any_element(),
-                ),
+            let element = match (entry.id, row.agent.is_empty()) {
+                ("by", false) => by_link
+                    .take()
+                    .expect("the facts hold one \"by\"")
+                    .into_any_element(),
+                _ => SharedString::from(entry.value.clone()).into_any_element(),
             };
-            shown_facts.push(fact("run-fact", entry, element, lines, &p));
+            shown_facts.push(fact("run-fact", entry, element, &p));
         }
         let facts_view = div()
             .id("run-drawer-facts")
@@ -2056,7 +2051,11 @@ impl Render for CommandPanel {
                             .flex_wrap()
                             .gap_x(space::XL)
                             .gap_y(space::XS)
-                            .children(facts.iter().map(|entry| inline_fact(entry, &p))),
+                            .children(facts.iter().map(|entry| {
+                                let said = (entry.id == "by" && by_session.is_some())
+                                    .then(|| by_sentence("run-modal-fact-by-said", window, cx));
+                                inline_fact(entry, said, &p)
+                            })),
                     )
                     .child(output);
             }

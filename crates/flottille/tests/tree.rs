@@ -589,7 +589,7 @@ fn a_lead_lists_the_agent_tools_ask_and_approval_answer_and_a_worker_none_of_the
     for family in ["skills", "commands", "setup", "project", "workspace"] {
         assert!(names.iter().any(|n| n == family), "{family}");
     }
-    assert_eq!(names.len(), 26);
+    assert_eq!(names.len(), 27);
 
     let names = worker.names();
     assert_eq!(names.len(), 15, "{names:?}");

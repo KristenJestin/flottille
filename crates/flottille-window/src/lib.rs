@@ -28,6 +28,7 @@ pub mod project_removal;
 pub mod project_settings;
 pub mod providers;
 pub mod queued;
+pub mod rename;
 pub mod repositories;
 pub mod rules;
 pub mod runs;
