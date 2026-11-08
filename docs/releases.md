@@ -13,40 +13,39 @@ Nothing is published anywhere but GitHub's releases of the repository.
 
 ## Releasing
 
-Every pull request is merged by squash, the release too: releasing is the maintainer's pull
-request `dev → main`, merged by squash. Its commit on `main` says nothing of the version, and
-holds none of `dev`'s commits, so CI keeps the link itself:
+Branches reach `dev` by squash. A release does not: **`main` moves forward to a commit of `dev`**
+(a fast-forward), and is then that very commit, with no squash and no merge commit of its own.
+`main` is always an ancestor of `dev`.
 
-- **The released dev commit is marked.** When `main` publishes `vX.Y.Z`, CI tags the head of
-  `dev` that the pull request squashed (its head commit, as GitHub's API gives it) with
-  `released/vX.Y.Z`, and tags the squash on `main` `vX.Y.Z`. No tag is pushed by hand.
-- **The stable version is the one dev already had**: the version of the beta of that head of
-  `dev`, without its pre-release (`0.3.0-beta.12` releases `0.3.0`).
-- **Its changelog** lists the commits of `dev` between the previous mark and the new one.
-- **The release is recorded in `dev`'s history.** A squash on `main` never reaches `dev`: left
-  so, the two share only the repository's first commit, and the next release pull request
-  conflicts on every file. Once `vX.Y.Z` is published, CI makes a merge of the squash on the
-  head of `dev`, with the message `chore(repo): record the X.Y.Z release in dev's history`, that
-  keeps `dev`'s files (what `git merge -s ours` makes) and changes none, and pushes it to `dev`.
-  It is the one commit on `dev` no pull request made: CI writes it through GitHub's API with the
-  publish job's token, which starts no run, and `tools/branch-guard.sh`, which refuses a commit
-  on `dev`, is for people's clones. A `dev` that moved meanwhile gets the merge on its new head,
-  still right since `dev`'s files are kept. A run run again finds the squash already in `dev`'s
-  history and records nothing.
-- **If the record fails** (a push refused three times), the run fails, saying so; the release
-  stays published. Record it by hand, the squash being the commit the run was for:
+- **The release pull request `dev → main` is opened for review**, and is never merged with the
+  button. The `Release` workflow (`.github/workflows/release.yml`) closes it: started by hand
+  (`gh workflow run release.yml --ref dev`, or "Run workflow" on its page, from `dev`), with the
+  commit of `dev` to release as its input, a full SHA or `dev` for its head (the default). Once
+  `main` is the pull request's head, GitHub shows it merged. Releasing an older commit of `dev`
+  leaves the pull request open.
+- **What it checks**: it runs from `dev` only; the input is a full SHA or `dev`, nothing else;
+  the commit is on `dev`; `main` is its ancestor. Then it moves `main` through GitHub's API,
+  not forced: GitHub refuses anything but a fast-forward, so nothing can be overwritten. Any of
+  these refused, nothing moves and the run fails, saying why. Its job holds the token that
+  writes `main` and runs no code of any branch: no checkout, no git, only `gh`.
+- **Then the stable build**: a ref moved with the workflow's own token starts no `push` run, so
+  the `Release` workflow starts `ci.yml` on `main` itself (`workflow_dispatch`, which a workflow's
+  token may start), which builds and publishes as on any push. Run again when `main` is already
+  the commit, it moves nothing and starts the build again, which publishes nothing already
+  published.
+- **The tag `vX.Y.Z` is put on the released commit**, the same commit on `main` and on `dev`. No
+  tag is pushed by hand.
+- **The stable version is the one dev already had**: the version of the beta of that commit,
+  without its pre-release (`0.3.0-beta.12` releases `0.3.0`). **Its changelog** lists the commits
+  of `dev` between the previous stable tag and it.
+- A push to `main` that is not a commit of `dev` (none should happen) publishes nothing and
+  fails its run, saying why. A run on a commit already released publishes nothing.
 
-  ```
-  git fetch origin
-  git switch dev && git merge --ff-only origin/dev
-  git merge -s ours -m "chore(repo): record the X.Y.Z release in dev's history" <squash>
-  git push origin dev
-  ```
-- A push to `main` that is not the squash of a pull request from `dev` (none should happen)
-  publishes nothing and fails its run, saying why. Should GitHub's API not list the pull request
-  of a real release yet, run the run again once it does (`gh run rerun <run id>`, or "Re-run
-  jobs" on the run's page): the lookup is made again. A run on a head of `dev` already released
-  publishes nothing.
+**The two first releases were made by squash** (0.1.0 and 0.1.1): each squash on `main` was
+tagged `vX.Y.Z`, the head of `dev` it squashed was marked `released/vX.Y.Z`, and a merge of the
+squash that changed no file was recorded on `dev` (`chore(repo): record the X.Y.Z release in
+dev's history`), so that `main` is in `dev`'s history. Those marks and records stay and are still
+read (below); no new release makes either.
 
 ## The version
 
@@ -54,9 +53,10 @@ Computed, never typed (`tools/version.sh stable|beta|alpha [--branch <name>] [--
 for HEAD by default):
 
 - **It counts from the last release**: the highest stable tag `vX.Y.Z`, compared as versions,
-  wherever it is, and from its mark `released/vX.Y.Z` on. The commits counted are those of the
-  build's own history that the mark does not hold, so a feature branch started before a release
-  counts only its own commits after it. A stable tag without a mark counts from its own commit.
+  wherever it is, and from its own commit on, the commit of `dev` it released (a release made by
+  squash: from its mark `released/vX.Y.Z`). The commits counted are those of the build's own
+  history that the release does not hold, so a feature branch started before a release counts
+  only its own commits after it, and the next version is the one `dev` gets.
   Pre-release tags (`v0.3.0-beta.12`) do not count. Without a stable tag, from `0.0.0` and the
   first commit.
 - **The next version** follows the Angular commits counted (`tools/commit-message.sh` is the rule
@@ -69,17 +69,19 @@ for HEAD by default):
   commit of dev's own line since the last release (a squash's body) sets the next stable version,
   and the betas and alphas that follow it (`0.2.0-beta.N`). It applies when it is above the
   computed one (equal changes nothing; with several, the highest wins), and it is forgotten once
-  released, the next release counting from its mark. A value below the computed version, or not
+  released, the next release counting from its tag. A value below the computed version, or not
   `X.Y.Z`, is refused: `tools/version.sh` exits 1 naming the commit, and so fails the build until
   the commit is fixed. Example: the Specs pull request is developed on `feat/specs` and reaches
   `dev` as one squash whose body ends with `Release-As: 0.2.0`; the next stable is `0.2.0`
   instead of `0.1.x`, the betas after it `0.2.0-beta.N`, and the release after that `0.2.1`.
 - **Only the build's own line is read**: the commits counted, the types that bump and the
-  changelog follow first parents only, so the release squash a record reaches through its
-  second parent is neither counted nor listed, and a merge is one commit of that line.
+  changelog follow first parents only, so a release squash that a record of the releases made by
+  squash reaches through its second parent is neither counted nor listed, and a merge is one
+  commit of that line.
 - **The beta and alpha numbers** count those commits (first parents only, so a merge counts
-  once): each squash into `dev` makes the next beta, numbered after the previous one. The record
-  of a release counts too, as one: the first beta after a release is `-beta.2`.
+  once): each squash into `dev` makes the next beta, numbered after the previous one, and the
+  first beta after a release is `-beta.1`. The record of the 0.1.1 release counts as one beta of
+  0.1.2.
 - **An alpha names its branch**: each byte of the name but ASCII letters, digits and dashes is a
   dash, `feat/46-packages` giving `alpha.feat-46-packages.<n>` and the tag
   `alpha-feat-46-packages`. CI, its cleanup, `install.sh` and `flottille update` follow that one
@@ -97,8 +99,8 @@ for HEAD by default):
 
 ## What CI publishes
 
-On a push to `main`, `dev`, `feat/**` or `fix/**`, `.github/workflows/ci.yml` runs two jobs
-beside its checks:
+On a push to `dev`, `feat/**` or `fix/**`, and on `main` when the `Release` workflow starts it,
+`.github/workflows/ci.yml` runs two jobs beside its checks:
 
 - **`build`** runs the branch's code with a token that can only read. On Ubuntu 22.04, old
   enough a C library (glibc 2.35) that the binary runs on current Arch and Debian stable, it
@@ -122,8 +124,7 @@ beside its checks:
   it uploads. Right before writing, it reads the branch's tip again through GitHub's API: a
   branch moved on to another commit, or deleted, publishes nothing (the later push publishes
   itself). Then:
-  - on `main`, the mark `released/vX.Y.Z`, then the release `vX.Y.Z` on the squash, marked
-    latest;
+  - on `main`, the release `vX.Y.Z` on the commit released, marked latest;
   - on `dev`, the pre-release `vX.Y.Z-beta.N`;
   - on a feature branch, the pre-release `alpha-<branch>`, replaced in place: its tag moves to the
     new commit, the new archive and sum are added (the sum first), the old ones removed, and its
@@ -247,12 +248,13 @@ alike: the tests serve a fake one on `127.0.0.1` (`crates/flottille/tests/releas
 
 ## What only a real push proves
 
-The tests run the version and changelog scripts on throwaway repositories, a squash of `dev`
-into `main` included, build the archive from a binary, and run `install.sh` and
-`flottille update` against a local server in a throwaway home. What they cannot run is the
-workflows themselves. A push to a feature branch proves the alpha's: `build` on Ubuntu 22.04,
+The tests run the version and changelog scripts on throwaway repositories, the releases made by
+squash and the fast-forward ones after them included, run the `Release` workflow's script and
+`ci.yml`'s version step against a throwaway repository (a `gh` standing for GitHub's API), build
+the archive from a binary, and run `install.sh` and `flottille update` against a local server in
+a throwaway home. What they cannot run is the workflows themselves on GitHub. A push to a feature branch proves the alpha's: `build` on Ubuntu 22.04,
 `publish` with the job's token, the alpha replaced in place, GitHub's API answering as the
 scripts read it. Deleting the branch proves its cleanup. The first merge into `dev` proves the
-beta's, and the first release pull request into `main` the pull request found from the squash,
-the mark, the stable tag and the release marked latest, and the release recorded in `dev`'s
-history, through the API, with the job's token.
+beta's, and the first `Release` run the move of `main` with the workflow's token, the pull
+request shown merged, `ci.yml` started on `main` by it, the stable tag on the commit released and
+the release marked latest.
