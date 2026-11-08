@@ -21,6 +21,7 @@ use crate::interact::{choose, fade, feel, wire, wire_with};
 use crate::listing::{Item, Placement};
 use crate::menu::Menu;
 use crate::motion::{HOVER, Motion, PANEL};
+use crate::reveal::changed;
 use crate::theme::{palette, radius};
 use crate::typography::Type;
 
@@ -217,14 +218,18 @@ impl RenderOnce for TreeRow {
         if let Some(leading) = self.leading {
             row = row.child(leading);
         }
+        // A title that changes (a session its agent or the user named) fades to the new one.
+        let title_id = ElementId::Name(format!("{}-title", self.id).into());
+        let opacity = changed(&title_id, &self.title, window, cx);
         let title = tipped_when_cut(
             div()
-                .id(ElementId::Name(format!("{}-title", self.id).into()))
+                .id(title_id)
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
+                .opacity(opacity)
                 .child(self.title.clone()),
             self.title.clone(),
             window,

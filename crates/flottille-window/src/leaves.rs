@@ -53,8 +53,14 @@ impl LeaveRow {
     /// What it lets, seen from the session `root`: `May write to Login`, `Login may write here`.
     pub fn said(&self, root: &str) -> String {
         match self.writer == root {
-            true => format!("May write to {}", self.session_name),
-            false => format!("{} may write here", self.writer_name),
+            true => format!(
+                "May write to {}",
+                flottille_ui::quoted_title(&self.session_name)
+            ),
+            false => format!(
+                "{} may write here",
+                flottille_ui::quoted_title(&self.writer_name)
+            ),
         }
     }
 

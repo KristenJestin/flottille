@@ -695,6 +695,12 @@ const MIGRATIONS: &[&str] = &[
     -- discard removes only that (`docs/workspaces.md`, \"Removal\"). NULL for any other request.
     ALTER TABLE approval_requests ADD COLUMN digest TEXT;
 ",
+    "
+    -- Who named a session (`docs/tools.md`, \"The session's title\"): its agent, with
+    -- `session_title`, or the user, whose title always wins; `NULL` while it keeps the first line
+    -- of its first message.
+    ALTER TABLE agents ADD COLUMN titled_by TEXT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -707,7 +713,7 @@ const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, sta
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
     depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
-    launched_by, pending_model, pending_effort, exchanged_at, led, detached_from";
+    launched_by, pending_model, pending_effort, exchanged_at, led, detached_from, titled_by";
 
 const DELIVERY_COLUMNS: &str =
     "id, agent, kind, body, urgency, state, created_at, sent_at, images, typed, commands";
@@ -1138,7 +1144,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40)"
             ),
             params![
                 agent.id,
@@ -1180,6 +1186,7 @@ impl Store {
                 agent.exchanged_at,
                 agent.led,
                 agent.detached_from,
+                agent.titled_by,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -1347,6 +1354,28 @@ impl Store {
             .agent(id)?
             .ok_or_else(|| Error::Refused(format!("there is no agent {id}")))?;
         Ok((agent, event))
+    }
+
+    /// Names a session, with its `agent.titled` event, in one transaction: by `"user"` always, by
+    /// `"agent"` only while the user has not named it. `None` when the user's title held.
+    pub fn retitle_agent(&mut self, id: &str, title: &str, by: &str) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE agents SET title = ?2, titled_by = ?3, updated_at = ?4 \
+             WHERE id = ?1 AND (?3 = 'user' OR titled_by IS NOT 'user')",
+            params![id, title, by, now_ms()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let event = append_agent_event(
+            &transaction,
+            id,
+            "agent.titled",
+            json!({"agent": id, "title": title, "by": by}),
+        )?;
+        transaction.commit()?;
+        Ok(Some(event))
     }
 
     /// Gives the agent the tools its role has now, with the agent's event, in one transaction.
@@ -3371,6 +3400,7 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
         exchanged_at: row.get(36)?,
         led: row.get(37)?,
         detached_from: text(38)?,
+        titled_by: text(39)?,
     }))
 }
 
@@ -4080,6 +4110,7 @@ mod tests {
             launched_by: None,
             led: false,
             detached_from: None,
+            titled_by: None,
         }
     }
 

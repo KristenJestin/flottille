@@ -309,6 +309,30 @@ fn a_toast_with_a_long_unbroken_word_stays_inside_the_window(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn a_toast_that_quotes_a_session_title_keeps_it_on_one_line(cx: &mut TestAppContext) {
+    let (_, cx) = toasts(cx);
+    let title = "Bring every route of the public API under the new guard, list the ones that \
+                 still miss it and write the docs for each";
+    cx.update(|_, cx| {
+        toast(
+            Toast::failure("Not detached from ")
+                .quoting(&format!("{title}\nand a second line"))
+                .detail("It is not led by anyone."),
+            cx,
+        )
+    });
+    advance(cx, ENTER * 2);
+    // The toast says the whole first line, and draws it on the one line of its title (19.5 px),
+    // cut to the room the words leave, with its tooltip for the rest.
+    let said = format!("Not detached from {title}");
+    assert!(cx.update(|window, _| window.try_find_by_label(&said).is_some()));
+    let line = bounds("toast-1-title", cx);
+    assert!(line.size.height < px(19.5 * 1.5), "{line:?} is one line");
+    let quoted = bounds("toast-1-title-title", cx);
+    assert!(quoted.right() <= line.right(), "{quoted:?} in {line:?}");
+}
+
+#[gpui_kit::test]
 fn a_toast_stays_while_it_is_hovered(cx: &mut TestAppContext) {
     let (_, cx) = toasts(cx);
     cx.update(|_, cx| toast(Toast::success("Task test saved"), cx));
