@@ -957,6 +957,14 @@ name, or `needs` names a service `services.toml` does not hold.
 (`repository: null` puts it back at the top; `ready` or `url` `null` or `""` removes it). Answers
 the task.
 
+#### `task.copy`
+
+`{"project", "name", "to"}`: writes the task in the project `to`, as `task.add` writes it (same
+name, line and flags), and answers it with `"project"` the target. Its `repository` is kept when
+`to` has a repository of that path, else it runs at the top of the place. `refused` when `to` has
+a task of that name, when `to` is `project`, or while `to` is being removed; `not-found` for a
+project or a task that does not exist.
+
 #### `task.remove`
 
 `{"project", "name"}`: `{"project", "removed": "<name>"}`. `refused` while a setup step runs it.
