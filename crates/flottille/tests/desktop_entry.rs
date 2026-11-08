@@ -583,3 +583,38 @@ fn update_dates_the_icon_folder_when_it_writes_an_icon_and_only_then() {
     update();
     assert_eq!(modified(&hicolor), written);
 }
+
+#[test]
+fn the_packaged_icon_is_the_brands_full_icon() {
+    let packaged = repo("packaging/linux/icons/hicolor");
+    assert_eq!(
+        std::fs::read_to_string(packaged.join("scalable/apps/flottille.svg")).unwrap(),
+        std::fs::read_to_string(repo("assets/brand/icon-full.svg")).unwrap(),
+        "the packaged SVG is the brand's full icon"
+    );
+    // The PNGs are renders of it: at each size, the tile is off-white where the mark has no ink,
+    // its corner is transparent, and a sail is filled with ink (the old icon's sails were hollow).
+    for size in [48u32, 128, 256] {
+        let png = image::open(packaged.join(format!("{size}x{size}/apps/flottille.png")))
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(png.dimensions(), (size, size));
+        let at = |x: f32, y: f32| {
+            let [r, g, b, a] = png
+                .get_pixel((x * size as f32) as u32, (y * size as f32) as u32)
+                .0;
+            (r, g, b, a)
+        };
+        assert_eq!(at(0.01, 0.01).3, 0, "{size}: the corner is transparent");
+        let tile = at(0.5, 0.1);
+        assert!(
+            tile.0 > 0xe0 && tile.3 == 0xff,
+            "{size}: the tile is off-white: {tile:?}"
+        );
+        let sail = at(0.45, 0.45);
+        assert!(
+            sail.0 < 0x40 && sail.3 == 0xff,
+            "{size}: the sail is filled: {sail:?}"
+        );
+    }
+}

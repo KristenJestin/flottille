@@ -1,7 +1,7 @@
 //! The scenarios of Full, the third mode (`docs/design.md` §7.1): every call the gate would hold
 //! passes without a request, base calls included, while every refusal of bare mode stays; a
-//! session the user starts never starts in it, one an agent starts takes its launcher's mode, and
-//! no agent can put a session in it, though it reads its own. The agents and the judge are
+//! session the user starts starts in Auto unless the user names its mode, one an agent starts
+//! takes its launcher's mode, and no agent can put a session in it, though it reads its own. The agents and the judge are
 //! fake ACP agents (`crates/flottille-fake-agent`), in throwaway repositories and temporary XDG
 //! folders.
 
@@ -266,12 +266,12 @@ fn a_call_allowed_by_full_is_recorded_as_allowed_by_full_mode() {
 }
 
 #[test]
-fn a_session_starts_in_ask_or_auto_never_full() {
+fn a_session_starts_in_auto_unless_the_user_names_a_mode() {
     let user = User::with_fake_agent().with_fake_launchers();
     let (id, _, _) = session(&user);
     assert_eq!(mode_of(&user, &id), "auto");
 
-    // The user's own start takes no mode: Full is chosen afterwards, never at the start.
+    // `mode` is a permission mode of the agent's, which no start takes: the gate's is `gate_mode`.
     let refused = user.call(
         "agent.run",
         json!({"project": "app", "message": "go", "mode": "full"}),
@@ -908,4 +908,123 @@ fn in_full_a_repository_s_claude_commands_are_readable_but_never_written() {
         assert!(!said.contains("fake-login"), "{said}");
     }
     assert!(no_request(&user));
+}
+
+/// The project `app` over a throwaway repository, no session started, whose fake agent writes
+/// `notes.txt` in `main` (a call to judge) in the first turn of a session.
+fn writing_project(user: &User) {
+    user.fake_script(json!({"turns": [{"when": "write the notes", "do": [
+        {"mcp": {"tool": "fs_write", "arguments": {"path": "notes.txt", "content": "made-up notes"}}}
+    ]}]}));
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+}
+
+/// The user starts a session in `main` of `app`, in `mode`: its id.
+fn start_in(user: &User, mode: &str) -> String {
+    let answer = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "write the notes", "gate_mode": mode}),
+        )
+        .unwrap();
+    answer["agent"]["id"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn a_session_started_in_ask_holds_its_first_turns_calls_for_the_user() {
+    // A judge that would allow the call: in Ask it is never asked.
+    let user = User::with_fake_agent().with_allowing_judge();
+    writing_project(&user);
+
+    let id = start_in(&user, "ask");
+
+    eventually("the first turn's call is held", || !no_request(&user));
+    assert_eq!(mode_of(&user, &id), "ask");
+    let requests = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+    assert_eq!(requests.as_array().unwrap().len(), 1, "{requests}");
+    assert_eq!(requests[0]["agent"], id.as_str(), "{requests}");
+    assert!(!user.path("work/app/notes.txt").exists());
+    assert_eq!(judge_prompts(&user), 0, "the judge was asked");
+}
+
+#[test]
+fn a_session_started_in_full_is_in_full_before_its_first_message() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    writing_project(&user);
+
+    let id = start_in(&user, "full");
+
+    eventually("the first turn's call is served", || {
+        user.path("work/app/notes.txt").exists()
+    });
+    assert_eq!(mode_of(&user, &id), "full");
+    assert!(no_request(&user), "a request was made");
+    assert_eq!(judge_prompts(&user), 0, "the judge was asked");
+    eventually("the call is recorded", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "agent.tool_served")
+    });
+    assert_eq!(last_served(&user, &id)["gate"], "full");
+}
+
+#[test]
+fn a_start_names_ask_auto_or_full_and_nothing_else() {
+    let user = User::with_fake_agent();
+    writing_project(&user);
+
+    let (code, message) = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "go", "gate_mode": "yolo"}),
+        )
+        .unwrap_err();
+
+    assert_eq!(code, "invalid-params", "{message}");
+    assert!(message.contains("ask, auto and full"), "{message}");
+    let agents = user.call("agent.list", json!({})).unwrap()["agents"].clone();
+    assert_eq!(agents.as_array().unwrap().len(), 0, "{agents}");
+}
+
+#[test]
+fn an_agent_cannot_start_a_session_in_full() {
+    // A judge that allows the launch: in Auto it is the judge who answers.
+    let user = User::with_fake_agent()
+        .with_fake_launchers()
+        .with_allowing_judge();
+    let (_, mcp, _) = session(&user);
+
+    // No tool of an agent names a mode, whatever it calls it.
+    for field in ["gate_mode", "mode"] {
+        let mut args = json!({"title": "Docs", "brief": "Write the docs.", "kind": "handed"});
+        args[field] = json!("full");
+        let answer = mcp.call("agent_launch", args);
+        assert!(answer.error, "{field}: {}", answer.text);
+    }
+    // Nor does the pilot door, which an outside agent drives.
+    let pilot = Mcp::pilot(&user).call(
+        "agent_start",
+        json!({"project": "app", "message": "go", "gate_mode": "full"}),
+    );
+    assert!(pilot.error, "{}", pilot.text);
+    assert_eq!(
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "a session was started"
+    );
+
+    // A session an agent starts from a tree in Auto is in Auto.
+    done(launch_root(&mcp, "Docs"));
+    assert_eq!(mode_of(&user, &started(&user, "Docs")), "auto");
 }

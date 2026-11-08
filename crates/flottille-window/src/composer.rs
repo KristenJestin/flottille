@@ -19,6 +19,7 @@ use gpui_kit::{
 
 use crate::actions::{Command, Pick, Target};
 use crate::attachments::{Attachments, STILL_SCALING};
+use crate::mode::ModeSwitch;
 use crate::providers::{Provider, Providers};
 use crate::settings::Reveal;
 use crate::shell::Shell;
@@ -181,6 +182,9 @@ pub struct Composer {
     sending: Option<Target>,
     error: Option<SharedString>,
     blocked: Option<String>,
+    /// The mode the next session starts in: Auto each time the composer is shown and after each
+    /// start, so that Full is never on by mistake.
+    mode: Entity<ModeSwitch>,
     /// How many times it was drawn: the tests count them.
     renders: usize,
     _subscriptions: Vec<Subscription>,
@@ -208,6 +212,7 @@ impl Composer {
             follow_theme(&mut field, cx);
             field
         });
+        let mode = cx.new(|_| ModeSwitch::local(shell.clone()));
         let subscriptions = vec![cx.subscribe_in(
             &field,
             window,
@@ -241,6 +246,7 @@ impl Composer {
             sending: None,
             error: None,
             blocked: None,
+            mode,
             renders: 0,
             _subscriptions: subscriptions,
         }
@@ -257,6 +263,16 @@ impl Composer {
             *flag(self) = value;
             cx.notify();
         }
+    }
+
+    /// The control of the mode the next session starts in.
+    pub fn mode(&self) -> &Entity<ModeSwitch> {
+        &self.mode
+    }
+
+    /// Back on Auto, as each time the composer is shown.
+    pub fn reset_mode(&mut self, cx: &mut Context<Self>) {
+        self.mode.update(cx, |mode, cx| mode.reset(cx));
     }
 
     pub fn renders(&self) -> usize {
@@ -304,6 +320,11 @@ impl Composer {
             first_pick(providers, project, last)
         };
         let default = (project.0.map(str::to_owned), project.1.map(str::to_owned));
+        if providers.known {
+            let chosen = providers.judge.is_some();
+            self.mode
+                .update(cx, |mode, cx| mode.set_judge_chosen(chosen, cx));
+        }
         if self.providers != *providers || self.pick != pick || self.default != default {
             self.providers = providers.clone();
             self.default = default;
@@ -569,6 +590,7 @@ impl Composer {
             pick: self.pick.clone(),
             message,
             images: self.attached.sending(),
+            mode: self.mode.read(cx).mode().unwrap_or("auto").to_owned(),
         };
         self.sending = Some(target);
         self.sent = Some(self.pick.clone());
@@ -589,6 +611,7 @@ impl Composer {
             .update(cx, |field, cx| field.set_value("", window, cx));
         self.has_text = false;
         self.attached.clear();
+        self.reset_mode(cx);
         cx.notify();
         used
     }
@@ -637,6 +660,7 @@ impl Composer {
             .child(Attachments::button(cx, Self::attached_of))
             .child(div().flex_1())
             .children(self.render_agent_pickers(cx))
+            .child(self.mode.clone())
             .child(
                 Button::round("send", Icon::Send, "Start")
                     .disabled(!can_send)

@@ -112,6 +112,8 @@ pub enum Command {
         message: String,
         /// The pictures that go with the first message.
         images: Vec<Picture>,
+        /// The mode the session starts in: `ask`, `auto` or `full`.
+        mode: String,
     },
     /// Enables or disables a provider in `providers.toml`.
     SetProvider {
@@ -1348,6 +1350,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             pick,
             message,
             images,
+            mode,
         } => {
             let workspace = match target {
                 Target::Main => None,
@@ -1356,7 +1359,14 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             match ask_alone(
                 connect,
                 "agent.start",
-                start_params(&project, workspace.as_deref(), &pick, &message, &images),
+                start_params(
+                    &project,
+                    workspace.as_deref(),
+                    &pick,
+                    &message,
+                    &images,
+                    &mode,
+                ),
                 bounds.quick,
             ) {
                 Ok(Ok(started)) => started_outcome(&project, &started),
@@ -2571,6 +2581,7 @@ fn start_params(
     pick: &Pick,
     message: &str,
     images: &[Picture],
+    mode: &str,
 ) -> Value {
     // What is left out is sent as a null, which the daemon reads as absent: its to choose.
     json!({
@@ -2579,6 +2590,7 @@ fn start_params(
         "provider": pick.provider,
         "model": pick.model,
         "effort": pick.effort,
+        "gate_mode": mode,
         "message": message,
         "images": images.iter().map(Picture::to_json).collect::<Vec<_>>(),
     })
@@ -2836,6 +2848,7 @@ mod tests {
             pick: Pick::default(),
             message: "Fix the timeout".into(),
             images: Vec::new(),
+            mode: "auto".into(),
         }
     }
 

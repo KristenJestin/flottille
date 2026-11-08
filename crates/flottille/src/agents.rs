@@ -551,6 +551,19 @@ async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
              and a permission mode of the agent's could only loosen it"
         )));
     }
+    // The user's door alone reaches this method, so it is the user who names the session's mode.
+    let gate_mode = asked
+        .gate_mode
+        .as_deref()
+        .map(|text| {
+            GateMode::parse(text).ok_or_else(|| {
+                Failure::new(
+                    "invalid-params",
+                    format!("there is no mode {text}: the modes are ask, auto and full"),
+                )
+            })
+        })
+        .transpose()?;
     let role = roles::role(asked.role.as_deref().unwrap_or(roles::LEAD)).ok_or_else(|| {
         Failure::refused(format!(
             "there is no role {}: the roles are {}",
@@ -616,7 +629,7 @@ async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             provider: asked.provider,
             model: asked.model,
             effort: asked.effort,
-            gate_mode: None,
+            gate_mode,
             launched_by: None,
             led: false,
         },
@@ -657,8 +670,8 @@ pub struct New {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// A child's is its parent's, a root an agent starts its launcher's tree's; `None` for the
-    /// user's new root, which starts in Auto.
+    /// A child's is its parent's, a root an agent starts its launcher's tree's; the user's new
+    /// root is in the mode the user named, Auto when none.
     pub gate_mode: Option<GateMode>,
     /// The agent that starts this root for the user; `None` for a child or the user's own root.
     pub launched_by: Option<String>,

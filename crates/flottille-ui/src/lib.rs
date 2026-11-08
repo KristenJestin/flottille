@@ -67,7 +67,8 @@ pub use reveal::{
     growing, presence, presence_of,
 };
 pub use rows::{
-    ListCard, ListRow, TreeLevel, TreeRow, meta, section_label, toggle_id, tree_children, turning,
+    ListCard, ListRow, Tie, TreeLevel, TreeRow, meta, section_label, tie_below_id, tie_id,
+    tie_through_id, tie_turn_id, toggle_id, tree_children, tree_tie, turning,
 };
 pub use segmented::Segmented;
 pub use select::{Select, SelectOption};

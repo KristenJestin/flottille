@@ -557,8 +557,9 @@ Starts a root agent and gives it its first message, then returns at once: the ag
 own. `--workspace <name>` runs it in a ready workspace (the project folder otherwise),
 `--provider <provider>` on a provider (the project's otherwise, for the agent's life), `--model
 <model>` asks for a model (the project's otherwise; never replaced by another), `--effort
-<effort>` for an effort of the model, `--role lead|worker` (`lead` by default). A provider that is
-not ready, or a model or an effort it is known not to offer, is refused with a sentence that names
+<effort>` for an effort of the model, `--role lead|worker` (`lead` by default), `--mode
+ask|auto|full` for the session's mode, its gate's from its first message (`auto` by default,
+design §7.1; another word is refused). A provider that is not ready, or a model or an effort it is known not to offer, is refused with a sentence that names
 what is available.
 `--json` prints `agent.start`: `{"agent": {...}, "after": <n>}`, where `after` is the event number
 to follow it from (`flottille watch --after <n>`, `flottille agent read <id> --after <n>`).
@@ -572,7 +573,7 @@ Follow it with `flottille agent read bd7ed8152969`, or `flottille watch --after 
 ### `flottille agent run <project> <message>`
 
 `start`, then follows the agent and prints its reply until its first turn ends: for trying an
-agent by hand. Same options as `start`, except `--role`. `--json` prints nothing while the turn
+agent by hand. Same options as `start`, except `--role` and `--mode`. `--json` prints nothing while the turn
 runs, then the agent alone, the object under `agent` in `agent show --json` (its id is `.id`, not
 `.agent.id`). (It is `start` followed by `watch`, nothing more.) It follows
 the turn as `send --follow` does, below.

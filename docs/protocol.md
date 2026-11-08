@@ -1142,16 +1142,21 @@ then `null`), `reported_at` when it reported,
 `quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
 it waits for an answer: a child's from its parent, a led session's from its pilot, any other
 root's from the user, until that one writes to
-it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask` or `auto`
+it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask`, `auto` or `full`
 (`agent.mode`).
 
 Each method answers `not-found` when the agent does not exist.
 
 #### `agent.start`
 
-`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "role"?, "message", "images"?}`.
+`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "gate_mode"?, "role"?, "message", "images"?}`.
 Creates a root agent in the project folder or the workspace, and gives it its first message:
-`{"agent", "after"}`. `images` is as in `agent.send`, and goes with the first message; with
+`{"agent", "after"}`. `gate_mode` is the session's mode (`ask`, `auto` or `full`, `docs/design.md`
+§7.1), `auto` when left out: it is the root's before its first message is given, so that the
+first turn's calls already follow it. Only the user's door names it: `agent.start` is answered on
+the user's socket alone (a client an agent started is refused), and no tool of an agent, nor the
+pilot door's `agent_start`, takes a mode. `invalid-params` for another mode, and nothing is
+started. `images` is as in `agent.send`, and goes with the first message; with
 images, the message may be empty (pictures alone are a first message). They are judged and stored
 before the agent exists, so that one refused, or one that cannot be stored, starts none, and a
 session replaced is given them again with its first message. A provider whose last agent that
@@ -1302,8 +1307,9 @@ agent started (a root of the user's, a child) and for one already detached. Ther
 call to judge and every base call passes without a request, and what the gate refuses stays
 refused. A tree has one mode, its root's: a
 child named switches its root, and every agent of the tree reads the root's mode at each call
-(an agent's `gate_mode` is its root's). A new session starts in `auto`, never `full` (a session an
-agent starts from a tree in `full` starts in `auto`), and the mode is kept when it resumes. Answers `{"agent"}`, the root, with its `gate_mode`, and emits
+(an agent's `gate_mode` is its root's). A new session starts in `auto` unless the user's `agent.start`
+names its `gate_mode`, and a session an agent starts takes the mode of the tree that started it
+(no tool of an agent names one); the mode is kept when it resumes. Answers `{"agent"}`, the root, with its `gate_mode`, and emits
 `agent.gate_mode_changed` for the root (`docs/events.md`).
 `invalid-params` for another mode, `not-found` for an agent that does not exist. The user's door
 alone reaches it: no tool of an agent changes a mode.
@@ -1590,7 +1596,9 @@ on the model a new session takes when none is asked, once one said it: what the 
 value that names the model it stands for (`_meta.jetbrains.air.recommendedValue` of the `model`
 option) is an alias: it stays listed with `stands_for`, that model's id, and the model it stands
 for is the `default` one, with the alias's `efforts`. A `default` whose `recommendedValue` is
-itself runs a model no other value does: it is no alias, and is the `default` one, by its name. `default_effort` is the effort a model runs
+itself runs a model no other value does: it is no alias, and is the `default` one, by its name (the
+model its description names, never the adapter's "Default (recommended)"; the same when the
+description names a model and no `recommendedValue` is given). `default_effort` is the effort a model runs
 with when none is asked, once a new session none was set on said it by its name (Claude says it
 as `default` only: never there for Claude). `models_outdated` is `true`
 when they were said by another version of the program or with other API keys set: they are listed
