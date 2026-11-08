@@ -19,6 +19,7 @@ use gpui_kit::{
 
 use crate::button::Button;
 use crate::color::mix;
+use crate::cut::quoted;
 use crate::icons::{Icon, icon};
 use crate::interact::hoverable;
 use crate::layer;
@@ -48,6 +49,9 @@ pub enum ToastKind {
 pub struct Toast {
     kind: ToastKind,
     title: SharedString,
+    /// What the title says before a session's title it quotes: the quote takes one line, whatever
+    /// its length.
+    quoting: Option<SharedString>,
     detail: Option<SharedString>,
     action: Option<Action>,
     key: Option<SharedString>,
@@ -95,6 +99,7 @@ impl Toast {
         Self {
             kind: ToastKind::Success,
             title: title.into(),
+            quoting: None,
             detail: None,
             action: None,
             key: None,
@@ -107,6 +112,16 @@ impl Toast {
             kind: ToastKind::Failure,
             ..Self::success(title)
         }
+    }
+
+    /// The line quotes a session's title after what it says so far ("Detached from "): the title
+    /// is drawn on the line's one line, in emphasis, cut with an ellipsis to the room the words
+    /// leave, and the toast's [`title`](Self::title) says it whole.
+    pub fn quoting(mut self, title: &str) -> Self {
+        let title = title.lines().next().unwrap_or_default().trim();
+        self.quoting = Some(self.title.clone());
+        self.title = format!("{}{title}", self.title).into();
+        self
     }
 
     /// The second line: what follows from it, or why it failed.
@@ -274,7 +289,13 @@ impl ToastStack {
         }
     }
 
-    fn card(&self, number: usize, toast: &Toast, cx: &mut Context<Self>) -> impl IntoElement {
+    fn card(
+        &self,
+        number: usize,
+        toast: &Toast,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = palette(cx);
         let failed = toast.kind == ToastKind::Failure;
         let (glyph, ink, wash) = if failed {
@@ -297,20 +318,41 @@ impl ToastStack {
             .min_w_0()
             .flex()
             .flex_col()
-            .child(changing(
-                ElementId::Name(format!("toast-{number}-title-line").into()),
-                toast.title.clone(),
-                move |title| {
+            .child(match &toast.quoting {
+                Some(before) => {
+                    let title = toast
+                        .title
+                        .strip_prefix(before.as_ref())
+                        .unwrap_or_default();
                     div()
-                        .id(ElementId::Name(format!("toast-{number}-title").into()))
                         .text_size(px(13.))
                         .line_height(px(19.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(title)
-                        .test_support()
+                        .child(quoted(
+                            format!("toast-{number}-title"),
+                            before,
+                            title,
+                            "",
+                            window,
+                            cx,
+                        ))
                         .into_any_element()
-                },
-            ))
+                }
+                None => changing(
+                    ElementId::Name(format!("toast-{number}-title-line").into()),
+                    toast.title.clone(),
+                    move |title| {
+                        div()
+                            .id(ElementId::Name(format!("toast-{number}-title").into()))
+                            .text_size(px(13.))
+                            .line_height(px(19.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(title)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .into_any_element(),
+            })
             .children(toast.detail.clone().map(|detail| {
                 div()
                     .id(ElementId::Name(format!("toast-{number}-detail").into()))
@@ -415,7 +457,7 @@ impl Render for ToastStack {
                 Item::new(
                     ElementId::Name(format!("toast-item-{number}").into()),
                     placement,
-                    self.card(number, &toast, cx),
+                    self.card(number, &toast, window, cx),
                 )
                 .rising()
                 .gap(px(GAP))

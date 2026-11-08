@@ -347,7 +347,7 @@ fn a_title_quoted_in_a_sentence_never_takes_more_than_one_line(cx: &mut TestAppC
     );
     assert_eq!(title, sentence, "the title on the sentence's one line");
 
-    // A sentence that is only a string cuts the title: the toast says "Detached from …".
+    // A toast says the whole title and draws it on its one line, cut to the room it has.
     cx.update(|window, cx| window.hover(session_id(&led), cx));
     settle(cx);
     cx.update(|window, cx| window.click(session_menu_id(&led), cx));
@@ -356,11 +356,12 @@ fn a_title_quoted_in_a_sentence_never_takes_more_than_one_line(cx: &mut TestAppC
     until(&shell, cx, "the detached toast", |cx| {
         !toasts(&shell, cx).is_empty()
     });
+    settle(cx);
     let toast = toasts(&shell, cx).remove(0);
-    assert!(toast.starts_with("Detached from "), "{toast}");
-    assert!(toast.ends_with('…'), "{toast}");
-    assert!(
-        toast.chars().count() <= "Detached from ".len() + flottille_ui::QUOTED_CHARS + 1,
-        "{toast}"
-    );
+    assert_eq!(toast, format!("Detached from {LONG}"));
+    let line = cx.update(|window, _| {
+        let found = window.find("toast-1-title");
+        f32::from(found.bounds().size.height)
+    });
+    assert!(line < 30., "the toast's title is one line, not {line} px");
 }

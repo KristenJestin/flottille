@@ -1008,19 +1008,15 @@ impl Shell {
                 },
                 cx,
             ),
-            Outcome::Detached { from, refused } => {
-                let from = flottille_ui::quoted_title(&from);
-                flottille_ui::toast(
-                    match refused {
-                        None => flottille_ui::Toast::success(format!("Detached from {from}")),
-                        Some(why) => {
-                            flottille_ui::Toast::failure(format!("Not detached from {from}"))
-                                .detail(why)
-                        }
-                    },
-                    cx,
-                )
-            }
+            Outcome::Detached { from, refused } => flottille_ui::toast(
+                match refused {
+                    None => flottille_ui::Toast::success("Detached from ").quoting(&from),
+                    Some(why) => flottille_ui::Toast::failure("Not detached from ")
+                        .quoting(&from)
+                        .detail(why),
+                },
+                cx,
+            ),
             Outcome::ToolsReloaded {
                 session,
                 after_turn,
