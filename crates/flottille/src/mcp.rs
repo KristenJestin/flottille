@@ -98,7 +98,7 @@ const LEAVE_WITHDRAWN: &str = "refused: the user withdrew your leave to write to
 
 /// An `agent_stop` allowed as the end of a session the caller leads, which it no longer leads:
 /// the user detached it, or it was handed, meanwhile.
-const NO_LONGER_LED: &str = "refused: this agent no longer leads that session, the user took it     over while this call was decided; ask again and the user decides";
+const NO_LONGER_LED: &str = "refused: this agent no longer leads that session, the user took it over while this call was decided; ask again and the user decides";
 
 /// What a call of a session that was replaced is answered.
 /// What a call is answered when its process ended while it was on its way.
