@@ -52,6 +52,7 @@ pub static PROVIDER: Provider = Provider {
     // Told the list changed, it does not list the tools again: seen on a real session, where it
     // said an action was missing while the daemon accepted it.
     lists_tools_again: false,
+    says_every_effort: true,
     cache_lifetime,
     unready: providers::ready_here,
     forget_process: forget_bridge,
