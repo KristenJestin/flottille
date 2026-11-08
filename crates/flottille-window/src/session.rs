@@ -1887,7 +1887,7 @@ impl Render for SessionPage {
                     .test_support()
             }))
             .when(!wide, |d| {
-                let mut agents = Button::icon("open-rail", Icon::Agents, "Agents")
+                let mut agents = Button::icon("open-rail", Icon::PanelRight, "Session details")
                     .on_click(move |_, _, cx| drawer.update(cx, |d, cx| d.open(cx)));
                 if self.needs_you {
                     agents = agents.badge(Badge::alert());
