@@ -553,6 +553,7 @@ mod tests {
             launched_by: None,
             led: false,
             detached_from: None,
+            titled_by: None,
         }
     }
 

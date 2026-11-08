@@ -754,6 +754,19 @@ $ flottille agent resume bd7ed8152969
 Resumed agent bd7ed8152969 on its own session; it is idle now. Its next message starts it.
 ```
 
+### `flottille agent rename <agent> <title>`
+
+Names a session (`agent.rename`, `docs/protocol.md`; the window's session header and row menu
+have `Rename…`): the title replaces the first line of its first message and any title its agent
+gave, and its agent can no longer change it (`docs/tools.md`, "The session's title"). `--json`
+prints `{"agent", "title", "by": "user"}`. Refused, saying why, for an empty title, one on several
+lines, and a child, whose title is its `agent_launch` title.
+
+```
+$ flottille agent rename bd7ed8152969 "Release notes"
+Renamed agent bd7ed8152969: "Release notes".
+```
+
 ### `flottille agent detach <agent>`
 
 Takes a session an agent started (led or handed) away from that agent (`agent.detach`,

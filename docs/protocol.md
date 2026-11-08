@@ -1105,7 +1105,10 @@ what the agent does during a turn never moves it, which is what a list of sessio
 it (`docs/tools.md`, "When the tools change"); `tools_outdated` says whether its running session
 runs an older list than that. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
-(each replacement adds one), `title` and `brief` a child's task, `launched_by` the id of the agent
+(each replacement adds one), `title` and `brief` a child's task, or for a root the title its
+agent or the user named its session with (`docs/tools.md`, "The session's title"), `titled_by`
+who did (`agent` or `user`; `null` for a child and a session not named yet, which keeps the first
+line of its first message), `launched_by` the id of the agent
 that started a root for the user (`null` for a root the user started, and for a child), whose
 `brief` is then that agent's first message, never the user's, `led` whether that agent leads it
 (`led_by` its id, `null` for a session handed to the user, `docs/tools.md`, "Sessions an agent
@@ -1260,6 +1263,15 @@ turn that started before is never cut: the new session follows its end. A compac
 needs no threshold, no margin and no notice seen. `agent.compacted` says it is done, `agent.compaction_failed` why it failed, in
 which case nothing changed. `refused` when there is no compactor (none chosen, or none could be
 picked), and for an agent in a final state.
+
+#### `agent.rename`
+
+`{"agent", "title"}`. The user names a session (`docs/tools.md`, "The session's title"): the title
+replaces the first line of its first message and any its agent gave, and from then on the agent's
+`session_title` is refused; the user may rename it again. The title is trimmed and masked of
+secrets; an empty one or one on several lines is refused (`invalid-params`), and so is a child,
+whose title is its `agent_launch` title. `agent.titled` is emitted with `by` `user`. Answers
+`{"agent", "title", "by": "user"}`.
 
 #### `agent.detach`
 

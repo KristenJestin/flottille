@@ -234,6 +234,9 @@ Flottille's own tools:
   and the mode of that session's tree; framed as that session's data, never instructions; judged
   in Ask and Auto; a session of another project is refused. Without `session` (or with the
   caller's own id) it reads this session: its id, its role and its tree's mode, asked of nobody.
+- `session_title {title}` (a root): names its session for the user, 3 to 8 words on one line, at
+  most 60 characters, in its first turn and again when the work changes, until the user renames
+  it (`docs/tools.md`, "The session's title").
 - `agent_send {agent_id, message}`: a message to one of the caller's children.
 - `agent_status {agent_id?, action?, detail?, after?}`: for one child or all of them: state, what
   it is doing now (thinking, in a tool call, which command runs and for how long, waiting for
@@ -262,9 +265,9 @@ The tool list of a session is its role's, and changes only when the role's does 
 `reference/hemera.md` §7): a project that declares or drops a forge or a tracker, a new version.
 A running session is then told (`notifications/tools/list_changed`) and served the new list, or
 said to run an older one until a restart (`docs/tools.md`, "When the tools change"). It depends
-on what the agent can do: every agent gets `ask`, a root `session_send`, `session_read`, `skills`,
+on what the agent can do: every agent gets `ask`, a root `session_send`, `session_read`, `session_title`, `skills`,
 `commands`, `setup` and `project`; a child, whatever its role, gets no `agent_*` tools
-and no `approval_answer`. A root lead has 25 tools, a child 14; one more each when the
+and no `approval_answer`. A root lead has 27 tools, a child 14; one more each when the
 project's repositories declare a forge (`forge`), one more when it declares a tracker
 (`tickets`), whatever the place (`reference/mcp.md` §4).
 
@@ -865,15 +868,21 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   turn, its creation before either: the session that last had one on top. Work done during a turn
   never moves a row, so two sessions working at once keep their places; a state is drawn by the
   row's mark, never by reordering). There is no row for `main` nor for a workspace: workspaces live on the project
-  page, and one with no session is not in the sidebar. A session is titled by the first line of
+  page, and one with no session is not in the sidebar. A session is titled by the title its agent
+  gives it in its first turn (`session_title`, 3 to 8 words, `docs/tools.md`, "The session's
+  title") or the user gives it (`Rename…` in its row's "⋯" menu and its header, a dialog with a
+  labelled field; the user's title always wins), and until then by the first line of
   its first message that says what the work is (a greeting or a single word does not: the session
-  is `agent <id>` until a later message of the user does); a session an agent started says it in
+  is `agent <id>` until a later message of the user does); a new title fades in over the old one in
+  the row and the header; a session an agent started says it in
   its page's header, "started by <agent>", not in the sidebar. A session an agent leads (`led`)
   is the one exception to the flat list: its row sits right under its pilot's session's row,
   indented, starting with a mark whose tooltip says "led by <pilot>"; the pilot's row gains a
   chevron that folds its led rows away with it, and each led row keeps its own mark, unread dot
   and draft pencil. Its page's header says "led by <pilot>", and a line above its composer says
-  that the user's messages reach it directly and the pilot is not asked. The row's "⋯" menu of a
+  "Your messages go straight to this session; its lead is not asked." (it names no session: a
+  sentence of the window that quotes a session's title shows it on one line at most, cut with an
+  ellipsis, in emphasis, never wrapped into the sentence). The row's "⋯" menu of a
   session an agent started offers "Detach from <agent>" (`agent.detach`, a toast says the
   result): the row slides back among the project's sessions, its indent and mark fade, and the
   header's line and the note fold away. A question a led session asks its pilot shows in its

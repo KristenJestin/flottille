@@ -2169,6 +2169,8 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
             .then(|| json!({"model": agent.pending.model, "effort": agent.pending.effort})),
         "role": agent.role,
         "title": agent.title,
+        // Who named the session: its agent or the user; `null` while its first message does.
+        "titled_by": agent.titled_by,
         "project": agent.project,
         "workspace": agent.workspace,
         "parent": agent.parent,

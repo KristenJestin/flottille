@@ -165,6 +165,7 @@ impl Provider {
         if root {
             names.push("session_send");
             names.push("session_read");
+            names.push("session_title");
         }
         if !at_depth_limit {
             names.push("approval_answer");
@@ -1486,9 +1487,20 @@ mod tests {
                 "ask",
                 "session_send",
                 "session_read",
+                "session_title",
                 "approval_answer",
             ]
         );
+    }
+
+    #[test]
+    fn a_child_agent_has_no_title_tool() {
+        let title = "session_title".to_owned();
+        assert!(short(claude::PROVIDER.tools(true, false, false, false, false)).contains(&title));
+        for at_depth_limit in [false, true] {
+            let child = short(claude::PROVIDER.tools(false, at_depth_limit, true, true, true));
+            assert!(!child.contains(&title), "{child:?}");
+        }
     }
 
     #[test]

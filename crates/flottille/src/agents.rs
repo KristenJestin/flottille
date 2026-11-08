@@ -247,6 +247,12 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             tell_resumed(daemon, &agent, ended_at);
             Ok(json!({"agent": agent.to_json()}))
         }
+        "agent.rename" => {
+            let asked: flottille_core::protocol::AgentRename = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            refuse_child(daemon, &agent, "names it, with agent_launch")?;
+            crate::titles::rename(daemon, &agent, &asked.title)
+        }
         "agent.detach" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let mut agent = tree::detach(daemon, &asked.agent)?;
@@ -812,6 +818,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         launched_by: new.launched_by,
         led: new.led,
         detached_from: None,
+        titled_by: None,
     };
     daemon.write(|store| {
         let event = store.create_agent(

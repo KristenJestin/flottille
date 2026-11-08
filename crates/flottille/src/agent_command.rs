@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 use flottille_core::paths::Paths;
-use flottille_core::protocol::{AgentName, AgentRun, AgentSend};
+use flottille_core::protocol::{AgentName, AgentRename, AgentRun, AgentSend};
 use serde_json::Value;
 
 use crate::chat;
@@ -97,6 +97,14 @@ pub enum AgentAction {
     /// Start an ended root again on its own session
     Resume {
         agent: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Name a session: your title replaces the first line of its message and its agent's, and
+    /// its agent can no longer change it
+    Rename {
+        agent: String,
+        title: String,
         #[arg(long)]
         json: bool,
     },
@@ -352,6 +360,22 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     "Resumed agent {} on its own session; it is {} now. Its next message starts it.",
                     text(&resumed["agent"], "id"),
                     text(&resumed["agent"], "state")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Rename { agent, title, json } => {
+            let renamed = Client::connect_or_start(paths)?.request(
+                "agent.rename",
+                serde_json::to_value(AgentRename { agent, title })?,
+            )?;
+            if json {
+                println!("{renamed}");
+            } else {
+                println!(
+                    "Renamed agent {}: \"{}\".",
+                    text(&renamed, "agent"),
+                    text(&renamed, "title")
                 );
             }
             Ok(ExitCode::SUCCESS)

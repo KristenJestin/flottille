@@ -1839,6 +1839,7 @@ mod at_once {
             launched_by: None,
             led: false,
             detached_from: None,
+            titled_by: None,
         }
     }
 

@@ -105,7 +105,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 31] = [
+const SERVED: [Definition; 32] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -859,6 +859,22 @@ const SERVED: [Definition; 31] = [
                 "until": {"type": "string", "description": "With since: the messages before it."},
                 "cursor": {"type": "string", "description": "As a previous page gave it, alone: reads on."}
             }, "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "session_title",
+        title: "Title your session",
+        description: "Names your session for the user's sidebar: 3 to 8 words on one line, at \
+            most 60 characters, in the user's language, saying the work. Call it in your first \
+            turn, and again when the work changes; once the user renamed the session it is \
+            refused. {\"title\": \"Rework the login page\"}.",
+        read_only: false,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "title": {"type": "string", "description": "3 to 8 words, one line, at most 60 characters."}
+            }, "required": ["title"], "additionalProperties": false})
         },
     },
 ];
@@ -3005,6 +3021,7 @@ async fn performed_once(
         "forge" => crate::forge::forge(daemon, &grant.agent, &grant.place, args).await,
         "tickets" => crate::tickets::tickets(daemon, &grant.agent, &grant.place, args).await,
         "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
+        "session_title" => crate::titles::session_title(daemon, grant, args),
         "vault" => crate::vault::tool(daemon, grant, args),
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         tool if crate::actions::TOOLS.contains(&tool) => {

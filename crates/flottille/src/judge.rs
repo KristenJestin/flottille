@@ -1032,6 +1032,7 @@ fn as_agent(folder: &Path, instructions: &str) -> Agent {
         launched_by: None,
         led: false,
         detached_from: None,
+        titled_by: None,
     }
 }
 
