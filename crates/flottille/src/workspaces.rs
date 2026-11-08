@@ -2578,26 +2578,36 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
 }
 
 /// The first local branch of the repository at `dir`, but `own`, that holds `commit`: its work is
-/// merged into, or contained in, that branch (`git merge-base --is-ancestor`).
+/// merged into, or contained in, that branch (`git merge-base --is-ancestor`). Full ref names, as
+/// a short one may be `heads/<own>` beside a tag of its name, and no symbolic ref: one may point
+/// at `own` itself.
 pub async fn integrated_into(dir: &Path, commit: &str, own: &str) -> Option<String> {
-    let branches = git::output(
+    let refs = git::output(
         dir,
-        &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(symref)",
+            "refs/heads/",
+        ],
         Class::Read,
     )
     .await
     .ok()?;
-    for branch in branches.lines().filter(|b| !b.is_empty() && *b != own) {
-        let reference = format!("refs/heads/{branch}");
+    let own = format!("refs/heads/{own}");
+    for line in refs.lines() {
+        let (reference, symref) = line.split_once(' ').unwrap_or((line, ""));
+        if reference.is_empty() || reference == own || !symref.is_empty() {
+            continue;
+        }
         let line = [
             "merge-base",
             "--is-ancestor",
             "--end-of-options",
             commit,
-            &reference,
+            reference,
         ];
         if git::output(dir, &line, Class::Read).await.is_ok() {
-            return Some(branch.to_owned());
+            return reference.strip_prefix("refs/heads/").map(str::to_owned);
         }
     }
     None

@@ -1424,6 +1424,62 @@ fn a_workspace_with_uncommitted_changes_is_still_refused_even_if_integrated() {
     assert!(fixture.show("login").is_ok());
 }
 
+/// The workspace `name`, made, with a commit in `lib` never pushed: its folder in `lib` and the
+/// commit.
+fn unpushed(fixture: &Fixture, name: &str) -> (PathBuf, String) {
+    fixture.create(json!({"name": name})).unwrap();
+    fixture.settled(name);
+    let lib = fixture.workspace(name).join("lib");
+    std::fs::write(lib.join(format!("{name}.rs")), "fn f() {}\n").unwrap();
+    fixture.user.git(&lib, &["add", "."]);
+    fixture
+        .user
+        .git(&lib, &["commit", "--quiet", "-m", "add the feature"]);
+    let commit = fixture.git(&lib, &["rev-parse", "HEAD"]);
+    (lib, commit)
+}
+
+/// The removal of `login`, whose commit is on no remote and in no other branch, is refused and
+/// its branch kept.
+fn refused_and_kept(fixture: &Fixture, commit: &str) {
+    let (code, message) = fixture.remove("login").unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("lib has commits on no remote, on its branch app/login"),
+        "{message}"
+    );
+    let main = fixture.folder.join("lib");
+    assert_eq!(
+        fixture.git(&main, &["rev-parse", "refs/heads/app/login"]),
+        commit
+    );
+}
+
+#[test]
+fn a_branch_with_a_tag_of_its_name_is_not_integrated_into_itself() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let (lib, commit) = unpushed(&fixture, "login");
+    fixture.user.git(&lib, &["tag", "app/login"]);
+
+    refused_and_kept(&fixture, &commit);
+    assert!(fixture.workspace("login").exists());
+}
+
+#[test]
+fn a_symbolic_ref_to_the_own_branch_is_not_another_branch() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let (lib, commit) = unpushed(&fixture, "login");
+    fixture.user.git(
+        &lib,
+        &["symbolic-ref", "refs/heads/alias", "refs/heads/app/login"],
+    );
+
+    refused_and_kept(&fixture, &commit);
+    assert!(fixture.workspace("login").exists());
+}
+
 #[test]
 fn removal_succeeds_on_a_clean_pushed_workspace_and_leaves_git_worktree_list_clean() {
     let fixture = Fixture::new(true);
