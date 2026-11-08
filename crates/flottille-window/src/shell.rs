@@ -11,7 +11,7 @@ use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, StateIcon, Status,
     Tie, Toast, ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays,
-    icon, keys_held, open_overlay, palette, presence, pressable, space,
+    icon, keys_held, open_overlay, palette, presence, pressable, space, toast,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
