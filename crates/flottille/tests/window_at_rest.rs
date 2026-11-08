@@ -170,6 +170,36 @@ fn the_window_draws_no_frame_at_rest_on_the_project_page(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_add_a_project_with_its_folder_detected(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    let folder = user.path("work/other");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "other\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| s.add_project(window, cx));
+    let form = shell.read_with(cx, |s, _| s.add_project_form().clone());
+    cx.update(|window, cx| form.update(cx, |f, cx| f.set_folder(folder.clone(), window, cx)));
+    until(&shell, cx, "the folder is detected", |cx| {
+        form.read_with(cx, |f, _| f.detected().is_some())
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_the_project_page_with_a_picture_attached(
     cx: &mut TestAppContext,
 ) {
