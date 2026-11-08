@@ -364,6 +364,12 @@ fn remove_with_discard_removes_the_workspace_with_unsaved_work_and_says_so() {
     let output = user.run(&["project", "remove", "app", "--discard"]);
 
     assert!(output.status.success(), "{}", stderr(&output));
+    let shown = stderr(&output);
+    assert!(
+        shown
+            .contains("The workspace draft would lose: notes.txt holds work that is not committed"),
+        "it shows what it discards first: {shown}"
+    );
     let said = stdout(&output);
     assert!(said.contains("Removed the workspace draft"), "{said}");
     assert!(!said.contains("Kept"), "{said}");

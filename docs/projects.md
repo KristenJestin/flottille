@@ -87,18 +87,21 @@ Removing a project cleans up what Flottille made for it and never loses the user
 (`project.remove`). In this order:
 
 1. every agent of the project is stopped, roots and children, as Stop stops a session, and the
-   daemon waits for their processes to be gone (15 seconds at most);
+   daemon waits for their processes to be gone (15 seconds at most). An agent whose record has
+   ended but whose process still lives counts as running: asking again waits for it again;
 2. every command run of the project still running is stopped, the user's tasks as the agents';
 3. each workspace is removed as `workspace.remove` removes it (its worktrees, then its local
    branches whose work has landed), when it would lose nothing. One holding files not committed or
    commits on no remote is **kept** on disk with its branch, and the result says which and why;
    with `discard` (the CLI's `--discard`, the window's "Also remove workspaces with unsaved work")
-   it is removed too, its work lost, as long as what it would lose is what was checked. A
-   workspace whose state cannot be read is kept;
+   it is removed too, its work lost, as long as what it would lose is within what the user was
+   shown: `discard` carries back each workspace with its losses as `project.removal` gave them.
+   One whose losses appeared after the preview (an agent wrote in it before it was stopped) is
+   kept, and the result says it changed. A workspace whose state cannot be read is kept;
 4. the project's file is removed and `project.removed` is emitted.
 
-The project is marked from the start: meanwhile no agent, workspace or command run starts in it,
-each refused with "project <name> is being removed". The folder and the checkouts of its
+The project is marked from the start: meanwhile no agent, workspace or command run starts in it
+and its file is not edited, each refused with "project <name> is being removed". The folder and the checkouts of its
 repositories are never touched: only the worktrees and the branches Flottille made.
 
 A failure partway (an agent still running after the wait, a workspace git could not remove)

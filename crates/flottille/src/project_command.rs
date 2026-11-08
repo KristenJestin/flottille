@@ -160,10 +160,20 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
             discard,
             json,
         } => {
-            let removed = ask(
-                "project.remove",
-                serde_json::json!({"name": wanted, "discard": discard}),
-            )?;
+            let mut asked = serde_json::json!({"name": wanted});
+            if discard {
+                // What is discarded is what was shown: the daemon keeps a workspace whose losses
+                // grew meanwhile.
+                let removal = ask("project.removal", name(wanted.clone())?)?;
+                eprint!("{}", losses_text(&removal));
+                asked["discard"] = removal["workspaces"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|w| serde_json::json!({"name": w["name"], "losses": w["losses"]}))
+                    .collect();
+            }
+            let removed = ask("project.remove", asked)?;
             if json {
                 println!("{removed}");
             } else {
@@ -243,8 +253,12 @@ fn removed_text(removed: &Value) -> String {
     }
     let kept = entries(&removed["workspaces"]["kept"]);
     for workspace in &kept {
+        let changed = match workspace["changed"] == true {
+            true => " (it changed since it was shown)",
+            false => "",
+        };
         out.push_str(&format!(
-            "Kept the workspace {}: {}.\n",
+            "Kept the workspace {}{changed}: {}.\n",
             text(workspace, "name"),
             list_of(&workspace["why"]).join("; ")
         ));
@@ -254,6 +268,22 @@ fn removed_text(removed: &Value) -> String {
             "A workspace kept stays on disk with its branch: save its work, then remove it with \
              `flottille workspace remove <project> <name>`.\n",
         );
+    }
+    out
+}
+
+/// What each workspace of `project.removal` would lose, said before it is discarded.
+fn losses_text(removal: &Value) -> String {
+    let mut out = String::new();
+    for workspace in removal["workspaces"].as_array().into_iter().flatten() {
+        let losses = list_of(&workspace["losses"]);
+        if !losses.is_empty() {
+            out.push_str(&format!(
+                "The workspace {} would lose: {}.\n",
+                text(workspace, "name"),
+                losses.join("; ")
+            ));
+        }
     }
     out
 }

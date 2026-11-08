@@ -13,7 +13,7 @@ use flottille_core::paths::Paths;
 use flottille_core::project::{Project, slug, valid_name};
 use flottille_core::protocol::{
     Conventions, MessageChecks, ProjectFolder, ProjectName, ProjectRemove, ProjectRepository,
-    ProjectSettings,
+    ProjectSettings, ShownWorkspace,
 };
 use flottille_core::registry::Registry;
 use flottille_core::run::Run;
@@ -172,12 +172,12 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
 /// were stopped: each has its own grace, and they stop together.
 const RELEASE_WAIT: Duration = Duration::from_secs(15);
 
-/// The refusal of anything that would start in a project being removed: an agent, a workspace,
-/// a command run.
+/// The refusal of anything that would start in a project being removed (an agent, a workspace,
+/// a command run) or edit its file.
 pub fn refuse_removing(daemon: &Daemon, project: &str) -> std::result::Result<(), Failure> {
     match daemon.removing_projects.lock().unwrap().contains(project) {
         true => Err(Failure::refused(format!(
-            "project {project} is being removed: nothing starts in it"
+            "project {project} is being removed: nothing starts in it and its file is not edited"
         ))),
         false => Ok(()),
     }
@@ -266,7 +266,7 @@ pub async fn remove(daemon: Arc<Daemon>, params: Value) -> std::result::Result<V
             "project {name} is being removed already"
         )));
     }
-    let removed = remove_marked(&daemon, &name, discard).await;
+    let removed = remove_marked(&daemon, &name, discard.as_deref()).await;
     daemon.removing_projects.lock().unwrap().remove(&name);
     removed
 }
@@ -319,7 +319,7 @@ impl Done {
 async fn remove_marked(
     daemon: &Arc<Daemon>,
     name: &str,
-    discard: bool,
+    discard: Option<&[ShownWorkspace]>,
 ) -> std::result::Result<Value, Failure> {
     let mut done = Done::default();
     // Read before the agents stop, whose runs end with them: all are said stopped. None starts
@@ -341,10 +341,16 @@ async fn remove_marked(
         }
     }
     done.agents = agents.iter().map(agent_json).collect();
-    // A workspace is removed once nothing of an agent's runs in it any more.
+    // A workspace is removed once nothing of an agent's runs in it any more: every agent of the
+    // project, ended ones too, whose process an earlier removal's wait may have outlived.
+    let all: Vec<Agent> = daemon
+        .read(Store::agents)?
+        .into_iter()
+        .filter(|agent| agent.project == name)
+        .collect();
     let deadline = Instant::now() + RELEASE_WAIT;
     loop {
-        let stopping: Vec<&str> = agents
+        let stopping: Vec<&str> = all
             .iter()
             .filter(|agent| crate::agents::stopping(daemon, &agent.id))
             .map(|agent| agent.id.as_str())
@@ -397,10 +403,25 @@ async fn remove_marked(
                 continue;
             }
         };
-        if !losses.is_empty() && !discard {
-            done.kept
-                .push(json!({"name": workspace.name, "why": losses}));
-            continue;
+        if !losses.is_empty() {
+            let Some(shown) = discard else {
+                done.kept
+                    .push(json!({"name": workspace.name, "why": losses}));
+                continue;
+            };
+            // The user discards what they were shown, never what appeared since.
+            let seen = shown
+                .iter()
+                .find(|shown| shown.name == workspace.name)
+                .is_some_and(|shown| losses.iter().all(|loss| shown.losses.contains(loss)));
+            if !seen {
+                done.kept.push(json!({
+                    "name": workspace.name,
+                    "why": losses,
+                    "changed": true,
+                }));
+                continue;
+            }
         }
         let approved = (!losses.is_empty()).then_some(losses.as_slice());
         match workspaces::remove_with_project(daemon.clone(), &workspace, approved).await {
@@ -1103,6 +1124,7 @@ pub fn rewrite(
     let mut projects = daemon.projects.lock().unwrap();
     let projects = &mut *projects;
     let project = load(projects, name)?;
+    refuse_removing(daemon, name)?;
     let file = projects.registry.file(name);
     let unavailable = |error: std::io::Error| {
         Failure::new("unavailable", format!("projects/{name}.toml: {error}"))

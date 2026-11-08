@@ -264,7 +264,9 @@ Project shop: the repositories match the configuration.
 Stops the project's agents and command runs, removes its workspaces and forgets its configuration,
 never its folder nor its repositories (`docs/projects.md`, "Removing a project"). A workspace
 holding work not committed or not pushed is kept and named with why, unless `--discard`, which
-removes it too and loses that work. `--json` prints `project.remove`.
+removes it too and loses that work: it first prints what each workspace would lose
+(`project.removal`), and only that is discarded; a workspace whose losses grew meanwhile is kept.
+`--json` prints `project.remove`.
 
 ```
 $ flottille project remove shop

@@ -77,13 +77,22 @@ pub struct ProjectName {
 }
 
 /// The parameters of `project.remove`: with `discard`, the workspaces that would lose work are
-/// removed too.
+/// removed too, as long as what they would lose is within what the user was shown.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectRemove {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discard: Option<Vec<ShownWorkspace>>,
+}
+
+/// A workspace as `project.removal` showed it: what removing it would lose, then.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShownWorkspace {
+    pub name: String,
     #[serde(default)]
-    pub discard: bool,
+    pub losses: Vec<String>,
 }
 
 /// The parameters of `project.add_repository` and `project.remove_repository`: a repository's

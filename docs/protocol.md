@@ -206,20 +206,24 @@ ended, `runs` its command runs still running, `workspaces` by name, each `state`
 
 #### `project.remove`
 
-`{"name", "discard"?}`. Stops the project's agents (roots and children) and waits for their
-processes, stops its command runs, removes its workspaces that would lose nothing (with
-`discard`, `true`, the others too), then removes the project's file (`docs/projects.md`,
-"Removing a project"). The result says what was done:
+`{"name", "discard"?: [{"name", "losses"}]}`. Stops the project's agents (roots and children) and
+waits for their processes, stops its command runs, removes its workspaces that would lose
+nothing, then removes the project's file (`docs/projects.md`, "Removing a project"). `discard` is
+what the user was shown and agreed to lose: the workspaces of `project.removal`, each with its
+`losses` as given there. A workspace that would lose work is removed too only when it is listed
+and each of its losses now is among those listed; otherwise it is kept, with `"changed": true`.
+The result says what was done:
 
 ```json
 {"removed": "shop",
  "stopped": {"agents": [{"id", "title", "parent"}], "runs": [{"run", "name", "line", "agent"}]},
- "workspaces": {"removed": [{"name", "branch", "branches"}], "kept": [{"name", "why": ["…"]}]}}
+ "workspaces": {"removed": [{"name", "branch", "branches"}], "kept": [{"name", "why": ["…"], "changed"?: true}]}}
 ```
 
 `branches` as `workspace.remove` gives them. The folder and its repositories' checkouts are never
 touched. Meanwhile nothing starts in the project: `agent.run`, `agent.start`, `agent.resume`,
-`workspace.create` and `task.run` are `refused`, "project <name> is being removed". `not-found`
+`workspace.create`, `task.run` and every edit of the project's file are `refused`, "project
+<name> is being removed". `not-found`
 when there is no such project; `refused` when it is being removed already, or when a step failed
 partway, the project still known and the sentence saying what failed and what was done.
 

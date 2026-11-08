@@ -2103,7 +2103,8 @@ fn in_use(
     for agent in daemon.read(Store::agents)? {
         if agent.project == workspace.project
             && agent.workspace.as_deref() == Some(workspace.name.as_str())
-            && !agent.state.is_final()
+            // An agent ended whose process lives still works in it.
+            && (!agent.state.is_final() || crate::agents::stopping(daemon, &agent.id))
             && by.is_none_or(|by| agent.id != by.agent)
         {
             let whose = match (by, theirs(&agent.id)) {

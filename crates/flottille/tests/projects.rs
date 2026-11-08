@@ -1475,9 +1475,27 @@ mod removal {
         ids
     }
 
+    /// Removes `app`; with `discard`, the workspaces the preview showed losing work too, sent back
+    /// as it showed them, as a client does.
     fn remove(user: &User, discard: bool) -> Value {
-        user.call("project.remove", json!({"name": "app", "discard": discard}))
+        let mut asked = json!({"name": "app"});
+        if discard {
+            asked["discard"] = shown(user);
+        }
+        user.call("project.remove", asked).unwrap()
+    }
+
+    /// The workspaces `project.removal` shows, with what each would lose.
+    fn shown(user: &User) -> Value {
+        let said = user
+            .call("project.removal", json!({"name": "app"}))
+            .unwrap();
+        said["workspaces"]
+            .as_array()
             .unwrap()
+            .iter()
+            .map(|w| json!({"name": w["name"], "losses": w["losses"]}))
+            .collect()
     }
 
     fn branches(user: &User, folder: &Path) -> String {
@@ -1615,10 +1633,10 @@ mod removal {
     #[test]
     fn removing_a_project_with_discard_removes_unsaved_workspaces_too() {
         let user = user();
-        project(&user, "app");
-        let (dirty, _) = workspace(&user, "app", "dirty");
+        let folder = project(&user, "app");
+        let (dirty, dirty_branch) = workspace(&user, "app", "dirty");
         std::fs::write(dirty.join("draft.txt"), "not committed\n").unwrap();
-        let (ahead, _) = workspace(&user, "app", "ahead");
+        let (ahead, ahead_branch) = workspace(&user, "app", "ahead");
         std::fs::write(ahead.join("work.txt"), "done\n").unwrap();
         user.git(&ahead, &["add", "work.txt"]);
         user.git(&ahead, &["commit", "--quiet", "-m", "the work"]);
@@ -1633,6 +1651,66 @@ mod removal {
         assert_eq!(removed["workspaces"]["kept"], json!([]));
         assert!(!dirty.exists());
         assert!(!ahead.exists());
+        // As `discard` does for one workspace: a branch is deleted once its work has landed, so
+        // the commits on no remote stay on theirs, and the result says why.
+        let left = branches(&user, &folder);
+        assert!(
+            !left.contains(&dirty_branch),
+            "the branch with no commit of its own is gone: {left}"
+        );
+        assert!(left.contains(&ahead_branch), "{left}");
+        let fate = |name: &str| {
+            removed["workspaces"]["removed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|w| w["name"] == name)
+                .unwrap()["branches"][0]
+                .clone()
+        };
+        assert_eq!(fate("dirty")["deleted"], true, "{removed}");
+        assert_eq!(fate("ahead")["deleted"], false, "{removed}");
+    }
+
+    #[test]
+    fn discard_keeps_a_workspace_whose_losses_appeared_after_the_preview() {
+        let user = user();
+        project(&user, "app");
+        let (clean, _) = workspace(&user, "app", "clean");
+        let (dirty, _) = workspace(&user, "app", "dirty");
+        std::fs::write(dirty.join("draft.txt"), "not committed\n").unwrap();
+        let (grown, _) = workspace(&user, "app", "grown");
+        std::fs::write(grown.join("draft.txt"), "not committed\n").unwrap();
+        let shown = shown(&user);
+        // Written after the preview, as an agent still working would: the user never saw it.
+        std::fs::write(clean.join("late.txt"), "the agent's work\n").unwrap();
+        std::fs::write(grown.join("late.txt"), "the agent's work\n").unwrap();
+
+        let removed = user
+            .call("project.remove", json!({"name": "app", "discard": shown}))
+            .unwrap();
+
+        assert_eq!(
+            ids(&removed["workspaces"]["removed"]),
+            ["dirty"],
+            "{removed}"
+        );
+        assert_eq!(
+            ids(&removed["workspaces"]["kept"]),
+            ["clean", "grown"],
+            "{removed}"
+        );
+        for kept in removed["workspaces"]["kept"].as_array().unwrap() {
+            assert_eq!(kept["changed"], true, "{kept}");
+            assert!(kept["why"].to_string().contains("late.txt"), "{kept}");
+        }
+        assert!(!dirty.exists());
+        assert_eq!(
+            std::fs::read_to_string(clean.join("late.txt")).unwrap(),
+            "the agent's work\n"
+        );
+        assert!(grown.join("late.txt").exists());
+        assert!(grown.join("draft.txt").exists());
     }
 
     /// What a checkout is, but git's own folder: its files, their contents and its branch.
@@ -1749,29 +1827,22 @@ mod removal {
         assert!(user.project_file("app").exists());
     }
 
-    /// A user whose `git` runs the real one but holds `git worktree remove` until the test
-    /// releases it: `held` exists once it waits, `release` lets it go on.
-    fn holding_removals() -> (User, PathBuf, PathBuf) {
-        let user = user();
+    /// The user with a `git` that runs the real one, but first `on_remove` (shell) for a
+    /// `git worktree remove`.
+    fn wrapping_removals(user: User, on_remove: &str) -> User {
         let real = std::process::Command::new("sh")
             .args(["-c", "command -v git"])
             .output()
             .unwrap();
         let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
-        let (bin, held, release) = (
-            user.path("fake-git"),
-            user.path("removal-held"),
-            user.path("removal-released"),
-        );
+        let bin = user.path("fake-git");
         std::fs::create_dir_all(&bin).unwrap();
         let script = bin.join("git");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\ncase \"$*\" in *\"worktree remove\"*)\n  touch '{}'\n  while [ ! -e '{}' ]; \
-                 do sleep 0.05; done;;\nesac\nexec '{real}' \"$@\"\n",
-                held.display(),
-                release.display()
+                "#!/bin/sh\ncase \"$*\" in *\"worktree remove\"*)\n{on_remove};;\nesac\nexec \
+                 '{real}' \"$@\"\n"
             ),
         )
         .unwrap();
@@ -1782,7 +1853,20 @@ mod removal {
             bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        (user.with_env("PATH", &path), held, release)
+        user.with_env("PATH", &path)
+    }
+
+    /// A user whose `git` holds `git worktree remove` until the test releases it: `held` exists
+    /// once it waits, `release` lets it go on.
+    fn holding_removals() -> (User, PathBuf, PathBuf) {
+        let user = user();
+        let (held, release) = (user.path("removal-held"), user.path("removal-released"));
+        let on_remove = format!(
+            "  touch '{}'\n  while [ ! -e '{}' ]; do sleep 0.05; done",
+            held.display(),
+            release.display()
+        );
+        (wrapping_removals(user, &on_remove), held, release)
     }
 
     #[test]
@@ -1810,5 +1894,121 @@ mod removal {
             assert_eq!(code, "refused", "{what}: {message}");
             assert!(message.contains("being removed"), "{what}: {message}");
         }
+    }
+
+    #[test]
+    fn a_project_being_removed_refuses_edits() {
+        let (user, held, release) = holding_removals();
+        project(&user, "app");
+        workspace(&user, "app", "w");
+        let mut edited = None;
+        std::thread::scope(|scope| {
+            let removing = scope.spawn(|| user.call("project.remove", json!({"name": "app"})));
+            eventually("the removal holds", || held.exists());
+            edited = Some(user.call(
+                "project.set_conventions",
+                json!({"name": "app", "branch_format": "^late/"}),
+            ));
+            std::fs::write(&release, "").unwrap();
+            removing.join().unwrap().unwrap();
+        });
+
+        let (code, message) = edited.unwrap().expect_err("an edit");
+        assert_eq!(code, "refused", "{message}");
+        assert!(message.contains("being removed"), "{message}");
+    }
+
+    #[test]
+    fn a_failed_workspace_removal_keeps_the_project_and_a_retry_continues_where_it_stopped() {
+        let user = user();
+        let failing = user.path("removals-fail");
+        let user = wrapping_removals(
+            user,
+            &format!(
+                "  case \"$*\" in *broken*) [ -e '{}' ] && {{ echo refused >&2; exit 1; }};; esac",
+                failing.display()
+            ),
+        );
+        std::fs::write(&failing, "").unwrap();
+        project(&user, "app");
+        let (fine, _) = workspace(&user, "app", "fine");
+        let (broken, _) = workspace(&user, "app", "broken");
+
+        let (code, message) = user
+            .call("project.remove", json!({"name": "app"}))
+            .expect_err("a removal stopped partway");
+
+        assert_eq!(code, "refused", "{message}");
+        assert!(message.contains("still known"), "{message}");
+        assert!(message.contains("removed the workspaces fine"), "{message}");
+        assert!(!fine.exists());
+        assert!(broken.exists());
+        assert!(user.project_file("app").exists());
+
+        std::fs::remove_file(&failing).unwrap();
+        let removed = remove(&user, false);
+
+        assert_eq!(
+            ids(&removed["workspaces"]["removed"]),
+            ["broken"],
+            "{removed}"
+        );
+        assert!(!broken.exists());
+        assert!(!user.project_file("app").exists());
+    }
+
+    #[test]
+    fn a_retry_after_a_timeout_waits_for_a_process_still_alive() {
+        let user = User::with_fake_agent();
+        // Stuck while it opens its session, it never sees the order to stop: its process
+        // outlives the wait.
+        user.fake_script(json!({"stall": true}));
+        project(&user, "app");
+        let (w, _) = workspace(&user, "app", "w");
+        let agent = user
+            .call(
+                "agent.run",
+                json!({"project": "app", "workspace": "w", "message": "hello"}),
+            )
+            .unwrap()["agent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        eventually("the agent opens", || {
+            !user.received_requests("session/new").is_empty()
+        });
+
+        let (_, first) = user
+            .call_within(
+                "project.remove",
+                json!({"name": "app"}),
+                Duration::from_secs(60),
+            )
+            .expect_err("the wait times out");
+        assert!(first.contains(&agent) && first.contains("still"), "{first}");
+        assert!(w.exists());
+
+        let started = Instant::now();
+        let (code, again) = user
+            .call_within(
+                "project.remove",
+                json!({"name": "app"}),
+                Duration::from_secs(60),
+            )
+            .expect_err("the retry waits again");
+
+        assert_eq!(code, "refused", "{again}");
+        assert!(again.contains(&agent) && again.contains("still"), "{again}");
+        assert!(
+            started.elapsed() > Duration::from_secs(10),
+            "it waited for the process again"
+        );
+        assert!(w.exists(), "nothing is removed under a running process");
+        assert!(user.project_file("app").exists());
+        let (code, refused) = user
+            .call("workspace.remove", json!({"project": "app", "name": "w"}))
+            .expect_err("its process works in it");
+        assert_eq!(code, "refused", "{refused}");
+        assert!(refused.contains(&agent), "{refused}");
     }
 }
