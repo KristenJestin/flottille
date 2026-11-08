@@ -9528,7 +9528,7 @@ fn a_project_is_added_from_the_window_detected_again_and_removed(cx: &mut TestAp
     settle(cx);
     cx.update(|window, cx| window.click("remove-project", cx));
     settle(cx);
-    assert!(page.read_with(cx, |p, _| p.is_confirming_removal()));
+    assert!(page.read_with(cx, |p, cx| p.is_confirming_removal(cx)));
     cx.update(|window, cx| window.click("project-removal-action", cx));
     until(&shell, cx, "the project is gone", |cx| {
         shell.read_with(cx, |s, _| {
@@ -9545,6 +9545,79 @@ fn a_project_is_added_from_the_window_detected_again_and_removed(cx: &mut TestAp
         folder.join("README.md").exists(),
         "its folder is left as it is"
     );
+}
+
+#[gpui_kit::test]
+fn the_removal_confirmation_lists_what_runs_and_the_workspaces_states_and_the_switch_discards(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let folder = project(&user, "app");
+    workspace(&user, "app", "clean");
+    workspace(&user, "app", "dirty");
+    let dirty = PathBuf::from(
+        user.call("workspace.show", json!({"project": "app", "name": "dirty"}))
+            .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(dirty.join("draft.txt"), "not committed\n").unwrap();
+    let agent = start(&user, "app", Some("clean"), "hello");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "app", cx);
+
+    cx.update(|window, cx| window.click("project-more", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-project", cx));
+    let removal = page.read_with(cx, |p, _| p.removal().clone());
+    until(&shell, cx, "what the removal does is read", |cx| {
+        removal.read_with(cx, |r, _| r.read().is_some())
+    });
+    settle(cx);
+    let label = |id: &'static str, cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.find(id).label().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    cx.update(|window, _| {
+        assert!(
+            window
+                .find(gpui_kit::ElementId::Name(
+                    format!("project-removal-session-{agent}").into()
+                ))
+                .visible()
+        );
+        assert!(window.find("project-removal-discard").visible());
+    });
+    assert_eq!(
+        label("project-removal-workspace-clean", cx),
+        "clean clean · removed"
+    );
+    assert_eq!(
+        label("project-removal-workspace-dirty", cx),
+        "dirty uncommitted changes · kept"
+    );
+
+    cx.update(|window, cx| window.click("project-removal-discard", cx));
+    settle(cx);
+    assert!(removal.read_with(cx, |r, _| r.discards()));
+    assert_eq!(
+        label("project-removal-workspace-dirty", cx),
+        "dirty uncommitted changes · removed"
+    );
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves once the line changed"
+    );
+
+    cx.update(|window, cx| window.click("project-removal-action", cx));
+    toast_said(&shell, "The project app was removed", cx);
+    assert!(!dirty.exists(), "the workspace with unsaved work went too");
+    assert_eq!(
+        user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"],
+        "ended"
+    );
+    assert!(folder.join("README.md").exists());
 }
 
 #[gpui_kit::test]
