@@ -259,13 +259,26 @@ $ flottille project check shop
 Project shop: the repositories match the configuration.
 ```
 
-### `flottille project remove <name>`
+### `flottille project remove <name> [--discard [--yes]]`
 
-Forgets the project: its configuration file, never its folder.
+Stops the project's agents and command runs, removes its workspaces and forgets its configuration,
+never its folder nor its repositories (`docs/projects.md`, "Removing a project"). A workspace
+holding work not committed or not pushed is kept and named with why, unless `--discard`, which
+removes it too and loses that work: it first prints what each workspace would lose
+(`project.removal`), then asks `Discard it and remove the project? [y/N]`; anything but a yes
+removes nothing, and with nothing to read an answer from (an input that is not a terminal and
+closed) it refuses and says `--yes`, which discards without asking. Only what was printed is
+discarded: a workspace that changed meanwhile, a file written in included, is kept. When no
+workspace would lose anything, nothing is asked. `--json` prints `project.remove`.
 
 ```
 $ flottille project remove shop
 Removed project shop. Its folder was not touched.
+Stopped the agent 3f9a1c2b7d10 (Fix the login).
+Stopped the command run 8c1d0e5f2a47 (pnpm dev).
+Removed the workspace login.
+Kept the workspace draft: notes.txt holds work that is not committed.
+A workspace kept stays on disk with its branch: save its work, then remove it with `flottille workspace remove <project> <name>`.
 ```
 
 ## Skills

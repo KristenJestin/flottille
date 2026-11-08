@@ -616,7 +616,8 @@ impl Snapshot {
             let id = agent["id"].as_str().unwrap_or_default();
             let root = root_of(&parents, id);
             // Nothing runs under an agent that ended: whatever its record still says.
-            let busy = matches!(agent["state"].as_str(), Some("starting" | "working"))
+            let busy = (matches!(agent["state"].as_str(), Some("starting" | "working"))
+                || agent["compacting"] == true)
                 && !under_an_ended(&parents, &final_ids, id);
             let active = agent["active_at"]
                 .as_u64()
@@ -627,6 +628,11 @@ impl Snapshot {
             entry.2 += 1;
             entry.3 += usize::from(!ended(agent));
         }
+        let compacting: HashSet<&str> = agents
+            .iter()
+            .filter(|agent| agent["compacting"] == true)
+            .map(|agent| root_of(&parents, agent["id"].as_str().unwrap_or_default()))
+            .collect();
         let running = list(answers.commands, "commands");
         let commands_of = |key: &str, name: &str| {
             running
@@ -706,6 +712,9 @@ impl Snapshot {
                 };
                 let mark_said = match mark {
                     None => String::new(),
+                    Some(AgentState::Running) if compacting.contains(id.as_str()) => {
+                        "Compacting".to_owned()
+                    }
                     Some(AgentState::Running) => "Running".to_owned(),
                     Some(AgentState::Waiting) => waiting_for
                         .get(id.as_str())

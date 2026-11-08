@@ -228,8 +228,18 @@ pub enum Command {
     },
     /// Detects the project's repositories again, against its file.
     CheckProject(String),
-    /// Forgets the project, never its folder.
-    RemoveProject(String),
+    /// What removing the project would do (`project.removal`): read `serial` of its dialog.
+    ReadRemoval {
+        project: String,
+        serial: u64,
+    },
+    /// Removes the project: stops what runs in it, removes its workspaces (with `discard`, the
+    /// workspaces as the dialog showed them, those holding unsaved work too as long as it is what
+    /// was shown) and forgets it, never its folder.
+    RemoveProject {
+        project: String,
+        discard: Option<Vec<flottille_core::protocol::ShownWorkspace>>,
+    },
     /// What registering a folder would register.
     DetectProject {
         folder: String,
@@ -798,10 +808,16 @@ pub enum Outcome {
         project: String,
         read: Result<Value, String>,
     },
-    /// The project was forgotten as asked, or the daemon refused, and why.
+    /// What removing the project would do, or why it cannot be read.
+    RemovalRead {
+        project: String,
+        serial: u64,
+        read: Result<Value, String>,
+    },
+    /// What the removal of the project did, or why the daemon refused it.
     ProjectRemoved {
         project: String,
-        refused: Option<String>,
+        result: Result<Value, String>,
     },
     /// What a folder would register (`project.detect`), or why it cannot be.
     ProjectDetected {
@@ -1595,14 +1611,27 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             )),
             project,
         },
-        Command::RemoveProject(project) => Outcome::ProjectRemoved {
-            refused: answer(ask_alone(
+        Command::ReadRemoval { project, serial } => Outcome::RemovalRead {
+            read: answer(ask_alone(
                 connect,
-                "project.remove",
+                "project.removal",
                 json!({"name": project}),
                 bounds.quick,
-            ))
-            .err(),
+            )),
+            project,
+            serial,
+        },
+        // Its agents stop and its worktrees are removed: git's work.
+        Command::RemoveProject { project, discard } => Outcome::ProjectRemoved {
+            result: answer(ask_alone(
+                connect,
+                "project.remove",
+                json!(flottille_core::protocol::ProjectRemove {
+                    name: project.clone(),
+                    discard,
+                }),
+                bounds.slow,
+            )),
             project,
         },
         Command::DetectProject { folder, name } => Outcome::ProjectDetected {

@@ -983,6 +983,9 @@ pub fn doing(daemon: &Daemon, agent: &Agent) -> String {
     if daemon.waiting_provider.lock().unwrap().contains(&agent.id) {
         return "waiting on the provider".into();
     }
+    if crate::compaction::running(daemon, &agent.id) {
+        return "compacting the conversation".into();
+    }
     match agent.state {
         AgentState::Working => "in a turn".into(),
         _ if agent.reported_at.is_some() => "reported".into(),
@@ -2197,6 +2200,9 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "tools_outdated": daemon.mcp.outdated(&agent.id),
         // A reload of its tools waits for its next process (`agent.reload_tools`).
         "tools_reload": agents::reloading(daemon, &agent.id),
+        // Flottille's compaction of it runs (`docs/design.md` §5.8): the compactor at work, or the
+        // agent writing its handoff.
+        "compacting": crate::compaction::running(daemon, &agent.id),
     })
 }
 

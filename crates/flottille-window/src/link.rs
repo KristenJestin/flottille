@@ -416,6 +416,10 @@ fn matters(event: &Event) -> bool {
                 | "agent.moved"
                 // A session's title, from its agent or the user.
                 | "agent.titled"
+                // The session's state says "Compacting" from the first to the last of them.
+                | "agent.compacting"
+                | "agent.compacted"
+                | "agent.compaction_failed"
         ),
         _ => false,
     }
@@ -726,6 +730,16 @@ mod tests {
         assert!(!matters(&event("delivery.queued", json!({"kind": "user"}))));
         assert!(matters(&event("approval.requested", json!({}))));
         assert!(matters(&event("agent.turn_ended", json!({}))));
+        for name in [
+            "agent.compacting",
+            "agent.compacted",
+            "agent.compaction_failed",
+        ] {
+            assert!(
+                matters(&event(name, json!({}))),
+                "{name}: the session's state"
+            );
+        }
         assert!(matters(&event("run.started", json!({}))), "the tree's icon");
         assert!(matters(&event("run.ended", json!({}))));
         assert!(

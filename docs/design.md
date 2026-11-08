@@ -482,7 +482,8 @@ agent wrote is data.
    its brief, the summary, then its latest messages word for word. The summary, masked of the
    daemon's secrets, comes in a block of its own (`<earlier_conversation_summary>`, every `<`
    escaped) under a line that says a model wrote it from the earlier conversation: data, not the
-   user's words nor Flottille's instructions. `agent.compacted` says it, with
+   user's words nor Flottille's instructions. `agent.compacting` says it began, so that the
+   window shows the compaction as a step that runs; `agent.compacted` says it is done, with
    the sizes before and after and the summary; the conversation shows it as one line,
    `Conversation compacted · 152k → 9k tokens`, which unfolds to the summary.
 5. **A failure** changes nothing: the agent goes on in its session, `agent.compaction_failed` and
