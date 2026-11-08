@@ -380,9 +380,11 @@ fn a_filter_closed_mine_or_repository_changes_the_rows_animated(cx: &mut TestApp
     declare(&user, &["api", "web"], false);
     refresh(&user);
     let (_shell, items, cx) = open_page(&user, cx);
+    click(cx, "project-items-mine");
+    settle(cx);
     let mut open = keys(&items, cx);
     open.sort();
-    assert_eq!(open, ["1", "7"], "open by default");
+    assert_eq!(open, ["1", "7"], "open, with mine only off");
     let first = rows(&items, cx)
         .into_iter()
         .find(|r| r.key == "1")
@@ -658,6 +660,7 @@ fn an_answer_older_than_the_one_applied_changes_nothing(cx: &mut TestAppContext)
     project(&user, &["api"]);
     declare(&user, &["api"], false);
     let (_shell, items, cx) = open_page(&user, cx);
+    items.update(cx, |items, cx| items.toggle_mine(cx));
     let read = |title: &str| Read {
         items: vec![ItemRow::of(&json!({"kind": "pull", "repository": "api",
             "key": "1", "title": title, "state": "open"}))],
@@ -910,6 +913,8 @@ fn a_tab_shown_again_does_not_fold_away_rows_that_left_while_it_was_hidden(
     declare(&user, &["api"], true);
     refresh(&user);
     let (_shell, items, cx) = open_page(&user, cx);
+    click(cx, "project-items-mine");
+    settle(cx);
     click(cx, "project-items-tabs-tickets");
     settle(cx);
     let gone = rows(&items, cx)
@@ -1017,6 +1022,79 @@ fn mine_only_is_disabled_with_its_reason_when_who_the_user_is_is_not_known(
     settle(cx);
     let tip = label(cx, "project-items-mine-switch-tooltip");
     assert_eq!(tip, why, "the tooltip says why");
+}
+
+#[gpui_kit::test]
+fn mine_only_is_on_by_default_on_both_tabs(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    let mut theirs = pull("api", 2, "Their open work", "OPEN", OLD);
+    theirs["author"] = json!({"login": "other"});
+    let mut theirs_issue = issue(6, "Typo on the page", "OPEN", OLD);
+    theirs_issue["assignees"] = json!([]);
+    user.gh_script(json!({
+        "user": {"login": "someone"},
+        "pulls": {"acme/api": {"feature-1": pull("api", 1, "Mine, open", "OPEN", OLD), "feature-2": theirs}},
+        "issues": {"acme/api": {"5": issue(5, "Users cannot sign in", "OPEN", OLD), "6": theirs_issue}}
+    }));
+    declare(&user, &["api"], true);
+    refresh(&user);
+    let (_shell, items, cx) = open_page(&user, cx);
+    assert_eq!(
+        keys(&items, cx),
+        ["1"],
+        "the pull requests start with the user's own"
+    );
+    click(cx, "project-items-tabs-tickets");
+    settle(cx);
+    assert_eq!(
+        keys(&items, cx),
+        ["5"],
+        "the tickets start with the user's own"
+    );
+}
+
+#[gpui_kit::test]
+fn a_mine_only_turned_off_stays_off_when_the_items_are_read_again(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    let mut theirs = pull("api", 2, "Their open work", "OPEN", OLD);
+    theirs["author"] = json!({"login": "other"});
+    user.gh_script(json!({
+        "user": {"login": "someone"},
+        "pulls": {"acme/api": {"feature-1": pull("api", 1, "Mine, open", "OPEN", OLD), "feature-2": theirs}}
+    }));
+    declare(&user, &["api"], false);
+    refresh(&user);
+    let (shell, items, cx) = open_page(&user, cx);
+    assert_eq!(keys(&items, cx), ["1"], "mine only is on at first");
+
+    click(cx, "project-items-mine");
+    settle(cx);
+    let mut shown = keys(&items, cx);
+    shown.sort();
+    assert_eq!(shown, ["1", "2"], "the user switched it off");
+
+    // A new read of the items: the choice is kept.
+    // Changed after the cursor, so that the incremental read asks for it.
+    let mut newer = pull("api", 3, "Another's open work", "OPEN", NEW);
+    newer["author"] = json!({"login": "other"});
+    user.gh_script(json!({
+        "user": {"login": "someone"},
+        "pulls": {"acme/api": {
+            "feature-1": pull("api", 1, "Mine, open", "OPEN", OLD),
+            "feature-2": theirs,
+            "feature-3": newer
+        }}
+    }));
+    refresh(&user);
+    until(&shell, cx, "the new pull request is listed", |cx| {
+        keys(&items, cx).len() == 3
+    });
+    settle(cx);
+    let mut shown = keys(&items, cx);
+    shown.sort();
+    assert_eq!(shown, ["1", "2", "3"], "the switched-off choice stayed off");
 }
 
 // The list scrolls inside its section (#446).

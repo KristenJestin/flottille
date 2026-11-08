@@ -766,6 +766,11 @@ impl Conversation {
                 // The delivery of a picture sent alone, for the bubble its thumbnails make.
                 let mut alone = None;
                 for (at, (kind, body)) in sections(&text("text")).into_iter().enumerate() {
+                    // What a compaction sends the new session again is the `compacted` line's
+                    // business: nobody said it.
+                    if delivery(at).is_some_and(|id| is_replay(&id)) {
+                        continue;
+                    }
                     // A picture sent alone has no words: its thumbnails are the message.
                     if body.trim().is_empty() && !names.is_empty() {
                         alone = alone.or_else(|| delivery(at));
@@ -1742,31 +1747,8 @@ fn diff_of(input: &Value) -> Option<Block> {
     Some(Block::Diff { path, lines })
 }
 
-/// The deliveries of a prompt, each `(kind, body)`: the daemon starts each with a line
-/// `[flottille:<kind>]`, which no data can forge (it escapes the marker in every body). Text
-/// before the first marker is of no kind.
-pub fn sections(text: &str) -> Vec<(String, String)> {
-    let mut found: Vec<(String, Vec<&str>)> = Vec::new();
-    for line in text.lines() {
-        match marker(line) {
-            Some(kind) => found.push((kind.to_owned(), Vec::new())),
-            None => match found.last_mut() {
-                Some((_, lines)) => lines.push(line),
-                None => found.push((String::new(), vec![line])),
-            },
-        }
-    }
-    found
-        .into_iter()
-        .map(|(kind, lines)| (kind, lines.join("\n").trim().to_owned()))
-        .filter(|(kind, body)| !kind.is_empty() || !body.is_empty())
-        .collect()
-}
-
-fn marker(line: &str) -> Option<&str> {
-    let kind = line.strip_prefix("[flottille:")?.strip_suffix(']')?;
-    (!kind.is_empty() && kind.chars().all(|c| c.is_ascii_lowercase() || c == '-')).then_some(kind)
-}
+use flottille_core::prompt::is_replay;
+pub use flottille_core::prompt::sections;
 
 /// Whether an event is the user's own message starting a turn of the root (not a delivery: a
 /// command that ended, a child's report, an answer to a request): a text with no marker, or one
@@ -2754,6 +2736,52 @@ mod tests {
             Activity::Thinking,
             "its call is done, the next is awaited"
         );
+    }
+
+    #[test]
+    fn what_a_compaction_sends_again_is_not_a_message_but_what_the_user_wrote_stays() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(
+            1,
+            "agent.prompted",
+            json!({"text": "[flottille:brief]\nadd the page", "deliveries": ["brief-a-0"]}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.compacted",
+            json!({"by": "flottille", "summary": "S"}),
+        ));
+        let before = c.blocks().len();
+        // The new session's first prompt: its brief, the summary, and a message written meanwhile.
+        c.apply(&event(
+            3,
+            "agent.prompted",
+            json!({
+                "text": "[flottille:brief]\nadd the page\n\n[flottille:resume]\nS\n\n[flottille:user]\nand a footer",
+                "deliveries": ["brief-a-1-replay", "resume-a-1-replay", "d7"],
+                "images": ["kept.png"],
+            }),
+        ));
+        let said: Vec<&Block> = c.blocks()[before..].iter().collect();
+        assert_eq!(
+            said,
+            [&Block::Message {
+                from: USER.into(),
+                text: "and a footer".into(),
+                images: vec!["kept.png".into()],
+                commands: None,
+            }]
+        );
+        // A prompt that is only the replay adds nothing.
+        c.apply(&event(
+            4,
+            "agent.prompted",
+            json!({
+                "text": "[flottille:brief]\nadd the page\n\n[flottille:resume]\nS",
+                "deliveries": ["brief-a-2-replay", "resume-a-2-replay"],
+            }),
+        ));
+        assert_eq!(c.blocks().len(), before + 1);
     }
 
     #[test]

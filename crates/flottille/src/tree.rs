@@ -1238,7 +1238,14 @@ fn read(daemon: &Daemon, caller: &Agent, id: &str, after: Option<u64>) -> Done {
 fn conversation_line(name: &str, data: &Value) -> Option<String> {
     let text = |field: &str| cut(data[field].as_str().unwrap_or_default(), LINE_CHARS);
     Some(match name {
-        "agent.prompted" => format!("sent: {}", text("text")),
+        "agent.prompted" => {
+            // What a compaction sends the new session again was not said to it by anyone.
+            let sent = flottille_core::prompt::without_replay(data);
+            if sent.is_empty() {
+                return None;
+            }
+            format!("sent: {}", cut(&sent, LINE_CHARS))
+        }
         "agent.message" => format!("said: {}", text("text")),
         "agent.tool_call" if data["update"] != true => {
             format!("tool call: {}", text("title"))
@@ -2174,7 +2181,11 @@ pub fn compacted(daemon: &Arc<Daemon>, id: &str) {
             daemon,
             id,
             "brief",
-            Some(format!("brief-{id}-{}-c{}", agent.epoch, now_ms())),
+            Some(flottille_core::prompt::replay_id(&format!(
+                "brief-{id}-{}-{}",
+                agent.epoch,
+                now_ms()
+            ))),
             &format!("Your conversation was compacted. Your brief, again:\n\n{brief}"),
             approval::BETWEEN_TURNS,
         );
