@@ -9187,7 +9187,8 @@ fn every_switch_of_the_task_dialog_draws_its_label_and_its_hint(cx: &mut TestApp
             "{id}"
         );
     }
-    cx.update(|window, _| assert!(window.find("task-place").visible(), "the place is a select"));
+    // The project's folder is its only repository: the task runs in the place's folder.
+    cx.update(|window, _| assert!(window.try_find("task-place").is_none(), "no place to pick"));
 }
 
 #[gpui_kit::test]
@@ -9454,10 +9455,10 @@ fn a_dialog_opened_from_a_tab_and_closed_brings_back_the_same_tab(cx: &mut TestA
         .unwrap();
     cx.update(|window, cx| window.click("add-task", cx));
     settle(cx);
-    cx.update(|window, _| assert!(window.find("task-place").visible(), "the dialog is open"));
+    cx.update(|window, _| assert!(window.find("task-line").visible(), "the dialog is open"));
     cx.simulate_keystrokes("escape");
     settle(cx);
-    cx.update(|window, _| assert!(window.try_find("task-place").is_none(), "it is closed"));
+    cx.update(|window, _| assert!(window.try_find("task-line").is_none(), "it is closed"));
     assert_eq!(page.read_with(cx, |p, _| p.tab()), tasks);
     assert_eq!(the_section_shown(cx), ["tasks"]);
 }

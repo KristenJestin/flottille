@@ -1175,3 +1175,191 @@ fn the_dependencies_chosen_in_the_dialog_are_saved_and_the_row_says_them(cx: &mu
     });
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
 }
+
+// A project whose folder is its only repository does not name it (#598).
+
+/// A repository at `folder/<at>` (the folder itself for `""`) with a commit.
+fn repository_at(user: &User, folder: &std::path::Path, at: &str) {
+    let dir = if at.is_empty() {
+        folder.to_path_buf()
+    } else {
+        folder.join(at)
+    };
+    user.git_init(&dir);
+    std::fs::write(dir.join("README.md"), "start\n").unwrap();
+    user.git(&dir, &["add", "."]);
+    user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+}
+
+/// The three shapes: the folder is its only repository (`solo`), two repositories below it
+/// (`duo`), and one repository below it with nothing at the root (`deep`). Each has a task that
+/// runs in its first repository.
+fn three_shapes(user: &User) {
+    for (name, repositories) in [
+        ("solo", vec![""]),
+        ("duo", vec!["api", "web"]),
+        ("deep", vec!["api"]),
+    ] {
+        let folder = user.path(&format!("work/{name}"));
+        for at in &repositories {
+            repository_at(user, &folder, at);
+        }
+        user.call("project.add", json!({"folder": folder, "name": name}))
+            .unwrap();
+        let repository = if repositories[0].is_empty() {
+            "."
+        } else {
+            repositories[0]
+        };
+        user.call(
+            "task.add",
+            json!({"project": name, "name": "build", "line": "echo build",
+                   "repository": repository}),
+        )
+        .unwrap();
+    }
+}
+
+fn tasks_of(
+    shell: &Entity<Shell>,
+    project: &str,
+    cx: &mut VisualTestContext,
+) -> Entity<ProjectSettingsPage> {
+    open_settings(shell, project, cx);
+    let page = settings_page(shell, cx);
+    cx.update(|window, cx| window.click("project-settings-tabs-tasks", cx));
+    settle(cx);
+    until(shell, cx, "the tasks are listed", |cx| {
+        has("task-build", cx)
+    });
+    settle(cx);
+    page
+}
+
+#[gpui_kit::test]
+fn the_task_editor_of_a_project_that_is_its_only_repository_asks_no_place(cx: &mut TestAppContext) {
+    let user = user();
+    three_shapes(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    for (project, asked) in [("solo", false), ("duo", true), ("deep", true)] {
+        tasks_of(&shell, project, cx);
+        cx.update(|window, cx| window.click("add-task", cx));
+        settle(cx);
+        assert!(
+            has("task-line-field-label", cx),
+            "{project}: the dialog is open"
+        );
+        assert_eq!(
+            has("task-place", cx),
+            asked,
+            "{project}: the choice of a place"
+        );
+        assert_eq!(
+            has("task-place-field-label", cx),
+            asked,
+            "{project}: its label"
+        );
+        assert_eq!(pending_frames(cx), 0, "{project}: nothing moves at rest");
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+    }
+}
+
+#[gpui_kit::test]
+fn the_task_list_of_a_project_that_is_its_only_repository_drops_in_the_repository(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    three_shapes(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    for (project, said) in [
+        ("solo", "in each place's folder"),
+        ("duo", "in api"),
+        ("deep", "in api"),
+    ] {
+        tasks_of(&shell, project, cx);
+        assert_eq!(
+            label_of("task-build-detail", cx).as_deref(),
+            Some(said),
+            "{project}"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn the_new_workspace_dialog_of_a_project_that_is_its_only_repository_shows_the_base_alone(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    three_shapes(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    // (project, the repository whose chip and base are looked for, its chip is drawn, the label)
+    for (project, repository, chip, label) in [
+        ("solo", ".", false, "Base branch"),
+        ("duo", "api", true, "Repositories and their bases"),
+        ("deep", "api", true, "Repositories and their bases"),
+    ] {
+        open_project(&shell, project, cx);
+        let form = shell
+            .read_with(cx, |s, _| s.new_workspace_of(project).cloned())
+            .unwrap();
+        cx.update(|window, cx| window.click("new-workspace", cx));
+        until(&shell, cx, "the rules are read", |cx| {
+            form.read_with(cx, |f, _| f.base_said(repository).is_some())
+        });
+        settle(cx);
+        assert_eq!(
+            has(&format!("new-workspace-take-{repository}"), cx),
+            chip,
+            "{project}: the chip"
+        );
+        assert!(
+            has(&format!("new-workspace-base-{repository}"), cx),
+            "{project}: the base field"
+        );
+        assert_eq!(
+            label_of("new-workspace-takes-label", cx).as_deref(),
+            Some(label),
+            "{project}: the label"
+        );
+        assert_eq!(pending_frames(cx), 0, "{project}: nothing moves at rest");
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+    }
+}
+
+#[gpui_kit::test]
+fn the_repositories_of_a_project_that_is_its_only_repository_do_not_read_as_a_list_of_one(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    three_shapes(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    for (project, repository, path, alone) in
+        [("solo", "solo", ".", true), ("duo", "api", "api", false)]
+    {
+        let section = open_settings(&shell, project, cx);
+        until(&shell, cx, "the repositories are read", |cx| {
+            section.read_with(cx, |s, _| s.repositories().is_some())
+        });
+        settle(cx);
+        // The facts stay: the card of the repository, its base, its remote.
+        assert!(has(&format!("repository-{repository}"), cx), "{project}");
+        assert!(
+            has(&format!("repository-base-{path}"), cx),
+            "{project}: its base"
+        );
+        assert_eq!(
+            has("repositories-count", cx),
+            !alone,
+            "{project}: the count of a list"
+        );
+        let sentence = label_of("repositories-sentence", cx).unwrap();
+        assert_eq!(
+            sentence.starts_with("The project folder is a git repository"),
+            alone,
+            "{project}: {sentence}"
+        );
+        assert_eq!(pending_frames(cx), 0, "{project}: nothing moves at rest");
+    }
+}
