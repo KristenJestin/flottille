@@ -587,6 +587,19 @@ fn removal_words(removal: Removal) -> Vec<String> {
     says
 }
 
+/// The state of the workspace a removal names, read now (`workspaces::digest`): read before its
+/// card, it is what the user's answer to discard covers, a file written in since included.
+/// `None` when it cannot be read: nothing is then discarded.
+pub async fn removal_digest(daemon: &Daemon, grant: &Grant, args: &Value) -> Option<String> {
+    let call: WorkspaceCall = arguments("workspace", args.clone()).ok()?;
+    let place = &grant.place;
+    let name = workspace_named(daemon, place, call.name.as_deref(), "workspace remove").ok()?;
+    let workspace = daemon
+        .read(|store| store.workspace(&place.project, &name))
+        .ok()??;
+    crate::workspaces::digest(&workspace).await.ok()
+}
+
 /// The losses the user's answer to discard covers: what removing the workspace loses now, once
 /// that is what the `card` the user read said. The removal is done only while it still finds
 /// these.
@@ -1327,12 +1340,14 @@ fn command_of(call: &CommandsCall) -> Result<(String, Command), Outcome> {
 }
 
 /// `workspace` `remove` allowed by the user with the answer to discard what would be lost, which
-/// is `approved`: the removal is refused if it finds anything else.
+/// is `approved`, in the state `digest` read when it was asked: the removal is refused if it finds
+/// anything else.
 pub async fn remove_discarding(
     daemon: &Arc<Daemon>,
     grant: &Grant,
     args: Value,
     approved: &[String],
+    digest: &str,
 ) -> Outcome {
     let call: WorkspaceCall = match arguments("workspace", args) {
         Ok(call) => call,
@@ -1344,6 +1359,7 @@ pub async fn remove_discarding(
         &grant.place,
         call.name.as_deref(),
         Some(approved),
+        Some(digest),
     )
     .await
 }
@@ -1365,6 +1381,7 @@ pub async fn remove_losing(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> 
         &grant.place,
         call.name.as_deref(),
         Some(&losses),
+        None,
     )
     .await
 }
@@ -1660,6 +1677,7 @@ async fn performed(
                         &grant.agent,
                         &grant.place,
                         call.name.as_deref(),
+                        None,
                         None,
                     )
                     .await;

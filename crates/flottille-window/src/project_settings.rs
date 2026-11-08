@@ -16,10 +16,11 @@ use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_core::project::cycle_sentence;
 use flottille_ui::{
     Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, Section,
-    Select, SelectOption, Switch, Tabs, Toast, Type, enter, follow_theme, hoverable, icon, palette,
-    presence, presence_of, space, toast,
+    Select, SelectOption, Switch, Tabs, Toast, Type, changing, enter, follow_theme, hoverable,
+    icon, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
@@ -32,7 +33,7 @@ use crate::commands::{CommandsSection, boxed, menu_of, problem_line};
 use crate::conventions::{Convention, Kind};
 use crate::message_checks::MessageChecks;
 use crate::programs::{ProgramChecks, program_block};
-use crate::project::repository_label;
+use crate::project::{only_at_root, repository_label};
 use crate::project_removal::ProjectRemoval;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
 use crate::rules::RulesEditor;
@@ -1534,11 +1535,18 @@ impl ProjectSettingsPage {
         let checking = self.programs.read(cx).is_checking();
         // From what the project declares, not from a read: one that failed is asked again.
         let forges = self.forms.iter().any(|form| form.declared.is_some());
-        Section::new("repositories", "Repositories")
-            .count(count.to_string())
-            .sentence(
-                "The git repositories of the project folder. A workspace takes a worktree of each.",
-            )
+        // The folder is the only repository: the section does not read as a list of one.
+        let alone = read.as_ref().is_some_and(|read| {
+            let paths: Vec<_> = read.listed.iter().map(|info| info.path.clone()).collect();
+            only_at_root(&paths)
+        });
+        let section = Section::new("repositories", "Repositories")
+            .when(!alone, |section| section.count(count.to_string()))
+            .sentence(if alone {
+                "The project folder is a git repository. A workspace takes a worktree of it."
+            } else {
+                "The git repositories of the project folder. A workspace takes a worktree of each."
+            })
             .action(
                 Button::quiet("check-forge-programs", "Check programs")
                     .leading(Icon::Search)
@@ -1579,7 +1587,14 @@ impl ProjectSettingsPage {
                 )
                 .gap(space::MD),
             )
-            .child(problem_line("repositories-problem", problem, space::MD, cx))
+            .child(problem_line("repositories-problem", problem, space::MD, cx));
+        // Adding a second repository (or removing the last other) changes the section's words:
+        // it fades back in rather than swapping them at once.
+        changing(
+            "repositories-framing",
+            if alone { "alone" } else { "several" },
+            move |_| section.into_any_element(),
+        )
     }
 
     /// The branch prefix of the project's workspaces: a field with its Save, empty allowed.

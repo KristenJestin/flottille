@@ -2879,13 +2879,15 @@ pub fn being_removed(daemon: &Daemon, agent: &str, tool: &str) -> Option<String>
 /// it and `approved` is exactly what would be lost (the losses the answer covered), its landed
 /// branches deleted as that removal deletes them. The agent's own workspace: its tree's commands
 /// running in it are stopped first, and once it is removed the agent works in `main`, moved in the
-/// removal's own write, so that it is never left with no place.
+/// removal's own write, so that it is never left with no place. `digest`, the workspace's state
+/// when the user was asked: it is removed only if it is still that.
 pub async fn workspace_remove(
     daemon: &Arc<Daemon>,
     agent: &str,
     place: &Place,
     named: Option<&str>,
     approved: Option<&[String]>,
+    digest: Option<&str>,
 ) -> Outcome {
     let name = match workspace_named(daemon, place, named, "workspace remove") {
         Ok(name) => name,
@@ -2939,7 +2941,7 @@ pub async fn workspace_remove(
         daemon.clone(),
         asked,
         approved,
-        None,
+        digest,
         moving.as_ref(),
         Some(by),
     )
