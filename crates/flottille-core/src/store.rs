@@ -691,13 +691,18 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE agents ADD COLUMN detached_from TEXT REFERENCES agents (id);
 ",
     "
+    -- The state of the workspace a removal's request names, read when it was asked: the answer to
+    -- discard removes only that (`docs/workspaces.md`, \"Removal\"). NULL for any other request.
+    ALTER TABLE approval_requests ADD COLUMN digest TEXT;
+",
+    "
     -- The workspace a task the user ran from a session's rail runs in: that session lists it.
     ALTER TABLE runs ADD COLUMN workspace TEXT;
 ",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
-    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place";
+    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place, digest";
 
 const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
     ended_at, output, dismissed, project, ready, url, url_error, workspace";
@@ -1797,8 +1802,9 @@ impl Store {
         let number: u64 = transaction.query_row(
             "INSERT INTO approval_requests (agent, call_key, tool, arguments, shown, reasons, \
              sensitive, identity, held_by, forwards, state, created_at, kind, says, judgement, \
-             place) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, 'pending', ?10, ?11, ?12, ?13, ?14) \
+             place, digest) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, 'pending', ?10, ?11, ?12, ?13, ?14, \
+             ?15) \
              RETURNING number",
             params![
                 asked.agent,
@@ -1819,6 +1825,7 @@ impl Store {
                     .map(serde_json::to_string)
                     .transpose()?,
                 asked.place,
+                asked.digest,
             ],
             |row| row.get(0),
         )?;
@@ -3246,6 +3253,7 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
         created_at: row.get(13)?,
         decided_at: row.get(14)?,
         place: row.get(18)?,
+        digest: row.get(19)?,
     }))
 }
 
@@ -5307,6 +5315,7 @@ mod tests {
             created_at: 0,
             decided_at: None,
             place: None,
+            digest: None,
         }
     }
 

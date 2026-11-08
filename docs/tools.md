@@ -1741,8 +1741,11 @@ depend on it`.
 
 **The user answers** a request they hold: allow it once, or deny it. A workspace's removal is
 also allowed with the answer to discard what would be lost (`flottille approve <n> --discard`),
-refused for any other request. That answer covers exactly what the card listed: work that appeared
-since is not discarded, the removal is refused and the agent calls again for a new card. Nothing they answer allows
+refused for any other request. That answer covers exactly what the card listed, in the state the
+workspace was in when it was asked (its digest, read before the card and kept with the request, as
+`project.removal` gives one): work that appeared since, more written into a file the card already
+named included, is not discarded, the removal is refused, nothing touched, and the agent calls
+again for a new card. A workspace whose state could not be read then is never forced. Nothing they answer allows
 a later call: the next one goes through the gate again. A request held by an agent is not listed
 for the user and cannot be answered by them.
 

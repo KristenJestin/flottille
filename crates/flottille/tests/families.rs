@@ -4571,9 +4571,9 @@ fn with_work_appearing_before_the_look(user: User, look: u32) -> User {
 
 #[test]
 fn work_appearing_after_the_user_s_answer_is_checked_is_not_discarded_by_the_removal() {
-    // The work appears just before the fifth look at the workspace, the removal's own: the four
-    // before are the card's and the answer's checks of it.
-    let user = with_work_appearing_before_the_look(user(), 5);
+    // The work appears just before the sixth look at the workspace, the removal's own: the five
+    // before are the state read when it is asked, the card's and the answer's checks of it.
+    let user = with_work_appearing_before_the_look(user(), 6);
     on_github(&user);
     let folder = workspace_folder(&user);
     std::fs::write(folder.join("login.ts"), "login\n").unwrap();

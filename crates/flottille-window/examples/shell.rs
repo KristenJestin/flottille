@@ -29,7 +29,6 @@ use std::time::Duration;
 use flottille_core::paths::Paths;
 use flottille_ui::Icons;
 use flottille_window::Shell;
-use flottille_window::actions::Command;
 use flottille_window::composer::Menu;
 use flottille_window::shell::Selection;
 use gpui_kit::{AppContext as _, Bounds, Focusable as _, WindowBounds, WindowOptions, px, size};
@@ -154,10 +153,7 @@ fn main() {
                         if let Some(folder) = add_project.clone() {
                             shell.add_project(window, cx);
                             let form = shell.add_project_form().clone();
-                            form.update(cx, |form, cx| {
-                                form.set_folder(folder.clone().into(), window, cx)
-                            });
-                            shell.perform(Command::DetectProject { folder, name: None });
+                            form.update(cx, |form, cx| form.set_folder(folder.into(), window, cx));
                         }
                         if settings {
                             shell.open(Selection::Settings, window, cx);

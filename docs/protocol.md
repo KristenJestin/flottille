@@ -1196,7 +1196,7 @@ agent at the same time.
 `refused` when the agent is in a final state, the message is empty, or the agent is a child: only
 its parent writes to it, and the sentence names its root.
 
-`compact` is the composer's **Compact before sending**: when the agent's prompt cache expired
+`compact` is the composer's **Compact** chip (compact before sending): when the agent's prompt cache expired
 (`agent.cache_expired`), `true` compacts it before the turn the message starts and `false` sends it
 to the session as it is, whatever the setting `after_expiry`; left out, the setting decides.
 
