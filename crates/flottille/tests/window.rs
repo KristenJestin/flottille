@@ -9406,15 +9406,10 @@ fn a_dialog_opened_from_a_tab_and_closed_brings_back_the_same_tab(cx: &mut TestA
         .unwrap();
     cx.update(|window, cx| window.click("add-task", cx));
     settle(cx);
-    cx.update(|window, _| {
-        assert!(
-            window.find("task-line-field").visible(),
-            "the dialog is open"
-        )
-    });
+    cx.update(|window, _| assert!(window.find("task-line").visible(), "the dialog is open"));
     cx.simulate_keystrokes("escape");
     settle(cx);
-    cx.update(|window, _| assert!(window.try_find("task-line-field").is_none(), "it is closed"));
+    cx.update(|window, _| assert!(window.try_find("task-line").is_none(), "it is closed"));
     assert_eq!(page.read_with(cx, |p, _| p.tab()), tasks);
     assert_eq!(the_section_shown(cx), ["tasks"]);
 }
