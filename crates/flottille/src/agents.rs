@@ -1408,6 +1408,7 @@ fn compacted_session(
         if compacted.summary.is_none() {
             data["missing"] = true.into();
         }
+        crate::compaction::over(daemon, id);
         record(daemon, id, "agent.compacted", data, false);
     }
     crate::compaction::finish(daemon, id);
