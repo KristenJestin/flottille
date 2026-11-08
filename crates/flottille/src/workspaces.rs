@@ -2341,6 +2341,11 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
                     .is_ok_and(|beyond| beyond.trim().is_empty());
             }
         }
+        // Merged into, or contained in, another local branch: integrated there, not lost.
+        if !commits.is_empty() && !merged && !remotes.trim().is_empty() {
+            let own = head.branch_or(&workspace.branch);
+            merged = integrated_into(&dir, "HEAD", own).await.is_some();
+        }
         if !commits.is_empty() && !merged {
             unpushed += 1;
             problems.push(format!(
@@ -2579,6 +2584,8 @@ async fn remove_held(
 /// cannot be read keeps it. Each repository's branch as `{repository, deleted, why}`, none where
 /// it is gone already.
 async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
+    // A branch counted as integrated into another must still be there when it is deleted.
+    let _landing = daemon.landing.lock().await;
     let local = format!("refs/heads/{}", workspace.branch);
     let mut fates = Vec::new();
     let mut unsure = Vec::new();
@@ -2599,9 +2606,13 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
             &local,
             &worktree.base.reference,
         ];
-        match git::output(&main, &in_base, Class::Read).await {
-            Ok(_) => fates.push((worktree, main, Ok("it has no commit of its own".to_owned()))),
-            Err(_) => unsure.push((worktree, main)),
+        if git::output(&main, &in_base, Class::Read).await.is_ok() {
+            fates.push((worktree, main, Ok("it has no commit of its own".to_owned())));
+        } else if let Some(other) = integrated_into(&main, &local, &workspace.branch).await {
+            let why = format!("it is integrated into {other}");
+            fates.push((worktree, main, Ok(why)));
+        } else {
+            unsure.push((worktree, main));
         }
     }
     if !unsure.is_empty() {
@@ -2681,6 +2692,67 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
         branches.push(json!({"repository": worktree.path, "deleted": deleted, "why": why}));
     }
     branches
+}
+
+/// The first local branch of the repository at `dir`, but `own`, that holds `commit`: its work is
+/// merged into, or contained in, that branch (`git merge-base --is-ancestor`). Full ref names, as
+/// a short one may be `heads/<own>` beside a tag of its name, and no symbolic ref: one may point
+/// at `own` itself.
+pub async fn integrated_into(dir: &Path, commit: &str, own: &str) -> Option<String> {
+    let refs = git::output(
+        dir,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(symref)",
+            "refs/heads/",
+        ],
+        Class::Read,
+    )
+    .await
+    .ok()?;
+    let own = format!("refs/heads/{own}");
+    for line in refs.lines() {
+        let (reference, symref) = line.split_once(' ').unwrap_or((line, ""));
+        if reference.is_empty() || reference == own || !symref.is_empty() {
+            continue;
+        }
+        let line = [
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            commit,
+            reference,
+        ];
+        if git::output(dir, &line, Class::Read).await.is_ok() {
+            return reference.strip_prefix("refs/heads/").map(str::to_owned);
+        }
+    }
+    None
+}
+
+/// The branch a workspace's own work is integrated into: the first repository whose branch holds
+/// commits beyond its base and is contained in another local branch. `None` when none is, or the
+/// workspace is gone.
+pub async fn integrated(daemon: &Daemon, project: &str, name: &str) -> Option<String> {
+    let workspace = daemon.read(|store| store.workspace(project, name)).ok()??;
+    let local = format!("refs/heads/{}", workspace.branch);
+    for worktree in &workspace.repositories {
+        let dir = workspace.folder_of(&worktree.path);
+        let in_base = [
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            &local,
+            &worktree.base.commit,
+        ];
+        if git::output(&dir, &in_base, Class::Read).await.is_ok() {
+            continue;
+        }
+        if let Some(other) = integrated_into(&dir, &local, &workspace.branch).await {
+            return Some(other);
+        }
+    }
+    None
 }
 
 /// The workspace's forges, read for its branch.

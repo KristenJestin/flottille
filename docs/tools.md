@@ -1027,7 +1027,7 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 | `session_read {session?, last?, since?, until?, cursor?}` (a root) | A page of the conversation of another session of the caller's project, framed as that session's data, with the mode of its tree; without `session`, the caller's own id, role and mode ("Sessions that read each other", below). |
 | `agent_send {agent_id, message, model?, effort?}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. With `model` or `effort` it also changes the child's, as `agent.options` does for the user (`docs/agents.md`, "The options"): checked as at `agent_launch` (a model or an effort its provider is known not to offer is refused, naming those it offers, and nothing is sent), then set between its turns, before its next prompt. The provider never changes. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
-| `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. `agent_id` may also name a session of the caller's project (one it started, led or handed, or any other): ending it is held for the user every time, in every mode, Full included ("Sessions that talk to each other", "Ending another session"). |
+| `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. `agent_id` may also name a session of the caller's project: one it started as `led` is its own to end, judged as any call in the tree's mode; any other (one it handed, or one it did not start) is held for the user every time, in every mode, Full included ("Sessions that talk to each other", "Ending another session"). |
 | `report {text}` | The caller is done. At most 10,000 characters, so that it rides whole on its parent's results; a longer one is refused, asking for fewer words and a file that holds the details. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
 | `ask {question}` | A question, answered later as a message; the daemon decides where it goes, never the agent, and the tool's description says it for the caller in one sentence chosen by its kind: a **child** asks its parent (`child-question`, answered with `agent_send`; until then the child shows as waiting on its parent); a **led** session asks its pilot (the pilot is woken at the turn's end, "Following a session", and answers with `session_send`; until then the session shows as waiting on its pilot, and the user sees the question in the session too); **any other root** asks the user (`agent.asked`, the inbox). What an agent needs goes here, never in a report or a last message; see "Where a question goes", below. |
 | `ask_user {question}`, `ask_parent {question}` | The two names `ask` replaced, kept for one release: no agent is given them, and a call of either is answered, routed as `ask` is, whoever makes it. |
@@ -1125,6 +1125,14 @@ its pilot is no longer woken, and its questions go to the user, who would otherw
 them. It also ends when the session ends or fails (the wake says so), and when the pilot ends.
 It never blocks the inactivity sweep of the pilot (`docs/design.md` §5.7) and does not draw it as
 waiting.
+
+**A led session stays open after its report.** Its pilot reads the report, integrates the work,
+then stops the session (`agent_stop`, its own to end) and removes its workspace (`workspace
+remove`: a branch merged into another local branch is integrated, not lost, "The workspace").
+When a led session has reported, is idle, and its workspace's branch is contained in another
+local branch of one of its repositories, with commits of its own, the pilot is reminded once per
+session, by a delivery `led-integrated` checked at the end of a turn of either: `"Login" (agent
+…) reported and its branch is in main: stop it and remove its workspace?`.
 
 #### Where a question goes
 
@@ -1227,11 +1235,16 @@ caller itself (`refused: <id> is your own session: …`), a child of another ses
 is a child of another session: it is stopped by its parent, …`), a session of another project, an
 id that names no agent and a session that ended are refused before anything is asked.
 
-- **The user decides, every time.** Ending one is held for the user in every mode, **Full
+- **A session it leads is its own.** One the caller itself started as `led`, and still leads, is
+  ended without the user's word: judged as any call in the tree's mode (a card in Ask, the judge
+  in Auto, passed in Full), never held "always". It ends as below, its conversation saying `ended
+  by the session that led it, <caller>`, and the caller is answered `Ended the session …`.
+- **The user decides, every time**, for every other: a session the user opened, a `handed` one,
+  one another agent started or leads. Ending one is held for the user in every mode, **Full
   included**, and never reaches the judge; unlike a `session_send` leave, nothing is kept: the
   next one asks again. Its request is an `action` of class `base` whose words name the session,
-  its workspace and who started it, and say what ending does (`End the session "Login" (agent …),
-  in the workspace login, started by this agent: its tree, its runs and what was queued for it
+  its workspace and whose it is, and say what ending does (`End the session "Login" (agent …),
+  in the workspace login, started by this agent and handed to you: yours: its tree, its runs and what was queued for it
   are stopped; its workspace stays`). The call is answered at once that it is held; the result
   comes later as a delivery.
 - **Allowed, it ends as the window's End session ends it** (`tree::stop_tree`): its tree, its
