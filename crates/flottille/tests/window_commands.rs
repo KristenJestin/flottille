@@ -1108,7 +1108,7 @@ fn the_command_modal_follows_new_output_and_stops_the_command(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
-fn started_by_is_cut_to_two_lines_in_the_panel(cx: &mut TestAppContext) {
+fn started_by_quotes_the_session_on_one_line_in_the_panel(cx: &mut TestAppContext) {
     let user = user();
     let (lead, mcp, _) = lead_saying(
         &user,
@@ -1119,10 +1119,9 @@ fn started_by_is_cut_to_two_lines_in_the_panel(cx: &mut TestAppContext) {
     let (run, _, _, cx) = panel_of_server(&user, &lead, &mcp, cx);
 
     let by = label(cx, "run-fact-by").unwrap();
-    assert!(
-        by.chars().count() > 120,
-        "a long first message, in full: {by}"
-    );
+    // A session's title quoted in a sentence is one line, cut to the room the words leave, and
+    // the sentence says it whole (#589).
+    assert!(by.ends_with("for the team"), "the sentence is whole: {by}");
     let (line, cut) = cx.update(|window, _| {
         (
             f32::from(window.find("run-fact-where").bounds().size.height),
@@ -1130,23 +1129,27 @@ fn started_by_is_cut_to_two_lines_in_the_panel(cx: &mut TestAppContext) {
         )
     });
     assert!(
-        cut <= line * 2. + 1.,
-        "{cut}px is more than two lines of {line}px"
+        cut <= line + 1.,
+        "{cut}px is more than one line of {line}px"
     );
-    assert!(cut > line + 1., "and it did take its second line: {cut}px");
-    // The modal shows it whole.
+
+    // The modal says the same: its title has the room of a modal, but is one line too, so that a
+    // title never wraps a sentence wherever it is quoted.
     cx.update(|window, cx| window.click("run-drawer-expand", cx));
     settle(cx);
     let (whole, one_line) = cx.update(|window, _| {
+        let said = window.find("run-modal-fact-by-said-title").bounds();
+        let fact = window.find("run-modal-fact-by").bounds();
+        assert!(said.right() <= fact.right(), "{said:?} in {fact:?}");
         (
-            f32::from(window.find("run-modal-fact-by").bounds().size.height),
+            f32::from(fact.size.height),
             f32::from(window.find("run-modal-fact-where").bounds().size.height),
         )
     });
     assert_eq!(label(cx, "run-modal-fact-by").unwrap(), by);
     assert!(
-        whole <= one_line * 2. + 1.,
-        "the facts are on one or two lines: {whole}px"
+        whole <= one_line + 1.,
+        "{whole}px is more than one line of {one_line}px"
     );
     ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
 }
