@@ -28,7 +28,7 @@ The child knows only what the brief and the files it names say. Write it for a c
 1. Read the report, then the result itself: the whole diff, or a sample of what was written. A child reports its mistakes in the same sure words as its successes: check the claim that matters most.
 2. A task by a small model that turned out to touch something sensitive gets a read-only review by a larger model before it is integrated.
 3. Integrate only what the user allowed; merge only when the checks pass on the current base.
-4. Its session ends with its report; its workspace stays until nothing in it is uncommitted or unpushed.
+4. A child's session ends with its report; its workspace stays until nothing in it is uncommitted or unpushed. A led session stays open after its report: once its work is integrated, stop it (`agent_stop`) and remove its workspace (`workspace remove`); a branch merged into another local branch counts as saved. A session you handed to the user, or one the user opened, is theirs to end.
 5. Tell the user in a few lines: what landed, what was checked, what is not verified, what waits for them.
 
 Never do a child's work yourself once it is handed on. Keep the conversation with the user light: every request re-reads all of it.

@@ -726,9 +726,10 @@ const SERVED: [Definition; 31] = [
         title: "Stop a child or end a session",
         description: "Stops one of your children with its own children, deepest first; what was \
             queued for them is dropped. Use it once its report is acted on, or to end a child \
-            going in circles. It also asks to end any session of your project (one you started \
-            for the user, or another): the user decides every time, the result comes later. \
-            Workspaces stay.",
+            going in circles. A session you started as led is yours to end too, once its report is \
+            acted on and its work integrated. It also asks to end any other session of your \
+            project (one you handed to the user, or another): the user decides every time, the \
+            result comes later. Workspaces stay.",
         read_only: false,
         idempotent: true,
         destructive: true,
@@ -2437,6 +2438,9 @@ fn verdict_of(
     }
     if tool == "agent_stop" && crate::tree::ends_session(daemon, grant, args) {
         return gate::end_session();
+    }
+    if tool == "agent_stop" && crate::tree::ends_led(daemon, grant, args) {
+        return gate::end_led();
     }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.

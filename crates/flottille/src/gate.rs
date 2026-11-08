@@ -559,6 +559,19 @@ pub fn end_session() -> Verdict {
     found.verdict(Kind::Action)
 }
 
+/// Why `agent_stop` of a session the caller leads is to judge: it is the caller's own job, ended
+/// as a call of its tree is, in its mode.
+pub const END_LED: &str = "it ends a session this agent started as led and pilots, with its \
+    tree, its runs and what was queued for it; its workspace stays";
+
+/// `agent_stop` of a session the caller leads: judged as any call of its tree, never held
+/// "always".
+pub fn end_led() -> Verdict {
+    let mut found = Found::default();
+    found.judge(END_LED.into());
+    found.verdict(Kind::Action)
+}
+
 /// Whether a held call ends a session that is not the caller's child: only the user answers it.
 pub fn asks_end(ask: &Ask) -> bool {
     ask.reasons.iter().any(|reason| reason == END_SESSION)
