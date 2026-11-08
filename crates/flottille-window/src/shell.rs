@@ -25,7 +25,7 @@ use gpui_kit::{
 };
 use lyon_tessellation::{LineCap, LineJoin};
 
-use crate::actions::{Actions, Command, Details, Outcome, Pick};
+use crate::actions::{Actions, Command, Details, Outcome, Pick, RunFrom};
 use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::history::{History, Way};
@@ -621,6 +621,9 @@ impl Shell {
             shell.history.show_agent(&session, agent);
         }));
         self.session_page = Some(page.clone());
+        // The rail's Run a task lists the project's tasks.
+        let project = page.read(cx).project().to_owned();
+        self.actions.send(Command::Tasks { project });
         Some(page)
     }
 
@@ -1485,6 +1488,15 @@ impl Shell {
                     let section = page.read(cx).tasks().clone();
                     section.update(cx, |section, cx| section.listed(listed.clone(), cx));
                 }
+                // The rail of a session of the project offers them to run.
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).project() == project
+                    && let Ok(tasks) = &listed
+                {
+                    let names = tasks.iter().map(|task| task.name.clone()).collect();
+                    let list = page.read(cx).commands(cx);
+                    list.update(cx, |list, cx| list.set_tasks(names, cx));
+                }
                 if let Some(tasks) = self.project_tasks_of(&project, cx) {
                     tasks.update(cx, |tasks, cx| tasks.listed(listed, cx));
                 }
@@ -1521,13 +1533,19 @@ impl Shell {
             Outcome::TaskRun {
                 project,
                 name,
+                from,
                 refused,
-            } => {
-                if let Some(tasks) = self.project_tasks_of(&project, cx) {
-                    let _ = name;
-                    tasks.update(cx, |tasks, cx| tasks.started(refused, cx));
+            } => match from {
+                RunFrom::Page => {
+                    if let Some(tasks) = self.project_tasks_of(&project, cx) {
+                        tasks.update(cx, |tasks, cx| tasks.started(refused, cx));
+                    }
                 }
-            }
+                RunFrom::Settings => crate::tasks::ran(&name, None, refused, cx),
+                RunFrom::Session { workspace } => {
+                    crate::tasks::ran(&name, Some(workspace.as_deref()), refused, cx);
+                }
+            },
             Outcome::ProjectRuns {
                 project,
                 listed,

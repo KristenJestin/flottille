@@ -971,10 +971,12 @@ project or a task that does not exist.
 
 #### `task.run`
 
-`{"project", "name"}`: `{"project", "name", "run"}`, at once. The user runs the task in the
-project folder with the project's variables, as a run of no agent: no gate, no delivery
-(`docs/tools.md`, "Tasks and runs"). A task that keeps running (`serve`) and already runs for the
-user is joined: its run is answered. It is followed with the run methods. The services the task
+`{"project", "name", "workspace"?}`: `{"project", "name", "run"}`, at once. The user runs the task
+in the project folder with the project's variables, or with `workspace` in that workspace with its
+own (a session's rail runs it in the session's workspace), as a run of no agent: no gate, no
+delivery (`docs/tools.md`, "Tasks and runs"). A task that keeps running (`serve`) and already runs
+for the user in the same place is joined: its run is answered. `refused` when the project has no
+such workspace. It is followed with the run methods. The services the task
 needs are started first and waited for (`docs/projects.md`, "Services"): `refused` naming the
 service that failed, or was not ready in time, and why.
 
@@ -1455,7 +1457,8 @@ The commands the agents run with `run` (`docs/tools.md`), and the tasks the user
 ```
 
 `name` is the task it runs, `null` for a line of the agent's. `agent` and `root` are `null` for a
-task the user ran; `project` is always the project's. `state` is `running`,
+task the user ran; `project` is always the project's; `workspace` is its agent's, or for a task the
+user ran, the one it runs in (`null` in the project folder). `state` is `running`,
 `exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `ready` is
 `null` for a run of a task that says no ready, else `starting`, `ready` or `missed` (it ended before
 it was ready); `url` its address, `url_error` why it has none when its task's line for it failed
@@ -1469,7 +1472,8 @@ card in the conversation shows folded, a running command's as well as one that e
 
 `{"project"?, "tree"?, "ended"?, "user"?}`. `{"commands": [...]}`: the commands running, oldest
 first. With `project`, the project's, the user's included; with `tree`, an agent's id, those of the
-agents of its root's tree; without either, every one. With `user` (and `project`, required), only
+agents of its root's tree and the tasks the user ran in the root's place (its workspace, or the
+project folder); without either, every one. With `user` (and `project`, required), only
 the tasks the user ran in the project, as its page lists them. With `ended`, the commands that ended and were not dismissed come after them,
 the last 30 to have ended at most, and none for a tree whose root ended or failed: they go with
 their session, and the daemon forgets them when the session is over for good (`docs/tools.md`)

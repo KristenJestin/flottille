@@ -11078,6 +11078,51 @@ fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }
 
+#[gpui_kit::test]
+fn run_in_a_task_s_menu_in_the_settings_starts_it_in_the_project_folder(cx: &mut TestAppContext) {
+    let user = user().with_fake_escalation();
+    let folder = project(&user, "atlas");
+    let say = folder.join("say.sh");
+    std::fs::write(&say, "#!/bin/sh\necho first\necho second\n").unwrap();
+    std::fs::set_permissions(&say, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "say", "line": "./say.sh"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+    until(&shell, cx, "the task is listed", |cx| {
+        !tasks_listed(&shell, cx).is_empty()
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("task-more-say", cx));
+    settle(cx);
+    // Run comes first, beside Edit, and Remove… stays last.
+    cx.update(|window, cx| window.click("menu-run-task-say", cx));
+    toast_said(&shell, "say started", cx);
+    let runs = || {
+        user.call(
+            "run.list",
+            json!({"project": "atlas", "user": true, "ended": true}),
+        )
+        .unwrap()["commands"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    until(&shell, cx, "the user's run is listed", |_| {
+        runs()
+            .iter()
+            .any(|r| r["name"] == "say" && r["state"] != "running")
+    });
+    let run = runs().into_iter().find(|r| r["name"] == "say").unwrap();
+    assert_eq!(run["agent"], serde_json::Value::Null, "{run}");
+    assert_eq!(run["folder"], folder.to_str().unwrap(), "{run}");
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
 // ── Everything that moves is animated ─────────────────────────────────────────────────────────
 
 fn y_of(id: &str, cx: &mut VisualTestContext) -> f32 {

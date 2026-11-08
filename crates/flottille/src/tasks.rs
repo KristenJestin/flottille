@@ -28,6 +28,15 @@ struct Named {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ToRun {
+    project: String,
+    name: String,
+    /// The workspace of the session whose rail ran it; the project folder without.
+    workspace: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Copy {
     project: String,
     name: String,
@@ -250,12 +259,13 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
     }
 }
 
-/// `task.run`: the user runs a task in the project folder; answered with its run at once.
+/// `task.run`: the user runs a task in the project folder, or in a workspace; answered with its
+/// run at once.
 pub async fn run(daemon: &Arc<Daemon>, params: Value) -> Answer {
-    let asked: Named = serde_json::from_value(params)?;
+    let asked: ToRun = serde_json::from_value(params)?;
     let project = projects::load_project(daemon, &asked.project)?;
     find(&project, &asked.name)?;
-    let run = crate::runs::run_for_user(daemon, &project, &asked.name)
+    let run = crate::runs::run_for_user(daemon, &project, &asked.name, asked.workspace.as_deref())
         .await
         .map_err(Failure::refused)?;
     Ok(json!({"project": project.name, "name": asked.name, "run": run}))

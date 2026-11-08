@@ -47,7 +47,7 @@ use gpui_kit::{
     canvas, div, list, point, px, radians,
 };
 
-use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer};
+use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer, RunFrom};
 use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::CommandInfo;
 use crate::conversation::{
@@ -528,6 +528,25 @@ impl SessionPage {
 
     pub fn id(&self) -> &str {
         &self.opened.id
+    }
+
+    pub fn project(&self) -> &str {
+        &self.opened.project
+    }
+
+    /// The rail's Run a task: the task starts as the user's in the session's place, and its row
+    /// unfolds into the Runs once the daemon lists it.
+    pub fn run_task(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.perform(
+            Command::RunTask {
+                project: self.opened.project.clone(),
+                name: name.to_owned(),
+                from: RunFrom::Session {
+                    workspace: self.opened.place.clone(),
+                },
+            },
+            cx,
+        );
     }
 
     /// The session's state, as the shell's tree draws it.

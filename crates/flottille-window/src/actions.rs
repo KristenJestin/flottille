@@ -66,6 +66,17 @@ impl Picture {
     }
 }
 
+/// Where the user ran a task from: the answer goes back there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunFrom {
+    /// The project page's Run, in the project folder.
+    Page,
+    /// Run in a task's "⋯" of the project's settings, in the project folder.
+    Settings,
+    /// A session's rail, in the session's workspace (`None`: `main`).
+    Session { workspace: Option<String> },
+}
+
 /// What the user does to a command, as the daemon's `run.*` methods have it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunAct {
@@ -324,10 +335,11 @@ pub enum Command {
         method: &'static str,
         params: Value,
     },
-    /// Runs a task in the project folder, for the user.
+    /// Runs a task for the user, in the place `from` says.
     RunTask {
         project: String,
         name: String,
+        from: RunFrom,
     },
     /// The tasks the user ran in the project, and the output of the one whose panel is open.
     ProjectRuns {
@@ -988,6 +1000,7 @@ pub enum Outcome {
     TaskRun {
         project: String,
         name: String,
+        from: RunFrom,
         refused: Option<String>,
     },
     /// The tasks the user ran in the project, and the output asked for.
@@ -2027,19 +2040,27 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::TaskWritten { project, refused }
         }
-        Command::RunTask { project, name } => {
-            let refused = match ask_alone(
-                connect,
-                "task.run",
-                json!({"project": project, "name": name}),
-                bounds.quick,
-            ) {
+        Command::RunTask {
+            project,
+            name,
+            from,
+        } => {
+            let mut params = json!({"project": project, "name": name});
+            if let RunFrom::Session {
+                workspace: Some(workspace),
+                ..
+            } = &from
+            {
+                params["workspace"] = workspace.as_str().into();
+            }
+            let refused = match ask_alone(connect, "task.run", params, bounds.quick) {
                 Ok(Ok(_)) => None,
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::TaskRun {
                 project,
                 name,
+                from,
                 refused,
             }
         }

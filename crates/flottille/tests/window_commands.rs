@@ -1825,6 +1825,10 @@ fn the_runs_section_lists_task_runs_only(cx: &mut TestAppContext) {
 fn no_task_run_folds_the_runs_section_away(cx: &mut TestAppContext) {
     let user = user();
     let (lead, _, shell, cx) = with_a_child(&user, cx);
+    let page = session_page(&shell, cx);
+    let list = page.read_with(cx, |page, cx| page.commands(cx));
+    // A project with no task: nothing to run from the section either.
+    list.update(cx, |list, cx| list.set_tasks(Vec::new(), cx));
     list_runs(
         &shell,
         vec![run_of("r-task", &lead, Some("server"), true, 1)],
@@ -1840,6 +1844,89 @@ fn no_task_run_folds_the_runs_section_away(cx: &mut TestAppContext) {
 
     list_runs(&shell, vec![], cx);
     assert!(!has(cx, "rail-runs"));
+
+    list.update(cx, |list, cx| list.set_tasks(vec!["server".into()], cx));
+    settle(cx);
+    assert!(
+        has(cx, "rail-runs") && has(cx, "rail-run-task"),
+        "the project has a task: the section stays for its Run a task"
+    );
+}
+
+// The user runs a task from the rail (#601): it starts in the session's workspace, as a run of
+// the user's, and its row unfolds into the Runs.
+
+#[gpui_kit::test]
+fn run_a_task_from_the_rail_starts_it_in_the_session_s_workspace(cx: &mut TestAppContext) {
+    let user = user().with_fake_escalation();
+    let (lead, _, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail offers the project's tasks", |cx| {
+        has(cx, "rail-run-task")
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("rail-run-task", cx));
+    settle(cx);
+    assert!(has(cx, "rail-run-task-menu"), "the list of the tasks opens");
+    cx.update(|window, cx| window.click("rail-run-task-server", cx));
+    until(&shell, cx, "the user's run is listed in the rail", |cx| {
+        commands(&page, cx)
+            .iter()
+            .any(|row| row.name.as_deref() == Some("server") && row.agent.is_empty())
+    });
+    let row = commands(&page, cx)
+        .into_iter()
+        .find(|row| row.name.as_deref() == Some("server"))
+        .unwrap();
+    assert_eq!(row.workspace.as_deref(), Some("w"), "{row:?}");
+    assert!(row.running(), "a server keeps running: {row:?}");
+    until(&shell, cx, "its row is drawn with its Stop", |cx| {
+        has(cx, &format!("command-{}", row.run)) && has(cx, &format!("command-stop-{}", row.run))
+    });
+    settle(cx);
+    assert!(
+        !has(cx, "rail-run-task-menu"),
+        "the list closed once a task was picked"
+    );
+    user.call("run.stop", json!({"run": row.run})).unwrap();
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[gpui_kit::test]
+fn a_run_the_user_started_unfolds_into_the_runs(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _, shell, cx) = with_a_child(&user, cx);
+    list_runs(
+        &shell,
+        vec![run_of("r-agent", &lead, Some("fails"), true, 1)],
+        cx,
+    );
+    let page = session_page(&shell, cx);
+    let list = page.read_with(cx, |page, cx| page.commands(cx));
+    list.update(cx, |list, cx| {
+        list.set(
+            vec![
+                run_of("r-agent", &lead, Some("fails"), true, 1),
+                run_of("r-user", "", Some("server"), true, 2),
+            ],
+            cx,
+        )
+    });
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let arriving = bounds_of(cx, "command-item-r-user").expect("its row is drawn at once");
+    settle(cx);
+    let settled = bounds_of(cx, "command-item-r-user").unwrap();
+    assert!(
+        arriving.size.height < settled.size.height,
+        "it unfolds: {arriving:?} then {settled:?}"
+    );
+    assert_eq!(
+        label(cx, "command-who-r-user").as_deref(),
+        Some("task server · you")
+    );
 }
 
 #[gpui_kit::test]

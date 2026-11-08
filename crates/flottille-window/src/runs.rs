@@ -18,9 +18,9 @@ use flottille_core::ansi;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{MODAL, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Button, Icon, Item, Listing, Modal, Palette, Skeleton, StateIcon, Status, Toast,
-    Type, awaiting, changing, fade, fold_frame, hoverable, icon, palette, presence, section_label,
-    space, tipped, tipped_when_cut, toast, turning,
+    AgentState, Align, Button, Dropdown, Icon, Item, Listing, MenuItem, Modal, Palette, Skeleton,
+    StateIcon, Status, Toast, Type, awaiting, changing, fade, fold_frame, hoverable, icon, palette,
+    presence, section_label, space, tipped, tipped_when_cut, toast, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -124,6 +124,13 @@ impl Owner {
                 .ok(),
             Owner::Services(page) => page.update(cx, |page, cx| page.start_run(run, cx)).ok(),
         };
+    }
+
+    /// The user runs a project's task from the list: a session's page runs it in its place.
+    fn run_task(&self, name: &str, cx: &mut App) {
+        if let Owner::Session(page) = self {
+            page.update(cx, |page, cx| page.run_task(name, cx)).ok();
+        }
     }
 
     /// Shows the conversation of the agent that started a run: a session's page does.
@@ -474,10 +481,12 @@ pub fn arrange(rows: &[CommandRow]) -> Arranged<'_> {
     arrange_of(rows, None)
 }
 
-/// [`arrange`] for the runs `agent` started, or for every agent's when none is given. A one-off
-/// line is left out: its card in the conversation is where it is seen.
+/// [`arrange`] for the runs `agent` started and the user's, or for every one when none is given.
+/// A one-off line is left out: its card in the conversation is where it is seen.
 pub fn arrange_of<'a>(rows: &'a [CommandRow], agent: Option<&str>) -> Arranged<'a> {
-    let mine = |row: &&CommandRow| row.is_task() && agent.is_none_or(|agent| row.agent == agent);
+    let mine = |row: &&CommandRow| {
+        row.is_task() && (row.agent.is_empty() || agent.is_none_or(|agent| row.agent == agent))
+    };
     let running = rows
         .iter()
         .filter(mine)
@@ -758,6 +767,10 @@ pub struct CommandList {
     known: bool,
     /// Draws the time again each second, while a command runs.
     ticker: Option<Task<()>>,
+    /// The project's tasks, which Run a task offers.
+    tasks: Vec<String>,
+    /// The list of Run a task is open.
+    picking: bool,
     renders: usize,
 }
 
@@ -777,8 +790,52 @@ impl CommandList {
             error: None,
             known: false,
             ticker: None,
+            tasks: Vec::new(),
+            picking: false,
             renders: 0,
         }
+    }
+
+    /// The project's tasks, offered by Run a task: the section stays for them when nothing ran.
+    pub fn set_tasks(&mut self, tasks: Vec<String>, cx: &mut Context<Self>) {
+        if self.tasks != tasks {
+            self.picking &= !tasks.is_empty();
+            self.tasks = tasks;
+            cx.notify();
+        }
+    }
+
+    /// Run a task, in the section's title: the list of the project's tasks, a pick runs one.
+    fn run_picker(&self, cx: &mut Context<Self>) -> Dropdown {
+        let items = self.tasks.iter().map(|name| {
+            let (list, name) = (cx.entity().downgrade(), name.clone());
+            MenuItem::new(
+                ElementId::Name(format!("rail-run-task-{name}").into()),
+                SharedString::from(name.clone()),
+            )
+            .on_click(move |_, cx| {
+                list.update(cx, |list, cx| {
+                    list.picking = false;
+                    list.page.run_task(&name, cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+        });
+        let list = cx.entity().downgrade();
+        Dropdown::new("rail-run-task", "Run a task")
+            .leading(Icon::Play)
+            .align(Align::End)
+            .width(px(220.))
+            .open(self.picking)
+            .on_toggle(move |_, cx| {
+                list.update(cx, |list, cx| {
+                    list.picking = !list.picking;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .items(items)
     }
 
     /// Lists the runs of `agent` only.
@@ -1063,7 +1120,7 @@ impl Render for CommandList {
         }
         let p = palette(cx);
         let now = now_ms();
-        let present = !self.running.is_empty() || ended_count > 0;
+        let present = !self.running.is_empty() || ended_count > 0 || !self.tasks.is_empty();
         let draw =
             |this: &Self, listing: &Listing<CommandRow>, window: &mut Window, cx: &mut App| {
                 let listed: Vec<(String, CommandRow, flottille_ui::Placement)> = listing
@@ -1125,6 +1182,15 @@ impl Render for CommandList {
                     ))
                 }),
         );
+        // Run a task comes and goes with the project's tasks.
+        let picker = Some(
+            presence(
+                "rail-run-task-shown",
+                !self.tasks.is_empty(),
+                self.run_picker(cx),
+            )
+            .into_any_element(),
+        );
         // Switching the agent shown fades the other's runs in.
         let body = div()
             .flex()
@@ -1154,7 +1220,7 @@ impl Render for CommandList {
                 div()
                     .id("rail-runs-title")
                     .aria_label("Runs")
-                    .child(rail_label("Runs", None, cx))
+                    .child(rail_label("Runs", picker, cx))
                     .test_support(),
             )
             .child(changing(
@@ -2110,6 +2176,21 @@ mod tests {
         assert_eq!(runs(&mine.running), ["mine"]);
         assert_eq!(runs(&mine.kept), ["done"]);
         assert_eq!(runs(&arrange_of(&rows, Some("c")).running), [] as [&str; 0]);
+    }
+
+    #[test]
+    fn a_task_the_user_ran_is_arranged_whichever_agent_is_shown() {
+        let mut rows = tasks(vec![
+            row("mine", "running", 1, None),
+            row("user", "running", 2, None),
+        ]);
+        rows[1].agent = String::new();
+
+        assert_eq!(
+            runs(&arrange_of(&rows, Some("a")).running),
+            ["mine", "user"]
+        );
+        assert_eq!(runs(&arrange_of(&rows, Some("c")).running), ["user"]);
     }
 
     fn runs(rows: &[&CommandRow]) -> Vec<String> {

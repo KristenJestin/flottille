@@ -25,7 +25,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use crate::actions::{Command, RunAct, RunAnswer};
+use crate::actions::{Command, RunAct, RunAnswer, RunFrom};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
 use crate::conversation::Ending;
 use crate::project::{only_at_root, repository_label};
@@ -750,12 +750,36 @@ impl TasksSection {
         cx.notify();
     }
 
+    /// Run in a task's "⋯": the task starts in the project folder, a toast says so.
+    pub fn run(&self, name: &str, cx: &mut Context<Self>) {
+        let command = Command::RunTask {
+            project: self.project.clone(),
+            name: name.to_owned(),
+            from: RunFrom::Settings,
+        };
+        perform_later(&self.shell, command, cx);
+    }
+
     fn menu(&mut self, name: &str, cx: &mut Context<Self>) -> Entity<Menu> {
         let this = cx.entity().downgrade();
         menu_of(&mut self.menus, "task", name, cx, move |name, menu| {
-            let (edit, copy, remove) = (this.clone(), this.clone(), this.clone());
-            let (to_edit, to_copy, to_remove) = (name.to_owned(), name.to_owned(), name.to_owned());
+            let (run, edit, copy, remove) =
+                (this.clone(), this.clone(), this.clone(), this.clone());
+            let (to_run, to_edit, to_copy, to_remove) = (
+                name.to_owned(),
+                name.to_owned(),
+                name.to_owned(),
+                name.to_owned(),
+            );
             menu.entry(
+                format!("menu-run-task-{name}"),
+                "Run",
+                Some(Icon::Play),
+                move |_, cx| {
+                    run.update(cx, |this, cx| this.run(&to_run, cx)).ok();
+                },
+            )
+            .entry(
                 format!("edit-task-{name}"),
                 "Edit",
                 None,
@@ -1325,6 +1349,24 @@ impl Render for TasksSection {
 
 // ── The project page ───────────────────────────────────────────────────────────────────────────
 
+/// The toast of a task the user ran from the settings (`place` `None`) or a session's rail (its
+/// workspace, `Some(None)` for `main`): where it runs and where its output is, or why it did not
+/// start.
+pub fn ran(name: &str, place: Option<Option<&str>>, refused: Option<String>, cx: &mut App) {
+    let detail = match place {
+        None => "In the project folder. Its output is under Runs on the project page.".to_owned(),
+        Some(None) => "In the project folder. Its output is under Runs.".to_owned(),
+        Some(Some(workspace)) => format!("In workspace {workspace}. Its output is under Runs."),
+    };
+    toast(
+        match refused {
+            None => Toast::success(format!("{name} started")).detail(detail),
+            Some(why) => Toast::failure(format!("{name} did not start")).detail(why),
+        },
+        cx,
+    );
+}
+
 /// The project page's Runs and Tasks: each task with Run, and what the user ran, running first
 /// then the last five finished, each opening its detail in the run drawer.
 pub struct ProjectTasks {
@@ -1453,6 +1495,7 @@ impl ProjectTasks {
         let command = Command::RunTask {
             project: self.project.clone(),
             name: name.to_owned(),
+            from: RunFrom::Page,
         };
         perform_later(&self.shell, command, cx);
         cx.notify();
