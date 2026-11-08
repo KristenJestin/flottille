@@ -287,7 +287,9 @@ spec 3 (shop) draft: Sign in with a passkey [internal, ABC-12]
 
 The spec whole: its sections in their order (Problem, the expected behaviour `C1`…, the decisions
 `D1`… with their question and the options set aside, out of scope, the technical notes, the
-verification of each `C`, the open questions).
+verification of each `C`, the open questions). A `C` or a `D` an accepted amendment changed or
+added says so after its text: `(decided during development, 2026-11-08; was: …)`. The amendments
+follow, answered or not.
 
 ### `flottille spec write <spec> <section> --file F`
 
@@ -344,7 +346,29 @@ name that is free.
 
 ### `flottille spec draft <spec>`
 
-Sends a Ready spec back to Draft, so that it can be written again; its writing session is told.
+Sends a spec that is Ready, In progress or Review back to Draft, so that it can be written again;
+its writing session is told, and during a development the session developing it too: no amendment
+is taken from it while the spec is a Draft, and those it proposed stay for you.
+
+### `flottille spec amendments <spec> [--json]`
+
+The amendments the session developing the spec proposed when you decided something that changes a
+`C` or a `D`: each numbered, pending, accepted (with the identifier it took) or refused, what it
+proposes and why. `--json` prints `spec.amendments`'s answer.
+
+```
+$ flottille spec amendments 3
+Amendment 1 (pending) by session a1b2c3: C2 changed: The filters are chips, one per status.
+  why: You chose chips rather than fields while trying the first version.
+```
+
+### `flottille spec amendment accept|refuse <spec> <n>`
+
+Your answer to amendment `n`; the session that proposed it is told with a delivery. Accepted, it is
+part of the spec, past Draft too: a changed `C` or `D` keeps its identifier and its old text, a new
+one takes the next identifier, each marked "decided during development" with its date. Refused, the
+spec is unchanged and the amendment kept. Refused for one already answered, and an accept once the
+spec is Done.
 
 ## Projects
 

@@ -322,6 +322,7 @@ fn the_extension_s_tables_are_created_by_its_migrations_and_kept_when_off() {
     assert_eq!(
         tables(&user),
         [
+            "ext_specs_amendments",
             "ext_specs_developments",
             "ext_specs_questions",
             "ext_specs_specs",
@@ -336,6 +337,7 @@ fn the_extension_s_tables_are_created_by_its_migrations_and_kept_when_off() {
     assert_eq!(
         tables(&user),
         [
+            "ext_specs_amendments",
             "ext_specs_developments",
             "ext_specs_questions",
             "ext_specs_specs",

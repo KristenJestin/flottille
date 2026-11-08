@@ -110,6 +110,24 @@ pub const EXTENSION: Extension = Extension {
         started_at INTEGER NOT NULL
     ) STRICT;
     ",
+        "
+    -- An amendment a development session proposed: a C or a D added (no item) or changed (the
+    -- item), as JSON, with why; the user accepts or refuses it. Kept once answered: an accepted
+    -- one says the identifier it took, a refused one stays on the spec's page.
+    CREATE TABLE ext_specs_amendments (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        spec        INTEGER NOT NULL REFERENCES ext_specs_specs (id),
+        agent       TEXT NOT NULL,
+        section     TEXT NOT NULL,
+        item        TEXT,
+        content     TEXT NOT NULL,
+        why         TEXT NOT NULL,
+        state       TEXT NOT NULL,
+        became      TEXT,
+        proposed_at INTEGER NOT NULL,
+        answered_at INTEGER
+    ) STRICT;
+    ",
     ],
     methods: Methods {
         prefix: "spec",
@@ -124,6 +142,7 @@ pub const EXTENSION: Extension = Extension {
         "ticket",
         "departures",
         "develop",
+        "amendment",
     ],
     tools: &[TOOL],
     started: its_session,
@@ -189,8 +208,9 @@ fn spec_of_session(daemon: &Daemon, agent: &str) -> Option<Value> {
 }
 
 /// What a root of a project where Specs is active may do with its specs; no action makes a spec
-/// Ready or Draft, which are the user's gestures alone.
-const ACTIONS: &[&str] = &["read", "write", "ask", "questions"];
+/// Ready or Draft, which are the user's gestures alone. `amend` is the development session's
+/// only: the gate refuses it to any other (`amends`).
+const ACTIONS: &[&str] = &["read", "write", "ask", "questions", "amend"];
 
 const TOOL: Tool = Tool {
     definition: Definition {
@@ -206,8 +226,12 @@ const TOOL: Tool = Tool {
             at Done). ask: a wave of questions only the user can answer, each with two \
             options at least, the one you recommend and why; then end your turn: each answer \
             comes back as a delivery and becomes a D. questions: those asked and their state. \
-            Ready and Draft are the user's alone. Refused for a spec this session does not \
-            write, or past Draft.",
+            amend, for the session developing the spec only: when the user decides something \
+            that changes a C or a D, propose it with why (section behaviour or decisions, \
+            content one item, with the id of the one it changes or none for a new one); the \
+            user accepts or refuses it, and the answer comes as a delivery. Ready and Draft are \
+            the user's alone. write and ask are refused for a spec this session does not write, \
+            or past Draft; amend while the spec is back to Draft.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -225,7 +249,8 @@ fn tool_schema() -> Value {
         "action": {"type": "string", "enum": ACTIONS},
         "spec": {"type": "integer", "minimum": 1, "description": "The spec's number."},
         "section": {"type": "string", "enum": SECTIONS, "description": "write: the section, written whole."},
-        "content": {"description": "write: the section: a text for problem and notes, a list for the others."},
+        "content": {"description": "write: the section: a text for problem and notes, a list for the others. amend: one C {id?, text} or one D {id?, question, decision, set_aside}."},
+        "why": {"type": "string", "description": "amend: what the user decided, and why it changes the spec."},
         "questions": {"type": "array", "minItems": 1, "description": "ask: the wave.", "items": {
             "type": "object", "properties": {
                 "question": {"type": "string"},
@@ -289,6 +314,9 @@ fn from_word<T: serde::de::DeserializeOwned>(word: &str) -> Result<T> {
 struct Behaviour {
     id: String,
     text: String,
+    /// The amendments accepted on it, in order: it was "decided during development".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    amended: Vec<Amended>,
 }
 
 /// A decision, `D<n>`, with the question it answered and the options set aside.
@@ -299,6 +327,26 @@ struct Decision {
     question: String,
     decision: String,
     set_aside: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    amended: Vec<Amended>,
+}
+
+/// An amendment accepted on an item: when, and the text it had before, none for an item it
+/// added.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Amended {
+    at: u64,
+    was: Option<String>,
+}
+
+/// "decided during development, 2026-11-08", of the last amendment accepted on an item.
+fn decided(amended: &[Amended]) -> Option<String> {
+    let at = amended.last()?.at;
+    Some(format!(
+        "decided during development, {}",
+        &crate::session_read::shown_date(at)[..10]
+    ))
 }
 
 /// What the spec leaves out, with its reason or the ticket that takes it.
@@ -379,6 +427,78 @@ struct Spec {
     /// Its last write to its ticket, and what that says (why it failed, which ticket changed).
     ticket_write: Option<(TicketWrite, String)>,
     departures_posted_at: Option<u64>,
+    /// The amendments its development sessions proposed, answered or not.
+    amendments: Vec<Amendment>,
+}
+
+/// An amendment a development session proposed: a `C` or a `D` added or changed, with why.
+struct Amendment {
+    id: u64,
+    agent: String,
+    /// `behaviour` or `decisions`.
+    section: String,
+    /// The item it changes; none for one it adds.
+    item: Option<String>,
+    /// The item as proposed: `{text}` for a C, `{question, decision, set_aside}` for a D.
+    content: Value,
+    why: String,
+    /// `pending`, `accepted` or `refused`.
+    state: String,
+    /// The identifier it took once accepted.
+    became: Option<String>,
+    proposed_at: u64,
+    answered_at: Option<u64>,
+}
+
+impl Amendment {
+    fn to_json(&self) -> Value {
+        json!({
+            "amendment": self.id,
+            "agent": self.agent,
+            "section": self.section,
+            "item": self.item,
+            "content": self.content,
+            "why": self.why,
+            "state": self.state,
+            "became": self.became,
+            "proposed_at": self.proposed_at,
+            "answered_at": self.answered_at,
+        })
+    }
+}
+
+fn amendments_of(space: &Space, id: u64) -> Result<Vec<Amendment>> {
+    let mut statement = space.tables().prepare(
+        "SELECT id, agent, section, item, content, why, state, became, proposed_at, answered_at \
+         FROM ext_specs_amendments WHERE spec = ?1 ORDER BY id",
+    )?;
+    let rows = statement
+        .query_map([id], |row| {
+            Ok((
+                Amendment {
+                    id: row.get(0)?,
+                    agent: row.get(1)?,
+                    section: row.get(2)?,
+                    item: row.get(3)?,
+                    content: Value::Null,
+                    why: row.get(5)?,
+                    state: row.get(6)?,
+                    became: row.get(7)?,
+                    proposed_at: row.get(8)?,
+                    answered_at: row.get(9)?,
+                },
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|(amendment, content)| {
+            Ok(Amendment {
+                content: serde_json::from_str(&content)?,
+                ..amendment
+            })
+        })
+        .collect()
 }
 
 /// A question the writing session asked the user.
@@ -435,6 +555,7 @@ impl Spec {
             "ticket_write": self.ticket_write_json(),
             "departures": self.content.departures,
             "departures_posted_at": self.departures_posted_at,
+            "amendments": self.amendments.iter().map(Amendment::to_json).collect::<Vec<_>>(),
         })
     }
 
@@ -559,6 +680,7 @@ fn specs_where(space: &Space, filter: &str, values: &[&dyn rusqlite::ToSql]) -> 
                 content: serde_json::from_str(&raw.content)?,
                 tickets: tickets_of(space, raw.id)?,
                 asked: asked_of(space, raw.id)?,
+                amendments: amendments_of(space, raw.id)?,
                 writer: raw.writer,
                 ticket_write: match raw.ticket_state {
                     Some(state) => {
@@ -705,18 +827,22 @@ fn set_status(daemon: &Daemon, id: u64, to: Status) -> std::result::Result<Value
         let space = store.space(EXTENSION.name)?;
         let mut spec =
             spec_of(&space, id)?.ok_or_else(|| Error::Refused(format!("no spec {id}")))?;
-        let from = match to {
-            Status::Draft => Status::Ready,
-            _ => Status::Draft,
+        // Back to Draft from Ready, or during a development (its session is told).
+        let (from, said) = match to {
+            Status::Draft => (
+                &[Status::Ready, Status::InProgress, Status::Review][..],
+                "Ready, In progress or Review",
+            ),
+            _ => (&[Status::Draft][..], "Draft"),
         };
-        if spec.status != from {
+        if !from.contains(&spec.status) {
             return Err(Error::Refused(format!(
-                "spec {id} is {}: only a spec that is {} becomes {}",
+                "spec {id} is {}: only a spec that is {said} becomes {}",
                 spec.status.title(),
-                from.title(),
                 to.title()
             )));
         }
+        let from = spec.status;
         if to == Status::Ready {
             let open = spec.open_questions();
             if open > 0 {
@@ -828,6 +954,20 @@ struct DecisionAsked {
     set_aside: Vec<String>,
 }
 
+fn decision_of(asked: DecisionAsked, id: String, amended: Vec<Amended>) -> Result<Decision> {
+    Ok(Decision {
+        question: said(&asked.question, &format!("{id}.question"))?,
+        decision: said(&asked.decision, &format!("{id}.decision"))?,
+        set_aside: asked
+            .set_aside
+            .iter()
+            .map(|option| said(option, &format!("{id}.set_aside")))
+            .collect::<Result<_>>()?,
+        id,
+        amended,
+    })
+}
+
 /// One section written whole, as `spec.write` gives it: a text for `problem` and `notes`, a list
 /// for the others.
 fn write_section(project: &Project, spec: &mut Spec, section: &str, content: Value) -> Result<()> {
@@ -851,12 +991,19 @@ fn write_section(project: &Project, spec: &mut Spec, section: &str, content: Val
                 &now,
                 &mut spec.last_c,
             )?;
+            // An item rewritten keeps what was decided of it during a development.
             let behaviour = asked
                 .into_iter()
                 .zip(ids)
                 .map(|(asked, id)| {
                     Ok(Behaviour {
                         text: said(&asked.text, &id)?,
+                        amended: content_of
+                            .behaviour
+                            .iter()
+                            .find(|c| c.id == id)
+                            .map(|c| c.amended.clone())
+                            .unwrap_or_default(),
                         id,
                     })
                 })
@@ -879,16 +1026,13 @@ fn write_section(project: &Project, spec: &mut Spec, section: &str, content: Val
                 .into_iter()
                 .zip(ids)
                 .map(|(asked, id)| {
-                    Ok(Decision {
-                        question: said(&asked.question, &format!("{id}.question"))?,
-                        decision: said(&asked.decision, &format!("{id}.decision"))?,
-                        set_aside: asked
-                            .set_aside
-                            .iter()
-                            .map(|option| said(option, &format!("{id}.set_aside")))
-                            .collect::<Result<_>>()?,
-                        id,
-                    })
+                    let amended = content_of
+                        .decisions
+                        .iter()
+                        .find(|d| d.id == id)
+                        .map(|d| d.amended.clone())
+                        .unwrap_or_default();
+                    decision_of(asked, id, amended)
                 })
                 .collect::<Result<_>>()?;
         }
@@ -1055,6 +1199,21 @@ struct Departures {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AmendmentAnswer {
+    spec: u64,
+    amendment: u64,
+    answer: Answered,
+}
+
+#[derive(Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Answered {
+    Accept,
+    Refuse,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TicketOf {
     spec: u64,
     ticket: String,
@@ -1177,9 +1336,34 @@ fn answer_now(
                 Ok("tickets")
             })
         }
+        "spec.amendments" => {
+            let Named { spec } = serde_json::from_value(params)?;
+            let (spec, _) = current_spec(daemon, spec)?;
+            Ok(json!({
+                "spec": spec.id,
+                "amendments": spec.amendments.iter().map(Amendment::to_json).collect::<Vec<_>>(),
+            }))
+        }
+        "spec.amendment" => answer_amendment(daemon, serde_json::from_value(params)?),
         "spec.draft" => {
             let Named { spec } = serde_json::from_value(params)?;
+            let was = current_spec(daemon, spec)?.0.status;
             let drafted = set_status(daemon, spec, Status::Draft)?;
+            if matches!(was, Status::InProgress | Status::Review)
+                && let Some(developer) = developer(daemon, spec)
+            {
+                super::tell(
+                    daemon,
+                    &EXTENSION,
+                    &developer,
+                    &format!(
+                        "The user sent spec {spec}, which you develop, back to Draft during your \
+                         development: it may be written again, and no amendment is taken while \
+                         it is a Draft. Those you proposed wait for the user. Ask them what \
+                         changes before you build on what the spec says."
+                    ),
+                );
+            }
             if let Some(writer) = drafted["writer"].as_str() {
                 super::tell(
                     daemon,
@@ -1198,6 +1382,181 @@ fn answer_now(
             format!("unknown method `{method}`"),
         )),
     }
+}
+
+/// `spec.amendment`: the user's answer to an amendment the development session proposed. An
+/// accepted one is part of the spec, past Draft too, the one write the lock lets through: a
+/// changed item keeps its identifier and its old text, a new one takes the next identifier, each
+/// marked with its date. A refused one is kept, the spec unchanged. The session is told.
+fn answer_amendment(
+    daemon: &Arc<Daemon>,
+    asked: AmendmentAnswer,
+) -> std::result::Result<Value, Failure> {
+    let id = asked.spec;
+    current_spec(daemon, id)?;
+    let (spec, agent, told) = daemon.write(|store| {
+        let space = store.space(EXTENSION.name)?;
+        let mut spec =
+            spec_of(&space, id)?.ok_or_else(|| Error::Refused(format!("no spec {id}")))?;
+        let amendment = spec
+            .amendments
+            .iter()
+            .find(|amendment| amendment.id == asked.amendment)
+            .ok_or_else(|| {
+                Error::Refused(format!("spec {id} has no amendment {}", asked.amendment))
+            })?;
+        let n = amendment.id;
+        if amendment.state != "pending" {
+            return Err(Error::Refused(format!(
+                "amendment {n} of spec {id} is {} already",
+                amendment.state
+            )));
+        }
+        let agent = amendment.agent.clone();
+        let proposed = (
+            amendment.section.clone(),
+            amendment.item.clone(),
+            amendment.content.clone(),
+        );
+        let at = now_ms();
+        let (state, became, what, told) = match asked.answer {
+            Answered::Refuse => (
+                "refused",
+                None,
+                "amendments",
+                format!(
+                    "The user refused amendment {n} of spec {id}: the spec is unchanged. Build \
+                     what it says, or ask the user."
+                ),
+            ),
+            Answered::Accept => {
+                if spec.status == Status::Done {
+                    return Err(Error::Refused(format!(
+                        "spec {id} is Done: its pull requests are merged; refuse the amendment"
+                    )));
+                }
+                let (became, said) = accept(&mut spec, proposed, at)?;
+                space.tables().execute(
+                    "UPDATE ext_specs_specs SET content = ?2, last_c = ?3, last_d = ?4, \
+                     updated_at = ?5 WHERE id = ?1",
+                    params![
+                        id,
+                        serde_json::to_string(&spec.content)?,
+                        spec.last_c,
+                        spec.last_d,
+                        at
+                    ],
+                )?;
+                spec.updated_at = at;
+                let what = match became.starts_with('C') {
+                    true => "behaviour",
+                    false => "decisions",
+                };
+                let told = format!(
+                    "The user accepted amendment {n} of spec {id}: {became} is part of the spec, \
+                     decided during development: {said}"
+                );
+                ("accepted", Some(became), what, told)
+            }
+        };
+        space.tables().execute(
+            "UPDATE ext_specs_amendments SET state = ?2, became = ?3, answered_at = ?4 \
+             WHERE id = ?1",
+            params![n, state, became, at],
+        )?;
+        spec.amendments = amendments_of(&space, id)?;
+        let event = space.append_event(
+            "spec.changed",
+            json!({"spec": id, "project": spec.project, "what": what}),
+        )?;
+        space.commit()?;
+        Ok(((spec, agent, told), event))
+    })?;
+    super::tell(daemon, &EXTENSION, &agent, &told);
+    Ok(spec.to_json())
+}
+
+/// An amendment written into the spec: the item it changes keeps its identifier, its old text
+/// kept; a new one takes the next identifier. Its identifier, and the item as it now reads.
+fn accept(
+    spec: &mut Spec,
+    (section, item, content): (String, Option<String>, Value),
+    at: u64,
+) -> Result<(String, String)> {
+    let id_of_spec = spec.id;
+    let gone = |item: &str| {
+        Error::Refused(format!(
+            "{item} is no longer in spec {id_of_spec}: refuse the amendment"
+        ))
+    };
+    let content_of = &mut spec.content;
+    if section == "behaviour" {
+        let text = content["text"].as_str().unwrap_or_default().to_owned();
+        let id = match item {
+            Some(item) => {
+                let c = content_of
+                    .behaviour
+                    .iter_mut()
+                    .find(|c| c.id == item)
+                    .ok_or_else(|| gone(&item))?;
+                let was = std::mem::replace(&mut c.text, text.clone());
+                c.amended.push(Amended { at, was: Some(was) });
+                item
+            }
+            None => {
+                spec.last_c += 1;
+                let id = format!("C{}", spec.last_c);
+                content_of.behaviour.push(Behaviour {
+                    id: id.clone(),
+                    text: text.clone(),
+                    amended: vec![Amended { at, was: None }],
+                });
+                id
+            }
+        };
+        return Ok((id, text));
+    }
+    let asked: DecisionAsked = serde_json::from_value(content)?;
+    let id = match item {
+        Some(item) => {
+            let d = content_of
+                .decisions
+                .iter_mut()
+                .find(|d| d.id == item)
+                .ok_or_else(|| gone(&item))?;
+            let mut amended = std::mem::take(&mut d.amended);
+            amended.push(Amended {
+                at,
+                was: Some(d.decision.clone()),
+            });
+            *d = decision_of(asked, item.clone(), amended)?;
+            item
+        }
+        None => {
+            spec.last_d += 1;
+            let id = format!("D{}", spec.last_d);
+            let d = decision_of(asked, id.clone(), vec![Amended { at, was: None }])?;
+            content_of.decisions.push(d);
+            id
+        }
+    };
+    let d = content_of
+        .decisions
+        .iter()
+        .find(|d| d.id == id)
+        .expect("written above");
+    Ok((id, format!("{} {}", d.question, d.decision)))
+}
+
+/// The session that develops the spec now, if one runs.
+fn developer(daemon: &Daemon, id: u64) -> Option<String> {
+    let developments = daemon
+        .write(|store| {
+            let space = store.space(EXTENSION.name)?;
+            Ok((developments_of(&space, id)?, None::<Event>))
+        })
+        .ok()?;
+    running(daemon, &developments)
 }
 
 /// `spec.new`: a Draft in the project's language, alone without tickets and internal with them
@@ -1521,6 +1880,7 @@ fn answer(daemon: &Arc<Daemon>, asked: Answer) -> std::result::Result<Value, Fai
             question: question.text.clone(),
             decision,
             set_aside,
+            amended: Vec::new(),
         });
         Ok("answered")
     })?;
@@ -1564,6 +1924,13 @@ fn remember_reads(
 
 /// The spec as its ticket's description: Markdown, its sections in their order, and nothing of
 /// Flottille (no marker, no footer): Flottille knows it by its own record (`posts`).
+/// " (decided during development, 2026-11-08)" after an item an amendment changed or added.
+fn marked(amended: &[Amended]) -> String {
+    decided(amended)
+        .map(|said| format!(" ({said})"))
+        .unwrap_or_default()
+}
+
 fn markdown(spec: &Spec) -> String {
     let content = &spec.content;
     let mut text = String::new();
@@ -1578,7 +1945,7 @@ fn markdown(spec: &Spec) -> String {
         content
             .behaviour
             .iter()
-            .map(|c| format!("- **{}** {}\n", c.id, c.text))
+            .map(|c| format!("- **{}** {}{}\n", c.id, c.text, marked(&c.amended)))
             .collect(),
     );
     section(
@@ -1591,7 +1958,13 @@ fn markdown(spec: &Spec) -> String {
                     true => String::new(),
                     false => format!(" (set aside: {})", d.set_aside.join("; ")),
                 };
-                format!("- **{}** {} {}{aside}\n", d.id, d.question, d.decision)
+                format!(
+                    "- **{}** {} {}{aside}{}\n",
+                    d.id,
+                    d.question,
+                    d.decision,
+                    marked(&d.amended)
+                )
             })
             .collect(),
     );
@@ -2007,6 +2380,7 @@ struct ToolCall {
     section: Option<String>,
     content: Option<Value>,
     questions: Option<Vec<Asked>>,
+    why: Option<String>,
 }
 
 /// A question as the writing session asks it; each part checked with what to do.
@@ -2051,15 +2425,102 @@ fn writes(spec: &Spec, agent: &str) -> std::result::Result<(), String> {
 /// Specs' refusals at the gate: a write or a question by a session that does not write the
 /// spec, or past Draft. What the arguments do not say is left to the call, which refuses it.
 fn tool_gate(daemon: &Daemon, grant: &Grant, args: &Value) -> std::result::Result<(), String> {
-    if !matches!(args["action"].as_str(), Some("write" | "ask")) {
+    let action = args["action"].as_str();
+    if !matches!(action, Some("write" | "ask" | "amend")) {
         return Ok(());
     }
     let Some(id) = args["spec"].as_u64() else {
         return Ok(());
     };
     match read(daemon, id).map_err(|error| error.to_string())? {
-        Some(spec) if spec.project == grant.place.project => writes(&spec, &grant.agent),
+        Some(spec) if spec.project == grant.place.project => match action {
+            Some("amend") => amends(daemon, &spec, &grant.agent),
+            _ => writes(&spec, &grant.agent),
+        },
         _ => Ok(()),
+    }
+}
+
+/// Whether the session may propose an amendment to the spec: it develops it, and the spec is not
+/// back to Draft nor Done. The one write past Draft, and only through the user's acceptance.
+fn amends(daemon: &Daemon, spec: &Spec, agent: &str) -> std::result::Result<(), String> {
+    let id = spec.id;
+    let developments = daemon
+        .write(|store| {
+            let space = store.space(EXTENSION.name)?;
+            Ok((developments_of(&space, id)?, None::<Event>))
+        })
+        .map_err(|error| error.to_string())?;
+    if !developments
+        .iter()
+        .any(|development| development.agent == agent)
+    {
+        return Err(match running(daemon, &developments) {
+            Some(developer) => format!(
+                "spec {id} is developed by session {developer}: only the session developing a \
+                 spec proposes an amendment to it"
+            ),
+            None => format!(
+                "spec {id} has no development session here: only the session developing a spec \
+                 proposes an amendment to it"
+            ),
+        });
+    }
+    match spec.status {
+        Status::Draft => Err(format!(
+            "the spec is back to draft: spec {id} is a Draft, and no amendment is taken while it \
+             is; the user makes it Ready again, or tells you what changes"
+        )),
+        Status::Done => Err(format!("spec {id} is Done: its pull requests are merged")),
+        _ => Ok(()),
+    }
+}
+
+/// An amendment as the development session proposes it: the item it changes, if any, and the
+/// item as it would be, checked as `write` checks it.
+fn proposal(
+    spec: &Spec,
+    section: &str,
+    content: Value,
+) -> std::result::Result<(Option<String>, Value), String> {
+    let refuse = |error: serde_json::Error| format!("amend: {section}: {error}");
+    let unknown = |id: &str, letter: char| {
+        format!(
+            "amend: {id} is not a {letter} of spec {}: a new {letter} is proposed without its \
+             identifier, and gets the next one once accepted",
+            spec.id
+        )
+    };
+    match section {
+        "behaviour" => {
+            let asked: BehaviourAsked = serde_json::from_value(content).map_err(refuse)?;
+            if let Some(id) = &asked.id
+                && !spec.content.behaviour.iter().any(|c| c.id == *id)
+            {
+                return Err(unknown(id, 'C'));
+            }
+            let text = said(&asked.text, "amend: text").map_err(|error| error.to_string())?;
+            Ok((asked.id, json!({"text": text})))
+        }
+        "decisions" => {
+            let asked: DecisionAsked = serde_json::from_value(content).map_err(refuse)?;
+            if let Some(id) = &asked.id
+                && !spec.content.decisions.iter().any(|d| d.id == *id)
+            {
+                return Err(unknown(id, 'D'));
+            }
+            let item = asked.id.clone();
+            let d = decision_of(asked, "amend".to_owned(), Vec::new())
+                .map_err(|error| error.to_string())?;
+            Ok((
+                item,
+                json!({"question": d.question, "decision": d.decision, "set_aside": d.set_aside}),
+            ))
+        }
+        section => Err(format!(
+            "amend: {section}: an amendment changes a C or a D: its section is behaviour or \
+             decisions"
+        )),
     }
 }
 
@@ -2272,6 +2733,70 @@ fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
                     if count == 1 { "" } else { "s" }
                 )),
                 Err(failure) => refused(failure),
+            }
+        }
+        "amend" => {
+            if let Err(why) = amends(daemon, &spec, agent) {
+                return Outcome::Refused(format!("refused: {why}"));
+            }
+            let (Some(section), Some(content)) = (asked.section, asked.content) else {
+                return Outcome::Refused(
+                    "refused: amend takes the section (behaviour or decisions), its content (one \
+                     item) and why"
+                        .into(),
+                );
+            };
+            let why = crate::mcp::masked(asked.why.as_deref().unwrap_or_default(), &grant.place);
+            let why = why.trim();
+            if why.is_empty() {
+                return Outcome::Refused(
+                    "refused: amend: say why: what the user decided, and why it changes the spec"
+                        .into(),
+                );
+            }
+            let (item, content) = match proposal(&spec, &section, masked(content, &grant.place)) {
+                Ok(proposed) => proposed,
+                Err(why) => return Outcome::Refused(format!("refused: {why}")),
+            };
+            let proposed = daemon.write(|store| {
+                let space = store.space(EXTENSION.name)?;
+                let spec =
+                    spec_of(&space, id)?.ok_or_else(|| Error::Refused(format!("no spec {id}")))?;
+                if spec.status == Status::Draft {
+                    return Err(Error::Refused(format!(
+                        "the spec is back to draft: spec {id} is a Draft, and no amendment is \
+                         taken while it is"
+                    )));
+                }
+                space.tables().execute(
+                    "INSERT INTO ext_specs_amendments (spec, agent, section, item, content, why, \
+                     state, proposed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
+                    params![
+                        id,
+                        agent,
+                        section,
+                        item,
+                        serde_json::to_string(&content)?,
+                        why,
+                        now_ms()
+                    ],
+                )?;
+                let n = space.tables().last_insert_rowid();
+                let event = space.append_event(
+                    "spec.changed",
+                    json!({"spec": id, "project": spec.project, "what": "amendments"}),
+                )?;
+                space.commit()?;
+                Ok((n, event))
+            });
+            match proposed {
+                Ok(n) => Outcome::Done(format!(
+                    "Amendment {n} of spec {id} proposed to the user, who accepts or refuses it \
+                     on the spec's page. The answer comes back to you as a delivery; until then \
+                     the spec says what it said."
+                )),
+                Err(Error::Refused(why)) => Outcome::Refused(format!("refused: {why}")),
+                Err(error) => Outcome::Failed(error.to_string()),
             }
         }
         action => Outcome::Refused(format!(

@@ -491,6 +491,16 @@ marked "decided during development" with its date, the old text kept. A spec sen
 during its development: the development session is told, and `spec` refuses amendments while it is
 Draft.
 
+As built (S6): `spec`'s `amend` is given to the roots like its other actions, and Specs' gate
+refuses it to any session but the one developing that spec (a child has no `spec`, the pilot door
+neither): the actions of a tool depend on who calls it, and nothing new of the frame was needed.
+An amendment is kept with the spec (`ext_specs_amendments`), pending, accepted or refused; the
+spec's page shows the pending ones with Accept and Refuse, the refused ones folded, and an item an
+amendment changed with its old text folded under the new one. `flottille spec amendments` and
+`spec amendment accept|refuse` are the command line's. An accepted amendment is the one write the
+lock lets through past Draft. Whoever reads the spec afterwards (`spec.show`, `read`, the ticket
+written at the next Ready) reads it as it is now, each changed or added item marked.
+
 **The ticket side** (S4, built; `docs/tickets.md`, "What a spec writes"). What leaves Flottille
 carries nothing of it: the description written and the comment posted have no marker nor footer,
 and Flottille knows them by its record (the maintainer's rule of 2026-11-01, over "marked as
@@ -514,7 +524,7 @@ development on its own at Ready.
 | S3 (built) | the project's Specs tab, a spec's page, its settings tab | screens: a project tab, a page, an action on a ticket's row, the renderer of an extension's tab and of its project section |
 | S4 (built) | the ticket side of the modes | Core event triggers (a ticket changed) |
 | S5 (built) | launching the development, the statuses read from what Flottille sees | Core event triggers (an agent ended, a pull request opened or merged) |
-| S6 | amendments | nothing new: actions of the tool given by who calls it |
+| S6 (built) | amendments | nothing new: actions of the tool given by who calls it |
 
 ### Compaction
 

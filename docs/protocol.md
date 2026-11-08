@@ -437,7 +437,8 @@ is off globally, the projects' switches kept.
   extension's method of that action with the other parameters, as if called by its name
   (`extension.act {"name": "specs", "action": "answer", "spec": 3, "question": 7, "option": 1}`
   is `spec.answer`). `refused` for an action the extension does not declare, naming those it does:
-  for Specs `new`, `from_ticket`, `answer`, `ready`, `draft`.
+  for Specs `new`, `from_ticket`, `answer`, `ready`, `draft`, `ticket`, `departures`, `develop`,
+  `amendment`.
 
 `extension.set` emits `extension.changed`; turning an extension on or off globally gives each
 running session of every project the tools its role has now, before the answer (`docs/tools.md`,
@@ -460,7 +461,11 @@ number), "text", "options", "recommended", "reason", "state" (`open` or `answere
 ticket (mode `ticket`), `{"state": "written" | "changed" | "failed", "problem"}` (what it says:
 where it was written, which ticket changed, why it failed), `null` before a Ready wrote or since a
 Back to draft; `departures` an internal spec's draft comment of where it departs from its tickets,
-and `departures_posted_at` when the user posted it, `null` before.
+and `departures_posted_at` when the user posted it, `null` before; `amendments` those its
+development sessions proposed, as `spec.amendments` gives them. A `C` or a `D` an accepted
+amendment changed or added holds `amended`, a list of `{"at", "was"}`: when it was decided during
+development, and its text before (the `C`'s text, the `D`'s decision), `null` for one it added;
+an item no amendment touched has no `amended`.
 
 - `spec.new {project, title?, idea?, mode?, tickets?}`: a Draft in the project's `language` (its
   own, else the one of `extensions.toml`, else the user's locale), kept with it. `alone` takes no
@@ -503,7 +508,9 @@ and `departures_posted_at` when the user posted it, `null` before.
   writes"), or creates its ticket when it has none, and answers once that is done: the spec, with
   `ticket_write`. A ticket changed since Flottille last read it is not written (`changed`); a
   write that fails says why (`failed`); the spec stays Ready either way. `spec.draft {spec}` moves
-  a Ready spec back to Draft, and tells its writing session with a delivery.
+  a spec that is Ready, In progress or Review back to Draft, and tells its writing session with a
+  delivery; during a development, the session developing it is told too, and `spec`'s `amend` is
+  refused while the spec is a Draft. Its pending amendments stay for the user.
 - `spec.ticket {spec, choice: "take" | "overwrite"}`: the user's choice once `ticket_write` is
   `changed`. `take` moves the spec back to Draft, keeps the tickets' texts read now as the last
   read and tells the writing session those texts, framed as data; `overwrite` writes the spec over
@@ -526,6 +533,20 @@ and `departures_posted_at` when the user posted it, `null` before.
   ends, fails or is resumed, when a pull request of its branch moves, and when it is read
   (`spec.show`, `spec.list`) after Specs was off. Done is terminal. Nothing calls it on its own at Ready.
 
+- `spec.amendments {spec}` answers `{"spec", "amendments"}`, each `{"amendment" (its number),
+  "agent" (the development session that proposed it), "section" (`behaviour` or `decisions`),
+  "item" (the `C` or `D` it changes, `null` for a new one), "content" (the item proposed:
+  `{"text"}` for a `C`, `{"question", "decision", "set_aside"}` for a `D`), "why", "state"
+  (`pending`, `accepted` or `refused`), "became" (the identifier it took once accepted),
+  "proposed_at", "answered_at"}`, answered ones kept.
+- `spec.amendment {spec, amendment, answer: "accept" | "refuse"}`: the user's answer. Accepted, the
+  amendment is written into the spec whatever its status but Done, the one write the lock lets
+  through: a changed item keeps its identifier, its old text kept in `amended`; a new one takes the
+  next identifier. Refused, the spec is unchanged and the amendment kept. The session that proposed
+  it is told the answer with a delivery (`[flottille:specs]`). `refused` for an amendment already
+  answered, an accept of a spec that is Done, and one whose item is no longer in the spec. Answers
+  the spec.
+
 **The statuses read from what Flottille sees.** A spec under development is **In progress** while
 its development session runs, **Review** while a pull request of a development's branch is open,
 **Done** once those pull requests are merged (a closed one counts for nothing), and back to
@@ -537,10 +558,12 @@ Draft is the user's and stays one.
 **The lock.** Past Draft, every write to a spec (`spec.write`, `spec.link`, `spec.unlink`,
 `spec.answer`, and the `spec` tool's `write` and `ask`) is refused, whoever asks, the user's door
 included: `spec 3 is Ready: it is locked; send it back to Draft first`. Every write passes one
-check, in the same transaction as the write.
+check, in the same transaction as the write. The one write past Draft is an amendment the user
+accepts (`spec.amendment`).
 
 `spec.new` and `spec.from_ticket` emit `spec.created`; a write, a question asked or answered, the
-writing session recorded, a write to the ticket and the departures posted `spec.changed`; `spec.ready`, `spec.draft`, `spec.develop` and the statuses read from what Flottille sees
+writing session recorded, a write to the ticket, the departures posted, an amendment proposed and
+an amendment answered `spec.changed`; `spec.ready`, `spec.draft`, `spec.develop` and the statuses read from what Flottille sees
 `spec.status_changed`. The
 user's door alone reaches these methods: an agent has the `spec` tool (`docs/tools.md`, "Specs"),
 whose actions make no spec Ready nor Draft.
