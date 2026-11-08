@@ -1028,3 +1028,96 @@ fn the_session_page_shows_the_spec_its_session_develops(cx: &mut TestAppContext)
         spec_page(&shell, cx).is_some_and(|page| page.read_with(cx, |p, _| p.spec() == spec))
     });
 }
+
+/// "Launch development" on the daemon's side: the client of the development session.
+fn developing(user: &User, spec: u64) -> Mcp {
+    let opened = user.received_requests("session/new").len();
+    user.call("spec.develop", json!({"spec": spec})).unwrap();
+    let (url, authorization) = server_of(user, opened);
+    Mcp::initialize(&url, &authorization)
+}
+
+fn amend(mcp: &Mcp, spec: u64, content: Value) {
+    let answer = mcp.call(
+        "spec",
+        json!({"action": "amend", "spec": spec, "section": "behaviour", "content": content,
+            "why": "The user chose it while trying the first version."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+}
+
+#[gpui_kit::test]
+fn an_amendment_waits_on_the_spec_page_and_folds_away_once_answered(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    let spec = ready_spec(&user);
+    let mcp = developing(&user, spec);
+    amend(
+        &mcp,
+        spec,
+        json!({"id": "C1", "text": "A link sent by mail signs the user in once, for a day."}),
+    );
+    amend(
+        &mcp,
+        spec,
+        json!({"text": "The link names the device it was asked from."}),
+    );
+    let (shell, cx) = window(&user, cx);
+    open_spec(&shell, cx, spec);
+    let numbers: Vec<u64> = show(&user, spec)["amendments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["amendment"].as_u64().unwrap())
+        .collect();
+    let (changed, added) = (numbers[0], numbers[1]);
+    until(&shell, cx, "both amendments wait on the page", |cx| {
+        found(cx, &format!("spec-amendment-{changed}"))
+            && found(cx, &format!("spec-amendment-{added}"))
+    });
+    assert_eq!(
+        label(cx, &format!("spec-amendment-{changed}-why")).as_deref(),
+        Some("The user chose it while trying the first version.")
+    );
+    settle(cx);
+
+    // Accepted: its card folds away, and C1 shows it was decided during development, its old
+    // text folded under the new one.
+    click(cx, &format!("spec-amendment-{changed}-accept"));
+    until(&shell, cx, "C1 is marked", |cx| {
+        label(cx, "spec-behaviour-C1-decided")
+            .is_some_and(|said| said.starts_with("Decided during development, "))
+    });
+    assert!(step(cx) > 0, "the card folds away and the mark unfolds");
+    settle(cx);
+    assert!(!found(cx, &format!("spec-amendment-{changed}")));
+    assert!(label(cx, "spec-behaviour-C1").is_some_and(|said| said.contains("for a day")),);
+    assert!(!found(cx, "spec-behaviour-C1-was-text"));
+    click(cx, "spec-behaviour-C1-was-toggle");
+    assert!(step(cx) > 0, "the old text unfolds");
+    settle(cx);
+    assert_eq!(
+        label(cx, "spec-behaviour-C1-was-text").as_deref(),
+        Some("A link sent by mail signs the user in once.")
+    );
+    assert!(
+        toasts(&shell, cx)
+            .iter()
+            .any(|(failed, title, _)| !failed && title == "Amendment accepted")
+    );
+
+    // Refused: the spec is unchanged, and the amendment is kept, folded.
+    click(cx, &format!("spec-amendment-{added}-refuse"));
+    until(&shell, cx, "the refused ones are offered", |cx| {
+        found(cx, "spec-amendments-refused-toggle")
+    });
+    settle(cx);
+    assert!(!found(cx, &format!("spec-amendment-{added}")));
+    assert!(!found(cx, "spec-behaviour-C2"));
+    assert!(!found(cx, &format!("spec-amendment-{added}-refused")));
+    click(cx, "spec-amendments-refused-toggle");
+    settle(cx);
+    assert!(found(cx, &format!("spec-amendment-{added}-refused")));
+    at_rest(cx);
+}
