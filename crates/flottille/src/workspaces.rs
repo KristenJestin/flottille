@@ -2024,7 +2024,7 @@ pub fn resume_at_start(daemon: &Arc<Daemon>) {
 // Removal.
 
 async fn remove(daemon: Arc<Daemon>, asked: WorkspaceName) -> Answer {
-    removed(daemon, asked, None, None, None).await
+    removed(daemon, asked, None, None, None, None).await
 }
 
 /// The agent removing the workspace it works in: it then works in `main`.
@@ -2036,11 +2036,13 @@ struct Moving<'a> {
 /// Removes the workspace; with `approved`, the losses the user's answer to an agent's request
 /// said to discard, even what would be lost: as long as it is exactly what it finds. `moving`,
 /// the agent that works in it, which then works in the project's folder. `by`, the agent that
-/// removes it and the root of its tree; `None` for the user.
+/// removes it and the root of its tree; `None` for the user. `digest`, the workspace's state
+/// as the user was shown it: it is removed only if it is still that.
 async fn removed(
     daemon: Arc<Daemon>,
     asked: WorkspaceName,
     approved: Option<&[String]>,
+    digest: Option<&str>,
     moving: Option<&Moving<'_>>,
     by: Option<By<'_>>,
 ) -> Answer {
@@ -2054,7 +2056,7 @@ async fn removed(
         .lock()
         .unwrap()
         .insert(workspace.id);
-    let removed = remove_held(&daemon, &workspace, approved, moving, by).await;
+    let removed = remove_held(&daemon, &workspace, approved, digest, moving, by).await;
     daemon
         .removing_workspaces
         .lock()
@@ -2164,17 +2166,80 @@ pub async fn loss_state(
 }
 
 /// The user's removal of a workspace with its project: `workspace.remove`'s, and with
-/// `discard`, what would be lost too, as long as it is exactly what `loss_state` said.
+/// `discard`, what would be lost too, as long as it is exactly what `loss_state` said and the
+/// workspace's `digest` is still the one shown.
 pub async fn remove_with_project(
     daemon: Arc<Daemon>,
     workspace: &Workspace,
-    discard: Option<&[String]>,
+    discard: Option<(&[String], &str)>,
 ) -> Answer {
     let asked = WorkspaceName {
         project: workspace.project.clone(),
         name: workspace.name.clone(),
     };
-    removed(daemon, asked, discard, None, None).await
+    let (approved, digest) = discard.unzip();
+    removed(daemon, asked, approved, digest, None, None).await
+}
+
+/// The work of the workspace as read now: each worktree's commit, what `git status` says and the
+/// content of each file it names. The losses' sentences cannot tell a file not committed from
+/// the same file with more written in it; two equal digests can.
+pub async fn digest(workspace: &Workspace) -> Result<String, Failure> {
+    let mut read = String::new();
+    for worktree in &workspace.repositories {
+        let dir = workspace.folder_of(&worktree.path);
+        if std::fs::symlink_metadata(dir.join(".git")).is_err() {
+            continue;
+        }
+        // An unborn branch has no commit: git says nothing, which is what it is.
+        let head = git::run(
+            &dir,
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            Class::Read,
+        )
+        .await
+        .map_err(|error| cannot_check(&worktree.path, &error))?
+        .stdout;
+        let status = git::output(
+            &dir,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            Class::Work,
+        )
+        .await
+        .map_err(|error| cannot_check(&worktree.path, &error))?;
+        let mut files = Vec::new();
+        let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+        while let Some(entry) = entries.next() {
+            let (code, path) = entry.split_at(3.min(entry.len()));
+            if code.starts_with(['R', 'C']) {
+                entries.next();
+            }
+            files.push(dir.join(path));
+        }
+        let contents = tokio::task::spawn_blocking(move || {
+            files
+                .iter()
+                .map(|file| match std::fs::symlink_metadata(file) {
+                    Ok(meta) if meta.is_symlink() => {
+                        std::fs::read_link(file).map(|target| format!("link {}", target.display()))
+                    }
+                    Ok(meta) if meta.is_file() => std::fs::File::open(file)
+                        .and_then(|mut file| crate::files::sha256_of(&mut file)),
+                    // Gone, or a folder (another repository): `git status` said it already.
+                    _ => Ok("-".to_owned()),
+                })
+                .collect::<std::io::Result<Vec<String>>>()
+        })
+        .await
+        .map_err(|error| Failure::new("unavailable", error.to_string()))?
+        .map_err(|error| cannot_check(&worktree.path, &error.to_string()))?;
+        read.push_str(&format!(
+            "{}\0{head}\0{status}\0{}\0",
+            worktree.path,
+            contents.join("\0")
+        ));
+    }
+    Ok(crate::files::sha256(read.as_bytes()))
 }
 
 async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checked<'a>, Failure> {
@@ -2327,6 +2392,7 @@ async fn remove_held(
     daemon: &Arc<Daemon>,
     workspace: &Workspace,
     approved: Option<&[String]>,
+    shown: Option<&str>,
     moving: Option<&Moving<'_>>,
     by: Option<By<'_>>,
 ) -> Answer {
@@ -2354,6 +2420,16 @@ async fn remove_held(
                 true => "nothing".to_owned(),
                 false => problems.join("; "),
             }
+        )));
+    }
+    // Read after the losses: a file written since the user saw it, even one said the same.
+    if let Some(shown) = shown
+        && digest(workspace).await? != shown
+    {
+        return Err(Failure::refused(format!(
+            "workspace {} of project {} is not removed, nothing was touched: it changed since \
+             it was shown",
+            workspace.name, workspace.project
         )));
     }
     // Checked again once the checks above, which take time, are done: nothing may have come to
@@ -2787,7 +2863,16 @@ pub async fn workspace_remove(
             crate::runs::stop_by_user(daemon, &run.id).await;
         }
     }
-    let removed = match removed(daemon.clone(), asked, approved, moving.as_ref(), Some(by)).await {
+    let removed = match removed(
+        daemon.clone(),
+        asked,
+        approved,
+        None,
+        moving.as_ref(),
+        Some(by),
+    )
+    .await
+    {
         Ok(removed) => removed,
         Err(failure) => {
             return match failure.code {

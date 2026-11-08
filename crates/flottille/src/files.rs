@@ -333,7 +333,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn sha256_of(file: &mut File) -> std::io::Result<String> {
+pub fn sha256_of(file: &mut File) -> std::io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; CHUNK];
     loop {

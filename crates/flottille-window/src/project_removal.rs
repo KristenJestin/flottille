@@ -36,6 +36,8 @@ pub struct WorkspaceLoss {
     /// `clean`, `uncommitted`, `unpushed` or `unknown`.
     pub state: String,
     pub losses: Vec<String>,
+    /// Its state as read, given back with a discard: opaque.
+    pub digest: String,
 }
 
 impl WorkspaceLoss {
@@ -83,6 +85,7 @@ impl Removal {
                         .flatten()
                         .map(text)
                         .collect(),
+                    digest: text(&w["digest"]),
                 })
                 .collect(),
         }
@@ -194,6 +197,7 @@ impl ProjectRemoval {
                 .map(|w| ShownWorkspace {
                     name: w.name.clone(),
                     losses: w.losses.clone(),
+                    digest: w.digest.clone(),
                 })
                 .collect()
         });

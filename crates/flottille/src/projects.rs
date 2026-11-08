@@ -234,11 +234,14 @@ pub async fn removal(daemon: Arc<Daemon>, params: Value) -> std::result::Result<
             Ok(found) => found,
             Err(failure) => ("unknown", vec![failure.message]),
         };
+        // A state not read matches none: the workspace is kept.
+        let digest = workspaces::digest(&workspace).await.unwrap_or_default();
         workspaces.push(json!({
             "name": workspace.name,
             "branch": workspace.branch,
             "state": state,
             "losses": losses,
+            "digest": digest,
         }));
     }
     Ok(json!({
@@ -395,8 +398,14 @@ async fn remove_marked(
     let mut failed = Vec::new();
     for workspace in workspaces_of(daemon, name)? {
         // A workspace whose losses cannot be read is kept: nothing is lost on a guess.
-        let losses = match workspaces::loss_state(daemon, &workspace).await {
-            Ok((_, losses)) => losses,
+        let read = match workspaces::loss_state(daemon, &workspace).await {
+            Ok((_, losses)) => workspaces::digest(&workspace)
+                .await
+                .map(|digest| (losses, digest)),
+            Err(failure) => Err(failure),
+        };
+        let (losses, digest) = match read {
+            Ok(read) => read,
             Err(failure) => {
                 done.kept
                     .push(json!({"name": workspace.name, "why": [failure.message]}));
@@ -409,12 +418,14 @@ async fn remove_marked(
                     .push(json!({"name": workspace.name, "why": losses}));
                 continue;
             };
-            // The user discards what they were shown, never what appeared since.
-            let seen = shown
-                .iter()
-                .find(|shown| shown.name == workspace.name)
-                .is_some_and(|shown| losses.iter().all(|loss| shown.losses.contains(loss)));
-            if !seen {
+            // The user discards what they were shown, never what appeared since, nor what was
+            // written since in a file they were shown.
+            let seen = shown.iter().find(|shown| {
+                shown.name == workspace.name
+                    && shown.digest == digest
+                    && losses.iter().all(|loss| shown.losses.contains(loss))
+            });
+            if seen.is_none() {
                 done.kept.push(json!({
                     "name": workspace.name,
                     "why": losses,
@@ -423,7 +434,7 @@ async fn remove_marked(
                 continue;
             }
         }
-        let approved = (!losses.is_empty()).then_some(losses.as_slice());
+        let approved = (!losses.is_empty()).then_some((losses.as_slice(), digest.as_str()));
         match workspaces::remove_with_project(daemon.clone(), &workspace, approved).await {
             Ok(removed) => done.removed.push(json!({
                 "name": workspace.name,

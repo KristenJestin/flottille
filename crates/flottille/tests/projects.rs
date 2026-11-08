@@ -1494,7 +1494,7 @@ mod removal {
             .as_array()
             .unwrap()
             .iter()
-            .map(|w| json!({"name": w["name"], "losses": w["losses"]}))
+            .map(|w| json!({"name": w["name"], "losses": w["losses"], "digest": w["digest"]}))
             .collect()
     }
 
@@ -1711,6 +1711,43 @@ mod removal {
         );
         assert!(grown.join("late.txt").exists());
         assert!(grown.join("draft.txt").exists());
+    }
+
+    #[test]
+    fn discard_keeps_a_workspace_whose_dirty_file_changed_after_the_preview() {
+        let user = user();
+        project(&user, "app");
+        let (edited, _) = workspace(&user, "app", "edited");
+        std::fs::write(edited.join("draft.txt"), "shown\n").unwrap();
+        let (dirty, _) = workspace(&user, "app", "dirty");
+        std::fs::write(dirty.join("draft.txt"), "shown\n").unwrap();
+        let shown = shown(&user);
+        // The same file, still not committed, says the same sentence: only its content changed.
+        std::fs::write(
+            edited.join("draft.txt"),
+            "shown\nand 300 lines the user never saw\n",
+        )
+        .unwrap();
+
+        let removed = user
+            .call("project.remove", json!({"name": "app", "discard": shown}))
+            .unwrap();
+
+        assert_eq!(
+            ids(&removed["workspaces"]["removed"]),
+            ["dirty"],
+            "{removed}"
+        );
+        assert_eq!(ids(&removed["workspaces"]["kept"]), ["edited"], "{removed}");
+        assert_eq!(
+            removed["workspaces"]["kept"][0]["changed"], true,
+            "{removed}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(edited.join("draft.txt")).unwrap(),
+            "shown\nand 300 lines the user never saw\n"
+        );
+        assert!(!dirty.exists());
     }
 
     /// What a checkout is, but git's own folder: its files, their contents and its branch.

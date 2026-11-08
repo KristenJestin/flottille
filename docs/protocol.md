@@ -198,20 +198,25 @@ folder or its repositories.
 
 `{"name"}`. What removing the project would do, changing nothing (`docs/projects.md`, "Removing a
 project"): `{"name", "sessions": [{"id", "title", "parent"}], "runs": [{"run", "name", "line",
-"agent"}], "workspaces": [{"name", "branch", "state", "losses"}]}`. `sessions` are its roots not
+"agent"}], "workspaces": [{"name", "branch", "state", "losses", "digest"}]}`. `sessions` are its roots not
 ended, `runs` its command runs still running, `workspaces` by name, each `state` `clean`,
 `uncommitted` (files not committed, whatever else), `unpushed` (only commits on no remote) or
 `unknown` (its state could not be read, `losses` saying why), `losses` the sentences
-`workspace.remove` would refuse with. `not-found` when there is no such project.
+`workspace.remove` would refuse with, `digest` an opaque string for the state its worktrees were
+read in (each one's commit, `git status` and the content of each file that names), empty when it
+could not be read. `not-found` when there is no such project.
 
 #### `project.remove`
 
-`{"name", "discard"?: [{"name", "losses"}]}`. Stops the project's agents (roots and children) and
+`{"name", "discard"?: [{"name", "losses", "digest"}]}`. Stops the project's agents (roots and children) and
 waits for their processes, stops its command runs, removes its workspaces that would lose
 nothing, then removes the project's file (`docs/projects.md`, "Removing a project"). `discard` is
 what the user was shown and agreed to lose: the workspaces of `project.removal`, each with its
-`losses` as given there. A workspace that would lose work is removed too only when it is listed
-and each of its losses now is among those listed; otherwise it is kept, with `"changed": true`.
+`losses` and its `digest` as given there (`digest` is required). A workspace that would lose work
+is removed too only when it is listed, each of its losses now is among those listed and its digest
+now is the one listed, read again right before its forced removal; otherwise it is kept, with
+`"changed": true`. A file not committed is one loss whatever it holds: the digest is what tells
+that more was written in it since.
 The result says what was done:
 
 ```json

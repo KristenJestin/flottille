@@ -170,7 +170,13 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(|w| serde_json::json!({"name": w["name"], "losses": w["losses"]}))
+                    .map(|w| {
+                        serde_json::json!({
+                            "name": w["name"],
+                            "losses": w["losses"],
+                            "digest": w["digest"],
+                        })
+                    })
                     .collect();
             }
             let removed = ask("project.remove", asked)?;

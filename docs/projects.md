@@ -95,8 +95,9 @@ Removing a project cleans up what Flottille made for it and never loses the user
    commits on no remote is **kept** on disk with its branch, and the result says which and why;
    with `discard` (the CLI's `--discard`, the window's "Also remove workspaces with unsaved work")
    it is removed too, its work lost, as long as what it would lose is within what the user was
-   shown: `discard` carries back each workspace with its losses as `project.removal` gave them.
-   One whose losses appeared after the preview (an agent wrote in it before it was stopped) is
+   shown: `discard` carries back each workspace with its losses and its digest (the state its
+   files were read in) as `project.removal` gave them. One that changed after the preview (an
+   agent wrote in it before it was stopped, a new file or more lines in a file already shown) is
    kept, and the result says it changed. A workspace whose state cannot be read is kept;
 4. the project's file is removed and `project.removed` is emitted.
 
