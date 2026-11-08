@@ -92,6 +92,47 @@ fn text(value: &Value) -> Option<String> {
 
 impl Provider {
     pub fn of(entry: &Value) -> Provider {
+        let mut provider = Provider::read(entry);
+        provider.unword_own_choice();
+        provider
+    }
+
+    /// The row of the provider's own choice (`default`) is never shown by a name that says
+    /// "default", nor by none: models stored under the adapter's "Default (recommended)" are
+    /// shown by the model they stand for or run, else by the provider's, until a session says
+    /// them again (the daemon names the row by its model then).
+    fn unword_own_choice(&mut self) {
+        let Some(models) = self.models.as_mut() else {
+            return;
+        };
+        let Some(row) = models.iter().find(|m| m.id == provider::OWN_CHOICE) else {
+            return;
+        };
+        if row
+            .name
+            .as_deref()
+            .is_some_and(|n| !provider::says_default(n))
+        {
+            return;
+        }
+        // An alias is the model it stands for; a row that runs a model of its own, or any other
+        // row, is not a model the others tell.
+        let named = |id: &str| {
+            let model = models.iter().find(|m| m.id == id)?;
+            let label = model.label();
+            (model.id != provider::OWN_CHOICE && !provider::says_default(&label)).then_some(label)
+        };
+        let shown = row
+            .stands_for
+            .as_deref()
+            .and_then(named)
+            .unwrap_or_else(|| format!("{}'s model", self.title));
+        if let Some(row) = models.iter_mut().find(|m| m.id == provider::OWN_CHOICE) {
+            row.name = Some(shown);
+        }
+    }
+
+    fn read(entry: &Value) -> Provider {
         Provider {
             name: text(&entry["name"]).unwrap_or_default(),
             title: text(&entry["title"]).unwrap_or_default(),
@@ -366,7 +407,7 @@ mod tests {
         ]})));
         let claude = providers.get("claude").unwrap();
         let labels: Vec<String> = claude.models.iter().flatten().map(Model::label).collect();
-        assert_eq!(labels, ["Default (recommended)", "Fable", "haiku"]);
+        assert_eq!(labels, ["Fable", "Fable", "haiku"]);
         assert_eq!(
             claude.model("default").unwrap().stands_for.as_deref(),
             Some("fable")
@@ -376,6 +417,48 @@ mod tests {
             (fable.id.as_str(), fable.default_effort.as_deref()),
             ("fable", Some("low"))
         );
+    }
+
+    #[test]
+    fn a_stored_default_recommended_name_is_not_shown() {
+        // What the daemon stored before it named the row by its model: the adapter's wording,
+        // or no name at all.
+        for name in [Some("Default (recommended)"), None] {
+            let mut stored = json!({"id": "default", "efforts": ["low", "high"], "default": true});
+            if let Some(name) = name {
+                stored["name"] = json!(name);
+            }
+            let providers = Providers::of(Ok(&json!({"providers": [
+                {"name": "claude", "title": "Claude", "enabled": true, "ready": true,
+                 "models": [stored, {"id": "opus", "name": "Claude Opus 5.5", "efforts": null}]}
+            ]})));
+            let pick = crate::actions::Pick {
+                provider: Some("claude".into()),
+                model: None,
+                effort: None,
+            };
+            let pickers = crate::composer::Pickers {
+                providers: &providers,
+                pick: &pick,
+                project: (None, None),
+            };
+            let mut said = vec![pickers.model_shown()];
+            said.extend(
+                pickers
+                    .entries(crate::composer::Menu::Model)
+                    .into_iter()
+                    .map(|e| e.label),
+            );
+            said.push(providers.model_line("claude", None));
+            for line in &said {
+                assert!(
+                    !line.to_lowercase().contains("default"),
+                    "{name:?}: {said:?}"
+                );
+                assert!(!line.contains("recommended"), "{name:?}: {said:?}");
+            }
+            assert_eq!(said[0], "Claude's model", "{name:?}");
+        }
     }
 
     #[test]
