@@ -741,7 +741,15 @@ impl RenderOnce for ListRow {
                     .child(name)
                     .children(tags)
                     .when_some(self.detail, |d, detail| {
-                        d.child(div().mono(11.5).text_color(p.faint).child(detail))
+                        d.child(
+                            div()
+                                .id(ElementId::Name(format!("{}-detail", self.id).into()))
+                                .aria_label(detail.clone())
+                                .mono(11.5)
+                                .text_color(p.faint)
+                                .child(detail)
+                                .test_support(),
+                        )
                     });
                 let mono_line = self.mono_line;
                 let line = self.line.map(|line| {
