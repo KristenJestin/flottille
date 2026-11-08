@@ -784,14 +784,29 @@ pub fn holding(daemon: &Daemon, agent: &str) -> bool {
     daemon.compactions.phases.lock().unwrap().get(agent) == Some(&Phase::Running)
 }
 
+/// Whether the agent's compaction is under way, the compactor at work or the agent writing its
+/// handoff: what the window shows as a step that runs.
+pub fn running(daemon: &Daemon, agent: &str) -> bool {
+    matches!(
+        daemon.compactions.phases.lock().unwrap().get(agent),
+        Some(Phase::Running | Phase::Handing)
+    )
+}
+
 /// Whether the agent is asked for its handoff: its prompt is that message alone.
 pub fn handing(daemon: &Daemon, agent: &str) -> bool {
     daemon.compactions.phases.lock().unwrap().get(agent) == Some(&Phase::Handing)
 }
 
+/// The compaction is over, done or failed: the agent is no longer said to compact. Before the
+/// event that ends it, so that whoever reads the agent on that event does not see it compact.
+pub fn over(daemon: &Daemon, agent: &str) {
+    daemon.compactions.phases.lock().unwrap().remove(agent);
+}
+
 /// The compaction is over, done or failed: what waited for it goes to the agent.
 pub fn finish(daemon: &Arc<Daemon>, agent: &str) {
-    daemon.compactions.phases.lock().unwrap().remove(agent);
+    over(daemon, agent);
     agents::order(daemon, agent, Order::Ring);
 }
 
@@ -1131,6 +1146,7 @@ fn hand_off(daemon: &Arc<Daemon>, agent: &str) {
     let daemon = daemon.clone();
     let agent = agent.to_owned();
     tokio::spawn(async move {
+        say_started(&daemon, &agent, "agent", before);
         if deliveries::deliver(
             &daemon,
             &agent,
@@ -1372,11 +1388,24 @@ pub struct Compacted {
     pub interrupted: bool,
 }
 
+/// `agent.compacting`: the compaction began, `source` writing the summary (`compactor`, or the
+/// `agent` itself); `agent.compacted` or `agent.compaction_failed` ends it.
+fn say_started(daemon: &Daemon, agent: &str, source: &str, before: u64) {
+    agents::record(
+        daemon,
+        agent,
+        "agent.compacting",
+        json!({"source": source, "before": before}),
+        false,
+    );
+}
+
 /// One compaction of the agent, in the background: the summary, then the new session through
 /// the agent's task. A failure is said and changes nothing.
 async fn run(daemon: Arc<Daemon>, agent: String) {
     let started = std::time::Instant::now();
     let used = usage(&daemon, &agent).map(|(used, _)| used);
+    say_started(&daemon, &agent, "compactor", used.unwrap_or(0));
     let outcome = match tokio::time::timeout(timeout(), compact(&daemon, &agent)).await {
         Ok(outcome) => outcome,
         Err(_) => Err(format!(
@@ -1406,6 +1435,7 @@ async fn run(daemon: Arc<Daemon>, agent: String) {
                     "duration_ms": started.elapsed().as_millis() as u64}),
                 &[],
             );
+            over(&daemon, &agent);
             agents::record(
                 &daemon,
                 &agent,

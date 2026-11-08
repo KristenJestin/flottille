@@ -420,6 +420,19 @@ A tool call the agent makes, or a change of one (`update`).
 | `update` | False when the call appears, true for a change of it. |
 | `title`, `kind`, `status`, `locations`, `content`, `raw_input`, `raw_output` | As the agent sent them, each only when it did; `status` is `pending`, `in_progress`, `completed` or `failed`. |
 
+#### `agent.compacting`
+
+Flottille's compaction of the agent began (`docs/design.md` §5.8): the compactor was started, or
+the agent was asked for its handoff. The window shows a step that runs from it, until
+`agent.compacted` or `agent.compaction_failed` ends it. The agent's CLI compacting on its own
+says nothing before: only `agent.compacted`.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `source` | `compactor`, or `agent` when it writes its own handoff (`summary = "agent"`). |
+| `before` | The tokens of the context in use, as the last `agent.usage` said. |
+
 #### `agent.compacted`
 
 The agent's context was compacted: by its own CLI, or by Flottille (`docs/design.md` §5.8), whose
