@@ -10,8 +10,8 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, StateIcon, Status,
-    Tie, ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon,
-    keys_held, open_overlay, palette, presence, pressable, space,
+    Tie, Toast, ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays,
+    icon, keys_held, open_overlay, palette, presence, pressable, space, toast,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
@@ -1154,15 +1154,29 @@ impl Shell {
             }
             // Detect again is the settings' own read of the repositories now.
             Outcome::ProjectChecked { .. } => {}
-            Outcome::ProjectRemoved { project, refused } => match refused {
-                Some(why) => {
-                    if let Some(page) = self.project_settings.clone()
-                        && page.read(cx).name() == project
-                    {
-                        page.update(cx, |page, cx| page.remove_refused(why, cx));
-                    }
+            Outcome::RemovalRead {
+                project,
+                serial,
+                read,
+            } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let removal = page.read(cx).removal().clone();
+                    removal.update(cx, |removal, cx| removal.answered(serial, read, cx));
                 }
-                None => {
+            }
+            Outcome::ProjectRemoved { project, result } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let removal = page.read(cx).removal().clone();
+                    removal.update(cx, |removal, cx| removal.removed(result.clone(), cx));
+                } else if let Ok(done) = &result {
+                    // The page was left meanwhile: the toast is said all the same.
+                    let mut said = Toast::success(format!("The project {project} was removed"));
+                    if let Some(detail) = crate::project_removal::done_said(done) {
+                        said = said.detail(detail);
+                    }
+                    toast(said, cx);
+                }
+                if result.is_ok() {
                     self.forms.remove(&project);
                     self.snapshot.projects.retain(|p| p.name != project);
                     let next = self.snapshot.projects.first().map(|p| p.name.clone());
@@ -1177,7 +1191,7 @@ impl Shell {
                         }
                     }
                 }
-            },
+            }
             Outcome::ProjectDetected { read, .. } => {
                 self.add_project
                     .update(cx, |form, cx| form.detect_answered(read, cx));

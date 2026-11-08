@@ -705,6 +705,7 @@ async fn rename_branch(daemon: &Daemon, asked: WorkspaceRenameBranch) -> Answer 
 
 async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
     let project = projects::load_project(&daemon, &asked.project)?;
+    projects::refuse_removing(&daemon, &project.name)?;
     if !valid_name(&asked.name) {
         return Err(Failure::refused(format!(
             "{} is not a name for a workspace: use 1 to 64 letters, digits, dots, dashes or \
@@ -2023,7 +2024,7 @@ pub fn resume_at_start(daemon: &Arc<Daemon>) {
 // Removal.
 
 async fn remove(daemon: Arc<Daemon>, asked: WorkspaceName) -> Answer {
-    removed(daemon, asked, None, None, None).await
+    removed(daemon, asked, None, None, None, None).await
 }
 
 /// The agent removing the workspace it works in: it then works in `main`.
@@ -2035,11 +2036,13 @@ struct Moving<'a> {
 /// Removes the workspace; with `approved`, the losses the user's answer to an agent's request
 /// said to discard, even what would be lost: as long as it is exactly what it finds. `moving`,
 /// the agent that works in it, which then works in the project's folder. `by`, the agent that
-/// removes it and the root of its tree; `None` for the user.
+/// removes it and the root of its tree; `None` for the user. `digest`, the workspace's state
+/// as the user was shown it: it is removed only if it is still that.
 async fn removed(
     daemon: Arc<Daemon>,
     asked: WorkspaceName,
     approved: Option<&[String]>,
+    digest: Option<&str>,
     moving: Option<&Moving<'_>>,
     by: Option<By<'_>>,
 ) -> Answer {
@@ -2053,7 +2056,7 @@ async fn removed(
         .lock()
         .unwrap()
         .insert(workspace.id);
-    let removed = remove_held(&daemon, &workspace, approved, moving, by).await;
+    let removed = remove_held(&daemon, &workspace, approved, digest, moving, by).await;
     daemon
         .removing_workspaces
         .lock()
@@ -2102,7 +2105,8 @@ fn in_use(
     for agent in daemon.read(Store::agents)? {
         if agent.project == workspace.project
             && agent.workspace.as_deref() == Some(workspace.name.as_str())
-            && !agent.state.is_final()
+            // An agent ended whose process lives still works in it.
+            && (!agent.state.is_final() || crate::agents::stopping(daemon, &agent.id))
             && by.is_none_or(|by| agent.id != by.agent)
         {
             let whose = match (by, theirs(&agent.id)) {
@@ -2129,6 +2133,8 @@ fn in_use(
 struct Checked<'a> {
     made: Vec<&'a Worktree>,
     problems: Vec<String>,
+    /// How many of `problems` are commits on no remote; the others are work not committed.
+    unpushed: usize,
     ours: Vec<PathBuf>,
 }
 
@@ -2141,6 +2147,99 @@ pub async fn losses(daemon: &Daemon, project: &str, name: &str) -> Result<Vec<St
     };
     let workspace = find(daemon, &asked)?;
     Ok(checked(daemon, &workspace).await?.problems)
+}
+
+/// What removing the workspace would lose, as `losses` says it, and its state for the removal of
+/// its project: `clean`, `uncommitted` (work not committed, whatever else) or `unpushed` (only
+/// commits on no remote).
+pub async fn loss_state(
+    daemon: &Daemon,
+    workspace: &Workspace,
+) -> Result<(&'static str, Vec<String>), Failure> {
+    let checked = checked(daemon, workspace).await?;
+    let state = match (checked.problems.len(), checked.unpushed) {
+        (0, _) => "clean",
+        (all, unpushed) if all == unpushed => "unpushed",
+        _ => "uncommitted",
+    };
+    Ok((state, checked.problems))
+}
+
+/// The user's removal of a workspace with its project: `workspace.remove`'s, and with
+/// `discard`, what would be lost too, as long as it is exactly what `loss_state` said and the
+/// workspace's `digest` is still the one shown.
+pub async fn remove_with_project(
+    daemon: Arc<Daemon>,
+    workspace: &Workspace,
+    discard: Option<(&[String], &str)>,
+) -> Answer {
+    let asked = WorkspaceName {
+        project: workspace.project.clone(),
+        name: workspace.name.clone(),
+    };
+    let (approved, digest) = discard.unzip();
+    removed(daemon, asked, approved, digest, None, None).await
+}
+
+/// The work of the workspace as read now: each worktree's commit, what `git status` says and the
+/// content of each file it names. The losses' sentences cannot tell a file not committed from
+/// the same file with more written in it; two equal digests can.
+pub async fn digest(workspace: &Workspace) -> Result<String, Failure> {
+    let mut read = String::new();
+    for worktree in &workspace.repositories {
+        let dir = workspace.folder_of(&worktree.path);
+        if std::fs::symlink_metadata(dir.join(".git")).is_err() {
+            continue;
+        }
+        // An unborn branch has no commit: git says nothing, which is what it is.
+        let head = git::run(
+            &dir,
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            Class::Read,
+        )
+        .await
+        .map_err(|error| cannot_check(&worktree.path, &error))?
+        .stdout;
+        let status = git::output(
+            &dir,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            Class::Work,
+        )
+        .await
+        .map_err(|error| cannot_check(&worktree.path, &error))?;
+        let mut files = Vec::new();
+        let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+        while let Some(entry) = entries.next() {
+            let (code, path) = entry.split_at(3.min(entry.len()));
+            if code.starts_with(['R', 'C']) {
+                entries.next();
+            }
+            files.push(dir.join(path));
+        }
+        let contents = tokio::task::spawn_blocking(move || {
+            files
+                .iter()
+                .map(|file| match std::fs::symlink_metadata(file) {
+                    Ok(meta) if meta.is_symlink() => {
+                        std::fs::read_link(file).map(|target| format!("link {}", target.display()))
+                    }
+                    Ok(meta) if meta.is_file() => std::fs::File::open(file)
+                        .and_then(|mut file| crate::files::sha256_of(&mut file)),
+                    // Gone, or a folder (another repository): `git status` said it already.
+                    _ => Ok("-".to_owned()),
+                })
+                .collect::<std::io::Result<Vec<String>>>()
+        })
+        .await
+        .map_err(|error| Failure::new("unavailable", error.to_string()))?
+        .map_err(|error| cannot_check(&worktree.path, &error.to_string()))?;
+        read.push_str(&format!(
+            "{}\0{head}\0{status}\0{}\0",
+            worktree.path,
+            contents.join("\0")
+        ));
+    }
+    Ok(crate::files::sha256(read.as_bytes()))
 }
 
 async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checked<'a>, Failure> {
@@ -2158,6 +2257,7 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
             .map_err(Failure::refused)?
     };
     let mut ours = Vec::new();
+    let mut unpushed = 0;
     let mut read = None;
     let heads = heads(workspace).await;
     for worktree in &made {
@@ -2241,7 +2341,13 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
                     .is_ok_and(|beyond| beyond.trim().is_empty());
             }
         }
+        // Merged into, or contained in, another local branch: integrated there, not lost.
+        if !commits.is_empty() && !merged && !remotes.trim().is_empty() {
+            let own = head.branch_or(&workspace.branch);
+            merged = integrated_into(&dir, "HEAD", own).await.is_some();
+        }
         if !commits.is_empty() && !merged {
+            unpushed += 1;
             problems.push(format!(
                 "{} has commits on {nowhere}, {on}: {}",
                 worktree.path,
@@ -2269,6 +2375,7 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
                 .map_err(|error| cannot_check(&worktree.path, &error))?;
             let left: Vec<&str> = left.lines().filter(|line| !line.is_empty()).collect();
             if !left.is_empty() {
+                unpushed += 1;
                 problems.push(format!(
                     "{} has commits on {nowhere}, on its branch {}: {}",
                     worktree.path,
@@ -2281,6 +2388,7 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
     Ok(Checked {
         made,
         problems,
+        unpushed,
         ours,
     })
 }
@@ -2289,6 +2397,7 @@ async fn remove_held(
     daemon: &Arc<Daemon>,
     workspace: &Workspace,
     approved: Option<&[String]>,
+    shown: Option<&str>,
     moving: Option<&Moving<'_>>,
     by: Option<By<'_>>,
 ) -> Answer {
@@ -2297,6 +2406,7 @@ async fn remove_held(
         made,
         problems,
         ours,
+        ..
     } = checked(daemon, workspace).await?;
     // The user discards what they were shown, not what appeared since.
     let (allowed, changed) = match approved {
@@ -2315,6 +2425,16 @@ async fn remove_held(
                 true => "nothing".to_owned(),
                 false => problems.join("; "),
             }
+        )));
+    }
+    // Read after the losses: a file written since the user saw it, even one said the same.
+    if let Some(shown) = shown
+        && digest(workspace).await? != shown
+    {
+        return Err(Failure::refused(format!(
+            "workspace {} of project {} is not removed, nothing was touched: it changed since \
+             it was shown",
+            workspace.name, workspace.project
         )));
     }
     // Checked again once the checks above, which take time, are done: nothing may have come to
@@ -2464,6 +2584,8 @@ async fn remove_held(
 /// cannot be read keeps it. Each repository's branch as `{repository, deleted, why}`, none where
 /// it is gone already.
 async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
+    // A branch counted as integrated into another must still be there when it is deleted.
+    let _landing = daemon.landing.lock().await;
     let local = format!("refs/heads/{}", workspace.branch);
     let mut fates = Vec::new();
     let mut unsure = Vec::new();
@@ -2484,9 +2606,13 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
             &local,
             &worktree.base.reference,
         ];
-        match git::output(&main, &in_base, Class::Read).await {
-            Ok(_) => fates.push((worktree, main, Ok("it has no commit of its own".to_owned()))),
-            Err(_) => unsure.push((worktree, main)),
+        if git::output(&main, &in_base, Class::Read).await.is_ok() {
+            fates.push((worktree, main, Ok("it has no commit of its own".to_owned())));
+        } else if let Some(other) = integrated_into(&main, &local, &workspace.branch).await {
+            let why = format!("it is integrated into {other}");
+            fates.push((worktree, main, Ok(why)));
+        } else {
+            unsure.push((worktree, main));
         }
     }
     if !unsure.is_empty() {
@@ -2566,6 +2692,67 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
         branches.push(json!({"repository": worktree.path, "deleted": deleted, "why": why}));
     }
     branches
+}
+
+/// The first local branch of the repository at `dir`, but `own`, that holds `commit`: its work is
+/// merged into, or contained in, that branch (`git merge-base --is-ancestor`). Full ref names, as
+/// a short one may be `heads/<own>` beside a tag of its name, and no symbolic ref: one may point
+/// at `own` itself.
+pub async fn integrated_into(dir: &Path, commit: &str, own: &str) -> Option<String> {
+    let refs = git::output(
+        dir,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(symref)",
+            "refs/heads/",
+        ],
+        Class::Read,
+    )
+    .await
+    .ok()?;
+    let own = format!("refs/heads/{own}");
+    for line in refs.lines() {
+        let (reference, symref) = line.split_once(' ').unwrap_or((line, ""));
+        if reference.is_empty() || reference == own || !symref.is_empty() {
+            continue;
+        }
+        let line = [
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            commit,
+            reference,
+        ];
+        if git::output(dir, &line, Class::Read).await.is_ok() {
+            return reference.strip_prefix("refs/heads/").map(str::to_owned);
+        }
+    }
+    None
+}
+
+/// The branch a workspace's own work is integrated into: the first repository whose branch holds
+/// commits beyond its base and is contained in another local branch. `None` when none is, or the
+/// workspace is gone.
+pub async fn integrated(daemon: &Daemon, project: &str, name: &str) -> Option<String> {
+    let workspace = daemon.read(|store| store.workspace(project, name)).ok()??;
+    let local = format!("refs/heads/{}", workspace.branch);
+    for worktree in &workspace.repositories {
+        let dir = workspace.folder_of(&worktree.path);
+        let in_base = [
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            &local,
+            &worktree.base.commit,
+        ];
+        if git::output(&dir, &in_base, Class::Read).await.is_ok() {
+            continue;
+        }
+        if let Some(other) = integrated_into(&dir, &local, &workspace.branch).await {
+            return Some(other);
+        }
+    }
+    None
 }
 
 /// The workspace's forges, read for its branch.
@@ -2748,7 +2935,16 @@ pub async fn workspace_remove(
             crate::runs::stop_by_user(daemon, &run.id).await;
         }
     }
-    let removed = match removed(daemon.clone(), asked, approved, moving.as_ref(), Some(by)).await {
+    let removed = match removed(
+        daemon.clone(),
+        asked,
+        approved,
+        None,
+        moving.as_ref(),
+        Some(by),
+    )
+    .await
+    {
         Ok(removed) => removed,
         Err(failure) => {
             return match failure.code {

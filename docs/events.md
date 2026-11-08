@@ -58,8 +58,9 @@ The project's file was edited: the daemon noticed it at its next request about p
 
 ### `project.removed`
 
-The project was removed (`project.remove`), or its file is gone. Only Flottille's configuration is
-removed, never the folder.
+The project was removed (`project.remove`), or its file is gone. Never its folder: a removal
+emits it last, after the events of what it stopped and removed (`agent.ended`, `run.ended`,
+`workspace.removed`).
 
 | Field | |
 |---|---|
@@ -89,6 +90,17 @@ again.
 | Field | |
 |---|---|
 | `name` | The provider's name. |
+
+### `provider.models_learning`
+
+The daemon started listing a provider's models (`"learning": true`), or the listing ended,
+whatever its outcome (`"learning": false`). The window shows the effort picker's skeleton for a
+model whose efforts are not known while it lists, and reads the providers again.
+
+| Field | |
+|---|---|
+| `name` | The provider's name. |
+| `learning` | Whether the listing runs. |
 
 ### `provider.judge_changed`
 
@@ -393,7 +405,7 @@ A turn starts with this message.
 | `agent` | |
 | `text` | The message. |
 | `images` | The names of the images that went with it, when some did (`agent.image` gives each back). An image that did not go is said in `text` instead. |
-| `deliveries` | The ids of the deliveries the message is made of, in order: one per delivery of `text` (the id `agent.send` answered for a message of the user). An event written before it was kept has none. |
+| `deliveries` | The ids of the deliveries the message is made of, in order: one per delivery of `text` (the id `agent.send` answered for a message of the user). An event written before it was kept has none. A delivery that only gives a new session the conversation again after a compaction (its brief, the summary, the latest messages, or the handoff) has an id ending in `-replay` (`brief-<agent>-<epoch>-replay`): it is part of the compaction, not something anyone said, and a reader that shows what was sent leaves its section of `text` out. |
 | `typed` | When a delivery of the message used commands (`docs/commands.md`): one entry per delivery of `text`, in order, `{"text", "commands"}` for one that used commands (what was typed, masked, and the names of the commands in the order of their first use), `null` for the others. Left out when none did; an event written before it was kept has none. |
 
 #### `agent.user_message`, `agent.message`, `agent.thought`

@@ -34,6 +34,7 @@ use crate::conventions::{Convention, Kind};
 use crate::message_checks::MessageChecks;
 use crate::programs::{ProgramChecks, program_block};
 use crate::project::{only_at_root, repository_label};
+use crate::project_removal::ProjectRemoval;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
 use crate::rules::RulesEditor;
 use crate::setup::SetupSection;
@@ -392,9 +393,8 @@ pub struct ProjectSettingsPage {
     fields: Option<Fields>,
     dialog_error: Option<SharedString>,
     saving: Option<Saving>,
-    confirming_remove: bool,
-    removing: bool,
-    removed: Option<String>,
+    /// The confirmation of its removal, which reads what the removal would do.
+    removal: Entity<ProjectRemoval>,
     narrow: bool,
     /// This project's own rules (`docs/projects.md`, "Rules").
     rules: Entity<RulesEditor>,
@@ -459,6 +459,7 @@ impl ProjectSettingsPage {
             reading.update(cx, |section, cx| section.read(cx));
         });
         let this = cx.entity().downgrade();
+        let removal = cx.new(|_| ProjectRemoval::new(shell.clone(), name.clone()));
         let more = cx.new(|cx| {
             Menu::new("project-more", "More", cx).danger(
                 "remove-project",
@@ -505,9 +506,7 @@ impl ProjectSettingsPage {
             fields: None,
             dialog_error: None,
             saving: None,
-            confirming_remove: false,
-            removing: false,
-            removed: None,
+            removal,
             narrow: false,
             rules,
             message_checks,
@@ -670,12 +669,17 @@ impl ProjectSettingsPage {
         self.forge_kind
     }
 
-    pub fn is_confirming_removal(&self) -> bool {
-        self.confirming_remove
+    pub fn is_confirming_removal(&self, cx: &App) -> bool {
+        self.removal.read(cx).is_open()
     }
 
-    pub fn removal_refused(&self) -> Option<&str> {
-        self.removed.as_deref()
+    pub fn removal_refused<'a>(&self, cx: &'a App) -> Option<&'a str> {
+        self.removal.read(cx).refused()
+    }
+
+    /// The confirmation of the project's removal.
+    pub fn removal(&self) -> &Entity<ProjectRemoval> {
+        &self.removal
     }
 
     pub fn site_field(&self) -> Option<&Entity<InputState>> {
@@ -1238,33 +1242,9 @@ impl ProjectSettingsPage {
         }
     }
 
-    /// Asks to remove the project, in a confirmation.
+    /// Asks to remove the project, in a confirmation that says what the removal would do.
     pub fn ask_removal(&mut self, cx: &mut Context<Self>) {
-        self.confirming_remove = true;
-        cx.notify();
-    }
-
-    fn remove(&mut self, cx: &mut Context<Self>) {
-        self.removing = true;
-        self.confirming_remove = false;
-        self.removed = None;
-        let command = Command::RemoveProject(self.name.clone());
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
-        cx.notify();
-    }
-
-    /// The daemon refused to forget the project, and why; a removal done closes the page.
-    pub fn remove_refused(&mut self, why: String, cx: &mut Context<Self>) {
-        self.removing = false;
-        toast(
-            Toast::failure(format!("The project {} was not removed", self.name))
-                .detail(why.clone()),
-            cx,
-        );
-        self.removed = Some(why);
-        cx.notify();
+        self.removal.update(cx, |removal, cx| removal.ask(cx));
     }
 
     fn repository_menu(&mut self, path: &str, cx: &mut Context<Self>) -> Entity<Menu> {
@@ -2147,30 +2127,6 @@ impl ProjectSettingsPage {
         }
     }
 
-    fn confirm(&self, cx: &mut Context<Self>) -> flottille_ui::Confirm {
-        let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
-        flottille_ui::Confirm::new(
-            "project-removal",
-            format!("Remove the project {}?", self.name),
-        )
-        .sentence(
-            "Flottille forgets it and its file. The folder and its repositories are not touched.",
-        )
-        .action("Remove project")
-        .open(self.confirming_remove)
-        .on_confirm(move |_, cx| {
-            this.update(cx, |this, cx| this.remove(cx)).ok();
-        })
-        .on_cancel(move |_, cx| {
-            again
-                .update(cx, |this, cx| {
-                    this.confirming_remove = false;
-                    cx.notify();
-                })
-                .ok();
-        })
-    }
-
     /// Where it was opened at, from the project page.
     pub fn revealed(&self) -> Option<&Reveal> {
         self.revealed.as_ref()
@@ -2351,7 +2307,7 @@ impl Render for ProjectSettingsPage {
                 .child(element)
         };
         let modal = self.dialog_modal(cx).into_any_element();
-        let confirm = self.confirm(cx);
+        let confirm = self.removal.clone();
         // The header and the tabs stay in place; the section under them scrolls.
         let top = div()
             .w_full()

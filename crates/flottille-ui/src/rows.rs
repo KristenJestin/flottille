@@ -744,9 +744,9 @@ impl RenderOnce for ListRow {
                         d.child(
                             div()
                                 .id(ElementId::Name(format!("{}-detail", self.id).into()))
-                                .aria_label(detail.clone())
                                 .mono(11.5)
                                 .text_color(p.faint)
+                                .aria_label(detail.clone())
                                 .child(detail)
                                 .test_support(),
                         )

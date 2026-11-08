@@ -810,6 +810,7 @@ fn start(
     phase: Phase,
     readying: Readying,
 ) -> Result<(), String> {
+    crate::projects::refuse_removing(daemon, &run.project).map_err(|refused| refused.message)?;
     let (reader, writer) = std::io::pipe().map_err(|e| format!("cannot run it: {e}"))?;
     let mut command = tokio::process::Command::new(&words[0]);
     command

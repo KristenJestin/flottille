@@ -4203,6 +4203,8 @@ fn choosing_the_other_and_a_model_starts_the_session_on_them_and_the_tree_shows_
     cx.update(|window, cx| window.click("provider-choice-opencode", cx));
     cx.update(|window, cx| window.click("model-picker", cx));
     cx.update(|window, cx| window.click("model-choice-open/small", cx));
+    // The effort picker's room opens as the model's efforts come.
+    settle(cx);
     cx.update(|window, cx| window.click("effort-picker", cx));
     cx.update(|window, cx| window.click("effort-choice-high", cx));
     type_task("Please launch a helper", cx);
@@ -4442,6 +4444,8 @@ fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_s
         assert!(window.try_find("model-choice-fake-large").is_some());
     });
     cx.update(|window, cx| window.click("model-choice-fake-large", cx));
+    // The effort picker's room opens as the model's efforts come.
+    settle(cx);
     cx.update(|window, cx| window.click("effort-picker", cx));
     cx.update(|window, cx| window.click("effort-choice-high", cx));
 
@@ -5002,7 +5006,8 @@ fn the_project_s_model_still_wins_and_is_marked(cx: &mut TestAppContext) {
     let rows = composer.read_with(cx, |c, _| c.entries(Menu::Model));
     let haiku = rows.iter().find(|e| e.id == "model-choice-haiku").unwrap();
     assert!(haiku.on);
-    assert_eq!(haiku.note.as_deref(), Some("the project's"));
+    // Haiku has no effort: its row says so, the one place it is said.
+    assert_eq!(haiku.note.as_deref(), Some("the project's · no effort"));
     let fable = rows.iter().find(|e| e.id == "model-choice-fable").unwrap();
     assert!(!fable.on);
     assert_eq!(fable.note.as_deref(), Some("default"));
@@ -8349,6 +8354,50 @@ fn in_main_slash_lists_the_commands_too(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_project_with_no_command_of_its_own_says_so_under_its_heading_only(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "login");
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the built-in command", |cx| {
+        slash_offered(&shell, cx) == ["reload-tools"]
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("slash-builtin-label").visible());
+        assert!(window.find("slash-reload-tools").visible());
+        assert!(window.find("slash-project-label").visible());
+        assert!(window.find("slash-none").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn a_project_with_a_command_shows_its_row_and_no_note(cx: &mut TestAppContext) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the commands", |cx| {
+        slash_offered(&shell, cx).len() == 3
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("slash-builtin-label").visible());
+        assert!(window.find("slash-project-label").visible());
+        assert!(window.find("slash-close").visible());
+        assert!(window.try_find("slash-none").is_none());
+    });
+}
+
+#[gpui_kit::test]
 fn an_unknown_slash_word_is_sent_as_text(cx: &mut TestAppContext) {
     let user = user_with_commands();
     let lead = start(&user, "atlas", Some("login"), "Fix the login");
@@ -9529,7 +9578,7 @@ fn a_project_is_added_from_the_window_detected_again_and_removed(cx: &mut TestAp
     settle(cx);
     cx.update(|window, cx| window.click("remove-project", cx));
     settle(cx);
-    assert!(page.read_with(cx, |p, _| p.is_confirming_removal()));
+    assert!(page.read_with(cx, |p, cx| p.is_confirming_removal(cx)));
     cx.update(|window, cx| window.click("project-removal-action", cx));
     until(&shell, cx, "the project is gone", |cx| {
         shell.read_with(cx, |s, _| {
@@ -9546,6 +9595,91 @@ fn a_project_is_added_from_the_window_detected_again_and_removed(cx: &mut TestAp
         folder.join("README.md").exists(),
         "its folder is left as it is"
     );
+}
+
+#[gpui_kit::test]
+fn the_removal_confirmation_lists_what_runs_and_the_workspaces_states_and_the_switch_discards(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let folder = project(&user, "app");
+    workspace(&user, "app", "clean");
+    workspace(&user, "app", "dirty");
+    let dirty = PathBuf::from(
+        user.call("workspace.show", json!({"project": "app", "name": "dirty"}))
+            .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(dirty.join("draft.txt"), "not committed\n").unwrap();
+    let agent = start(&user, "app", Some("clean"), "hello");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "app", cx);
+
+    cx.update(|window, cx| window.click("project-more", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-project", cx));
+    let removal = page.read_with(cx, |p, _| p.removal().clone());
+    until(&shell, cx, "what the removal does is read", |cx| {
+        removal.read_with(cx, |r, _| r.read().is_some())
+    });
+    settle(cx);
+    let label = |id: &'static str, cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.find(id).label().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    cx.update(|window, _| {
+        assert!(
+            window
+                .find(gpui_kit::ElementId::Name(
+                    format!("project-removal-session-{agent}").into()
+                ))
+                .visible()
+        );
+        assert!(window.find("project-removal-discard").visible());
+    });
+    assert_eq!(
+        label("project-removal-workspace-clean", cx),
+        "clean clean · removed"
+    );
+    assert_eq!(
+        label("project-removal-workspace-dirty", cx),
+        "dirty uncommitted changes · kept"
+    );
+
+    cx.update(|window, cx| window.click("project-removal-discard", cx));
+    settle(cx);
+    assert!(removal.read_with(cx, |r, _| r.discards()));
+    assert_eq!(
+        label("project-removal-workspace-dirty", cx),
+        "dirty uncommitted changes · removed"
+    );
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves once the line changed"
+    );
+
+    // Written after the dialog read it, as an agent still working would: never discarded.
+    let clean = PathBuf::from(
+        user.call("workspace.show", json!({"project": "app", "name": "clean"}))
+            .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(clean.join("late.txt"), "the agent's work\n").unwrap();
+    cx.update(|window, cx| window.click("project-removal-action", cx));
+    toast_said(&shell, "The project app was removed", cx);
+    assert!(!dirty.exists(), "the workspace with unsaved work went too");
+    assert!(
+        clean.join("late.txt").exists(),
+        "what appeared after the dialog read is kept"
+    );
+    assert_eq!(
+        user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"],
+        "ended"
+    );
+    assert!(folder.join("README.md").exists());
 }
 
 #[gpui_kit::test]

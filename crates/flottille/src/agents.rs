@@ -212,6 +212,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
             refuse_child(daemon, &agent, "resumes it")?;
+            crate::projects::refuse_removing(daemon, &agent.project)?;
             if !agent.state.is_final() {
                 return Err(Failure::refused(format!(
                     "agent {} has not ended: it is {}",
@@ -680,6 +681,7 @@ pub struct New {
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
 pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
+    crate::projects::refuse_removing(daemon, &project.name)?;
     let (place, folder, repositories) = match &new.workspace {
         None => {
             let repositories: Vec<_> = project
@@ -1415,6 +1417,15 @@ fn compacted_session(
     goes_on
 }
 
+/// The id of a delivery a new session is given again, marked as a replay when a compaction
+/// started it.
+fn replayed(id: String, compacted: bool) -> String {
+    match compacted {
+        true => flottille_core::prompt::replay_id(&id),
+        false => id,
+    }
+}
+
 /// `replace`, the new session sent `resume` in place of the word on why it starts again.
 fn renew(
     daemon: &Arc<Daemon>,
@@ -1480,6 +1491,8 @@ fn renew(
     if let Some((provider, native)) = replaced {
         (provider.forget_session)(&daemon.paths, &native);
     }
+    // What a compaction sends again is no news to the conversation: its ids say so.
+    let compacted = resume.is_some();
     if agent.brief.is_some() {
         let (kind, brief) = crate::tree::first_message(daemon, &agent);
         // The pictures of the user's first message are given again with it: their files stay
@@ -1494,7 +1507,7 @@ fn renew(
             daemon,
             id,
             kind,
-            Some(format!("brief-{id}-{}", agent.epoch)),
+            Some(replayed(format!("brief-{id}-{}", agent.epoch), compacted)),
             &crate::commands::Message::plain(&brief),
             approval::BETWEEN_TURNS,
             images,
@@ -1504,7 +1517,7 @@ fn renew(
         daemon,
         id,
         "resume",
-        Some(format!("resume-{id}-{}", agent.epoch)),
+        Some(replayed(format!("resume-{id}-{}", agent.epoch), compacted)),
         &resume.unwrap_or_else(|| {
             format!(
                 "A previous session of yours stopped: {reason}. You start again from your brief: \
@@ -1970,6 +1983,14 @@ impl acp::Events for Recorder {
     fn turn_started(&self, text: &str, images: &[String], typed: &Value, deliveries: &[String]) {
         *self.started_at.lock().unwrap() = Some(now_ms());
         let mut data = json!({"text": text, "deliveries": deliveries});
+        // The pictures of a brief given again are the first message's, which shows them already.
+        let again: Vec<String> = deliveries
+            .iter()
+            .filter(|id| flottille_core::prompt::is_replay(id))
+            .filter_map(|id| self.daemon.read(|store| store.delivery(id)).ok().flatten())
+            .flat_map(|delivery| delivery.images)
+            .collect();
+        let images: Vec<&String> = images.iter().filter(|name| !again.contains(name)).collect();
         if !images.is_empty() {
             data["images"] = json!(images);
         }

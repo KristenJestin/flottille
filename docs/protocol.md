@@ -194,10 +194,43 @@ Registers the folder: writes `projects/<name>.toml` with the repositories detect
 remote `origin` and the base rule `["main"]`, and answers the project. Nothing is written in the
 folder or its repositories.
 
+#### `project.removal`
+
+`{"name"}`. What removing the project would do, changing nothing (`docs/projects.md`, "Removing a
+project"): `{"name", "sessions": [{"id", "title", "parent"}], "runs": [{"run", "name", "line",
+"agent"}], "workspaces": [{"name", "branch", "state", "losses", "digest"}]}`. `sessions` are its roots not
+ended, `runs` its command runs still running, `workspaces` by name, each `state` `clean`,
+`uncommitted` (files not committed, whatever else), `unpushed` (only commits on no remote) or
+`unknown` (its state could not be read, `losses` saying why), `losses` the sentences
+`workspace.remove` would refuse with, `digest` an opaque string for the state its worktrees were
+read in (each one's commit, `git status` and the content of each file that names), empty when it
+could not be read. `not-found` when there is no such project.
+
 #### `project.remove`
 
-`{"name"}`. Removes the project's file; the result is `{"removed": "<name>"}`. The folder and its
-repositories are never touched. `not-found` when there is no such file.
+`{"name", "discard"?: [{"name", "losses", "digest"}]}`. Stops the project's agents (roots and children) and
+waits for their processes, stops its command runs, removes its workspaces that would lose
+nothing, then removes the project's file (`docs/projects.md`, "Removing a project"). `discard` is
+what the user was shown and agreed to lose: the workspaces of `project.removal`, each with its
+`losses` and its `digest` as given there (`digest` is required). A workspace that would lose work
+is removed too only when it is listed, each of its losses now is among those listed and its digest
+now is the one listed, read again right before its forced removal; otherwise it is kept, with
+`"changed": true`. A file not committed is one loss whatever it holds: the digest is what tells
+that more was written in it since.
+The result says what was done:
+
+```json
+{"removed": "shop",
+ "stopped": {"agents": [{"id", "title", "parent"}], "runs": [{"run", "name", "line", "agent"}]},
+ "workspaces": {"removed": [{"name", "branch", "branches"}], "kept": [{"name", "why": ["…"], "changed"?: true}]}}
+```
+
+`branches` as `workspace.remove` gives them. The folder and its repositories' checkouts are never
+touched. Meanwhile nothing starts in the project: `agent.run`, `agent.start`, `agent.resume`,
+`workspace.create`, `task.run` and every edit of the project's file are `refused`, "project
+<name> is being removed". `not-found`
+when there is no such project; `refused` when it is being removed already, or when a step failed
+partway, the project still known and the sentence saying what failed and what was done.
 
 #### `project.check`
 
@@ -1538,6 +1571,7 @@ when they name none:
       "models": [{"id": "sonnet", "name": "Sonnet", "efforts": ["low", "medium", "high"], "default": true},
                  {"id": "opus", "name": "Opus", "efforts": null}],
       "models_outdated": false,
+      "models_learning": false,
       "images": true
     },
     {"name": "opencode", "title": "OpenCode", "enabled": false, "ready": false,
@@ -1561,7 +1595,7 @@ sure: a version other than the one Flottille was checked against, no sign-in it 
 program standing for the provider (`docs/agents.md`, "For tests and development"). `models` is
 `null` until the daemon read them from the provider's agent (as soon as it is enabled and ready, with
 no prompt) or a session said them, and `efforts` of a model `null` until a
-session had that model; `name` is what the provider shows the model by; `default` is there, `true`,
+session had that model (Claude's say every model's: `[]` for one without); `name` is what the provider shows the model by; `default` is there, `true`,
 on the model a new session takes when none is asked, once one said it: what the provider's
 `default` stands for, else its first model listed, the model Flottille sets (`docs/agents.md`,
 "The options"). A provider's own `default`
@@ -1574,7 +1608,9 @@ description names a model and no `recommendedValue` is given). `default_effort` 
 with when none is asked, once a new session none was set on said it by its name (Claude says it
 as `default` only: never there for Claude). `models_outdated` is `true`
 when they were said by another version of the program or with other API keys set: they are listed
-as they were, but refuse no model and no effort until a session says them again. `project` is there only when one is named; its `provider` is `null` when
+as they were, but refuse no model and no effort until a session says them again.
+`models_learning` is `true` while the daemon lists the provider's models
+(`provider.models_learning`). `project` is there only when one is named; its `provider` is `null` when
 none is enabled, its `model` `null` when the project names none. `judge` is the Auto judge the user
 chose (`provider.set_judge`) or Flottille picked, its `model` `null` for the provider's default,
 `"picked": true` while the user has not seen the notice of a judge Flottille picked, or `null` when

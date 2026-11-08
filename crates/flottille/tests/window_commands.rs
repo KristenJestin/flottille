@@ -1406,7 +1406,7 @@ fn a_starting_server_shows_its_spinner_then_a_live_dot_once_ready(cx: &mut TestA
     );
     std::fs::write(workspace.join("go"), "").unwrap();
     until(&shell, cx, "the row says it is ready", |cx| {
-        label(cx, &who).is_some_and(|who| who == "task web · ready")
+        label(cx, &who).is_some_and(|who| who == "task web")
     });
     settle(cx);
 
@@ -1416,6 +1416,66 @@ fn a_starting_server_shows_its_spinner_then_a_live_dot_once_ready(cx: &mut TestA
         "the live dot"
     );
     ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn a_ready_runs_line_does_not_say_ready(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, workspace) = lead(&user);
+    let run = start(&mcp, "web");
+    std::fs::write(workspace.join("go"), "").unwrap();
+    let (shell, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the row shows its ready dot", |cx| {
+        label(cx, &format!("command-mark-{run}")).as_deref() == Some("ready")
+    });
+    settle(cx);
+
+    assert!(
+        cx.update(|window, _| window.try_find(format!("command-dot-{run}")).is_some()),
+        "the green dot says it is ready"
+    );
+    assert_eq!(
+        label(cx, &format!("command-who-{run}")).unwrap(),
+        "task web",
+        "the dot says ready: the line does not repeat it"
+    );
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn a_ready_server_on_the_project_page_does_not_say_ready_in_its_detail(cx: &mut TestAppContext) {
+    let user = user();
+    lead(&user);
+    let folder = user.path("work/app");
+    let script = folder.join("booting.sh");
+    std::fs::write(&script, SCRIPTS[7].1).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(folder.join("go"), "").unwrap();
+    let run = user
+        .call("task.run", json!({"project": "app", "name": "web"}))
+        .unwrap()["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, cx) = window(&user, 1280., cx);
+    // The runs come last on the page: tall enough to hold them.
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    shell.update_in(cx, |s, window, cx| {
+        s.open(
+            flottille_window::shell::Selection::Project("app".into()),
+            window,
+            cx,
+        )
+    });
+    until(&shell, cx, "the project page shows the run ready", |cx| {
+        label(cx, &format!("project-run-mark-{run}")).as_deref() == Some("ready")
+    });
+    settle(cx);
+
+    let detail = label(cx, &format!("command-{run}-detail")).unwrap();
+    assert!(detail.starts_with("task web · "), "{detail}");
+    assert!(!detail.contains("ready"), "the dot says it: {detail}");
+    user.call("run.stop", json!({"run": run})).unwrap();
 }
 
 #[gpui_kit::test]
@@ -1483,7 +1543,7 @@ fn the_drawer_of_a_ready_server_says_ready_and_links_its_address(cx: &mut TestAp
     let (shell, cx) = open_session(&user, &lead, cx);
     let page = session_page(&shell, cx);
     until(&shell, cx, "the row says it is ready", |cx| {
-        label(cx, &format!("command-who-{run}")).is_some_and(|who| who == "task web · ready")
+        label(cx, &format!("command-who-{run}")).is_some_and(|who| who == "task web")
     });
     settle(cx);
 

@@ -1238,7 +1238,14 @@ fn read(daemon: &Daemon, caller: &Agent, id: &str, after: Option<u64>) -> Done {
 fn conversation_line(name: &str, data: &Value) -> Option<String> {
     let text = |field: &str| cut(data[field].as_str().unwrap_or_default(), LINE_CHARS);
     Some(match name {
-        "agent.prompted" => format!("sent: {}", text("text")),
+        "agent.prompted" => {
+            // What a compaction sends the new session again was not said to it by anyone.
+            let sent = flottille_core::prompt::without_replay(data);
+            if sent.is_empty() {
+                return None;
+            }
+            format!("sent: {}", cut(&sent, LINE_CHARS))
+        }
         "agent.message" => format!("said: {}", text("text")),
         "agent.tool_call" if data["update"] != true => {
             format!("tool call: {}", text("title"))
@@ -1325,7 +1332,8 @@ pub fn stop_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Str
         None => "main".to_owned(),
     };
     let starter = match session.launched_by.as_deref() {
-        Some(id) if id == caller.id => "this agent".to_owned(),
+        Some(id) if id == caller.id && session.led => "this agent, which leads it".to_owned(),
+        Some(id) if id == caller.id => "this agent and handed to you: yours".to_owned(),
         None => "you, not by this agent".to_owned(),
         Some(id) => match daemon.read(|store| store.agent(id)) {
             Ok(Some(agent)) => format!("{}, not by this agent", named(&agent)),
@@ -1339,15 +1347,33 @@ pub fn stop_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Str
     )])
 }
 
-/// Whether an `agent_stop` ends a session rather than one of the caller's children: the user
-/// is asked, every time, in every mode (`gate::end_session`).
+/// Whether an `agent_stop` ends a session that is neither one of the caller's children nor one
+/// it leads: the user is asked, every time, in every mode (`gate::end_session`).
 pub fn ends_session(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
-    let Ok(asked) = serde_json::from_value::<StopChild>(args.clone()) else {
-        return false;
-    };
-    caller_of(daemon, grant)
-        .and_then(|caller| stopped(daemon, &caller, &asked.agent_id))
-        .is_ok_and(|stopped| matches!(stopped, Stopped::Session(_)))
+    session_ended(daemon, grant, args).is_some_and(|led| !led)
+}
+
+/// Whether an `agent_stop` ends a session the caller leads: judged as any call of its tree
+/// (`gate::end_led`).
+pub fn ends_led(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
+    session_ended(daemon, grant, args).is_some_and(|led| led)
+}
+
+/// For an `agent_stop` that ends a session, whether the caller leads it; `None` for a child or a
+/// call refused before anything is asked.
+fn session_ended(daemon: &Daemon, grant: &Grant, args: &Value) -> Option<bool> {
+    let asked = serde_json::from_value::<StopChild>(args.clone()).ok()?;
+    let caller = caller_of(daemon, grant).ok()?;
+    match stopped(daemon, &caller, &asked.agent_id).ok()? {
+        Stopped::Session(session) => Some(leads(&caller, &session)),
+        Stopped::Child(_) => None,
+    }
+}
+
+/// Whether `caller` started `session` as `led` and still leads it: the session is its own to end
+/// (`docs/tools.md`, "Ending another session"). A handed one, or one the user opened, is not.
+pub fn leads(caller: &Agent, session: &Agent) -> bool {
+    session.led && session.launched_by.as_deref() == Some(caller.id.as_str())
 }
 
 /// `agent_stop`: one of the caller's children, or, once the user allowed it, a session of its
@@ -1357,10 +1383,13 @@ fn stop(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let child = match stopped(daemon, caller, &asked.agent_id)? {
         Stopped::Child(child) => child,
         Stopped::Session(session) => {
-            let reason = format!(
-                "ended at the request of the session {}, allowed by you",
-                named(caller)
-            );
+            let reason = match leads(caller, &session) {
+                true => format!("ended by the session that led it, {}", named(caller)),
+                false => format!(
+                    "ended at the request of the session {}, allowed by you",
+                    named(caller)
+                ),
+            };
             stop_tree(daemon, &session.id, &reason);
             return Ok(Outcome::Done(format!(
                 "Ended the session {} with its tree. Its workspace stays.",
@@ -1997,6 +2026,68 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
     true
 }
 
+/// The kind of the delivery that reminds a pilot of a led session whose work is integrated.
+pub const LED_INTEGRATED: &str = "led-integrated";
+
+/// At the end of a turn of a led session or of its pilot: each led session among them that
+/// reported, is idle, and whose workspace's branch is contained in another branch reminds its
+/// pilot once to stop it and remove its workspace (`docs/tools.md`, "Following a session").
+fn remind_integrated(daemon: &Arc<Daemon>, agent: &Agent) {
+    let sessions: Vec<Agent> = daemon
+        .read(|store| store.agents())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|session| session.led && session.workspace.is_some())
+        .filter(|session| {
+            session.id == agent.id || session.launched_by.as_deref() == Some(agent.id.as_str())
+        })
+        .collect();
+    if sessions.is_empty() {
+        return;
+    }
+    let daemon = daemon.clone();
+    tokio::spawn(async move {
+        for session in sessions {
+            remind_once(&daemon, &session).await;
+        }
+    });
+}
+
+async fn remind_once(daemon: &Arc<Daemon>, session: &Agent) {
+    let (Some(pilot), Some(workspace)) = (&session.launched_by, &session.workspace) else {
+        return;
+    };
+    let id = format!("{LED_INTEGRATED}-{}", session.id);
+    if !matches!(daemon.read(|store| store.delivery(&id)), Ok(None)) {
+        return;
+    }
+    let idle = matches!(
+        daemon.read(|store| store.agent(&session.id)),
+        Ok(Some(now)) if now.state == AgentState::Idle && now.led
+    );
+    let reported = daemon
+        .read(|store| store.last_agent_events(&session.id, "agent.reported", 1))
+        .is_ok_and(|events| !events.is_empty());
+    if !idle || !reported {
+        return;
+    }
+    let Some(branch) = crate::workspaces::integrated(daemon, &session.project, workspace).await
+    else {
+        return;
+    };
+    deliveries::deliver(
+        daemon,
+        pilot,
+        LED_INTEGRATED,
+        Some(id),
+        &format!(
+            "{} reported and its branch is in {branch}: stop it and remove its workspace?",
+            named(session)
+        ),
+        approval::BETWEEN_TURNS,
+    );
+}
+
 /// What follows the end of an agent's turn, for a child: a reported child ends; one that ended
 /// its turn without reporting, with nothing to wait for, is reminded once, then its parent is
 /// told it went idle.
@@ -2009,6 +2100,7 @@ pub fn after_turn(daemon: &Arc<Daemon>, id: &str, stop_reason: &str) {
     }
     if agent.parent.is_none() {
         crate::subscriptions::turn_ended(daemon, &agent);
+        remind_integrated(daemon, &agent);
         return;
     }
     if agent.reported_at.is_some() {
@@ -2089,7 +2181,11 @@ pub fn compacted(daemon: &Arc<Daemon>, id: &str) {
             daemon,
             id,
             "brief",
-            Some(format!("brief-{id}-{}-c{}", agent.epoch, now_ms())),
+            Some(flottille_core::prompt::replay_id(&format!(
+                "brief-{id}-{}-{}",
+                agent.epoch,
+                now_ms()
+            ))),
             &format!("Your conversation was compacted. Your brief, again:\n\n{brief}"),
             approval::BETWEEN_TURNS,
         );
