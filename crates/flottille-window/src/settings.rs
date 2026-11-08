@@ -25,7 +25,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use crate::actions::Command;
+use crate::actions::{Command, SessionsSetting};
 use crate::providers::{Provider, Providers};
 use crate::rules::RulesEditor;
 use crate::shell::Shell;
@@ -203,7 +203,11 @@ pub const SESSIONS_HINT: &str = "A session with no activity for that many days i
 
 /// What the Sessions section says under its title.
 const SESSIONS_SENTENCE: &str = "Sessions pile up: one that finished its work stays open until you end it. \
-     Off, nothing is ended on its own.";
+     Off, nothing is ended on its own, and a session whose quota ran out waits for you.";
+
+/// What the switch that resumes sessions at their quota's reset does, under its label.
+pub const RESUME_HINT: &str = "A session whose quota ran out is told to continue at the reset. \
+     Each session's composer can switch it for that session alone.";
 
 /// What the developer mode's switch logs, under its label.
 pub const DEVELOPER_HINT: &str = "Each gate decision with its reasons, the judge's input and \
@@ -253,6 +257,10 @@ pub struct SettingsPage {
     sessions: Option<Option<u64>>,
     /// A choice made, until the daemon answers: what it was asked to become.
     sessions_pending: Option<Option<u64>>,
+    /// Whether a session is resumed at its quota's reset, once the daemon said it.
+    resume: Option<bool>,
+    /// The switch flipped, until the daemon answers: what it was asked to become.
+    resume_pending: Option<bool>,
     /// The window's appearance, once the daemon said it.
     appearance: Option<Appearance>,
     /// Why the daemon could not read the appearance it keeps: the tab says so and stays usable,
@@ -320,6 +328,8 @@ impl SettingsPage {
             tool_results_pending: None,
             sessions: None,
             sessions_pending: None,
+            resume: None,
+            resume_pending: None,
             appearance: None,
             appearance_unread: None,
             tab: 0,
@@ -1268,21 +1278,53 @@ impl SettingsPage {
     /// why.
     pub fn sessions_answered(
         &mut self,
-        shown: Result<Option<u64>, String>,
-        written: bool,
+        shown: Result<(Option<u64>, bool), String>,
+        written: Option<SessionsSetting>,
         cx: &mut Context<Self>,
     ) {
-        if written {
-            self.sessions_pending = None;
+        match written {
+            Some(SessionsSetting::Days) => self.sessions_pending = None,
+            Some(SessionsSetting::Resume) => self.resume_pending = None,
+            None => {}
         }
         match shown {
-            Ok(days) => self.sessions = Some(days),
-            Err(why) if written => toast(
-                Toast::failure("Ending inactive sessions was not changed").detail(why),
-                cx,
-            ),
-            Err(_) => {}
+            Ok((days, resume)) => {
+                self.sessions = Some(days);
+                self.resume = Some(resume);
+            }
+            Err(why) => match written {
+                Some(SessionsSetting::Days) => toast(
+                    Toast::failure("Ending inactive sessions was not changed").detail(why),
+                    cx,
+                ),
+                Some(SessionsSetting::Resume) => toast(
+                    Toast::failure("Resuming at the quota's reset was not changed").detail(why),
+                    cx,
+                ),
+                None => {}
+            },
         }
+        cx.notify();
+    }
+
+    /// Whether a session is resumed at its quota's reset, as the daemon last said it.
+    pub fn resume_said(&self) -> Option<bool> {
+        self.resume
+    }
+
+    fn choose_resume(&mut self, cx: &mut Context<Self>) {
+        let Some(resume) = self.resume else {
+            return;
+        };
+        if self.resume_pending.is_some() {
+            return;
+        }
+        self.resume_pending = Some(!resume);
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::ResumeSet { resume: !resume })
+            })
+            .ok();
         cx.notify();
     }
 
@@ -1351,9 +1393,33 @@ impl SettingsPage {
                 .gap(space::MD),
             )
             .test_support();
+        let resume = Switch::new(
+            "sessions-resume-switch",
+            self.resume_pending.or(self.resume).unwrap_or(false),
+            "Resume sessions when the quota resets",
+        )
+        .hint(RESUME_HINT)
+        .disabled(self.resume.is_none() || self.resume_pending.is_some())
+        .on_click(cx.listener(|this, _, _, cx| this.choose_resume(cx)));
+        let resume_card = div()
+            .id("sessions-resume")
+            .p(space::LG)
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(resume)
+            .test_support();
         Section::new("sessions", "Sessions")
             .sentence(SESSIONS_SENTENCE)
-            .child(card)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::MD)
+                    .child(card)
+                    .child(resume_card),
+            )
     }
 
     /// Whether the daemon answered about the window's appearance, with it or with why it cannot

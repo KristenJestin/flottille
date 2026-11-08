@@ -418,6 +418,8 @@ fn matters(event: &Event) -> bool {
                 | "agent.compacting"
                 | "agent.compacted"
                 | "agent.compaction_failed"
+                // A session that waits for its quota's reset says it on its row.
+                | "agent.quota"
         ),
         _ => false,
     }

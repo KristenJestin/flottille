@@ -1003,6 +1003,11 @@ impl Shell {
                     );
                 }
             }
+            Outcome::QuotaResumed { session, refused } => {
+                if let Some(reply) = self.replies.get(&session) {
+                    reply.update(cx, |reply, cx| reply.quota_answered(refused, cx));
+                }
+            }
             Outcome::ModeSet { session, refused } => {
                 if let Some(reply) = self.replies.get(&session) {
                     let mode = reply.read(cx).mode.clone();
