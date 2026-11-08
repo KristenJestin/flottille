@@ -10545,6 +10545,115 @@ fn a_task_is_added_edited_and_removed_from_the_tasks_section(cx: &mut TestAppCon
     assert!(!file().contains("tasks"), "{}", file());
 }
 
+/// Opens the "Copy to…" dialog of the task `test` of the tasks section.
+fn copy_dialog_of_test(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    until(shell, cx, "the task is listed", |cx| {
+        !tasks_listed(shell, cx).is_empty()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("task-more-test", cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.find("copy-task-test").visible()));
+    cx.update(|window, cx| window.click("copy-task-test", cx));
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn a_task_s_menu_copies_it_to_another_project_and_a_toast_names_it(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "beacon");
+    project(&user, "cedar");
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "test", "line": "cargo test", "check": true}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+    let section = tasks_section(&shell, cx);
+
+    copy_dialog_of_test(&shell, cx);
+    assert!(section.read_with(cx, |s, _| s.is_copying()));
+    cx.update(|window, _| {
+        // The other projects, not the one the task is in.
+        assert!(window.find("copy-task-to-beacon").visible());
+        assert!(window.find("copy-task-to-cedar").visible());
+        assert!(
+            window
+                .try_find("copy-task-to-atlas")
+                .is_none_or(|row| !row.visible())
+        );
+        assert!(
+            window
+                .try_find("task-copy-none-line")
+                .is_none_or(|line| !line.visible())
+        );
+    });
+
+    cx.update(|window, cx| window.click("copy-task-to-beacon", cx));
+    toast_said(&shell, "Task test copied to beacon", cx);
+    settle(cx);
+    assert!(!section.read_with(cx, |s, _| s.is_copying()));
+    let file = |name: &str| std::fs::read_to_string(user.project_file(name)).unwrap();
+    assert!(
+        file("beacon").contains("[tasks.test]"),
+        "{}",
+        file("beacon")
+    );
+    assert!(file("beacon").contains("line = \"cargo test\""));
+    assert!(file("beacon").contains("check = true"));
+    assert!(!file("cedar").contains("tasks"), "{}", file("cedar"));
+}
+
+#[gpui_kit::test]
+fn the_copy_dialog_says_once_that_there_is_no_other_project(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "test", "line": "cargo test"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+
+    copy_dialog_of_test(&shell, cx);
+    cx.update(|window, _| {
+        assert!(window.find("task-copy-none-line").visible());
+        assert!(
+            window
+                .try_find("task-copy-list")
+                .is_none_or(|list| !list.visible())
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_name_the_other_project_has_is_refused_in_a_toast(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "beacon");
+    for (name, line) in [("atlas", "cargo test"), ("beacon", "make test")] {
+        user.call(
+            "task.add",
+            json!({"project": name, "name": "test", "line": line}),
+        )
+        .unwrap();
+    }
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+    let before = std::fs::read_to_string(user.project_file("beacon")).unwrap();
+
+    copy_dialog_of_test(&shell, cx);
+    cx.update(|window, cx| window.click("copy-task-to-beacon", cx));
+    toast_said(&shell, "Task test was not copied to beacon", cx);
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("beacon")).unwrap(),
+        before
+    );
+}
+
 #[gpui_kit::test]
 fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
     use flottille_window::tasks::{AddressKind, ReadyKind};
