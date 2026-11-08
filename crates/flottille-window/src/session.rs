@@ -4041,6 +4041,11 @@ impl Row {
         }
     }
 
+    /// The head of a compaction that runs: its label, then how long it has taken.
+    pub fn compaction_head(&self, _cx: &gpui_kit::App) -> Option<String> {
+        None
+    }
+
     /// The head of a thought: what its label says, then the time it took when one is shown.
     pub fn thought_head(&self, cx: &gpui_kit::App) -> Option<String> {
         let Block::Thought { since, until, .. } = &*self.block else {
@@ -5155,6 +5160,7 @@ impl Render for Row {
                     .test_support()
                     .into_any_element()
             }
+            Block::Compacting { .. } => div().into_any_element(),
             Block::Text { .. } => {
                 let author = self.author().map(|me| {
                     let letter = me.chars().next().unwrap_or('?').to_uppercase().to_string();

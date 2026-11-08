@@ -61,6 +61,12 @@ pub enum Block {
         since: u64,
         until: Option<u64>,
     },
+    /// Flottille's compaction of the conversation, running while `until` is `None`; it becomes
+    /// the compacted mark (or the line that says it failed) in the same row when it ends.
+    Compacting {
+        since: u64,
+        until: Option<u64>,
+    },
     /// What it said.
     Text {
         text: String,
@@ -261,11 +267,12 @@ pub fn in_sight(block: &Block) -> bool {
         | Block::Message { .. }
         | Block::Relayed { .. }
         | Block::SubAgents
-        | Block::Links { .. } => true,
+        | Block::Links { .. }
+        | Block::Compacting { .. } => true,
         Block::Notice { kind, .. } => {
             matches!(
                 kind.as_str(),
-                "failed" | "ended" | "resumed" | COMPACTED_KIND
+                "failed" | "ended" | "resumed" | COMPACTED_KIND | COMPACTION_FAILED_KIND
             )
         }
         _ => false,
@@ -274,6 +281,9 @@ pub fn in_sight(block: &Block) -> bool {
 
 /// The kind of the line a compaction of the conversation is.
 pub const COMPACTED_KIND: &str = "compacted";
+
+/// The kind of the line that says a compaction of the conversation failed.
+pub const COMPACTION_FAILED_KIND: &str = "compaction failed";
 
 /// A compaction's line, then the summary Flottille's compactor wrote: `Conversation compacted ·
 /// 150k → 9k tokens`. One by the agent's own CLI has no summary to show.
@@ -1782,6 +1792,130 @@ mod tests {
             kind: COMPACTED_KIND.into(),
             text: String::new()
         }));
+    }
+
+    #[test]
+    fn a_compaction_that_starts_is_a_step_that_runs_in_sight() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(1, "agent.message", json!({"text": "Done."})));
+        let changes = c.apply(&event(
+            2,
+            "agent.compacting",
+            json!({"source": "compactor", "before": 150_000}),
+        ));
+        assert_eq!(changes, vec![Change::Added]);
+        assert_eq!(
+            c.blocks()[1],
+            Block::Compacting {
+                since: 200,
+                until: None
+            }
+        );
+        assert!(in_sight(&c.blocks()[1]), "not folded into a group of steps");
+        // Read again (a replay, a second page): one step, not two.
+        assert!(
+            c.apply(&event(
+                3,
+                "agent.compacting",
+                json!({"source": "compactor"})
+            ))
+            .is_empty()
+        );
+        assert_eq!(c.blocks().len(), 2);
+    }
+
+    #[test]
+    fn a_compaction_that_ends_folds_the_step_into_the_compacted_mark() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(
+            1,
+            "agent.compacting",
+            json!({"source": "compactor"}),
+        ));
+        let changes = c.apply(&event(
+            2,
+            "agent.compacted",
+            json!({"by": "flottille", "before": 152_400, "after": 9_100, "summary": "S"}),
+        ));
+        assert_eq!(changes, vec![Change::Changed(0)], "the same row");
+        assert_eq!(
+            c.blocks(),
+            [Block::Notice {
+                kind: COMPACTED_KIND.into(),
+                text: "Conversation compacted · 152k → 9k tokens\nS".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_compaction_by_the_cli_has_no_step_before_its_mark() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(1, "agent.compacted", json!({})));
+        assert_eq!(c.blocks().len(), 1);
+        assert!(matches!(&c.blocks()[0], Block::Notice { kind, .. } if kind == COMPACTED_KIND));
+    }
+
+    #[test]
+    fn a_compaction_that_fails_says_so_in_an_error_line() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(
+            1,
+            "agent.compacting",
+            json!({"source": "compactor"}),
+        ));
+        let changes = c.apply(&event(
+            2,
+            "agent.compaction_failed",
+            json!({"reason": "the compactor did not answer", "used": 150_000}),
+        ));
+        assert_eq!(changes, vec![Change::Changed(0)]);
+        let failed = Block::Notice {
+            kind: COMPACTION_FAILED_KIND.into(),
+            text: "The conversation was not compacted: the compactor did not answer".into(),
+        };
+        assert_eq!(c.blocks(), [failed.clone()]);
+        assert!(in_sight(&failed));
+    }
+
+    #[test]
+    fn an_agent_whose_handoff_failed_gets_one_mark_that_says_the_handoff_is_missing() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(1, "agent.compacting", json!({"source": "agent"})));
+        assert!(
+            c.apply(&event(
+                2,
+                "agent.compaction_failed",
+                json!({"reason": "the agent wrote no handoff", "source": "agent"})
+            ))
+            .is_empty(),
+            "the mark that follows says it"
+        );
+        c.apply(&event(
+            3,
+            "agent.compacted",
+            json!({"by": "flottille", "missing": true, "summary": null}),
+        ));
+        assert_eq!(c.blocks().len(), 1);
+        assert!(matches!(&c.blocks()[0], Block::Notice { kind, text }
+                if kind == COMPACTED_KIND && text.contains("handoff is missing")));
+    }
+
+    #[test]
+    fn a_step_that_runs_when_the_agent_ends_stops_running() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(
+            1,
+            "agent.compacting",
+            json!({"source": "compactor"}),
+        ));
+        c.apply(&event(2, "agent.died", json!({})));
+        assert_eq!(
+            c.blocks()[0],
+            Block::Compacting {
+                since: 100,
+                until: Some(200)
+            }
+        );
     }
 
     #[test]

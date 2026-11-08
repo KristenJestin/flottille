@@ -32,13 +32,18 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 /// A user whose agents are the fake agent, `FULL` reporting a context past the threshold once,
 /// and whose compactor answers `SUMMARY`.
 fn user(settings: &str) -> User {
+    user_with(json!([{"say": SUMMARY}]), settings)
+}
+
+/// `user`, the compactor playing `steps`.
+fn user_with(steps: Value, settings: &str) -> User {
     let user = User::with_fake_agent();
     let long = "the form posts to the API and shows its errors. ".repeat(60);
     user.fake_script(json!({"turns": [
         {"when": "FULL", "times": 1, "do": [{"say": long}, {"usage": {"used": 150_000, "size": 200_000}}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
-    user.with_compactor(json!([{"say": SUMMARY}]), settings)
+    user.with_compactor(steps, settings)
 }
 
 /// A project `app` and a root agent working in its folder: its id.
@@ -522,4 +527,164 @@ fn the_conversation_shows_one_divider_with_the_sizes_and_the_summary_folded(
     settle(cx);
     let text = label(cx, &format!("row-{at}-notice-text")).unwrap();
     assert!(text.contains("Wire the form."), "{text}");
+}
+
+/// The compactor is at work: it was given its prompt and holds until `release` is written.
+fn compactor_at_work(user: &User) {
+    eventually("the compactor at work", || {
+        !user.compactor_received().is_empty()
+    });
+}
+
+fn release(user: &User) {
+    std::fs::write(user.path("fake-compactor/release"), "").unwrap();
+}
+
+fn blocks(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<Block> {
+    page.read_with(cx, |page, cx| {
+        page.conversation().read(cx).blocks().to_vec()
+    })
+}
+
+fn step_row(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<usize> {
+    blocks(page, cx)
+        .iter()
+        .position(|b| matches!(b, Block::Compacting { .. }))
+}
+
+fn said_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> String {
+    shell.read_with(cx, |s, _| {
+        s.snapshot().session(id).unwrap().mark_said.clone()
+    })
+}
+
+#[gpui_kit::test]
+fn a_compaction_that_runs_is_a_live_step_and_the_session_says_compacting(cx: &mut TestAppContext) {
+    let user = user_with(json!([{"hold": "release"}, {"say": SUMMARY}]), "");
+    let id = start(&user, "add the login page FULL");
+    compactor_at_work(&user);
+    let (shell, cx) = window(&user, cx);
+    let page = open_session(&shell, &id, cx);
+
+    until(&shell, cx, "the step that runs", |cx| {
+        step_row(&page, cx).is_some()
+    });
+    settle(cx);
+    let at = step_row(&page, cx).unwrap();
+    assert_eq!(
+        label(cx, &format!("row-{at}-compaction")).as_deref(),
+        Some("Compacting the conversation")
+    );
+    assert!(
+        page.read_with(cx, |page, cx| page.conversation().read(cx).rows()[at]
+            .read(cx)
+            .compaction_head(cx))
+            .is_some_and(|head| head.starts_with("Compacting the conversation ")),
+        "with its elapsed time"
+    );
+
+    // The session's state says it, in the sidebar and the rail, and is no longer idle.
+    until(&shell, cx, "the session says it compacts", |cx| {
+        said_of(&shell, &id, cx) == "Compacting"
+    });
+    assert_eq!(
+        label(cx, &format!("rail-waiting-{id}")).as_deref(),
+        Some("Compacting the conversation")
+    );
+
+    // It folds into the mark once done, in the same row.
+    release(&user);
+    until(&shell, cx, "the mark", |cx| {
+        compacted_row(&page, cx).is_some()
+    });
+    settle(cx);
+    assert_eq!(step_row(&page, cx), None, "no step left running");
+    assert_eq!(compacted_row(&page, cx).map(|(row, _)| row), Some(at));
+    assert_ne!(said_of(&shell, &id, cx), "Compacting");
+    assert!(
+        !present(cx, &format!("rail-waiting-{id}")),
+        "the line folded away"
+    );
+}
+
+#[gpui_kit::test]
+fn a_message_sent_during_a_compaction_says_it_waits_for_the_compaction(cx: &mut TestAppContext) {
+    let user = user_with(json!([{"hold": "release"}, {"say": SUMMARY}]), "");
+    let id = start(&user, "add the login page FULL");
+    compactor_at_work(&user);
+    let (shell, cx) = window(&user, cx);
+    let page = open_session(&shell, &id, cx);
+    until(&shell, cx, "the step that runs", |cx| {
+        step_row(&page, cx).is_some()
+    });
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "and add the logout page"}),
+    )
+    .unwrap();
+
+    let waiting = |page: &Entity<SessionPage>, cx: &mut VisualTestContext| -> Option<String> {
+        page.read_with(cx, |page, cx| {
+            page.queued()
+                .read(cx)
+                .messages()
+                .first()
+                .map(|m| m.delivery.clone())
+        })
+    };
+    until(&shell, cx, "the message waits", |cx| {
+        waiting(&page, cx).is_some()
+    });
+    settle(cx);
+    let delivery = waiting(&page, cx).unwrap();
+    assert_eq!(
+        label(cx, &format!("queued-{delivery}-waits")).as_deref(),
+        Some("Queued · after the compaction")
+    );
+
+    release(&user);
+    until(&shell, cx, "the message is sent", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Message { text, .. } if text == "and add the logout page"))
+    });
+}
+
+#[gpui_kit::test]
+fn a_compaction_that_fails_says_so_and_the_queued_message_is_sent_without_it(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with(json!([{"hold": "release"}, {"die": 3}]), "");
+    let id = start(&user, "add the login page FULL");
+    compactor_at_work(&user);
+    let (shell, cx) = window(&user, cx);
+    let page = open_session(&shell, &id, cx);
+    until(&shell, cx, "the step that runs", |cx| {
+        step_row(&page, cx).is_some()
+    });
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "and add the logout page"}),
+    )
+    .unwrap();
+    release(&user);
+
+    until(&shell, cx, "the error line", |cx| {
+        blocks(&page, cx).iter().any(|b| {
+            matches!(b, Block::Notice { kind, text } if kind == "compaction failed"
+                && text.starts_with("The conversation was not compacted: "))
+        })
+    });
+    settle(cx);
+    assert_eq!(step_row(&page, cx), None, "the step stopped running");
+    assert_ne!(said_of(&shell, &id, cx), "Compacting");
+    until(&shell, cx, "the message is sent all the same", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Message { text, .. } if text == "and add the logout page"))
+    });
+    assert!(
+        compacted_row(&page, cx).is_none(),
+        "it was not compacted: the session went on as it was"
+    );
 }
