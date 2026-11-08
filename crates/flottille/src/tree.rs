@@ -2297,6 +2297,8 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         // Flottille's compaction of it runs (`docs/design.md` §5.8): the compactor at work, or the
         // agent writing its handoff.
         "compacting": crate::compaction::running(daemon, &agent.id),
+        // It waits for its quota's reset (`docs/design.md` §5.9): when, and whether it resumes.
+        "quota": crate::quota::shown(daemon, agent),
     })
 }
 
