@@ -1481,6 +1481,36 @@ fn a_symbolic_ref_to_the_own_branch_is_not_another_branch() {
 }
 
 #[test]
+fn two_workspaces_on_the_same_commit_removed_together_keep_one_branch() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let (_, commit) = unpushed(&fixture, "login");
+    fixture.create(json!({"name": "signup"})).unwrap();
+    fixture.settled("signup");
+    let signup = fixture.workspace("signup").join("lib");
+    fixture
+        .user
+        .git(&signup, &["reset", "--quiet", "--hard", &commit]);
+
+    std::thread::scope(|scope| {
+        let removals: Vec<_> = ["login", "signup"]
+            .into_iter()
+            .map(|name| scope.spawn(|| fixture.remove(name)))
+            .collect();
+        for removal in removals {
+            let _ = removal.join().unwrap();
+        }
+    });
+
+    let main = fixture.folder.join("lib");
+    let holding = fixture.git(
+        &main,
+        &["branch", "--contains", &commit, "--format=%(refname)"],
+    );
+    assert!(!holding.is_empty(), "no branch holds {commit} any more");
+}
+
+#[test]
 fn removal_succeeds_on_a_clean_pushed_workspace_and_leaves_git_worktree_list_clean() {
     let fixture = Fixture::new(true);
     std::fs::create_dir(fixture.folder.join("notes")).unwrap();

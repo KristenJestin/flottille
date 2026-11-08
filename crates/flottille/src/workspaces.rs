@@ -2469,6 +2469,8 @@ async fn remove_held(
 /// cannot be read keeps it. Each repository's branch as `{repository, deleted, why}`, none where
 /// it is gone already.
 async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
+    // A branch counted as integrated into another must still be there when it is deleted.
+    let _landing = daemon.landing.lock().await;
     let local = format!("refs/heads/{}", workspace.branch);
     let mut fates = Vec::new();
     let mut unsure = Vec::new();
