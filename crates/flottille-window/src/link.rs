@@ -414,6 +414,10 @@ fn matters(event: &Event) -> bool {
                 | "agent.answered"
                 // A session that removed its own workspace goes on under main.
                 | "agent.moved"
+                // The session's state says "Compacting" from the first to the last of them.
+                | "agent.compacting"
+                | "agent.compacted"
+                | "agent.compaction_failed"
         ),
         _ => false,
     }
@@ -724,6 +728,16 @@ mod tests {
         assert!(!matters(&event("delivery.queued", json!({"kind": "user"}))));
         assert!(matters(&event("approval.requested", json!({}))));
         assert!(matters(&event("agent.turn_ended", json!({}))));
+        for name in [
+            "agent.compacting",
+            "agent.compacted",
+            "agent.compaction_failed",
+        ] {
+            assert!(
+                matters(&event(name, json!({}))),
+                "{name}: the session's state"
+            );
+        }
         assert!(matters(&event("run.started", json!({}))), "the tree's icon");
         assert!(matters(&event("run.ended", json!({}))));
         assert!(
