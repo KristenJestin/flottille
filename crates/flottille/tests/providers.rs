@@ -1335,3 +1335,75 @@ fn an_unknown_model_is_refused_naming_codex_s_models() {
     assert_eq!(agents(&user).len(), 1);
     assert_eq!(agent(&user, &first)["provider"], "codex");
 }
+
+/// Claude's adapter words the `default` row "Default (recommended)" always and says the model it
+/// runs in the row's description (`buildModelConfigOption`, `session-model.js`).
+const ADAPTER_DEFAULT: &str = "Default (recommended)";
+
+fn default_row(user: &User) -> Value {
+    user.call("provider.list", Value::Null).unwrap()["providers"][0]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "default")
+        .expect("the default row is listed")
+        .clone()
+}
+
+#[test]
+fn the_default_row_is_named_by_the_model_the_adapter_says_it_runs() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({
+        "models": ["default", "opus"],
+        "model_rows": {"default": {"name": ADAPTER_DEFAULT, "description": "Opus 5.5 (1M context)"}}
+    }));
+    project(&user);
+    let started = id(&start(&user, json!({"message": "hello"})).unwrap());
+    eventually("the session", || agent(&user, &started)["state"] == "idle");
+    let row = default_row(&user);
+    assert_eq!(row["name"], "Opus 5.5 (1M context)", "{row}");
+    assert_eq!(
+        row["default"], true,
+        "it runs a model no other row does: {row}"
+    );
+}
+
+#[test]
+fn a_default_row_without_a_description_never_shows_the_word_default() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({
+        "models": ["default", "opus"],
+        "model_rows": {"default": {"name": ADAPTER_DEFAULT}, "opus": {"name": "Claude Opus 5.5"}}
+    }));
+    project(&user);
+    let started = id(&start(&user, json!({"message": "hello"})).unwrap());
+    eventually("the session", || agent(&user, &started)["state"] == "idle");
+    let row = default_row(&user);
+    let name = row["name"].as_str().unwrap().to_lowercase();
+    assert!(!name.contains("default"), "{row}");
+    assert_eq!(
+        row["name"], "Claude Opus 5.5",
+        "the model Flottille applies: {row}"
+    );
+}
+
+#[test]
+fn a_stored_default_recommended_name_is_named_again_by_the_next_session() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"models": ["default", "opus"]}));
+    project(&user);
+    let first = id(&start(&user, json!({"message": "hello"})).unwrap());
+    eventually("the session", || agent(&user, &first)["state"] == "idle");
+    assert_eq!(
+        default_row(&user)["name"],
+        "opus",
+        "the model Flottille applies, by its name"
+    );
+    user.fake_script(json!({
+        "models": ["default", "opus"],
+        "model_rows": {"default": {"name": ADAPTER_DEFAULT, "description": "Opus 5.5 (1M context)"}}
+    }));
+    let second = id(&start(&user, json!({"message": "hello"})).unwrap());
+    eventually("the session", || agent(&user, &second)["state"] == "idle");
+    assert_eq!(default_row(&user)["name"], "Opus 5.5 (1M context)");
+}
