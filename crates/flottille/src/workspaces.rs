@@ -2241,6 +2241,11 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
                     .is_ok_and(|beyond| beyond.trim().is_empty());
             }
         }
+        // Merged into, or contained in, another local branch: integrated there, not lost.
+        if !commits.is_empty() && !merged && !remotes.trim().is_empty() {
+            let own = head.branch_or(&workspace.branch);
+            merged = integrated_into(&dir, "HEAD", own).await.is_some();
+        }
         if !commits.is_empty() && !merged {
             problems.push(format!(
                 "{} has commits on {nowhere}, {on}: {}",
@@ -2484,9 +2489,13 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
             &local,
             &worktree.base.reference,
         ];
-        match git::output(&main, &in_base, Class::Read).await {
-            Ok(_) => fates.push((worktree, main, Ok("it has no commit of its own".to_owned()))),
-            Err(_) => unsure.push((worktree, main)),
+        if git::output(&main, &in_base, Class::Read).await.is_ok() {
+            fates.push((worktree, main, Ok("it has no commit of its own".to_owned())));
+        } else if let Some(other) = integrated_into(&main, &local, &workspace.branch).await {
+            let why = format!("it is integrated into {other}");
+            fates.push((worktree, main, Ok(why)));
+        } else {
+            unsure.push((worktree, main));
         }
     }
     if !unsure.is_empty() {
@@ -2566,6 +2575,57 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
         branches.push(json!({"repository": worktree.path, "deleted": deleted, "why": why}));
     }
     branches
+}
+
+/// The first local branch of the repository at `dir`, but `own`, that holds `commit`: its work is
+/// merged into, or contained in, that branch (`git merge-base --is-ancestor`).
+pub async fn integrated_into(dir: &Path, commit: &str, own: &str) -> Option<String> {
+    let branches = git::output(
+        dir,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        Class::Read,
+    )
+    .await
+    .ok()?;
+    for branch in branches.lines().filter(|b| !b.is_empty() && *b != own) {
+        let reference = format!("refs/heads/{branch}");
+        let line = [
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            commit,
+            &reference,
+        ];
+        if git::output(dir, &line, Class::Read).await.is_ok() {
+            return Some(branch.to_owned());
+        }
+    }
+    None
+}
+
+/// The branch a workspace's own work is integrated into: the first repository whose branch holds
+/// commits beyond its base and is contained in another local branch. `None` when none is, or the
+/// workspace is gone.
+pub async fn integrated(daemon: &Daemon, project: &str, name: &str) -> Option<String> {
+    let workspace = daemon.read(|store| store.workspace(project, name)).ok()??;
+    let local = format!("refs/heads/{}", workspace.branch);
+    for worktree in &workspace.repositories {
+        let dir = workspace.folder_of(&worktree.path);
+        let in_base = [
+            "merge-base",
+            "--is-ancestor",
+            "--end-of-options",
+            &local,
+            &worktree.base.commit,
+        ];
+        if git::output(&dir, &in_base, Class::Read).await.is_ok() {
+            continue;
+        }
+        if let Some(other) = integrated_into(&dir, &local, &workspace.branch).await {
+            return Some(other);
+        }
+    }
+    None
 }
 
 /// The workspace's forges, read for its branch.
