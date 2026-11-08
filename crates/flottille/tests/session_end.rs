@@ -177,7 +177,8 @@ fn an_agent_asks_to_end_a_session_it_launched_for_the_user_and_the_user_allows_i
         .unwrap()
         .to_owned();
     assert!(
-        description.contains("any session of your project") && description.contains("every time"),
+        description.contains("any other session of your project")
+            && description.contains("every time"),
         "{description}"
     );
 }
@@ -298,4 +299,126 @@ fn an_ended_session_says_who_asked_and_that_the_user_allowed_it() {
         shown(&user, &x)["state_reason"],
         format!("ended at the request of the session agent {a}, allowed by you")
     );
+}
+
+#[test]
+fn a_lead_stops_a_led_session_it_started_without_asking_the_user() {
+    for mode in ["full", "auto"] {
+        let user = user();
+        let (a, mcp) = root(&user, "app");
+        set_mode(&user, &a, mode);
+        let session = launched(&user, &mcp, "led", "Login");
+        let judged = judge_prompts(&user);
+
+        let stopped = stop(&mcp, &session);
+
+        assert!(!stopped.error, "{mode}: {}", stopped.text);
+        assert!(
+            stopped
+                .text
+                .starts_with(&format!("Ended the session \"Login\" (agent {session})")),
+            "{mode}: {}",
+            stopped.text
+        );
+        assert!(requests(&user).is_empty(), "{mode}: {:?}", requests(&user));
+        ended(&user, &session);
+        assert_eq!(
+            shown(&user, &session)["state_reason"],
+            format!("ended by the session that led it, agent {a}"),
+            "{mode}"
+        );
+        // Full lets it through; Auto has the judge decide it, as any call of the tree's.
+        let asked = judge_prompts(&user) - judged;
+        match mode {
+            "full" => assert_eq!(asked, 0, "the judge was asked in Full"),
+            _ => assert_eq!(asked, 1, "the judge was not asked in Auto"),
+        }
+        assert_eq!(shown(&user, &a)["state"], "idle");
+    }
+}
+
+#[test]
+fn an_agent_stopping_a_session_the_user_opened_is_held_for_the_user_every_time() {
+    for mode in ["full", "auto"] {
+        let user = user();
+        let (a, mcp) = root(&user, "app");
+        let (x, _) = root(&user, "app");
+        set_mode(&user, &a, mode);
+        let judged = judge_prompts(&user);
+
+        let first = held(&stop(&mcp, &x));
+        let says = requests(&user)[0]["says"].to_string();
+        assert!(
+            says.contains(&format!(
+                "End the session agent {x}, in main, started by you, not by this agent"
+            )),
+            "{mode}: {says}"
+        );
+        answer(&user, first, "approval.deny");
+        assert_eq!(shown(&user, &x)["state"], "idle", "{mode}");
+
+        let second = held(&stop(&mcp, &x));
+        assert!(second > first, "{mode}");
+        assert_eq!(judge_prompts(&user), judged, "{mode}: the judge was asked");
+    }
+}
+
+#[test]
+fn an_agent_stopping_a_handed_session_is_held_for_the_user_every_time() {
+    for mode in ["full", "auto"] {
+        let user = user();
+        let (a, mcp) = root(&user, "app");
+        set_mode(&user, &a, mode);
+        let session = launched(&user, &mcp, "handed", "Login");
+        let judged = judge_prompts(&user);
+
+        let first = held(&stop(&mcp, &session));
+        let says = requests(&user)[0]["says"].to_string();
+        assert!(
+            says.contains(&format!(
+                "End the session \\\"Login\\\" (agent {session}), in main, started by this agent \
+                 and handed to you: yours"
+            )),
+            "{mode}: {says}"
+        );
+        answer(&user, first, "approval.deny");
+        assert_eq!(shown(&user, &session)["state"], "idle", "{mode}");
+
+        let second = held(&stop(&mcp, &session));
+        assert!(second > first, "{mode}");
+        assert_eq!(judge_prompts(&user), judged, "{mode}: the judge was asked");
+    }
+}
+
+#[test]
+fn a_session_handed_while_the_judge_decides_is_not_ended() {
+    // The judge allows once the test releases it.
+    let user = User::with_fake_agent().with_judge(json!([
+        {"hold": "release"},
+        {"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}
+    ]));
+    project(&user, "app");
+    let release = user.path("fake-judge/release");
+    std::fs::write(&release, "").unwrap();
+    let (a, mcp) = root(&user, "app");
+    set_mode(&user, &a, "auto");
+    let session = launched(&user, &mcp, "led", "Login");
+    std::fs::remove_file(&release).unwrap();
+    let judged = judge_prompts(&user);
+
+    // While the judge decides, the user takes the session over.
+    let stopped = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            eventually("the judgement", || judge_prompts(&user) > judged);
+            user.call("agent.detach", json!({"agent": session}))
+                .unwrap();
+            std::fs::write(&release, "").unwrap();
+        });
+        stop(&mcp, &session)
+    });
+
+    assert!(stopped.error, "{}", stopped.text);
+    assert!(stopped.text.contains("no longer leads"), "{}", stopped.text);
+    assert_eq!(shown(&user, &session)["state"], "idle");
+    assert!(requests(&user).is_empty(), "{:?}", requests(&user));
 }

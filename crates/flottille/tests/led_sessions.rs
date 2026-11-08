@@ -802,3 +802,67 @@ fn detaching_a_session_no_agent_started_is_refused() {
         assert!(refused.contains(said), "{id}: {refused}");
     }
 }
+
+const INTEGRATED: &str = "led-integrated";
+
+#[test]
+fn a_lead_is_reminded_once_when_its_led_sessions_work_is_integrated_and_it_is_idle() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [
+            {"mcp": {"tool": "report", "arguments": {"text": "Login fixed."}}},
+            {"say": "Reported."}]}
+    ]}));
+    let (lead, mcp) = lead(&user);
+    let (answer, session) = launch(
+        &user,
+        &mcp,
+        json!({"kind": "led", "title": "Login", "brief": "Fix the login.",
+            "new_workspace": "login"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let (session, _) = session.unwrap();
+    eventually("the report's wake", || wakes(&user, &lead).len() == 1);
+    eventually("the lead's turn on the report", || turns(&user, &lead) >= 2);
+    settle();
+    // Reported, idle, but its branch holds nothing of its own yet: no reminder.
+    assert!(delivered(&user, &lead, INTEGRATED).is_empty());
+
+    let folder = std::path::PathBuf::from(shown(&user, &session)["folder"].as_str().unwrap());
+    std::fs::write(folder.join("login.rs"), "fn login() {}\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "fix the login"]);
+    let branch = user.git_output(&folder, &["branch", "--show-current"]);
+    let project = user.path("work/app");
+    user.git(
+        &project,
+        &["merge", "--quiet", "--no-ff", "-m", "merge", branch.trim()],
+    );
+    let main = user.git_output(&project, &["branch", "--show-current"]);
+    let before = turns(&user, &lead);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "Merged it."}),
+    )
+    .unwrap();
+
+    eventually("the reminder", || {
+        delivered(&user, &lead, INTEGRATED).len() == 1
+    });
+    let reminder = delivered(&user, &lead, INTEGRATED).remove(0);
+    assert_eq!(
+        reminder,
+        format!(
+            "\"Login\" (agent {session}) reported and its branch is in {}: stop it and remove \
+             its workspace?",
+            main.trim()
+        )
+    );
+    // Its turn on the reminder, then another of the user's: never a second one.
+    eventually("the lead's turns", || turns(&user, &lead) >= before + 2);
+    user.call("agent.send", json!({"agent": lead, "message": "Go on."}))
+        .unwrap();
+    eventually("the lead's next turn", || turns(&user, &lead) >= before + 3);
+    settle();
+    assert_eq!(delivered(&user, &lead, INTEGRATED).len(), 1);
+}

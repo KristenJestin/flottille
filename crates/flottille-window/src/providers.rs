@@ -66,6 +66,8 @@ pub struct Provider {
     pub models: Option<Vec<Model>>,
     /// The models were said by another version of its program: shown, but they refuse nothing.
     pub models_outdated: bool,
+    /// The daemon is listing its models now: efforts not known yet may come.
+    pub models_learning: bool,
     /// Whether its agents take images in a prompt, as the last that started said; `None` before
     /// one did.
     pub images: Option<bool>,
@@ -168,6 +170,7 @@ impl Provider {
                     .collect()
             }),
             models_outdated: entry["models_outdated"] == true,
+            models_learning: entry["models_learning"] == true,
             images: entry["images"].as_bool(),
         }
     }

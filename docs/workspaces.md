@@ -15,7 +15,7 @@ multi-repository case (`docs/reference/multi-repo-case.md`) needs.
 | `flottille workspace show <project> <name>` | Its repositories, their bases, and each step with its state; a failure with its last lines. |
 | `flottille workspace ticket <project> <name> <ticket>` | Links it to a ticket (`#123` or a Jira key), or to none with `--clear` (`docs/tickets.md`). `create` takes `--ticket` too. |
 | `flottille workspace prepare <project> <name>` | Resumes a preparation, from the step that failed. |
-| `flottille workspace remove <project> <name>` | Removes it when all its work is committed and pushed, then deletes its local branches whose work has landed, never a remote one. Never forced: only the user's answer to an agent's request discards work ("Removal"). |
+| `flottille workspace remove <project> <name>` | Removes it when all its work is committed and pushed, or integrated into another local branch, then deletes its local branches whose work has landed, never a remote one. Never forced: only the user's answer to an agent's request discards work ("Removal"). |
 
 All of them take `--json` and print what the daemon answered (`docs/protocol.md`).
 
@@ -256,8 +256,14 @@ preparation. Then nothing is touched unless:
   recorded one is still a local branch, it is checked the same way; Commits on no remote are no loss when the repository's forge says the
   branch's pull request is merged and every one of them is in the commit it merged (its head, as
   the forge gives it: GitHub's `headRefOid`, Bitbucket's source commit): a squash-merged branch
-  whose remote branch the forge deleted and a fetch pruned. A commit made after, a pull request
-  not merged, a forge that cannot be read or none declared still refuse;
+  whose remote branch the forge deleted and a fetch pruned. Commits on no remote are no loss
+  either when another local branch of the repository holds them: the branch is **integrated**,
+  merged into or contained in that branch (`git merge-base --is-ancestor HEAD <branch>`, for
+  each local branch but its own, by full ref name, and but a symbolic ref, which may point at its
+  own). Any local branch counts, even one never pushed: that branch keeps the commits. Removals
+  delete branches one at a time, so that two branches holding the same commits are never both
+  deleted, each counted as kept in the other. A commit made after, a pull request not merged, a forge that
+  cannot be read or none declared still refuse; uncommitted files refuse, integrated or not;
 - outside the worktrees made, the workspace folder holds nothing but the links Flottille made and
   folders holding nothing else (`<path> is in no worktree`): no `git status` sees a file written in
   the folder of a workspace that does not take the root repository, nor in a repository folder
@@ -274,6 +280,8 @@ and why (`docs/protocol.md`, `workspace.remove`):
 
 - it holds no commit of its own: every commit of it is in its base (`git merge-base
   --is-ancestor`), and the forge is not asked;
+- or it is contained in another local branch (`git merge-base --is-ancestor`), its work
+  integrated there: `it is integrated into <branch>`;
 - or the repository's forge says its pull request is merged (a squash merge included, whose
   commits git never finds in the base), and each of its commits is on a remote or in the commit
   the pull request merged: a commit made after the merge and never pushed keeps it.
@@ -285,8 +293,10 @@ not merged is not lost by the removal: the workspace is removed and its branch k
 
 A root agent removes a workspace the same way, with `workspace` `remove`, always held for the
 user, its card saying what would be lost (`docs/tools.md`, "The workspace"); the one it works in
-too, once its work is done ("Its own workspace", below). What would be lost refuses it unless the user's answer said to discard it: then nothing
-is checked for loss, each worktree is removed with `git worktree remove --force`, and the folder
+too, once its work is done ("Its own workspace", below). What would be lost refuses it unless the user's answer said to discard it, and the losses
+are still those of the card and the workspace's state still the one read when it was asked
+(its digest, as `project.removal` reads it, kept with the request; a file written into since changes it, and a state
+that could not be read then is never forced): then nothing is checked for loss, each worktree is removed with `git worktree remove --force`, and the folder
 with what it held. Its landed branches are then deleted as above, and the others kept, which its
 answer says. It is refused, nothing touched, while the
 workspace is in use outside the agent's tree (`docs/design.md` §5.1): an agent of another tree not

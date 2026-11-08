@@ -1222,9 +1222,9 @@ impl Shell {
                     }
                 }
             }
-            Outcome::ProjectDetected { read, .. } => {
+            Outcome::ProjectDetected { seq, read, .. } => {
                 self.add_project
-                    .update(cx, |form, cx| form.detect_answered(read, cx));
+                    .update(cx, |form, cx| form.detect_answered(seq, read, cx));
             }
             Outcome::ProjectAdded { read, .. } => {
                 let added = self

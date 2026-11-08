@@ -55,7 +55,8 @@ fn holder(daemon: &Daemon, agent: &str) -> String {
 
 /// Writes the request for a held call, or finds the one its call key already made, and answers
 /// the agent at once. `says` is what it changes, in words, for the user; `judgement` what the
-/// judge said of it, in Auto.
+/// judge said of it, in Auto; `digest`, for a workspace's removal, the workspace's state read
+/// before its card.
 #[allow(clippy::too_many_arguments)]
 pub fn ask(
     daemon: &Arc<Daemon>,
@@ -66,6 +67,7 @@ pub fn ask(
     ask: gate::Ask,
     says: Vec<String>,
     judgement: Option<Judgement>,
+    digest: Option<String>,
 ) -> (Outcome, Option<u64>) {
     let place = place_of(grant.place.workspace.as_deref());
     // A call decided slowly (the judge) may come back after its agent left the place it was
@@ -105,6 +107,7 @@ pub fn ask(
         created_at: 0,
         decided_at: None,
         place: Some(place),
+        digest,
     };
     // Two first messages of a pair at once ask the user once: the second finds the first's
     // request in the same lock that writes it.
@@ -399,12 +402,23 @@ async fn performed(
             }
         }
     }
-    // The losses the user discards are the ones they read, up to the removal itself.
+    // The losses the user discards are the ones they read, up to the removal itself, and so is
+    // the state they were read in: a workspace whose state was not read is kept.
     let discarding = match discard {
         true => match actions::approved_losses(daemon, &grant, &request.arguments, &request.says)
             .await
         {
-            Ok(losses) => Some(losses),
+            Ok(losses) => match &request.digest {
+                Some(digest) => Some((losses, digest.clone())),
+                None => {
+                    return not_executed(
+                        "the workspace's state could not be read when it was asked, so what it \
+                         would lose is not discarded; nothing was touched: call workspace remove \
+                         again for a new request."
+                            .into(),
+                    );
+                }
+            },
             Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
                 return not_executed(mcp::masked(&why, &grant.place));
             }
@@ -577,6 +591,7 @@ mod tests {
             created_at: 0,
             decided_at: None,
             place: None,
+            digest: None,
         }
     }
 

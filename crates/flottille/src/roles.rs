@@ -233,6 +233,19 @@ mod tests {
     }
 
     #[test]
+    fn the_leads_guide_says_to_stop_a_led_session_and_remove_its_workspace_once_integrated() {
+        let folder = Path::new("/work/zebra");
+        let text = instructions(role(LEAD).unwrap(), &session(folder), &[]);
+        assert!(
+            text.contains(
+                "A led session stays open after its report: once its work is integrated, stop it \
+                 (`agent_stop`) and remove its workspace (`workspace remove`)"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn an_agent_moved_to_main_is_told_it_works_there() {
         let folder = Path::new("/work/zebra-login");
         let text = instructions(role(WORKER).unwrap(), &session(folder), &[]);

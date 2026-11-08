@@ -1347,6 +1347,169 @@ fn removal_refuses_an_unpushed_commit_and_names_it() {
     assert!(lib.join("feature.rs").exists());
 }
 
+/// The workspace's commit in `lib`, never pushed, then merged into the local branch `integration`
+/// of the project's own checkout.
+fn integrated(fixture: &Fixture) -> PathBuf {
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    fixture.settled("login");
+    let lib = fixture.workspace("login").join("lib");
+    std::fs::write(lib.join("feature.rs"), "fn f() {}\n").unwrap();
+    fixture.user.git(&lib, &["add", "."]);
+    fixture
+        .user
+        .git(&lib, &["commit", "--quiet", "-m", "add the feature"]);
+    let main = fixture.folder.join("lib");
+    fixture
+        .user
+        .git(&main, &["switch", "--quiet", "-c", "integration"]);
+    fixture.user.git(
+        &main,
+        &[
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "-m",
+            "merge login",
+            "app/login",
+        ],
+    );
+    lib
+}
+
+#[test]
+fn a_workspace_whose_branch_is_in_another_branch_is_removed_without_discard_and_says_where() {
+    let fixture = Fixture::new(false);
+    integrated(&fixture);
+
+    let removed = fixture.remove("login").unwrap();
+
+    assert_eq!(removed["removed"], "login");
+    let lib = removed["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fate| fate["repository"] == "lib")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        lib,
+        json!({"repository": "lib", "deleted": true, "why": "it is integrated into integration"})
+    );
+    assert!(!fixture.workspace("login").exists());
+    let main = fixture.folder.join("lib");
+    assert!(
+        fixture
+            .git(&main, &["branch", "--list", "app/login"])
+            .is_empty()
+    );
+    assert!(main.join("feature.rs").exists());
+}
+
+#[test]
+fn a_workspace_with_uncommitted_changes_is_still_refused_even_if_integrated() {
+    let fixture = Fixture::new(false);
+    let lib = integrated(&fixture);
+    std::fs::write(lib.join("draft.txt"), "draft\n").unwrap();
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("lib/draft.txt holds work that is not committed"),
+        "{message}"
+    );
+    assert!(!message.contains("has commits on no remote"), "{message}");
+    assert!(lib.join("draft.txt").exists());
+    assert!(fixture.show("login").is_ok());
+}
+
+/// The workspace `name`, made, with a commit in `lib` never pushed: its folder in `lib` and the
+/// commit.
+fn unpushed(fixture: &Fixture, name: &str) -> (PathBuf, String) {
+    fixture.create(json!({"name": name})).unwrap();
+    fixture.settled(name);
+    let lib = fixture.workspace(name).join("lib");
+    std::fs::write(lib.join(format!("{name}.rs")), "fn f() {}\n").unwrap();
+    fixture.user.git(&lib, &["add", "."]);
+    fixture
+        .user
+        .git(&lib, &["commit", "--quiet", "-m", "add the feature"]);
+    let commit = fixture.git(&lib, &["rev-parse", "HEAD"]);
+    (lib, commit)
+}
+
+/// The removal of `login`, whose commit is on no remote and in no other branch, is refused and
+/// its branch kept.
+fn refused_and_kept(fixture: &Fixture, commit: &str) {
+    let (code, message) = fixture.remove("login").unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("lib has commits on no remote, on its branch app/login"),
+        "{message}"
+    );
+    let main = fixture.folder.join("lib");
+    assert_eq!(
+        fixture.git(&main, &["rev-parse", "refs/heads/app/login"]),
+        commit
+    );
+}
+
+#[test]
+fn a_branch_with_a_tag_of_its_name_is_not_integrated_into_itself() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let (lib, commit) = unpushed(&fixture, "login");
+    fixture.user.git(&lib, &["tag", "app/login"]);
+
+    refused_and_kept(&fixture, &commit);
+    assert!(fixture.workspace("login").exists());
+}
+
+#[test]
+fn a_symbolic_ref_to_the_own_branch_is_not_another_branch() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let (lib, commit) = unpushed(&fixture, "login");
+    fixture.user.git(
+        &lib,
+        &["symbolic-ref", "refs/heads/alias", "refs/heads/app/login"],
+    );
+
+    refused_and_kept(&fixture, &commit);
+    assert!(fixture.workspace("login").exists());
+}
+
+#[test]
+fn two_workspaces_on_the_same_commit_removed_together_keep_one_branch() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let (_, commit) = unpushed(&fixture, "login");
+    fixture.create(json!({"name": "signup"})).unwrap();
+    fixture.settled("signup");
+    let signup = fixture.workspace("signup").join("lib");
+    fixture
+        .user
+        .git(&signup, &["reset", "--quiet", "--hard", &commit]);
+
+    std::thread::scope(|scope| {
+        let removals: Vec<_> = ["login", "signup"]
+            .into_iter()
+            .map(|name| scope.spawn(|| fixture.remove(name)))
+            .collect();
+        for removal in removals {
+            let _ = removal.join().unwrap();
+        }
+    });
+
+    let main = fixture.folder.join("lib");
+    let holding = fixture.git(
+        &main,
+        &["branch", "--contains", &commit, "--format=%(refname)"],
+    );
+    assert!(!holding.is_empty(), "no branch holds {commit} any more");
+}
+
 #[test]
 fn removal_succeeds_on_a_clean_pushed_workspace_and_leaves_git_worktree_list_clean() {
     let fixture = Fixture::new(true);

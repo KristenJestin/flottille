@@ -244,6 +244,8 @@ pub enum Command {
     DetectProject {
         folder: String,
         name: Option<String>,
+        /// The form's generation: the answer carries it back.
+        seq: u64,
     },
     /// Registers a folder with the repositories shown.
     AddProject {
@@ -822,6 +824,8 @@ pub enum Outcome {
     /// What a folder would register (`project.detect`), or why it cannot be.
     ProjectDetected {
         folder: String,
+        /// The form's generation when it asked: an answer to an older one is dropped.
+        seq: u64,
         read: Result<Value, String>,
     },
     /// A folder was registered (`project.add`'s answer), or why not.
@@ -1634,7 +1638,8 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             )),
             project,
         },
-        Command::DetectProject { folder, name } => Outcome::ProjectDetected {
+        Command::DetectProject { folder, name, seq } => Outcome::ProjectDetected {
+            seq,
             read: answer(ask_alone(
                 connect,
                 "project.detect",

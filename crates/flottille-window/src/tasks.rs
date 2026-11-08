@@ -9,12 +9,14 @@ use std::time::Duration;
 use std::collections::HashMap;
 
 use flottille_ui::drawer::Closed;
+use flottille_ui::motion::PANEL;
 use flottille_ui::{
     AgentState, Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow,
     Listing, Menu, Modal, Placement, RadioChoices, Section, Select, SelectOption, StateIcon,
-    Status, Switch, Toast, Type, icon, palette, presence, space, toast,
+    Status, Switch, Toast, Type, fade, icon, palette, presence, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString,
@@ -26,7 +28,7 @@ use serde_json::{Value, json};
 use crate::actions::{Command, RunAct, RunAnswer};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
 use crate::conversation::Ending;
-use crate::project::repository_label;
+use crate::project::{only_at_root, repository_label};
 use crate::project_settings::Reveal;
 use crate::runs::{CommandList, CommandOutput, CommandPanel, CommandRow, Watch, arrange};
 use crate::session::seconds;
@@ -743,9 +745,13 @@ impl TasksSection {
                 row = row.tag(flag.tag());
             }
         }
+        // The folder is the only repository: a task "in" it runs where every task runs.
+        let alone = only_at_root(&self.repositories);
         row = row.detail(SharedString::from(match &info.repository {
-            Some(repository) => format!("in {}", repository_label(&self.project, repository)),
-            None => "in each place's folder".to_owned(),
+            Some(repository) if !alone => {
+                format!("in {}", repository_label(&self.project, repository))
+            }
+            _ => "in each place's folder".to_owned(),
         }));
         if !info.needs.is_empty() {
             row = row.below(needs_line(
@@ -779,7 +785,7 @@ impl TasksSection {
             })
     }
 
-    fn modal(&mut self, cx: &mut Context<Self>) -> Modal {
+    fn modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Modal {
         let this = cx.entity().downgrade();
         let title = match &self.editing {
             Some(Some(name)) => format!("Task {name}"),
@@ -795,6 +801,14 @@ impl TasksSection {
             return modal;
         };
         let p = palette(cx);
+        // The folder is the only repository: the task runs in the place's folder, no choice.
+        let asked = fade(
+            "task-place-asked",
+            !only_at_root(&self.repositories),
+            PANEL,
+            window,
+            cx,
+        );
         let switches = Flag::ALL.into_iter().map(|flag| {
             Switch::new(
                 ElementId::Name(format!("task-flag-{}", flag.key()).into()),
@@ -851,7 +865,6 @@ impl TasksSection {
             .child(
                 div()
                     .flex()
-                    .gap(space::MD)
                     .child(
                         div().flex_1().min_w_0().child(
                             Field::new("task-name-field", "Name", name)
@@ -859,10 +872,19 @@ impl TasksSection {
                         ),
                     )
                     .child(
-                        div().flex_1().min_w_0().child(
-                            Field::new("task-place-field", "Runs in", place)
-                                .hint("Or one repository of the place."),
-                        ),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex_grow(asked)
+                            .overflow_hidden()
+                            .ml(space::MD * asked)
+                            .opacity(asked)
+                            .when(asked > 0., |d| {
+                                d.child(
+                                    Field::new("task-place-field", "Runs in", place)
+                                        .hint("Or one repository of the place."),
+                                )
+                            }),
                     ),
             )
             .child(Field::new(
@@ -1120,7 +1142,7 @@ pub(crate) fn ready_and_url<V: 'static>(
 }
 
 impl Render for TasksSection {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         if let Some(listed) = self.listed.clone() {
             let now = cx.background_executor().now();
@@ -1144,7 +1166,7 @@ impl Render for TasksSection {
         }
         let count = self.rows.len();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
-        let modal = self.modal(cx);
+        let modal = self.modal(window, cx);
         let section = Section::new("tasks", "Tasks")
             .count(count.to_string())
             .sentence(
@@ -1543,6 +1565,8 @@ impl ProjectTasks {
             };
             let time = seconds(row.elapsed_ms(now));
             let detail = match (&row.name, row.readiness()) {
+                // The dot says it is ready.
+                (Some(task), Some("ready")) => format!("task {task} · {time}"),
                 (Some(task), Some(ready)) => format!("task {task} · {ready} · {time}"),
                 (Some(task), None) => format!("task {task} · {who} · {time}"),
                 (None, _) => format!("{who} · {time}"),

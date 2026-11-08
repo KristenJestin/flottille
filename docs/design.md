@@ -243,7 +243,9 @@ Flottille's own tools:
   approval #n, waiting on the provider), time since its last sign of activity, context use; the
   last few messages for one child, or for all with `detail: full`. `action: conversation`: a
   page of the child's conversation.
-- `agent_stop {agent_id}`: stops the child and its own tree.
+- `agent_stop {agent_id}`: stops the child and its own tree; also ends a session the caller
+  started as `led`, judged as any call of its tree, and asks the user to end any other session
+  of the project (§7.2).
 - `report {text}`: the caller is done; its report goes to its parent at once and the session ends
   (see 5.3). A root agent's report goes to the user.
 - `ask {question}`: a question, answered later as a delivery (never blocks), to whom the daemon
@@ -330,6 +332,12 @@ and that still wait, whole. It is a following, a subscription that has no end of
 `docs/tools.md`, "Following a session"). Two sessions that write to each other five times
 without the user pause it. A pilot that ends leaves its led sessions going on, handed to the
 user.
+
+A led session stays open after its report: once its work is integrated, its pilot stops it and
+removes its workspace. When a led session reported, is idle and its workspace's branch is
+contained in another branch of the repository, its pilot is reminded once, by `led-integrated`
+(`"Login" (agent …) reported and its branch is in main: stop it and remove its workspace?`),
+checked at the end of a turn of either.
 
 ### 5.3 What the parent is told
 
@@ -485,7 +493,9 @@ agent wrote is data.
    user's words nor Flottille's instructions. `agent.compacting` says it began, so that the
    window shows the compaction as a step that runs; `agent.compacted` says it is done, with
    the sizes before and after and the summary; the conversation shows it as one line,
-   `Conversation compacted · 152k → 9k tokens`, which unfolds to the summary.
+   `Conversation compacted · 152k → 9k tokens`, which unfolds to the summary. What is sent to the new session is part of the compaction:
+   the conversation, `agent show` and `session_read` never show it as messages, and a
+   message the user wrote meanwhile stays where it is (`docs/events.md`, `agent.prompted`).
 5. **A failure** changes nothing: the agent goes on in its session, `agent.compaction_failed` and
    the developer log say why, and the CLI's own compaction stays the safety net. With a compactor
    chosen, each CLI is set to compact as late as it allows (`docs/agents.md`, "Compaction").
@@ -500,8 +510,10 @@ agent wrote is data.
    not seen, for a context that did not grow since the session started or its last compaction
    failed, nor for a provider whose cache lifetime is not established (`docs/agents.md`, "The
    prompt cache's lifetime"); the Compaction tab says each provider's. Once an agent's cache
-   expired, the composer shows **Compact before sending**, ticked from the setting: unticked, the
-   message goes to the session as it is; ticked, it compacts first even with the setting off. A
+   expired, the composer's toolbar shows a **Compact** chip beside the mode, ticked from the setting
+   (its tooltip says why): unticked, the message goes to the session as it is; ticked, it
+   compacts first even with the setting off. The composer keeps its height: an option of the
+   composer is a control of its toolbar, never a block above it. A
    message from Flottille itself (a child's news, a delivery) follows the setting.
 7. **The agent's own handoff**: **Summary written by** (`summary` in `compaction.toml`) is the
    compactor (the default, all of the above) or **the agent itself**. Then, at the same moments
@@ -564,7 +576,9 @@ by `reference/multi-repo-case.md`:
 - **Copy of ignored files**: `copy` steps take globs (`.env`, `.env.*`), per repository, never
   overwrite.
 - **Removal** refuses a worktree with uncommitted files **or commits not on any remote**
-  (`git log HEAD --not --remotes`), names them, and never forces.
+  (`git log HEAD --not --remotes`), names them, and never forces. Commits contained in another
+  local branch of the repository (`git merge-base --is-ancestor`) are integrated, not lost: the
+  removal goes on, and deletes the branch saying where it is (`it is integrated into dev`).
 
 Agents are placed in a workspace or in the main checkout; what each may do there is the gate's
 (§7).
@@ -782,7 +796,9 @@ who asked:
   talk to each other").
   Ending a session that is not the agent's own child (`agent_stop`) is held for the user the same
   way, in every mode, Full included, and every time: nothing is kept (`docs/tools.md`, "Ending
-  another session").
+  another session"). The one exception is a session the agent itself started as `led`, which it
+  pilots: that one is its own to end, judged as any call in the tree's mode. A session the user
+  opened, or a `handed` one, stays the user's.
 - **A child's request is held by its parent**, as a `child-asks` delivery. The parent denies it or
   forwards it with one sentence of why (`approval_answer`); forwarding passes it to the parent's
   own parent, one level at a time, and from the root to the user, with every reason given on the

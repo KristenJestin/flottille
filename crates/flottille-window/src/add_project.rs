@@ -1,16 +1,17 @@
 //! Adding a project from the window, as `flottille project add` does: its folder (typed, or
 //! picked with the system's own dialog), the repositories the daemon detects in it shown before
 //! anything is registered, then the project's settings page, where its forges and tracker are
-//! declared.
+//! declared. The folder is detected by itself: once typing rests, or at once for a picked one.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
-use flottille_ui::{Button, Modal, Type, enter, palette, space};
+use flottille_ui::{Button, Modal, Type, enter, palette, presence, space};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
     ParentElement, PathPromptOptions, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    Subscription, Task, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use serde_json::Value;
 
@@ -18,6 +19,9 @@ use crate::actions::Command;
 use crate::commands::problem_line;
 use crate::project_settings::{field_frame, styled_input};
 use crate::shell::Shell;
+
+/// How long typing rests before the folder typed is detected.
+const DETECT_AFTER: Duration = Duration::from_millis(400);
 
 /// What the daemon would register.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,7 +48,16 @@ pub struct AddProject {
     folder: Entity<InputState>,
     name: Entity<InputState>,
     detected: Option<Detected>,
-    /// What the daemon is asked, while it answers.
+    /// What `detected` was kept after, to fold away with its text still there.
+    shown: Option<Detected>,
+    /// The folder and name the detection (answered, or on its way) is for.
+    asked: Option<(String, Option<String>)>,
+    /// Counts the changes of the folder and name; an answer to an older one is dropped.
+    generation: u64,
+    detecting: bool,
+    /// The pause before a typed folder is detected; replaced by the next change.
+    pause: Option<Task<()>>,
+    /// Adding, while the daemon answers.
     busy: Option<&'static str>,
     error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
@@ -59,12 +72,7 @@ impl AddProject {
             .into_iter()
             .map(|field| {
                 cx.subscribe_in(field, window, |this, _, event, _, cx| match event {
-                    // What was detected is for the folder and name it was asked for.
-                    InputEvent::Change => {
-                        if this.detected.take().is_some() {
-                            cx.notify();
-                        }
-                    }
+                    InputEvent::Change => this.changed(cx),
                     InputEvent::PressEnter { .. } => this.next(cx),
                     _ => {}
                 })
@@ -76,6 +84,11 @@ impl AddProject {
             folder,
             name,
             detected: None,
+            shown: None,
+            asked: None,
+            generation: 0,
+            detecting: false,
+            pause: None,
             busy: None,
             error: None,
             _subscriptions: subscriptions,
@@ -92,6 +105,11 @@ impl AddProject {
 
     pub fn detected(&self) -> Option<&Detected> {
         self.detected.as_ref()
+    }
+
+    /// How many times the folder or name changed: what an answer to a detection says it is for.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -117,29 +135,65 @@ impl AddProject {
         (folder, (!name.is_empty()).then_some(name))
     }
 
-    /// Enter or the main button: detect the repositories, then add what was detected.
+    /// The folder or the name changed: what was detected is for what it was asked, so it goes,
+    /// and the new folder is detected once typing rests.
+    fn changed(&mut self, cx: &mut Context<Self>) {
+        let typed = self.typed(cx);
+        if self.asked.as_ref() == Some(&typed) {
+            return;
+        }
+        self.generation += 1;
+        self.asked = None;
+        self.detected = None;
+        self.error = None;
+        self.detecting = false;
+        self.pause = None;
+        if !typed.0.is_empty() {
+            self.pause = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(DETECT_AFTER).await;
+                this.update(cx, |this, cx| this.detect(cx)).ok();
+            }));
+        }
+        cx.notify();
+    }
+
+    /// Asks the daemon what the folder holds, without waiting for the pause to end.
+    fn detect(&mut self, cx: &mut Context<Self>) {
+        self.pause = None;
+        let typed = self.typed(cx);
+        if typed.0.is_empty() || self.asked.as_ref() == Some(&typed) {
+            return;
+        }
+        let (folder, name) = typed.clone();
+        self.asked = Some(typed);
+        self.detecting = true;
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::DetectProject {
+                    folder,
+                    name,
+                    seq: self.generation,
+                })
+            })
+            .ok();
+        cx.notify();
+    }
+
+    /// Enter or the main button: add what was detected; Enter before it was detects at once.
     fn next(&mut self, cx: &mut Context<Self>) {
         if self.busy.is_some() {
             return;
         }
-        let (folder, name) = self.typed(cx);
-        if folder.is_empty() {
+        let Some(detected) = &self.detected else {
+            self.detect(cx);
             return;
-        }
-        let command = match &self.detected {
-            None => {
-                self.busy = Some("Detecting…");
-                Command::DetectProject { folder, name }
-            }
-            Some(detected) => {
-                self.busy = Some("Adding…");
-                Command::AddProject {
-                    folder: detected.folder.clone(),
-                    name: Some(detected.name.clone()),
-                    repositories: detected.repositories.clone(),
-                }
-            }
         };
+        let command = Command::AddProject {
+            folder: detected.folder.clone(),
+            name: Some(detected.name.clone()),
+            repositories: detected.repositories.clone(),
+        };
+        self.busy = Some("Adding…");
         self.error = None;
         self.shell
             .update(cx, |shell, _| shell.perform(command))
@@ -172,13 +226,21 @@ impl AddProject {
         let text = path.display().to_string();
         self.folder
             .update(cx, |field, cx| field.set_value(text, window, cx));
-        self.detected = None;
-        cx.notify();
+        self.changed(cx);
+        self.detect(cx);
     }
 
     /// What the daemon detected in the folder, or why it cannot be registered.
-    pub fn detect_answered(&mut self, read: Result<Value, String>, cx: &mut Context<Self>) {
-        self.busy = None;
+    pub fn detect_answered(
+        &mut self,
+        seq: u64,
+        read: Result<Value, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if seq != self.generation {
+            return;
+        }
+        self.detecting = false;
         match read {
             Ok(found) => {
                 self.detected = Some(Detected {
@@ -192,6 +254,7 @@ impl AddProject {
                         .map(str::to_owned)
                         .collect(),
                 });
+                self.shown = self.detected.clone();
             }
             Err(why) => self.error = Some(why.into()),
         }
@@ -229,7 +292,8 @@ impl Render for AddProject {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let this = cx.entity().downgrade();
-        let detected = self.detected.clone().map(|detected| {
+        // Folding away, the result still shows what it held.
+        let detected = self.shown.clone().map(|detected| {
             div()
                 .id("add-project-detected")
                 .flex()
@@ -275,16 +339,10 @@ impl Render for AddProject {
                 div().mono(11.5).text_color(p.faint).child(busy),
             )
             .into_any_element(),
-            None => Button::primary(
-                "add-project-next",
-                if self.detected.is_some() {
-                    "Add"
-                } else {
-                    "Detect"
-                },
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.next(cx)))
-            .into_any_element(),
+            None => Button::primary("add-project-next", "Add project")
+                .disabled(self.detected.is_none())
+                .on_click(cx.listener(|this, _, _, cx| this.next(cx)))
+                .into_any_element(),
         };
         Modal::new("add-project-modal", "Add a project")
             .open(self.open)
@@ -310,7 +368,27 @@ impl Render for AddProject {
                     ),
             )
             .child(field_frame("add-project-name", &self.name, cx))
-            .children(detected.map(|detected| enter("add-project-detected-enter", 0, detected)))
+            .child(
+                presence(
+                    "add-project-looking",
+                    self.detecting,
+                    div()
+                        .id("add-project-looking")
+                        .mono(11.5)
+                        .text_color(p.faint)
+                        .child("Looking…")
+                        .test_support(),
+                )
+                .gap(space::LG),
+            )
+            .child(
+                presence(
+                    "add-project-found",
+                    self.detected.is_some(),
+                    div().children(detected),
+                )
+                .gap(space::LG),
+            )
             .child(problem_line(
                 "add-project-error",
                 self.error.clone(),

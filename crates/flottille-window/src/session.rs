@@ -27,7 +27,7 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Confirm, Drawer, Field, Icon, ListRow, Listing, Menu, Modal,
-    Palette, Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Switch, Toast, Type, awaiting,
+    Palette, Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting,
     changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence,
     presence_of, section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
 };
@@ -99,8 +99,10 @@ pub fn end_sentence(count: usize) -> String {
 /// The reply field's placeholder and its send button's tooltip: the field writes to the root.
 pub const REPLY_PLACEHOLDER: &str = "Reply…";
 pub const SEND: &str = "Send";
-/// The composer's toggle while the root's prompt cache expired, and what it does.
-pub const COMPACT_BEFORE_SENDING: &str = "Compact before sending";
+/// The composer's chip while the root's prompt cache expired, and what it does (its tooltip).
+pub const COMPACT_CHIP: &str = "Compact";
+/// The room the chip takes at rest (padding and its word): how wide it is while it opens and folds.
+const COMPACT_CHIP_WIDTH: f32 = 80.;
 const COMPACT_HINT: &str = "Its prompt cache expired: a summary makes the next turn read a short history instead of the whole conversation at full price.";
 /// The composer's button that interrupts the turn that runs.
 pub const STOP: &str = "Stop the turn";
@@ -8355,24 +8357,34 @@ impl Reply {
         cx.notify();
     }
 
-    /// Compact before sending, under the field while the root's cache expired: it unfolds and
-    /// folds away with its gap.
-    fn render_compact(&self, cx: &mut Context<Self>) -> AnyElement {
-        presence(
-            "reply-compact",
+    /// Compact before sending, a chip in the toolbar while the root's cache expired: its room
+    /// opens and it fades in, folds and fades out; its fill follows the toggle. At rest it is
+    /// its natural width, and the explanation is its tooltip.
+    fn render_compact(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let shown = fade(
+            "reply-compact-shown",
             self.compact_offered,
+            PANEL,
+            window,
+            cx,
+        );
+        if !self.compact_offered && shown == 0.0 {
+            return None;
+        }
+        Some(
             div()
-                .id("reply-compact-line")
-                .pt(space::SM)
-                .px(space::XS)
+                .flex_none()
+                .opacity(shown)
+                .when(shown < 1.0, |d| {
+                    d.w(px(COMPACT_CHIP_WIDTH) * shown).overflow_hidden()
+                })
                 .child(
-                    Switch::new("reply-compact-toggle", self.compact, COMPACT_BEFORE_SENDING)
-                        .hint(COMPACT_HINT)
+                    Button::choice("reply-compact", COMPACT_CHIP, self.compact)
+                        .tooltip(COMPACT_HINT)
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_compact(cx))),
                 )
-                .test_support(),
+                .into_any_element(),
         )
-        .into_any_element()
     }
 
     fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
@@ -8660,41 +8672,54 @@ impl Reply {
                 cx.reduce_motion(),
             );
         }
-        let rows: Vec<AnyElement> = self
+        // The composer's own commands sit under their heading, the project's under theirs: the
+        // note about the project's commands belongs to the second one alone.
+        let mut builtin: Vec<AnyElement> = Vec::new();
+        let mut project: Vec<AnyElement> = Vec::new();
+        for row in self.slash_rows.rows() {
+            let (name, description) = row.value.clone();
+            let is_builtin = name == RELOAD_COMMAND;
+            let picked = name.clone();
+            let mut line = ListRow::new(
+                ElementId::Name(format!("slash-{name}").into()),
+                format!("/{name}"),
+            )
+            .line(description)
+            .selected(open && on.as_ref().is_some_and(|(on, _)| *on == name));
+            if open && !row.placement.is_gone() {
+                line = line.on_click(
+                    cx.listener(move |this, _, window, cx| this.pick(&picked, window, cx)),
+                );
+            }
+            let item = flottille_ui::Item::new(
+                ElementId::Name(format!("slash-item-{name}").into()),
+                row.placement,
+                line,
+            )
+            .gap(space::XS)
+            .into_any_element();
+            if is_builtin {
+                builtin.push(item);
+            } else {
+                project.push(item);
+            }
+        }
+        let builtin_listed = self
             .slash_rows
             .rows()
-            .map(|row| {
-                let (name, description) = row.value.clone();
-                let picked = name.clone();
-                let mut line = ListRow::new(
-                    ElementId::Name(format!("slash-{name}").into()),
-                    format!("/{name}"),
-                )
-                .line(description)
-                .selected(open && on.as_ref().is_some_and(|(on, _)| *on == name));
-                if open && !row.placement.is_gone() {
-                    line = line.on_click(
-                        cx.listener(move |this, _, window, cx| this.pick(&picked, window, cx)),
-                    );
-                }
-                flottille_ui::Item::new(
-                    ElementId::Name(format!("slash-item-{name}").into()),
-                    row.placement,
-                    line,
-                )
-                .gap(space::XS)
-                .into_any_element()
-            })
-            .collect();
-        let listed = !self.slash_rows.is_empty();
+            .any(|row| row.value.0 == RELOAD_COMMAND && !row.placement.is_gone());
+        let project_listed = self
+            .slash_rows
+            .rows()
+            .any(|row| row.value.0 != RELOAD_COMMAND && !row.placement.is_gone());
         let note = div()
             .id("slash-none")
-            .aria_label("This project has no command yet: add one in its settings.")
+            .aria_label("No command of this project yet: add one in its settings.")
             .px(space::MD)
             .py(space::SM)
             .text_size(px(12.5))
             .text_color(p.faint)
-            .child("This project has no command yet: add one in its settings.")
+            .child("No command of this project yet: add one in its settings.")
             .test_support();
         let card = div()
             .id("slash-list")
@@ -8708,8 +8733,24 @@ impl Reply {
             .flex()
             .flex_col()
             .gap(space::XS)
-            .child(presence("slash-label", listed, section_label("Commands", cx)).gap(space::XS))
-            .children(rows)
+            .child(
+                presence(
+                    "slash-builtin-label",
+                    builtin_listed,
+                    section_label("Flottille", cx),
+                )
+                .gap(space::XS),
+            )
+            .children(builtin)
+            .child(
+                presence(
+                    "slash-project-label",
+                    project_listed || none,
+                    section_label("This project", cx),
+                )
+                .gap(space::XS),
+            )
+            .children(project)
             .child(presence("slash-note", none, note).gap(space::XS))
             .test_support();
         div()
@@ -9002,7 +9043,6 @@ impl Render for Reply {
                     .test_support(),
             )
             .child(chips)
-            .child(self.render_compact(cx))
             .child(
                 div()
                     .flex()
@@ -9012,6 +9052,7 @@ impl Render for Reply {
                     .px(space::XS)
                     .child(self.options.clone())
                     .child(self.mode.clone())
+                    .children(self.render_compact(window, cx))
                     .child(Attachments::button(cx, Self::attached_of))
                     // What the root does while its turn runs, where the line above the field was.
                     .child(

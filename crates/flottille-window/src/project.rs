@@ -9,11 +9,12 @@ use std::collections::HashMap;
 
 use flottille_core::workspace::StepState;
 use flottille_ui::color::mix;
+use flottille_ui::motion::PANEL;
 use flottille_ui::{
     AgentState, Block, Button, Card, CardHead, Chip, Confirm, Field, FlatRow, FooterAction, Icon,
     Item, LINE_GAP, LabelledLine, Listing, Menu, Modal, PageHeader, Section, Skeleton, StateIcon,
-    Status, StepRow, StepTone, Toast, Type, awaiting, caption, enter, follow_theme, hoverable,
-    icon, lines_block, palette, presence, presence_of, selectable, space, toast,
+    Status, StepRow, StepTone, Toast, Type, awaiting, caption, changing, enter, fade, follow_theme,
+    hoverable, icon, lines_block, palette, presence, presence_of, selectable, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -92,6 +93,12 @@ pub fn repository_label(project: &str, path: &str) -> String {
         "." => project.to_owned(),
         path => path.to_owned(),
     }
+}
+
+/// Whether the project's folder is its only repository: then the repositories are not "one among
+/// several", and the screens that name the one a thing happens in have nothing to name.
+pub fn only_at_root(repositories: &[String]) -> bool {
+    matches!(repositories, [only] if only == ".")
 }
 
 /// A folder as the page shows it: under the home folder, from `~`.
@@ -2022,6 +2029,8 @@ impl Render for NewWorkspace {
         let repositories = {
             // A row per repository: taken or not (when there is a choice), and its base.
             let several = self.repositories.len() > 1;
+            // The folder is the only repository: there is nothing to tell it from.
+            let alone = only_at_root(&self.repositories);
             let rows: Vec<_> = self
                 .repositories
                 .clone()
@@ -2063,8 +2072,27 @@ impl Render for NewWorkspace {
                             .border_color(mix(p.field_line, p.focus_line, taken))
                             .text_color(mix(p.faint, p.text, taken))
                     });
-                    div().flex().items_start().gap(space::SM).child(chip).child(
-                        div().flex_1().min_w_0().child(presence(
+                    // The chip's width and ink follow whether it names anything.
+                    let named = fade(
+                        ElementId::Name(format!("new-workspace-take-{path}-named").into()),
+                        !alone,
+                        PANEL,
+                        window,
+                        cx,
+                    );
+                    div()
+                        .flex()
+                        .items_start()
+                        .child(
+                            div()
+                                .flex_none()
+                                .overflow_hidden()
+                                .w((px(140.) + space::SM) * named)
+                                .pr(space::SM)
+                                .opacity(named)
+                                .when(named > 0., |d| d.child(chip)),
+                        )
+                        .child(div().flex_1().min_w_0().child(presence(
                             ElementId::Name(format!("new-workspace-base-{path}-block").into()),
                             taken,
                             input_frame(
@@ -2072,8 +2100,7 @@ impl Render for NewWorkspace {
                                 &base,
                                 cx,
                             ),
-                        )),
-                    )
+                        )))
                 })
                 .collect();
             div()
@@ -2114,14 +2141,16 @@ impl Render for NewWorkspace {
                     .children(preview),
             )
             .when(!self.repositories.is_empty(), |modal| {
-                modal.child(
-                    Field::new(
-                        "new-workspace-takes",
-                        "Repositories and their bases",
-                        repositories,
-                    )
-                    .hint("The base is the project's rule when left empty."),
-                )
+                let label = if only_at_root(&self.repositories) {
+                    "Base branch"
+                } else {
+                    "Repositories and their bases"
+                };
+                modal.child(changing("new-workspace-takes-block", label, move |label| {
+                    Field::new("new-workspace-takes", label, repositories)
+                        .hint("The base is the project's rule when left empty.")
+                        .into_any_element()
+                }))
             })
             .child(
                 Field::new(

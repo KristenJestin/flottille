@@ -151,6 +151,9 @@ pub struct Daemon {
     /// Those of `preparing` held by a removal: nothing starts in them until they are gone, and a
     /// refusal says they are being removed.
     pub removing_workspaces: Mutex<HashSet<i64>>,
+    /// Held while a removal decides which branches to delete and deletes them, one removal at a
+    /// time: two removals each counting its branch as kept in the other's would delete both.
+    pub landing: tokio::sync::Mutex<()>,
     /// The projects being removed: no agent, workspace or command run starts in them until they
     /// are forgotten or the removal stopped (`projects::refuse_removing`).
     pub removing_projects: Mutex<HashSet<String>>,
@@ -224,6 +227,7 @@ impl Daemon {
             projects: Mutex::new(projects),
             preparing: Mutex::new(HashSet::new()),
             removing_workspaces: Mutex::new(HashSet::new()),
+            landing: tokio::sync::Mutex::new(()),
             removing_projects: Mutex::new(HashSet::new()),
             removing: Mutex::new(HashMap::new()),
             step_outputs: Mutex::new(HashMap::new()),

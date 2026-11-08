@@ -61,6 +61,8 @@
 //!   "fake-small"}`), as an agent that falls back to another model.
 //! - `model_efforts`: the efforts of each model that has its own (`{"fake-large": ["low"]}`), the
 //!   others having `efforts`; a model set keeps the effort when it has it, else its first.
+//! - `said_efforts`: each model's row says that model's efforts in its `_meta`
+//!   (`{"flottille": {"efforts": [...]}}`), as Flottille's Claude bridge does (false by default).
 //! - `set_wait`: milliseconds `session/set_config_option` waits before it answers (none by
 //!   default).
 //! - `turns`: a prompt plays the first turn whose `when` is in its text; a prompt matching none is
@@ -729,6 +731,9 @@ impl Agent {
                             row[key] = said.clone();
                         }
                     }
+                    if self.script["said_efforts"] == true {
+                        row["_meta"] = json!({"flottille": {"efforts": self.efforts_of(v)}});
+                    }
                 }
                 row
             };
@@ -767,8 +772,13 @@ impl Agent {
                     .cloned()
             })
             .unwrap_or_default();
-        match &self.script["model_efforts"][model.as_str()] {
-            Value::Array(_) => self.values(&self.script["model_efforts"][model.as_str()], "effort"),
+        self.efforts_of(&model)
+    }
+
+    /// The efforts of a model: its own, else `efforts`.
+    fn efforts_of(&self, model: &str) -> Vec<String> {
+        match &self.script["model_efforts"][model] {
+            Value::Array(_) => self.values(&self.script["model_efforts"][model], "effort"),
             _ => self.values(&self.script["efforts"], "effort"),
         }
     }

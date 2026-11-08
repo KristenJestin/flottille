@@ -69,6 +69,10 @@ pub struct Provider {
     /// (`docs/tools.md`, "When the tools change"). When it does not, a new build's tools are said
     /// to it in a delivery.
     pub lists_tools_again: bool,
+    /// Whether its sessions say every model's efforts, not only the current one's: a listing
+    /// then learns them all, and is made again while a model's are unknown (`docs/agents.md`,
+    /// "The models").
+    pub says_every_effort: bool,
     /// How long its prompt cache lives after a request, in seconds (`docs/agents.md`, "The prompt
     /// cache's lifetime"); none when it cannot be established, and then Flottille does not compact
     /// around its expiry.
@@ -618,7 +622,8 @@ fn known_models(daemon: &Daemon, check: &Check) -> Option<Vec<Value>> {
 }
 
 /// What a session of the provider's agent offers in its config options, kept: its models, the
-/// efforts of the model it has now, and, `fresh` (a new session none was set on), that this
+/// efforts of the model it has now and of every model whose row says its own (`[]` for one
+/// without), and, `fresh` (a new session none was set on), that this
 /// model is the default; `own_effort` (none was set), that its effort is the model's own. A
 /// `default` value that names the model it stands for is an alias: that model is the one the
 /// session has. What another version offered goes.
@@ -649,6 +654,7 @@ pub fn learn(
         current
     }
     .to_owned();
+    let said = said_efforts(model);
     let effort = find("thought_level");
     let efforts = effort.map(values).unwrap_or_default();
     let own =
@@ -688,7 +694,9 @@ pub fn learn(
             // The model an alias stands for has its own efforts once a session ran on it; the
             // alias's list only fills in until then.
             let own_list = id != current && recorded.as_array().is_some_and(|l| !l.is_empty());
-            let efforts = if now && !own_list {
+            let efforts = if let Some(said) = said.get(&id) {
+                json!(said)
+            } else if now && !own_list {
                 json!(efforts)
             } else {
                 recorded
@@ -755,6 +763,27 @@ pub(crate) fn alias_of(option: &Value) -> Option<&str> {
                 .and_then(|(_, _, description)| described_model(description.as_deref()?))
                 .map(|_| provider::OWN_CHOICE)
         })
+}
+
+/// The efforts each value of a model option says for itself in its `_meta`, as Flottille's
+/// Claude bridge does; a value that says none is not there.
+fn said_efforts(option: &Value) -> HashMap<String, Vec<String>> {
+    fn collect(values: &Value, out: &mut HashMap<String, Vec<String>>) {
+        for value in values.as_array().into_iter().flatten() {
+            match value["value"].as_str() {
+                Some(id) => {
+                    if let Some(efforts) = value["_meta"]["flottille"]["efforts"].as_array() {
+                        let efforts = efforts.iter().filter_map(Value::as_str);
+                        out.insert(id.to_owned(), efforts.map(str::to_owned).collect());
+                    }
+                }
+                None => collect(&value["options"], out),
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    collect(&option["options"], &mut out);
+    out
 }
 
 /// The values a select option offers, in order, groups flattened.
@@ -1482,6 +1511,7 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
             let last = last_models(daemon, check);
             entry["models_outdated"] = json!(last.as_ref().is_some_and(|(_, current)| !current));
             entry["models"] = json!(last.map(|(models, _)| models));
+            entry["models_learning"] = json!(crate::models::learning(check.provider.name));
             entry["images"] = json!(takes_images(daemon, check.provider.name));
             entry
         })

@@ -58,8 +58,18 @@ pub fn enabled(daemon: &Arc<Daemon>, provider: &'static Provider) {
     check(daemon);
 }
 
+/// Whether the provider's models are being listed now.
+pub fn learning(provider: &str) -> bool {
+    RUNNING
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|running| running.contains(provider))
+}
+
 /// Starts the listing of every enabled provider whose models are not read from the program and
-/// the keys there are now. Looks at files only, so that the sweep can call it: the listing itself
+/// the keys there are now, or, for one whose sessions say every model's efforts, while a model's
+/// efforts are unknown. Looks at files only, so that the sweep can call it: the listing itself
 /// runs in the background.
 pub fn check(daemon: &Arc<Daemon>) {
     if silenced() {
@@ -73,7 +83,10 @@ pub fn check(daemon: &Arc<Daemon>) {
         if !check.enabled || (check.program.is_none() && check.overridden.is_none()) {
             continue;
         }
-        if providers::last_models(daemon, &check).is_some_and(|(_, current)| current) {
+        if providers::last_models(daemon, &check).is_some_and(|(models, current)| {
+            current
+                && !(provider.says_every_effort && models.iter().any(|m| m["efforts"].is_null()))
+        }) {
             continue;
         }
         let state = format!(
@@ -97,12 +110,21 @@ pub fn check(daemon: &Arc<Daemon>) {
             tried.insert(provider.name, state);
         }
         let daemon = daemon.clone();
+        let _ = daemon.emit(
+            "provider.models_learning",
+            json!({"name": provider.name, "learning": true}),
+        );
         tokio::spawn(async move {
             let outcome = read(&daemon, provider).await;
             if let Some(running) = RUNNING.lock().unwrap().as_mut() {
                 running.remove(provider.name);
             }
             report(&daemon, provider, outcome);
+            // Whatever the outcome: the window stops waiting for the efforts.
+            let _ = daemon.emit(
+                "provider.models_learning",
+                json!({"name": provider.name, "learning": false}),
+            );
         });
     }
 }

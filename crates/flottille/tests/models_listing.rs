@@ -321,3 +321,62 @@ fn the_models_of_a_program_replaced_while_it_lists_are_not_kept_as_current() {
         ids(&claude).contains(&"new".to_owned()) && claude["models_outdated"] == false
     });
 }
+
+#[test]
+fn the_efforts_of_every_model_are_learned_once_per_provider_version_without_a_prompt() {
+    // The fake `claude`'s models: `default` and `fable` with efforts of their own, `haiku` with
+    // none. Its answer to `initialize` says them all; no session ever runs on `fable`.
+    let user = User::with_fake_claude().with_env(ASKS.0, ASKS.1);
+    eventually("the models of Claude", || {
+        ids(&listed(&user, "claude")).contains(&"haiku".to_owned())
+    });
+
+    let claude = listed(&user, "claude");
+    let efforts = |id: &str| {
+        claude["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == id)
+            .unwrap()["efforts"]
+            .clone()
+    };
+    assert_eq!(
+        efforts("default"),
+        json!(["default", "low", "medium", "high", "xhigh"])
+    );
+    assert_eq!(
+        efforts("fable"),
+        json!(["default", "low", "medium", "high", "xhigh", "max"]),
+        "a model no session ran on has its efforts: {claude}"
+    );
+    assert_eq!(
+        efforts("haiku"),
+        json!([]),
+        "a model without effort: {claude}"
+    );
+
+    // Once per version of the provider: a daemon started again lists nothing more.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    assert_eq!(listed(&user, "claude")["models_outdated"], false);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(user.claude_starts().len(), 1, "one listing");
+
+    // No model was set and nothing was prompted: only `initialize` reached `claude`.
+    let received: Vec<Value> = user
+        .claude_received()
+        .into_iter()
+        .filter_map(|entry| entry.get("received").cloned())
+        .collect();
+    let controls: Vec<&str> = received
+        .iter()
+        .filter(|m| m["type"] == "control_request")
+        .filter_map(|m| m["request"]["subtype"].as_str())
+        .collect();
+    assert_eq!(controls, ["initialize"], "{received:?}");
+    assert!(
+        !received.iter().any(|m| m["type"] == "user"),
+        "no prompt: {received:?}"
+    );
+}

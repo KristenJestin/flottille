@@ -4203,6 +4203,8 @@ fn choosing_the_other_and_a_model_starts_the_session_on_them_and_the_tree_shows_
     cx.update(|window, cx| window.click("provider-choice-opencode", cx));
     cx.update(|window, cx| window.click("model-picker", cx));
     cx.update(|window, cx| window.click("model-choice-open/small", cx));
+    // The effort picker's room opens as the model's efforts come.
+    settle(cx);
     cx.update(|window, cx| window.click("effort-picker", cx));
     cx.update(|window, cx| window.click("effort-choice-high", cx));
     type_task("Please launch a helper", cx);
@@ -4442,6 +4444,8 @@ fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_s
         assert!(window.try_find("model-choice-fake-large").is_some());
     });
     cx.update(|window, cx| window.click("model-choice-fake-large", cx));
+    // The effort picker's room opens as the model's efforts come.
+    settle(cx);
     cx.update(|window, cx| window.click("effort-picker", cx));
     cx.update(|window, cx| window.click("effort-choice-high", cx));
 
@@ -5002,7 +5006,8 @@ fn the_project_s_model_still_wins_and_is_marked(cx: &mut TestAppContext) {
     let rows = composer.read_with(cx, |c, _| c.entries(Menu::Model));
     let haiku = rows.iter().find(|e| e.id == "model-choice-haiku").unwrap();
     assert!(haiku.on);
-    assert_eq!(haiku.note.as_deref(), Some("the project's"));
+    // Haiku has no effort: its row says so, the one place it is said.
+    assert_eq!(haiku.note.as_deref(), Some("the project's · no effort"));
     let fable = rows.iter().find(|e| e.id == "model-choice-fable").unwrap();
     assert!(!fable.on);
     assert_eq!(fable.note.as_deref(), Some("default"));
@@ -8349,6 +8354,50 @@ fn in_main_slash_lists_the_commands_too(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_project_with_no_command_of_its_own_says_so_under_its_heading_only(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "login");
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the built-in command", |cx| {
+        slash_offered(&shell, cx) == ["reload-tools"]
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("slash-builtin-label").visible());
+        assert!(window.find("slash-reload-tools").visible());
+        assert!(window.find("slash-project-label").visible());
+        assert!(window.find("slash-none").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn a_project_with_a_command_shows_its_row_and_no_note(cx: &mut TestAppContext) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the commands", |cx| {
+        slash_offered(&shell, cx).len() == 3
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("slash-builtin-label").visible());
+        assert!(window.find("slash-project-label").visible());
+        assert!(window.find("slash-close").visible());
+        assert!(window.try_find("slash-none").is_none());
+    });
+}
+
+#[gpui_kit::test]
 fn an_unknown_slash_word_is_sent_as_text(cx: &mut TestAppContext) {
     let user = user_with_commands();
     let lead = start(&user, "atlas", Some("login"), "Fix the login");
@@ -9138,7 +9187,8 @@ fn every_switch_of_the_task_dialog_draws_its_label_and_its_hint(cx: &mut TestApp
             "{id}"
         );
     }
-    cx.update(|window, _| assert!(window.find("task-place").visible(), "the place is a select"));
+    // The project's folder is its only repository: the task runs in the place's folder.
+    cx.update(|window, _| assert!(window.try_find("task-place").is_none(), "no place to pick"));
 }
 
 #[gpui_kit::test]
@@ -9405,10 +9455,10 @@ fn a_dialog_opened_from_a_tab_and_closed_brings_back_the_same_tab(cx: &mut TestA
         .unwrap();
     cx.update(|window, cx| window.click("add-task", cx));
     settle(cx);
-    cx.update(|window, _| assert!(window.find("task-place").visible(), "the dialog is open"));
+    cx.update(|window, _| assert!(window.find("task-line").visible(), "the dialog is open"));
     cx.simulate_keystrokes("escape");
     settle(cx);
-    cx.update(|window, _| assert!(window.try_find("task-place").is_none(), "it is closed"));
+    cx.update(|window, _| assert!(window.try_find("task-line").is_none(), "it is closed"));
     assert_eq!(page.read_with(cx, |p, _| p.tab()), tasks);
     assert_eq!(the_section_shown(cx), ["tasks"]);
 }
@@ -9805,6 +9855,184 @@ fn the_project_at_the_root_of_the_picked_folder_is_named_after_its_folder(cx: &m
         Some("shop"),
         "the window names it after its folder"
     );
+}
+
+/// A throwaway repository with one commit, at `sub` of the user's folder.
+fn repository_at(user: &User, sub: &str) -> PathBuf {
+    let folder = user.path(sub);
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "start\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    folder
+}
+
+/// The window with "Add a project" open on its folder field, and the form.
+fn add_project_open<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    Entity<flottille_window::add_project::AddProject>,
+    &'a mut VisualTestContext,
+) {
+    let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the window is read", |cx| {
+        cx.update(|window, _| window.try_find("add-first-project").is_some())
+    });
+    cx.update(|window, cx| window.click("add-first-project", cx));
+    settle(cx);
+    let form = shell.read_with(cx, |s, _| s.add_project_form().clone());
+    assert!(form.read_with(cx, |f, _| f.is_open()));
+    (shell, form, cx)
+}
+
+#[gpui_kit::test]
+fn typing_a_folder_and_pausing_shows_what_it_holds_without_a_click(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = repository_at(&user, "work/beta");
+    let (shell, form, cx) = add_project_open(&user, cx);
+
+    cx.simulate_input(folder.to_str().unwrap());
+    assert!(
+        form.read_with(cx, |f, _| f.detected().is_none()),
+        "nothing is asked while the typing goes on"
+    );
+    until_time_passes(&shell, cx, "the folder is detected by itself", |cx| {
+        form.read_with(cx, |f, _| f.detected().is_some())
+    });
+    settle(cx);
+
+    let detected = form.read_with(cx, |f, _| f.detected().cloned().unwrap());
+    assert_eq!(detected.name, "beta");
+    assert_eq!(
+        text_of("add-project-repository-0", cx).as_deref(),
+        Some("beta"),
+        "what it holds is shown under the field"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("add-project-looking").is_none()),
+        "the busy line is gone once it answered"
+    );
+    assert!(
+        user.call("project.list", json!({})).unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "detecting registers nothing"
+    );
+}
+
+#[gpui_kit::test]
+fn a_folder_changed_again_before_the_answer_drops_the_old_answer(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = repository_at(&user, "work/beta");
+    let (shell, form, cx) = add_project_open(&user, cx);
+
+    cx.simulate_input(folder.to_str().unwrap());
+    until_time_passes(&shell, cx, "the first folder is detected", |cx| {
+        form.read_with(cx, |f, _| f.detected().is_some())
+    });
+    let (asked, answer) = form.read_with(cx, |f, _| {
+        let found = f.detected().cloned().unwrap();
+        (
+            f.generation(),
+            json!({"name": found.name, "folder": found.folder, "repositories": found.repositories}),
+        )
+    });
+
+    // The path changes again; the answer to the first one is still on its way.
+    cx.simulate_input("-gone");
+    assert!(
+        form.read_with(cx, |f, _| f.detected().is_none()),
+        "what was detected is for the path it was asked for"
+    );
+    form.update(cx, |f, cx| f.detect_answered(asked, Ok(answer), cx));
+    assert!(
+        form.read_with(cx, |f, _| f.detected().is_none()),
+        "the old answer is dropped"
+    );
+
+    until_time_passes(&shell, cx, "the newer path is answered", |cx| {
+        form.read_with(cx, |f, _| f.error().is_some())
+    });
+    assert!(form.read_with(cx, |f, _| f.detected().is_none()));
+}
+
+#[gpui_kit::test]
+fn browse_detects_the_picked_folder_at_once(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = repository_at(&user, "work/beta");
+    let (shell, form, cx) = add_project_open(&user, cx);
+
+    // `until` lets no time pass on the window's clock: only a detection asked for at once
+    // answers in it.
+    cx.update(|window, cx| {
+        form.update(cx, |f, cx| f.set_folder(folder.clone(), window, cx));
+    });
+    until(
+        &shell,
+        cx,
+        "the picked folder is detected without a pause",
+        |cx| form.read_with(cx, |f, _| f.detected().is_some()),
+    );
+    assert_eq!(
+        form.read_with(cx, |f, _| f.detected().unwrap().name.clone()),
+        "beta"
+    );
+}
+
+#[gpui_kit::test]
+fn add_project_is_disabled_until_a_usable_result(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = repository_at(&user, "work/beta");
+    let (shell, form, cx) = add_project_open(&user, cx);
+    let added = |user: &User| {
+        user.call("project.list", json!({})).unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(
+        text_of("add-project-next", cx).as_deref(),
+        Some("Add project")
+    );
+
+    // Nothing typed, then typed but not yet answered: a click does nothing.
+    cx.update(|window, cx| window.click("add-project-next", cx));
+    cx.simulate_input(user.path("work/missing").to_str().unwrap());
+    cx.update(|window, cx| window.click("add-project-next", cx));
+    for _ in 0..40 {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(added(&user), 0);
+    assert!(
+        form.read_with(cx, |f, _| f.detected().is_none() && f.error().is_none()),
+        "the disabled button asks nothing either: only the pause does"
+    );
+
+    // A folder that cannot be a project: its reason is shown and the button stays disabled.
+    until_time_passes(&shell, cx, "the missing folder is refused", |cx| {
+        form.read_with(cx, |f, _| f.error().is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("add-project-next", cx));
+    settle(cx);
+    assert_eq!(added(&user), 0);
+
+    // A usable folder enables it.
+    cx.update(|window, cx| {
+        form.update(cx, |f, cx| f.set_folder(folder.clone(), window, cx));
+    });
+    until(&shell, cx, "the folder is detected", |cx| {
+        form.read_with(cx, |f, _| f.detected().is_some())
+    });
+    settle(cx);
+    assert!(form.read_with(cx, |f, _| f.error().is_none()));
+    cx.update(|window, cx| window.click("add-project-next", cx));
+    until(&shell, cx, "the project is added", |_| added(&user) == 1);
 }
 
 #[gpui_kit::test]
