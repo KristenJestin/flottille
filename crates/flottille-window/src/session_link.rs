@@ -790,6 +790,13 @@ impl Link {
             {
                 stale.mark(false, false, true, false);
             }
+            // A task the user ran in the project may be one of this place's, which the rail lists.
+            if name.starts_with("run.")
+                && data["agent"].is_null()
+                && data["project"] == self.place.project.as_str()
+            {
+                stale.mark(false, false, false, true);
+            }
             // A leave names two sessions, and goes with the end of either, the other one too.
             let root = self.root.as_str();
             if (name.starts_with("leave.") && (data["writer"] == root || data["session"] == root))

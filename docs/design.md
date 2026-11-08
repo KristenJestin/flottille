@@ -938,7 +938,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   (the program's own page, and a command to copy where one fits most systems) or the command to
   sign in, with a Check again (`forges.md`; Flottille installs nothing), its Skills (a path picked in the project folder, or a text;
   added, edited, removed), its Commands (added from a list of the templates and a blank one,
-  edited, removed), its Tasks (a line, where it runs and its flags), its Setup (steps added,
+  edited, removed), its Tasks (a line, where it runs and its flags; a task's "⋯" holds Run, which runs it in the
+  project folder, beside Edit and Remove), its Setup (steps added,
   edited, removed and reordered, each with its kind, where it is done and its time limit), then
   its Rules (the global rules above, read-only and folded, with a link to edit them; a switch,
   "Use only this project's rules"; the project's text editor, Reset to default, and a line saying
@@ -1029,12 +1030,16 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   conversation read-only;
 - the runs of the agents (`docs/tools.md`, "Tasks and runs"): the rail's **Runs** section lists
   the **task** runs of the agent shown (the root by default, the child once the user opens it from
-  the Agents list; a run belongs to the agent that started it) (it is not called "Commands", which
+  the Agents list; a run belongs to the agent that started it), and the tasks the user ran in the
+  session's place, whichever agent is shown (it is not called "Commands", which
   are the project's `/name` instructions), running first, each with its line, who started it (the
   agent, and the task), how long, its last output line and Stop, then the last five that ended,
   greyed, folded under `N ended` (unfolded by a click, as the Agents' `N ended`), with how they
   ended. A one-off line (`run {"line": …}`) is not listed, running or ended: its card in the
-  conversation is where it is seen, and the section folds away when there is no task run. A child
+  conversation is where it is seen, and the section folds away when there is no task run and the
+  project has no task. Its title holds **Run a task**, which opens the list of the project's tasks;
+  picking one runs it as the user, in the session's workspace (or the project folder), without the
+  gate (`task.run`), and its row unfolds into the section. A child
   with task runs still going says so on its row in the Agents list (`2 runs`), and a click opens
   that child with its Runs section; a click on a run opens its drawer (the same on the project
   page, which lists only the tasks the user ran there): its command, its
