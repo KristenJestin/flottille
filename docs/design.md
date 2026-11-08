@@ -240,7 +240,9 @@ Flottille's own tools:
   approval #n, waiting on the provider), time since its last sign of activity, context use; the
   last few messages for one child, or for all with `detail: full`. `action: conversation`: a
   page of the child's conversation.
-- `agent_stop {agent_id}`: stops the child and its own tree.
+- `agent_stop {agent_id}`: stops the child and its own tree; also ends a session the caller
+  started as `led`, judged as any call of its tree, and asks the user to end any other session
+  of the project (§7.2).
 - `report {text}`: the caller is done; its report goes to its parent at once and the session ends
   (see 5.3). A root agent's report goes to the user.
 - `ask {question}`: a question, answered later as a delivery (never blocks), to whom the daemon
@@ -327,6 +329,12 @@ and that still wait, whole. It is a following, a subscription that has no end of
 `docs/tools.md`, "Following a session"). Two sessions that write to each other five times
 without the user pause it. A pilot that ends leaves its led sessions going on, handed to the
 user.
+
+A led session stays open after its report: once its work is integrated, its pilot stops it and
+removes its workspace. When a led session reported, is idle and its workspace's branch is
+contained in another branch of the repository, its pilot is reminded once, by `led-integrated`
+(`"Login" (agent …) reported and its branch is in main: stop it and remove its workspace?`),
+checked at the end of a turn of either.
 
 ### 5.3 What the parent is told
 
@@ -560,7 +568,9 @@ by `reference/multi-repo-case.md`:
 - **Copy of ignored files**: `copy` steps take globs (`.env`, `.env.*`), per repository, never
   overwrite.
 - **Removal** refuses a worktree with uncommitted files **or commits not on any remote**
-  (`git log HEAD --not --remotes`), names them, and never forces.
+  (`git log HEAD --not --remotes`), names them, and never forces. Commits contained in another
+  local branch of the repository (`git merge-base --is-ancestor`) are integrated, not lost: the
+  removal goes on, and deletes the branch saying where it is (`it is integrated into dev`).
 
 Agents are placed in a workspace or in the main checkout; what each may do there is the gate's
 (§7).
@@ -778,7 +788,9 @@ who asked:
   talk to each other").
   Ending a session that is not the agent's own child (`agent_stop`) is held for the user the same
   way, in every mode, Full included, and every time: nothing is kept (`docs/tools.md`, "Ending
-  another session").
+  another session"). The one exception is a session the agent itself started as `led`, which it
+  pilots: that one is its own to end, judged as any call in the tree's mode. A session the user
+  opened, or a `handed` one, stays the user's.
 - **A child's request is held by its parent**, as a `child-asks` delivery. The parent denies it or
   forwards it with one sentence of why (`approval_answer`); forwarding passes it to the parent's
   own parent, one level at a time, and from the root to the user, with every reason given on the
