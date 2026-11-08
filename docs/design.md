@@ -265,8 +265,8 @@ The tool list of a session is its role's, and changes only when the role's does 
 `reference/hemera.md` §7): a project that declares or drops a forge or a tracker, a new version.
 A running session is then told (`notifications/tools/list_changed`) and served the new list, or
 said to run an older one until a restart (`docs/tools.md`, "When the tools change"). It depends
-on what the agent can do: every agent gets `ask`, a root `session_send`, `session_read`, `session_title`, `skills`,
-`commands`, `setup` and `project`; a child, whatever its role, gets no `agent_*` tools
+on what the agent can do: every agent gets `ask`, a root `session_send`, `session_read`,
+`session_title`, `skills`, `commands`, `setup` and `project`; a child, whatever its role, gets no `agent_*` tools
 and no `approval_answer`. A root lead has 27 tools, a child 14; one more each when the
 project's repositories declare a forge (`forge`), one more when it declares a tracker
 (`tickets`), whatever the place (`reference/mcp.md` §4).
