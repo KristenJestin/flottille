@@ -151,6 +151,9 @@ pub struct Daemon {
     /// Those of `preparing` held by a removal: nothing starts in them until they are gone, and a
     /// refusal says they are being removed.
     pub removing_workspaces: Mutex<HashSet<i64>>,
+    /// The projects being removed: no agent, workspace or command run starts in them until they
+    /// are forgotten or the removal stopped (`projects::refuse_removing`).
+    pub removing_projects: Mutex<HashSet<String>>,
     /// The agents removing their own workspace, with its name and how many removals of it are
     /// under way: meanwhile they start nothing in it (`workspaces::being_removed`).
     pub removing: Mutex<HashMap<String, (String, usize)>>,
@@ -221,6 +224,7 @@ impl Daemon {
             projects: Mutex::new(projects),
             preparing: Mutex::new(HashSet::new()),
             removing_workspaces: Mutex::new(HashSet::new()),
+            removing_projects: Mutex::new(HashSet::new()),
             removing: Mutex::new(HashMap::new()),
             step_outputs: Mutex::new(HashMap::new()),
             agents: Live::default(),
@@ -623,6 +627,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         .any(|prefix| request.method.starts_with(prefix))
             || [
                 "project.show",
+                "project.remove",
+                "project.removal",
                 "project.repositories",
                 "project.add_repository",
                 "project.remove_repository",
@@ -654,6 +660,10 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     sweep::call(daemon, &request.method, request.params).await
                 } else if request.method == "project.show" {
                     projects::show(daemon, request.params).await
+                } else if request.method == "project.remove" {
+                    projects::remove(daemon, request.params).await
+                } else if request.method == "project.removal" {
+                    projects::removal(daemon, request.params).await
                 } else if request.method == "project.repositories" {
                     projects::repositories(daemon, request.params).await
                 } else if request.method == "project.add_repository" {

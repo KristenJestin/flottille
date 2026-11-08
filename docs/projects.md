@@ -4,7 +4,7 @@ A project is a folder registered with Flottille. Flottille keeps its configurati
 file per project, `$XDG_CONFIG_HOME/flottille/projects/<name>.toml` (`~/.config/flottille/projects/`
 by default). The file is the user's to edit; the daemon is the only program that writes it.
 **Nothing is ever written in the project's folder or its repositories**, and removing a project
-removes that file only.
+never touches them: it removes only what Flottille made for it ("Removing a project").
 
 The daemon validates a file whenever it reads it and refuses one it cannot use with its file and
 its key, for example `projects/app.toml: repositories[2].depends_on: unknown repository "x"`.
@@ -17,7 +17,7 @@ Unknown keys are refused too, so a typo is never silently ignored.
 | `flottille project add <folder> [--name <name>] [--yes]` | Detects the repositories, shows them, asks for a yes on the standard input (`--yes` skips the question; no answer at all is a refusal) and registers the folder. |
 | `flottille project list` | The projects. Fails, naming the file and the key, when a file cannot be used. |
 | `flottille project show <name>` | One project's configuration, every default filled in. |
-| `flottille project remove <name>` | Forgets the project, never its folder. |
+| `flottille project remove <name> [--discard]` | Stops the project's agents and command runs, removes its workspaces and forgets it, never its folder ("Removing a project"). A workspace holding unsaved work is kept unless `--discard`. |
 | `flottille project check <name>` | Detects the repositories again; fails when they differ from the configuration. |
 
 The project page lists the project's repositories (`project.repositories`): each with the branch
@@ -80,6 +80,38 @@ project"): a folder, typed or picked, the repositories detected in it shown befo
 registered, then the new project's Settings, where it can be checked again or removed.
 
 All of them take `--json` and print what the daemon answered (`docs/protocol.md`).
+
+## Removing a project
+
+Removing a project cleans up what Flottille made for it and never loses the user's work silently
+(`project.remove`). In this order:
+
+1. every agent of the project is stopped, roots and children, as Stop stops a session, and the
+   daemon waits for their processes to be gone (15 seconds at most);
+2. every command run of the project still running is stopped, the user's tasks as the agents';
+3. each workspace is removed as `workspace.remove` removes it (its worktrees, then its local
+   branches whose work has landed), when it would lose nothing. One holding files not committed or
+   commits on no remote is **kept** on disk with its branch, and the result says which and why;
+   with `discard` (the CLI's `--discard`, the window's "Also remove workspaces with unsaved work")
+   it is removed too, its work lost, as long as what it would lose is what was checked. A
+   workspace whose state cannot be read is kept;
+4. the project's file is removed and `project.removed` is emitted.
+
+The project is marked from the start: meanwhile no agent, workspace or command run starts in it,
+each refused with "project <name> is being removed". The folder and the checkouts of its
+repositories are never touched: only the worktrees and the branches Flottille made.
+
+A failure partway (an agent still running after the wait, a workspace git could not remove)
+stops there and leaves the project known; the refusal says what failed and what was done
+already, and asking again goes on from there. A workspace kept is not a failure: the project is
+forgotten, the workspace stays, and once its work is saved `flottille workspace remove` removes it
+as any other.
+
+Before anything, `project.removal` says what the removal would do: the sessions and command runs
+still running and each workspace's state (clean, uncommitted changes, commits not pushed). The
+window's confirmation (the project's Settings, "⋯", Remove project…) shows it in labelled lines,
+what runs first, then the workspaces each with its state and whether it is removed or kept, then
+the discard switch when a workspace holds unsaved work; what the removal did comes as a toast.
 
 ## Where the workspaces go
 

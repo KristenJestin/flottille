@@ -1329,3 +1329,486 @@ fn the_conventions_are_saved_in_the_file_and_emptied_away() {
     let text = std::fs::read_to_string(user.project_file("app")).unwrap();
     assert!(!text.contains("branch_format"), "{text}");
 }
+
+// Removing a project with what Flottille made for it: its agents, its runs, its workspaces.
+
+mod removal {
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    use super::common::User;
+    use super::common::mcp::Mcp;
+    use serde_json::{Value, json};
+
+    /// A user whose agents are the fake agent: a message holding `HANG` keeps its agent mid-turn,
+    /// the others answer and end their turn.
+    fn user() -> User {
+        let user = User::with_fake_agent();
+        user.fake_script(json!({"turns": [{"when": "HANG", "do": [{"hang": true}]}]}));
+        user
+    }
+
+    fn eventually(what: &str, mut check: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !check() {
+            assert!(Instant::now() < deadline, "{what} never happened");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// The project `name` over a throwaway repository pushed to its own bare remote, with a
+    /// task `long` that runs until it is stopped: its folder.
+    fn project(user: &User, name: &str) -> PathBuf {
+        let folder = user.path(&format!("work/{name}"));
+        user.git_init(&folder);
+        std::fs::write(folder.join("README.md"), format!("{name}\n")).unwrap();
+        user.git(&folder, &["add", "README.md"]);
+        user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+        let remote = user.path(&format!("remotes/{name}.git"));
+        user.git(
+            &user.path(""),
+            &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+        );
+        user.git(
+            &folder,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        user.git(&folder, &["push", "--quiet", "origin", "main"]);
+        user.call("project.add", json!({"folder": folder, "name": name}))
+            .unwrap();
+        let tools = user.path("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let long = tools.join("long.sh");
+        std::fs::write(&long, "#!/bin/sh\necho started\nexec sleep 60\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = user.project_file(name);
+        let mut text = std::fs::read_to_string(&file).unwrap();
+        text.push_str(&format!("\n[tasks.long]\nline = \"{}\"\n", long.display()));
+        std::fs::write(&file, text).unwrap();
+        folder
+    }
+
+    /// The workspace `name` of the project, ready: its folder and its branch.
+    fn workspace(user: &User, project: &str, name: &str) -> (PathBuf, String) {
+        user.call(
+            "workspace.create",
+            json!({"project": project, "name": name}),
+        )
+        .unwrap();
+        let mut shown = Value::Null;
+        eventually("the workspace", || {
+            shown = user
+                .call("workspace.show", json!({"project": project, "name": name}))
+                .unwrap();
+            shown["state"] == "ready"
+        });
+        (
+            PathBuf::from(shown["folder"].as_str().unwrap()),
+            shown["branch"].as_str().unwrap().to_owned(),
+        )
+    }
+
+    fn workspace_exists(user: &User, project: &str, name: &str) -> bool {
+        user.call("workspace.show", json!({"project": project, "name": name}))
+            .is_ok()
+    }
+
+    /// A root the user starts in the workspace, mid-turn: its id.
+    fn hanging_root(user: &User, project: &str, workspace: &str) -> String {
+        let answer = user
+            .call(
+                "agent.run",
+                json!({"project": project, "workspace": workspace, "message": "HANG here"}),
+            )
+            .unwrap();
+        let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+        eventually("the root works", || state(user, &id) == "working");
+        id
+    }
+
+    fn state(user: &User, agent: &str) -> String {
+        user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// The MCP session of the last agent opened whose instructions hold `part`.
+    fn session(user: &User, part: &str) -> Mcp {
+        let mut found = None;
+        eventually("the session", || {
+            found = user
+                .received_requests("session/new")
+                .into_iter()
+                .rev()
+                .find(|opened| {
+                    opened["params"]["_meta"]["claudeCode"]["options"]["systemPrompt"]["prompt"][2]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains(part)
+                });
+            found.is_some()
+        });
+        let server = &found.unwrap()["params"]["mcpServers"][0];
+        Mcp::initialize(
+            server["url"].as_str().unwrap(),
+            server["headers"][0]["value"].as_str().unwrap(),
+        )
+    }
+
+    fn ids(list: &Value) -> Vec<String> {
+        let mut ids: Vec<String> = list
+            .as_array()
+            .unwrap_or_else(|| panic!("not a list: {list}"))
+            .iter()
+            .map(|entry| {
+                entry["id"]
+                    .as_str()
+                    .or(entry["run"].as_str())
+                    .or(entry["name"].as_str())
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn remove(user: &User, discard: bool) -> Value {
+        user.call("project.remove", json!({"name": "app", "discard": discard}))
+            .unwrap()
+    }
+
+    fn branches(user: &User, folder: &Path) -> String {
+        user.git_output(folder, &["branch", "--list", "--format=%(refname:short)"])
+    }
+
+    #[test]
+    fn removing_a_project_stops_its_running_agents_and_their_children() {
+        let user = user();
+        project(&user, "app");
+        workspace(&user, "app", "w");
+        let root = hanging_root(&user, "app", "w");
+        let lead = session(&user, "You are the root");
+        let launched = lead.call(
+            "agent_launch",
+            json!({"kind": "child", "title": "worker", "brief": "HANG on", "workspace": "w"}),
+        );
+        assert!(!launched.error, "{}", launched.text);
+        let child = user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["parent"] == root.as_str())
+            .map(|agent| agent["id"].as_str().unwrap().to_owned())
+            .expect("the child");
+
+        let removed = remove(&user, false);
+
+        let mut both = vec![root.clone(), child.clone()];
+        both.sort();
+        assert_eq!(ids(&removed["stopped"]["agents"]), both, "{removed}");
+        assert_eq!(state(&user, &root), "ended");
+        assert_eq!(state(&user, &child), "ended");
+        assert!(
+            !workspace_exists(&user, "app", "w"),
+            "its place went with it"
+        );
+        assert!(!user.project_file("app").exists());
+    }
+
+    #[test]
+    fn removing_a_project_stops_its_running_command_runs() {
+        let user = user();
+        project(&user, "app");
+        let run = user
+            .call("task.run", json!({"project": "app", "name": "long"}))
+            .unwrap()["run"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        eventually("the run started", || {
+            user.call("run.output", json!({"run": run})).unwrap()["output"] == "started"
+        });
+
+        let removed = remove(&user, false);
+
+        assert_eq!(
+            ids(&removed["stopped"]["runs"]),
+            std::slice::from_ref(&run),
+            "{removed}"
+        );
+        let shown = user.call("run.output", json!({"run": run})).unwrap();
+        assert_eq!(shown["state"], "stopped", "{shown}");
+    }
+
+    #[test]
+    fn removing_a_project_removes_its_clean_workspaces_and_their_branches() {
+        let user = user();
+        let folder = project(&user, "app");
+        let (w, branch) = workspace(&user, "app", "w");
+        assert!(branches(&user, &folder).contains(&branch));
+
+        let removed = remove(&user, false);
+
+        assert_eq!(ids(&removed["workspaces"]["removed"]), ["w"], "{removed}");
+        assert_eq!(removed["workspaces"]["kept"], json!([]));
+        assert!(!w.exists(), "its worktree is gone");
+        assert!(!workspace_exists(&user, "app", "w"));
+        assert!(
+            !branches(&user, &folder).contains(&branch),
+            "its branch is gone: {}",
+            branches(&user, &folder)
+        );
+        assert!(!user.project_file("app").exists());
+    }
+
+    #[test]
+    fn removing_a_project_keeps_a_workspace_with_uncommitted_changes_and_says_so() {
+        let user = user();
+        project(&user, "app");
+        let (w, _) = workspace(&user, "app", "w");
+        std::fs::write(w.join("draft.txt"), "not committed\n").unwrap();
+
+        let removed = remove(&user, false);
+
+        assert_eq!(removed["workspaces"]["removed"], json!([]), "{removed}");
+        let kept = &removed["workspaces"]["kept"][0];
+        assert_eq!(kept["name"], "w", "{removed}");
+        assert!(kept["why"].to_string().contains("draft.txt"), "{kept}");
+        assert!(kept["why"].to_string().contains("not committed"), "{kept}");
+        assert_eq!(
+            std::fs::read_to_string(w.join("draft.txt")).unwrap(),
+            "not committed\n"
+        );
+        assert!(
+            !user.project_file("app").exists(),
+            "the project is forgotten"
+        );
+        // Its work saved, the workspace kept is removed as any other.
+        std::fs::remove_file(w.join("draft.txt")).unwrap();
+        user.call("workspace.remove", json!({"project": "app", "name": "w"}))
+            .unwrap();
+        assert!(!w.exists());
+    }
+
+    #[test]
+    fn removing_a_project_keeps_a_workspace_with_unpushed_commits_and_says_so() {
+        let user = user();
+        let folder = project(&user, "app");
+        let (w, branch) = workspace(&user, "app", "w");
+        std::fs::write(w.join("work.txt"), "done\n").unwrap();
+        user.git(&w, &["add", "work.txt"]);
+        user.git(&w, &["commit", "--quiet", "-m", "the work"]);
+
+        let removed = remove(&user, false);
+
+        let kept = &removed["workspaces"]["kept"][0];
+        assert_eq!(kept["name"], "w", "{removed}");
+        assert!(kept["why"].to_string().contains("the work"), "{kept}");
+        assert!(kept["why"].to_string().contains("no remote"), "{kept}");
+        assert!(w.join("work.txt").exists());
+        assert!(branches(&user, &folder).contains(&branch));
+    }
+
+    #[test]
+    fn removing_a_project_with_discard_removes_unsaved_workspaces_too() {
+        let user = user();
+        project(&user, "app");
+        let (dirty, _) = workspace(&user, "app", "dirty");
+        std::fs::write(dirty.join("draft.txt"), "not committed\n").unwrap();
+        let (ahead, _) = workspace(&user, "app", "ahead");
+        std::fs::write(ahead.join("work.txt"), "done\n").unwrap();
+        user.git(&ahead, &["add", "work.txt"]);
+        user.git(&ahead, &["commit", "--quiet", "-m", "the work"]);
+
+        let removed = remove(&user, true);
+
+        assert_eq!(
+            ids(&removed["workspaces"]["removed"]),
+            ["ahead", "dirty"],
+            "{removed}"
+        );
+        assert_eq!(removed["workspaces"]["kept"], json!([]));
+        assert!(!dirty.exists());
+        assert!(!ahead.exists());
+    }
+
+    /// What a checkout is, but git's own folder: its files, their contents and its branch.
+    fn checkout(user: &User, folder: &Path) -> Vec<String> {
+        let mut seen: Vec<String> = super::snapshot(folder)
+            .into_iter()
+            .filter(|line| !line.starts_with(".git"))
+            .collect();
+        seen.push(user.git_output(folder, &["status", "--porcelain=v1", "--branch"]));
+        seen.push(user.git_output(folder, &["rev-parse", "HEAD"]));
+        seen
+    }
+
+    #[test]
+    fn removing_a_project_never_touches_its_folder_or_its_repositories_checkouts() {
+        let user = user();
+        let folder = project(&user, "app");
+        std::fs::write(folder.join("notes.txt"), "mine\n").unwrap();
+        let (w, _) = workspace(&user, "app", "w");
+        std::fs::write(w.join("draft.txt"), "kept\n").unwrap();
+        workspace(&user, "app", "clean");
+        let before = checkout(&user, &folder);
+
+        remove(&user, false);
+
+        assert_eq!(checkout(&user, &folder), before);
+        assert_eq!(
+            std::fs::read_to_string(folder.join("notes.txt")).unwrap(),
+            "mine\n"
+        );
+    }
+
+    #[test]
+    fn removing_a_project_leaves_other_projects_agents_and_workspaces_alone() {
+        let user = user();
+        project(&user, "app");
+        project(&user, "other");
+        workspace(&user, "app", "w");
+        let (theirs, _) = workspace(&user, "other", "w");
+        let ours = hanging_root(&user, "app", "w");
+        let other = hanging_root(&user, "other", "w");
+        let run = user
+            .call("task.run", json!({"project": "other", "name": "long"}))
+            .unwrap()["run"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let removed = remove(&user, false);
+
+        assert_eq!(
+            ids(&removed["stopped"]["agents"]),
+            std::slice::from_ref(&ours)
+        );
+        assert_eq!(state(&user, &ours), "ended");
+        assert_eq!(state(&user, &other), "working");
+        assert!(workspace_exists(&user, "other", "w"));
+        assert!(theirs.exists());
+        let shown = user.call("run.output", json!({"run": run})).unwrap();
+        assert_eq!(shown["state"], "running", "{shown}");
+        user.call("project.show", json!({"name": "other"})).unwrap();
+    }
+
+    #[test]
+    fn the_removal_says_beforehand_what_runs_and_each_workspace_s_state() {
+        let user = user();
+        project(&user, "app");
+        workspace(&user, "app", "clean");
+        let (dirty, _) = workspace(&user, "app", "dirty");
+        std::fs::write(dirty.join("draft.txt"), "not committed\n").unwrap();
+        let (ahead, _) = workspace(&user, "app", "ahead");
+        std::fs::write(ahead.join("work.txt"), "done\n").unwrap();
+        user.git(&ahead, &["add", "work.txt"]);
+        user.git(&ahead, &["commit", "--quiet", "-m", "the work"]);
+        let root = hanging_root(&user, "app", "clean");
+        let run = user
+            .call("task.run", json!({"project": "app", "name": "long"}))
+            .unwrap()["run"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let said = user
+            .call("project.removal", json!({"name": "app"}))
+            .unwrap();
+
+        assert_eq!(
+            ids(&said["sessions"]),
+            std::slice::from_ref(&root),
+            "{said}"
+        );
+        assert_eq!(ids(&said["runs"]), [run], "{said}");
+        let states: Vec<(String, String)> = said["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| {
+                (
+                    w["name"].as_str().unwrap().to_owned(),
+                    w["state"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("ahead".to_owned(), "unpushed".to_owned()),
+                ("clean".to_owned(), "clean".to_owned()),
+                ("dirty".to_owned(), "uncommitted".to_owned()),
+            ],
+            "{said}"
+        );
+        assert_eq!(state(&user, &root), "working", "asking stops nothing");
+        assert!(user.project_file("app").exists());
+    }
+
+    /// A user whose `git` runs the real one but holds `git worktree remove` until the test
+    /// releases it: `held` exists once it waits, `release` lets it go on.
+    fn holding_removals() -> (User, PathBuf, PathBuf) {
+        let user = user();
+        let real = std::process::Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap();
+        let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+        let (bin, held, release) = (
+            user.path("fake-git"),
+            user.path("removal-held"),
+            user.path("removal-released"),
+        );
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = bin.join("git");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in *\"worktree remove\"*)\n  touch '{}'\n  while [ ! -e '{}' ]; \
+                 do sleep 0.05; done;;\nesac\nexec '{real}' \"$@\"\n",
+                held.display(),
+                release.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        (user.with_env("PATH", &path), held, release)
+    }
+
+    #[test]
+    fn nothing_starts_in_a_project_being_removed() {
+        let (user, held, release) = holding_removals();
+        project(&user, "app");
+        workspace(&user, "app", "w");
+        let (mut started, mut created, mut ran) = (None, None, None);
+        std::thread::scope(|scope| {
+            let removing = scope.spawn(|| user.call("project.remove", json!({"name": "app"})));
+            eventually("the removal holds", || held.exists());
+            started = Some(user.call("agent.run", json!({"project": "app", "message": "hello"})));
+            created = Some(user.call(
+                "workspace.create",
+                json!({"project": "app", "name": "late"}),
+            ));
+            ran = Some(user.call("task.run", json!({"project": "app", "name": "long"})));
+            std::fs::write(&release, "").unwrap();
+            removing.join().unwrap().unwrap();
+        });
+
+        for (what, answer) in [("agent", started), ("workspace", created), ("run", ran)] {
+            let answer = answer.unwrap();
+            let (code, message) = answer.expect_err(what);
+            assert_eq!(code, "refused", "{what}: {message}");
+            assert!(message.contains("being removed"), "{what}: {message}");
+        }
+    }
+}

@@ -58,8 +58,9 @@ The project's file was edited: the daemon noticed it at its next request about p
 
 ### `project.removed`
 
-The project was removed (`project.remove`), or its file is gone. Only Flottille's configuration is
-removed, never the folder.
+The project was removed (`project.remove`), or its file is gone. Never its folder: a removal
+emits it last, after the events of what it stopped and removed (`agent.ended`, `run.ended`,
+`workspace.removed`).
 
 | Field | |
 |---|---|

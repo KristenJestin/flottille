@@ -70,10 +70,20 @@ pub struct ProjectFolder {
     pub repositories: Option<Vec<String>>,
 }
 
-/// The parameters of `project.show`, `project.remove` and `project.check`.
+/// The parameters of `project.show`, `project.removal` and `project.check`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectName {
     pub name: String,
+}
+
+/// The parameters of `project.remove`: with `discard`, the workspaces that would lose work are
+/// removed too.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRemove {
+    pub name: String,
+    #[serde(default)]
+    pub discard: bool,
 }
 
 /// The parameters of `project.add_repository` and `project.remove_repository`: a repository's

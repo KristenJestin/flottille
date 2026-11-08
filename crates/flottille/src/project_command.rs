@@ -39,9 +39,14 @@ pub enum ProjectAction {
         #[arg(long)]
         json: bool,
     },
-    /// Forget a project: its configuration, never its folder
+    /// Remove a project: stop its agents and command runs, remove its workspaces, forget its
+    /// configuration. Its folder and its repositories are never touched; a workspace holding
+    /// work not committed or not pushed is kept
     Remove {
         name: String,
+        /// Also remove the workspaces holding work not committed or not pushed: it is lost
+        #[arg(long)]
+        discard: bool,
         #[arg(long)]
         json: bool,
     },
@@ -150,12 +155,19 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        ProjectAction::Remove { name: wanted, json } => {
-            let removed = ask("project.remove", name(wanted.clone())?)?;
+        ProjectAction::Remove {
+            name: wanted,
+            discard,
+            json,
+        } => {
+            let removed = ask(
+                "project.remove",
+                serde_json::json!({"name": wanted, "discard": discard}),
+            )?;
             if json {
                 println!("{removed}");
             } else {
-                println!("Removed project {wanted}. Its folder was not touched.");
+                print!("{}", removed_text(&removed));
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -197,6 +209,53 @@ fn confirm() -> Result<()> {
         "y" | "yes" => Ok(()),
         _ => Err("not registered".into()),
     }
+}
+
+/// What `project.remove` did: what it stopped, removed and kept, and why.
+fn removed_text(removed: &Value) -> String {
+    let mut out = format!(
+        "Removed project {}. Its folder was not touched.\n",
+        text(removed, "removed")
+    );
+    let entries = |value: &Value| value.as_array().cloned().unwrap_or_default();
+    for agent in entries(&removed["stopped"]["agents"]) {
+        let title = match agent["title"].as_str() {
+            Some(title) => format!(" ({title})"),
+            None => String::new(),
+        };
+        out.push_str(&format!(
+            "Stopped the agent {}{title}.\n",
+            text(&agent, "id")
+        ));
+    }
+    for run in entries(&removed["stopped"]["runs"]) {
+        out.push_str(&format!(
+            "Stopped the command run {} ({}).\n",
+            text(&run, "run"),
+            text(&run, "line")
+        ));
+    }
+    for workspace in entries(&removed["workspaces"]["removed"]) {
+        out.push_str(&format!(
+            "Removed the workspace {}.\n",
+            text(&workspace, "name")
+        ));
+    }
+    let kept = entries(&removed["workspaces"]["kept"]);
+    for workspace in &kept {
+        out.push_str(&format!(
+            "Kept the workspace {}: {}.\n",
+            text(workspace, "name"),
+            list_of(&workspace["why"]).join("; ")
+        ));
+    }
+    if !kept.is_empty() {
+        out.push_str(
+            "A workspace kept stays on disk with its branch: save its work, then remove it with \
+             `flottille workspace remove <project> <name>`.\n",
+        );
+    }
+    out
 }
 
 fn list_of(value: &Value) -> Vec<&str> {

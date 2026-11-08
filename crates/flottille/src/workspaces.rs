@@ -705,6 +705,7 @@ async fn rename_branch(daemon: &Daemon, asked: WorkspaceRenameBranch) -> Answer 
 
 async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
     let project = projects::load_project(&daemon, &asked.project)?;
+    projects::refuse_removing(&daemon, &project.name)?;
     if !valid_name(&asked.name) {
         return Err(Failure::refused(format!(
             "{} is not a name for a workspace: use 1 to 64 letters, digits, dots, dashes or \
@@ -2129,6 +2130,8 @@ fn in_use(
 struct Checked<'a> {
     made: Vec<&'a Worktree>,
     problems: Vec<String>,
+    /// How many of `problems` are commits on no remote; the others are work not committed.
+    unpushed: usize,
     ours: Vec<PathBuf>,
 }
 
@@ -2141,6 +2144,36 @@ pub async fn losses(daemon: &Daemon, project: &str, name: &str) -> Result<Vec<St
     };
     let workspace = find(daemon, &asked)?;
     Ok(checked(daemon, &workspace).await?.problems)
+}
+
+/// What removing the workspace would lose, as `losses` says it, and its state for the removal of
+/// its project: `clean`, `uncommitted` (work not committed, whatever else) or `unpushed` (only
+/// commits on no remote).
+pub async fn loss_state(
+    daemon: &Daemon,
+    workspace: &Workspace,
+) -> Result<(&'static str, Vec<String>), Failure> {
+    let checked = checked(daemon, workspace).await?;
+    let state = match (checked.problems.len(), checked.unpushed) {
+        (0, _) => "clean",
+        (all, unpushed) if all == unpushed => "unpushed",
+        _ => "uncommitted",
+    };
+    Ok((state, checked.problems))
+}
+
+/// The user's removal of a workspace with its project: `workspace.remove`'s, and with
+/// `discard`, what would be lost too, as long as it is exactly what `loss_state` said.
+pub async fn remove_with_project(
+    daemon: Arc<Daemon>,
+    workspace: &Workspace,
+    discard: Option<&[String]>,
+) -> Answer {
+    let asked = WorkspaceName {
+        project: workspace.project.clone(),
+        name: workspace.name.clone(),
+    };
+    removed(daemon, asked, discard, None, None).await
 }
 
 async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checked<'a>, Failure> {
@@ -2158,6 +2191,7 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
             .map_err(Failure::refused)?
     };
     let mut ours = Vec::new();
+    let mut unpushed = 0;
     let mut read = None;
     let heads = heads(workspace).await;
     for worktree in &made {
@@ -2242,6 +2276,7 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
             }
         }
         if !commits.is_empty() && !merged {
+            unpushed += 1;
             problems.push(format!(
                 "{} has commits on {nowhere}, {on}: {}",
                 worktree.path,
@@ -2269,6 +2304,7 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
                 .map_err(|error| cannot_check(&worktree.path, &error))?;
             let left: Vec<&str> = left.lines().filter(|line| !line.is_empty()).collect();
             if !left.is_empty() {
+                unpushed += 1;
                 problems.push(format!(
                     "{} has commits on {nowhere}, on its branch {}: {}",
                     worktree.path,
@@ -2281,6 +2317,7 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
     Ok(Checked {
         made,
         problems,
+        unpushed,
         ours,
     })
 }
@@ -2297,6 +2334,7 @@ async fn remove_held(
         made,
         problems,
         ours,
+        ..
     } = checked(daemon, workspace).await?;
     // The user discards what they were shown, not what appeared since.
     let (allowed, changed) = match approved {

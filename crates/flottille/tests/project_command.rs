@@ -302,7 +302,72 @@ fn remove_with_json_says_what_was_removed() {
 
     let output = user.run(&["project", "remove", "app", "--json"]);
 
-    assert_eq!(stdout(&output).trim(), r#"{"removed":"app"}"#);
+    let removed: Value = serde_json::from_str(stdout(&output).trim()).unwrap();
+    assert_eq!(removed["removed"], "app");
+    assert_eq!(removed["stopped"], json!({"agents": [], "runs": []}));
+    assert_eq!(removed["workspaces"], json!({"removed": [], "kept": []}));
+}
+
+/// A project `app` of one committed repository, with a ready workspace `draft` holding a file
+/// not committed: the workspace's folder.
+fn with_unsaved_work(user: &User) -> std::path::PathBuf {
+    let app = registered(user);
+    std::fs::write(app.join("README.md"), "app\n").unwrap();
+    user.git(&app, &["add", "README.md"]);
+    user.git(&app, &["commit", "--quiet", "-m", "start"]);
+    let made = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "draft"}),
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while user
+        .call("workspace.show", json!({"project": "app", "name": "draft"}))
+        .unwrap()["state"]
+        != "ready"
+    {
+        assert!(std::time::Instant::now() < deadline, "never ready");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let folder = std::path::PathBuf::from(made["folder"].as_str().unwrap());
+    std::fs::write(folder.join("notes.txt"), "mine\n").unwrap();
+    folder
+}
+
+#[test]
+fn remove_keeps_a_workspace_with_unsaved_work_and_says_why() {
+    let user = User::new();
+    let draft = with_unsaved_work(&user);
+
+    let output = user.run(&["project", "remove", "app"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stdout(&output);
+    assert!(said.contains("Removed project app"), "{said}");
+    assert!(
+        said.contains("Kept the workspace draft: notes.txt holds work that is not committed"),
+        "{said}"
+    );
+    assert!(
+        said.contains("flottille workspace remove"),
+        "it says how to remove it later: {said}"
+    );
+    assert!(draft.join("notes.txt").exists());
+}
+
+#[test]
+fn remove_with_discard_removes_the_workspace_with_unsaved_work_and_says_so() {
+    let user = User::new();
+    let draft = with_unsaved_work(&user);
+
+    let output = user.run(&["project", "remove", "app", "--discard"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let said = stdout(&output);
+    assert!(said.contains("Removed the workspace draft"), "{said}");
+    assert!(!said.contains("Kept"), "{said}");
+    assert!(!draft.exists());
 }
 
 #[test]

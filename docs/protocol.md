@@ -194,10 +194,34 @@ Registers the folder: writes `projects/<name>.toml` with the repositories detect
 remote `origin` and the base rule `["main"]`, and answers the project. Nothing is written in the
 folder or its repositories.
 
+#### `project.removal`
+
+`{"name"}`. What removing the project would do, changing nothing (`docs/projects.md`, "Removing a
+project"): `{"name", "sessions": [{"id", "title", "parent"}], "runs": [{"run", "name", "line",
+"agent"}], "workspaces": [{"name", "branch", "state", "losses"}]}`. `sessions` are its roots not
+ended, `runs` its command runs still running, `workspaces` by name, each `state` `clean`,
+`uncommitted` (files not committed, whatever else), `unpushed` (only commits on no remote) or
+`unknown` (its state could not be read, `losses` saying why), `losses` the sentences
+`workspace.remove` would refuse with. `not-found` when there is no such project.
+
 #### `project.remove`
 
-`{"name"}`. Removes the project's file; the result is `{"removed": "<name>"}`. The folder and its
-repositories are never touched. `not-found` when there is no such file.
+`{"name", "discard"?}`. Stops the project's agents (roots and children) and waits for their
+processes, stops its command runs, removes its workspaces that would lose nothing (with
+`discard`, `true`, the others too), then removes the project's file (`docs/projects.md`,
+"Removing a project"). The result says what was done:
+
+```json
+{"removed": "shop",
+ "stopped": {"agents": [{"id", "title", "parent"}], "runs": [{"run", "name", "line", "agent"}]},
+ "workspaces": {"removed": [{"name", "branch", "branches"}], "kept": [{"name", "why": ["…"]}]}}
+```
+
+`branches` as `workspace.remove` gives them. The folder and its repositories' checkouts are never
+touched. Meanwhile nothing starts in the project: `agent.run`, `agent.start`, `agent.resume`,
+`workspace.create` and `task.run` are `refused`, "project <name> is being removed". `not-found`
+when there is no such project; `refused` when it is being removed already, or when a step failed
+partway, the project still known and the sentence saying what failed and what was done.
 
 #### `project.check`
 
