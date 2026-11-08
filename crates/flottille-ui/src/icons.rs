@@ -54,7 +54,8 @@ gpui_kit::assets::icon_assets!(
         Server,
         KeyRound,
         ChevronLeft,
-        ChevronRight
+        ChevronRight,
+        PanelRightOpen
     ]
 );
 
@@ -151,10 +152,12 @@ pub enum Icon {
     Previous,
     /// Goes to the next one: a picture of a message.
     Next,
+    /// Opens the right panel: the session's details (its rail).
+    PanelRight,
 }
 
 impl Icon {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 41] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -195,6 +198,7 @@ impl Icon {
         Self::Key,
         Self::Previous,
         Self::Next,
+        Self::PanelRight,
     ];
 
     pub fn path(self) -> SharedString {
@@ -242,6 +246,7 @@ impl Icon {
             Self::Key => IconName::KeyRound,
             Self::Previous => IconName::ChevronLeft,
             Self::Next => IconName::ChevronRight,
+            Self::PanelRight => IconName::PanelRightOpen,
         }
         .path()
     }

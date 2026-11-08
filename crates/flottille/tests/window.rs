@@ -581,6 +581,55 @@ fn below_860_the_tree_is_a_drawer_opened_by_the_menu_button(cx: &mut TestAppCont
     assert!(cx.update(|window, _| window.try_find("open-rail").is_none()));
 }
 
+#[gpui_kit::test]
+fn the_narrow_session_opens_its_rail_with_a_panel_icon_labelled_session_details(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let id = start(&user, "atlas", None, "On a portrait screen");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 720., cx);
+    until(&shell, cx, "the session is known", |cx| {
+        shell.read_with(cx, |s, _| s.session(&id).is_some())
+    });
+    cx.update(|window, cx| window.click("open-tree", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the session's page is open", |cx| {
+        session_page(&shell, cx).read_with(cx, |page, cx| {
+            !page.conversation().read(cx).rows().is_empty()
+        })
+    });
+    let page = session_page(&shell, cx);
+    cx.update(|window, cx| window.render_frame(cx));
+
+    assert!(
+        cx.update(|window, _| window.try_find(Icon::PanelRight.glyph_id()).is_some()),
+        "the rail button draws the panel icon"
+    );
+    assert!(
+        !page.read_with(cx, |p, cx| p.drawer().read(cx).is_open()),
+        "the rail is closed at first"
+    );
+
+    cx.update(|window, cx| window.hover("open-rail", cx));
+    settle(cx);
+    settle(cx);
+    let tip = cx.update(|window, _| {
+        window
+            .try_find("open-rail-tooltip")
+            .and_then(|found| found.label().map(str::to_owned))
+    });
+    assert_eq!(tip.as_deref(), Some("Session details"));
+
+    cx.update(|window, cx| window.click("open-rail", cx));
+    settle(cx);
+    assert!(
+        page.read_with(cx, |p, cx| p.drawer().read(cx).is_open()),
+        "a click opens the rail"
+    );
+}
+
 /// Lets a drawer's slide end.
 fn flottille_ui_advance(cx: &mut VisualTestContext) {
     for _ in 0..30 {
