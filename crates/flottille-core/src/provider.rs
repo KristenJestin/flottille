@@ -41,6 +41,12 @@ pub fn listed_model<'a>(
 /// a session on it: it applies what it stands for, by its name.
 pub const OWN_CHOICE: &str = "default";
 
+/// Whether a label says the word "default": a model is never shown by it, whoever worded it
+/// (Claude's adapter words its own choice "Default (recommended)").
+pub fn says_default(label: &str) -> bool {
+    label.to_lowercase().contains("default")
+}
+
 /// The model a provider's session takes when none is asked, among the ids it lists: the one its
 /// `default` stands for (`stands_for`) when listed, `default` itself when it stands for a model
 /// no other id runs, else the first one that is not `default`.

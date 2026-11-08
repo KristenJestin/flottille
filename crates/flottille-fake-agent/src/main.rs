@@ -50,6 +50,9 @@
 //!   agent whose process dies before it takes a prompt.
 //! - `models`, `efforts`: the values of the `model` and `thought_level` options, the first one
 //!   current; no effort option without `efforts`.
+//! - `model_rows`: the name and the description a model's row carries, by value (`{"default":
+//!   {"name": "Default (recommended)", "description": "Opus 5.5 (1M context)"}}`), as Claude's
+//!   adapter words its `default`; a model with no entry here is named by its value.
 //! - `refuse`: values the options list but `session/set_config_option` refuses, as an agent whose
 //!   catalogue lists a model its account cannot take.
 //! - `broken`: values `session/set_config_option` answers with an internal error, as an agent
@@ -717,9 +720,21 @@ impl Agent {
                 .map(str::to_owned)
                 .or_else(|| values.first().cloned())
                 .unwrap_or_default();
+            let rows = &self.script["model_rows"];
+            let row = |v: &String| {
+                let mut row = json!({"value": v, "name": v});
+                if id == "model" {
+                    for key in ["name", "description"] {
+                        if let Some(said) = rows[v.as_str()].get(key) {
+                            row[key] = said.clone();
+                        }
+                    }
+                }
+                row
+            };
             json!({"id": id, "name": name, "category": category, "type": "select",
                 "currentValue": value,
-                "options": values.iter().map(|v| json!({"value": v, "name": v})).collect::<Vec<_>>()})
+                "options": values.iter().map(row).collect::<Vec<_>>()})
         };
         let mut options = vec![select(
             "model",

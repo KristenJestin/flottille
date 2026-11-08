@@ -550,7 +550,10 @@ fn own_choice(options: &Value, category: &str) -> Option<String> {
     let offered = providers::values(&option);
     let recommended = option["_meta"]["jetbrains"]["air"]["recommendedValue"].as_str();
     let found = match category {
-        "model" => provider::default_model(offered.iter().map(String::as_str), recommended),
+        "model" => provider::default_model(
+            offered.iter().map(String::as_str),
+            providers::alias_of(&option),
+        ),
         _ => recommended
             .filter(|r| offered.iter().any(|o| o == r))
             .or_else(|| provider::middle_effort(&offered).map(String::as_str)),

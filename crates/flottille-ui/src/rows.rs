@@ -319,6 +319,124 @@ pub fn tree_children(children: impl IntoIterator<Item = AnyElement>, cx: &App) -
         .children(children)
 }
 
+/// Where a session's row sits among the sessions its pilot leads, so that a connector can tie it
+/// to the row above: one entry of `through` for each ancestor under the first row of the tree,
+/// true while that ancestor has a sibling below it (its line goes on past this row), and whether
+/// this row is the last of its pilot's.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tie {
+    pub through: Vec<bool>,
+    pub last: bool,
+}
+
+impl Tie {
+    /// How many levels the row is under the first row of the tree.
+    pub fn depth(&self) -> usize {
+        self.through.len() + 1
+    }
+}
+
+/// How far each level of led sessions is indented: `space::XL`, the step the window draws it with.
+const TIE_INDENT: f32 = 24.;
+/// Where the connector's first line runs: under the chevron of a row of the first level.
+const TIE_ROOT: f32 = 14.;
+/// How round the connector turns.
+const TIE_TURN: f32 = 6.;
+/// How far past the indent the connector runs into its row.
+const TIE_INTO: f32 = 4.;
+
+/// The element id of a row's connector, whose label says whether the row is the last one.
+pub fn tie_id(row: impl Into<ElementId>) -> ElementId {
+    ElementId::NamedChild(std::sync::Arc::new(row.into()), "tie".into())
+}
+
+/// The element id of the turn of a row's connector.
+pub fn tie_turn_id(row: impl Into<ElementId>) -> ElementId {
+    ElementId::NamedChild(std::sync::Arc::new(tie_id(row)), "turn".into())
+}
+
+/// The element id of the line that goes on below a row's turn, to the next row of its pilot's.
+pub fn tie_below_id(row: impl Into<ElementId>) -> ElementId {
+    ElementId::NamedChild(std::sync::Arc::new(tie_id(row)), "below".into())
+}
+
+/// The element id of the line that goes on past a row for its ancestor of this level.
+pub fn tie_through_id(row: impl Into<ElementId>, level: usize) -> ElementId {
+    ElementId::NamedChild(
+        std::sync::Arc::new(tie_id(row)),
+        format!("through-{level}").into(),
+    )
+}
+
+/// The connector of a session's row to its pilot's: a thin line that comes down from the row
+/// above and turns right into the row, at the middle of its first line (`first_line`, from the
+/// row's top), going on below it while the row has a sibling after it, and the lines of the
+/// ancestors that go on past it. Draw it over the row, in a block that starts where the row's
+/// indent starts; `shown` fades it with the row.
+pub fn tree_tie(
+    row: impl Into<ElementId>,
+    tie: &Tie,
+    first_line: f32,
+    shown: f32,
+    cx: &App,
+) -> impl IntoElement {
+    let p = palette(cx);
+    let row = row.into();
+    let own = TIE_ROOT + TIE_INDENT * (tie.depth() - 1) as f32;
+    let line = |x: f32| {
+        div()
+            .absolute()
+            .left(px(x))
+            .top_0()
+            .bottom_0()
+            .w(px(1.))
+            .bg(p.line)
+    };
+    div()
+        .id(tie_id(row.clone()))
+        .aria_label(if tie.last { "Last branch" } else { "Branch" })
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .w_full()
+        .opacity(shown)
+        .children(
+            tie.through
+                .iter()
+                .enumerate()
+                .filter(|(_, on)| **on)
+                .map(|(level, _)| {
+                    line(TIE_ROOT + TIE_INDENT * level as f32)
+                        .id(tie_through_id(row.clone(), level))
+                        .test_support()
+                }),
+        )
+        .child(
+            div()
+                .id(tie_turn_id(row.clone()))
+                .absolute()
+                .left(px(own))
+                .top_0()
+                .w(px(TIE_INDENT * tie.depth() as f32 + TIE_INTO - own))
+                .h(px(first_line))
+                .border_l_1()
+                .border_b_1()
+                .border_color(p.line)
+                .rounded_bl(px(TIE_TURN))
+                .test_support(),
+        )
+        .when(!tie.last, |d| {
+            d.child(
+                line(own)
+                    .top(px(first_line))
+                    .id(tie_below_id(row.clone()))
+                    .test_support(),
+            )
+        })
+        .test_support()
+}
+
 /// Mono, faint metadata: a time ago, a model, a count.
 pub fn meta(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
     let p = palette(cx);

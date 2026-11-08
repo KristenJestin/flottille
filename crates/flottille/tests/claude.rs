@@ -442,11 +442,7 @@ fn through_the_bridge_claude_s_models_are_listed_by_their_names_once_a_session_o
         .collect();
     assert_eq!(
         named,
-        [
-            ("default", "Default (recommended)"),
-            ("fable", "Fable"),
-            ("haiku", "Haiku")
-        ]
+        [("default", "Fable"), ("fable", "Fable"), ("haiku", "Haiku")]
     );
     assert_eq!(claude["models_outdated"], false);
 }

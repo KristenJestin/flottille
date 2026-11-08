@@ -182,7 +182,8 @@ from the entry its app id names.
 
 The package holds them under `share/`, from `packaging/linux/`. **The PNGs are committed**, not
 rendered by CI: the archive then needs no renderer, and the same files give the same archive.
-`tools/icons.sh` renders them again from the SVG (`rsvg-convert`) when the SVG changes. The entry
+The SVG is `assets/brand/icon-full.svg`, the brand's full icon; `tools/icons.sh` copies it and renders
+the PNGs again from it (`rsvg-convert`) when the brand's icon changes. The entry
 of the package says `Exec=flottille window`; `install.sh` and `flottille update` write it with the
 binary's real path (symbolic links resolved, so that the two write the same line whatever the way
 the home is reached). **Refusing some characters is Flottille's choice**: the format allows a

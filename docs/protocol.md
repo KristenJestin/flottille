@@ -1580,7 +1580,9 @@ on the model a new session takes when none is asked, once one said it: what the 
 value that names the model it stands for (`_meta.jetbrains.air.recommendedValue` of the `model`
 option) is an alias: it stays listed with `stands_for`, that model's id, and the model it stands
 for is the `default` one, with the alias's `efforts`. A `default` whose `recommendedValue` is
-itself runs a model no other value does: it is no alias, and is the `default` one, by its name. `default_effort` is the effort a model runs
+itself runs a model no other value does: it is no alias, and is the `default` one, by its name (the
+model its description names, never the adapter's "Default (recommended)"; the same when the
+description names a model and no `recommendedValue` is given). `default_effort` is the effort a model runs
 with when none is asked, once a new session none was set on said it by its name (Claude says it
 as `default` only: never there for Claude). `models_outdated` is `true`
 when they were said by another version of the program or with other API keys set: they are listed

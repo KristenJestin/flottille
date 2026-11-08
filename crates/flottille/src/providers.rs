@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 use flottille_core::agent::{Agent, Choices};
 use flottille_core::paths::Paths;
 use flottille_core::project::Project;
-use flottille_core::provider::{self, Judge, Settings};
+use flottille_core::provider::{self, Judge, Settings, says_default};
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
@@ -639,11 +639,12 @@ pub fn learn(
     let Some(model) = find("model") else { return };
     let current = model["currentValue"].as_str().unwrap_or_default();
     let listed = named_values(model);
-    let alias = recommended(model).filter(|r| listed.iter().any(|(id, _)| id == r));
+    let alias = alias_of(model);
     // The model the session has, the alias resolved: what it stands for (itself when no other id
     // runs it), else the first model listed, the one Flottille applies (`acp::own_choice`).
     let has = if current == provider::OWN_CHOICE {
-        provider::default_model(listed.iter().map(|(id, _)| id.as_str()), alias).unwrap_or(current)
+        provider::default_model(listed.iter().map(|(id, _, _)| id.as_str()), alias)
+            .unwrap_or(current)
     } else {
         current
     }
@@ -660,9 +661,27 @@ pub fn learn(
     let settings = Settings::load(&daemon.paths).unwrap_or_default();
     let check = Check::of(provider, &settings, Version::Skip);
     let before = known_models(daemon, &check).unwrap_or_default();
+    // What the row of the provider's own choice is shown by when its name says "default": the
+    // model Flottille knows the session runs, by its name, else the provider's.
+    let runs = listed
+        .iter()
+        .find(|(id, name, _)| *id == has && id != provider::OWN_CHOICE && !says_default(name))
+        .map_or_else(
+            || format!("{}'s model", provider.title),
+            |(_, n, _)| n.clone(),
+        );
     let models: Vec<Value> = listed
         .into_iter()
-        .map(|(id, name)| {
+        .map(|(id, name, description)| {
+            let name = if id != provider::OWN_CHOICE {
+                name
+            } else if let Some(model) = description.as_deref().and_then(described_model) {
+                model
+            } else if says_default(&name) {
+                runs.clone()
+            } else {
+                name
+            };
             let known = before.iter().find(|m| m["id"] == id.as_str());
             let now = id == current || id == has;
             let recorded = known.map_or(Value::Null, |m| m["efforts"].clone());
@@ -709,18 +728,58 @@ fn recommended(option: &Value) -> Option<&str> {
     option["_meta"]["jetbrains"]["air"]["recommendedValue"].as_str()
 }
 
-/// The values a select option offers, in order, groups flattened.
-pub fn values(option: &Value) -> Vec<String> {
-    named_values(option).into_iter().map(|(id, _)| id).collect()
+/// The model of an option's own choice (`default`), by the name its description gives: Claude's
+/// adapter words the row "Default (recommended)" and says the model it runs there. `None` when
+/// the description says none, or says "default" itself.
+fn described_model(description: &str) -> Option<String> {
+    let description = description.trim();
+    let named = description
+        .split_once("(currently ")
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .map_or(description, str::trim);
+    (!named.is_empty() && !says_default(named)).then(|| named.to_owned())
 }
 
-/// The values a select option offers and the name each is shown by, its value when it has none.
-fn named_values(option: &Value) -> Vec<(String, String)> {
-    fn collect(values: &Value, out: &mut Vec<(String, String)>) {
+/// The value a model option's `default` stands for: the one the agent names when it is listed;
+/// else `default` itself when its description names the model it runs, as Claude's adapter does
+/// when no other row runs that model (Flottille says it takes `recommendedValue`, so its absence
+/// is that case). `None` when nothing says which model it is.
+pub(crate) fn alias_of(option: &Value) -> Option<&str> {
+    let listed = named_values(option);
+    recommended(option)
+        .filter(|r| listed.iter().any(|(id, _, _)| id == r))
+        .or_else(|| {
+            listed
+                .iter()
+                .find(|(id, _, _)| id == provider::OWN_CHOICE)
+                .and_then(|(_, _, description)| described_model(description.as_deref()?))
+                .map(|_| provider::OWN_CHOICE)
+        })
+}
+
+/// The values a select option offers, in order, groups flattened.
+pub fn values(option: &Value) -> Vec<String> {
+    named_values(option)
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect()
+}
+
+/// The values a select option offers, the name each is shown by (its value when it has none) and
+/// its description when it has a non-empty one.
+fn named_values(option: &Value) -> Vec<(String, String, Option<String>)> {
+    fn collect(values: &Value, out: &mut Vec<(String, String, Option<String>)>) {
         for value in values.as_array().into_iter().flatten() {
             if let Some(id) = value["value"].as_str() {
                 let name = value["name"].as_str().unwrap_or(id);
-                out.push((id.to_owned(), name.to_owned()));
+                let description = value["description"]
+                    .as_str()
+                    .filter(|d| !d.trim().is_empty());
+                out.push((
+                    id.to_owned(),
+                    name.to_owned(),
+                    description.map(str::to_owned),
+                ));
             } else {
                 collect(&value["options"], out);
             }

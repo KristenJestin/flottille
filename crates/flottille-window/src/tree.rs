@@ -7,10 +7,11 @@ use std::collections::HashSet;
 
 use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, PANEL};
-use flottille_ui::rows::TreeLevel;
+use flottille_ui::rows::{TWO_LINES, TreeLevel};
 use flottille_ui::{
-    AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, TreeRow, fade,
-    hoverable, meta, palette, presence, presence_of, section_label, space, tipped, tree_children,
+    AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, Tie, TreeRow,
+    fade, hoverable, meta, palette, presence, presence_of, section_label, space, tipped,
+    tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -324,10 +325,14 @@ impl Sidebar {
 }
 
 /// The rows of a level inside their frames: one that comes unfolds, one that goes folds away.
+///
+/// A row rises into place as it comes, at its full size, unless `unfolds` says it unfolds from
+/// nothing, as a fold opens (the sessions under a session's row): it is then shown as it folds.
 fn framed<V: Render>(
     list: &mut Listing<Entity<V>>,
     rows: &[Entity<V>],
     scope: &str,
+    unfolds: impl Fn(&Entity<V>, &App) -> bool,
     cx: &mut App,
 ) -> Vec<gpui_kit::AnyElement> {
     let now = cx.background_executor().now();
@@ -340,12 +345,15 @@ fn framed<V: Render>(
     );
     list.rows()
         .map(|row| {
-            Item::new(
+            let item = Item::new(
                 ElementId::Name(format!("{scope}-{}", row.key).into()),
                 row.placement,
                 row.value.clone(),
-            )
-            .rising()
+            );
+            match unfolds(row.value, cx) {
+                true => item,
+                false => item.rising(),
+            }
             .into_any_element()
         })
         .collect()
@@ -354,7 +362,13 @@ fn framed<V: Render>(
 impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let projects = framed(&mut self.list, &self.projects, "tree-project", cx);
+        let projects = framed(
+            &mut self.list,
+            &self.projects,
+            "tree-project",
+            |_, _| false,
+            cx,
+        );
         let shell = self.shell.clone();
         let adds = self.shell.clone();
         let ended = self.ended.clone().map(|(group, present)| {
@@ -487,7 +501,7 @@ pub struct ProjectNode {
     held: Option<AgentState>,
     /// How many commands its agents run now.
     commands: usize,
-    sessions: Entity<Level<SessionRow>>,
+    sessions: Entity<Level>,
     fold: Entity<Fold>,
     shell: WeakEntity<Shell>,
 }
@@ -616,12 +630,12 @@ impl Render for ProjectNode {
 }
 
 /// The rows of one level, on a guide line: the sessions of a project, or of the "Ended" group.
-pub struct Level<V> {
-    rows: Vec<Entity<V>>,
-    list: Listing<Entity<V>>,
+pub struct Level {
+    rows: Vec<Entity<SessionRow>>,
+    list: Listing<Entity<SessionRow>>,
 }
 
-impl<V> Level<V> {
+impl Level {
     fn new() -> Self {
         Self {
             rows: Vec::new(),
@@ -629,10 +643,7 @@ impl<V> Level<V> {
         }
     }
 
-    fn set(&mut self, rows: Vec<Entity<V>>, cx: &mut Context<Self>)
-    where
-        V: 'static,
-    {
+    fn set(&mut self, rows: Vec<Entity<SessionRow>>, cx: &mut Context<Self>) {
         if self.rows != rows {
             self.rows = rows;
             cx.notify();
@@ -640,9 +651,15 @@ impl<V> Level<V> {
     }
 }
 
-impl<V: Render> Render for Level<V> {
+impl Render for Level {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = framed(&mut self.list, &self.rows, "tree-row", cx);
+        let rows = framed(
+            &mut self.list,
+            &self.rows,
+            "tree-row",
+            |row, cx| row.read(cx).led_by().is_some(),
+            cx,
+        );
         if rows.is_empty() {
             return div().into_any_element();
         }
@@ -654,7 +671,7 @@ impl<V: Render> Render for Level<V> {
 /// folded until the user opens it.
 pub struct EndedNode {
     open: bool,
-    sessions: Entity<Level<SessionRow>>,
+    sessions: Entity<Level>,
     fold: Entity<Fold>,
 }
 
@@ -775,6 +792,10 @@ pub struct SessionRow {
     /// How many led sessions sit under its row, and whether they are unfolded.
     leads: usize,
     open: bool,
+    /// Where its row sits among the sessions its pilot leads, which the connector to the row
+    /// above draws, and the last one it drew, which stays while it fades out.
+    tie: Option<Tie>,
+    tie_shown: Tie,
     shell: WeakEntity<Shell>,
 }
 
@@ -813,7 +834,25 @@ impl SessionRow {
             led_said: SharedString::default(),
             leads: 0,
             open: true,
+            tie: None,
+            tie_shown: Tie::default(),
             shell,
+        }
+    }
+
+    /// Where its row sits among the sessions its pilot leads, `None` for a row that no session
+    /// leads.
+    pub fn tie(&self) -> Option<&Tie> {
+        self.tie.as_ref()
+    }
+
+    pub fn set_tie(&mut self, tie: Option<Tie>, cx: &mut Context<Self>) {
+        if self.tie != tie {
+            if let Some(tie) = &tie {
+                self.tie_shown = tie.clone();
+            }
+            self.tie = tie;
+            cx.notify();
         }
     }
 
@@ -1233,8 +1272,30 @@ impl Render for SessionRow {
         if self.scope.is_none() {
             row = row.second(self.second_line(window, cx));
         }
+        // The connector to the row above, and the indent it runs into, fade with the row.
+        let tied = fade(
+            ElementId::Name(format!("session-tie-fade-{}", self.id).into()),
+            self.tie.is_some(),
+            PANEL,
+            window,
+            cx,
+        );
+        let first_line = match self.scope {
+            None => (TWO_LINES - (FIRST + LINE)) / 2. + FIRST / 2.,
+            Some(_) => 14.,
+        };
         div()
-            .pl(space::LG * led)
+            .relative()
+            .pl(space::XL * (self.tie_shown.depth() as f32 * tied))
+            .when(tied > 0.0, |d| {
+                d.child(tree_tie(
+                    session_id(&self.id),
+                    &self.tie_shown,
+                    first_line,
+                    tied,
+                    cx,
+                ))
+            })
             .child(row.trailing(trailing(id, self.commands, last, cx)))
     }
 }
@@ -1282,6 +1343,8 @@ impl SessionRow {
 
 /// The height of a session's second line.
 const LINE: f32 = 16.;
+/// The height of a row's first line, above its second.
+const FIRST: f32 = 18.;
 
 impl SessionRow {
     /// Under the title, faint: the place's icon and name, then, when there is room, its pull
