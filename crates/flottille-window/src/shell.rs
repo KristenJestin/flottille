@@ -10,7 +10,7 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, StateIcon, Status,
-    ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon,
+    Tie, ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon,
     keys_held, open_overlay, palette, presence, pressable, space,
 };
 use futures::StreamExt as _;
@@ -3073,13 +3073,14 @@ fn nested(
         .collect();
     let mut out = Vec::new();
     let mut placed = HashSet::new();
-    // Depth first from each session no other leads; `shown` is false under a folded row.
-    let mut stack: Vec<(usize, bool)> = (0..live.len())
+    // Depth first from each session no other leads; `shown` is false under a folded row. The tie
+    // of a row is the lines the rows above it go on with and whether it is its pilot's last.
+    let mut stack: Vec<(usize, bool, Option<Tie>)> = (0..live.len())
         .rev()
         .filter(|&at| pilots[at].is_none())
-        .map(|at| (at, true))
+        .map(|at| (at, true, None))
         .collect();
-    while let Some((at, shown)) = stack.pop() {
+    while let Some((at, shown, tie)) = stack.pop() {
         if !placed.insert(at) {
             continue;
         }
@@ -3087,6 +3088,10 @@ fn nested(
         let led_by = pilots[at].and(live[at].led_by.as_deref());
         if row.read(cx).led_by() != led_by {
             row.update(cx, |row, cx| row.set_led_by(led_by, cx));
+        }
+        if row.read(cx).tie() != tie.as_ref() {
+            let tie = tie.clone();
+            row.update(cx, |row, cx| row.set_tie(tie, cx));
         }
         let led: Vec<usize> = (0..live.len())
             .filter(|&other| pilots[other] == Some(at))
@@ -3098,7 +3103,19 @@ fn nested(
             out.push(row.clone());
         }
         let open = shown && row.read(cx).is_open();
-        stack.extend(led.into_iter().rev().map(|other| (other, open)));
+        // A child's line goes on past its own children's rows while it has a sibling below.
+        let through = match &tie {
+            Some(tie) => [tie.through.clone(), vec![!tie.last]].concat(),
+            None => Vec::new(),
+        };
+        let last = led.len().saturating_sub(1);
+        stack.extend(led.into_iter().enumerate().rev().map(|(place, other)| {
+            let tie = Tie {
+                through: through.clone(),
+                last: place == last,
+            };
+            (other, open, Some(tie))
+        }));
     }
     out
 }
