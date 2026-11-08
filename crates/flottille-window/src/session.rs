@@ -1846,12 +1846,29 @@ impl Render for SessionPage {
                     .text_ellipsis()
                     .text_size(px(14.))
                     .semibold()
+                    // A title its agent or the user gives fades in over the one before.
+                    .opacity(flottille_ui::changed(
+                        &"session-title".into(),
+                        &SharedString::from(self.opened.title.clone()),
+                        window,
+                        cx,
+                    ))
                     .aria_label(SharedString::from(self.opened.title.clone()))
                     .child(SharedString::from(self.opened.title.clone())),
                 SharedString::from(self.opened.title.clone()),
                 window,
                 cx,
             ))
+            .child({
+                let (shell, id) = (self.shell.clone(), self.opened.id.clone());
+                Button::icon("session-rename", Icon::Edit, "Rename the session").on_click(
+                    move |_, window, cx| {
+                        shell
+                            .update(cx, |shell, cx| shell.rename_of(&id, window, cx))
+                            .ok();
+                    },
+                )
+            })
             .child(
                 div()
                     .id("session-place")
@@ -1947,7 +1964,7 @@ impl Render for SessionPage {
                     .led_by
                     .as_ref()
                     .filter(|_| root)
-                    .map(|by| format!("{LED_NOTE}; {by} is not asked.").into()),
+                    .map(|_| LED_NOTE.into()),
                 move |said| {
                     div()
                         .id("session-led-note")
@@ -5851,7 +5868,10 @@ impl Row {
     fn render_asked(&self) -> AnyElement {
         let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
         Card::new()
-            .title(SharedString::from(format!("{} asks its pilot", self.me)))
+            .title(SharedString::from(format!(
+                "{} asks its pilot",
+                flottille_ui::quoted_title(&self.me)
+            )))
             .meta(self.when.map(clock).unwrap_or_default())
             .child(
                 div()
@@ -5955,15 +5975,17 @@ impl Row {
 }
 
 /// What a led session's page says above its composer, before its pilot's name.
-pub const LED_NOTE: &str = "Your messages reach this session directly";
+/// The line above a led session's composer: it names no session, whose title would make it a
+/// paragraph.
+pub const LED_NOTE: &str = "Your messages go straight to this session; its lead is not asked.";
 
 impl SessionPage {
     /// Who leads the session (`led by …`) or started it (`started by …`), small, beside its
     /// place; it fades and narrows away when the session is detached.
     fn by_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let said = match (&self.opened.led_by, &self.opened.started_by) {
-            (Some(by), _) => Some((format!("led by {by}"), "session-led-by")),
-            (None, Some(by)) => Some((format!("started by {by}"), "session-started-by")),
+            (Some(by), _) => Some((by.clone(), "session-led-by")),
+            (None, Some(by)) => Some((by.clone(), "session-started-by")),
             (None, None) => None,
         };
         if let Some((said, id)) = &said {
@@ -5980,18 +6002,17 @@ impl SessionPage {
             .overflow_hidden()
             .opacity(t)
             .when(t < 1.0, |d| d.max_w(px(320. * t)))
-            .child(tipped_when_cut(
-                div()
-                    .id(id)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(12.))
-                    .text_color(p.faint)
-                    .aria_label(said.clone())
-                    .child(said.clone()),
-                said,
+            .text_size(px(12.))
+            .text_color(p.faint)
+            // The title on one line, cut, in emphasis: never a sentence wrapped around it.
+            .child(flottille_ui::quoted(
+                id,
+                match id {
+                    "session-led-by" => "led by ",
+                    _ => "started by ",
+                },
+                &said,
+                "",
                 window,
                 cx,
             ))

@@ -214,13 +214,13 @@ fn the_window_offers_detach_and_moves_the_session_under_its_workspace(cx: &mut T
     until(&shell, cx, "the led session's row", |cx| {
         label(cx, session_id(&led)).is_some()
     });
-    // Its page says who leads it, and that the user's messages reach it directly.
+    // Its page says who leads it, and that the user's messages go straight to it.
     cx.update(|window, cx| window.click(session_id(&led), cx));
     until(&shell, cx, "the page says who leads it", |cx| {
         label(cx, "session-led-by".into()).as_deref() == Some("led by begin the docs session")
     });
     let note = label(cx, "session-led-note".into()).expect("the note");
-    assert!(note.contains("directly"), "{note}");
+    assert!(note.contains("straight to this session"), "{note}");
 
     cx.update(|window, cx| window.hover(session_id(&led), cx));
     settle(cx);

@@ -42,7 +42,7 @@ use gpui_kit::App;
 pub use button::{Badge, Button, ButtonKind, Tooltip, tipped};
 pub use card::{Block, Card};
 pub use confirm::Confirm;
-pub use cut::tipped_when_cut;
+pub use cut::{QUOTED_CHARS, quoted, quoted_title, tipped_when_cut};
 pub use drawer::{Drawer, Side};
 pub use dropdown::{Align, Dropdown, MenuItem};
 pub use field::{Field, StyledField, field_style, follow_theme};
@@ -63,7 +63,7 @@ pub use page::{EmptyLine, PageHeader, Section};
 pub use path::path_line;
 pub use radio::RadioChoices;
 pub use reveal::{
-    Changing, Fold, Growing, Presence, PresenceOf, PulsingLabel, changing, enter, fold_frame,
+    Changing, Fold, Growing, Presence, PresenceOf, PulsingLabel, changed, changing, enter, fold_frame,
     growing, presence, presence_of,
 };
 pub use rows::{

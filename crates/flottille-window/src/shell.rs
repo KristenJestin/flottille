@@ -25,6 +25,7 @@ use gpui_kit::{
 
 use crate::actions::{Actions, Command, Details, Outcome, Pick};
 use crate::add_project::AddProject;
+use crate::rename::RenameSession;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::history::{History, Way};
 use crate::link::{self, Connect, Seen, Update};
@@ -193,6 +194,8 @@ pub struct Shell {
     project_settings: Option<Entity<ProjectSettingsPage>>,
     /// The form that adds a project, one for the window's life.
     add_project: Entity<AddProject>,
+    /// The dialog that renames a session.
+    rename: Entity<RenameSession>,
     /// The quick switcher (Ctrl K): sessions, projects and actions found by what is typed.
     switcher: Entity<Switcher>,
     /// The link's updates, until a task takes them.
@@ -293,6 +296,10 @@ impl Shell {
             let this = this.clone();
             cx.new(|cx| AddProject::new(this, window, cx))
         };
+        let rename = {
+            let this = this.clone();
+            cx.new(|cx| RenameSession::new(this, window, cx))
+        };
         let focus = cx.focus_handle();
         let switcher = {
             let (this, focus) = (this.clone(), focus.clone());
@@ -354,6 +361,7 @@ impl Shell {
             texts_due: true,
             project_settings: None,
             add_project,
+            rename,
             switcher,
             updates: Some(updates),
             _link: Task::ready(()),
@@ -457,6 +465,20 @@ impl Shell {
         self.left.update(cx, |drawer, cx| drawer.close(cx));
         self.add_project
             .update(cx, |form, cx| form.open(window, cx));
+    }
+
+    /// The dialog that renames a session.
+    pub fn rename_form(&self) -> &Entity<RenameSession> {
+        &self.rename
+    }
+
+    /// "Rename…" in a session's row or header: the dialog, its field holding the title it has.
+    pub fn rename_of(&mut self, session: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(title) = self.snapshot.session(session).map(|s| s.title.clone()) else {
+            return;
+        };
+        self.rename
+            .update(cx, |form, cx| form.open(session, &title, window, cx));
     }
 
     /// The quick switcher.
@@ -977,14 +999,26 @@ impl Shell {
                     page.update(cx, |page, cx| page.resumed(refused, cx));
                 }
             }
-            Outcome::Detached { from, refused } => flottille_ui::toast(
+            Outcome::Renamed { refused } => flottille_ui::toast(
                 match refused {
-                    None => flottille_ui::Toast::success(format!("Detached from {from}")),
-                    Some(why) => flottille_ui::Toast::failure(format!("Not detached from {from}"))
-                        .detail(why),
+                    None => flottille_ui::Toast::success("Session renamed"),
+                    Some(why) => flottille_ui::Toast::failure("Session not renamed").detail(why),
                 },
                 cx,
             ),
+            Outcome::Detached { from, refused } => {
+                let from = flottille_ui::quoted_title(&from);
+                flottille_ui::toast(
+                    match refused {
+                        None => flottille_ui::Toast::success(format!("Detached from {from}")),
+                        Some(why) => {
+                            flottille_ui::Toast::failure(format!("Not detached from {from}"))
+                                .detail(why)
+                        }
+                    },
+                    cx,
+                )
+            }
             Outcome::ToolsReloaded {
                 session,
                 after_turn,
@@ -2675,6 +2709,7 @@ impl Render for Shell {
                 d.child(self.notice_card(false, compaction_notice, text, cx))
             })
             .child(self.add_project.clone())
+            .child(self.rename.clone())
             .child(self.switcher.clone())
             .when(bell_drawn, |d| {
                 let scrim = div()

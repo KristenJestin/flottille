@@ -51,6 +51,10 @@ pub fn session_resume_id(id: &str) -> ElementId {
 }
 
 /// The element id of "Detach from …" in the row menu of a session an agent started.
+pub fn session_rename_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-row-rename-{id}").into())
+}
+
 pub fn session_detach_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-row-detach-{id}").into())
 }
@@ -822,7 +826,7 @@ impl SessionRow {
         if self.led_by() != led_by {
             self.led_by = led_by.map(|by| SharedString::from(by.to_owned()));
             if let Some(by) = &self.led_by {
-                self.led_said = format!("led by {by}").into();
+                self.led_said = format!("led by {}", flottille_ui::quoted_title(by)).into();
             }
             cx.notify();
         }
@@ -919,11 +923,25 @@ impl SessionRow {
                 let (shell, id) = (self.shell.clone(), self.id.clone());
                 let menu = cx.new(|cx| {
                     let mut menu = Menu::new(session_menu_id(&id), "Session actions", cx);
+                    {
+                        let (shell, id) = (shell.clone(), id.clone());
+                        menu = menu.entry(
+                            session_rename_id(&id),
+                            crate::rename::RENAME_LABEL,
+                            Some(Icon::Edit),
+                            move |window, cx| {
+                                let id = id.clone();
+                                shell
+                                    .update(cx, |shell, cx| shell.rename_of(&id, window, cx))
+                                    .ok();
+                            },
+                        );
+                    }
                     if let Some(by) = detach {
                         let (shell, id) = (shell.clone(), id.clone());
                         menu = menu.entry(
                             session_detach_id(&id),
-                            format!("Detach from {by}"),
+                            format!("Detach from {}", flottille_ui::quoted_title(&by)),
                             None,
                             move |_, cx| {
                                 let id = id.clone();

@@ -1839,7 +1839,7 @@ impl Render for CommandPanel {
                     .cloned()
                     .unwrap_or_else(|| format!("agent {agent}"));
                 match &self.session {
-                    Some(session) => format!("{name}, in {session}"),
+                    Some(session) => format!("{name}, in {}", flottille_ui::quoted_title(session)),
                     None => name,
                 }
             }

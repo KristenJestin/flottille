@@ -414,6 +414,8 @@ fn matters(event: &Event) -> bool {
                 | "agent.answered"
                 // A session that removed its own workspace goes on under main.
                 | "agent.moved"
+                // A session's title, from its agent or the user.
+                | "agent.titled"
         ),
         _ => false,
     }
