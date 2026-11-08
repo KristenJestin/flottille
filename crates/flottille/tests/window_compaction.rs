@@ -600,7 +600,11 @@ fn a_compaction_that_runs_is_a_live_step_and_the_session_says_compacting(cx: &mu
     settle(cx);
     assert_eq!(step_row(&page, cx), None, "no step left running");
     assert_eq!(compacted_row(&page, cx).map(|(row, _)| row), Some(at));
-    assert_ne!(said_of(&shell, &id, cx), "Compacting");
+    // The shell reads the sessions again on the event: the state follows a moment after the row.
+    until(&shell, cx, "the session no longer says it compacts", |cx| {
+        said_of(&shell, &id, cx) != "Compacting"
+    });
+    settle(cx);
     assert!(
         !present(cx, &format!("rail-waiting-{id}")),
         "the line folded away"
@@ -677,7 +681,9 @@ fn a_compaction_that_fails_says_so_and_the_queued_message_is_sent_without_it(
     });
     settle(cx);
     assert_eq!(step_row(&page, cx), None, "the step stopped running");
-    assert_ne!(said_of(&shell, &id, cx), "Compacting");
+    until(&shell, cx, "the session no longer says it compacts", |cx| {
+        said_of(&shell, &id, cx) != "Compacting"
+    });
     until(&shell, cx, "the message is sent all the same", |cx| {
         blocks(&page, cx)
             .iter()

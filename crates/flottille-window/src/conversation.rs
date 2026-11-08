@@ -945,11 +945,15 @@ impl Conversation {
             "agent.turn_ended" | "agent.died" => {
                 let mut changes = self.close(Some(event.at));
                 changes.extend(self.interrupt(event.at));
+                if event.name == "agent.died" {
+                    changes.extend(self.stop_compaction(event.at));
+                }
                 changes
             }
             "agent.failed" | "agent.ended" => {
                 let mut changes = self.close(Some(event.at));
                 changes.extend(self.interrupt(event.at));
+                changes.extend(self.stop_compaction(event.at));
                 let kind = event.name.trim_start_matches("agent.").to_owned();
                 changes.extend(self.push(Block::Notice {
                     kind,
@@ -957,10 +961,28 @@ impl Conversation {
                 }));
                 changes
             }
-            // One line, its summary folded under it.
-            "agent.compacted" => self.push(Block::Notice {
+            // One step that runs; a replay of the event does not make a second.
+            "agent.compacting" => match self.compaction() {
+                Some(_) => Vec::new(),
+                None => {
+                    let mut changes = self.close(Some(event.at));
+                    changes.extend(self.push(Block::Compacting {
+                        since: event.at,
+                        until: None,
+                    }));
+                    changes
+                }
+            },
+            // One line, its summary folded under it: in the row of the step that ran, if any.
+            "agent.compacted" => self.end_compaction(Block::Notice {
                 kind: COMPACTED_KIND.into(),
                 text: compacted_text(data),
+            }),
+            // An agent that wrote no handoff is told by the mark that follows.
+            "agent.compaction_failed" if data["source"] == "agent" => Vec::new(),
+            "agent.compaction_failed" => self.end_compaction(Block::Notice {
+                kind: COMPACTION_FAILED_KIND.into(),
+                text: format!("The conversation was not compacted: {}", text("reason")),
             }),
             "agent.resumed" => self.push(Block::Notice {
                 kind: "resumed".into(),
@@ -1003,6 +1025,36 @@ impl Conversation {
             changes.extend(self.push(Block::SubAgents));
         }
         changes
+    }
+
+    /// The agent is gone: the compaction that ran will not end.
+    fn stop_compaction(&mut self, at: u64) -> Vec<Change> {
+        let Some(row) = self.compaction() else {
+            return Vec::new();
+        };
+        if let Block::Compacting { until, .. } = &mut self.blocks[row] {
+            *until = Some(at);
+        }
+        vec![Change::Changed(row)]
+    }
+
+    /// The row of the compaction that runs, if one does.
+    fn compaction(&self) -> Option<usize> {
+        self.blocks
+            .iter()
+            .rposition(|block| matches!(block, Block::Compacting { until: None, .. }))
+    }
+
+    /// The compaction ended: its row becomes `block`; a compaction nobody announced (by the
+    /// agent's own CLI) is a row of its own.
+    fn end_compaction(&mut self, block: Block) -> Vec<Change> {
+        match self.compaction() {
+            Some(at) => {
+                self.blocks[at] = block;
+                vec![Change::Changed(at)]
+            }
+            None => self.push(block),
+        }
     }
 
     fn end_thought(&mut self, at: u64) -> Vec<Change> {
@@ -1873,7 +1925,7 @@ mod tests {
             kind: COMPACTION_FAILED_KIND.into(),
             text: "The conversation was not compacted: the compactor did not answer".into(),
         };
-        assert_eq!(c.blocks(), [failed.clone()]);
+        assert_eq!(c.blocks(), std::slice::from_ref(&failed));
         assert!(in_sight(&failed));
     }
 

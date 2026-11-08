@@ -51,8 +51,9 @@ use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnsw
 use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::CommandInfo;
 use crate::conversation::{
-    Activity, Block, COMPACTED_KIND, Call, CallState, Change, Conversation, DiffLine, Ending,
-    STARTED_SESSION_KIND, Summary, USER, VaultAsk, WOKEN_BY_KIND, in_sight, is_hidden,
+    Activity, Block, COMPACTED_KIND, COMPACTION_FAILED_KIND, Call, CallState, Change, Conversation,
+    DiffLine, Ending, STARTED_SESSION_KIND, Summary, USER, VaultAsk, WOKEN_BY_KIND, in_sight,
+    is_hidden,
 };
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
@@ -115,6 +116,9 @@ pub const NOT_SENT_LINE: &str = "Not sent";
 pub const RETRY: &str = "Retry";
 /// Why a message the daemon took is not sent after all: the agent failed, or ended, first.
 pub const AGENT_FAILED: &str = "the agent failed before it read it";
+/// What the step of a compaction says while it runs, and when its agent ended before it did.
+const COMPACTING: &str = "Compacting the conversation";
+const COMPACTION_STOPPED: &str = "Compaction interrupted";
 pub const AGENT_ENDED: &str = "the session ended before the agent read it";
 pub const NEVER_READ: &str = "the agent ended before it read it";
 pub const NOT_INTERRUPTED: &str = "The turn was not interrupted";
@@ -126,6 +130,8 @@ pub fn state_of(agent: &TreeAgent) -> AgentState {
         "ended" if agent.state_reason.as_deref() == Some("it reported") => AgentState::Completed,
         "ended" => AgentState::Stopped,
         _ if agent.parent.is_none() && agent.needs_user => AgentState::NeedsYou,
+        // Not idle, nor waiting for what happens outside: it works on its conversation.
+        _ if agent.compacting => AgentState::Running,
         _ if agent.parent.is_some() && agent.waiting_on.as_deref() == Some("parent") => {
             AgentState::Waiting
         }
@@ -1476,6 +1482,9 @@ impl SessionPage {
             let images = root.images;
             let queued = root.queued.clone();
             self.queued.update(cx, |list, cx| list.set(queued, cx));
+            let compacting = root.compacting;
+            self.queued
+                .update(cx, |list, cx| list.set_compacting(compacting, cx));
             self.sync_pending(cx);
             self.fetch_pictures(cx);
             self.reply.update(cx, |reply, cx| {
@@ -1502,6 +1511,7 @@ impl SessionPage {
                     context_tokens: agent.context_tokens,
                     doing: agent.doing.clone(),
                     waits_on_subscription: agent.waiting_on.as_deref() == Some("subscription"),
+                    compacting: agent.compacting,
                     status,
                 })
             })
@@ -3586,7 +3596,10 @@ const FRAME: Duration = Duration::from_millis(16);
 /// Whether a notice is a delivery the agent was sent, folded to one line, rather than the
 /// agent's own end or resumption, or a session it started, said whole.
 fn is_delivery(kind: &str) -> bool {
-    !matches!(kind, "failed" | "ended" | "resumed" | STARTED_SESSION_KIND)
+    !matches!(
+        kind,
+        "failed" | "ended" | "resumed" | STARTED_SESSION_KIND | COMPACTION_FAILED_KIND
+    )
 }
 
 /// The pieces of a group's line: how many steps (of the part read, when its start is on an
@@ -4042,8 +4055,16 @@ impl Row {
     }
 
     /// The head of a compaction that runs: its label, then how long it has taken.
-    pub fn compaction_head(&self, _cx: &gpui_kit::App) -> Option<String> {
-        None
+    pub fn compaction_head(&self, cx: &gpui_kit::App) -> Option<String> {
+        let Block::Compacting { .. } = &*self.block else {
+            return None;
+        };
+        let (label, timer) = self.thinking.as_ref()?;
+        Some(format!(
+            "{} {}",
+            label.read(cx).text(),
+            timer.read(cx).time()
+        ))
     }
 
     /// The head of a thought: what its label says, then the time it took when one is shown.
@@ -4242,6 +4263,28 @@ impl Row {
                     Some(_) => {}
                 }
             }
+            Block::Compacting { since, until } => {
+                let (since, until) = (*since, *until);
+                let said = match until {
+                    None => COMPACTING,
+                    Some(_) => COMPACTION_STOPPED,
+                };
+                match &self.thinking {
+                    None => {
+                        let label = cx.new(|cx| PulsingLabel::new(said, until.is_none(), cx));
+                        let timer = cx.new(|cx| ThinkingTimer::new(since, until, cx));
+                        self.thinking = Some((label, timer));
+                    }
+                    Some((label, timer)) if until.is_some() => {
+                        label.update(cx, |label, cx| {
+                            label.set_active(false, cx);
+                            label.set_text(said, cx);
+                        });
+                        timer.update(cx, |timer, cx| timer.end(until, cx));
+                    }
+                    Some(_) => {}
+                }
+            }
             Block::Steps { calls } => {
                 for (at, call) in calls.iter().enumerate() {
                     let state = call_state(call);
@@ -4263,6 +4306,10 @@ impl Row {
         }
         if !matches!(block, Block::Approval { .. }) {
             self.card = None;
+        }
+        // A step that ran and became its mark keeps no timer.
+        if !matches!(block, Block::Thought { .. } | Block::Compacting { .. }) {
+            self.thinking = None;
         }
         self.block = Rc::new(block);
         cx.notify();
@@ -5160,7 +5207,28 @@ impl Render for Row {
                     .test_support()
                     .into_any_element()
             }
-            Block::Compacting { .. } => div().into_any_element(),
+            // A step like a thought's, with no text to open: a pulsing label and its timer, which
+            // the mark of the compaction replaces in this row.
+            Block::Compacting { .. } => {
+                let (label, timer) = self.thinking.clone().expect("a compaction has its timer");
+                let said = SharedString::from(label.read(cx).text().to_owned());
+                let step = id("compaction");
+                changing(id("compaction-swap"), "step", move |_| {
+                    div()
+                        .id(step)
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .text_size(px(13.))
+                        .text_color(p.faint)
+                        .aria_label(said)
+                        .child(label)
+                        .child(timer)
+                        .test_support()
+                        .into_any_element()
+                })
+                .into_any_element()
+            }
             Block::Text { .. } => {
                 let author = self.author().map(|me| {
                     let letter = me.chars().next().unwrap_or('?').to_uppercase().to_string();
@@ -5555,17 +5623,26 @@ impl Render for Row {
                 self.links.draw(self.at, links, &open, cx)
             }
             // The agent's own end is shown whole: a failure's reason, what was not done and why.
-            Block::Notice { kind, text } if !is_delivery(kind) => div()
-                .id(id("notice"))
-                .flex()
-                .gap(space::SM)
-                .mono(12.)
-                .text_color(p.faint)
-                .aria_label(SharedString::from(text.clone()))
-                .child(div().flex_none().child(SharedString::from(kind.clone())))
-                .child(div().min_w_0().child(SharedString::from(text.clone())))
-                .test_support()
-                .into_any_element(),
+            Block::Notice { kind, text } if !is_delivery(kind) => {
+                let failed = kind == COMPACTION_FAILED_KIND;
+                let line = div()
+                    .id(id("notice"))
+                    .flex()
+                    .gap(space::SM)
+                    .mono(12.)
+                    .text_color(if failed { p.fail } else { p.faint })
+                    .aria_label(SharedString::from(text.clone()))
+                    .child(div().flex_none().child(SharedString::from(kind.clone())))
+                    .child(div().min_w_0().child(SharedString::from(text.clone())))
+                    .test_support()
+                    .into_any_element();
+                // The error line takes the place of the step that ran, fading in.
+                match failed {
+                    true => changing(id("compaction-swap"), kind.clone(), move |_| line)
+                        .into_any_element(),
+                    false => line,
+                }
+            }
             // A delivery is one line, its kind and its first words, its whole text folded under
             // it until a click opens it; what woke the agent is its own line, the forge's text
             // folded under it.
@@ -5617,7 +5694,7 @@ impl Render for Row {
                             cx.notify();
                         }))
                     });
-                div()
+                let notice = div()
                     .id(id("notice"))
                     .flex()
                     .flex_col()
@@ -5638,7 +5715,13 @@ impl Render for Row {
                             .test_support(),
                     ))
                     .test_support()
-                    .into_any_element()
+                    .into_any_element();
+                // The mark takes the place of the step that ran, fading in.
+                match kind == COMPACTED_KIND {
+                    true => changing(id("compaction-swap"), kind.clone(), move |_| notice)
+                        .into_any_element(),
+                    false => notice,
+                }
             }
             // Folded to its path and its count until a click opens it.
             Block::Diff { path, lines } => {
@@ -6275,6 +6358,8 @@ pub struct RailAgent {
     pub doing: String,
     /// It waits between turns for what happens outside (`doing` says what).
     pub waits_on_subscription: bool,
+    /// Flottille compacts its conversation.
+    pub compacting: bool,
     pub status: Entity<Status>,
 }
 
@@ -6873,8 +6958,9 @@ impl Render for SessionRail {
                     }),
                 ),
             };
-            let waiting_line = agent.waits_on_subscription.then(|| {
+            let waiting_line = (agent.waits_on_subscription || agent.compacting).then(|| {
                 SharedString::from(match wakes.get(&agent.id) {
+                    _ if agent.compacting => COMPACTING.to_owned(),
                     Some(at) => format!("waiting: wake at {}", clock(*at)),
                     None => agent.doing.clone(),
                 })
@@ -9171,6 +9257,7 @@ mod tests {
             queued: Vec::new(),
             tools_outdated: false,
             tools_reload: false,
+            compacting: false,
         }
     }
 
