@@ -9610,9 +9610,21 @@ fn the_removal_confirmation_lists_what_runs_and_the_workspaces_states_and_the_sw
         "nothing moves once the line changed"
     );
 
+    // Written after the dialog read it, as an agent still working would: never discarded.
+    let clean = PathBuf::from(
+        user.call("workspace.show", json!({"project": "app", "name": "clean"}))
+            .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(clean.join("late.txt"), "the agent's work\n").unwrap();
     cx.update(|window, cx| window.click("project-removal-action", cx));
     toast_said(&shell, "The project app was removed", cx);
     assert!(!dirty.exists(), "the workspace with unsaved work went too");
+    assert!(
+        clean.join("late.txt").exists(),
+        "what appeared after the dialog read is kept"
+    );
     assert_eq!(
         user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"],
         "ended"

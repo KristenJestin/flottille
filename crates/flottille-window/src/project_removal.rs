@@ -4,6 +4,7 @@
 //! workspace with its state, removed or kept, and the choice to also remove those holding unsaved
 //! work. What the removal did is said in a toast.
 
+use flottille_core::protocol::ShownWorkspace;
 use flottille_ui::{
     Confirm, Icon, LabelledLine, Skeleton, Switch, Toast, awaiting, caption, changing, enter,
     presence, space, toast,
@@ -185,9 +186,20 @@ impl ProjectRemoval {
         self.open = false;
         self.removing = true;
         self.refused = None;
+        // Sent back as shown: the daemon discards nothing that appeared since.
+        let discard = self.discard.then(|| {
+            self.read
+                .iter()
+                .flat_map(|read| &read.workspaces)
+                .map(|w| ShownWorkspace {
+                    name: w.name.clone(),
+                    losses: w.losses.clone(),
+                })
+                .collect()
+        });
         let command = Command::RemoveProject {
             project: self.project.clone(),
-            discard: self.discard,
+            discard,
         };
         perform_later(&self.shell, command, cx);
         cx.notify();
@@ -245,14 +257,21 @@ pub fn done_said(done: &Value) -> Option<String> {
     if removed > 0 {
         parts.push(format!("removed {}", plural(removed, "workspace")));
     }
-    let kept: Vec<String> = done["workspaces"]["kept"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|w| w["name"].as_str().unwrap_or_default().to_owned())
-        .collect();
-    if !kept.is_empty() {
-        parts.push(format!("kept {} (unsaved work)", kept.join(", ")));
+    // Those whose losses appeared after the dialog read them are said apart.
+    for (changed, why) in [
+        (false, "unsaved work"),
+        (true, "changed since it was shown"),
+    ] {
+        let kept: Vec<String> = done["workspaces"]["kept"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|w| (w["changed"] == true) == changed)
+            .map(|w| w["name"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        if !kept.is_empty() {
+            parts.push(format!("kept {} ({why})", kept.join(", ")));
+        }
     }
     let mut said = parts.join(" · ");
     if let Some(first) = said.get(..1) {

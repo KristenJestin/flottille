@@ -231,11 +231,12 @@ pub enum Command {
         project: String,
         serial: u64,
     },
-    /// Removes the project: stops what runs in it, removes its workspaces (with `discard`, those
-    /// holding unsaved work too) and forgets it, never its folder.
+    /// Removes the project: stops what runs in it, removes its workspaces (with `discard`, the
+    /// workspaces as the dialog showed them, those holding unsaved work too as long as it is what
+    /// was shown) and forgets it, never its folder.
     RemoveProject {
         project: String,
-        discard: bool,
+        discard: Option<Vec<flottille_core::protocol::ShownWorkspace>>,
     },
     /// What registering a folder would register.
     DetectProject {
@@ -1606,7 +1607,10 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             result: answer(ask_alone(
                 connect,
                 "project.remove",
-                json!({"name": project, "discard": discard}),
+                json!(flottille_core::protocol::ProjectRemove {
+                    name: project.clone(),
+                    discard,
+                }),
                 bounds.slow,
             )),
             project,
