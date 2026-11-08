@@ -116,6 +116,11 @@ fn visible(cx: &mut VisualTestContext, id: &str) -> bool {
     cx.update(|window, _| window.try_find(id.to_owned()).is_some_and(|f| f.visible()))
 }
 
+fn height(cx: &mut VisualTestContext, id: &str) -> f32 {
+    let id = id.to_owned();
+    cx.update(|window, _| f32::from(window.find(id).bounds().size.height))
+}
+
 fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
     cx.update(|window, _| {
         window
@@ -197,7 +202,7 @@ fn the_compaction_tab_shows_the_compactor_its_settings_and_its_guidance(cx: &mut
         })
     });
     one_frame(cx);
-    assert!(present(cx, "compaction-threshold"), "folding away");
+    assert!(present(cx, "compaction-threshold"), "fading out");
     settle(cx);
     assert!(!present(cx, "compaction-threshold"));
     assert_eq!(shown(&user)["compactor"], Value::Null);
@@ -241,7 +246,7 @@ fn a_compactor_flottille_picked_is_said_once_in_a_notice_that_opens_settings(
         })
     });
     one_frame(cx);
-    assert!(present(cx, "compaction-notice"), "folding away");
+    assert!(present(cx, "compaction-notice"), "fading out");
     until(&shell, cx, "the daemon dropped the notice", |_| {
         shown(&user)["compactor"] == json!({"provider": "claude", "model": "haiku"})
     });
@@ -392,48 +397,66 @@ fn compactions(user: &User, id: &str) -> usize {
 }
 
 #[gpui_kit::test]
-fn the_composer_toggle_shows_only_when_the_cache_expired_and_follows_the_setting(
-    cx: &mut TestAppContext,
-) {
+fn the_composer_chip_shows_in_the_toolbar_only_when_the_cache_expired(cx: &mut TestAppContext) {
     let (user, _id, shell, page, cx) = expiring("after_expiry = false", cx);
     assert_eq!(offer(&page, cx), None);
-    assert!(!present(cx, "reply-compact-toggle"));
+    assert!(!present(cx, "reply-compact"));
+    let rest = height(cx, "reply");
 
     // Claude's cache lives an hour here: not yet expired at 59 minutes.
     user.call("test.advance", json!({"ms": 59 * 60_000}))
         .unwrap();
     settle(cx);
-    assert!(!present(cx, "reply-compact-toggle"));
+    assert!(!present(cx, "reply-compact"));
 
     user.call("test.advance", json!({"ms": 2 * 60_000}))
         .unwrap();
-    until(&shell, cx, "the toggle is offered", |cx| {
+    until(&shell, cx, "the chip is offered", |cx| {
         offer(&page, cx).is_some()
     });
-    // Unticked, as the setting is off; it unfolds.
+    // Unticked, as the setting is off; it fades in.
     assert_eq!(offer(&page, cx), Some(false));
     one_frame(cx);
-    assert!(present(cx, "reply-compact-toggle"), "unfolding");
+    assert!(present(cx, "reply-compact"), "fading in");
     settle(cx);
-    assert!(visible(cx, "reply-compact-toggle"));
-    assert_eq!(
-        label(cx, "reply-compact-toggle").as_deref(),
-        Some("Compact before sending")
+    assert!(visible(cx, "reply-compact"));
+    assert_eq!(label(cx, "reply-compact").as_deref(), Some("Compact"));
+
+    // In the toolbar, on the line of the mode and before the send button, and no block of
+    // its own above it: the composer keeps its height.
+    let (chip, mode, send) = cx.update(|window, _| {
+        (
+            window.find("reply-compact").bounds(),
+            window.find("reply-mode").bounds(),
+            window.find("reply-send").bounds(),
+        )
+    });
+    assert!(chip.left() >= mode.right(), "beside the mode");
+    assert!(chip.right() <= send.left(), "before the send button");
+    let (chip_middle, mode_middle) = (chip.center().y, mode.center().y);
+    assert!(
+        (chip_middle - mode_middle).abs() <= px(1.),
+        "on the toolbar's line"
     );
+    assert!(
+        !present(cx, "reply-compact-line"),
+        "no block above the toolbar"
+    );
+    assert_eq!(height(cx, "reply"), rest, "the composer keeps its height");
 }
 
 #[gpui_kit::test]
-fn unticking_the_toggle_sends_without_compacting(cx: &mut TestAppContext) {
+fn unticking_the_chip_sends_without_compacting(cx: &mut TestAppContext) {
     let (user, id, shell, page, cx) = expiring("", cx);
     user.call("test.advance", json!({"ms": 61 * 60_000}))
         .unwrap();
-    until(&shell, cx, "the toggle is offered", |cx| {
+    until(&shell, cx, "the chip is offered", |cx| {
         offer(&page, cx).is_some()
     });
     assert_eq!(offer(&page, cx), Some(true), "ticked from the setting");
     settle(cx);
 
-    cx.update(|window, cx| window.click("reply-compact-toggle", cx));
+    cx.update(|window, cx| window.click("reply-compact", cx));
     settle(cx);
     assert_eq!(offer(&page, cx), Some(false));
     cx.update(|window, cx| window.click("reply-field", cx));
@@ -442,14 +465,14 @@ fn unticking_the_toggle_sends_without_compacting(cx: &mut TestAppContext) {
     let reply = page.read_with(cx, |page, _| page.reply().cloned()).unwrap();
     reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
 
-    // The turn starts in the same session, and the toggle folds away.
-    until(&shell, cx, "the toggle leaves", |cx| {
+    // The turn starts in the same session, and the chip fades out.
+    until(&shell, cx, "the chip leaves", |cx| {
         offer(&page, cx).is_none()
     });
     one_frame(cx);
-    assert!(present(cx, "reply-compact-toggle"), "folding away");
+    assert!(present(cx, "reply-compact"), "fading out");
     settle(cx);
-    assert!(!present(cx, "reply-compact-toggle"));
+    assert!(!present(cx, "reply-compact"));
     eventually("the turn's end", || {
         user.call("agent.show", json!({"agent": id})).unwrap()["events"]
             .as_array()
