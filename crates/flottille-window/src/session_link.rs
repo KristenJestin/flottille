@@ -69,6 +69,8 @@ pub struct TreeAgent {
     pub tools_outdated: bool,
     /// A reload of its tools waits for its next process (`agent.reload_tools`).
     pub tools_reload: bool,
+    /// Flottille compacts its conversation: the compactor works, or it writes its handoff.
+    pub compacting: bool,
 }
 
 /// A change of model and effort waiting for the end of the turn.
@@ -153,6 +155,7 @@ impl TreeAgent {
                 .collect(),
             tools_outdated: agent["tools_outdated"] == true,
             tools_reload: agent["tools_reload"] == true,
+            compacting: agent["compacting"] == true,
         }
     }
 }
@@ -552,6 +555,10 @@ const TREE_EVENTS: &[&str] = &[
     "agent.tools_outdated",
     // The line that says the tools reload after this turn.
     "agent.tools_reload",
+    // The session says it compacts while it does, and what waits says it waits for that.
+    "agent.compacting",
+    "agent.compacted",
+    "agent.compaction_failed",
     "delivery.queued",
     // A waiting message taken back leaves the queue under the conversation.
     "delivery.withdrawn",

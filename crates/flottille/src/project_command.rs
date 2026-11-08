@@ -39,9 +39,18 @@ pub enum ProjectAction {
         #[arg(long)]
         json: bool,
     },
-    /// Forget a project: its configuration, never its folder
+    /// Remove a project: stop its agents and command runs, remove its workspaces, forget its
+    /// configuration. Its folder and its repositories are never touched; a workspace holding
+    /// work not committed or not pushed is kept
     Remove {
         name: String,
+        /// Also remove the workspaces holding work not committed or not pushed: it is lost.
+        /// What would be lost is shown and you confirm it
+        #[arg(long)]
+        discard: bool,
+        /// Discard without asking
+        #[arg(short, long, requires = "discard")]
+        yes: bool,
         #[arg(long)]
         json: bool,
     },
@@ -96,7 +105,11 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
             ));
             eprintln!("{}", detected_text(&found, &file));
             if !yes {
-                confirm()?;
+                confirm(
+                    "Register it?",
+                    "not registered",
+                    "use --yes to register without asking",
+                )?;
             }
             // What was shown is what is registered: the daemon refuses if the folder changed meanwhile.
             let project = ask(
@@ -150,12 +163,44 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        ProjectAction::Remove { name: wanted, json } => {
-            let removed = ask("project.remove", name(wanted.clone())?)?;
+        ProjectAction::Remove {
+            name: wanted,
+            discard,
+            yes,
+            json,
+        } => {
+            let mut asked = serde_json::json!({"name": wanted});
+            if discard {
+                // What is discarded is what was shown and confirmed: the daemon keeps a workspace
+                // that changed meanwhile.
+                let removal = ask("project.removal", name(wanted.clone())?)?;
+                let losses = losses_text(&removal);
+                eprint!("{losses}");
+                if !yes && !losses.is_empty() {
+                    confirm(
+                        "Discard it and remove the project?",
+                        "not removed, nothing was touched",
+                        "use --yes to discard without asking",
+                    )?;
+                }
+                asked["discard"] = removal["workspaces"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|w| {
+                        serde_json::json!({
+                            "name": w["name"],
+                            "losses": w["losses"],
+                            "digest": w["digest"],
+                        })
+                    })
+                    .collect();
+            }
+            let removed = ask("project.remove", asked)?;
             if json {
                 println!("{removed}");
             } else {
-                println!("Removed project {wanted}. Its folder was not touched.");
+                print!("{}", removed_text(&removed));
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -181,22 +226,87 @@ pub fn in_full(paths: &Paths, message: &str) -> String {
     }
 }
 
-/// Asks on the standard input; anything but a yes, or no answer at all, refuses.
-fn confirm() -> Result<()> {
-    eprint!("Register it? [y/N] ");
+/// Asks `question` on the standard input; anything but a yes refuses with `refused`, and no
+/// answer at all says `instead` too.
+fn confirm(question: &str, refused: &str, instead: &str) -> Result<()> {
+    eprint!("{question} [y/N] ");
     std::io::stderr().flush()?;
     let mut answer = String::new();
     if std::io::stdin().lock().read_line(&mut answer)? == 0 {
         eprintln!();
-        return Err(
-            "not registered: nothing to read an answer from, use --yes to register without asking"
-                .into(),
-        );
+        return Err(format!("{refused}: nothing to read an answer from, {instead}").into());
     }
     match answer.trim().to_lowercase().as_str() {
         "y" | "yes" => Ok(()),
-        _ => Err("not registered".into()),
+        _ => Err(refused.into()),
     }
+}
+
+/// What `project.remove` did: what it stopped, removed and kept, and why.
+fn removed_text(removed: &Value) -> String {
+    let mut out = format!(
+        "Removed project {}. Its folder was not touched.\n",
+        text(removed, "removed")
+    );
+    let entries = |value: &Value| value.as_array().cloned().unwrap_or_default();
+    for agent in entries(&removed["stopped"]["agents"]) {
+        let title = match agent["title"].as_str() {
+            Some(title) => format!(" ({title})"),
+            None => String::new(),
+        };
+        out.push_str(&format!(
+            "Stopped the agent {}{title}.\n",
+            text(&agent, "id")
+        ));
+    }
+    for run in entries(&removed["stopped"]["runs"]) {
+        out.push_str(&format!(
+            "Stopped the command run {} ({}).\n",
+            text(&run, "run"),
+            text(&run, "line")
+        ));
+    }
+    for workspace in entries(&removed["workspaces"]["removed"]) {
+        out.push_str(&format!(
+            "Removed the workspace {}.\n",
+            text(&workspace, "name")
+        ));
+    }
+    let kept = entries(&removed["workspaces"]["kept"]);
+    for workspace in &kept {
+        let changed = match workspace["changed"] == true {
+            true => " (it changed since it was shown)",
+            false => "",
+        };
+        out.push_str(&format!(
+            "Kept the workspace {}{changed}: {}.\n",
+            text(workspace, "name"),
+            list_of(&workspace["why"]).join("; ")
+        ));
+    }
+    if !kept.is_empty() {
+        out.push_str(
+            "A workspace kept stays on disk with its branch: save its work, then remove it with \
+             `flottille workspace remove <project> <name>`.\n",
+        );
+    }
+    out
+}
+
+/// What each workspace of `project.removal` would lose, said before it is discarded.
+fn losses_text(removal: &Value) -> String {
+    let mut out = String::new();
+    for workspace in removal["workspaces"].as_array().into_iter().flatten() {
+        let losses = list_of(&workspace["losses"]);
+        if !losses.is_empty() {
+            out.push_str(&format!(
+                "The workspace {} would lose: {}.\n",
+                text(workspace, "name"),
+                losses.join("; ")
+            ));
+        }
+    }
+    out
 }
 
 fn list_of(value: &Value) -> Vec<&str> {

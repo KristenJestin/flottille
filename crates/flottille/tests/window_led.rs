@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use flottille_ui::omarchy::Environment;
-use flottille_ui::toggle_id;
+use flottille_ui::{tie_below_id, tie_id, tie_through_id, tie_turn_id, toggle_id};
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::tree::{session_detach_id, session_id, session_led_id, session_menu_id};
@@ -214,6 +214,8 @@ fn the_window_offers_detach_and_moves_the_session_under_its_workspace(cx: &mut T
     until(&shell, cx, "the led session's row", |cx| {
         label(cx, session_id(&led)).is_some()
     });
+    // The row unfolds as it comes: it is clicked once it is there in full.
+    settle(cx);
     // Its page says who leads it, and that the user's messages reach it directly.
     cx.update(|window, cx| window.click(session_id(&led), cx));
     until(&shell, cx, "the page says who leads it", |cx| {
@@ -251,4 +253,252 @@ fn the_window_offers_detach_and_moves_the_session_under_its_workspace(cx: &mut T
         label(cx, "session-led-by".into()).is_none()
             && label(cx, "session-led-note".into()).is_none()
     });
+}
+
+/// A lead that launches two led sessions, one of which launches a third: the sessions' ids.
+struct Family {
+    lead: String,
+    docs: String,
+    spec: String,
+    tests: String,
+}
+
+fn family(user: &User) -> Family {
+    user.fake_script(json!({"turns": [
+        {"when": "begin the docs session", "do": [
+            {"mcp": {"tool": "agent_launch",
+                "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "led"}}},
+            {"mcp": {"tool": "agent_launch",
+                "arguments": {"title": "Tests", "brief": "Run the tests", "kind": "led"}}}]},
+        {"when": "Write the docs", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "Spec", "brief": "Write the spec", "kind": "led"}}}]}
+    ]}));
+    project(user);
+    user.call(
+        "agent.start",
+        json!({"project": "atlas", "message": "begin the docs session"}),
+    )
+    .unwrap();
+    // Each launch comes to the user and the session starts once they allow it.
+    eventually("the four sessions exist", || {
+        let held = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+        for request in held.as_array().unwrap() {
+            user.call("approval.approve", json!({"number": request["number"]}))
+                .unwrap();
+        }
+        agents(user).len() == 4
+    });
+    let by_title = |title: &str| {
+        agents(user)
+            .into_iter()
+            .find(|agent| agent["title"] == title)
+            .unwrap_or_else(|| panic!("a session titled {title}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let lead = agents(user)
+        .into_iter()
+        .find(|agent| agent["led_by"].is_null())
+        .expect("the lead")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    Family {
+        lead,
+        docs: by_title("Docs"),
+        spec: by_title("Spec"),
+        tests: by_title("Tests"),
+    }
+}
+
+/// The element id of the frame a session's row unfolds in.
+fn frame_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> gpui_kit::ElementId {
+    let row = shell.read_with(cx, |s, _| s.session(id).expect("the row").entity_id());
+    gpui_kit::ElementId::Name(format!("tree-row-{}", row.as_u64()).into())
+}
+
+fn frame_bounds(
+    shell: &Entity<Shell>,
+    id: &str,
+    cx: &mut VisualTestContext,
+) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    let frame = frame_of(shell, id, cx);
+    bounds(cx, frame)
+}
+
+fn bounds(
+    cx: &mut VisualTestContext,
+    id: gpui_kit::ElementId,
+) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    cx.update(|window, _| window.find(id).bounds())
+}
+
+/// One frame, `by` later.
+fn after(cx: &mut VisualTestContext, by: Duration) {
+    cx.executor().advance_clock(by);
+    cx.run_until_parked();
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+}
+
+fn the_family<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (Family, Entity<Shell>, &'a mut VisualTestContext) {
+    let family = family(user);
+    let (shell, cx) = window(user, cx);
+    until(&shell, cx, "the family's rows", |cx| {
+        [&family.docs, &family.spec, &family.tests]
+            .iter()
+            .all(|id| label(cx, session_id(id)).is_some())
+    });
+    settle(cx);
+    (family, shell, cx)
+}
+
+#[gpui_kit::test]
+fn unfolding_a_sessions_children_is_animated_like_folding_them(cx: &mut TestAppContext) {
+    let user = user();
+    let (family, shell, cx) = the_family(&user, cx);
+    let full = frame_bounds(&shell, &family.docs, cx).size.height;
+
+    cx.update(|window, cx| window.click(toggle_id(session_id(&family.lead)), cx));
+    after(cx, Duration::from_millis(70));
+    let folding = frame_bounds(&shell, &family.docs, cx).size.height;
+    assert!(
+        folding > px(0.) && folding < full,
+        "the children fold away: {folding:?} of {full:?}"
+    );
+    settle(cx);
+    assert_eq!(listed(&shell, cx), std::slice::from_ref(&family.lead));
+
+    cx.update(|window, cx| window.click(toggle_id(session_id(&family.lead)), cx));
+    after(cx, Duration::from_millis(70));
+    let unfolding = frame_bounds(&shell, &family.docs, cx).size.height;
+    assert!(
+        unfolding > px(0.) && unfolding < full,
+        "the children unfold from nothing, as they fold away: {unfolding:?} of {full:?}"
+    );
+    settle(cx);
+    assert_eq!(frame_bounds(&shell, &family.docs, cx).size.height, full);
+}
+
+#[gpui_kit::test]
+fn a_child_session_row_is_tied_to_its_parent_by_a_connector(cx: &mut TestAppContext) {
+    let user = user();
+    let (family, shell, cx) = the_family(&user, cx);
+
+    // The first row has nothing above it to be tied to.
+    assert_eq!(label(cx, tie_id(session_id(&family.lead))), None);
+    for child in [&family.docs, &family.tests, &family.spec] {
+        assert!(
+            label(cx, tie_id(session_id(child))).is_some(),
+            "{child} has its connector"
+        );
+    }
+
+    // It comes down from under the parent's chevron, turns right at the middle of the row's
+    // first line, and runs into the row.
+    let chevron = bounds(cx, toggle_id(session_id(&family.lead)));
+    let row = bounds(cx, session_id(&family.docs));
+    let turn = bounds(cx, tie_turn_id(session_id(&family.docs)));
+    let title = bounds(
+        cx,
+        gpui_kit::ElementId::Name(format!("session-{}-title", family.docs).into()),
+    );
+    let near = |a: gpui_kit::Pixels, b: gpui_kit::Pixels| f32::from(a - b).abs() <= 1.5;
+    assert_eq!(turn.top(), row.top(), "it comes down from the row above");
+    assert!(
+        near(turn.left() + px(0.5), chevron.center().x),
+        "under the chevron: {turn:?} {chevron:?}"
+    );
+    assert!(
+        near(turn.bottom() - px(0.5), title.center().y),
+        "at the middle of the first line: {turn:?} {title:?}"
+    );
+    assert!(
+        turn.right() > row.left() && turn.right() <= title.left(),
+        "it runs into the row: {turn:?} {row:?} {title:?}"
+    );
+
+    // A grandchild is tied one level deeper, under its pilot's icon.
+    let docs_turn = bounds(cx, tie_turn_id(session_id(&family.docs)));
+    let spec_turn = bounds(cx, tie_turn_id(session_id(&family.spec)));
+    assert!(spec_turn.left() > docs_turn.left());
+    let spec_row = bounds(cx, session_id(&family.spec));
+    assert!(spec_row.left() > row.left(), "indented under its pilot");
+    assert_eq!(
+        listed(&shell, cx).len(),
+        4,
+        "no row was added for the connector"
+    );
+}
+
+#[gpui_kit::test]
+fn the_last_child_ends_the_connector(cx: &mut TestAppContext) {
+    let user = user();
+    let (family, shell, cx) = the_family(&user, cx);
+
+    let children: Vec<String> = listed(&shell, cx)
+        .into_iter()
+        .filter(|id| led_by(&shell, id, cx).is_some() && *id != family.spec)
+        .collect();
+    let (last, others) = children.split_last().expect("two children");
+    assert_eq!(
+        label(cx, tie_id(session_id(last))).as_deref(),
+        Some("Last branch"),
+        "└"
+    );
+    cx.update(|window, _| assert!(window.try_find(tie_below_id(session_id(last))).is_none()));
+    for other in others {
+        assert_eq!(
+            label(cx, tie_id(session_id(other))).as_deref(),
+            Some("Branch"),
+            "├"
+        );
+        cx.update(|window, _| assert!(window.try_find(tie_below_id(session_id(other))).is_some()));
+    }
+
+    // Its only child ends its own connector, and the line of its pilot goes on past it while the
+    // pilot has a sibling below.
+    assert_eq!(
+        label(cx, tie_id(session_id(&family.spec))).as_deref(),
+        Some("Last branch")
+    );
+    let docs_is_last = last == &family.docs;
+    cx.update(|window, _| {
+        assert_eq!(
+            window
+                .try_find(tie_through_id(session_id(&family.spec), 0))
+                .is_some(),
+            !docs_is_last
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn the_connector_folds_away_with_the_children(cx: &mut TestAppContext) {
+    let user = user();
+    let (family, shell, cx) = the_family(&user, cx);
+    let tie = tie_id(session_id(&family.docs));
+    assert!(label(cx, tie.clone()).is_some());
+    let full = frame_bounds(&shell, &family.docs, cx).size.height;
+
+    cx.update(|window, cx| window.click(toggle_id(session_id(&family.lead)), cx));
+    after(cx, Duration::from_millis(70));
+    let folding = frame_bounds(&shell, &family.docs, cx).size.height;
+    assert!(
+        folding > px(0.) && folding < full,
+        "the frame the connector is drawn in is folding: {folding:?} of {full:?}"
+    );
+    assert!(
+        label(cx, tie.clone()).is_some(),
+        "it is still drawn while the children fold away"
+    );
+    settle(cx);
+    assert_eq!(label(cx, tie.clone()), None, "gone with the children");
+
+    cx.update(|window, cx| window.click(toggle_id(session_id(&family.lead)), cx));
+    settle(cx);
+    assert!(label(cx, tie).is_some(), "back with them");
 }

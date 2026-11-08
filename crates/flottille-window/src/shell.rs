@@ -10,8 +10,8 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, StateIcon, Status,
-    ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon,
-    keys_held, open_overlay, palette, presence, pressable, space,
+    Tie, Toast, ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays,
+    icon, keys_held, open_overlay, palette, presence, pressable, space, toast,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
@@ -19,9 +19,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle,
     InteractiveElement, IntoElement, KeyDownEvent, Modifiers, MouseButton, NavigationDirection,
-    ParentElement, PathBuilder, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Task, TestSupportExt as _, WeakEntity, Window, canvas, div, point, px,
+    ParentElement, PathBuilder, PathStyle, Pixels, Render, SharedString,
+    StatefulInteractiveElement, StrokeOptions, Styled, Subscription, Task, TestSupportExt as _,
+    WeakEntity, Window, canvas, div, point, px,
 };
+use lyon_tessellation::{LineCap, LineJoin};
 
 use crate::actions::{Actions, Command, Details, Outcome, Pick};
 use crate::add_project::AddProject;
@@ -1152,15 +1154,29 @@ impl Shell {
             }
             // Detect again is the settings' own read of the repositories now.
             Outcome::ProjectChecked { .. } => {}
-            Outcome::ProjectRemoved { project, refused } => match refused {
-                Some(why) => {
-                    if let Some(page) = self.project_settings.clone()
-                        && page.read(cx).name() == project
-                    {
-                        page.update(cx, |page, cx| page.remove_refused(why, cx));
-                    }
+            Outcome::RemovalRead {
+                project,
+                serial,
+                read,
+            } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let removal = page.read(cx).removal().clone();
+                    removal.update(cx, |removal, cx| removal.answered(serial, read, cx));
                 }
-                None => {
+            }
+            Outcome::ProjectRemoved { project, result } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let removal = page.read(cx).removal().clone();
+                    removal.update(cx, |removal, cx| removal.removed(result.clone(), cx));
+                } else if let Ok(done) = &result {
+                    // The page was left meanwhile: the toast is said all the same.
+                    let mut said = Toast::success(format!("The project {project} was removed"));
+                    if let Some(detail) = crate::project_removal::done_said(done) {
+                        said = said.detail(detail);
+                    }
+                    toast(said, cx);
+                }
+                if result.is_ok() {
                     self.forms.remove(&project);
                     self.snapshot.projects.retain(|p| p.name != project);
                     let next = self.snapshot.projects.first().map(|p| p.name.clone());
@@ -1175,7 +1191,7 @@ impl Shell {
                         }
                     }
                 }
-            },
+            }
             Outcome::ProjectDetected { read, .. } => {
                 self.add_project
                     .update(cx, |form, cx| form.detect_answered(read, cx));
@@ -3027,30 +3043,56 @@ impl Render for BellList {
     }
 }
 
-/// The Flottille mark: a hull and two sails, drawn in a 16-unit box.
+/// The Flottille mark, drawn as `assets/brand/mark.svg` draws it: its geometry, in that file's
+/// 64-unit box. The sails are filled triangles with a round-joined outline; the hull is one
+/// curved stroke with round ends.
+const MARK_SAILS: [[(f32, f32); 3]; 2] = [
+    [(19., 8.), (19., 38.), (37., 38.)],
+    [(44., 19.), (44., 38.), (57., 38.)],
+];
+const MARK_SAIL_OUTLINE: f32 = 4.;
+const MARK_HULL: [(f32, f32); 4] = [(7., 46.), (20., 53.5), (44., 53.5), (57., 46.)];
+const MARK_HULL_STROKE: f32 = 6.4;
+
+/// The Flottille mark in the box it is given: two filled sails over one curved hull.
 fn logo(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
     canvas(
         |_, _, _| {},
         move |bounds: Bounds<Pixels>, _, window, _| {
-            let unit = f32::from(bounds.size.width) / 16.0;
-            let at = |x: f32, y: f32| {
+            let unit = f32::from(bounds.size.width) / 64.0;
+            let at = |(x, y): (f32, f32)| {
                 point(
                     bounds.origin.x + px(x * unit),
                     bounds.origin.y + px(y * unit),
                 )
             };
-            let mut path = PathBuilder::stroke(px(1.7 * unit));
-            path.move_to(at(2.0, 11.5));
-            path.cubic_bezier_to(at(14.0, 11.5), at(4.5, 13.1), at(11.5, 13.1));
-            path.move_to(at(5.5, 10.0));
-            path.line_to(at(5.5, 3.0));
-            path.line_to(at(9.5, 8.5));
-            path.line_to(at(5.5, 8.5));
-            path.move_to(at(10.5, 10.0));
-            path.line_to(at(10.5, 5.5));
-            path.line_to(at(13.0, 9.0));
-            path.line_to(at(10.5, 9.0));
-            if let Ok(path) = path.build() {
+            let stroke = |width: f32| {
+                PathBuilder::fill().with_style(PathStyle::Stroke(
+                    StrokeOptions::default()
+                        .with_line_width(width * unit)
+                        .with_line_join(LineJoin::Round)
+                        .with_line_cap(LineCap::Round),
+                ))
+            };
+            for sail in MARK_SAILS {
+                let mut fill = PathBuilder::fill();
+                let mut outline = stroke(MARK_SAIL_OUTLINE);
+                for builder in [&mut fill, &mut outline] {
+                    builder.move_to(at(sail[0]));
+                    builder.line_to(at(sail[1]));
+                    builder.line_to(at(sail[2]));
+                    builder.close();
+                }
+                for builder in [fill, outline] {
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, color);
+                    }
+                }
+            }
+            let mut hull = stroke(MARK_HULL_STROKE);
+            hull.move_to(at(MARK_HULL[0]));
+            hull.cubic_bezier_to(at(MARK_HULL[3]), at(MARK_HULL[1]), at(MARK_HULL[2]));
+            if let Ok(path) = hull.build() {
                 window.paint_path(path, color);
             }
         },
@@ -3075,13 +3117,14 @@ fn nested(
         .collect();
     let mut out = Vec::new();
     let mut placed = HashSet::new();
-    // Depth first from each session no other leads; `shown` is false under a folded row.
-    let mut stack: Vec<(usize, bool)> = (0..live.len())
+    // Depth first from each session no other leads; `shown` is false under a folded row. The tie
+    // of a row is the lines the rows above it go on with and whether it is its pilot's last.
+    let mut stack: Vec<(usize, bool, Option<Tie>)> = (0..live.len())
         .rev()
         .filter(|&at| pilots[at].is_none())
-        .map(|at| (at, true))
+        .map(|at| (at, true, None))
         .collect();
-    while let Some((at, shown)) = stack.pop() {
+    while let Some((at, shown, tie)) = stack.pop() {
         if !placed.insert(at) {
             continue;
         }
@@ -3089,6 +3132,10 @@ fn nested(
         let led_by = pilots[at].and(live[at].led_by.as_deref());
         if row.read(cx).led_by() != led_by {
             row.update(cx, |row, cx| row.set_led_by(led_by, cx));
+        }
+        if row.read(cx).tie() != tie.as_ref() {
+            let tie = tie.clone();
+            row.update(cx, |row, cx| row.set_tie(tie, cx));
         }
         let led: Vec<usize> = (0..live.len())
             .filter(|&other| pilots[other] == Some(at))
@@ -3100,7 +3147,65 @@ fn nested(
             out.push(row.clone());
         }
         let open = shown && row.read(cx).is_open();
-        stack.extend(led.into_iter().rev().map(|other| (other, open)));
+        // A child's line goes on past its own children's rows while it has a sibling below.
+        let through = match &tie {
+            Some(tie) => [tie.through.clone(), vec![!tie.last]].concat(),
+            None => Vec::new(),
+        };
+        let last = led.len().saturating_sub(1);
+        stack.extend(led.into_iter().enumerate().rev().map(|(place, other)| {
+            let tie = Tie {
+                through: through.clone(),
+                last: place == last,
+            };
+            (other, open, Some(tie))
+        }));
     }
     out
+}
+
+#[cfg(test)]
+mod mark {
+    use super::*;
+
+    /// The numbers of the first attribute `name="…"` of each element that has one.
+    fn attributes(svg: &str, name: &str) -> Vec<String> {
+        let key = format!(" {name}=\"");
+        svg.match_indices(&key)
+            .map(|(at, _)| {
+                let rest = &svg[at + key.len()..];
+                rest[..rest.find('"').unwrap()].to_owned()
+            })
+            .collect()
+    }
+
+    fn numbers(path: &str) -> Vec<f32> {
+        path.split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+            .filter(|n| !n.is_empty())
+            .map(|n| n.parse().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn the_corner_mark_is_the_brand_mark() {
+        let svg = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/brand/mark.svg"
+        ))
+        .unwrap();
+        let paths = attributes(&svg, "d");
+        assert_eq!(paths.len(), 3, "two sails and a hull: {paths:?}");
+        let flat = |points: &[(f32, f32)]| -> Vec<f32> {
+            points.iter().flat_map(|&(x, y)| [x, y]).collect()
+        };
+        assert_eq!(numbers(&paths[0]), flat(&MARK_SAILS[0]));
+        assert_eq!(numbers(&paths[1]), flat(&MARK_SAILS[1]));
+        assert_eq!(numbers(&paths[2]), flat(&MARK_HULL));
+        // Sails are filled and outlined; the hull is a stroke alone.
+        assert_eq!(attributes(&svg, "fill"), ["#ececec", "#ececec", "none"]);
+        let widths = attributes(&svg, "stroke-width");
+        let outline = MARK_SAIL_OUTLINE.to_string();
+        assert_eq!(widths[..2], [outline.clone(), outline]);
+        assert_eq!(widths[2], MARK_HULL_STROKE.to_string());
+    }
 }

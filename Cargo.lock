@@ -2278,6 +2278,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "libc",
+ "lyon_tessellation",
  "serde_json",
 ]
 

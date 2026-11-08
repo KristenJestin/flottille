@@ -194,10 +194,43 @@ Registers the folder: writes `projects/<name>.toml` with the repositories detect
 remote `origin` and the base rule `["main"]`, and answers the project. Nothing is written in the
 folder or its repositories.
 
+#### `project.removal`
+
+`{"name"}`. What removing the project would do, changing nothing (`docs/projects.md`, "Removing a
+project"): `{"name", "sessions": [{"id", "title", "parent"}], "runs": [{"run", "name", "line",
+"agent"}], "workspaces": [{"name", "branch", "state", "losses", "digest"}]}`. `sessions` are its roots not
+ended, `runs` its command runs still running, `workspaces` by name, each `state` `clean`,
+`uncommitted` (files not committed, whatever else), `unpushed` (only commits on no remote) or
+`unknown` (its state could not be read, `losses` saying why), `losses` the sentences
+`workspace.remove` would refuse with, `digest` an opaque string for the state its worktrees were
+read in (each one's commit, `git status` and the content of each file that names), empty when it
+could not be read. `not-found` when there is no such project.
+
 #### `project.remove`
 
-`{"name"}`. Removes the project's file; the result is `{"removed": "<name>"}`. The folder and its
-repositories are never touched. `not-found` when there is no such file.
+`{"name", "discard"?: [{"name", "losses", "digest"}]}`. Stops the project's agents (roots and children) and
+waits for their processes, stops its command runs, removes its workspaces that would lose
+nothing, then removes the project's file (`docs/projects.md`, "Removing a project"). `discard` is
+what the user was shown and agreed to lose: the workspaces of `project.removal`, each with its
+`losses` and its `digest` as given there (`digest` is required). A workspace that would lose work
+is removed too only when it is listed, each of its losses now is among those listed and its digest
+now is the one listed, read again right before its forced removal; otherwise it is kept, with
+`"changed": true`. A file not committed is one loss whatever it holds: the digest is what tells
+that more was written in it since.
+The result says what was done:
+
+```json
+{"removed": "shop",
+ "stopped": {"agents": [{"id", "title", "parent"}], "runs": [{"run", "name", "line", "agent"}]},
+ "workspaces": {"removed": [{"name", "branch", "branches"}], "kept": [{"name", "why": ["…"], "changed"?: true}]}}
+```
+
+`branches` as `workspace.remove` gives them. The folder and its repositories' checkouts are never
+touched. Meanwhile nothing starts in the project: `agent.run`, `agent.start`, `agent.resume`,
+`workspace.create`, `task.run` and every edit of the project's file are `refused`, "project
+<name> is being removed". `not-found`
+when there is no such project; `refused` when it is being removed already, or when a step failed
+partway, the project still known and the sentence saying what failed and what was done.
 
 #### `project.check`
 
@@ -1314,8 +1347,8 @@ the session has not taken yet, `null` when nothing waits; `resumable`: whether `
 whether the process of an agent that ended is still stopping; `images`: as in the agent's full
 form; `tools_outdated`: whether its running session runs an older list of tools than its role
 has, which a restart replaces, `docs/tools.md`, "When the tools change"; `tools_reload`: whether
-a reload of its tools waits for its next process, `agent.reload_tools`); `doing` a sentence of what it does
-(`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
+a reload of its tools waits for its next process, `agent.reload_tools`; `compacting`: whether Flottille's compaction of it runs, the compactor at work or the agent writing its handoff, from `agent.compacting` to `agent.compacted` or `agent.compaction_failed`); `doing` a sentence of what it does
+(`working`, `idle`, `compacting the conversation`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `pilot` for a
 led session whose question waits for its pilot, `user` for a root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
 says `waiting for #12: checks`, `#12 of api` when the project has several repositories, `waiting for its wake in 20 min`), else `null`; `needs_user`, for the root, whether a request of its tree or its
@@ -1568,7 +1601,9 @@ on the model a new session takes when none is asked, once one said it: what the 
 value that names the model it stands for (`_meta.jetbrains.air.recommendedValue` of the `model`
 option) is an alias: it stays listed with `stands_for`, that model's id, and the model it stands
 for is the `default` one, with the alias's `efforts`. A `default` whose `recommendedValue` is
-itself runs a model no other value does: it is no alias, and is the `default` one, by its name. `default_effort` is the effort a model runs
+itself runs a model no other value does: it is no alias, and is the `default` one, by its name (the
+model its description names, never the adapter's "Default (recommended)"; the same when the
+description names a model and no `recommendedValue` is given). `default_effort` is the effort a model runs
 with when none is asked, once a new session none was set on said it by its name (Claude says it
 as `default` only: never there for Claude). `models_outdated` is `true`
 when they were said by another version of the program or with other API keys set: they are listed

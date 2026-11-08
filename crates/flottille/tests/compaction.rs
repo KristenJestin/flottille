@@ -1109,3 +1109,70 @@ fn a_codex_agent_and_an_opencode_agent_hand_off_the_same_way() {
         });
     }
 }
+
+/// The agent's entry in its own tree, as `agent.tree` gives it.
+fn entry(user: &User, agent: &str) -> Value {
+    user.call("agent.tree", json!({"agent": agent})).unwrap()["agents"][0].clone()
+}
+
+#[test]
+fn a_compaction_says_it_started_and_the_tree_says_it_runs() {
+    let user = user_with(json!([{"hold": "release"}, {"say": SUMMARY}]), "");
+    let agent = session(&user, "add the login page FULL");
+    eventually("the compactor at work", || {
+        compactor_prompts(&user).len() == 1
+    });
+
+    let started = events(&user, &agent, "agent.compacting");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["source"], "compactor", "{started:?}");
+    assert_eq!(started[0]["before"], 150_000, "{started:?}");
+    assert!(compacted(&user, &agent).is_empty(), "it is not over yet");
+    let running = entry(&user, &agent);
+    assert_eq!(running["agent"]["compacting"], true, "{running}");
+    assert!(
+        running["doing"]
+            .as_str()
+            .unwrap()
+            .starts_with("compacting the conversation"),
+        "{running}"
+    );
+
+    std::fs::write(user.path("fake-compactor/release"), "").unwrap();
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    assert_eq!(events(&user, &agent, "agent.compacting").len(), 1);
+    eventually("the tree says it is over", || {
+        entry(&user, &agent)["agent"]["compacting"] == false
+    });
+}
+
+#[test]
+fn a_failed_compaction_said_it_started_first_and_the_tree_stops_saying_it_runs() {
+    let user = user_with(json!([{"die": 3}]), "");
+    let agent = session(&user, "add the login page FULL");
+    eventually("the failure", || !failed(&user, &agent).is_empty());
+
+    assert_eq!(events(&user, &agent, "agent.compacting").len(), 1);
+    let seqs = |name: &str| -> u64 {
+        user.call("agent.show", json!({"agent": agent})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .map(|e| e["seq"].as_u64().unwrap())
+            .unwrap()
+    };
+    assert!(seqs("agent.compacting") < seqs("agent.compaction_failed"));
+    assert_eq!(entry(&user, &agent)["agent"]["compacting"], false);
+}
+
+#[test]
+fn an_agent_writing_its_handoff_is_compacting_too() {
+    let user = handing_user(json!([{"say": HANDOFF}]));
+    let agent = session(&user, "add the login page FULL");
+    eventually("the handoff", || !compacted(&user, &agent).is_empty());
+
+    let started = events(&user, &agent, "agent.compacting");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["source"], "agent", "{started:?}");
+}
