@@ -636,6 +636,39 @@ fn nothing_is_removed_when_work_would_be_lost_unless_discarded() {
 }
 
 #[test]
+fn an_approved_removal_keeps_a_workspace_whose_dirty_file_changed_after_the_card() {
+    let user = user();
+    project(&user);
+    let folder = login(&user);
+    std::fs::write(folder.join("notes.txt"), "notes\n").unwrap();
+    let (id, mcp) = root_in_login(&user);
+
+    let number = held(mcp.call("workspace", json!({"action": "remove"})));
+    let says = request(&user, number)["says"].to_string();
+    assert!(
+        says.contains("notes.txt holds work that is not committed"),
+        "{says}"
+    );
+    // Written after the card: the same sentence, work the user never saw.
+    std::fs::write(folder.join("notes.txt"), "notes\nmore notes\n").unwrap();
+    let output = user.run(&["approve", &number.to_string(), "--discard"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = answer_of(&user, number).body;
+    assert!(body.contains("was not executed"), "{body}");
+    assert!(body.contains("it changed since it was shown"), "{body}");
+    assert!(body.contains("nothing was touched"), "{body}");
+    assert_eq!(
+        std::fs::read_to_string(folder.join("notes.txt")).unwrap(),
+        "notes\nmore notes\n"
+    );
+    assert_eq!(agent(&user, &id)["workspace"], "login");
+}
+
+#[test]
 fn a_child_still_removes_no_workspace() {
     let user = user();
     project(&user);

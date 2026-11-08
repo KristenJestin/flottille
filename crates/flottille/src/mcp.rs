@@ -2163,6 +2163,12 @@ async fn played_in(
     } else if let Some(why) = removed {
         Outcome::Refused(format!("refused: {why}"))
     } else if grant.tools.contains(&tool) {
+        // A removal's answer to discard covers the state the user was shown: read before its
+        // card, so that anything written since tells.
+        let digest = match removes_a_workspace(tool, &args) {
+            true => crate::actions::removal_digest(daemon, grant, &args).await,
+            false => None,
+        };
         // A write of the project shows what it changes; one that cannot be done is refused
         // before the user is asked anything.
         match crate::actions::prepared(daemon, grant, tool, &args).await {
@@ -2269,7 +2275,7 @@ async fn played_in(
                             }
                             judged => {
                                 let (outcome, number) = approvals::ask(
-                                    daemon, grant, tool, &args, key, ask, says, judged,
+                                    daemon, grant, tool, &args, key, ask, says, judged, digest,
                                 );
                                 request = number;
                                 outcome
@@ -2832,7 +2838,8 @@ fn removes_own_workspace(grant: &Grant, tool: &str, args: &Value) -> bool {
 
 /// Performs a call the user allowed, of its class, recorded as the agent's: the request's answer.
 /// `discarding`, the losses of a workspace's removal the user said to make even with what would
-/// be lost. `first`, the services it was judged again to start first.
+/// be lost, and the workspace's state when it was asked. `first`, the services it was judged
+/// again to start first.
 #[allow(clippy::too_many_arguments)]
 pub async fn performed(
     daemon: &Arc<Daemon>,
@@ -2842,14 +2849,16 @@ pub async fn performed(
     request: u64,
     class: gate::Class,
     first: &[String],
-    discarding: Option<Vec<String>>,
+    discarding: Option<(Vec<String>, String)>,
 ) -> Outcome {
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let cancelled = CancellationToken::new();
     let outcome = match discarding {
-        Some(losses) => crate::actions::remove_discarding(daemon, grant, args, &losses).await,
+        Some((losses, digest)) => {
+            crate::actions::remove_discarding(daemon, grant, args, &losses, &digest).await
+        }
         None => {
             perform(
                 daemon,

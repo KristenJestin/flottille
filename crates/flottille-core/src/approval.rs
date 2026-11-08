@@ -42,6 +42,10 @@ pub struct Request {
     /// Where its agent worked when it asked: `main`, or `workspace <name>`; `None` when it was
     /// stored before this was kept. A request is done only where it was asked.
     pub place: Option<String>,
+    /// A workspace's removal: the workspace's state when it was asked (`workspaces::digest`),
+    /// read before its card. The answer to discard removes it only while it is still that;
+    /// `None` when it could not be read, or for any other call.
+    pub digest: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
