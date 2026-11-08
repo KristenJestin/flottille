@@ -44,9 +44,13 @@ pub enum ProjectAction {
     /// work not committed or not pushed is kept
     Remove {
         name: String,
-        /// Also remove the workspaces holding work not committed or not pushed: it is lost
+        /// Also remove the workspaces holding work not committed or not pushed: it is lost.
+        /// What would be lost is shown and you confirm it
         #[arg(long)]
         discard: bool,
+        /// Discard without asking
+        #[arg(short, long, requires = "discard")]
+        yes: bool,
         #[arg(long)]
         json: bool,
     },
@@ -101,7 +105,11 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
             ));
             eprintln!("{}", detected_text(&found, &file));
             if !yes {
-                confirm()?;
+                confirm(
+                    "Register it?",
+                    "not registered",
+                    "use --yes to register without asking",
+                )?;
             }
             // What was shown is what is registered: the daemon refuses if the folder changed meanwhile.
             let project = ask(
@@ -158,14 +166,23 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
         ProjectAction::Remove {
             name: wanted,
             discard,
+            yes,
             json,
         } => {
             let mut asked = serde_json::json!({"name": wanted});
             if discard {
-                // What is discarded is what was shown: the daemon keeps a workspace whose losses
-                // grew meanwhile.
+                // What is discarded is what was shown and confirmed: the daemon keeps a workspace
+                // that changed meanwhile.
                 let removal = ask("project.removal", name(wanted.clone())?)?;
-                eprint!("{}", losses_text(&removal));
+                let losses = losses_text(&removal);
+                eprint!("{losses}");
+                if !yes && !losses.is_empty() {
+                    confirm(
+                        "Discard it and remove the project?",
+                        "not removed, nothing was touched",
+                        "use --yes to discard without asking",
+                    )?;
+                }
                 asked["discard"] = removal["workspaces"]
                     .as_array()
                     .into_iter()
@@ -209,21 +226,19 @@ pub fn in_full(paths: &Paths, message: &str) -> String {
     }
 }
 
-/// Asks on the standard input; anything but a yes, or no answer at all, refuses.
-fn confirm() -> Result<()> {
-    eprint!("Register it? [y/N] ");
+/// Asks `question` on the standard input; anything but a yes refuses with `refused`, and no
+/// answer at all says `instead` too.
+fn confirm(question: &str, refused: &str, instead: &str) -> Result<()> {
+    eprint!("{question} [y/N] ");
     std::io::stderr().flush()?;
     let mut answer = String::new();
     if std::io::stdin().lock().read_line(&mut answer)? == 0 {
         eprintln!();
-        return Err(
-            "not registered: nothing to read an answer from, use --yes to register without asking"
-                .into(),
-        );
+        return Err(format!("{refused}: nothing to read an answer from, {instead}").into());
     }
     match answer.trim().to_lowercase().as_str() {
         "y" | "yes" => Ok(()),
-        _ => Err("not registered".into()),
+        _ => Err(refused.into()),
     }
 }
 

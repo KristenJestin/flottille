@@ -361,7 +361,7 @@ fn remove_with_discard_removes_the_workspace_with_unsaved_work_and_says_so() {
     let user = User::new();
     let draft = with_unsaved_work(&user);
 
-    let output = user.run(&["project", "remove", "app", "--discard"]);
+    let output = user.run_with_input(&["project", "remove", "app", "--discard"], "y\n");
 
     assert!(output.status.success(), "{}", stderr(&output));
     let shown = stderr(&output);
@@ -373,6 +373,55 @@ fn remove_with_discard_removes_the_workspace_with_unsaved_work_and_says_so() {
     let said = stdout(&output);
     assert!(said.contains("Removed the workspace draft"), "{said}");
     assert!(!said.contains("Kept"), "{said}");
+    assert!(!draft.exists());
+}
+
+#[test]
+fn remove_with_discard_asks_and_anything_but_yes_keeps_everything() {
+    let user = User::new();
+    let draft = with_unsaved_work(&user);
+
+    for no in ["n\n", "\n", "maybe\n"] {
+        let output = user.run_with_input(&["project", "remove", "app", "--discard"], no);
+        assert!(!output.status.success(), "{no:?}");
+        let said = stderr(&output);
+        // The question comes after what would be lost, never before.
+        let shown = said
+            .find("The workspace draft would lose: notes.txt holds work that is not committed")
+            .unwrap_or_else(|| panic!("{no:?}: {said}"));
+        let asked = said
+            .find("[y/N]")
+            .unwrap_or_else(|| panic!("{no:?}: {said}"));
+        assert!(shown < asked, "{no:?}: {said}");
+        assert!(said.contains("not removed"), "{no:?}: {said}");
+        assert!(user.project_file("app").is_file(), "{no:?}");
+        assert!(draft.join("notes.txt").exists(), "{no:?}");
+    }
+}
+
+#[test]
+fn remove_with_discard_and_a_closed_input_refuses_and_keeps_everything() {
+    let user = User::new();
+    let draft = with_unsaved_work(&user);
+
+    let output = user.run(&["project", "remove", "app", "--discard"]);
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("--yes"), "{}", stderr(&output));
+    assert!(user.project_file("app").is_file());
+    assert!(draft.join("notes.txt").exists());
+}
+
+#[test]
+fn remove_with_discard_and_yes_discards_without_asking() {
+    let user = User::new();
+    let draft = with_unsaved_work(&user);
+
+    let output = user.run(&["project", "remove", "app", "--discard", "--yes"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("[y/N]"), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Removed the workspace draft"));
     assert!(!draft.exists());
 }
 

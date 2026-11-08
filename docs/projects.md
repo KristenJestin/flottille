@@ -17,7 +17,7 @@ Unknown keys are refused too, so a typo is never silently ignored.
 | `flottille project add <folder> [--name <name>] [--yes]` | Detects the repositories, shows them, asks for a yes on the standard input (`--yes` skips the question; no answer at all is a refusal) and registers the folder. |
 | `flottille project list` | The projects. Fails, naming the file and the key, when a file cannot be used. |
 | `flottille project show <name>` | One project's configuration, every default filled in. |
-| `flottille project remove <name> [--discard]` | Stops the project's agents and command runs, removes its workspaces and forgets it, never its folder ("Removing a project"). A workspace holding unsaved work is kept unless `--discard`. |
+| `flottille project remove <name> [--discard [--yes]]` | Stops the project's agents and command runs, removes its workspaces and forgets it, never its folder ("Removing a project"). A workspace holding unsaved work is kept unless `--discard`, which shows what would be lost and asks first. |
 | `flottille project check <name>` | Detects the repositories again; fails when they differ from the configuration. |
 
 The project page lists the project's repositories (`project.repositories`): each with the branch
