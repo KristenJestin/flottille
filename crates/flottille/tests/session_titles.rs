@@ -54,7 +54,9 @@ fn root(user: &User, message: &str) -> (String, Mcp) {
         .unwrap();
     let id = started["agent"]["id"].as_str().unwrap().to_owned();
     let (url, authorization) = server_of(user, opened);
-    eventually("the turn's end", || shown(user, &id)["agent"]["state"] == "idle");
+    eventually("the turn's end", || {
+        shown(user, &id)["agent"]["state"] == "idle"
+    });
     (id, Mcp::initialize(&url, &authorization))
 }
 
@@ -108,10 +110,7 @@ fn a_title_too_long_or_on_several_lines_is_refused_with_the_reason() {
     assert!(why.contains("one line"), "{why}");
     let why = refused(mcp.call("session_title", json!({"title": "Site"})));
     assert!(why.contains("3 to 8 words"), "{why}");
-    let why = refused(mcp.call(
-        "session_title",
-        json!({"title": "a b c d e f g h i"}),
-    ));
+    let why = refused(mcp.call("session_title", json!({"title": "a b c d e f g h i"})));
     assert!(why.contains("3 to 8 words"), "{why}");
 
     assert_eq!(title_of(&user, &id), (Value::Null, Value::Null));
@@ -140,7 +139,10 @@ fn the_user_renames_a_session_and_the_agent_can_no_longer_retitle_it() {
     let (id, mcp) = root(&user, "rework the site");
 
     let renamed = user
-        .call("agent.rename", json!({"agent": id, "title": "Site, take two"}))
+        .call(
+            "agent.rename",
+            json!({"agent": id, "title": "Site, take two"}),
+        )
         .unwrap();
     assert_eq!(renamed["title"], "Site, take two");
     assert_eq!(
@@ -178,7 +180,10 @@ fn a_secret_in_a_title_is_masked() {
     let (id, mcp) = root(&user, "look around");
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 
-    let answer = mcp.call("session_title", json!({"title": format!("Rotate {token} now")}));
+    let answer = mcp.call(
+        "session_title",
+        json!({"title": format!("Rotate {token} now")}),
+    );
     assert!(!answer.error, "{}", answer.text);
     let (title, _) = title_of(&user, &id);
     assert_eq!(title, "Rotate [masked] now");

@@ -53,7 +53,13 @@ impl RenameSession {
     }
 
     /// Opens the dialog on `session`, its field holding the title it has now.
-    pub fn open(&mut self, session: &str, title: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open(
+        &mut self,
+        session: &str,
+        title: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.session = Some(session.to_owned());
         self.error = None;
         self.field
@@ -101,7 +107,12 @@ impl Render for RenameSession {
                         "Title",
                         boxed("rename-title", Input::new(&self.field), cx),
                     ))
-                    .child(problem_line("rename-error", self.error.clone(), space::SM, cx)),
+                    .child(problem_line(
+                        "rename-error",
+                        self.error.clone(),
+                        space::SM,
+                        cx,
+                    )),
             )
             .action(
                 Button::primary("rename-save", "Save")

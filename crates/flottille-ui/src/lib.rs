@@ -63,8 +63,8 @@ pub use page::{EmptyLine, PageHeader, Section};
 pub use path::path_line;
 pub use radio::RadioChoices;
 pub use reveal::{
-    Changing, Fold, Growing, Presence, PresenceOf, PulsingLabel, changed, changing, enter, fold_frame,
-    growing, presence, presence_of,
+    Changing, Fold, Growing, Presence, PresenceOf, PulsingLabel, changed, changing, enter,
+    fold_frame, growing, presence, presence_of,
 };
 pub use rows::{
     ListCard, ListRow, Tie, TreeLevel, TreeRow, meta, section_label, tie_below_id, tie_id,

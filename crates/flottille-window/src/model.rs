@@ -1140,11 +1140,19 @@ mod tests {
     #[test]
     fn until_titled_a_session_keeps_the_first_line_of_its_message() {
         let mut titled = agent("r1", None, "idle", None);
-        let untitled = build(json!({"agents": [titled.clone()]}), json!({"requests": []}), &[]);
+        let untitled = build(
+            json!({"agents": [titled.clone()]}),
+            json!({"requests": []}),
+            &[],
+        );
         assert_eq!(untitled.sessions[0].title, "Fix the login");
         titled["title"] = json!("Rework the login");
         titled["titled_by"] = json!("agent");
-        let snapshot = build(json!({"agents": [titled.clone()]}), json!({"requests": []}), &[]);
+        let snapshot = build(
+            json!({"agents": [titled.clone()]}),
+            json!({"requests": []}),
+            &[],
+        );
         assert_eq!(snapshot.sessions[0].title, "Rework the login");
         titled["title"] = json!("Login, again");
         titled["titled_by"] = json!("user");

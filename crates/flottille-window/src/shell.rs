@@ -27,7 +27,6 @@ use lyon_tessellation::{LineCap, LineJoin};
 
 use crate::actions::{Actions, Command, Details, Outcome, Pick};
 use crate::add_project::AddProject;
-use crate::rename::RenameSession;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::history::{History, Way};
 use crate::link::{self, Connect, Seen, Update};
@@ -37,6 +36,7 @@ use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine};
 use crate::project_settings::ProjectSettingsPage;
 use crate::providers::Providers;
+use crate::rename::RenameSession;
 use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;

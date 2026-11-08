@@ -85,7 +85,9 @@ pub fn session_title(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcom
         Ok(true) => Outcome::Done(format!("The session is titled \"{title}\".")),
         // The user named it between the read and the write: their title holds.
         Ok(false) => match daemon.read(|store| store.agent(&agent.id)) {
-            Ok(Some(now)) => user_named(&now).unwrap_or_else(|| Outcome::Failed("not titled".into())),
+            Ok(Some(now)) => {
+                user_named(&now).unwrap_or_else(|| Outcome::Failed("not titled".into()))
+            }
             _ => Outcome::Failed(format!("there is no agent {}", agent.id)),
         },
         Err(error) => Outcome::Failed(error.to_string()),

@@ -122,7 +122,13 @@ pub fn quoted(
     use gpui_kit::FontWeight;
     let id: SharedString = id.into();
     let p = crate::theme::palette(cx);
-    let title: SharedString = title.lines().next().unwrap_or_default().trim().to_owned().into();
+    let title: SharedString = title
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
+        .into();
     let whole = format!("{before}{title}{after}");
     let words = |text: &str| {
         (!text.is_empty()).then(|| {
@@ -171,6 +177,9 @@ mod tests {
         assert_eq!(quoted_title("Fix the login\nand more"), "Fix the login…");
         let long = "Rework every page of the site with a new design system and fonts";
         let cut = quoted_title(long);
-        assert!(cut.ends_with('…') && cut.chars().count() <= QUOTED_CHARS + 1, "{cut}");
+        assert!(
+            cut.ends_with('…') && cut.chars().count() <= QUOTED_CHARS + 1,
+            "{cut}"
+        );
     }
 }

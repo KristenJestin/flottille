@@ -209,13 +209,18 @@ fn the_window_renames_a_session_from_its_rows_menu(cx: &mut TestAppContext) {
     project(&user);
     let id = start(&user, "write the release notes");
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the row", |cx| label(cx, session_id(&id)).is_some());
+    until(&shell, cx, "the row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
 
     cx.update(|window, cx| window.hover(session_id(&id), cx));
     settle(cx);
     cx.update(|window, cx| window.click(session_menu_id(&id), cx));
     settle(cx);
-    assert_eq!(label(cx, session_rename_id(&id)).as_deref(), Some("Rename…"));
+    assert_eq!(
+        label(cx, session_rename_id(&id)).as_deref(),
+        Some("Rename…")
+    );
     cx.update(|window, cx| window.click(session_rename_id(&id), cx));
     settle(cx);
     // The field holds the title it has now.
@@ -242,7 +247,9 @@ fn the_window_renames_a_session_from_its_header_and_the_title_fades_in(cx: &mut 
     project(&user);
     let id = start(&user, "write the release notes");
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the row", |cx| label(cx, session_id(&id)).is_some());
+    until(&shell, cx, "the row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
     cx.update(|window, cx| window.click(session_id(&id), cx));
     until(&shell, cx, "the page", |cx| {
         label(cx, "session-title").as_deref() == Some("write the release notes")
@@ -253,18 +260,26 @@ fn the_window_renames_a_session_from_its_header_and_the_title_fades_in(cx: &mut 
     cx.update(|window, cx| window.click("session-rename", cx));
     settle(cx);
     rename_to(&shell, "Release notes", cx);
-    until(&shell, cx, "the header and the row say the new title", |cx| {
-        label(cx, "session-title").as_deref() == Some("Release notes")
-            && row_title(cx, &id).as_deref() == Some("Release notes")
-    });
+    until(
+        &shell,
+        cx,
+        "the header and the row say the new title",
+        |cx| {
+            label(cx, "session-title").as_deref() == Some("Release notes")
+                && row_title(cx, &id).as_deref() == Some("Release notes")
+        },
+    );
     // The new title fades in over the old one, then nothing moves.
     assert!(pending_frames(cx) > 0, "the new title fades in");
     settle(cx);
     assert_eq!(pending_frames(cx), 0);
 
     // A title its agent gives later moves the same way, without a refresh.
-    user.call("agent.rename", json!({"agent": id, "title": "Notes for 1.2"}))
-        .unwrap();
+    user.call(
+        "agent.rename",
+        json!({"agent": id, "title": "Notes for 1.2"}),
+    )
+    .unwrap();
     until(&shell, cx, "the header follows", |cx| {
         label(cx, "session-title").as_deref() == Some("Notes for 1.2")
     });
