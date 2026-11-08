@@ -259,7 +259,10 @@ preparation. Then nothing is touched unless:
   whose remote branch the forge deleted and a fetch pruned. Commits on no remote are no loss
   either when another local branch of the repository holds them: the branch is **integrated**,
   merged into or contained in that branch (`git merge-base --is-ancestor HEAD <branch>`, for
-  each local branch but its own). A commit made after, a pull request not merged, a forge that
+  each local branch but its own, by full ref name, and but a symbolic ref, which may point at its
+  own). Any local branch counts, even one never pushed: that branch keeps the commits. Removals
+  delete branches one at a time, so that two branches holding the same commits are never both
+  deleted, each counted as kept in the other. A commit made after, a pull request not merged, a forge that
   cannot be read or none declared still refuse; uncommitted files refuse, integrated or not;
 - outside the worktrees made, the workspace folder holds nothing but the links Flottille made and
   folders holding nothing else (`<path> is in no worktree`): no `git status` sees a file written in
