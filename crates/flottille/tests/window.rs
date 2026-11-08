@@ -8354,6 +8354,50 @@ fn in_main_slash_lists_the_commands_too(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_project_with_no_command_of_its_own_says_so_under_its_heading_only(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "login");
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the built-in command", |cx| {
+        slash_offered(&shell, cx) == ["reload-tools"]
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("slash-builtin-label").visible());
+        assert!(window.find("slash-reload-tools").visible());
+        assert!(window.find("slash-project-label").visible());
+        assert!(window.find("slash-none").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn a_project_with_a_command_shows_its_row_and_no_note(cx: &mut TestAppContext) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the commands", |cx| {
+        slash_offered(&shell, cx).len() == 3
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("slash-builtin-label").visible());
+        assert!(window.find("slash-project-label").visible());
+        assert!(window.find("slash-close").visible());
+        assert!(window.try_find("slash-none").is_none());
+    });
+}
+
+#[gpui_kit::test]
 fn an_unknown_slash_word_is_sent_as_text(cx: &mut TestAppContext) {
     let user = user_with_commands();
     let lead = start(&user, "atlas", Some("login"), "Fix the login");

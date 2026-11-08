@@ -717,3 +717,65 @@ fn a_compaction_that_fails_says_so_and_the_queued_message_is_sent_without_it(
         "it was not compacted: the session went on as it was"
     );
 }
+
+/// The messages of the user the conversation shows, in order.
+fn user_messages(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<String> {
+    blocks(page, cx)
+        .into_iter()
+        .filter_map(|b| match b {
+            Block::Message { from, text, .. } if from == "you" => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui_kit::test]
+fn after_a_compaction_the_brief_is_not_shown_again_as_a_message_of_the_user(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with(json!([{"hold": "release"}, {"say": SUMMARY}]), "");
+    let id = start(&user, "add the login page FULL");
+    compactor_at_work(&user);
+    let (shell, cx) = window(&user, cx);
+    let page = open_session(&shell, &id, cx);
+    until(&shell, cx, "the step that runs", |cx| {
+        step_row(&page, cx).is_some()
+    });
+    // The user writes during the compaction, and after it.
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "and add the logout page"}),
+    )
+    .unwrap();
+    release(&user);
+    until(&shell, cx, "the message is sent", |cx| {
+        user_messages(&page, cx).contains(&"and add the logout page".to_owned())
+            && compacted_row(&page, cx).is_some()
+    });
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "and the footer"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the message after", |cx| {
+        user_messages(&page, cx).contains(&"and the footer".to_owned())
+    });
+    settle(cx);
+
+    // Each message of the user once, in the order they wrote them: no brief again.
+    assert_eq!(
+        user_messages(&page, cx),
+        [
+            "add the login page FULL",
+            "and add the logout page",
+            "and the footer"
+        ]
+    );
+    // After the line, the agent's next answer and the user's messages: nothing Flottille sent.
+    let shown = blocks(&page, cx);
+    assert!(
+        !shown.iter().any(|b| matches!(b,
+            Block::Notice { kind, .. } if kind == "resume" || kind == "brief")),
+        "{shown:?}"
+    );
+}

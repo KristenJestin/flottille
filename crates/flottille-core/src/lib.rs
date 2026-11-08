@@ -15,6 +15,7 @@ pub mod item;
 pub mod paths;
 pub mod place;
 pub mod project;
+pub mod prompt;
 pub mod protocol;
 pub mod provider;
 pub mod registry;

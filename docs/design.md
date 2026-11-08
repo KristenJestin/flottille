@@ -490,7 +490,9 @@ agent wrote is data.
    user's words nor Flottille's instructions. `agent.compacting` says it began, so that the
    window shows the compaction as a step that runs; `agent.compacted` says it is done, with
    the sizes before and after and the summary; the conversation shows it as one line,
-   `Conversation compacted · 152k → 9k tokens`, which unfolds to the summary.
+   `Conversation compacted · 152k → 9k tokens`, which unfolds to the summary. What is sent to the new session is part of the compaction:
+   the conversation, `agent show` and `session_read` never show it as messages, and a
+   message the user wrote meanwhile stays where it is (`docs/events.md`, `agent.prompted`).
 5. **A failure** changes nothing: the agent goes on in its session, `agent.compaction_failed` and
    the developer log say why, and the CLI's own compaction stays the safety net. With a compactor
    chosen, each CLI is set to compact as late as it allows (`docs/agents.md`, "Compaction").

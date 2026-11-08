@@ -8635,41 +8635,54 @@ impl Reply {
                 cx.reduce_motion(),
             );
         }
-        let rows: Vec<AnyElement> = self
+        // The composer's own commands sit under their heading, the project's under theirs: the
+        // note about the project's commands belongs to the second one alone.
+        let mut builtin: Vec<AnyElement> = Vec::new();
+        let mut project: Vec<AnyElement> = Vec::new();
+        for row in self.slash_rows.rows() {
+            let (name, description) = row.value.clone();
+            let is_builtin = name == RELOAD_COMMAND;
+            let picked = name.clone();
+            let mut line = ListRow::new(
+                ElementId::Name(format!("slash-{name}").into()),
+                format!("/{name}"),
+            )
+            .line(description)
+            .selected(open && on.as_ref().is_some_and(|(on, _)| *on == name));
+            if open && !row.placement.is_gone() {
+                line = line.on_click(
+                    cx.listener(move |this, _, window, cx| this.pick(&picked, window, cx)),
+                );
+            }
+            let item = flottille_ui::Item::new(
+                ElementId::Name(format!("slash-item-{name}").into()),
+                row.placement,
+                line,
+            )
+            .gap(space::XS)
+            .into_any_element();
+            if is_builtin {
+                builtin.push(item);
+            } else {
+                project.push(item);
+            }
+        }
+        let builtin_listed = self
             .slash_rows
             .rows()
-            .map(|row| {
-                let (name, description) = row.value.clone();
-                let picked = name.clone();
-                let mut line = ListRow::new(
-                    ElementId::Name(format!("slash-{name}").into()),
-                    format!("/{name}"),
-                )
-                .line(description)
-                .selected(open && on.as_ref().is_some_and(|(on, _)| *on == name));
-                if open && !row.placement.is_gone() {
-                    line = line.on_click(
-                        cx.listener(move |this, _, window, cx| this.pick(&picked, window, cx)),
-                    );
-                }
-                flottille_ui::Item::new(
-                    ElementId::Name(format!("slash-item-{name}").into()),
-                    row.placement,
-                    line,
-                )
-                .gap(space::XS)
-                .into_any_element()
-            })
-            .collect();
-        let listed = !self.slash_rows.is_empty();
+            .any(|row| row.value.0 == RELOAD_COMMAND && !row.placement.is_gone());
+        let project_listed = self
+            .slash_rows
+            .rows()
+            .any(|row| row.value.0 != RELOAD_COMMAND && !row.placement.is_gone());
         let note = div()
             .id("slash-none")
-            .aria_label("This project has no command yet: add one in its settings.")
+            .aria_label("No command of this project yet: add one in its settings.")
             .px(space::MD)
             .py(space::SM)
             .text_size(px(12.5))
             .text_color(p.faint)
-            .child("This project has no command yet: add one in its settings.")
+            .child("No command of this project yet: add one in its settings.")
             .test_support();
         let card = div()
             .id("slash-list")
@@ -8683,8 +8696,24 @@ impl Reply {
             .flex()
             .flex_col()
             .gap(space::XS)
-            .child(presence("slash-label", listed, section_label("Commands", cx)).gap(space::XS))
-            .children(rows)
+            .child(
+                presence(
+                    "slash-builtin-label",
+                    builtin_listed,
+                    section_label("Flottille", cx),
+                )
+                .gap(space::XS),
+            )
+            .children(builtin)
+            .child(
+                presence(
+                    "slash-project-label",
+                    project_listed || none,
+                    section_label("This project", cx),
+                )
+                .gap(space::XS),
+            )
+            .children(project)
             .child(presence("slash-note", none, note).gap(space::XS))
             .test_support();
         div()

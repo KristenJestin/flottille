@@ -293,8 +293,10 @@ not merged is not lost by the removal: the workspace is removed and its branch k
 
 A root agent removes a workspace the same way, with `workspace` `remove`, always held for the
 user, its card saying what would be lost (`docs/tools.md`, "The workspace"); the one it works in
-too, once its work is done ("Its own workspace", below). What would be lost refuses it unless the user's answer said to discard it: then nothing
-is checked for loss, each worktree is removed with `git worktree remove --force`, and the folder
+too, once its work is done ("Its own workspace", below). What would be lost refuses it unless the user's answer said to discard it, and the losses
+are still those of the card and the workspace's state still the one read when it was asked
+(its digest, as `project.removal` reads it, kept with the request; a file written into since changes it, and a state
+that could not be read then is never forced): then nothing is checked for loss, each worktree is removed with `git worktree remove --force`, and the folder
 with what it held. Its landed branches are then deleted as above, and the others kept, which its
 answer says. It is refused, nothing touched, while the
 workspace is in use outside the agent's tree (`docs/design.md` §5.1): an agent of another tree not

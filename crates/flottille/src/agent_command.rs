@@ -806,8 +806,13 @@ fn show_text(shown: &Value) -> String {
         } else {
             ""
         };
+        // What a compaction sends the new session again is not something the user said.
+        let sent = (name == "agent.prompted").then(|| flottille_core::prompt::without_replay(data));
+        if sent.as_deref() == Some("") {
+            continue;
+        }
         let said = match name {
-            "agent.prompted" => Some(("you", text(data, "text"))),
+            "agent.prompted" => Some(("you", sent.as_deref().unwrap_or_default())),
             "agent.user_message" => Some(("you", text(data, "text"))),
             "agent.message" => Some(("agent", text(data, "text"))),
             _ => None,
