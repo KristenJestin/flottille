@@ -389,3 +389,36 @@ fn an_agent_stopping_a_handed_session_is_held_for_the_user_every_time() {
         assert_eq!(judge_prompts(&user), judged, "{mode}: the judge was asked");
     }
 }
+
+#[test]
+fn a_session_handed_while_the_judge_decides_is_not_ended() {
+    // The judge allows once the test releases it.
+    let user = User::with_fake_agent().with_judge(json!([
+        {"hold": "release"},
+        {"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}
+    ]));
+    project(&user, "app");
+    let release = user.path("fake-judge/release");
+    std::fs::write(&release, "").unwrap();
+    let (a, mcp) = root(&user, "app");
+    set_mode(&user, &a, "auto");
+    let session = launched(&user, &mcp, "led", "Login");
+    std::fs::remove_file(&release).unwrap();
+    let judged = judge_prompts(&user);
+
+    // While the judge decides, the user takes the session over.
+    let stopped = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            eventually("the judgement", || judge_prompts(&user) > judged);
+            user.call("agent.detach", json!({"agent": session}))
+                .unwrap();
+            std::fs::write(&release, "").unwrap();
+        });
+        stop(&mcp, &session)
+    });
+
+    assert!(stopped.error, "{}", stopped.text);
+    assert!(stopped.text.contains("no longer leads"), "{}", stopped.text);
+    assert_eq!(shown(&user, &session)["state"], "idle");
+    assert!(requests(&user).is_empty(), "{:?}", requests(&user));
+}

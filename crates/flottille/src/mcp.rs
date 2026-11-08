@@ -96,6 +96,10 @@ const GUIDE: &str = include_str!("../roles/guide.md");
 const LEAVE_WITHDRAWN: &str = "refused: the user withdrew your leave to write to that session \
     while this message was judged; send it again to ask them";
 
+/// An `agent_stop` allowed as the end of a session the caller leads, which it no longer leads:
+/// the user detached it, or it was handed, meanwhile.
+const NO_LONGER_LED: &str = "refused: this agent no longer leads that session, the user took it     over while this call was decided; ask again and the user decides";
+
 /// What a call of a session that was replaced is answered.
 /// What a call is answered when its process ended while it was on its way.
 const GONE: &str = "refused: this session's process has ended: its token no longer works; stop \
@@ -2227,6 +2231,8 @@ async fn played_in(
                                 verdict = Some("full");
                                 if let Some(refused) = stale(daemon, grant, tool) {
                                     refused
+                                } else if no_longer_led(daemon, grant, tool, &args) {
+                                    Outcome::Refused(NO_LONGER_LED.into())
                                 } else if removes_a_workspace(tool, &args) {
                                     crate::actions::remove_losing(daemon, grant, args).await
                                 } else {
@@ -2247,6 +2253,9 @@ async fn played_in(
                                     (_, Some(refused)) => refused,
                                     (Some(Err(why)), _) => Outcome::Refused(why),
                                     (Some(Ok(true)), _) => Outcome::Refused(LEAVE_WITHDRAWN.into()),
+                                    _ if no_longer_led(daemon, grant, tool, &args) => {
+                                        Outcome::Refused(NO_LONGER_LED.into())
+                                    }
                                     _ => {
                                         verdict = Some("judged");
                                         let approved = Some(gate::Class::Judge);
@@ -2329,6 +2338,12 @@ fn is_replaced(daemon: &Daemon, grant: &Grant) -> bool {
 
 /// Why a call that waited (a read, a preparation, the judge) can no longer be performed: its
 /// session was replaced or its workspace is being removed meanwhile. Asked right before it is.
+/// Whether an `agent_stop` let through without the user now ends a session the caller does not
+/// lead: only one it leads was (`gate::end_led`), any other is the user's to allow.
+fn no_longer_led(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> bool {
+    tool == "agent_stop" && crate::tree::ends_session(daemon, grant, args)
+}
+
 fn stale(daemon: &Daemon, grant: &Grant, tool: &str) -> Option<Outcome> {
     if is_replaced(daemon, grant) {
         return Some(Outcome::Refused(REPLACED.into()));
