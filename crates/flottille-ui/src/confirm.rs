@@ -11,8 +11,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce, SharedString,
-    StatefulInteractiveElement, Styled, TestSupportExt, Window, div, px,
+    AnyElement, App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window, div, px,
 };
 
 use crate::button::Button;
@@ -29,6 +29,7 @@ pub struct Confirm {
     sentence: Option<SharedString>,
     action: SharedString,
     refused: Option<SharedString>,
+    children: Vec<AnyElement>,
     open: bool,
     on_confirm: Option<Handler>,
     on_cancel: Option<Handler>,
@@ -44,6 +45,7 @@ impl Confirm {
             sentence: None,
             action: "Remove".into(),
             refused: None,
+            children: Vec::new(),
             open: true,
             on_confirm: None,
             on_cancel: None,
@@ -85,6 +87,14 @@ impl Confirm {
     pub fn on_cancel(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_cancel = Some(Rc::new(f));
         self
+    }
+}
+
+/// What the consequence is made of, under the sentence (what runs, what is kept): each child
+/// enters as the dialog does.
+impl ParentElement for Confirm {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.children.extend(elements);
     }
 }
 
@@ -135,6 +145,7 @@ impl RenderOnce for Confirm {
         if let Some(sentence) = self.sentence {
             modal = modal.sentence(sentence);
         }
+        modal = modal.children(self.children);
         // The reason is known when the dialog opens: it comes with the dialog's own entrance.
         if self.refused.is_some() {
             modal = modal.child(refused);

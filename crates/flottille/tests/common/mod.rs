@@ -709,11 +709,19 @@ impl User {
     /// One request over the socket, to a daemon the first command starts: its result, or the
     /// code and the message of its error.
     pub fn call(&self, method: &str, params: Value) -> Result<Value, (String, String)> {
+        self.call_within(method, params, Duration::from_secs(10))
+    }
+
+    /// `call`, for a method that may take longer than its 10 seconds to answer.
+    pub fn call_within(
+        &self,
+        method: &str,
+        params: Value,
+        within: Duration,
+    ) -> Result<Value, (String, String)> {
         self.status();
         let mut stream = UnixStream::connect(self.path("runtime/flottille/daemon.sock")).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
+        stream.set_read_timeout(Some(within)).unwrap();
         let request = serde_json::json!({"id": "1", "method": method, "params": params});
         writeln!(stream, "{request}").unwrap();
         let mut line = String::new();

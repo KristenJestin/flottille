@@ -212,6 +212,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
             refuse_child(daemon, &agent, "resumes it")?;
+            crate::projects::refuse_removing(daemon, &agent.project)?;
             if !agent.state.is_final() {
                 return Err(Failure::refused(format!(
                     "agent {} has not ended: it is {}",
@@ -680,6 +681,7 @@ pub struct New {
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
 pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
+    crate::projects::refuse_removing(daemon, &project.name)?;
     let (place, folder, repositories) = match &new.workspace {
         None => {
             let repositories: Vec<_> = project
