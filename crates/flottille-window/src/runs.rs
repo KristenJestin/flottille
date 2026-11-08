@@ -559,9 +559,13 @@ pub(crate) fn ended_row(
 /// Who started a command: the task, then the agent as `names` calls it, or the user. The root
 /// agent is not named: its conversation is the page the rail is on, so the name says nothing.
 fn who(row: &CommandRow, names: &HashMap<String, String>) -> Option<String> {
-    // A server that says when it is ready says that instead of who started it.
+    // A server that says when it is ready says that instead of who started it. Its green dot
+    // says it is ready, so only a server still starting says so here.
     if let (Some(name), Some(ready)) = (&row.name, row.readiness()) {
-        return Some(format!("task {name} · {ready}"));
+        return Some(match ready {
+            "ready" => format!("task {name}"),
+            ready => format!("task {name} · {ready}"),
+        });
     }
     let agent = match row.agent.as_str() {
         "" => Some("you".to_owned()),
