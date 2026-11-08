@@ -4939,7 +4939,15 @@ impl Render for Row {
                                         .px(space::SM)
                                         .mono(11.5)
                                         .text_color(p.faint)
-                                        .child(SharedString::from(from))
+                                        // "started by <title>" is one line, cut: never wrapped.
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .child(SharedString::from(from)),
+                                        )
                                         .test_support(),
                                 )
                             })
@@ -5650,7 +5658,15 @@ impl Render for Row {
                     .text_color(if failed { p.fail } else { p.faint })
                     .aria_label(SharedString::from(text.clone()))
                     .child(div().flex_none().child(SharedString::from(kind.clone())))
-                    .child(div().min_w_0().child(SharedString::from(text.clone())))
+                    .child(
+                        div()
+                            .min_w_0()
+                            // A session's title is one line, cut; a failure's reason is whole.
+                            .when(kind == STARTED_SESSION_KIND, |d| {
+                                d.overflow_hidden().whitespace_nowrap().text_ellipsis()
+                            })
+                            .child(SharedString::from(text.clone())),
+                    )
                     .test_support()
                     .into_any_element();
                 // The error line takes the place of the step that ran, fading in.
