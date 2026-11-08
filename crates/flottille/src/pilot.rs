@@ -550,6 +550,7 @@ fn agent_start(paths: &Paths, args: Value) -> Done {
         model,
         effort,
         mode: None,
+        gate_mode: None,
         role,
         message,
         images: Vec::new(),

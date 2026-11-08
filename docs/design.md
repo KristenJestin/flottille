@@ -603,7 +603,11 @@ a malformed call, a login printed, the daemon driven from a command.
 ### 7.1 The mode and the judge
 
 Each session is in **Ask**, **Auto** or **Full**, a small three-choice control in the composer's
-bar. A session the user starts starts in Auto, never in Full. A tree has one mode, its
+bar, the same in the composer that starts a session. A session the user starts starts in Auto
+unless the user chose another mode in that composer (or `flottille agent start --mode`), and the
+mode is the root's before its first message, so that even the first turn's calls follow it. That
+composer is back on Auto each time it is shown and after each start: a choice never carries over to
+the next session, so that Full is never on by mistake. A tree has one mode, its
 root's, stored with the root and read at each call: a switch reaches every agent of the tree at
 once, children included. Only the user changes it, in the window or with
 `flottille agent mode <agent> ask|auto|full` (`agent.mode`, which switches the tree's root
@@ -1113,9 +1117,10 @@ nothing built, in [`extensions.md`](extensions.md).
 - Children cap 12 per project, no depth, quiet interval 20 min.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
   only warned about.
-- A session the user starts starts in Auto, and a tree has one mode, its root's, read at each call; Auto
-  without a judge asks the user as Ask does. Full is chosen by the user for a session already
-  started, never at its start; a session an agent starts takes its launcher's mode, Full included. A user who never chose a judge gets the smallest model
+- A session the user starts starts in Auto unless the user chose its mode in the composer that
+  starts it, which is back on Auto after each start, and a tree has one mode, its root's, read at
+  each call; Auto without a judge asks the user as Ask does. Only the user chooses Full, at a
+  session's start or later; a session an agent starts takes its launcher's mode, Full included. A user who never chose a judge gets the smallest model
   of the first provider installed and signed in, among those listed (Claude's `haiku`); one that is
   not listed gets nothing picked.
 - One judge process per judgement, stopped after it, rather than one kept warm: nothing of a

@@ -92,8 +92,9 @@ pub struct Agent {
 
 /// A session's mode (`docs/design.md` §7): in Ask a call to judge comes to the user; in Auto the
 /// judge decides it; in Full every call the gate would hold passes, base ones too, and what the
-/// gate refuses stays refused. A session the user starts starts in Auto, never in Full; one an
-/// agent starts takes its launcher's tree's mode, and a child runs in its root's.
+/// gate refuses stays refused. A session the user starts starts in Auto unless the user names
+/// another mode; one an agent starts takes its launcher's tree's mode, and a child runs in its
+/// root's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateMode {

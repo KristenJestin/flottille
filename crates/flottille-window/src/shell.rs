@@ -402,6 +402,8 @@ impl Shell {
             )
         });
         let forms = forms.clone();
+        // Shown, the composer is on Auto: a mode chosen for one session never reaches the next.
+        forms.0.update(cx, |composer, cx| composer.reset_mode(cx));
         if let Some(project) = self.snapshot.projects.iter().find(|p| &p.name == name) {
             let (repositories, default_set) = (
                 project.repositories.clone(),
