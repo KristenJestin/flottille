@@ -534,6 +534,7 @@ pub async fn run(
         ready: probe.as_ref().map(|_| Readiness::Starting),
         url,
         url_error,
+        workspace: None,
     };
     if let Err(why) = start(
         daemon,
@@ -577,11 +578,13 @@ pub async fn run_for_user(
     daemon: &Arc<Daemon>,
     project: &flottille_core::project::Project,
     name: &str,
+    workspace: Option<&str>,
 ) -> Result<String, String> {
     let task = project
         .tasks
         .get(name)
         .ok_or_else(|| format!("project {} has no task named {name}", project.name))?;
+    let place = user_place(daemon, project, workspace)?;
     let serving = task
         .serve
         .then(|| daemon.mcp.runs.serving(None, &project.name, name));
@@ -593,6 +596,7 @@ pub async fn run_for_user(
         && let Some(going) = daemon.mcp.runs.runs.lock().unwrap().values().find(|g| {
             g.run.agent.is_none()
                 && g.run.project == project.name
+                && g.run.workspace == place.workspace
                 && g.run.name.as_deref() == Some(name)
         })
     {
@@ -601,7 +605,6 @@ pub async fn run_for_user(
     crate::services::start_needed(daemon, &task.needs, None)
         .await
         .map_err(|why| format!("task {name} cannot run: {why}"))?;
-    let place = Place::main(project, project.folder.clone());
     let words = split_line(&task.line)?;
     let (repository, base) = place.base_for(task.repository.as_deref(), Folder::Task)?;
     let folder = place.resolve(base, ".");
@@ -635,6 +638,7 @@ pub async fn run_for_user(
         ready: probe.as_ref().map(|_| Readiness::Starting),
         url,
         url_error,
+        workspace: place.workspace.clone(),
     };
     start(
         daemon,
@@ -649,6 +653,22 @@ pub async fn run_for_user(
         },
     )?;
     Ok(id)
+}
+
+/// Where a task the user runs runs: the workspace named, or the project folder.
+fn user_place(
+    daemon: &Daemon,
+    project: &flottille_core::project::Project,
+    workspace: Option<&str>,
+) -> Result<Place, String> {
+    let Some(name) = workspace else {
+        return Ok(Place::main(project, project.folder.clone()));
+    };
+    let workspace = daemon
+        .read(|store| store.workspace(&project.name, name))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("project {} has no workspace named {name}", project.name))?;
+    Ok(Place::of_workspace(&workspace, workspace.folder.clone()))
 }
 
 /// The call that started the run answers while it runs: its end wakes the agent, unless it
@@ -1297,7 +1317,8 @@ pub async fn restart_by_user(
     {
         Some(Ok(grant)) => grant.place,
         Some(Err(why)) if alive.is_some() => return Err(why),
-        _ => Place::main(&project, project.folder.clone()),
+        // A task the user ran from a session's rail runs again in its workspace.
+        _ => user_place(daemon, &project, old.workspace.as_deref())?,
     };
     let notice = old.agent.as_ref().filter(|_| alive.is_none()).map(|agent| {
         format!("agent {agent} has ended: the command now runs as yours, with no agent to tell")
@@ -1416,6 +1437,10 @@ pub async fn restart_by_user(
         ready: probe.as_ref().map(|_| Readiness::Starting),
         url,
         url_error,
+        workspace: match owner {
+            Some(_) => None,
+            None => place.workspace.clone(),
+        },
     };
     // An agent's run is detached from the start: its end wakes the agent, as its call's would
     // have, even when it comes before this function goes on.
@@ -1962,6 +1987,7 @@ pub(crate) fn start_service(
         ready: start.probe.as_ref().map(|_| Readiness::Starting),
         url: start.url,
         url_error: start.url_error,
+        workspace: None,
     };
     self::start(
         daemon,

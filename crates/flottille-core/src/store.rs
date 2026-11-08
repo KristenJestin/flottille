@@ -690,13 +690,17 @@ const MIGRATIONS: &[&str] = &[
     -- the record once `launched_by` is cleared, and to keep its first message the agent's.
     ALTER TABLE agents ADD COLUMN detached_from TEXT REFERENCES agents (id);
 ",
+    "
+    -- The workspace a task the user ran from a session's rail runs in: that session lists it.
+    ALTER TABLE runs ADD COLUMN workspace TEXT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
     identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place";
 
 const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
-    ended_at, output, dismissed, project, ready, url, url_error";
+    ended_at, output, dismissed, project, ready, url, url_error, workspace";
 
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
@@ -1521,7 +1525,7 @@ impl Store {
         transaction.execute(
             &format!(
                 "INSERT INTO runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
-                 ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
+                 ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
             ),
             params![
                 run.id,
@@ -1540,6 +1544,7 @@ impl Store {
                 run.ready.map(Readiness::as_str),
                 run.url,
                 run.url_error,
+                run.workspace,
             ],
         )?;
         let event = append_event(&transaction, event.0, event.1)?;
@@ -1631,7 +1636,8 @@ impl Store {
     pub fn ended_runs_of(&self, agents: &[String], limit: usize, tail: usize) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
-             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error FROM runs \
+             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error, workspace \
+             FROM runs \
              WHERE agent = ?1 AND state != 'running' AND dismissed = 0 \
              ORDER BY ended_at DESC, id DESC LIMIT ?2"
         ))?;
@@ -1653,7 +1659,8 @@ impl Store {
     pub fn user_runs_of(&self, project: &str, limit: usize, tail: usize) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
-             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error FROM runs \
+             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error, workspace \
+             FROM runs \
              WHERE agent IS NULL AND project = ?1 AND (state = 'running' OR (dismissed = 0 \
              AND id IN (SELECT id FROM runs WHERE agent IS NULL AND project = ?1 \
              AND state != 'running' AND dismissed = 0 ORDER BY ended_at DESC, id DESC LIMIT ?2))) \
@@ -3168,6 +3175,7 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
             .and_then(|ready| Readiness::parse(&ready)),
         url: row.get(14)?,
         url_error: row.get(15)?,
+        workspace: row.get(16)?,
     }))
 }
 
@@ -4734,6 +4742,7 @@ mod tests {
             ready: None,
             url: None,
             url_error: None,
+            workspace: None,
         };
         for (id, project, at) in [("r1", "app", 5), ("r2", "app", 6), ("r3", "other", 7)] {
             store
@@ -5624,6 +5633,7 @@ mod tests {
             ready: None,
             url: None,
             url_error: None,
+            workspace: None,
         };
         store.create_run(&run, ("run.started", json!({}))).unwrap();
         assert_eq!(store.run("r1").unwrap().unwrap(), run);
@@ -5682,6 +5692,7 @@ mod tests {
             ready: Some(Readiness::Starting),
             url: Some("https://w.app.localhost".into()),
             url_error: None,
+            workspace: None,
         };
         for id in ["r1", "r2"] {
             store
@@ -5750,6 +5761,7 @@ mod tests {
                 ready: None,
                 url: None,
                 url_error: None,
+                workspace: None,
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }
@@ -5811,6 +5823,7 @@ mod tests {
                 ready: None,
                 url: None,
                 url_error: None,
+                workspace: None,
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }
