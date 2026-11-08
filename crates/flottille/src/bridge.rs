@@ -1203,8 +1203,11 @@ fn arguments(options: &Options, config: &Path, new: bool, session: &str) -> Vec<
     args
 }
 
-/// The session's options: the models `claude` listed, and the effort levels of the one set when
-/// it has any.
+/// The session's options: the models `claude` listed, each with its effort levels in `_meta`
+/// (`[]` for one without), and the effort levels of the one set when it has any. ACP says only
+/// the current model's efforts; `claude`'s `initialize` says every model's, so the daemon learns
+/// them all from a session without setting a model, which `claude` may check with a request to
+/// the API (`docs/agents.md`, "The models").
 fn config_options(claude: &Claude) -> Value {
     let mut models: Vec<Value> = claude
         .models
@@ -1212,7 +1215,9 @@ fn config_options(claude: &Claude) -> Value {
         .filter_map(|model| {
             let value = model["value"].as_str()?;
             let name = model["displayName"].as_str().unwrap_or(value);
-            Some(json!({"value": value, "name": name}))
+            let efforts = effort_levels(&claude.models, value).unwrap_or_default();
+            Some(json!({"value": value, "name": name,
+                "_meta": {"flottille": {"efforts": efforts}}}))
         })
         .collect();
     if !models.iter().any(|m| m["value"] == "default") {

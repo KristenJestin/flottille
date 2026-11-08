@@ -4203,6 +4203,8 @@ fn choosing_the_other_and_a_model_starts_the_session_on_them_and_the_tree_shows_
     cx.update(|window, cx| window.click("provider-choice-opencode", cx));
     cx.update(|window, cx| window.click("model-picker", cx));
     cx.update(|window, cx| window.click("model-choice-open/small", cx));
+    // The effort picker's room opens as the model's efforts come.
+    settle(cx);
     cx.update(|window, cx| window.click("effort-picker", cx));
     cx.update(|window, cx| window.click("effort-choice-high", cx));
     type_task("Please launch a helper", cx);
@@ -4442,6 +4444,8 @@ fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_s
         assert!(window.try_find("model-choice-fake-large").is_some());
     });
     cx.update(|window, cx| window.click("model-choice-fake-large", cx));
+    // The effort picker's room opens as the model's efforts come.
+    settle(cx);
     cx.update(|window, cx| window.click("effort-picker", cx));
     cx.update(|window, cx| window.click("effort-choice-high", cx));
 
@@ -5002,7 +5006,8 @@ fn the_project_s_model_still_wins_and_is_marked(cx: &mut TestAppContext) {
     let rows = composer.read_with(cx, |c, _| c.entries(Menu::Model));
     let haiku = rows.iter().find(|e| e.id == "model-choice-haiku").unwrap();
     assert!(haiku.on);
-    assert_eq!(haiku.note.as_deref(), Some("the project's"));
+    // Haiku has no effort: its row says so, the one place it is said.
+    assert_eq!(haiku.note.as_deref(), Some("the project's · no effort"));
     let fable = rows.iter().find(|e| e.id == "model-choice-fable").unwrap();
     assert!(!fable.on);
     assert_eq!(fable.note.as_deref(), Some("default"));

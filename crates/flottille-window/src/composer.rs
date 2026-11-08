@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use flottille_ui::color::mix;
-use flottille_ui::motion::HOVER;
+use flottille_ui::motion::{HOVER, PANEL};
 use flottille_ui::{
-    Align, Button, Dropdown, Icon, MenuItem, Toast, Type, enter, fade, follow_theme, hoverable,
-    palette, presence_of, space, toast,
+    Align, Button, Dropdown, Icon, MenuItem, Skeleton, Toast, Type, enter, fade, follow_theme,
+    hoverable, palette, presence_of, space, toast,
 };
 use gpui_kit::base::input::{InputEvent, RopeExt as _, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -148,6 +148,24 @@ pub fn efforts_of<'a>(provider: &'a Provider, model: Option<&str>) -> Option<&'a
     model.efforts.as_ref()
 }
 
+/// What the composer's effort slot holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffortSlot {
+    /// The model's efforts are known: the picker.
+    Picker,
+    /// They are being learned: the picker's skeleton.
+    Learning,
+    /// The model has none, or nothing will say them now: nothing.
+    Gone,
+}
+
+/// The room the effort picker takes besides its words (padding, gap and chevron), what a mono
+/// letter takes, and the width of its skeleton: how wide its slot is while it opens, folds or
+/// crossfades.
+const EFFORT_FRAME: f32 = 34.;
+const EFFORT_CHAR: f32 = 7.2;
+const EFFORT_SKELETON: f32 = 72.;
+
 /// What the composer picks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Choice {
@@ -185,6 +203,9 @@ pub struct Composer {
     /// The mode the next session starts in: Auto each time the composer is shown and after each
     /// start, so that Full is never on by mistake.
     mode: Entity<ModeSwitch>,
+    /// What the effort slot showed last while it was there, the picker or its skeleton: what it
+    /// folds away with when the model has no effort.
+    effort_known: bool,
     /// How many times it was drawn: the tests count them.
     renders: usize,
     _subscriptions: Vec<Subscription>,
@@ -238,6 +259,7 @@ impl Composer {
             choice: Choice::Main,
             wanted: None,
             menu: None,
+            effort_known: false,
             providers: Providers::default(),
             default: (None, None),
             pick: Pick::default(),
@@ -635,7 +657,7 @@ impl Composer {
         }
     }
 
-    fn render_pickers(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_pickers(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (glyph, label) = match &self.choice {
             Choice::Main => (Icon::Folder, "main".to_owned()),
             Choice::Workspace(name) => (Icon::Branch, name.clone()),
@@ -660,6 +682,7 @@ impl Composer {
             .child(Attachments::button(cx, Self::attached_of))
             .child(div().flex_1())
             .children(self.render_agent_pickers(cx))
+            .children(self.render_effort(window, cx))
             .child(self.mode.clone())
             .child(
                 Button::round("send", Icon::Send, "Start")
@@ -668,38 +691,115 @@ impl Composer {
             )
     }
 
-    /// The provider, model and effort pickers: the model's once a provider is picked, the
-    /// effort's once the model is known to have efforts.
+    /// The provider and model pickers, once a provider is picked.
     fn render_agent_pickers(&self, cx: &mut Context<Self>) -> Vec<Dropdown> {
         let Some(provider) = self.provider() else {
             return Vec::new();
         };
-        let mut wanted = vec![
-            ("provider-picker", Menu::Provider, provider.title.clone()),
-            ("model-picker", Menu::Model, self.model_shown()),
-        ];
-        if efforts_of(provider, self.pick.model.as_deref())
-            .is_some_and(|e| levels(e).next().is_some())
-        {
-            wanted.push(("effort-picker", Menu::Effort, self.effort_shown()));
+        vec![
+            self.agent_picker(
+                "provider-picker",
+                Menu::Provider,
+                provider.title.clone(),
+                cx,
+            ),
+            self.agent_picker("model-picker", Menu::Model, self.model_shown(), cx),
+        ]
+    }
+
+    fn agent_picker(
+        &self,
+        id: &'static str,
+        menu: Menu,
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> Dropdown {
+        let picker = Dropdown::new(id, label)
+            .align(Align::End)
+            .width(px(280.))
+            .open(self.menu == Some(menu))
+            .on_toggle(Self::handler(cx, move |this, _, cx| {
+                this.toggle_menu(menu, cx)
+            }))
+            .items(self.agent_items(menu, cx));
+        match menu {
+            Menu::Provider => picker.strong(),
+            _ => picker.mono(),
         }
-        let mut pickers = Vec::new();
-        for (id, menu, label) in wanted {
-            let items = self.agent_items(menu, cx);
-            let picker = Dropdown::new(id, label)
-                .align(Align::End)
-                .width(px(280.))
-                .open(self.menu == Some(menu))
-                .on_toggle(Self::handler(cx, move |this, _, cx| {
-                    this.toggle_menu(menu, cx)
-                }))
-                .items(items);
-            pickers.push(match menu {
-                Menu::Provider => picker.strong(),
-                _ => picker.mono(),
-            });
+    }
+
+    /// What the effort slot holds for the pick.
+    pub fn effort_slot(&self) -> EffortSlot {
+        let Some(provider) = self.provider() else {
+            return EffortSlot::Gone;
+        };
+        match efforts_of(provider, self.pick.model.as_deref()) {
+            Some(efforts) if levels(efforts).next().is_some() => EffortSlot::Picker,
+            Some(_) => EffortSlot::Gone,
+            None if provider.models_learning => EffortSlot::Learning,
+            None => EffortSlot::Gone,
         }
-        pickers
+    }
+
+    /// The effort picker, its skeleton while the model's efforts are being learned, or nothing
+    /// for a model without effort. Its room opens and it fades in, folds and fades out; the
+    /// skeleton crossfades into the picker. At rest it is its natural width.
+    fn render_effort(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let slot = self.effort_slot();
+        let shown = fade(
+            "effort-slot-shown",
+            slot != EffortSlot::Gone,
+            PANEL,
+            window,
+            cx,
+        );
+        let known = fade("effort-slot-known", self.effort_known, PANEL, window, cx);
+        if slot == EffortSlot::Gone && shown == 0.0 {
+            return None;
+        }
+        let label = self.effort_shown();
+        let picker_wide = EFFORT_FRAME + EFFORT_CHAR * label.chars().count() as f32;
+        let wide = EFFORT_SKELETON + (picker_wide - EFFORT_SKELETON) * known;
+        // Each is drawn from the frame it is wanted, transparent at first, until it has faded out.
+        let with_picker = self.effort_known || known > 0.0;
+        let with_skeleton = !self.effort_known || known < 1.0;
+        let moving = shown < 1.0 || (with_picker && with_skeleton);
+        let picker = with_picker.then(|| {
+            div()
+                .opacity(known)
+                .child(self.agent_picker("effort-picker", Menu::Effort, label, cx))
+        });
+        let skeleton = with_skeleton.then(|| {
+            let waiting = div()
+                .id("effort-picker-waiting")
+                .h(px(28.))
+                .px(space::SM)
+                .flex()
+                .items_center()
+                .aria_label(SharedString::from("The model's efforts are being learned"))
+                .child(
+                    Skeleton::new("effort-picker-skeleton").w(px(EFFORT_SKELETON) - space::SM * 2.),
+                )
+                .test_support();
+            // Under the picker while one crossfades into the other.
+            div()
+                .when(with_picker, |d| d.absolute().top_0().left_0())
+                .opacity(1.0 - known)
+                .child(waiting)
+        });
+        Some(
+            div()
+                .flex_none()
+                .relative()
+                .opacity(shown)
+                .when(moving, |d| d.w(px(wide * shown)).overflow_hidden())
+                .children(picker)
+                .children(skeleton),
+        )
     }
 
     fn agent_items(&self, menu: Menu, cx: &mut Context<Self>) -> Vec<MenuItem> {
@@ -963,6 +1063,17 @@ impl Pickers<'_> {
                         } else {
                             is_default.then(|| "default".to_owned())
                         };
+                        // A model without effort says so here, the one place it is said: the
+                        // effort picker is not there for it.
+                        let none = model
+                            .efforts
+                            .as_ref()
+                            .is_some_and(|efforts| levels(efforts).next().is_none());
+                        let note = match (note, none) {
+                            (Some(note), true) => Some(format!("{note} · no effort")),
+                            (None, true) => Some("no effort".to_owned()),
+                            (note, false) => note,
+                        };
                         // The default's row names no model: the daemon applies the default by
                         // its name. Unless the project's model would then be taken instead.
                         let asked = (!is_default || projects.is_some()).then_some(&model.id);
@@ -1060,6 +1171,11 @@ pub fn agents_label(n: usize) -> String {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
+        match self.effort_slot() {
+            EffortSlot::Picker => self.effort_known = true,
+            EffortSlot::Learning => self.effort_known = false,
+            EffortSlot::Gone => {}
+        }
         let p = palette(cx);
         let focus = fade("composer-focus", self.focused, HOVER, window, cx);
         let strip = self
@@ -1111,7 +1227,7 @@ impl Render for Composer {
                 .overflow_hidden()
                 .child(body),
         )
-        .child(self.render_pickers(cx).into_any_element())
+        .child(self.render_pickers(window, cx).into_any_element())
         .children(self.render_not_ready(cx))
         .child(presence_of(
             "composer-model-refused-line",

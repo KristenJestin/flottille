@@ -117,7 +117,8 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   session set on nothing is set to what it stands for, by its name ("The options", below).
 - **The models**: what a session of the provider's agent offers in its config options (the
   `model` option's values and their names, and the `thought_level` option's for the model the
-  session has), kept by the daemon per provider (`provider_models` in the store), read as soon as
+  session has, and the efforts each value says for itself in its `_meta.flottille.efforts`, as
+  the Claude bridge does for every model, `[]` for one without), kept by the daemon per provider (`provider_models` in the store), read as soon as
   the provider is enabled and its program is there (below), and learned again from every session
   that opens. They are kept with the program they came from (its path and modification
   time) and the names of the provider's API keys set (never their values): with another version
@@ -163,7 +164,13 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   date suffix (`-YYYYMMDD`) is that model (`claude-haiku-4-5` for `claude-haiku-4-5-20251001`),
   and its agent's choice, the Auto judge's (`provider.set_judge`) and the session's own check
   hold the listed id. An id that two listed models answer to is taken for none. The efforts of a model are `null` until a session
-  had that model. An effort asked without a model is checked against the default model's
+  had that model, or, for Claude, until a listing or any session said them all: its bridge gives
+  every model's from `claude`'s answer to `initialize`, so that no model is ever set to learn
+  them. Setting a model is no free probe: `claude` may check a model id it has not checked yet
+  with a one-token request to the API (`set_model`'s check of 2.1.312). While a Claude model's
+  efforts are `null` for the version there is now, the daemon lists its models again, once per
+  state of the provider; the window shows the effort picker's skeleton while a listing runs
+  (`models_learning` of `provider.list`, `provider.models_learning`). An effort asked without a model is checked against the default model's
   efforts, when they are known; until then it is taken, and a session that does not offer it
   fails the agent.
 - **Refusals** name what is available: `there is no provider gemini: the providers are claude,
@@ -641,7 +648,8 @@ bridge runs one session.
   list.
 - **The effort** is an option (`effort`, category `thought_level`) when the model set has effort
   levels (`supportsEffort`, `supportedEffortLevels` in the same answer): `default` and those
-  levels, set with an `apply_flag_settings` control request (`effortLevel`, `null` for
+  levels, which each value of the `model` option also says for its own model in
+  `_meta.flottille.efforts` (`[]` for a model without), set with an `apply_flag_settings` control request (`effortLevel`, `null` for
   `default`), the session's own flag layer, as `--effort` would. A model without the level set
   takes `default` back. There is no mode option: `agent.start` refuses a `mode`, since a
   permission mode of Claude Code's could only loosen Flottille's gate.

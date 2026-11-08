@@ -91,6 +91,17 @@ again.
 |---|---|
 | `name` | The provider's name. |
 
+### `provider.models_learning`
+
+The daemon started listing a provider's models (`"learning": true`), or the listing ended,
+whatever its outcome (`"learning": false`). The window shows the effort picker's skeleton for a
+model whose efforts are not known while it lists, and reads the providers again.
+
+| Field | |
+|---|---|
+| `name` | The provider's name. |
+| `learning` | Whether the listing runs. |
+
 ### `provider.judge_changed`
 
 The user chose the Auto judge, or none, through the daemon (`provider.set_judge`), Flottille picked
