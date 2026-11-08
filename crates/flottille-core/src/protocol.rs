@@ -243,6 +243,10 @@ pub struct AgentRun {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// The session's mode, `ask`, `auto` or `full` (`auto` when left out): the root's before its
+    /// first message is given. Not `mode`, which is a provider's permission mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_mode: Option<String>,
     /// `lead` when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,

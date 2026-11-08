@@ -36,6 +36,9 @@ pub enum AgentAction {
         /// Its role: lead (default) or worker
         #[arg(long)]
         role: Option<String>,
+        /// The session's mode from its first message: ask, auto (default) or full
+        #[arg(long)]
+        mode: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -191,6 +194,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
             model,
             effort,
             role,
+            mode,
             json,
         } => {
             let started = Client::connect_or_start(paths)?.request(
@@ -202,6 +206,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     model,
                     effort,
                     mode: None,
+                    gate_mode: mode,
                     role,
                     message,
                     images: Vec::new(),
@@ -487,6 +492,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 model,
                 effort,
                 mode: None,
+                gate_mode: None,
                 role: None,
                 message,
                 images: Vec::new(),
