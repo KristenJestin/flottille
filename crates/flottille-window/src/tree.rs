@@ -51,11 +51,12 @@ pub fn session_resume_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-row-resume-{id}").into())
 }
 
-/// The element id of "Detach from …" in the row menu of a session an agent started.
+/// The element id of "Rename…" in a session's row menu.
 pub fn session_rename_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-row-rename-{id}").into())
 }
 
+/// The element id of "Detach from …" in the row menu of a session an agent started.
 pub fn session_detach_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-row-detach-{id}").into())
 }
