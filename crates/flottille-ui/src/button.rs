@@ -335,7 +335,7 @@ impl RenderOnce for Button {
 
 use gpui_kit::prelude::FluentBuilder as _;
 
-/// A count or a mark on an icon button: the bell's count, the amber "!" on the agents button.
+/// A count or a mark on an icon button: the bell's count, the amber "!" on a button that needs a look.
 /// Amber, because it only ever counts what waits for the user.
 #[derive(IntoElement, Clone)]
 pub struct Badge {

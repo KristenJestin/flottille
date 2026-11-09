@@ -1,7 +1,7 @@
 //! The spacing scale of the window, and the widths a page and a dialog take.
 //!
-//! A gap or a padding of a screen is one of these steps: a scan of the window's sources refuses
-//! any other (`crates/flottille-window/tests/the_rule.rs`). The components of this crate keep the
+//! A gap or a padding of a screen is one of these steps: a scan of an application's sources can refuse
+//! any other. The components of this crate keep the
 //! exact sizes of the design, which are theirs to hold.
 
 use gpui_kit::{Pixels, px};

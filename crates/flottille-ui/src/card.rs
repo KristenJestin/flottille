@@ -1,7 +1,7 @@
 //! `Card`: an optional header (title, mono meta on the right), a body, blocks and a footer row of
-//! actions. Place cards, sub-agents, agent steps, reports, diffs and approvals are all cards.
+//! actions. A place, a sub-item, a step, a report, a diff and an approval are all cards.
 //!
-//! A [`Block`] is a part of a card that may have nothing to show (a workspace's links, its setup
+//! A [`Block`] is a part of a card that may have nothing to show (a place's links, its setup
 //! steps): the line between two parts is drawn only between two that exist, never twice and
 //! never under nothing. A block that comes and goes ([`Block::present`]) unfolds and folds away
 //! with its line.
@@ -41,7 +41,7 @@ impl Block {
     }
 
     /// Pushed to the card's bottom when the card is taller than its content (the cards of a row
-    /// of a grid share a height): "New session in …" stays on the last line.
+    /// of a grid share a height): "New item in …" stays on the last line.
     pub fn at_bottom(mut self) -> Self {
         self.bottom = true;
         self

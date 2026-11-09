@@ -29,7 +29,7 @@ pub struct Palette {
     /// Stronger borders.
     pub line2: Hsla,
     pub hover: Hsla,
-    /// The selected row (the open session).
+    /// The selected row (the open item).
     pub sel: Hsla,
     pub text: Hsla,
     pub mute: Hsla,

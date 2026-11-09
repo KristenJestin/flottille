@@ -17,9 +17,16 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
 - Build cost: a release build from scratch takes 8 to 14 minutes at `nice -n 19` with 6 jobs and
   up to 1 GB of memory for GPUI alone; incremental builds take about 5 s. Binary about 55 MB
   (embed only the icons used: `gpui_kit::assets::icon_assets!(Icons, [Play, …])`).
-  A glyph Lucide does not draw the way Flottille wants (stop: a small filled square) is an SVG
-  of `crates/flottille-ui/assets/icons/`, embedded with `include_bytes!` and served by `Icons`
-  (`icons.rs`) before the Lucide source; `Icon::path` names it like any other.
+  `flottille-ui` knows no app: its `Icons` serves the base set of `Icon`, and an app adds its
+  own. Another Lucide icon is `Icon::Lucide("name")`, a glyph of the app's own `Icon::Asset(path)`
+  (stroked) or `Icon::Filled(path)` (solid, drawn larger); the app's assets serve their files
+  beside `Icons`. Flottille's are in `crates/flottille-window/src/glyphs.rs` (`Assets`; the stop
+  glyph, a small filled square Lucide does not draw, is an SVG of
+  `crates/flottille-window/assets/icons/`, embedded with `include_bytes!`).
+  An app tells the kit its name and its look at `init` (`Identity`); the window's is
+  `flottille_window::identity()`. The parts that know agents (the state marks, the setup step
+  row, the tree's levels) are the window's own: `state.rs`, `steps.rs`, `tree.rs`. A scan
+  (`crates/flottille-ui/tests/no_app_word.rs`) keeps the kit from naming any of them.
 - CI (Ubuntu): `pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev
   libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev`; only fontconfig
   and freetype are linked at build time. Cache the build (`Swatinem/rust-cache`).

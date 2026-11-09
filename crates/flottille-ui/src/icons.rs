@@ -159,7 +159,7 @@ pub enum Icon {
     PanelRight,
     /// Folds a conversation into less: Compact.
     Fold,
-    /// Cuts a link: a workspace's ticket.
+    /// Cuts a link: a ticket of a place.
     Unlink,
     /// Cuts one thing off another: Detach.
     Detach,

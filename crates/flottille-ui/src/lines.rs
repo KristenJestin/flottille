@@ -1,6 +1,6 @@
 //! The small parts the cards of a page are made of: a [`Chip`] under a title, a card's
 //! [`CardHead`], a [`LabelledLine`] (an icon, a label, a value), a block's [`caption`], a
-//! [`FlatRow`] (a session in its place), a card's [`FooterAction`].
+//! [`FlatRow`] (a row in its place), a card's [`FooterAction`].
 //!
 //! Each part that is clicked fades its hover; none draws a separator: the [`Card`](crate::Card)
 //! draws them between its blocks.
@@ -310,7 +310,7 @@ pub fn lines_block(lines: impl IntoIterator<Item = AnyElement>) -> impl IntoElem
         .children(lines)
 }
 
-/// The caption above a block of a card: `SESSIONS 1`, `SETUP STEP 2 OF 3`. Its label is the
+/// The caption above a block of a card: `ITEMS 1`, `SETUP STEP 2 OF 3`. Its label is the
 /// caption in words (`Setup · step 2 of 3`).
 pub fn caption(
     id: impl Into<ElementId>,
@@ -368,7 +368,7 @@ impl FlatRow {
         self
     }
 
-    /// Mono, faint, on the right: a time, the agents.
+    /// Mono, faint, on the right: a time, a count.
     pub fn meta(mut self, element: impl IntoElement) -> Self {
         self.meta = Some(element.into_any_element());
         self
@@ -449,7 +449,7 @@ impl RenderOnce for FlatRow {
             div()
                 .id(ElementId::Name(format!("{id}-actions").into()))
                 .flex_none()
-                // The menu's clicks are its own, not the row's (which opens the session).
+                // The menu's clicks are its own, not the row's (which opens the row).
                 .on_click(|_, _, cx| cx.stop_propagation())
                 .child(menu)
                 .test_support()
@@ -462,7 +462,7 @@ impl RenderOnce for FlatRow {
     }
 }
 
-/// The last row of a card: "+ New session in main", faint until hovered. 40 px high.
+/// The last row of a card: "+ New item in main", faint until hovered. 40 px high.
 #[derive(IntoElement)]
 pub struct FooterAction {
     id: ElementId,
@@ -481,7 +481,7 @@ impl FooterAction {
         }
     }
 
-    /// A place still being prepared takes no session yet: the row stays, dimmed.
+    /// A place still being prepared takes no item yet: the row stays, dimmed.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self

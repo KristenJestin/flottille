@@ -38,7 +38,7 @@ pub struct TreeRow {
     top: bool,
     title: SharedString,
     expanded: Option<bool>,
-    /// A chevron on a row that is no project's, which turns up as what it holds unfolds above it.
+    /// A chevron on a row that is no first-level row's, which turns up as what it holds unfolds above it.
     upward: bool,
     selected: bool,
     trailing: Option<AnyElement>,
@@ -90,7 +90,7 @@ impl TreeRow {
         self
     }
 
-    /// A faint line under the title (the place a session works in): the row takes two lines, and
+    /// A faint line under the title (the place an item works in): the row takes two lines, and
     /// its trailing mark and actions stay on the title's.
     pub fn second(mut self, element: impl IntoElement) -> Self {
         self.second = Some(element.into_any_element());
@@ -179,15 +179,15 @@ impl RenderOnce for TreeRow {
             .when(self.expanded.is_some(), |d| {
                 d.aria_expanded(self.expanded == Some(true))
             });
-        // A session's row turns a chevron when it folds a level of its own (`on_toggle`). It sits
-        // after the title, so that every session of a level starts its title at the same x, with
+        // A row turns a chevron when it folds a level of its own (`on_toggle`). It sits
+        // after the title, so that every row of a level starts its title at the same x, with
         // or without children under it.
         let folds = self.on_toggle.is_some();
         let mut fold = None;
         if let Some(turn) = chevron_turn.filter(|_| top || self.upward || folds) {
             let angle = match self.upward {
                 false => -FRAC_PI_2 * turn,
-                // Folded (1) points right as a project's does; open (0) points up.
+                // Folded (1) points right as a first-level row's does; open (0) points up.
                 true => -PI + FRAC_PI_2 * turn,
             };
             let chevron = icon(Icon::Chevron)
@@ -219,7 +219,7 @@ impl RenderOnce for TreeRow {
         if let Some(leading) = self.leading {
             row = row.child(leading);
         }
-        // A title that changes (a session its agent or the user named) fades to the new one.
+        // A title that changes (one the user or a program named) fades to the new one.
         let title_id = ElementId::Name(format!("{}-title", self.id).into());
         let opacity = changed(&title_id, &self.title, window, cx);
         let title = tipped_when_cut(
@@ -325,10 +325,10 @@ pub fn tree_children(children: impl IntoIterator<Item = AnyElement>, cx: &App) -
         .children(children)
 }
 
-/// Where a session's row sits among the sessions its pilot leads, so that a connector can tie it
+/// Where a row sits among the rows its lead leads, so that a connector can tie it
 /// to the row above: one entry of `through` for each ancestor under the first row of the tree,
 /// true while that ancestor has a sibling below it (its line goes on past this row), and whether
-/// this row is the last of its pilot's.
+/// this row is the last of its lead's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tie {
     pub through: Vec<bool>,
@@ -342,7 +342,7 @@ impl Tie {
     }
 }
 
-/// How far each level of led sessions is indented: `space::XL`, the step the window draws it with.
+/// How far each level of led rows is indented: `space::XL`, the step the window draws it with.
 const TIE_INDENT: f32 = 24.;
 /// Where the connector's first line runs: under the first letters of a row of the first level.
 const TIE_ROOT: f32 = 14.;
@@ -363,7 +363,7 @@ pub fn tie_turn_id(row: impl Into<ElementId>) -> ElementId {
     ElementId::NamedChild(std::sync::Arc::new(tie_id(row)), "turn".into())
 }
 
-/// The element id of the line that goes on below a row's turn, to the next row of its pilot's.
+/// The element id of the line that goes on below a row's turn, to the next row of its lead's.
 pub fn tie_below_id(row: impl Into<ElementId>) -> ElementId {
     ElementId::NamedChild(std::sync::Arc::new(tie_id(row)), "below".into())
 }
@@ -376,7 +376,7 @@ pub fn tie_through_id(row: impl Into<ElementId>, level: usize) -> ElementId {
     )
 }
 
-/// The connector of a session's row to its pilot's: a thin line that comes down from the row
+/// The connector of a led row to its lead's: a thin line that comes down from the row
 /// above and turns right into the row, at the middle of its first line (`first_line`, from the
 /// row's top), going on below it while the row has a sibling after it, and the lines of the
 /// ancestors that go on past it. Draw it over the row, in a block that starts where the row's
@@ -464,7 +464,7 @@ pub fn meta(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
         .child(text.into())
 }
 
-/// A section label: mono 11 px, uppercase, faint (`PROJECTS`, `AGENTS`).
+/// A section label: mono 11 px, uppercase, faint (`PLACES`, `RECENT`).
 pub fn section_label(text: &str, cx: &App) -> impl IntoElement {
     let p = palette(cx);
     div()
