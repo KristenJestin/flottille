@@ -11,8 +11,8 @@
 
 use flottille_ui::{
     Badge, Block, Button, Card, Confirm, Drawer, EmptyLine, Field, Icon, Icons, ListCard, ListRow,
-    Menu, Modal, PageHeader, RadioChoices, Section, Segmented, Select, SelectOption, StateIcon,
-    Status, Switch, Toast, ToastStack, Type, icon, palette, space, toast,
+    Menu, Modal, PageHeader, RadioChoices, Section, Segmented, Select, SelectOption, Switch, Toast,
+    ToastStack, Type, icon, palette, space, toast,
 };
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::{
@@ -73,7 +73,6 @@ struct Components {
     toasts: Entity<ToastStack>,
     header_menu: Entity<Menu>,
     row_menus: Vec<Entity<Menu>>,
-    session: Entity<StateIcon>,
     name: Entity<InputState>,
     when: Entity<InputState>,
     file: Entity<InputState>,
@@ -185,8 +184,6 @@ impl Components {
                 })
             })
             .collect::<Vec<_>>();
-        let status = cx.new(|_| Status::new(flottille_ui::AgentState::Idle));
-        let session = cx.new(|cx| StateIcon::new(status, cx));
         let input = |placeholder: &'static str,
                      value: &'static str,
                      window: &mut Window,
@@ -230,7 +227,6 @@ impl Components {
             toasts,
             header_menu,
             row_menus,
-            session,
             name,
             when,
             file,
@@ -415,7 +411,7 @@ impl Components {
                     .block(
                         Block::new().child(
                             ListRow::new("ws-session", "Write the help page")
-                                .leading(self.session.clone())
+                                .leading(icon(Icon::File).text_color(p.faint))
                                 .meta("1h"),
                         ),
                     ),

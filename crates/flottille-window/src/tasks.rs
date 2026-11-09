@@ -4,6 +4,7 @@
 //! lists the agents' commands, each opening its output, live, in the same panel. The window writes
 //! nothing itself: every change and every run is the daemon's (`task.*`, `run.*`).
 
+use crate::state::{AgentState, StateIcon, Status};
 use std::time::Duration;
 
 use std::collections::HashMap;
@@ -11,9 +12,9 @@ use std::collections::HashMap;
 use flottille_ui::drawer::Closed;
 use flottille_ui::motion::PANEL;
 use flottille_ui::{
-    AgentState, Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow,
-    Listing, Menu, Modal, Placement, RadioChoices, Section, Select, SelectOption, StateIcon,
-    Status, Switch, Toast, Type, fade, icon, palette, presence, space, toast,
+    Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow, Listing,
+    Menu, Modal, Placement, RadioChoices, Section, Select, SelectOption, Switch, Toast, Type, fade,
+    icon, palette, presence, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;

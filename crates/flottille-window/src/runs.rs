@@ -7,6 +7,7 @@
 //! into the palette's, every other escape sequence dropped (`flottille_core::ansi`). The stored
 //! output is untouched.
 
+use crate::state::{AgentState, StateIcon, Status};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
@@ -18,9 +19,9 @@ use flottille_core::ansi;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{MODAL, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Button, Icon, Item, Listing, Menu, Modal, Palette, Skeleton, StateIcon, Status,
-    Toast, Type, awaiting, changing, fade, fold_frame, hoverable, icon, palette, presence,
-    section_label, space, tipped, tipped_when_cut, toast, turning,
+    Button, Icon, Item, Listing, Menu, Modal, Palette, Skeleton, Toast, Type, awaiting, changing,
+    fade, fold_frame, hoverable, icon, palette, presence, section_label, space, tipped,
+    tipped_when_cut, toast, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{

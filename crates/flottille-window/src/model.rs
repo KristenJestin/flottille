@@ -3,8 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::state::AgentState;
 use flottille_core::workspace::{Action, Step, StepState, Workspace as Record};
-use flottille_ui::AgentState;
 use serde_json::Value;
 
 /// Everything the shell draws, as one fresh read of the daemon gives it.

@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::rows::TreeLevel;
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Fold, Icon, Icons, ListRow, Pill, PulsingLabel, Side,
-    StateIcon, Status, TreeRow, Type, enter, icon, meta, palette, section_label, tree_children,
+    Badge, Button, Card, Drawer, Fold, Icon, Icons, ListRow, PulsingLabel, Side, TreeRow, Type,
+    enter, icon, meta, palette, section_label, tree_children,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -50,14 +50,12 @@ struct Agent {
     name: &'static str,
     model: &'static str,
     doing: &'static str,
-    icon: Entity<StateIcon>,
-    pill: Entity<Pill>,
+    mark: Icon,
+    state: &'static str,
 }
 
 struct Gallery {
-    states: Vec<(AgentState, Entity<StateIcon>, Entity<Pill>)>,
     agents: Vec<Agent>,
-    session_marks: Vec<Entity<StateIcon>>,
     thinking: Entity<PulsingLabel>,
     open_fold: Entity<Fold>,
     shut_fold: Entity<Fold>,
@@ -84,11 +82,12 @@ impl Render for Steps {
 }
 
 struct DrawerContent {
-    rows: Vec<(Entity<StateIcon>, Entity<Pill>, &'static str, &'static str)>,
+    rows: Vec<(Icon, &'static str, &'static str, &'static str)>,
 }
 
 impl Render for DrawerContent {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
         div()
             .p(px(12.))
             .flex()
@@ -98,11 +97,11 @@ impl Render for DrawerContent {
                 self.rows
                     .iter()
                     .enumerate()
-                    .map(|(i, (icon, pill, name, model))| {
+                    .map(|(i, (mark, state, name, model))| {
                         ListRow::new(("drawer-agent", i), *name)
-                            .leading(icon.clone())
+                            .leading(icon(*mark).text_color(p.faint))
                             .detail(*model)
-                            .trailing(pill.clone())
+                            .trailing(meta(*state, cx))
                             .selected(i == 0)
                     }),
             )
@@ -111,77 +110,45 @@ impl Render for DrawerContent {
 
 impl Gallery {
     fn new(drawer_open: bool, cx: &mut Context<Self>) -> Self {
-        let states = AgentState::ALL
-            .iter()
-            .map(|&state| {
-                let status = cx.new(|_| Status::new(state));
-                let icon = cx.new(|cx| StateIcon::new(status.clone(), cx));
-                let pill = cx.new(|cx| Pill::new(status, cx));
-                (state, icon, pill)
-            })
-            .collect();
-        let agent = |name, model, doing, state, cx: &mut Context<Self>| {
-            let status = cx.new(|_| Status::new(state));
-            Agent {
-                name,
-                model,
-                doing,
-                icon: cx.new(|cx| StateIcon::new(status.clone(), cx)),
-                pill: cx.new(|cx| Pill::new(status, cx)),
-            }
+        let agent = |name, model, doing, mark, state| Agent {
+            name,
+            model,
+            doing,
+            mark,
+            state,
         };
         let agents = vec![
             agent(
                 "api-tests",
                 "Sonnet",
                 "app-api · TTL units",
-                AgentState::Completed,
-                cx,
+                Icon::Check,
+                "completed",
             ),
             agent(
                 "web-form",
                 "Sonnet",
                 "asked lead · #3",
-                AgentState::Waiting,
-                cx,
+                Icon::Clock,
+                "waiting",
             ),
             agent(
                 "docs-pass",
                 "Haiku",
                 "docs · timeout default",
-                AgentState::Running,
-                cx,
+                Icon::Running,
+                "running",
             ),
-        ];
-        let mark = |state, cx: &mut Context<Self>| {
-            let status = cx.new(|_| Status::new(state));
-            cx.new(|cx| StateIcon::new(status, cx))
-        };
-        let session_marks = vec![
-            mark(AgentState::Running, cx),
-            mark(AgentState::NeedsYou, cx),
-            mark(AgentState::NeedsYou, cx),
         ];
         let thinking = cx.new(|cx| PulsingLabel::new("Thinking", true, cx));
         let steps = cx.new(|_| Steps);
         let open_fold = cx.new(|_| Fold::new("fold-open", steps.clone(), true));
         let shut_fold = cx.new(|_| Fold::new("fold-shut", steps, false));
-        let rows = [
-            ("lead", "Opus", AgentState::NeedsYou),
-            ("web-form", "Sonnet", AgentState::Waiting),
-            ("docs-pass", "Haiku", AgentState::Completed),
-        ]
-        .into_iter()
-        .map(|(name, model, state)| {
-            let status = cx.new(|_| Status::new(state));
-            (
-                cx.new(|cx| StateIcon::new(status.clone(), cx)),
-                cx.new(|cx| Pill::new(status, cx)),
-                name,
-                model,
-            )
-        })
-        .collect();
+        let rows = vec![
+            (Icon::Bell, "needs you", "lead", "Opus"),
+            (Icon::Clock, "waiting", "web-form", "Sonnet"),
+            (Icon::Check, "completed", "docs-pass", "Haiku"),
+        ];
         let content = cx.new(|_| DrawerContent { rows });
         let drawer = cx.new(|cx| {
             let mut drawer = Drawer::new("rail-drawer", Side::Right, px(290.), content);
@@ -191,9 +158,7 @@ impl Gallery {
             drawer
         });
         Self {
-            states,
             agents,
-            session_marks,
             thinking,
             open_fold,
             shut_fold,
@@ -253,23 +218,6 @@ impl Render for Gallery {
             ("add", p.add),
             ("del", p.del),
         ];
-
-        let states = panel("States", cx).child(div().flex().flex_col().gap(px(6.)).children(
-            self.states.iter().map(|(state, icon, pill)| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(icon.clone())
-                    .child(div().w(px(84.)).flex().child(pill.clone()))
-                    .child(
-                        div()
-                            .mono(11.)
-                            .text_color(p.faint)
-                            .child(format!("{state:?}").to_lowercase()),
-                    )
-            }),
-        ));
 
         let buttons = panel("Buttons", cx)
             .child(
@@ -353,10 +301,10 @@ impl Render for Gallery {
                                     "Sessions expire too early",
                                 )
                                 .selected(true)
-                                .trailing(self.session_marks[1].clone())
+                                .trailing(icon(Icon::Bell).text_color(p.wait))
                                 .into_any_element(),
                                 TreeRow::new("t-s3", TreeLevel::Session, "CSV export by tenant")
-                                    .trailing(self.session_marks[0].clone())
+                                    .trailing(icon(Icon::Running).text_color(p.run))
                                     .into_any_element(),
                                 TreeRow::new("t-s4", TreeLevel::Session, "Review the refresh flow")
                                     .trailing(meta("1h", cx))
@@ -371,7 +319,7 @@ impl Render for Gallery {
                 .child(
                     TreeRow::new("t-notes", TreeLevel::Project, "notes-app")
                         .expanded(false)
-                        .trailing(self.session_marks[2].clone()),
+                        .trailing(icon(Icon::Bell).text_color(p.wait)),
                 ),
         );
 
@@ -390,10 +338,10 @@ impl Render for Gallery {
                     self.agents.iter().enumerate().map(|(i, a)| {
                         enter(("enter-agent", i), i, {
                             ListRow::new(("agent", i), a.name)
-                                .leading(a.icon.clone())
+                                .leading(icon(a.mark).text_color(p.faint))
                                 .detail(a.model)
                                 .meta(a.doing)
-                                .trailing(a.pill.clone())
+                                .trailing(meta(a.state, cx))
                         })
                     }),
                 ));
@@ -413,7 +361,7 @@ impl Render for Gallery {
                             .items_center()
                             .gap(px(10.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(self.session_marks[1].clone())
+                            .child(icon(Icon::Bell).text_color(p.wait))
                             .child("Run npm run e2e?"),
                     )
                     .child(
@@ -533,7 +481,6 @@ impl Render for Gallery {
                             .flex()
                             .flex_col()
                             .gap(px(18.))
-                            .child(states)
                             .child(type_sample),
                     )
                     .child(

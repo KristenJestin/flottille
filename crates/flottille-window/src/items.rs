@@ -5,15 +5,16 @@
 //! say the project's changed go quiet: the window never asks a forge or a tracker itself. A row unfolds when it
 //! comes, folds away when it goes (a filter, a round), and moves to its place.
 
+use crate::state::{AgentState, StateIcon, Status};
 use std::collections::HashMap;
 use std::time::Duration;
 
 use flottille_ui::fuzzy;
 use flottille_ui::motion::PANEL;
 use flottille_ui::{
-    AgentState, Block, Button, Card, EmptyLine, Field, FlatRow, Icon, LINE_GAP, LabelledLine,
-    ListCard, ListRow, Listing, Modal, Section, Segmented, Select, SelectOption, StateIcon, Status,
-    Switch, Tabs, Type, changing, enter, fade, icon, palette, presence, presence_of, space, tipped,
+    Block, Button, Card, EmptyLine, Field, FlatRow, Icon, LINE_GAP, LabelledLine, ListCard,
+    ListRow, Listing, Modal, Section, Segmented, Select, SelectOption, Switch, Tabs, Type,
+    changing, enter, fade, icon, palette, presence, presence_of, space, tipped,
 };
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;

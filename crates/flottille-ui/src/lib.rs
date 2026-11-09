@@ -30,7 +30,6 @@ pub mod segmented;
 pub mod select;
 pub mod skeleton;
 pub mod space;
-pub mod state;
 pub mod switch;
 pub mod tabs;
 pub mod theme;
@@ -73,7 +72,6 @@ pub use rows::{
 pub use segmented::Segmented;
 pub use select::{Select, SelectOption};
 pub use skeleton::{Awaiting, Skeleton, awaiting};
-pub use state::{AgentState, Pill, StateIcon, Status};
 pub use switch::Switch;
 pub use tabs::Tabs;
 pub use theme::{Palette, palette};

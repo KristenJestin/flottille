@@ -8,15 +8,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
-use flottille_ui::state::icon_id;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::shell::Selection;
 use flottille_window::shell::switcher::{
     SWITCHER, Switcher, action_key, project_key, row_id, session_key, workspace_key,
 };
+use flottille_window::state::AgentState;
+use flottille_window::state::icon_id;
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};

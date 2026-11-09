@@ -8,14 +8,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
-use flottille_ui::state::{icon_id, pill_id};
 use flottille_ui::toggle_id;
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::session::{Reply, SessionPage};
+use flottille_window::state::AgentState;
+use flottille_window::state::{icon_id, pill_id};
 use flottille_window::tree::{project_id, session_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{

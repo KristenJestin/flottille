@@ -4,6 +4,7 @@
 
 mod common;
 
+use flottille_window::state::AgentState;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -12,9 +13,8 @@ use std::time::{Duration, Instant};
 use common::User;
 use common::mcp::Mcp;
 use flottille_core::workspace::StepState;
+use flottille_ui::Icon;
 use flottille_ui::omarchy::Environment;
-use flottille_ui::state::icon_id;
-use flottille_ui::{AgentState, Icon};
 use flottille_window::Shell;
 use flottille_window::actions::Changes;
 use flottille_window::composer::{Choice, Composer, Menu, PlaceChoice};
@@ -28,6 +28,7 @@ use flottille_window::project_settings::{
 use flottille_window::session::{RailRow, Reply, SessionPage};
 use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
+use flottille_window::state::icon_id;
 use flottille_window::tree::{project_id, session_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{

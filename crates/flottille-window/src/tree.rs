@@ -3,6 +3,7 @@
 //! request). Every row is its own view, so one session changing redraws its row and nothing else;
 //! a folded project, and the "Ended" group, show the strongest mark of what they hold.
 
+use crate::state::{AgentState, StateIcon, Status};
 use std::collections::HashSet;
 use std::f32::consts::FRAC_PI_2;
 
@@ -10,9 +11,8 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, PANEL};
 use flottille_ui::rows::{TWO_LINES, TreeLevel};
 use flottille_ui::{
-    AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, Tie, TreeRow,
-    fade, hoverable, meta, palette, presence, presence_of, section_label, space, tipped,
-    tree_children, tree_tie,
+    Button, Fold, Icon, Item, Listing, Menu, Modal, Tie, TreeRow, fade, hoverable, meta, palette,
+    presence, presence_of, section_label, space, tipped, tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{

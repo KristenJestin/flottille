@@ -3,15 +3,16 @@
 //! edits and removes them in a form with a task's fields. The window writes nothing itself:
 //! every change, start and stop is the daemon's (`service.*`).
 
+use crate::state::{AgentState, StateIcon, Status};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use flottille_ui::drawer::Closed;
 use flottille_ui::motion::HOVER;
 use flottille_ui::{
-    AgentState, Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow,
-    Listing, Menu, Modal, PageHeader, Placement, Section, StateIcon, Status, Switch, Toast, Type,
-    enter, fade, palette, presence, presence_of, space, toast,
+    Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow, Listing,
+    Menu, Modal, PageHeader, Placement, Section, Switch, Toast, Type, enter, fade, palette,
+    presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;

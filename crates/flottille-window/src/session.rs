@@ -13,6 +13,7 @@
 //!
 //! The root agent has no name on screen: where a text names it, it is "the conversation".
 
+use crate::state::{AgentState, Pill, StateIcon, Status};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
@@ -26,10 +27,10 @@ use flottille_ui::card::Block as CardBlock;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette,
-    Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter,
-    fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence, presence_of,
-    section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
+    Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette,
+    PulsingLabel, Side, Skeleton, Toast, Type, awaiting, changing, enter, fade, fold_frame,
+    follow_theme, hoverable, icon, palette, path_line, presence, presence_of, section_label,
+    selectable, space, text_region, tipped_when_cut, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{

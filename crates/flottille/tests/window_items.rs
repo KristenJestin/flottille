@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::items::{ItemRow, Kind, ProjectItems, Read};
 use flottille_window::shell::Selection;
+use flottille_window::state::AgentState;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};

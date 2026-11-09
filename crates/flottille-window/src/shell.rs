@@ -2,6 +2,7 @@
 //! showing the open page. It follows the daemon through the [`link`](crate::link) and draws
 //! again only the parts a change touches.
 
+use crate::state::{AgentState, StateIcon, Status};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -9,9 +10,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, StateIcon, Status,
-    Tie, Toast, ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays,
-    icon, keys_held, open_overlay, palette, presence, pressable, space, toast,
+    Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, Tie, Toast, ToastStack, Type,
+    dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon, keys_held,
+    open_overlay, palette, presence, pressable, space, toast,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};

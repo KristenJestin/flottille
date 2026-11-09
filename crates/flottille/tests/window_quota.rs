@@ -185,7 +185,7 @@ fn a_session_out_of_quota_says_it_once_in_the_sidebar_and_the_rail(cx: &mut Test
     });
     assert_eq!(
         shell.read_with(cx, |s, _| s.snapshot().session(&id).unwrap().mark),
-        Some(flottille_ui::AgentState::Waiting),
+        Some(flottille_window::state::AgentState::Waiting),
         "waiting, not idle"
     );
     until(&shell, cx, "the rail says it", |cx| {

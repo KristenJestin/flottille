@@ -13,15 +13,15 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
-use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
-use flottille_ui::state::icon_id;
 use flottille_ui::toggle_id;
 use flottille_window::Shell;
 use flottille_window::composer::Choice;
 use flottille_window::link::Connect;
 use flottille_window::session::{Reply, SessionPage};
 use flottille_window::shell::Selection;
+use flottille_window::state::AgentState;
+use flottille_window::state::icon_id;
 use flottille_window::tree::{
     ended_id, project_id, session_end_id, session_id, session_menu_id, session_resume_id,
 };

@@ -14,9 +14,9 @@ use gpui_kit::{
     Task, TestSupportExt, Window, canvas, div, point, px, relative,
 };
 
-use crate::motion::{Motion, PANEL, SWAP_FROM};
-use crate::theme::{Palette, palette, radius};
-use crate::typography::Type;
+use flottille_ui::Type;
+use flottille_ui::motion::{Motion, PANEL, SWAP_FROM};
+use flottille_ui::theme::{Palette, palette, radius};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AgentState {

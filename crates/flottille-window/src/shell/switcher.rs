@@ -6,13 +6,14 @@
 //! This is the data and the logic: what matches, in which order, which result is marked and what
 //! choosing it does. The look is `flottille_ui::Modal::search` over `ListRow`s.
 
+use crate::state::{AgentState, StateIcon, Status};
 use std::collections::HashMap;
 
 use flottille_ui::fuzzy::{self, Match};
 use flottille_ui::motion::MODAL;
 use flottille_ui::{
-    AgentState, EmptyLine, Field, Icon, Item, ListRow, Listing, Modal, StateIcon, Status, Type,
-    icon, meta, palette, presence, section_label, space,
+    EmptyLine, Field, Icon, Item, ListRow, Listing, Modal, Type, icon, meta, palette, presence,
+    section_label, space,
 };
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
