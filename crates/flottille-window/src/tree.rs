@@ -979,15 +979,17 @@ impl SessionRow {
                     }
                     if let Some(by) = detach {
                         let (shell, id) = (shell.clone(), id.clone());
-                        menu = menu.entry(
-                            session_detach_id(&id),
-                            format!("Detach from {}", flottille_ui::quoted_title(&by)),
-                            None,
-                            move |_, cx| {
-                                let id = id.clone();
-                                shell.update(cx, |shell, cx| shell.detach_of(&id, cx)).ok();
-                            },
-                        );
+                        menu = menu
+                            .entry(
+                                session_detach_id(&id),
+                                crate::session::DETACH,
+                                Some(Icon::Detach),
+                                move |_, cx| {
+                                    let id = id.clone();
+                                    shell.update(cx, |shell, cx| shell.detach_of(&id, cx)).ok();
+                                },
+                            )
+                            .detail(by.to_string());
                     }
                     match offered {
                         Actions::End => menu.entry(
@@ -999,10 +1001,15 @@ impl SessionRow {
                                 shell.update(cx, |shell, cx| shell.ask_end_of(&id, cx)).ok();
                             },
                         ),
-                        _ => menu.entry(session_resume_id(&id), "Resume", None, move |_, cx| {
-                            let id = id.clone();
-                            shell.update(cx, |shell, cx| shell.resume_of(&id, cx)).ok();
-                        }),
+                        _ => menu.entry(
+                            session_resume_id(&id),
+                            "Resume",
+                            Some(Icon::Play),
+                            move |_, cx| {
+                                let id = id.clone();
+                                shell.update(cx, |shell, cx| shell.resume_of(&id, cx)).ok();
+                            },
+                        ),
                     }
                 });
                 // The row keeps the menu in sight while it is open: it draws again as it changes.
