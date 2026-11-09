@@ -699,13 +699,17 @@ impl Snapshot {
                 let id = text(agent, "id");
                 let (busy, active_at, size, live) =
                     trees.get(id.as_str()).copied().unwrap_or_default();
+                // Between turns, it waits for its quota's reset.
+                let quota = (agent["state"] == "idle")
+                    .then(|| crate::session_link::Quota::of(&agent["quota"]))
+                    .flatten();
                 let mark = if ended(agent) {
                     None
                 } else if answers.needs_user.contains(&id) {
                     Some(AgentState::NeedsYou)
                 } else if busy {
                     Some(AgentState::Running)
-                } else if waiting.contains(id.as_str()) {
+                } else if waiting.contains(id.as_str()) || quota.is_some() {
                     Some(AgentState::Waiting)
                 } else {
                     None
@@ -716,6 +720,9 @@ impl Snapshot {
                         "Compacting".to_owned()
                     }
                     Some(AgentState::Running) => "Running".to_owned(),
+                    Some(AgentState::Waiting) if let Some(quota) = quota => {
+                        crate::session::out_of_quota(quota.reset_at)
+                    }
                     Some(AgentState::Waiting) => waiting_for
                         .get(id.as_str())
                         .cloned()

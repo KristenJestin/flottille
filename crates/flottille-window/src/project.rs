@@ -328,6 +328,7 @@ impl ProjectPage {
             if card.read(cx).facts != facts {
                 card.update(cx, |card, cx| {
                     card.facts = facts;
+                    card.sync_menu(cx);
                     cx.notify();
                 });
             }
@@ -641,6 +642,8 @@ pub struct PlaceCard {
     /// menu opens and closes.
     session_menus: HashMap<String, (Entity<Menu>, Subscription)>,
     menu: Option<Entity<Menu>>,
+    /// A ticket is linked (or being read), as the menu says.
+    linked: bool,
     /// "Link a ticket" is open, its field made the first time.
     linking: bool,
     ticket_field: Option<Entity<InputState>>,
@@ -658,39 +661,11 @@ impl PlaceCard {
         data: PlaceData,
         cx: &mut Context<Self>,
     ) -> Self {
-        let menu = data.place.clone().map(|name| {
-            let this = cx.entity().downgrade();
-            let (opening, linking, removing) = (this.clone(), this.clone(), this);
-            cx.new(|cx| {
-                workspace_menu(
-                    &format!("workspace-menu-{name}"),
-                    WorkspaceActions {
-                        open_in_editor: Box::new(move |cx| {
-                            opening.update(cx, |card, cx| card.open_in_editor(cx)).ok();
-                        }),
-                        link_ticket: Some(Box::new(move |cx| {
-                            linking
-                                .update(cx, |card, cx| {
-                                    card.linking = true;
-                                    card.ticket_error = None;
-                                    cx.notify();
-                                })
-                                .ok();
-                        })),
-                        unlink_ticket: None,
-                        remove: Some(Box::new(move |cx| {
-                            removing
-                                .update(cx, |card, cx| {
-                                    card.confirming = true;
-                                    cx.notify();
-                                })
-                                .ok();
-                        })),
-                    },
-                    cx,
-                )
-            })
-        });
+        let this = cx.entity().downgrade();
+        let menu = data
+            .place
+            .clone()
+            .map(|name| cx.new(|cx| Self::workspace_menu(&this, &name, false, cx)));
         let mut card = Self {
             shell,
             project,
@@ -709,6 +684,7 @@ impl PlaceCard {
             session_rows: Listing::default(),
             session_menus: HashMap::new(),
             menu,
+            linked: false,
             linking: false,
             ticket_field: None,
             ticket_error: None,
@@ -755,6 +731,55 @@ impl PlaceCard {
 
     pub fn renders(&self) -> usize {
         self.renders
+    }
+
+    /// The workspace's "⋯" menu, for a ticket linked or not.
+    fn workspace_menu(
+        this: &WeakEntity<Self>,
+        name: &str,
+        linked: bool,
+        cx: &mut Context<Menu>,
+    ) -> Menu {
+        let (opening, linking, removing) = (this.clone(), this.clone(), this.clone());
+        workspace_menu(
+            &format!("workspace-menu-{name}"),
+            WorkspaceActions {
+                open_in_editor: Box::new(move |cx| {
+                    opening.update(cx, |card, cx| card.open_in_editor(cx)).ok();
+                }),
+                ticket_linked: linked,
+                link_ticket: Some(Box::new(move |cx| {
+                    linking
+                        .update(cx, |card, cx| {
+                            card.linking = true;
+                            card.ticket_error = None;
+                            cx.notify();
+                        })
+                        .ok();
+                })),
+                unlink_ticket: None,
+                remove: Some(Box::new(move |cx| {
+                    removing
+                        .update(cx, |card, cx| {
+                            card.confirming = true;
+                            cx.notify();
+                        })
+                        .ok();
+                })),
+            },
+            cx,
+        )
+    }
+
+    /// The menu says what applies to the ticket: it is made again when one is linked.
+    fn sync_menu(&mut self, cx: &mut Context<Self>) {
+        let linked = self.facts.ticket.is_some() || self.facts.ticket_pending;
+        let Some(name) = self.data.place.clone().filter(|_| self.linked != linked) else {
+            return;
+        };
+        self.linked = linked;
+        let this = cx.entity().downgrade();
+        self.menu = Some(cx.new(|cx| Self::workspace_menu(&this, &name, linked, cx)));
     }
 
     fn set(&mut self, data: PlaceData, cx: &mut Context<Self>) {

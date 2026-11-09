@@ -25,7 +25,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use crate::actions::Command;
+use crate::actions::{Command, SessionsSetting};
 use crate::providers::{Provider, Providers};
 use crate::rules::RulesEditor;
 use crate::shell::Shell;
@@ -128,10 +128,10 @@ fn provider_title(provider: &str) -> &str {
 }
 
 /// What the Compaction tab says under its title.
-const COMPACTION_SENTENCE: &str = "When an agent's context fills up, the compactor or the \
-     agent itself writes a summary of its conversation, and the agent goes on in a new session \
-     from its brief and the summary. With the compactor set to None, each agent's program \
-     compacts on its own.";
+const COMPACTION_SENTENCE: &str = "When an agent's context fills up, a separate model or the \
+     session's own agent writes a summary of its conversation, and the agent goes on in a new \
+     session from its brief and the summary. With None chosen for the model, each agent's \
+     program compacts on its own.";
 
 /// What the compactor's picker calls no compactor.
 pub const NO_COMPACTOR: &str = "None (each program compacts on its own)";
@@ -203,7 +203,11 @@ pub const SESSIONS_HINT: &str = "A session with no activity for that many days i
 
 /// What the Sessions section says under its title.
 const SESSIONS_SENTENCE: &str = "Sessions pile up: one that finished its work stays open until you end it. \
-     Off, nothing is ended on its own.";
+     Off, nothing is ended on its own, and a session whose quota ran out waits for you.";
+
+/// What the switch that resumes sessions at their quota's reset does, under its label.
+pub const RESUME_HINT: &str = "A session whose quota ran out is told to continue at the reset. \
+     Each session's composer can switch it for that session alone.";
 
 /// What the developer mode's switch logs, under its label.
 pub const DEVELOPER_HINT: &str = "Each gate decision with its reasons, the judge's input and \
@@ -253,6 +257,10 @@ pub struct SettingsPage {
     sessions: Option<Option<u64>>,
     /// A choice made, until the daemon answers: what it was asked to become.
     sessions_pending: Option<Option<u64>>,
+    /// Whether a session is resumed at its quota's reset, once the daemon said it.
+    resume: Option<bool>,
+    /// The switch flipped, until the daemon answers: what it was asked to become.
+    resume_pending: Option<bool>,
     /// The window's appearance, once the daemon said it.
     appearance: Option<Appearance>,
     /// Why the daemon could not read the appearance it keeps: the tab says so and stays usable,
@@ -320,6 +328,8 @@ impl SettingsPage {
             tool_results_pending: None,
             sessions: None,
             sessions_pending: None,
+            resume: None,
+            resume_pending: None,
             appearance: None,
             appearance_unread: None,
             tab: 0,
@@ -597,10 +607,10 @@ impl SettingsPage {
         let summary = Select::new(
             "compaction-summary",
             [
-                SelectOption::new("compactor", "The compactor")
-                    .line("A model of your choice summarises the conversation."),
-                SelectOption::new("agent", "The agent itself")
-                    .line("Flottille asks the agent for its handoff, and turns its program's own compaction off where it can."),
+                SelectOption::new("compactor", "A model you choose")
+                    .line("A separate model summarises the conversation."),
+                SelectOption::new("agent", "The session's own agent")
+                    .line("The agent summarises its own conversation, in its session."),
             ],
             usize::from(shown.by_agent),
         )
@@ -793,8 +803,9 @@ impl SettingsPage {
             .border_1()
             .border_color(p.line)
             .child(
-                Field::new("compaction-summary-field", "Summary written by", summary)
-                    .hint("The compactor, or the agent itself in a handoff of a fixed shape."),
+                Field::new("compaction-summary-field", "Summary written by", summary).hint(
+                    "A model you choose, or the session's own agent in a handoff of a fixed shape.",
+                ),
             )
             .child(
                 div()
@@ -834,7 +845,7 @@ impl SettingsPage {
             return Vec::new();
         };
         let mut lines = vec![
-            provider.state(),
+            provider.status(),
             provider.sign_in(),
             provider.program_line(),
         ];
@@ -1268,21 +1279,53 @@ impl SettingsPage {
     /// why.
     pub fn sessions_answered(
         &mut self,
-        shown: Result<Option<u64>, String>,
-        written: bool,
+        shown: Result<(Option<u64>, bool), String>,
+        written: Option<SessionsSetting>,
         cx: &mut Context<Self>,
     ) {
-        if written {
-            self.sessions_pending = None;
+        match written {
+            Some(SessionsSetting::Days) => self.sessions_pending = None,
+            Some(SessionsSetting::Resume) => self.resume_pending = None,
+            None => {}
         }
         match shown {
-            Ok(days) => self.sessions = Some(days),
-            Err(why) if written => toast(
-                Toast::failure("Ending inactive sessions was not changed").detail(why),
-                cx,
-            ),
-            Err(_) => {}
+            Ok((days, resume)) => {
+                self.sessions = Some(days);
+                self.resume = Some(resume);
+            }
+            Err(why) => match written {
+                Some(SessionsSetting::Days) => toast(
+                    Toast::failure("Ending inactive sessions was not changed").detail(why),
+                    cx,
+                ),
+                Some(SessionsSetting::Resume) => toast(
+                    Toast::failure("Resuming at the quota's reset was not changed").detail(why),
+                    cx,
+                ),
+                None => {}
+            },
         }
+        cx.notify();
+    }
+
+    /// Whether a session is resumed at its quota's reset, as the daemon last said it.
+    pub fn resume_said(&self) -> Option<bool> {
+        self.resume
+    }
+
+    fn choose_resume(&mut self, cx: &mut Context<Self>) {
+        let Some(resume) = self.resume else {
+            return;
+        };
+        if self.resume_pending.is_some() {
+            return;
+        }
+        self.resume_pending = Some(!resume);
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::ResumeSet { resume: !resume })
+            })
+            .ok();
         cx.notify();
     }
 
@@ -1351,9 +1394,33 @@ impl SettingsPage {
                 .gap(space::MD),
             )
             .test_support();
+        let resume = Switch::new(
+            "sessions-resume-switch",
+            self.resume_pending.or(self.resume).unwrap_or(false),
+            "Resume sessions when the quota resets",
+        )
+        .hint(RESUME_HINT)
+        .disabled(self.resume.is_none() || self.resume_pending.is_some())
+        .on_click(cx.listener(|this, _, _, cx| this.choose_resume(cx)));
+        let resume_card = div()
+            .id("sessions-resume")
+            .p(space::LG)
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(resume)
+            .test_support();
         Section::new("sessions", "Sessions")
             .sentence(SESSIONS_SENTENCE)
-            .child(card)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::MD)
+                    .child(card)
+                    .child(resume_card),
+            )
     }
 
     /// Whether the daemon answered about the window's appearance, with it or with why it cannot
@@ -1660,7 +1727,7 @@ impl SettingsPage {
         let switch = Switch::new(
             ElementId::Name(format!("provider-switch-{name}").into()),
             on,
-            "Enabled",
+            "Use",
         )
         .disabled(self.pending.contains_key(&name))
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1706,12 +1773,18 @@ impl SettingsPage {
                     .text_color(state_color)
                     .child(mark)
                     // The daemon's sentence wraps rather than run past the row.
-                    .child(
+                    .child({
+                        let status = SharedString::from(provider.status());
                         div()
+                            .id(ElementId::Name(
+                                format!("provider-state-{}", provider.name).into(),
+                            ))
+                            .aria_label(status.clone())
                             .flex_1()
                             .min_w_0()
-                            .child(SharedString::from(provider.state())),
-                    ),
+                            .child(status)
+                            .test_support()
+                    }),
             )
             .child(line(provider.sign_in(), p.faint))
             .children(
@@ -1747,7 +1820,9 @@ impl Render for SettingsPage {
             .iter()
             .map(|provider| self.provider_row(provider, cx))
             .collect();
-        let count = rows.len();
+        let listed = rows.len();
+        // What is in use, not how many rows there are: three rows with one switched on count one.
+        let count = self.providers.offered().count();
         let providers = Section::new("providers", "Providers")
             .count(count.to_string())
             .sentence(
@@ -1777,7 +1852,7 @@ impl Render for SettingsPage {
             ))
             .child(presence(
                 "provider-list-block",
-                count > 0,
+                listed > 0,
                 ListCard::new("provider-list").rows(rows),
             ))
             .into_any_element();
@@ -1906,13 +1981,29 @@ pub(crate) fn grouped(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOL_RESULTS_SENTENCE, grouped};
+    use super::{COMPACTION_SENTENCE, TOOL_RESULTS_SENTENCE, grouped};
 
     #[test]
     fn the_sentence_of_the_tool_results_section_has_no_run_of_spaces() {
         assert!(
             !TOOL_RESULTS_SENTENCE.contains("  "),
             "{TOOL_RESULTS_SENTENCE}"
+        );
+    }
+
+    #[test]
+    fn the_compaction_sentence_names_the_choices_in_the_words_of_the_select() {
+        assert!(
+            COMPACTION_SENTENCE.contains("a separate model"),
+            "{COMPACTION_SENTENCE}"
+        );
+        assert!(
+            COMPACTION_SENTENCE.contains("the session's own agent"),
+            "{COMPACTION_SENTENCE}"
+        );
+        assert!(
+            !COMPACTION_SENTENCE.contains("compactor"),
+            "{COMPACTION_SENTENCE}"
         );
     }
 

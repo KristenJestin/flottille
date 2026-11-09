@@ -705,6 +705,17 @@ const MIGRATIONS: &[&str] = &[
     -- The workspace a task the user ran from a session's rail runs in: that session lists it.
     ALTER TABLE runs ADD COLUMN workspace TEXT;
 ",
+    "
+    -- A session whose provider said its quota is spent waits for its reset (`docs/design.md`
+    -- §5.9): the instant, NULL when it could not be read, and the user's choice for this session
+    -- alone, NULL to follow the app's setting. Kept across restarts; gone with the session.
+    CREATE TABLE quota_waits (
+        agent      TEXT PRIMARY KEY REFERENCES agents (id) ON DELETE CASCADE,
+        reset_at   INTEGER,
+        resume     INTEGER,
+        limited_at INTEGER NOT NULL
+    ) STRICT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -747,6 +758,34 @@ pub struct AgentChange {
     /// The user detached the session from the agent that started it: `launched_by` is cleared,
     /// `detached_from` keeps that agent (`docs/tools.md`, "Detach").
     pub detached_from: Option<String>,
+}
+
+/// A session waiting for its quota's reset (`docs/design.md` §5.9).
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuotaWait {
+    pub agent: String,
+    /// When the quota resets; `None` when the provider's words could not be read.
+    pub reset_at: Option<u64>,
+    /// The user's choice for this session; `None` follows the app's setting.
+    pub resume: Option<bool>,
+    /// When the provider said it.
+    pub limited_at: u64,
+}
+
+impl QuotaWait {
+    fn of_row(row: &rusqlite::Row) -> rusqlite::Result<QuotaWait> {
+        Ok(QuotaWait {
+            agent: row.get(0)?,
+            reset_at: row.get(1)?,
+            resume: row.get(2)?,
+            limited_at: row.get(3)?,
+        })
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({"agent": self.agent, "limited": true, "reset_at": self.reset_at,
+            "resume": self.resume, "limited_at": self.limited_at})
+    }
 }
 
 /// How many cut tool results of one agent keep their whole text (`docs/tools.md`, "Long
@@ -1265,11 +1304,13 @@ impl Store {
             )?;
         }
         // A leave lasts while both sessions do: one that ends, even to be resumed, takes it.
+        // So does a wait for the quota's reset: an ended session is never resumed by it.
         if change.state.is_some_and(AgentState::is_final) {
             transaction.execute(
                 "DELETE FROM session_leaves WHERE writer = ?1 OR session = ?1",
                 params![id],
             )?;
+            transaction.execute("DELETE FROM quota_waits WHERE agent = ?1", params![id])?;
         }
         if let Some(native_id) = change.native_id {
             transaction.execute(
@@ -2364,6 +2405,103 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The session `agent` waits for its quota's reset at `reset_at` (`None`: it could not be
+    /// read), and its `agent.quota` event. A wait already there takes the new instant and keeps
+    /// the user's choice for this session.
+    pub fn limit_quota(
+        &mut self,
+        agent: &str,
+        reset_at: Option<u64>,
+    ) -> Result<(QuotaWait, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let wait = transaction.query_row(
+            "INSERT INTO quota_waits (agent, reset_at, resume, limited_at) VALUES (?1, ?2, NULL, ?3) \
+             ON CONFLICT (agent) DO UPDATE SET reset_at = excluded.reset_at, \
+             limited_at = excluded.limited_at \
+             RETURNING agent, reset_at, resume, limited_at",
+            params![agent, reset_at, now_ms()],
+            QuotaWait::of_row,
+        )?;
+        let event = append_event(&transaction, "agent.quota", wait.to_json())?;
+        transaction.commit()?;
+        Ok((wait, Some(event)))
+    }
+
+    /// The session's wait for its quota's reset, if it waits.
+    pub fn quota_wait(&self, agent: &str) -> Result<Option<QuotaWait>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT agent, reset_at, resume, limited_at FROM quota_waits WHERE agent = ?1",
+                params![agent],
+                QuotaWait::of_row,
+            )
+            .optional()?)
+    }
+
+    /// Every session waiting for its quota's reset.
+    pub fn quota_waits(&self) -> Result<Vec<QuotaWait>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT agent, reset_at, resume, limited_at FROM quota_waits ORDER BY limited_at",
+        )?;
+        let rows = statement.query_map([], QuotaWait::of_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The user's choice to resume this session at its reset or not; `None` when it does not
+    /// wait.
+    pub fn choose_quota_resume(
+        &mut self,
+        agent: &str,
+        resume: bool,
+    ) -> Result<(Option<QuotaWait>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let wait = transaction
+            .query_row(
+                "UPDATE quota_waits SET resume = ?2 WHERE agent = ?1 \
+                 RETURNING agent, reset_at, resume, limited_at",
+                params![agent, resume],
+                QuotaWait::of_row,
+            )
+            .optional()?;
+        let Some(wait) = wait else {
+            return Ok((None, None));
+        };
+        let event = append_event(&transaction, "agent.quota", wait.to_json())?;
+        transaction.commit()?;
+        Ok((Some(wait), Some(event)))
+    }
+
+    /// The session no longer waits for its quota (`why`); with `reset_at`, only the wait for that
+    /// instant goes, so that two takers never both take it. Whether a wait went.
+    pub fn end_quota_wait(
+        &mut self,
+        agent: &str,
+        reset_at: Option<u64>,
+        why: &str,
+    ) -> Result<(bool, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let gone = match reset_at {
+            Some(at) => transaction.execute(
+                "DELETE FROM quota_waits WHERE agent = ?1 AND reset_at = ?2",
+                params![agent, at],
+            )?,
+            None => {
+                transaction.execute("DELETE FROM quota_waits WHERE agent = ?1", params![agent])?
+            }
+        };
+        if gone == 0 {
+            return Ok((false, None));
+        }
+        let event = append_event(
+            &transaction,
+            "agent.quota",
+            json!({"agent": agent, "limited": false, "why": why}),
+        )?;
+        transaction.commit()?;
+        Ok((true, Some(event)))
     }
 
     /// The vault's entries, by name.

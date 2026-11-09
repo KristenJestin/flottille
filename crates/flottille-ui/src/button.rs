@@ -57,6 +57,7 @@ pub struct Button {
     full_width: bool,
     disabled: bool,
     chosen: Option<bool>,
+    ghost: bool,
     on_click: Option<OnClick>,
 }
 
@@ -73,6 +74,7 @@ impl Button {
             full_width: false,
             disabled: false,
             chosen: None,
+            ghost: false,
             on_click: None,
         }
     }
@@ -126,6 +128,14 @@ impl Button {
         let mut button = Self::new(id, ButtonKind::Quiet).label(label);
         button.chosen = Some(chosen);
         button
+    }
+
+    /// A choice that stays quiet when it is the chosen one: the ground of a hover and the text's
+    /// own ink move in over [`PANEL`](crate::motion::PANEL), never the accent fill (only Send is
+    /// filled in the composer).
+    pub fn ghost(mut self) -> Self {
+        self.ghost = true;
+        self
     }
 
     /// Faded, and a click does nothing.
@@ -203,8 +213,13 @@ impl RenderOnce for Button {
         let mut ink_now = mix(ink, hover_ink, now.hover);
         if let Some(chosen) = self.chosen {
             let t = choose(&state, chosen, window, cx);
-            background = mix(background, p.acc, t);
-            ink_now = mix(ink_now, p.on_acc, t);
+            if self.ghost {
+                background = mix(background, p.hover, t);
+                ink_now = mix(ink_now, p.text, t);
+            } else {
+                background = mix(background, p.acc, t);
+                ink_now = mix(ink_now, p.on_acc, t);
+            }
         }
         // GPUI cannot scale an element: pressing shrinks the background layer instead.
         let inset = px(height * (1.0 - now.scale) / 2.0);

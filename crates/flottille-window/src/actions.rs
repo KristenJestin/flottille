@@ -156,6 +156,10 @@ pub enum Command {
     SessionsSet {
         days: Option<u64>,
     },
+    /// Chooses whether a session is resumed at its quota's reset (`sessions.set`).
+    ResumeSet {
+        resume: bool,
+    },
     /// The window's appearance (`appearance.show`); `seq` numbers the request (see
     /// `Shell::ask_appearance`).
     AppearanceRead {
@@ -497,6 +501,11 @@ pub enum Command {
     Interrupt {
         session: String,
     },
+    /// Whether the session, waiting for its quota's reset, is resumed at it (`agent.quota_resume`).
+    QuotaResume {
+        session: String,
+        resume: bool,
+    },
     /// Puts the session in Ask, Auto or Full (`ask`, `auto`, `full`): the user's alone to change.
     SetMode {
         session: String,
@@ -633,6 +642,13 @@ impl std::fmt::Debug for VaultWrite {
             VaultWrite::Remove { name } => f.debug_struct("Remove").field("name", name).finish(),
         }
     }
+}
+
+/// The setting of the Sessions tab a choice wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionsSetting {
+    Days,
+    Resume,
 }
 
 /// A change to a project's commands, as the daemon takes it.
@@ -912,10 +928,11 @@ pub enum Outcome {
         shown: Result<Option<usize>, String>,
     },
     /// After how many days an inactive session is ended as the daemon says it (`None` is off),
-    /// after a read (`written` false) or a choice.
+    /// and whether a session is resumed at its quota's reset, after a read (`written` none) or a
+    /// choice of one of them.
     Sessions {
-        written: bool,
-        shown: Result<Option<u64>, String>,
+        written: Option<SessionsSetting>,
+        shown: Result<(Option<u64>, bool), String>,
     },
     /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
     /// choice.
@@ -1116,6 +1133,12 @@ pub enum Outcome {
     },
     /// The session's turn was interrupted (or none ran), or the daemon refused with why.
     Interrupted {
+        session: String,
+        refused: Option<String>,
+    },
+    /// The session's choice to resume at its quota's reset was taken, or the daemon refused with
+    /// why.
+    QuotaResumed {
         session: String,
         refused: Option<String>,
     },
@@ -1496,17 +1519,22 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 .map(|shown| shown["limit"].as_u64().map(|limit| limit as usize));
             Outcome::ToolResults { written, shown }
         }
-        Command::SessionsRead | Command::SessionsSet { .. } => {
+        Command::SessionsRead | Command::SessionsSet { .. } | Command::ResumeSet { .. } => {
             let (method, params, written) = match command {
                 Command::SessionsSet { days } => (
                     "sessions.set",
                     json!({"days": days.map_or(json!("off"), |d| json!(d))}),
-                    true,
+                    Some(SessionsSetting::Days),
                 ),
-                _ => ("sessions.show", json!({}), false),
+                Command::ResumeSet { resume } => (
+                    "sessions.set",
+                    json!({"resume": resume}),
+                    Some(SessionsSetting::Resume),
+                ),
+                _ => ("sessions.show", json!({}), None),
             };
             let shown = answer(ask_alone(connect, method, params, bounds.quick))
-                .map(|shown| shown["days"].as_u64());
+                .map(|shown| (shown["days"].as_u64(), shown["resume"] == true));
             Outcome::Sessions { written, shown }
         }
         Command::AppearanceRead { seq } | Command::AppearanceSet { seq, .. } => {
@@ -2369,6 +2397,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 after_turn,
                 refused,
             }
+        }
+        Command::QuotaResume { session, resume } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.quota_resume",
+                json!({"agent": session, "resume": resume}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::QuotaResumed { session, refused }
         }
         Command::SetMode { session, mode } => {
             let refused = match ask_alone(

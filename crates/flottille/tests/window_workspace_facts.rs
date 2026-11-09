@@ -416,6 +416,75 @@ fn the_rail_s_workspace_menu_offers_removal(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui_kit::test]
+fn a_workspace_without_a_ticket_offers_no_unlink(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    let (_shell, cx) = open_session(&user, &lead, cx);
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    assert!(present(cx, "open-in-editor"), "the menu is open");
+    assert_eq!(
+        labelled(cx, "workspace-link-ticket-label").as_deref(),
+        Some("Link a ticket…")
+    );
+    assert!(
+        !present(cx, "workspace-unlink-ticket"),
+        "there is no ticket to unlink"
+    );
+}
+
+#[gpui_kit::test]
+fn a_workspace_with_a_ticket_offers_change_and_unlink(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    with_ticket_and_pull(&user);
+    let cx = open_rail(&user, &lead, cx);
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    assert_eq!(
+        labelled(cx, "workspace-link-ticket-label").as_deref(),
+        Some("Change the ticket…")
+    );
+    assert_eq!(
+        labelled(cx, "workspace-unlink-ticket-label").as_deref(),
+        Some("Unlink the ticket")
+    );
+}
+
+#[gpui_kit::test]
+fn every_row_of_a_workspace_menu_has_an_icon_of_its_own(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    with_ticket_and_pull(&user);
+    let (shell, cx) = {
+        let (shell, cx) = window(&user, cx);
+        until(&shell, cx, "the ticket in the rail", |cx| {
+            present(cx, &session_id(&lead).to_string())
+        });
+        cx.update(|window, cx| window.click(session_id(&lead), cx));
+        until(&shell, cx, "the ticket in the rail", |cx| {
+            let _ = session_page(&shell, cx);
+            present(cx, "rail-ticket")
+        });
+        (shell, cx)
+    };
+    let rows = session_page(&shell, cx).read_with(cx, |page, cx| {
+        page.rail().read(cx).workspace_menu().read(cx).entries()
+    });
+    assert!(rows.len() >= 4, "{rows:?}");
+    let mut icons: Vec<_> = rows.iter().map(|(_, _, icon)| *icon).collect();
+    assert!(
+        icons.iter().all(Option::is_some),
+        "an icon on every row: {rows:?}"
+    );
+    icons.sort_by_key(|icon| format!("{icon:?}"));
+    icons.dedup();
+    assert_eq!(icons.len(), rows.len(), "no two rows share an icon");
+}
+
 /// Stops the agent, and waits until the window knows its session ended.
 fn ended(user: &User, agent: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     user.call("agent.stop", json!({"agent": agent})).unwrap();

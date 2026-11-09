@@ -431,6 +431,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     tokio::spawn(sweep::run(daemon.clone(), daemon.stopping.subscribe()));
     crate::models::check(&daemon);
     crate::inactive::check(&daemon);
+    crate::quota::check(&daemon);
 
     let mut connections = JoinSet::new();
     let reason = loop {

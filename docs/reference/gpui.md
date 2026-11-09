@@ -132,6 +132,11 @@ the wrong code first).
    (**[test]** `PageHeader` refuses a third). A destructive action is never a visible button in a
    page or a row: it is a "Remove…" item of a "⋯" menu, last. A label never repeats a name the
    title already says.
+   A "⋯" menu (`Menu`) is as wide as its longest label: an entry is one line, cut only when it
+   could not fit the window; every entry has an icon of its own (the menu refuses two entries
+   with the same one; the destructive entry's is the bin), the labels start at one x, and an entry
+   offers only what applies (a second, fainter line may say what it acts on, never wrapped).
+   **[test]** `crates/flottille-ui/tests/menus.rs`.
 2. **One confirmation: a modal dialog.** Its title is the question with the object's name, then
    one sentence of consequence, Cancel and the danger button; Escape and the scrim cancel; when
    the action cannot be done, the dialog says why and its button is disabled. Never a button that

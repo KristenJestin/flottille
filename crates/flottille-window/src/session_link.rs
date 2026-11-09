@@ -71,6 +71,26 @@ pub struct TreeAgent {
     pub tools_reload: bool,
     /// Flottille compacts its conversation: the compactor works, or it writes its handoff.
     pub compacting: bool,
+    /// The root waits for its quota's reset (`docs/design.md` §5.9).
+    pub quota: Option<Quota>,
+}
+
+/// A root's wait for its quota's reset.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Quota {
+    /// When it resets; `None` when its provider's words could not be read.
+    pub reset_at: Option<u64>,
+    /// Whether the daemon resumes the session then.
+    pub resume: bool,
+}
+
+impl Quota {
+    pub fn of(value: &Value) -> Option<Quota> {
+        value.is_object().then(|| Quota {
+            reset_at: value["reset_at"].as_u64(),
+            resume: value["resume"] == true,
+        })
+    }
 }
 
 /// A change of model and effort waiting for the end of the turn.
@@ -156,6 +176,7 @@ impl TreeAgent {
             tools_outdated: agent["tools_outdated"] == true,
             tools_reload: agent["tools_reload"] == true,
             compacting: agent["compacting"] == true,
+            quota: Quota::of(&agent["quota"]),
         }
     }
 }
@@ -558,6 +579,8 @@ const TREE_EVENTS: &[&str] = &[
     // The session says it compacts while it does, and what waits says it waits for that.
     "agent.compacting",
     "agent.compacted",
+    // The session waits for its quota's reset, or no longer does.
+    "agent.quota",
     "agent.compaction_failed",
     "delivery.queued",
     // A waiting message taken back leaves the queue under the conversation.

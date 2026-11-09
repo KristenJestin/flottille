@@ -1895,6 +1895,33 @@ fn run_a_task_from_the_rail_starts_it_in_the_session_s_workspace(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+fn run_a_task_is_an_icon_button_at_the_end_of_the_runs_heading(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the rail offers the project's tasks", |cx| {
+        has(cx, "rail-run-task")
+    });
+    settle(cx);
+
+    let button = bounds_of(cx, "rail-run-task").expect("the button is drawn");
+    let title = bounds_of(cx, "rail-runs-title").expect("the heading row is drawn");
+    assert_eq!(
+        (f32::from(button.size.width), f32::from(button.size.height)),
+        (28., 28.),
+        "an icon button is a 28 px square, not a select that fills the row"
+    );
+    assert!(
+        (f32::from(title.right()) - f32::from(button.right())).abs() < 1.,
+        "it ends the heading row: {button:?} in {title:?}"
+    );
+    assert!(
+        !has(cx, "rail-run-task-menu"),
+        "the list of the tasks is closed at rest"
+    );
+}
+
+#[gpui_kit::test]
 fn a_run_the_user_started_unfolds_into_the_runs(cx: &mut TestAppContext) {
     let user = user();
     let (lead, _, shell, cx) = with_a_child(&user, cx);

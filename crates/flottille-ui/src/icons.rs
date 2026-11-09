@@ -55,7 +55,12 @@ gpui_kit::assets::icon_assets!(
         KeyRound,
         ChevronLeft,
         ChevronRight,
-        PanelRightOpen
+        PanelRightOpen,
+        FoldVertical,
+        Unlink,
+        Unplug,
+        Trash,
+        Replace
     ]
 );
 
@@ -154,10 +159,20 @@ pub enum Icon {
     Next,
     /// Opens the right panel: the session's details (its rail).
     PanelRight,
+    /// Folds a conversation into less: Compact.
+    Fold,
+    /// Cuts a link: a workspace's ticket.
+    Unlink,
+    /// Cuts a session off its lead: Detach.
+    Detach,
+    /// Removes: the destructive row of a menu.
+    Trash,
+    /// Swaps one thing for another: Change the ticket.
+    Change,
 }
 
 impl Icon {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 46] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -199,6 +214,11 @@ impl Icon {
         Self::Previous,
         Self::Next,
         Self::PanelRight,
+        Self::Fold,
+        Self::Unlink,
+        Self::Detach,
+        Self::Trash,
+        Self::Change,
     ];
 
     pub fn path(self) -> SharedString {
@@ -247,6 +267,11 @@ impl Icon {
             Self::Previous => IconName::ChevronLeft,
             Self::Next => IconName::ChevronRight,
             Self::PanelRight => IconName::PanelRightOpen,
+            Self::Fold => IconName::FoldVertical,
+            Self::Unlink => IconName::Unlink,
+            Self::Detach => IconName::Unplug,
+            Self::Trash => IconName::Trash,
+            Self::Change => IconName::Replace,
         }
         .path()
     }

@@ -7,6 +7,12 @@ on:
     branches: [main, dev, "feat/**", "fix/**"]
   workflow_dispatch:
 
+# A push makes the runs of the same ref's older pushes useless: they are cancelled, so that the
+# queue holds only what is current. Not on dev and main, whose runs publish and always finish.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' && github.ref != 'refs/heads/main' }}
+
 jobs:
   commit-messages:
     # A feature branch's commits are judged on its pull request, as before its pushes ran here.

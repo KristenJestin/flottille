@@ -189,6 +189,16 @@ impl Provider {
         }
     }
 
+    /// What the settings page says of it under its name: `Not used` when its switch is off (the
+    /// switch is right there, and the config file is the CLI's business), else its state.
+    pub fn status(&self) -> String {
+        if self.enabled {
+            self.state()
+        } else {
+            "Not used".into()
+        }
+    }
+
     /// How it signs in, as far as the daemon can see: never a key's value.
     pub fn sign_in(&self) -> String {
         match (&self.login, self.login_present, &self.api_key) {
