@@ -10,7 +10,7 @@ depend on what it can do (`docs/agents.md`): the file and command tools below fo
 do is the gate's business, not the list's), `skills`, `commands`, `setup` and `project` for a root (below,
 "The project"),
 `wake` for every agent ("Waking later"), and the tree's tools (`agent_*`, `report`, `ask`,
-`approval_answer`, and `session_send` and `session_read` for a root).
+`approval_answer`, and `session_send`, `session_read` and `session_title` for a root).
 
 ## The server
 
@@ -1025,6 +1025,7 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 | `agent_launch {kind, title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, branch?, base?}` | Starts an agent of the `kind` it names, never guessed, and answers at once with its id. **`kind`** is required, one of: **`child`**, a part of the caller's own task, in its place, that it directs and that reports to it; **`led`**, an autonomous job of its own (its own workspace or `main`) that the caller pilots: a real session the user sees under it and may talk to, which asks the caller its questions and wakes it when it asks, reports or ends; **`handed`**, a session the caller starts for the user and then lets go: it is the user's, and the caller hears nothing more of it unless it writes to it ("Sessions an agent starts", below). A launch without `kind` is refused before anything is asked, naming each kind and what it does (`refused: kind is required: say which agent you start. child: …; led: …; handed: …`); `root` and `follow`, which `kind` replaced, are refused the same way, naming `kind` (`refused: root is no longer taken: kind says which agent you start, …`): there is no silent mapping. Its description says each kind in one line, and holds a call of each. A child never works in another place than its parent's: `workspace` and `new_workspace` are a session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "kind": "led", … "workspace": "login" …`); naming the caller's own workspace is its own place. `provider` is the caller's when left out, and the agent's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default for a child) or `lead` (by default for a session); for `led` and `handed`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, `branch` as its branch and `base` (`{"api": "develop"}`) as the base a repository starts from, the same rules as `workspace create`: `<branch prefix>/<name>` when left out, an existing branch resumed, the project's branch format; the card says the branch, and that is the branch made, and each base chosen (`The repository api starts from develop, in place of its base rule`); a base for a repository the workspace does not take, or a name git refuses, is refused before the card, while whether the remote has it is read when the workspace is made (the card touches no network); `branch` and `base` without `new_workspace` are refused naming it; their schema says to name the branch by the repository's convention, with the ticket's key when there is one, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). A child launch is refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). |
 | `session_send {session, text}` (a root) | A message to a session the caller started (`agent_launch` with `led` or `handed`), to the agent that started the caller's session ("Sessions an agent starts", below), or to any other session of its project with the user's leave, asked once per pair ("Sessions that talk to each other"). |
 | `session_read {session?, last?, since?, until?, cursor?}` (a root) | A page of the conversation of another session of the caller's project, framed as that session's data, with the mode of its tree; without `session`, the caller's own id, role and mode ("Sessions that read each other", below). |
+| `session_title {title}` (a root) | Names the caller's session for the user: 3 to 8 words on one line, at most 60 characters ("The session's title", below). |
 | `agent_send {agent_id, message, model?, effort?}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. With `model` or `effort` it also changes the child's, as `agent.options` does for the user (`docs/agents.md`, "The options"): checked as at `agent_launch` (a model or an effort its provider is known not to offer is refused, naming those it offers, and nothing is sent), then set between its turns, before its next prompt. The provider never changes. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
 | `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. `agent_id` may also name a session of the caller's project: one it started as `led` is its own to end, judged as any call in the tree's mode; any other (one it handed, or one it did not start) is held for the user every time, in every mode, Full included ("Sessions that talk to each other", "Ending another session"). |
@@ -1309,6 +1310,33 @@ it at once.
   name the session and the page (`Read the conversation of the session "Login" (agent …),
   another session of this project: its last 20 messages`). It is never harmless, so that a mode
   that lets it pass can be added without making it pass in Ask or Auto.
+
+#### The session's title
+
+A session is titled by the first line of its first message that says what the work is
+(`docs/design.md` §10, the sidebar) until it is named. Its root's agent names it with
+`session_title {title}`, a tool of its own rather than an action of another, because it is the
+only thing it says about its session: the guide of a root the user started tells it to call it
+in its first turn, in the user's language, with a few words that say the work (`Rework the
+Flottille site`). There is no model call of Flottille's for it: the title is the agent's, in the
+turn it runs anyway, and costs no quota.
+
+- The title is 3 to 8 words, on one line, at most 60 characters; anything else is refused with
+  the reason (`refused: a title is at most 60 characters, this one has 72: …`, `… is one line …`,
+  `… is 3 to 8 words …`). It is masked of the daemon's secrets and of those of the caller's
+  place before it is stored.
+- The agent may call it again when the work changes, as long as the user has not named the
+  session.
+- **The user's title always wins.** The user renames a session from the window (its header and
+  its row's "⋯" menu, a dialog with a labelled field) or the command line (`flottille agent
+  rename`, `agent.rename`). Once they did, `session_title` is refused, saying so (`refused: the
+  user named this session "…", and the user's title stays: do not title it again`). The user may
+  rename it again at any time.
+- Each title given emits `agent.titled {agent, title, by}`, `by` being `agent` or `user`
+  (`docs/events.md`): the sidebar, the session's header, the quick switcher and the notifications
+  follow it without a refresh, and the title fades to the new one in the row and the header.
+- A child has no `session_title`: its title is the one its parent gave with `agent_launch`, and
+  the user does not rename it (`agent.rename` refuses a child).
 
 ## The web
 

@@ -960,16 +960,26 @@ name, or `needs` names a service `services.toml` does not hold.
 (`repository: null` puts it back at the top; `ready` or `url` `null` or `""` removes it). Answers
 the task.
 
+#### `task.copy`
+
+`{"project", "name", "to"}`: writes the task in the project `to`, as `task.add` writes it (same
+name, line and flags), and answers it with `"project"` the target. Its `repository` is kept when
+`to` has a repository of that path, else it runs at the top of the place. `refused` when `to` has
+a task of that name, when `to` is `project`, or while `to` is being removed; `not-found` for a
+project or a task that does not exist.
+
 #### `task.remove`
 
 `{"project", "name"}`: `{"project", "removed": "<name>"}`. `refused` while a setup step runs it.
 
 #### `task.run`
 
-`{"project", "name"}`: `{"project", "name", "run"}`, at once. The user runs the task in the
-project folder with the project's variables, as a run of no agent: no gate, no delivery
-(`docs/tools.md`, "Tasks and runs"). A task that keeps running (`serve`) and already runs for the
-user is joined: its run is answered. It is followed with the run methods. The services the task
+`{"project", "name", "workspace"?}`: `{"project", "name", "run"}`, at once. The user runs the task
+in the project folder with the project's variables, or with `workspace` in that workspace with its
+own (a session's rail runs it in the session's workspace), as a run of no agent: no gate, no
+delivery (`docs/tools.md`, "Tasks and runs"). A task that keeps running (`serve`) and already runs
+for the user in the same place is joined: its run is answered. `refused` when the project has no
+such workspace. It is followed with the run methods. The services the task
 needs are started first and waited for (`docs/projects.md`, "Services"): `refused` naming the
 service that failed, or was not ready in time, and why.
 
@@ -1141,7 +1151,10 @@ what the agent does during a turn never moves it, which is what a list of sessio
 it (`docs/tools.md`, "When the tools change"); `tools_outdated` says whether its running session
 runs an older list than that. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
-(each replacement adds one), `title` and `brief` a child's task, `launched_by` the id of the agent
+(each replacement adds one), `title` and `brief` a child's task, or for a root the title its
+agent or the user named its session with (`docs/tools.md`, "The session's title"), `titled_by`
+who did (`agent` or `user`; `null` for a child and a session not named yet, which keeps the first
+line of its first message), `launched_by` the id of the agent
 that started a root for the user (`null` for a root the user started, and for a child), whose
 `brief` is then that agent's first message, never the user's, `led` whether that agent leads it
 (`led_by` its id, `null` for a session handed to the user, `docs/tools.md`, "Sessions an agent
@@ -1297,6 +1310,15 @@ needs no threshold, no margin and no notice seen. `agent.compacted` says it is d
 which case nothing changed. `refused` when there is no compactor (none chosen, or none could be
 picked), and for an agent in a final state.
 
+#### `agent.rename`
+
+`{"agent", "title"}`. The user names a session (`docs/tools.md`, "The session's title"): the title
+replaces the first line of its first message and any its agent gave, and from then on the agent's
+`session_title` is refused; the user may rename it again. The title is trimmed and masked of
+secrets; an empty one or one on several lines is refused (`invalid-params`), and so is a child,
+whose title is its `agent_launch` title. `agent.titled` is emitted with `by` `user`. Answers
+`{"agent", "title", "by": "user"}`.
+
 #### `agent.detach`
 
 `{"agent"}`. Takes a session an agent started (`launched_by`, led or handed) away from that agent,
@@ -1444,7 +1466,8 @@ The commands the agents run with `run` (`docs/tools.md`), and the tasks the user
 ```
 
 `name` is the task it runs, `null` for a line of the agent's. `agent` and `root` are `null` for a
-task the user ran; `project` is always the project's. `state` is `running`,
+task the user ran; `project` is always the project's; `workspace` is its agent's, or for a task the
+user ran, the one it runs in (`null` in the project folder). `state` is `running`,
 `exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `ready` is
 `null` for a run of a task that says no ready, else `starting`, `ready` or `missed` (it ended before
 it was ready); `url` its address, `url_error` why it has none when its task's line for it failed
@@ -1458,7 +1481,8 @@ card in the conversation shows folded, a running command's as well as one that e
 
 `{"project"?, "tree"?, "ended"?, "user"?}`. `{"commands": [...]}`: the commands running, oldest
 first. With `project`, the project's, the user's included; with `tree`, an agent's id, those of the
-agents of its root's tree; without either, every one. With `user` (and `project`, required), only
+agents of its root's tree and the tasks the user ran in the root's place (its workspace, or the
+project folder); without either, every one. With `user` (and `project`, required), only
 the tasks the user ran in the project, as its page lists them. With `ended`, the commands that ended and were not dismissed come after them,
 the last 30 to have ended at most, and none for a tree whose root ended or failed: they go with
 their session, and the daemon forgets them when the session is over for good (`docs/tools.md`)

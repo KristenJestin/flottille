@@ -25,7 +25,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use crate::actions::{Command, RunAct, RunAnswer};
+use crate::actions::{Command, RunAct, RunAnswer, RunFrom};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
 use crate::conversation::Ending;
 use crate::project::{only_at_root, repository_label};
@@ -381,6 +381,8 @@ enum Writing {
     Added(String),
     Saved(String),
     Removed(String),
+    /// The task and the project it goes to.
+    Copied(String, String),
 }
 
 /// The "Tasks" section of the project's Settings.
@@ -409,6 +411,10 @@ pub struct TasksSection {
     confirming: Option<String>,
     /// What the confirmation names, kept while it fades away.
     asked: String,
+    /// The task whose "Copy to…" dialog is open.
+    copying: Option<String>,
+    /// What the dialog names, kept while it fades away.
+    copy_of: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -431,6 +437,8 @@ impl TasksSection {
             form_error: None,
             confirming: None,
             asked: String::new(),
+            copying: None,
+            copy_of: String::new(),
             _subscriptions: Vec::new(),
         }
     }
@@ -671,11 +679,54 @@ impl TasksSection {
         self.write("task.remove", params, writing, cx);
     }
 
+    /// Opens the dialog that copies a task to another project.
+    pub fn copy(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.copying = Some(name.to_owned());
+        self.copy_of = name.to_owned();
+        cx.notify();
+    }
+
+    /// Whether the "Copy to…" dialog is open.
+    pub fn is_copying(&self) -> bool {
+        self.copying.is_some()
+    }
+
+    /// Copies the task of the open dialog to the project `to`.
+    pub fn copy_to(&mut self, to: &str, cx: &mut Context<Self>) {
+        let Some(name) = self.copying.clone() else {
+            return;
+        };
+        if self.saving {
+            return;
+        }
+        let params = json!({"project": self.project, "name": name, "to": to});
+        self.write(
+            "task.copy",
+            params,
+            Writing::Copied(name, to.to_owned()),
+            cx,
+        );
+    }
+
     /// The daemon's answer to a write: a toast says it, and the list is read again; a refusal of
     /// the dialog's stays in it.
     pub fn written(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         self.saving = false;
         let writing = self.writing.take();
+        if let Some(Writing::Copied(name, to)) = &writing {
+            self.copying = None;
+            toast(
+                match refused {
+                    None => Toast::success(format!("Task {name} copied to {to}")),
+                    Some(why) => {
+                        Toast::failure(format!("Task {name} was not copied to {to}")).detail(why)
+                    }
+                },
+                cx,
+            );
+            cx.notify();
+            return;
+        }
         match refused {
             None => {
                 self.editing = None;
@@ -685,7 +736,8 @@ impl TasksSection {
                         .detail("Agents run it by its name; the project page has a Run for it."),
                     Some(Writing::Saved(name)) => Toast::success(format!("Task {name} saved")),
                     Some(Writing::Removed(name)) => Toast::success(format!("Task {name} removed")),
-                    None => Toast::success("Tasks saved"),
+                    // A copy is answered above.
+                    Some(Writing::Copied(..)) | None => Toast::success("Tasks saved"),
                 };
                 toast(said, cx);
                 self.read(cx);
@@ -698,12 +750,36 @@ impl TasksSection {
         cx.notify();
     }
 
+    /// Run in a task's "⋯": the task starts in the project folder, a toast says so.
+    pub fn run(&self, name: &str, cx: &mut Context<Self>) {
+        let command = Command::RunTask {
+            project: self.project.clone(),
+            name: name.to_owned(),
+            from: RunFrom::Settings,
+        };
+        perform_later(&self.shell, command, cx);
+    }
+
     fn menu(&mut self, name: &str, cx: &mut Context<Self>) -> Entity<Menu> {
         let this = cx.entity().downgrade();
         menu_of(&mut self.menus, "task", name, cx, move |name, menu| {
-            let (edit, remove) = (this.clone(), this.clone());
-            let (to_edit, to_remove) = (name.to_owned(), name.to_owned());
+            let (run, edit, copy, remove) =
+                (this.clone(), this.clone(), this.clone(), this.clone());
+            let (to_run, to_edit, to_copy, to_remove) = (
+                name.to_owned(),
+                name.to_owned(),
+                name.to_owned(),
+                name.to_owned(),
+            );
             menu.entry(
+                format!("menu-run-task-{name}"),
+                "Run",
+                Some(Icon::Play),
+                move |_, cx| {
+                    run.update(cx, |this, cx| this.run(&to_run, cx)).ok();
+                },
+            )
+            .entry(
                 format!("edit-task-{name}"),
                 "Edit",
                 None,
@@ -720,6 +796,14 @@ impl TasksSection {
                         }
                     })
                     .ok();
+                },
+            )
+            .entry(
+                format!("copy-task-{name}"),
+                "Copy to…",
+                None,
+                move |_, cx| {
+                    copy.update(cx, |this, cx| this.copy(&to_copy, cx)).ok();
                 },
             )
             .danger(format!("remove-task-{name}"), "Remove…", move |_, cx| {
@@ -783,6 +867,62 @@ impl TasksSection {
                     })
                     .ok();
             })
+    }
+
+    /// The dialog that picks the project a task is copied to: the others, a click on one copies.
+    fn copy_modal(&self, cx: &mut Context<Self>) -> Modal {
+        let this = cx.entity().downgrade();
+        let modal = Modal::new("task-copy-modal", format!("Copy the task {}", self.copy_of))
+            .sentence("Pick the project that gets it, with the same line and flags.")
+            .open(self.copying.is_some())
+            .on_close(move |_, cx| {
+                this.update(cx, |this, cx| {
+                    this.copying = None;
+                    cx.notify();
+                })
+                .ok();
+            });
+        let others: Vec<(String, String)> = self
+            .shell
+            .upgrade()
+            .map(|shell| {
+                shell
+                    .read(cx)
+                    .snapshot()
+                    .projects
+                    .iter()
+                    .filter(|project| project.name != self.project)
+                    .map(|project| (project.name.clone(), project.folder.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let empty = others.is_empty();
+        let list =
+            ListCard::new("task-copy-list").rows(others.into_iter().map(|(name, folder)| {
+                let to = name.clone();
+                ListRow::new(
+                    ElementId::Name(format!("copy-task-to-{name}").into()),
+                    SharedString::from(name),
+                )
+                .line(SharedString::from(folder))
+                .mono_line()
+                .on_click(cx.listener(move |this, _, _, cx| this.copy_to(&to, cx)))
+            }));
+        modal.child(
+            div()
+                .flex()
+                .flex_col()
+                .child(presence("task-copy-list-block", !empty, list))
+                .child(presence(
+                    "task-copy-none",
+                    empty,
+                    EmptyLine::new(
+                        "task-copy-none-line",
+                        Icon::Folder,
+                        "No other project yet: add one to copy tasks to it.",
+                    ),
+                )),
+        )
     }
 
     fn modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Modal {
@@ -1202,11 +1342,30 @@ impl Render for TasksSection {
             .text_color(p.text)
             .child(section)
             .child(modal)
+            .child(self.copy_modal(cx))
             .child(self.confirm(cx))
     }
 }
 
 // ── The project page ───────────────────────────────────────────────────────────────────────────
+
+/// The toast of a task the user ran from the settings (`place` `None`) or a session's rail (its
+/// workspace, `Some(None)` for `main`): where it runs and where its output is, or why it did not
+/// start.
+pub fn ran(name: &str, place: Option<Option<&str>>, refused: Option<String>, cx: &mut App) {
+    let detail = match place {
+        None => "In the project folder. Its output is under Runs on the project page.".to_owned(),
+        Some(None) => "In the project folder. Its output is under Runs.".to_owned(),
+        Some(Some(workspace)) => format!("In workspace {workspace}. Its output is under Runs."),
+    };
+    toast(
+        match refused {
+            None => Toast::success(format!("{name} started")).detail(detail),
+            Some(why) => Toast::failure(format!("{name} did not start")).detail(why),
+        },
+        cx,
+    );
+}
 
 /// The project page's Runs and Tasks: each task with Run, and what the user ran, running first
 /// then the last five finished, each opening its detail in the run drawer.
@@ -1336,6 +1495,7 @@ impl ProjectTasks {
         let command = Command::RunTask {
             project: self.project.clone(),
             name: name.to_owned(),
+            from: RunFrom::Page,
         };
         perform_later(&self.shell, command, cx);
         cx.notify();

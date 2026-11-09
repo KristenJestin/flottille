@@ -413,35 +413,43 @@ struct Changed {
 
 impl RenderOnce for Changing {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let key = ElementId::NamedChild(Arc::new(self.id.clone()), "changing".into());
-        let first = self.text.clone();
-        let state = window.use_keyed_state(key, cx, move |_, _| Changed {
-            text: first,
-            motion: Motion::settled(1.0),
-        });
-        let now = cx.background_executor().now();
-        let reduce = cx.reduce_motion();
-        let motion = state.update(cx, |changed, _| {
-            if changed.text != self.text {
-                changed.text = self.text.clone();
-                changed
-                    .motion
-                    .play(SWAP_FROM, 1.0, Duration::ZERO, HOVER, now, reduce);
-            }
-            changed.motion
-        });
-        if motion.is_running(now) {
-            window.request_animation_frame();
-        } else {
-            state.update(cx, |changed, _| changed.motion.settle(now));
-        }
+        let opacity = changed(&self.id, &self.text, window, cx);
         div()
             .id(self.id)
             .min_w_0()
-            .opacity(motion.value(now))
+            .opacity(opacity)
             .child((self.build)(self.text))
             .test_support()
     }
+}
+
+/// The opacity of a text whose element `id` draws, as [`changing`] fades it: 1 at rest, back from
+/// [`SWAP_FROM`] over [`HOVER`] once `text` differs from the last frame's. For a text drawn by an
+/// element that needs the window as it is built (a title that says itself whole when cut).
+pub fn changed(id: &ElementId, text: &SharedString, window: &mut Window, cx: &mut App) -> f32 {
+    let key = ElementId::NamedChild(Arc::new(id.clone()), "changing".into());
+    let first = text.clone();
+    let state = window.use_keyed_state(key, cx, move |_, _| Changed {
+        text: first,
+        motion: Motion::settled(1.0),
+    });
+    let now = cx.background_executor().now();
+    let reduce = cx.reduce_motion();
+    let motion = state.update(cx, |changed, _| {
+        if changed.text != *text {
+            changed.text = text.clone();
+            changed
+                .motion
+                .play(SWAP_FROM, 1.0, Duration::ZERO, HOVER, now, reduce);
+        }
+        changed.motion
+    });
+    if motion.is_running(now) {
+        window.request_animation_frame();
+    } else {
+        state.update(cx, |changed, _| changed.motion.settle(now));
+    }
+    motion.value(now)
 }
 
 /// `content` whose height follows its own: when it grows or shrinks (a field that wraps its text

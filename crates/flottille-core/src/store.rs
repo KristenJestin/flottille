@@ -696,6 +696,16 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE approval_requests ADD COLUMN digest TEXT;
 ",
     "
+    -- Who named a session (`docs/tools.md`, \"The session's title\"): its agent, with
+    -- `session_title`, or the user, whose title always wins; `NULL` while it keeps the first line
+    -- of its first message.
+    ALTER TABLE agents ADD COLUMN titled_by TEXT;
+",
+    "
+    -- The workspace a task the user ran from a session's rail runs in: that session lists it.
+    ALTER TABLE runs ADD COLUMN workspace TEXT;
+",
+    "
     -- A session whose provider said its quota is spent waits for its reset (`docs/design.md`
     -- §5.9): the instant, NULL when it could not be read, and the user's choice for this session
     -- alone, NULL to follow the app's setting. Kept across restarts; gone with the session.
@@ -712,13 +722,13 @@ const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, 
     identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place, digest";
 
 const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
-    ended_at, output, dismissed, project, ready, url, url_error";
+    ended_at, output, dismissed, project, ready, url, url_error, workspace";
 
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
     depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
-    launched_by, pending_model, pending_effort, exchanged_at, led, detached_from";
+    launched_by, pending_model, pending_effort, exchanged_at, led, detached_from, titled_by";
 
 const DELIVERY_COLUMNS: &str =
     "id, agent, kind, body, urgency, state, created_at, sent_at, images, typed, commands";
@@ -1177,7 +1187,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40)"
             ),
             params![
                 agent.id,
@@ -1219,6 +1229,7 @@ impl Store {
                 agent.exchanged_at,
                 agent.led,
                 agent.detached_from,
+                agent.titled_by,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -1388,6 +1399,28 @@ impl Store {
             .agent(id)?
             .ok_or_else(|| Error::Refused(format!("there is no agent {id}")))?;
         Ok((agent, event))
+    }
+
+    /// Names a session, with its `agent.titled` event, in one transaction: by `"user"` always, by
+    /// `"agent"` only while the user has not named it. `None` when the user's title held.
+    pub fn retitle_agent(&mut self, id: &str, title: &str, by: &str) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE agents SET title = ?2, titled_by = ?3, updated_at = ?4 \
+             WHERE id = ?1 AND (?3 = 'user' OR titled_by IS NOT 'user')",
+            params![id, title, by, now_ms()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let event = append_agent_event(
+            &transaction,
+            id,
+            "agent.titled",
+            json!({"agent": id, "title": title, "by": by}),
+        )?;
+        transaction.commit()?;
+        Ok(Some(event))
     }
 
     /// Gives the agent the tools its role has now, with the agent's event, in one transaction.
@@ -1567,7 +1600,7 @@ impl Store {
         transaction.execute(
             &format!(
                 "INSERT INTO runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
-                 ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
+                 ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
             ),
             params![
                 run.id,
@@ -1586,6 +1619,7 @@ impl Store {
                 run.ready.map(Readiness::as_str),
                 run.url,
                 run.url_error,
+                run.workspace,
             ],
         )?;
         let event = append_event(&transaction, event.0, event.1)?;
@@ -1677,7 +1711,8 @@ impl Store {
     pub fn ended_runs_of(&self, agents: &[String], limit: usize, tail: usize) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
-             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error FROM runs \
+             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error, workspace \
+             FROM runs \
              WHERE agent = ?1 AND state != 'running' AND dismissed = 0 \
              ORDER BY ended_at DESC, id DESC LIMIT ?2"
         ))?;
@@ -1699,7 +1734,8 @@ impl Store {
     pub fn user_runs_of(&self, project: &str, limit: usize, tail: usize) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
-             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error FROM runs \
+             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error, workspace \
+             FROM runs \
              WHERE agent IS NULL AND project = ?1 AND (state = 'running' OR (dismissed = 0 \
              AND id IN (SELECT id FROM runs WHERE agent IS NULL AND project = ?1 \
              AND state != 'running' AND dismissed = 0 ORDER BY ended_at DESC, id DESC LIMIT ?2))) \
@@ -3313,6 +3349,7 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
             .and_then(|ready| Readiness::parse(&ready)),
         url: row.get(14)?,
         url_error: row.get(15)?,
+        workspace: row.get(16)?,
     }))
 }
 
@@ -3509,6 +3546,7 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
         exchanged_at: row.get(36)?,
         led: row.get(37)?,
         detached_from: text(38)?,
+        titled_by: text(39)?,
     }))
 }
 
@@ -4218,6 +4256,7 @@ mod tests {
             launched_by: None,
             led: false,
             detached_from: None,
+            titled_by: None,
         }
     }
 
@@ -4880,6 +4919,7 @@ mod tests {
             ready: None,
             url: None,
             url_error: None,
+            workspace: None,
         };
         for (id, project, at) in [("r1", "app", 5), ("r2", "app", 6), ("r3", "other", 7)] {
             store
@@ -5771,6 +5811,7 @@ mod tests {
             ready: None,
             url: None,
             url_error: None,
+            workspace: None,
         };
         store.create_run(&run, ("run.started", json!({}))).unwrap();
         assert_eq!(store.run("r1").unwrap().unwrap(), run);
@@ -5829,6 +5870,7 @@ mod tests {
             ready: Some(Readiness::Starting),
             url: Some("https://w.app.localhost".into()),
             url_error: None,
+            workspace: None,
         };
         for id in ["r1", "r2"] {
             store
@@ -5897,6 +5939,7 @@ mod tests {
                 ready: None,
                 url: None,
                 url_error: None,
+                workspace: None,
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }
@@ -5958,6 +6001,7 @@ mod tests {
                 ready: None,
                 url: None,
                 url_error: None,
+                workspace: None,
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }

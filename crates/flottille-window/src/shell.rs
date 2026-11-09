@@ -25,7 +25,7 @@ use gpui_kit::{
 };
 use lyon_tessellation::{LineCap, LineJoin};
 
-use crate::actions::{Actions, Command, Details, Outcome, Pick};
+use crate::actions::{Actions, Command, Details, Outcome, Pick, RunFrom};
 use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::history::{History, Way};
@@ -36,6 +36,7 @@ use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine};
 use crate::project_settings::ProjectSettingsPage;
 use crate::providers::Providers;
+use crate::rename::RenameSession;
 use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;
@@ -195,6 +196,8 @@ pub struct Shell {
     project_settings: Option<Entity<ProjectSettingsPage>>,
     /// The form that adds a project, one for the window's life.
     add_project: Entity<AddProject>,
+    /// The dialog that renames a session.
+    rename: Entity<RenameSession>,
     /// The quick switcher (Ctrl K): sessions, projects and actions found by what is typed.
     switcher: Entity<Switcher>,
     /// The link's updates, until a task takes them.
@@ -295,6 +298,10 @@ impl Shell {
             let this = this.clone();
             cx.new(|cx| AddProject::new(this, window, cx))
         };
+        let rename = {
+            let this = this.clone();
+            cx.new(|cx| RenameSession::new(this, window, cx))
+        };
         let focus = cx.focus_handle();
         let switcher = {
             let (this, focus) = (this.clone(), focus.clone());
@@ -356,6 +363,7 @@ impl Shell {
             texts_due: true,
             project_settings: None,
             add_project,
+            rename,
             switcher,
             updates: Some(updates),
             _link: Task::ready(()),
@@ -459,6 +467,20 @@ impl Shell {
         self.left.update(cx, |drawer, cx| drawer.close(cx));
         self.add_project
             .update(cx, |form, cx| form.open(window, cx));
+    }
+
+    /// The dialog that renames a session.
+    pub fn rename_form(&self) -> &Entity<RenameSession> {
+        &self.rename
+    }
+
+    /// "Rename…" in a session's row or header: the dialog, its field holding the title it has.
+    pub fn rename_of(&mut self, session: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(title) = self.snapshot.session(session).map(|s| s.title.clone()) else {
+            return;
+        };
+        self.rename
+            .update(cx, |form, cx| form.open(session, &title, window, cx));
     }
 
     /// The quick switcher.
@@ -599,6 +621,9 @@ impl Shell {
             shell.history.show_agent(&session, agent);
         }));
         self.session_page = Some(page.clone());
+        // The rail's Run a task lists the project's tasks.
+        let project = page.read(cx).project().to_owned();
+        self.actions.send(Command::Tasks { project });
         Some(page)
     }
 
@@ -979,10 +1004,18 @@ impl Shell {
                     page.update(cx, |page, cx| page.resumed(refused, cx));
                 }
             }
+            Outcome::Renamed { refused } => flottille_ui::toast(
+                match refused {
+                    None => flottille_ui::Toast::success("Session renamed"),
+                    Some(why) => flottille_ui::Toast::failure("Session not renamed").detail(why),
+                },
+                cx,
+            ),
             Outcome::Detached { from, refused } => flottille_ui::toast(
                 match refused {
-                    None => flottille_ui::Toast::success(format!("Detached from {from}")),
-                    Some(why) => flottille_ui::Toast::failure(format!("Not detached from {from}"))
+                    None => flottille_ui::Toast::success("Detached from ").quoting(&from),
+                    Some(why) => flottille_ui::Toast::failure("Not detached from ")
+                        .quoting(&from)
                         .detail(why),
                 },
                 cx,
@@ -1460,6 +1493,15 @@ impl Shell {
                     let section = page.read(cx).tasks().clone();
                     section.update(cx, |section, cx| section.listed(listed.clone(), cx));
                 }
+                // The rail of a session of the project offers them to run.
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).project() == project
+                    && let Ok(tasks) = &listed
+                {
+                    let names = tasks.iter().map(|task| task.name.clone()).collect();
+                    let list = page.read(cx).commands(cx);
+                    list.update(cx, |list, cx| list.set_tasks(names, cx));
+                }
                 if let Some(tasks) = self.project_tasks_of(&project, cx) {
                     tasks.update(cx, |tasks, cx| tasks.listed(listed, cx));
                 }
@@ -1496,13 +1538,19 @@ impl Shell {
             Outcome::TaskRun {
                 project,
                 name,
+                from,
                 refused,
-            } => {
-                if let Some(tasks) = self.project_tasks_of(&project, cx) {
-                    let _ = name;
-                    tasks.update(cx, |tasks, cx| tasks.started(refused, cx));
+            } => match from {
+                RunFrom::Page => {
+                    if let Some(tasks) = self.project_tasks_of(&project, cx) {
+                        tasks.update(cx, |tasks, cx| tasks.started(refused, cx));
+                    }
                 }
-            }
+                RunFrom::Settings => crate::tasks::ran(&name, None, refused, cx),
+                RunFrom::Session { workspace } => {
+                    crate::tasks::ran(&name, Some(workspace.as_deref()), refused, cx);
+                }
+            },
             Outcome::ProjectRuns {
                 project,
                 listed,
@@ -2696,6 +2744,7 @@ impl Render for Shell {
                 d.child(self.notice_card(false, compaction_notice, text, cx))
             })
             .child(self.add_project.clone())
+            .child(self.rename.clone())
             .child(self.switcher.clone())
             .when(bell_drawn, |d| {
                 let scrim = div()

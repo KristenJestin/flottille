@@ -37,6 +37,9 @@ pub struct Run {
     pub url: Option<String>,
     /// Why it has no address, when its task's command for it failed.
     pub url_error: Option<String>,
+    /// The workspace a task the user ran runs in (from a session's rail); `None` in the project
+    /// folder, and for an agent's run, whose agent says where it is.
+    pub workspace: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -367,7 +367,16 @@ impl RenderOnce for MenuItem {
                         .text_color(p.faint),
                 )
             })
-            .child(div().flex_1().min_w_0().child(self.label))
+            // An entry is one line: a label that quotes a session's title is cut, never wrapped.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(self.label),
+            )
             .when_some(self.note, |d, note| {
                 d.child(div().flex_none().mono(11.).text_color(p.faint).child(note))
             })

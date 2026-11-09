@@ -970,3 +970,45 @@ fn a_line_whose_text_changes_fades_back_in_over_hover_and_then_stops_asking_for_
     assert_eq!(pending_frames(cx), 0);
     assert!(cx.update(|window, _| window.find("said-text").visible()));
 }
+
+// ── A tree row whose title changes ─────────────────────────────────────────────────────────────
+
+struct Titled {
+    title: SharedString,
+}
+
+impl Render for Titled {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(240.)).child(flottille_ui::TreeRow::new(
+            "titled-row",
+            flottille_ui::TreeLevel::Session,
+            self.title.clone(),
+        ))
+    }
+}
+
+#[gpui_kit::test]
+fn a_tree_row_whose_title_changes_fades_to_the_new_one(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    let (view, cx) = cx.add_window_view(|_, _| Titled {
+        title: "write the release notes".into(),
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    advance(cx, HOVER);
+    assert_eq!(pending_frames(cx), 0, "a first title is simply there");
+
+    cx.update(|_, cx| {
+        view.update(cx, |titled, cx| {
+            titled.title = "Release notes".into();
+            cx.notify()
+        })
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(pending_frames(cx) > 0, "the new title fades in");
+    advance(cx, HOVER * 2);
+    assert_eq!(pending_frames(cx), 0);
+    assert_eq!(
+        cx.update(|window, _| window.find("titled-row").label().map(str::to_owned)),
+        Some("Release notes".to_owned())
+    );
+}

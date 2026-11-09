@@ -18,10 +18,14 @@ use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 fn user() -> User {
+    user_launching("Docs")
+}
+
+fn user_launching(title: &str) -> User {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "begin the docs session", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "handed"}}}]},
+            "arguments": {"title": title, "brief": "Write the docs", "kind": "handed"}}}]},
         {"when": "Write the docs", "do": [
             {"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}]}
     ]}));
@@ -245,4 +249,77 @@ fn the_window_shows_the_brief_without_where_a_question_goes(cx: &mut TestAppCont
         started(cx).is_some()
     });
     assert_eq!(started(cx).unwrap(), "Write the docs");
+}
+
+const LONG: &str = "Bring every route of the public API under the new guard, list the ones that \
+                    still miss it and write the docs for each";
+
+/// How tall the first element of `ids` the window draws is, and its id.
+fn height_of(cx: &mut VisualTestContext, ids: &[String]) -> Option<(String, f32)> {
+    cx.update(|window, _| {
+        ids.iter().find_map(|id| {
+            window
+                .try_find(id.clone())
+                .map(|found| (id.clone(), f32::from(found.bounds().size.height)))
+        })
+    })
+}
+
+#[gpui_kit::test]
+fn a_session_title_quoted_in_the_conversation_never_wraps_in_a_narrow_window(
+    cx: &mut TestAppContext,
+) {
+    let user = user_launching(LONG);
+    let (lead, launched) = lead_and_launched(&user);
+    user.call("agent.rename", json!({"agent": lead, "title": LONG}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the lead's row", |cx| {
+        label(cx, session_id(&lead)).is_some()
+    });
+    let ids =
+        |part: &str| -> Vec<String> { (0..12).map(|at| format!("row-{at}-{part}")).collect() };
+
+    // The lead's conversation says it started a session, quoting its title: one cut line.
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    // A narrow window: its tree is a drawer, and the conversation has what is left.
+    cx.simulate_resize(size(px(300.), px(800.)));
+    let cut = flottille_ui::quoted_title(LONG);
+    assert!(cut.ends_with('…'), "the title is cut: {cut}");
+    // The notice sits among the steps of the turn that launched it, folded: a click opens them.
+    until(&shell, cx, "the steps of the turn", |cx| {
+        (0..30).any(|at| cx.update(|window, _| window.try_find(format!("group-{at}")).is_some()))
+    });
+    for at in 0..30 {
+        let group = format!("group-{at}");
+        if cx.update(|window, _| window.try_find(group.clone()).is_some()) {
+            cx.update(|window, cx| window.click(group, cx));
+        }
+    }
+    until(&shell, cx, "the notice of the started session", |cx| {
+        cx.update(|window, _| window.try_find_by_label(&cut).is_some())
+    });
+    // Let it unfold: a row that comes is measured at rest.
+    for _ in 0..40 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+    }
+    let notice = cx.update(|window, _| f32::from(window.find_by_label(&cut).bounds().size.height));
+    assert!(
+        notice < 24.,
+        "the notice is {notice}px: one line of 12px text"
+    );
+
+    // The started session's first message says who started it, quoting the lead's title.
+    cx.simulate_resize(size(px(1280.), px(800.)));
+    until(&shell, cx, "the launched session's row", |cx| {
+        label(cx, session_id(&launched)).is_some()
+    });
+    cx.update(|window, cx| window.click(session_id(&launched), cx));
+    cx.simulate_resize(size(px(300.), px(800.)));
+    until(&shell, cx, "the line that says who started it", |cx| {
+        height_of(cx, &ids("message-from")).is_some()
+    });
+    let (id, by) = height_of(cx, &ids("message-from")).unwrap();
+    assert!(by < 24., "{id} is {by}px: one line of 11.5px text");
 }

@@ -10723,6 +10723,115 @@ fn a_task_is_added_edited_and_removed_from_the_tasks_section(cx: &mut TestAppCon
     assert!(!file().contains("tasks"), "{}", file());
 }
 
+/// Opens the "Copy to…" dialog of the task `test` of the tasks section.
+fn copy_dialog_of_test(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    until(shell, cx, "the task is listed", |cx| {
+        !tasks_listed(shell, cx).is_empty()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("task-more-test", cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.find("copy-task-test").visible()));
+    cx.update(|window, cx| window.click("copy-task-test", cx));
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn a_task_s_menu_copies_it_to_another_project_and_a_toast_names_it(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "beacon");
+    project(&user, "cedar");
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "test", "line": "cargo test", "check": true}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+    let section = tasks_section(&shell, cx);
+
+    copy_dialog_of_test(&shell, cx);
+    assert!(section.read_with(cx, |s, _| s.is_copying()));
+    cx.update(|window, _| {
+        // The other projects, not the one the task is in.
+        assert!(window.find("copy-task-to-beacon").visible());
+        assert!(window.find("copy-task-to-cedar").visible());
+        assert!(
+            window
+                .try_find("copy-task-to-atlas")
+                .is_none_or(|row| !row.visible())
+        );
+        assert!(
+            window
+                .try_find("task-copy-none-line")
+                .is_none_or(|line| !line.visible())
+        );
+    });
+
+    cx.update(|window, cx| window.click("copy-task-to-beacon", cx));
+    toast_said(&shell, "Task test copied to beacon", cx);
+    settle(cx);
+    assert!(!section.read_with(cx, |s, _| s.is_copying()));
+    let file = |name: &str| std::fs::read_to_string(user.project_file(name)).unwrap();
+    assert!(
+        file("beacon").contains("[tasks.test]"),
+        "{}",
+        file("beacon")
+    );
+    assert!(file("beacon").contains("line = \"cargo test\""));
+    assert!(file("beacon").contains("check = true"));
+    assert!(!file("cedar").contains("tasks"), "{}", file("cedar"));
+}
+
+#[gpui_kit::test]
+fn the_copy_dialog_says_once_that_there_is_no_other_project(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "test", "line": "cargo test"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+
+    copy_dialog_of_test(&shell, cx);
+    cx.update(|window, _| {
+        assert!(window.find("task-copy-none-line").visible());
+        assert!(
+            window
+                .try_find("task-copy-list")
+                .is_none_or(|list| !list.visible())
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_name_the_other_project_has_is_refused_in_a_toast(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "beacon");
+    for (name, line) in [("atlas", "cargo test"), ("beacon", "make test")] {
+        user.call(
+            "task.add",
+            json!({"project": name, "name": "test", "line": line}),
+        )
+        .unwrap();
+    }
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+    let before = std::fs::read_to_string(user.project_file("beacon")).unwrap();
+
+    copy_dialog_of_test(&shell, cx);
+    cx.update(|window, cx| window.click("copy-task-to-beacon", cx));
+    toast_said(&shell, "Task test was not copied to beacon", cx);
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("beacon")).unwrap(),
+        before
+    );
+}
+
 #[gpui_kit::test]
 fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
     use flottille_window::tasks::{AddressKind, ReadyKind};
@@ -10966,6 +11075,51 @@ fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut
     // The same drawer as the session's: the user started it, in the project folder.
     assert_eq!(text_of("run-fact-by", cx).as_deref(), Some("you"));
     assert_eq!(text_of("run-fact-where", cx).as_deref(), Some("main"));
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[gpui_kit::test]
+fn run_in_a_task_s_menu_in_the_settings_starts_it_in_the_project_folder(cx: &mut TestAppContext) {
+    let user = user().with_fake_escalation();
+    let folder = project(&user, "atlas");
+    let say = folder.join("say.sh");
+    std::fs::write(&say, "#!/bin/sh\necho first\necho second\n").unwrap();
+    std::fs::set_permissions(&say, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "say", "line": "./say.sh"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+    until(&shell, cx, "the task is listed", |cx| {
+        !tasks_listed(&shell, cx).is_empty()
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("task-more-say", cx));
+    settle(cx);
+    // Run comes first, beside Edit, and Remove… stays last.
+    cx.update(|window, cx| window.click("menu-run-task-say", cx));
+    toast_said(&shell, "say started", cx);
+    let runs = || {
+        user.call(
+            "run.list",
+            json!({"project": "atlas", "user": true, "ended": true}),
+        )
+        .unwrap()["commands"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    until(&shell, cx, "the user's run is listed", |_| {
+        runs()
+            .iter()
+            .any(|r| r["name"] == "say" && r["state"] != "running")
+    });
+    let run = runs().into_iter().find(|r| r["name"] == "say").unwrap();
+    assert_eq!(run["agent"], serde_json::Value::Null, "{run}");
+    assert_eq!(run["folder"], folder.to_str().unwrap(), "{run}");
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }
 

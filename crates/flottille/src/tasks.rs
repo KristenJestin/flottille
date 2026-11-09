@@ -28,6 +28,23 @@ struct Named {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ToRun {
+    project: String,
+    name: String,
+    /// The workspace of the session whose rail ran it; the project folder without.
+    workspace: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Copy {
+    project: String,
+    name: String,
+    to: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Add {
     project: String,
     name: String,
@@ -169,6 +186,35 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
             })?;
             Ok(to_json(&name, find(&project, &name)?))
         }
+        "task.copy" => {
+            let asked: Copy = serde_json::from_value(params)?;
+            if asked.to == asked.project {
+                return Err(Failure::refused(format!(
+                    "project {} is where the task {} already is: copy it to another project",
+                    asked.project, asked.name
+                )));
+            }
+            // Read before the target's file is rewritten: both take the projects' lock.
+            let source = projects::load_project(daemon, &asked.project)?;
+            let mut task = find(&source, &asked.name)?.clone();
+            let name = asked.name.clone();
+            let project = projects::rewrite(daemon, &asked.to, |project, document| {
+                if project.tasks.contains_key(&name) {
+                    return Err(Failure::refused(format!(
+                        "project {} already has a task named {name}: edit it, or remove it first",
+                        project.name
+                    )));
+                }
+                // Where it runs follows the repository's name; without one of that name here, the
+                // task runs in the place's folder.
+                task.repository
+                    .take_if(|path| !project.repositories.iter().any(|r| r.path == *path));
+                write(document, &project.name, &name, &task)
+            })?;
+            let mut copied = to_json(&name, find(&project, &name)?);
+            copied["project"] = project.name.clone().into();
+            Ok(copied)
+        }
         "task.edit" => {
             let asked: Edit = serde_json::from_value(params)?;
             let name = asked.name.clone();
@@ -213,12 +259,13 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
     }
 }
 
-/// `task.run`: the user runs a task in the project folder; answered with its run at once.
+/// `task.run`: the user runs a task in the project folder, or in a workspace; answered with its
+/// run at once.
 pub async fn run(daemon: &Arc<Daemon>, params: Value) -> Answer {
-    let asked: Named = serde_json::from_value(params)?;
+    let asked: ToRun = serde_json::from_value(params)?;
     let project = projects::load_project(daemon, &asked.project)?;
     find(&project, &asked.name)?;
-    let run = crate::runs::run_for_user(daemon, &project, &asked.name)
+    let run = crate::runs::run_for_user(daemon, &project, &asked.name, asked.workspace.as_deref())
         .await
         .map_err(Failure::refused)?;
     Ok(json!({"project": project.name, "name": asked.name, "run": run}))

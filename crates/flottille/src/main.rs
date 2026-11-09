@@ -70,6 +70,7 @@ mod subscriptions;
 mod sweep;
 mod tasks;
 mod tickets;
+mod titles;
 mod tree;
 mod update;
 mod vault;

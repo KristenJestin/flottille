@@ -475,9 +475,14 @@ pub fn title_of(brief: &str) -> String {
         .to_owned()
 }
 
-/// The title of the session of root `id`, from its first message; the neutral `agent <id>` while
-/// none says what the work is.
-fn session_title(id: &str, brief: Option<&String>) -> String {
+/// The title of the session of `root`: the one its agent or the user gave it, else the first line
+/// of its first message; the neutral `agent <id>` while none says what the work is.
+fn session_title(root: &Value, id: &str, brief: Option<&String>) -> String {
+    if !root["titled_by"].is_null()
+        && let Some(title) = root["title"].as_str().filter(|title| !title.is_empty())
+    {
+        return title.to_owned();
+    }
     brief
         .map(|brief| title_of(brief))
         .filter(|title| !title.is_empty())
@@ -731,7 +736,7 @@ impl Snapshot {
                     },
                 };
                 Session {
-                    title: session_title(&id, answers.briefs.get(&id)),
+                    title: session_title(agent, &id, answers.briefs.get(&id)),
                     project: text(agent, "project"),
                     place: agent["workspace"].as_str().map(str::to_owned),
                     mark,
@@ -1146,6 +1151,29 @@ mod tests {
             subscriptions: &json!({"subscriptions": []}),
         });
         assert_eq!(snapshot.sessions[0].title, "agent r2");
+    }
+
+    #[test]
+    fn until_titled_a_session_keeps_the_first_line_of_its_message() {
+        let mut titled = agent("r1", None, "idle", None);
+        let untitled = build(
+            json!({"agents": [titled.clone()]}),
+            json!({"requests": []}),
+            &[],
+        );
+        assert_eq!(untitled.sessions[0].title, "Fix the login");
+        titled["title"] = json!("Rework the login");
+        titled["titled_by"] = json!("agent");
+        let snapshot = build(
+            json!({"agents": [titled.clone()]}),
+            json!({"requests": []}),
+            &[],
+        );
+        assert_eq!(snapshot.sessions[0].title, "Rework the login");
+        titled["title"] = json!("Login, again");
+        titled["titled_by"] = json!("user");
+        let snapshot = build(json!({"agents": [titled]}), json!({"requests": []}), &[]);
+        assert_eq!(snapshot.sessions[0].title, "Login, again");
     }
 
     #[test]

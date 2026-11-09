@@ -796,6 +796,18 @@ closed by it.
 | `pilot` | With `to` `pilot`: the pilot's id; `null` otherwise. |
 | `moved_from` | Present on a question to the pilot moved to the user: the pilot's id. |
 
+#### `agent.titled`
+
+A session was named (`docs/tools.md`, "The session's title"): by its agent (`session_title`), or by
+the user (`agent.rename`), whose title then stays. The window's sidebar, header, quick switcher and
+notifications follow it.
+
+| Field | |
+|---|---|
+| `agent` | The session's root. |
+| `title` | Masked. |
+| `by` | `agent` or `user`. |
+
 #### `agent.detached`
 
 The user detached a session from the agent that started it (`agent.detach`): `launched_by` is
