@@ -2574,7 +2574,10 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
             None => daemon
                 .read(|store| store.deliveries(&agent.id, "queued"))?
                 .into_iter()
-                .filter(|delivery| delivery.kind == "user")
+                // The answer of a question's card waits on the card, which says so.
+                .filter(|delivery| {
+                    delivery.kind == "user" && question::answered_ask(&delivery.id).is_none()
+                })
                 .map(|delivery| {
                     // What the user typed is shown; what the agent will receive unfolds.
                     let mut queued = json!({"delivery": delivery.id,

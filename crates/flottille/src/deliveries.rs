@@ -272,10 +272,26 @@ fn store(
     urgency: &str,
     images: Vec<String>,
 ) -> Option<String> {
+    let delivery = delivery_of(agent, kind, id, message, urgency, images);
+    if let Err(error) = daemon.write(|store| Ok(((), store.deliver(&delivery)?))) {
+        eprintln!("flottille daemon: agent {agent}: a delivery cannot be stored: {error}");
+        return None;
+    }
+    Some(delivery.id)
+}
+
+fn delivery_of(
+    agent: &str,
+    kind: &str,
+    id: Option<String>,
+    message: &Message,
+    urgency: &str,
+    images: Vec<String>,
+) -> Delivery {
     let id = id.unwrap_or_else(|| format!("{kind}-{}", new_id().unwrap_or_default()));
     let env = std::env::vars_os().collect();
-    let delivery = Delivery {
-        id: id.clone(),
+    Delivery {
+        id,
         agent: agent.to_owned(),
         kind: kind.to_owned(),
         body: secrets::mask(&message.text, &env),
@@ -289,12 +305,55 @@ fn store(
         created_at: 0,
         sent_at: None,
         images,
-    };
-    if let Err(error) = daemon.write(|store| Ok(((), store.deliver(&delivery)?))) {
-        eprintln!("flottille daemon: agent {agent}: a delivery cannot be stored: {error}");
-        return None;
     }
-    Some(id)
+}
+
+/// Stores the user's answer to the ask of `seq` (`agent.answer`) and wakes the agent: refused when
+/// an answer to that ask waits or was taken already. The check and the write are one write, so
+/// two answers at once cannot both pass; an answer withdrawn does not count.
+pub fn deliver_answer(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    seq: u64,
+    message: &Message,
+) -> Result<String, Failure> {
+    let id = crate::tree::answer_id(seq);
+    let prefix = format!("answer-{seq}-");
+    let delivery = delivery_of(
+        agent,
+        "user",
+        Some(id.clone()),
+        message,
+        approval::BETWEEN_TURNS,
+        Vec::new(),
+    );
+    // `None`: an answer to that ask is there already.
+    let stored = daemon
+        .write(|store| {
+            if store.user_message_taken_or_waiting(agent, &prefix)? {
+                return Ok((None, None));
+            }
+            let event = store.deliver(&delivery)?;
+            Ok((Some(event.is_some()), event))
+        })
+        .map_err(|error| {
+            eprintln!("flottille daemon: agent {agent}: a delivery cannot be stored: {error}");
+            Failure::new("unavailable", "the answer could not be stored")
+        })?;
+    match stored {
+        None => Err(Failure::new(
+            "refused",
+            format!("question {seq} is answered already"),
+        )),
+        Some(false) => Err(Failure::new(
+            "unavailable",
+            "the answer could not be stored",
+        )),
+        Some(true) => {
+            ring(daemon, agent);
+            Ok(id)
+        }
+    }
 }
 
 /// Wakes the agent for what is queued: mid-turn, an urgent delivery is pinned as a note and a

@@ -55,10 +55,14 @@ fn launched(user: &User, mcp: &Mcp, kind: &str, brief: &str) -> String {
 /// What the agent does while it holds: asks `questions`, then reads a folder, then waits for the
 /// test, as an agent that asked and went on with a long command.
 fn asks_then_works(questions: &[&str]) -> Value {
-    let mut steps: Vec<Value> = questions
+    let steps: Vec<Value> = questions
         .iter()
         .map(|q| json!({"mcp": {"tool": "ask_user", "arguments": {"question": q}}}))
         .collect();
+    asks_then_works_steps(steps)
+}
+
+fn asks_then_works_steps(mut steps: Vec<Value>) -> Value {
     steps.push(json!({"mcp": {"tool": "fs_list", "arguments": {"path": "."}}}));
     steps.push(json!({"hold": "release"}));
     steps.push(json!({"say": "Done for now."}));
@@ -146,8 +150,13 @@ fn asking(user: &User, mode: &str, questions: &[&str]) -> (String, Mcp) {
 
 /// The same, with the lead's id.
 fn asking_for(user: &User, kind: &str, mode: &str, questions: &[&str]) -> (String, (String, Mcp)) {
+    asking_with(user, kind, mode, asks_then_works(questions))
+}
+
+/// The same, the agent playing `script`.
+fn asking_with(user: &User, kind: &str, mode: &str, script: Value) -> (String, (String, Mcp)) {
     project(user);
-    user.fake_script(asks_then_works(questions));
+    user.fake_script(script);
     let (lead, mcp) = lead(user);
     let session = launched(user, &mcp, kind, "Draw the charts.");
     // Each tree keeps its own mode: the user puts the session's in `mode`.
@@ -769,4 +778,111 @@ fn flottille_agent_answer_answers_each_question_of_an_ask() {
             .any(|p| p.contains("> Who reviews it?\n\nAlice, Carol"))
     });
     eventually("no longer open", || open_seqs(&user, &id).is_empty());
+}
+
+/// The root's turn that asks `ask`, then holds, so that an answer waits under the conversation.
+fn asks_and_holds(ask: Value) -> Value {
+    json!({"turns": [
+        {"when": "go", "do": [ask, {"hold": "release"}, {"say": "Asked."}]},
+        {"when": "Blue", "do": [{"say": "Blue it is."}]}
+    ]})
+}
+
+fn waiting_under(user: &User, id: &str) -> Vec<Value> {
+    root_of_tree(user, id)["queued"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_waiting_card_answer_is_not_listed_as_a_user_message() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        asks_and_holds(json!({"mcp": {"tool": "ask", "arguments": {"question": "Colour?"}}})),
+    );
+    send(&user, &id, "go");
+    eventually("the ask", || open_seqs(&user, &id).len() == 1);
+    let seq = open_seqs(&user, &id)[0];
+    let answered = user
+        .call(
+            "agent.answer",
+            json!({"agent": id, "question": seq, "answers": [{"text": "Blue"}]}),
+        )
+        .unwrap();
+    let waiting = answered["delivery"].as_str().unwrap().to_owned();
+
+    // The answer waits for the turn's end, and the card says so: it is not a message of the
+    // user to cancel, edit or send now.
+    let stored = Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .deliveries(&id, "queued")
+        .unwrap();
+    assert!(stored.iter().any(|d| d.id == waiting), "it waits");
+    let listed = waiting_under(&user, &id);
+    assert!(
+        listed
+            .iter()
+            .all(|queued| queued["delivery"] != waiting.as_str()),
+        "{listed:?}"
+    );
+    release(&user);
+}
+
+#[test]
+fn a_withdrawn_answer_lets_the_question_be_answered_again() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        asks_and_holds(json!({"mcp": {"tool": "ask", "arguments": {"question": "Colour?"}}})),
+    );
+    send(&user, &id, "go");
+    eventually("the ask", || open_seqs(&user, &id).len() == 1);
+    let seq = open_seqs(&user, &id)[0];
+    let first = user
+        .call(
+            "agent.answer",
+            json!({"agent": id, "question": seq, "answers": [{"text": "Red"}]}),
+        )
+        .unwrap();
+    user.call(
+        "agent.unqueue",
+        json!({"agent": id, "delivery": first["delivery"]}),
+    )
+    .unwrap();
+
+    user.call(
+        "agent.answer",
+        json!({"agent": id, "question": seq, "answers": [{"text": "Blue"}]}),
+    )
+    .expect("the question is still open to an answer");
+    release(&user);
+    eventually("the agent took the second", || {
+        prompts(&user).iter().any(|p| p.contains("Blue"))
+    });
+    assert!(prompts(&user).iter().all(|p| !p.contains("Red")));
+    eventually("no longer open", || open_seqs(&user, &id).is_empty());
+}
+
+#[test]
+fn a_second_answer_to_an_ask_whose_answer_waits_is_refused() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        asks_and_holds(json!({"mcp": {"tool": "ask", "arguments": {"question": "Colour?"}}})),
+    );
+    send(&user, &id, "go");
+    eventually("the ask", || open_seqs(&user, &id).len() == 1);
+    let seq = open_seqs(&user, &id)[0];
+    let answer = |text: &str| {
+        user.call(
+            "agent.answer",
+            json!({"agent": id, "question": seq, "answers": [{"text": text}]}),
+        )
+    };
+    answer("Blue").unwrap();
+    let refused = answer("Red").unwrap_err();
+    assert!(refused.1.contains("answered already"), "{refused:?}");
+    release(&user);
 }

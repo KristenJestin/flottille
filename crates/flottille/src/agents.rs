@@ -125,32 +125,18 @@ fn answer(daemon: &Arc<Daemon>, asked: AgentAnswer) -> Answer {
         .iter()
         .find(|q| q["seq"] == asked.question)
         .ok_or(waits)?;
-    let sent = daemon
-        .read(|store| store.last_deliveries_of(&agent.id, "user", 64))?
-        .into_iter()
-        .any(|d| d.id.starts_with(&format!("answer-{}-", asked.question)));
-    if sent {
-        return Err(Failure::new(
-            "refused",
-            format!("question {} is answered already", asked.question),
-        ));
-    }
     let questions = flottille_core::question::of(entry);
     if let Some(why) = flottille_core::question::answers_refusal(&questions, &asked.answers) {
         return Err(Failure::new("refused", why));
     }
     let message = flottille_core::question::message(&questions, &asked.answers);
     let after = daemon.read(Store::last_seq)?;
-    let delivery = deliveries::deliver_message(
+    let delivery = deliveries::deliver_answer(
         daemon,
         &agent.id,
-        "user",
-        Some(tree::answer_id(asked.question)),
+        asked.question,
         &crate::commands::Message::plain(&message),
-        approval::BETWEEN_TURNS,
-        Vec::new(),
-    )
-    .ok_or_else(|| Failure::new("unavailable", "the answer could not be stored"))?;
+    )?;
     crate::subscriptions::user_wrote(daemon, &agent.id);
     let env = std::env::vars_os().collect();
     let answers: Vec<_> = asked
