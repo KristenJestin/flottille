@@ -1135,8 +1135,10 @@ there. An agent in a result:
 
 `workspace` is `null` for the project folder itself. `state` is `starting` (its process starts
 and its session opens), `working` (a turn runs), `idle` (between turns, its process running or
-released), or one of the final states: `ended`, `failed` (`state_reason` says why). A final state
-is never left, but for an ended root the user resumes (`agent.resume`).
+released; its `state_reason` says why its last turn failed when that left its session usable,
+`docs/agents.md`, "A failed turn"), or one of the final states: `ended`, `failed` (`state_reason`
+says why). A final state is never left, but for an ended or failed root the user resumes
+(`agent.resume`).
 `provider` is the provider it runs on, for life (`docs/agents.md`, "Providers"). `chosen` is what
 was asked, or the project's default model, `null` for the agent's default; `taken` what the agent reported
 at the last start of its process; `reopens` whether its agent offered to resume or load a session
@@ -1269,14 +1271,14 @@ names its root).
 
 #### `agent.resume`
 
-`{"agent"}`. Starts an ended root again on its own session: `{"agent"}`, the root once idle again
+`{"agent"}`. Starts an ended or failed root again on its own session: `{"agent"}`, the root once idle again
 (`agent.resumed`, `docs/events.md`). It keeps its id, its epoch, its conversation and its session;
 nothing is sent to it, and the next message (`agent.send`) starts its process, which resumes or
 loads the session as after an idle release (`docs/agents.md`, "How an agent runs"). Its children
 stay ended. Its next prompt starts with a
-`resume` delivery saying the user stopped it and naming its requests cancelled then. `refused`
-for a child (the sentence names its root), an agent that has not ended, a failed one (its session
-went with it), one whose agent can neither resume nor load a session, that never opened one or
+`resume` delivery saying the user stopped it, or that it failed and why, and naming its requests
+cancelled then. `refused` for a child (the sentence names its root), an agent that has not ended,
+one whose agent can neither resume nor load a session, that never opened one or
 whose session was forgotten (7 days after it ended), one whose workspace or project is gone: what
 `resumable` says, in short (`agent.tree`); and one whose last process is still stopping
 (`stopping`), with a sentence to try again in a moment.

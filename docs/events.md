@@ -657,7 +657,7 @@ it was performed for an allowed request.
 | Field | |
 |---|---|
 | `agent` | |
-| `stop_reason` | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`, or `interrupted` when its process died during the turn. |
+| `stop_reason` | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`, `interrupted` when its process died during the turn, or `failed` when the agent failed the prompt for a reason that leaves its session usable (`docs/agents.md`, "A failed turn"). |
 | `usage` | The turn's token counts when the agent gave them, else `null`. |
 
 #### `agent.released`
@@ -667,7 +667,7 @@ Its process was let go; the next message starts it again.
 | Field | |
 |---|---|
 | `agent` | |
-| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone), `reload` (the user reloaded its tools, `agent.reload_tools`) or `stopped` (an ended root whose session is kept: it can be resumed now, `agent.resume`). |
+| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone), `reload` (the user reloaded its tools, `agent.reload_tools`), `failed` (its turn failed for a reason that leaves its session usable: its `state_reason` says it until the next prompt, `docs/agents.md`, "A failed turn") or `stopped` (an ended or failed root whose session is kept: it can be resumed now, `agent.resume`). |
 
 #### `agent.died`
 

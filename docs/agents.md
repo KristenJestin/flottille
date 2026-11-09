@@ -239,6 +239,16 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`), or `interrupted` when the process
   died during it. Prompts sent while a turn runs wait their turn.
 - **A cancel** sends `session/cancel` while a turn runs; the turn then ends `cancelled`.
+- **A failed turn**: a prompt the agent answers with an error fails the agent, unless the
+  provider's words say its session is still usable (`crates/flottille/src/turn_failures.rs`, one
+  list per provider: Claude's login expired or refused, its service unreachable, overloaded or
+  failing; Codex signed out). Then the turn ends `failed`, the session stays, its process is let
+  go as after an idle release (`agent.released`, reason `failed`), and the agent is idle with a
+  `state_reason` that says what to do (`Claude's login expired: sign in again (run claude and
+  /login), then send your message again`), which the session's state line says. The next prompt
+  starts a process that resumes or loads the session, and the reason goes. A child's parent is
+  told (`child-idle`). What makes the session unusable still fails it: the process cannot start,
+  its session cannot be opened, the connection breaks.
 - **The agent's own permission prompts** (`session/request_permission`) are answered at once:
   a tool of the agent's own list, named by the provider's own field (Claude:
   `_meta.claudeCode.toolName`), is allowed once; anything else is rejected, a request with no tool
@@ -825,20 +835,22 @@ ends; a handed one is the user's.
   pending requests it made or held are cancelled (`approval.cancelled`: the user never sees them),
   its process and its runs are stopped. Workspaces stay. Nothing is delivered to an agent that
   ended. What Flottille keeps of its session goes (the bridge's history, Codex's
-  thread), but for a root that ended (not failed) whose agent resumes or loads sessions: that one
+  thread), but for a root that ended or failed whose agent resumes or loads sessions: that one
   is kept, so that the user can resume the root on it. It holds the whole conversation, what the
   agent's tools printed included (masked as the daemon masks what it keeps), and it is kept 7
   days after the root ended: then the sweep forgets it, and the root can be resumed no more.
   Once its process is gone, the root's `agent.released` (reason `stopped`) says it can be resumed.
-- **Resuming** an ended root (`agent.resume`, `docs/protocol.md`) makes it idle again, with its
+- **Resuming** an ended or failed root (`agent.resume`, `docs/protocol.md`) makes it idle again, with its
   id, its epoch (it is the same session, and its last process's token was revoked when it
   stopped), its conversation and its session; the next message starts its process, which resumes
   or loads the session as after an idle release. That message comes after a `resume` delivery,
-  queued without waking it: the user stopped it, and the requests of its own that were cancelled
+  queued without waking it: the user stopped it (or it failed, and why), and the requests of its own that were cancelled
   then, never executed. Its children stay ended: a resumed root is an ordinary session, in the mode it had, and so are the children it launches. It is refused while its
   last process is still stopping, and when its workspace or its project is gone (one made again
-  under the same name is another). A failed root is not resumed: its session could not go on, and
-  went.
+  under the same name is another). A failed root is resumed too: a failure rarely takes the
+  agent's own session with it (a login that expired before the failed turns of `turn_failures`
+  existed), and one that did fails again at its next start. A root that failed before its session
+  opened has none to resume.
 - **A report** (`report`, at most 10,000 characters) of a child goes to its parent at once, and
   the child ends when its turn does, or 2 minutes later if its turn goes on. A root's report is
   kept and the root stays.
