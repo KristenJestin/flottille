@@ -1508,8 +1508,14 @@ impl SessionPage {
                 .update(cx, |list, cx| list.set_compacting(compacting, cx));
             self.sync_pending(cx);
             self.fetch_pictures(cx);
+            // Between turns, why its last turn failed and its session stayed (`agent.released`,
+            // reason `failed`): said once, in the state line.
+            let stayed = (root.state == "idle")
+                .then(|| root.state_reason.clone())
+                .flatten();
             self.reply.update(cx, |reply, cx| {
                 reply.set_images(images);
+                reply.set_stayed(stayed, cx);
                 reply.set_running(running, cx)
             });
         }
@@ -8158,6 +8164,8 @@ pub struct Reply {
     options: Entity<SessionOptions>,
     /// What the root does while its turn runs, in the bar under the field.
     status_line: Entity<StatusLine>,
+    /// Why the root's last turn failed while its session stayed, until a turn starts again.
+    stayed: Option<String>,
     pub mode: Entity<ModeSwitch>,
     has_text: bool,
     focused: bool,
@@ -8245,6 +8253,7 @@ impl Reply {
             field,
             options,
             status_line: cx.new(|_| StatusLine::new()),
+            stayed: None,
             mode,
             has_text: false,
             focused: false,
@@ -8304,12 +8313,21 @@ impl Reply {
         self.attached.is_scaling()
     }
 
-    /// The line above the field while a turn runs: what the root does.
+    /// The line above the field: what the root does while a turn runs, else why its last turn
+    /// failed while its session stayed.
     pub fn status(&self) -> Option<String> {
-        self.activity
-            .as_ref()
-            .filter(|_| self.running)
-            .map(Activity::line)
+        match self.running {
+            true => self.activity.as_ref().map(Activity::line),
+            false => self.stayed.clone(),
+        }
+    }
+
+    fn set_stayed(&mut self, stayed: Option<String>, cx: &mut Context<Self>) {
+        if self.stayed != stayed {
+            self.stayed = stayed;
+            self.sync_status(cx);
+            cx.notify();
+        }
     }
 
     fn set_activity(&mut self, activity: Option<Activity>, cx: &mut Context<Self>) {
