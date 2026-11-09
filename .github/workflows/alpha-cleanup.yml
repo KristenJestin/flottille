@@ -1,4 +1,5 @@
-# A deleted feature branch takes its rolling alpha pre-release with it (docs/releases.md).
+# A deleted feature branch takes all its alpha pre-releases, and their tags, with it
+# (docs/releases.md).
 name: alpha-cleanup
 
 on:
@@ -16,10 +17,20 @@ jobs:
     concurrency:
       group: publish-${{ github.event.ref }}
     steps:
-      - env:
+      - name: Delete the alphas of the branch
+        id: forget
+        env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.event.ref }}
         run: |
+          # A listing that fails fails the job, not a deletion that finds nothing.
+          set -o pipefail
           # Each byte but ASCII letters, digits and dashes is a dash (docs/releases.md).
-          tag="alpha-$(printf '%s' "$BRANCH" | LC_ALL=C tr -c 'A-Za-z0-9-' '-')"
-          gh release delete "$tag" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || echo "$BRANCH had no alpha release"
+          slug=$(printf '%s' "$BRANCH" | LC_ALL=C tr -c 'A-Za-z0-9-' '-')
+          # Every `v<version>-alpha.<slug>.<n>`, the slug whole (`feat-a` is not `feat-a-b`), and
+          # the rolling `alpha-<slug>` of the former design. Drafts are listed with the token.
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName --jq '.[].tagName' |
+            { grep -E -x "v[0-9]+\.[0-9]+\.[0-9]+-alpha\.$slug\.[0-9]+|alpha-$slug" || true; } |
+            while read -r tag; do
+              gh release delete "$tag" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY"
+            done

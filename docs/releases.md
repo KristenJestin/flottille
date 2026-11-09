@@ -7,9 +7,11 @@ Every branch that matters publishes its own build, with a version that says wher
 |---|---|---|---|
 | `main` | stable | `0.3.0` | a GitHub release, tagged `v0.3.0` |
 | `dev` | beta | `0.3.0-beta.12` | a pre-release, tagged `v0.3.0-beta.12` |
-| `feat/*`, `fix/*` | alpha | `0.3.0-alpha.feat-46-packages.4` | one rolling pre-release per branch, tagged `alpha-<branch>`, replaced at each push, deleted with the branch |
+| `feat/*`, `fix/*` | alpha | `0.3.0-alpha.feat-46-packages.4` | a pre-release per push, tagged `v0.3.0-alpha.feat-46-packages.4` like a beta, all deleted with the branch |
 
-Nothing is published anywhere but GitHub's releases of the repository.
+Nothing is published anywhere but GitHub's releases of the repository. **Releases are immutable**
+(since 2026-11-04): a published version is never replaced, its tag never moved nor its files
+changed, so each build is its own release, an alpha's too.
 
 ## Releasing
 
@@ -83,13 +85,14 @@ for HEAD by default):
   first beta after a release is `-beta.1`. The record of the 0.1.1 release counts as one beta of
   0.1.2.
 - **An alpha names its branch**: each byte of the name but ASCII letters, digits and dashes is a
-  dash, `feat/46-packages` giving `alpha.feat-46-packages.<n>` and the tag
-  `alpha-feat-46-packages`. CI, its cleanup, `install.sh` and `flottille update` follow that one
-  rule. Two names that give the same one (`feat/a_b` and `feat/a-b`) share an alpha: the last
-  push wins.
+  dash, `feat/46-packages` giving `alpha.feat-46-packages.<n>` (the branch's slug). CI, its
+  cleanup, `install.sh` and `flottille update` follow that one rule. Two names that give the same
+  one (`feat/a_b` and `feat/a-b`) share their alphas, both counting in the one series.
 - **An alpha's number can go down**: it counts the branch's commits, so a force-push with fewer
-  of them gives a lower `N`, and `flottille update` then calls that newest build older and asks
-  for `--force`. The numbering stays as it is: rewriting a branch is the exception.
+  of them gives a lower `N`: a new release, but the highest alpha of the branch (the one
+  `install.sh` and `flottille update` take) stays the former one. A force-push with as many
+  commits gives a version already published, which is not published again. The numbering stays
+  as it is: rewriting a branch is the exception.
 
 `Cargo.toml` keeps its own version; CI gives the computed one to the build
 (`FLOTTILLE_BUILD_VERSION`, `FLOTTILLE_BUILD_CHANNEL`, `FLOTTILLE_BUILD_BRANCH`, read by
@@ -126,17 +129,18 @@ On a push to `dev`, `feat/**` or `fix/**`, and on `main` when the `Release` work
   itself). Then:
   - on `main`, the release `vX.Y.Z` on the commit released, marked latest;
   - on `dev`, the pre-release `vX.Y.Z-beta.N`;
-  - on a feature branch, the pre-release `alpha-<branch>`, replaced in place: its tag moves to the
-    new commit, the new archive and sum are added (the sum first), the old ones removed, and its
-    notes rewritten. The release is never missing. When the new files have the old names (the
-    same version, run again or pushed over), a download in that moment can find a sum that is
-    not its archive's: it then refuses and installs nothing.
+  - on a feature branch, the pre-release `vX.Y.Z-alpha.<branch>.N`, one per push, marked
+    pre-release and never latest.
 
-  Run again, a stable or beta release already published is left as it is. A release left as a
-  draft by a failed upload, of any channel, is deleted and made again.
+  **Nothing is replaced**: the release is made with its files in one `gh release create` (an
+  immutable release takes none afterwards), and a version already published, of any channel, is
+  left as it is (run again, or a branch pushed over to the same number). A release left as a
+  draft by a failed upload is deleted and made again. No alpha is pruned while its branch lives:
+  they pile up, one per push, until the branch is deleted.
 
-`.github/workflows/alpha-cleanup.yml` deletes a branch's alpha, and its tag, when the branch is
-deleted. It shares the branch's `publish` concurrency group, so it waits for one still running,
+`.github/workflows/alpha-cleanup.yml` deletes **every** alpha of a branch, with their tags, when
+the branch is deleted (an immutable release may be deleted), and the rolling `alpha-<branch>`
+release of the former design when one is still there. It shares the branch's `publish` concurrency group, so it waits for one still running,
 which then finds the branch gone, or publishes what the cleanup then deletes.
 
 Other targets (aarch64, macOS) come later.
@@ -155,8 +159,9 @@ one each release's notes name, of its own commit.
 `install.sh` needs `curl`, `tar`, `sha256sum` and GNU `sort`, and no root. Its body is one
 function called on its last line, so a download cut short runs nothing. It reads the channel's
 release from GitHub's API (stable: the latest release; beta: the `-beta.` pre-release published
-last, not the highest version (below); alpha: the branch's
-`alpha-<branch>`, the higher version when it holds two archives while it is replaced), downloads
+last, not the highest version (below); alpha: the **highest version** among the branch's alphas,
+`*-alpha.<slug>.<n>` of the 100 newest releases, the slug whole so that `feat-a` never takes
+`feat-a-b`'s), downloads
 its archive and sum, checks the sum (a wrong one installs nothing),
 and puts `flottille` in `~/.local/bin`, written beside it then renamed over it, with `flot` a link
 to it, and the launcher entry and the icon in the data folder (below). It refuses while Flottille's daemon runs, as `flottille update` does, and says to stop it
@@ -213,7 +218,7 @@ entry and the icons: to remove Flottille by hand, delete `flottille` and `flot` 
 
 `flottille update [--channel stable|beta|alpha] [--branch <name>] [--version <X.Y.Z[-pre]>]
 [--force]` replaces the binary it runs from with the channel's latest build (the most recently
-published, see "Installing"): by default the channel last chosen with `--channel` (and, for alpha,
+published, see "Installing"; an alpha's, the highest version of its branch): by default the channel last chosen with `--channel` (and, for alpha,
 its branch), else the one it was built on (a `local` build takes stable) and the branch it was
 built from; `--branch` goes with `--channel alpha` only. It reads the releases as `install.sh` does, with the user's own `curl`
 spawned without a shell, checks the archive's SHA-256 sum (a wrong one replaces nothing), unpacks
@@ -254,8 +259,8 @@ squash and the fast-forward ones after them included, run the `Release` workflow
 `ci.yml`'s version step against a throwaway repository (a `gh` standing for GitHub's API), build
 the archive from a binary, and run `install.sh` and `flottille update` against a local server in
 a throwaway home. What they cannot run is the workflows themselves on GitHub. A push to a feature branch proves the alpha's: `build` on Ubuntu 22.04,
-`publish` with the job's token, the alpha replaced in place, GitHub's API answering as the
-scripts read it. Deleting the branch proves its cleanup. The first merge into `dev` proves the
+`publish` with the job's token, a second push publishing the next alpha beside the first,
+GitHub's API answering as the scripts read it. Deleting the branch proves its cleanup. The first merge into `dev` proves the
 beta's, and the first `Release` run the move of `main` with the workflow's token, the pull
 request shown merged, `ci.yml` started on `main` by it, the stable tag on the commit released and
 the release marked latest.

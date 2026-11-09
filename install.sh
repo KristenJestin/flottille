@@ -31,36 +31,40 @@ archives() {
   tr ',' '\n' <"$1" | sed -n 's/.*"browser_download_url": *"\([^"]*-x86_64-linux\.tar\.gz\)".*/\1/p'
 }
 
-# The archive of the highest version among the addresses read, whatever order they come in.
-highest() {
-  sed 's|.*/flottille-\([^/]*\)-x86_64-linux\.tar\.gz$|\1 &|' | sort -t ' ' -k 1,1V | tail -n 1 | cut -d ' ' -f 2
-}
-
-# The archive of the release published last in a list of releases of the API, ties going to the
-# higher version. A release's `tag_name` and `published_at` come before its `assets` in GitHub's
-# answer, so each address is read with the date of its own release: reset at each tag, and empty
-# for a draft (`published_at` null), which is not offered. The dates are UTC, all of one shape,
-# so they sort as text.
-latest_published() {
+# The published releases' archives in a list of releases of the API, one line each: when its
+# release was published, the version and the address. A `tag_name` and `published_at` come before
+# a release's `assets` in GitHub's answer, so each address is read with the date of its own
+# release: reset at each tag, and empty for a draft (`published_at` null), which is not offered.
+# The dates are UTC, all of one shape, so they sort as text.
+published() {
   tr ',' '\n' <"$1" | sed -n \
     -e 's/.*"tag_name": *"[^"]*".*/T/p' \
     -e 's/.*"published_at": *"\([^"]*\)".*/P \1/p' \
     -e 's/.*"published_at": *null.*/P/p' \
     -e 's|.*"browser_download_url": *"\([^"]*/flottille-\([^/]*\)-x86_64-linux\.tar\.gz\)".*|U \2 \1|p' |
-    awk '$1 == "T" { at = "" } $1 == "P" { at = $2 } $1 == "U" && at != "" && $3 ~ /\/download\/v[0-9.]*-beta\.[0-9]*\// { print at, $2, $3 }' |
+    awk '$1 == "T" { at = "" } $1 == "P" { at = $2 } $1 == "U" && at != "" { print at, $2, $3 }'
+}
+
+# The archive of the release published last in a list of releases of the API, ties going to the
+# higher version.
+latest_published() {
+  published "$1" | awk '$3 ~ /\/download\/v[0-9.]*-beta\.[0-9]*\// { print }' |
     sort -k 1,1 -k 2,2V | tail -n 1 | cut -d ' ' -f 3
 }
 
-# The tag a version is published under: an alpha's is its branch's (`0.5.0-alpha.feat-x.7` is
-# in `alpha-feat-x`, replaced in place), any other's is `v` and the version.
+# The archive of the highest version among the alphas of the branch whose slug is $2, in a list
+# of releases: `*-alpha.<slug>.<n>`, the slug whole (`feat-a` is not `feat-a-b`), each alpha being
+# a release of its own.
+highest_alpha() {
+  published "$1" | awk -v slug="$2" '{
+      v = $2; sub(/^[0-9]+\.[0-9]+\.[0-9]+-alpha\./, "", v)
+      if (v != $2 && v ~ /\.[0-9]+$/) { sub(/\.[0-9]+$/, "", v); if (v == slug) print }
+    }' | sort -k 2,2V | tail -n 1 | cut -d ' ' -f 3
+}
+
+# The tag a version is published under: `v` and the version, whatever its channel.
 tag_of() {
-  case "$1" in
-    *-alpha.*.*)
-      rest=${1#*-alpha.}
-      printf 'alpha-%s' "${rest%.*}"
-      ;;
-    *) printf 'v%s' "$1" ;;
-  esac
+  printf 'v%s' "$1"
 }
 
 # The versions of the archives in the answer $1, up to five of those nearest the version $2.
@@ -219,10 +223,11 @@ main() {
       alpha)
         [ -n "$branch" ] || fail "the alpha channel needs --branch <name>"
         # Each byte but ASCII letters, digits and dashes is a dash, as CI names the alpha.
-        tag="alpha-$(printf '%s' "$branch" | LC_ALL=C tr -c 'A-Za-z0-9-' '-')"
-        read_api "$api/releases/tags/$tag" "$answer" || fail "there is no alpha release for $branch"
-        # Two while it is replaced: the newer.
-        url=$(archives "$answer" | highest)
+        slug=$(printf '%s' "$branch" | LC_ALL=C tr -c 'A-Za-z0-9-' '-')
+        # A branch whose alphas are all deleted has none, as one that never had any.
+        read_api "$api/releases?per_page=100" "$answer" || : >"$answer"
+        url=$(highest_alpha "$answer" "$slug")
+        [ -n "$url" ] || fail "there is no alpha release for $branch"
         ;;
       *) fail "the channel is stable, beta or alpha" ;;
     esac

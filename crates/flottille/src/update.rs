@@ -187,19 +187,10 @@ fn exact(text: &str) -> Result<Version> {
     }
 }
 
-/// The tag a version is published under: an alpha's is its branch's, replaced in place
-/// (`0.5.0-alpha.feat-x.7` is in `alpha-feat-x`), any other's is `v` and the version.
+/// The tag a version is published under: `v` and the version, whatever its channel (each alpha is
+/// a release of its own, as a beta is).
 fn tag_of(version: &Version) -> String {
-    version
-        .pre
-        .as_str()
-        .strip_prefix("alpha.")
-        .and_then(|rest| rest.rsplit_once('.'))
-        .filter(|(branch, _)| !branch.is_empty())
-        .map_or_else(
-            || format!("v{version}"),
-            |(branch, _)| format!("alpha-{branch}"),
-        )
+    format!("v{version}")
 }
 
 /// The archive of exactly this version; when there is none, the error names the versions
@@ -255,10 +246,23 @@ fn latest_published(releases: &[Value]) -> Option<String> {
         .map(|(_, url)| url)
 }
 
-/// The archive of the highest version among these addresses.
-fn highest(urls: Vec<String>) -> Option<String> {
-    urls.into_iter()
+/// The archive of the highest version among the alphas of the branch whose slug this is, in
+/// these releases: `*-alpha.<slug>.<n>`, the slug whole (`feat-a` is not `feat-a-b`), each alpha
+/// being a release of its own. A draft has no date and is not published: it is not offered.
+fn highest_alpha(releases: &[Value], slug: &str) -> Option<String> {
+    releases
+        .iter()
+        .filter(|release| release["published_at"].as_str().is_some())
+        .flat_map(archives)
         .filter_map(|url| Some((version_of(url.rsplit('/').next()?)?, url)))
+        .filter(|(version, _)| {
+            version
+                .pre
+                .as_str()
+                .strip_prefix("alpha.")
+                .and_then(|rest| rest.rsplit_once('.'))
+                .is_some_and(|(of, n)| of == slug && n.bytes().all(|b| b.is_ascii_digit()))
+        })
         .max_by(|a, b| a.0.cmp(&b.0))
         .map(|(_, url)| url)
 }
@@ -306,7 +310,7 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
                 .or(Some(BRANCH).filter(|b| !b.is_empty()))
                 .ok_or("the alpha channel needs --branch <name>")?;
             // Each byte but ASCII letters, digits and dashes is a dash, as CI names the alpha.
-            let tag: String = branch
+            let slug: String = branch
                 .bytes()
                 .map(|b| {
                     if b.is_ascii_alphanumeric() || b == b'-' {
@@ -316,14 +320,16 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
                     }
                 })
                 .collect();
-            let release = json(&format!("{}/releases/tags/alpha-{tag}", api()))?.ok_or_else(|| {
-                format!(
+            let releases = json(&format!("{}/releases?per_page=100", api()))?.unwrap_or_default();
+            let Some(url) = highest_alpha(releases.as_array().map_or(&[], Vec::as_slice), &slug)
+            else {
+                return Err(format!(
                     "there is no alpha release for {branch}: --channel beta (or another --branch) \
                      chooses another channel."
                 )
-            })?;
-            // Two while it is replaced: the newer.
-            highest(archives(&release))
+                .into());
+            };
+            Some(url)
         }
         _ => return Err("the channel is stable, beta or alpha".into()),
     };

@@ -128,11 +128,8 @@ jobs:
           # 3: nothing was committed since the last release, which is then this one, run again.
           [ "$status" -ne 3 ] || skip "nothing to release since the last stable release"
           [ "$status" -eq 0 ] || exit "$status"
-          case "$channel" in
-            # Each byte but ASCII letters, digits and dashes is a dash (docs/releases.md).
-            alpha) tag="alpha-$(printf '%s' "$GITHUB_REF_NAME" | LC_ALL=C tr -c 'A-Za-z0-9-' '-')" ;;
-            *) tag="v$version" ;;
-          esac
+          # Every build is its own release, an alpha's too: nothing is ever replaced.
+          tag="v$version"
           tools/changelog.sh --at "$at" > "$RUNNER_TEMP/changelog.md"
           {
             echo "channel=$channel"
@@ -215,35 +212,15 @@ jobs:
             cat "$RUNNER_TEMP/tip.err" >&2; exit 1
           fi
           title="Flottille v$VERSION"
-          # A release run again: published, it stays (stable, beta) or is replaced in place
-          # (alpha); a draft left by a failed upload is made again.
-          state=missing
+          # Nothing is replaced, ever (releases are immutable): a version already published, of any
+          # channel, stays as it is; a draft left by a failed upload is made again.
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null); then
-            if [ "$draft" = true ]; then gh release delete "$TAG" --yes; else state=published; fi
+            if [ "$draft" = true ]; then gh release delete "$TAG" --yes; else echo "::notice::$TAG is already published."; exit 0; fi
           fi
-          case "$CHANNEL" in
-            stable | beta)
-              if [ "$state" = published ]; then echo "::notice::$TAG is already published."; exit 0; fi
-              if [ "$CHANNEL" = stable ]; then
-                # On the commit released, the same on main and on dev: the next betas count from it.
-                gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --latest
-              else
-                gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --prerelease --latest=false
-              fi
-              ;;
-            alpha)
-              if [ "$state" = published ]; then
-                # Replaced in place, never missing: the tag moves, the new files come (each sum
-                # before its archive), then the old ones go.
-                gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true > /dev/null
-                gh release upload "$TAG" release/assets/*.sha256 --clobber
-                gh release upload "$TAG" release/assets/*.tar.gz --clobber
-                for name in $(gh release view "$TAG" --json assets --jq '.assets[].name'); do
-                  [ -e "release/assets/$name" ] || gh release delete-asset "$TAG" "$name" --yes
-                done
-                gh release edit "$TAG" --title "$title" --notes-file release/notes.md --prerelease --latest=false
-              else
-                gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --prerelease --latest=false
-              fi
-              ;;
-          esac
+          # The files go with the release in this one call: an immutable release takes none after.
+          if [ "$CHANNEL" = stable ]; then
+            # On the commit released, the same on main and on dev: the next betas count from it.
+            gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --latest
+          else
+            gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --prerelease --latest=false
+          fi

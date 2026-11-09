@@ -885,11 +885,6 @@ impl Releases {
         self.files.lock().unwrap().insert(path.to_owned(), body);
     }
 
-    /// Takes the address away: the API answers there not found, as it does for a deleted release.
-    fn delete(&self, path: &str) {
-        self.files.lock().unwrap().remove(path);
-    }
-
     /// The list the API answers in GitHub's own layout, not `list`'s short one: `author` before
     /// the tag, `published_at` (`null` on a draft) before the assets, an `uploader` object in each
     /// asset, and a body of commas and escaped quotes at the end.
@@ -1004,7 +999,7 @@ fn three_channels(releases: &Releases, programs: &Path) {
         None,
     );
     let alpha = releases.release(
-        "alpha-feat-46-packages",
+        "v0.5.0-alpha.feat-46-packages.7",
         "0.5.0-alpha.feat-46-packages.7",
         &standing_for(programs, "0.5.0-alpha.feat-46-packages.7"),
         None,
@@ -1351,36 +1346,35 @@ fn install_sh_cut_short_by_the_network_runs_nothing() {
     );
 }
 
-/// An alpha holding two archives while it is replaced, the older one listed first.
-fn alpha_with_two_archives(releases: &Releases, programs: &Path) {
-    let old = releases.release(
-        "alpha-feat-x",
+/// The alphas of two branches, each its own release, listed newest first as the API does, the
+/// highest not first (`.10` is above `.9`, which is above `.7`), and the alpha of `feat-x-y`,
+/// a longer name that starts with `feat-x`, the highest of all.
+fn alphas_of_two_branches(releases: &Releases, programs: &Path) {
+    let versions = [
+        "0.5.0-alpha.feat-x-y.30",
+        "0.5.0-alpha.feat-x.9",
+        "0.5.0-alpha.feat-x.10",
         "0.5.0-alpha.feat-x.7",
-        &standing_for(programs, "0.5.0-alpha.feat-x.7"),
-        None,
-    );
-    let new = releases.release(
-        "alpha-feat-x",
-        "0.5.0-alpha.feat-x.8",
-        &standing_for(programs, "0.5.0-alpha.feat-x.8"),
-        None,
-    );
-    let mut both = old.clone();
-    both["assets"]
-        .as_array_mut()
-        .unwrap()
-        .extend(new["assets"].as_array().unwrap().iter().cloned());
-    releases.put(
-        "/repos/o/r/releases/tags/alpha-feat-x",
-        both.to_string().into_bytes(),
-    );
+    ];
+    let made: Vec<serde_json::Value> = versions
+        .iter()
+        .map(|version| {
+            releases.release(
+                &format!("v{version}"),
+                version,
+                &standing_for(programs, version),
+                None,
+            )
+        })
+        .collect();
+    releases.list(&made.iter().collect::<Vec<_>>());
 }
 
 #[test]
-fn install_sh_picks_the_highest_archive_of_an_alpha_being_replaced() {
+fn the_highest_alpha_of_a_branch_is_installed() {
     let releases = Releases::serve();
     let programs = tempfile::tempdir().unwrap();
-    alpha_with_two_archives(&releases, programs.path());
+    alphas_of_two_branches(&releases, programs.path());
     let home = tempfile::tempdir().unwrap();
 
     let output = install(
@@ -1396,7 +1390,7 @@ fn install_sh_picks_the_highest_archive_of_an_alpha_being_replaced() {
         .unwrap();
     assert_eq!(
         String::from_utf8_lossy(&said.stdout).trim(),
-        "flottille 0.5.0-alpha.feat-x.8 (test, 000000000000)"
+        "flottille 0.5.0-alpha.feat-x.10 (test, 000000000000)"
     );
 }
 
@@ -1810,7 +1804,7 @@ fn every_release_title_has_a_v_before_its_version() {
 fn the_branch_name_is_sanitised_the_same_way_everywhere() {
     // Each byte but ASCII letters, digits and dashes is a dash: `é` is two.
     let branch = "feat/é_x";
-    let tag = "alpha-feat----x";
+    let slug = "feat----x";
 
     let repo = Repo::new();
     repo.commit("feat(core): start");
@@ -1819,48 +1813,55 @@ fn the_branch_name_is_sanitised_the_same_way_everywhere() {
         "0.0.1-alpha.feat----x.1"
     );
 
+    // The alpha of that name is found by both: nothing else of the list is taken.
     let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    let alpha = releases.release(
+        &format!("v0.9.0-alpha.{slug}.1"),
+        &format!("0.9.0-alpha.{slug}.1"),
+        &standing_for(programs.path(), &format!("0.9.0-alpha.{slug}.1")),
+        None,
+    );
+    let other = releases.release(
+        "v0.9.0-alpha.feat-x.9",
+        "0.9.0-alpha.feat-x.9",
+        &standing_for(programs.path(), "0.9.0-alpha.feat-x.9"),
+        None,
+    );
+    releases.list(&[&other, &alpha]);
     let home = tempfile::tempdir().unwrap();
-    install(
+    let output = install(
         home.path(),
         &releases,
         &["--channel", "alpha", "--branch", branch],
     );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        installed_version(home.path()),
+        format!("flottille 0.9.0-alpha.{slug}.1 (test, 000000000000)")
+    );
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
     let binary = installed();
-    user.command_through(
-        &binary,
-        &["update", "--channel", "alpha", "--branch", branch],
-    )
-    .output()
-    .unwrap();
-    let asked: Vec<String> = releases
-        .asked
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|p| p.contains("/releases/tags/"))
-        .cloned()
-        .collect();
+    let output = user
+        .command_through(
+            &binary,
+            &["update", "--channel", "alpha", "--branch", branch],
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let said = Command::new(&binary).arg("--version").output().unwrap();
     assert_eq!(
-        asked,
-        [
-            format!("/repos/o/r/releases/tags/{tag}"),
-            format!("/repos/o/r/releases/tags/{tag}")
-        ]
+        String::from_utf8_lossy(&said.stdout).trim(),
+        format!("flottille 0.9.0-alpha.{slug}.1 (test, 000000000000)")
     );
 
     // The workflows have no test of their own: they say the same rule, word for word.
-    for workflow in [
-        ".github/workflows/ci.yml",
-        ".github/workflows/alpha-cleanup.yml",
-    ] {
-        let text = std::fs::read_to_string(tool(workflow)).unwrap();
-        assert!(
-            text.contains("LC_ALL=C tr -c 'A-Za-z0-9-' '-'"),
-            "{workflow} sanitises the branch another way"
-        );
-    }
+    let text = std::fs::read_to_string(tool(".github/workflows/alpha-cleanup.yml")).unwrap();
+    assert!(
+        text.contains("LC_ALL=C tr -c 'A-Za-z0-9-' '-'"),
+        "the cleanup sanitises the branch another way"
+    );
 }
 
 // `flottille update`.
@@ -2255,10 +2256,7 @@ fn update_remembers_the_channel_last_chosen() {
         "--branch",
         "feat/46-packages",
     ]);
-    assert_eq!(
-        plain_update_reads(),
-        ["/repos/o/r/releases/tags/alpha-feat-46-packages"]
-    );
+    assert_eq!(plain_update_reads(), ["/repos/o/r/releases?per_page=100"]);
 
     choose(&["update", "--channel", "stable"]);
     assert_eq!(plain_update_reads(), ["/repos/o/r/releases/latest"]);
@@ -2324,7 +2322,7 @@ fn a_remembered_alpha_without_a_release_says_how_to_leave_it() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     // The branch is merged and its alpha deleted with it.
-    releases.delete("/repos/o/r/releases/tags/alpha-feat-46-packages");
+    releases.list(&[]);
 
     let binary = installed();
     let output = user.command_through(&binary, &["update"]).output().unwrap();
@@ -2740,10 +2738,10 @@ fn flottille_update_refuses_a_branch_without_the_alpha_channel() {
 }
 
 #[test]
-fn flottille_update_picks_the_highest_archive_of_an_alpha_being_replaced() {
+fn flottille_update_takes_the_highest_alpha_of_a_branch() {
     let releases = Releases::serve();
     let programs = tempfile::tempdir().unwrap();
-    alpha_with_two_archives(&releases, programs.path());
+    alphas_of_two_branches(&releases, programs.path());
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
     let binary = installed();
 
@@ -2759,8 +2757,367 @@ fn flottille_update_picks_the_highest_archive_of_an_alpha_being_replaced() {
     let said = Command::new(&binary).arg("--version").output().unwrap();
     assert_eq!(
         String::from_utf8_lossy(&said.stdout).trim(),
-        "flottille 0.5.0-alpha.feat-x.8 (test, 000000000000)"
+        "flottille 0.5.0-alpha.feat-x.10 (test, 000000000000)"
     );
+}
+
+#[test]
+fn an_alpha_of_another_branch_with_a_longer_name_is_not_taken() {
+    // `feat/x-y` has the highest alpha of the list; `feat/x` and `feat/x-y` each take their own.
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    alphas_of_two_branches(&releases, programs.path());
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+
+    for (branch, version) in [
+        ("feat/x", "0.5.0-alpha.feat-x.10"),
+        ("feat/x-y", "0.5.0-alpha.feat-x-y.30"),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let output = install(
+            home.path(),
+            &releases,
+            &["--channel", "alpha", "--branch", branch],
+        );
+        assert!(output.status.success(), "{branch}: {output:?}");
+        assert_eq!(
+            installed_version(home.path()),
+            format!("flottille {version} (test, 000000000000)")
+        );
+        let binary = installed();
+        let output = user
+            .command_through(
+                &binary,
+                &["update", "--channel", "alpha", "--branch", branch],
+            )
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{branch}: {output:?}");
+        let said = Command::new(&binary).arg("--version").output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&said.stdout).trim(),
+            format!("flottille {version} (test, 000000000000)")
+        );
+    }
+
+    // A branch whose own alphas are gone has none, whatever the longer names hold.
+    let only_longer = Releases::serve();
+    let longer = only_longer.release(
+        "v0.5.0-alpha.feat-x-y.30",
+        "0.5.0-alpha.feat-x-y.30",
+        &standing_for(programs.path(), "0.5.0-alpha.feat-x-y.30"),
+        None,
+    );
+    only_longer.list(&[&longer]);
+    let home = tempfile::tempdir().unwrap();
+    let output = install(
+        home.path(),
+        &only_longer,
+        &["--channel", "alpha", "--branch", "feat/x"],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no alpha release for feat/x"),
+        "{output:?}"
+    );
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &only_longer.api());
+    let output = user
+        .command_through(
+            &installed(),
+            &["update", "--channel", "alpha", "--branch", "feat/x"],
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no alpha release for feat/x"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn an_exact_alpha_version_is_read_under_its_own_tag() {
+    // Each alpha is its own release, tagged like a beta: `--version` asks for `v<version>`.
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    alphas_of_two_branches(&releases, programs.path());
+    let home = tempfile::tempdir().unwrap();
+
+    let output = install(
+        home.path(),
+        &releases,
+        &["--version", "0.5.0-alpha.feat-x.7"],
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        installed_version(home.path()),
+        "flottille 0.5.0-alpha.feat-x.7 (test, 000000000000)"
+    );
+    assert!(
+        releases
+            .asked
+            .lock()
+            .unwrap()
+            .contains(&"/repos/o/r/releases/tags/v0.5.0-alpha.feat-x.7".to_owned())
+    );
+}
+
+// The workflows' scripts, run with a `gh` of their own.
+
+/// A `gh` that keeps the published tags in `$FAKE_GH_STATE` (one per line, `draft:` before a
+/// draft's) and notes each call in `$FAKE_GH_LOG`: what `publish` and `alpha-cleanup` ask of it.
+const FAKE_RELEASES_GH: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >> "$FAKE_GH_LOG"
+touch "$FAKE_GH_STATE"
+case "$1 $2" in
+  "api repos/o/r/git/ref/heads/"*) echo "$FAKE_TIP" ;;
+  "release view")
+    tag=$3
+    if grep -qx "$tag" "$FAKE_GH_STATE"; then echo false
+    elif grep -qx "draft:$tag" "$FAKE_GH_STATE"; then echo true
+    else echo "release not found" >&2; exit 1; fi ;;
+  "release create") echo "$3" >> "$FAKE_GH_STATE" ;;
+  "release delete") sed -i "/^\(draft:\)\?$3\$/d" "$FAKE_GH_STATE" ;;
+  "release list") sed 's/^draft://' "$FAKE_GH_STATE" ;;
+  *) echo "gh: unexpected $*" >&2; exit 2 ;;
+esac
+"#;
+
+/// A throwaway place for the scripts of a workflow to run in, with `FAKE_RELEASES_GH` as `gh`.
+struct Fake {
+    dir: tempfile::TempDir,
+}
+
+impl Fake {
+    fn new() -> Fake {
+        let fake = Fake {
+            dir: tempfile::tempdir().unwrap(),
+        };
+        std::fs::create_dir_all(fake.dir.path().join("bin")).unwrap();
+        let gh = fake.dir.path().join("bin/gh");
+        std::fs::write(&gh, FAKE_RELEASES_GH).unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        // The artifact `publish` downloads.
+        std::fs::create_dir_all(fake.dir.path().join("release/assets")).unwrap();
+        std::fs::write(fake.dir.path().join("release/notes.md"), "notes").unwrap();
+        for name in ["a.tar.gz", "a.tar.gz.sha256"] {
+            std::fs::write(fake.dir.path().join("release/assets").join(name), "x").unwrap();
+        }
+        fake
+    }
+
+    fn state(&self, tags: &[&str]) {
+        std::fs::write(self.dir.path().join("state"), tags.join("\n") + "\n").unwrap();
+    }
+
+    fn tags(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir.path().join("state"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The calls `gh` was given, one per line.
+    fn log(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join("log")).unwrap_or_default()
+    }
+
+    fn run(&self, script: &str, env: &[(&str, &str)]) -> Output {
+        let mut command = Command::new("bash");
+        command
+            .args(["-e", "-c", script])
+            .current_dir(self.dir.path())
+            .env_clear()
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.dir.path().join("bin").display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            )
+            .env("RUNNER_TEMP", self.dir.path())
+            .env("GH_REPO", "o/r")
+            .env("GITHUB_REPOSITORY", "o/r")
+            .env("FAKE_GH_LOG", self.dir.path().join("log"))
+            .env("FAKE_GH_STATE", self.dir.path().join("state"));
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        command.output().unwrap()
+    }
+
+    /// `publish` for a push of `branch` at its tip, building this version.
+    fn publish(&self, channel: &str, branch: &str, version: &str) -> Output {
+        self.run(
+            &step_script(".github/workflows/ci.yml", "publish"),
+            &[
+                ("GH_TOKEN", "unused"),
+                ("CHANNEL", channel),
+                ("VERSION", version),
+                ("TAG", &format!("v{version}")),
+                ("GITHUB_REF_NAME", branch),
+                ("GITHUB_SHA", "abc123"),
+                ("FAKE_TIP", "abc123"),
+            ],
+        )
+    }
+}
+
+#[test]
+fn each_push_of_a_branch_publishes_its_own_prerelease_and_never_replaces_one() {
+    let fake = Fake::new();
+    let branch = "fix/666-alphas";
+
+    for n in [1, 2] {
+        let version = format!("0.2.0-alpha.fix-666-alphas.{n}");
+        let output = fake.publish("alpha", branch, &version);
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    assert_eq!(
+        fake.tags(),
+        [
+            "v0.2.0-alpha.fix-666-alphas.1",
+            "v0.2.0-alpha.fix-666-alphas.2"
+        ]
+    );
+    let log = fake.log();
+    let created: Vec<&str> = log
+        .lines()
+        .filter(|l| l.starts_with("release create"))
+        .collect();
+    assert_eq!(created.len(), 2, "{log}");
+    for line in created {
+        // Its files go with it in the one call: an immutable release takes none afterwards.
+        assert!(line.contains("release/assets/"), "{line}");
+        assert!(line.contains("--prerelease --latest=false"), "{line}");
+        assert!(line.contains("--target abc123"), "{line}");
+    }
+    // Nothing is moved, uploaded over, edited or removed.
+    for forbidden in [
+        "upload",
+        "edit",
+        "delete-asset",
+        "-X PATCH",
+        "git/refs/tags",
+    ] {
+        assert!(!log.contains(forbidden), "{forbidden}: {log}");
+    }
+}
+
+#[test]
+fn an_alpha_already_published_is_not_published_again() {
+    let fake = Fake::new();
+    fake.state(&["v0.2.0-alpha.fix-666-alphas.1"]);
+
+    let output = fake.publish("alpha", "fix/666-alphas", "0.2.0-alpha.fix-666-alphas.1");
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("already published"),
+        "{output:?}"
+    );
+    assert!(!fake.log().contains("release create"), "{}", fake.log());
+    assert_eq!(fake.tags(), ["v0.2.0-alpha.fix-666-alphas.1"]);
+}
+
+#[test]
+fn a_draft_left_by_a_failed_upload_is_made_again_for_an_alpha() {
+    let fake = Fake::new();
+    fake.state(&["draft:v0.2.0-alpha.fix-666-alphas.1"]);
+
+    let output = fake.publish("alpha", "fix/666-alphas", "0.2.0-alpha.fix-666-alphas.1");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fake.tags(), ["v0.2.0-alpha.fix-666-alphas.1"]);
+}
+
+#[test]
+fn a_branch_that_moved_on_publishes_nothing() {
+    let fake = Fake::new();
+    let script = step_script(".github/workflows/ci.yml", "publish");
+    let output = fake.run(
+        &script,
+        &[
+            ("CHANNEL", "alpha"),
+            ("VERSION", "0.2.0-alpha.x.1"),
+            ("TAG", "v0.2.0-alpha.x.1"),
+            ("GITHUB_REF_NAME", "fix/x"),
+            ("GITHUB_SHA", "abc123"),
+            ("FAKE_TIP", "def456"),
+        ],
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(!fake.log().contains("release create"), "{}", fake.log());
+}
+
+#[test]
+fn the_ci_names_an_alpha_like_a_beta() {
+    let script = step_script(".github/workflows/ci.yml", "version");
+    assert!(!script.contains("alpha-$"), "{script}");
+    assert!(script.contains("tag=\"v$version\""), "{script}");
+}
+
+#[test]
+fn a_deleted_branch_takes_every_alpha_with_it_and_no_other() {
+    let fake = Fake::new();
+    fake.state(&[
+        "v0.2.0-alpha.feat-a.1",
+        "v0.2.0-alpha.feat-a.12",
+        "draft:v0.2.1-alpha.feat-a.13",
+        // Another branch, a longer name, a beta and a stable one: kept.
+        "v0.2.0-alpha.feat-a-b.3",
+        "v0.2.0-alpha.other.1",
+        "v0.2.0-beta.4",
+        "v0.2.0",
+        // The rolling release of the old design.
+        "alpha-feat-a",
+        "alpha-feat-a-b",
+    ]);
+
+    let output = fake.run(
+        &step_script(".github/workflows/alpha-cleanup.yml", "forget"),
+        &[("GH_TOKEN", "unused"), ("BRANCH", "feat/a")],
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fake.tags(),
+        [
+            "v0.2.0-alpha.feat-a-b.3",
+            "v0.2.0-alpha.other.1",
+            "v0.2.0-beta.4",
+            "v0.2.0",
+            "alpha-feat-a-b",
+        ]
+    );
+    // The tags go with their releases.
+    for line in fake
+        .log()
+        .lines()
+        .filter(|l| l.starts_with("release delete"))
+    {
+        assert!(line.contains("--cleanup-tag"), "{line}");
+    }
+}
+
+#[test]
+fn a_deleted_branch_with_no_alpha_is_not_an_error() {
+    let fake = Fake::new();
+    fake.state(&["v0.2.0"]);
+
+    let output = fake.run(
+        &step_script(".github/workflows/alpha-cleanup.yml", "forget"),
+        &[("GH_TOKEN", "unused"), ("BRANCH", "feat/none")],
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fake.tags(), ["v0.2.0"]);
 }
 
 #[test]
