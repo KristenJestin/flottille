@@ -1102,9 +1102,9 @@ impl Shell {
             ),
             Outcome::Detached { from, refused } => flottille_ui::toast(
                 match refused {
-                    None => flottille_ui::Toast::success("Detached from ").quoting(&from),
+                    None => flottille_ui::Toast::success("Detached from ").quoted_title(&from),
                     Some(why) => flottille_ui::Toast::failure("Not detached from ")
-                        .quoting(&from)
+                        .quoted_title(&from)
                         .detail(why),
                 },
                 cx,
