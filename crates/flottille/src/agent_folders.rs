@@ -6,11 +6,16 @@
 //! result says so (`docs/design.md` §7.1).
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsStr;
-use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::ffi::{OsStr, OsString};
+use std::io::{Read, Write};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+use rustix::io::Errno;
 
 use crate::gate::{AGENT_FOLDERS, AGENT_LOGINS};
 
@@ -24,6 +29,25 @@ const ENTRIES_MAX: usize = 200;
 /// The largest file of an agent folder kept to be put back: a larger one changed is said, not
 /// put back.
 const KEPT_MAX: u64 = 1 << 20;
+
+// Called with an entry's path, relative to the place, between the check of what is on the way
+// to it and what is done there: a test changes the place in between.
+#[cfg(test)]
+type Race = Option<Box<dyn FnMut(&Path)>>;
+#[cfg(test)]
+thread_local! {
+    static RACE: std::cell::RefCell<Race> = std::cell::RefCell::new(None);
+}
+
+fn race(path: &Path) {
+    #[cfg(test)]
+    RACE.with(|race| {
+        if let Some(race) = race.borrow_mut().as_mut() {
+            race(path);
+        }
+    });
+    let _ = path;
+}
 
 /// What an entry of an agent folder is.
 #[derive(Clone, PartialEq)]
@@ -81,16 +105,8 @@ impl Snapshot {
             (Some(parent), Some(name)) => real(parent).join(name),
             _ => kept.to_owned(),
         };
-        let (entries, complete) = walk(&root, home.as_deref(), &kept);
-        let contents = entries
-            .iter()
-            .filter_map(|(path, kind)| match kind {
-                Kind::File { len, .. } if *len <= KEPT_MAX => {
-                    Some((path.clone(), read_file(&root.join(path)).ok()?))
-                }
-                _ => None,
-            })
-            .collect();
+        let mut contents = BTreeMap::new();
+        let (entries, complete) = walk(&root, home.as_deref(), &kept, Some(&mut contents));
         Snapshot {
             root,
             home,
@@ -106,11 +122,15 @@ impl Snapshot {
     /// moved first to the folder `run` of the snapshot's `kept`, never lost.
     pub fn restore(&self, run: &str) -> Restored {
         let kept = &self.kept.join(run);
-        let (after, complete) = walk(&self.root, self.home.as_deref(), &self.kept);
+        let (after, complete) = walk(&self.root, self.home.as_deref(), &self.kept, None);
         let mut restored = Restored {
             unchecked: !self.complete || !complete,
             ..Restored::default()
         };
+        let Ok(top) = open_root(&self.root) else {
+            return restored;
+        };
+        let top = top.as_fd();
         let shown = |path: &Path| path.display().to_string();
         // What was added, the deepest first; a folder is said only when nothing below it is.
         // Past the bound, what the snapshot did not see may have been there before.
@@ -119,8 +139,8 @@ impl Snapshot {
                 continue;
             }
             let removed = match kind {
-                Kind::Folder => self.below(path).and_then(std::fs::remove_dir),
-                _ => self.keep(path, kept, &mut restored.kept),
+                Kind::Folder => remove_folder(top, path),
+                _ => keep(top, path, kept, &mut restored.kept),
             };
             let said = *kind != Kind::Folder
                 || !after
@@ -140,7 +160,9 @@ impl Snapshot {
             let looked;
             let now = match after.get(path) {
                 None if !complete => {
-                    looked = self.below(path).ok().and_then(|at| kind_of(&at));
+                    looked = parent(top, path)
+                        .ok()
+                        .and_then(|(folder, name)| kind_of(folder.as_fd(), name));
                     looked.as_ref()
                 }
                 now => now,
@@ -153,8 +175,8 @@ impl Snapshot {
                 (Kind::Special, Some(Kind::Special)) => continue,
                 (Kind::File { .. }, Some(Kind::File { .. }))
                     if self.contents.get(path).is_some_and(|before| {
-                        self.below(path)
-                            .and_then(|at| read_file(&at))
+                        parent(top, path)
+                            .and_then(|(folder, name)| read_file(folder.as_fd(), name))
                             .is_ok_and(|content| content == *before)
                     }) =>
                 {
@@ -163,11 +185,11 @@ impl Snapshot {
                 _ => {}
             }
             let put = match now {
-                Some(Kind::Folder) => self.below(path).and_then(std::fs::remove_dir),
-                Some(_) => self.keep(path, kept, &mut restored.kept),
+                Some(Kind::Folder) => remove_folder(top, path),
+                Some(_) => keep(top, path, kept, &mut restored.kept),
                 None => Ok(()),
             }
-            .and_then(|()| self.write(path, kind));
+            .and_then(|()| self.write(top, path, kind));
             match put {
                 Ok(()) => restored.put_back.push(shown(path)),
                 Err(_) => restored.left.push(shown(path)),
@@ -176,76 +198,105 @@ impl Snapshot {
         restored
     }
 
-    /// Where `path` is on the disk, once each folder above it, below the place, is a real one: a
-    /// folder made a link since would lead the put-back elsewhere (the home).
-    fn below(&self, path: &Path) -> std::io::Result<PathBuf> {
-        let mut at = self.root.clone();
-        let mut parts = path.components().peekable();
-        while let Some(part) = parts.next() {
-            if parts.peek().is_none() {
-                return Ok(at.join(part));
-            }
-            at.push(part);
-            if !std::fs::symlink_metadata(&at)?.file_type().is_dir() {
-                return Err(std::io::Error::other("no longer a folder"));
-            }
-        }
-        Ok(at)
-    }
-
-    /// Moves the entry at `path` below `kept`, where the user finds what the put-back removed.
-    fn keep(&self, path: &Path, kept: &Path, said: &mut Option<PathBuf>) -> std::io::Result<()> {
-        let at = self.below(path)?;
-        let to = kept.join(path);
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        *said = Some(kept.to_owned());
-        match std::fs::rename(&at, &to) {
-            Err(error) if error.kind() == ErrorKind::CrossesDevices => {}
-            moved => return moved,
-        }
-        // On another disk, its copy is made first.
-        let kind = std::fs::symlink_metadata(&at)?.file_type();
-        if kind.is_file() {
-            write_new(&to, &read_file(&at)?, 0o600)?;
-        } else if kind.is_symlink() {
-            std::os::unix::fs::symlink(std::fs::read_link(&at)?, &to)?;
-        }
-        std::fs::remove_file(&at)
-    }
-
-    /// Writes an entry as it was, making the folders above it that are gone.
-    fn write(&self, path: &Path, kind: &Kind) -> std::io::Result<()> {
-        let mut made = PathBuf::new();
+    /// Writes an entry as it was, making the folders above it that are gone, each in the one
+    /// opened before it: a folder made a link since is never gone through (the home).
+    fn write(&self, top: BorrowedFd, path: &Path, kind: &Kind) -> std::io::Result<()> {
+        let mut folder = rustix::fs::openat(top, ".", FOLDER, Mode::empty())?;
         for part in path.parent().into_iter().flat_map(Path::components) {
-            made.push(part);
-            match self.below(&made) {
-                Ok(at) if std::fs::symlink_metadata(&at).is_ok() => {}
-                Ok(at) => std::fs::create_dir(&at)?,
-                Err(error) => return Err(error),
+            let part = part.as_os_str();
+            match rustix::fs::mkdirat(&folder, part, Mode::from_raw_mode(0o777)) {
+                Ok(()) | Err(Errno::EXIST) => {}
+                Err(error) => return Err(error.into()),
             }
+            folder = rustix::fs::openat(&folder, part, FOLDER, Mode::empty())?;
         }
-        let at = self.below(path)?;
-        if std::fs::symlink_metadata(&at).is_ok_and(|meta| !meta.is_dir()) {
+        let name = path.file_name().ok_or(Errno::INVAL)?;
+        race(path);
+        if rustix::fs::statat(&folder, name, AtFlags::SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) != FileType::Directory)
+        {
             return Err(std::io::Error::other("something else is there"));
         }
         match kind {
-            Kind::Folder => match std::fs::create_dir(&at) {
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
-                done => done,
+            Kind::Folder => match rustix::fs::mkdirat(&folder, name, Mode::from_raw_mode(0o777)) {
+                Ok(()) | Err(Errno::EXIST) => Ok(()),
+                Err(error) => Err(error.into()),
             },
-            Kind::Link(target) => std::os::unix::fs::symlink(target, &at),
+            Kind::Link(target) => Ok(rustix::fs::symlinkat(target, &folder, name)?),
             Kind::File { mode, .. } => {
                 let before = self
                     .contents
                     .get(path)
                     .ok_or_else(|| std::io::Error::other("too large to have been kept"))?;
-                write_new(&at, before, *mode)
+                write_new(folder.as_fd(), name, before, *mode)
             }
             Kind::Special => Err(std::io::Error::other("never made again")),
         }
     }
+}
+
+/// How a folder of the place is opened, to read its entries or act in it: never a link.
+const FOLDER: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// The place's folder, a real path.
+fn open_root(root: &Path) -> std::io::Result<OwnedFd> {
+    Ok(crate::nofollow::open(root, FOLDER)?.into())
+}
+
+/// The folder `relative` of the place, opened without going through a link: one made since it
+/// was looked at refuses the open (`ELOOP`) instead of leading elsewhere.
+fn folder_at(top: BorrowedFd, relative: &Path) -> std::io::Result<OwnedFd> {
+    if relative.as_os_str().is_empty() {
+        return Ok(rustix::fs::openat(top, ".", FOLDER, Mode::empty())?);
+    }
+    crate::nofollow::folder_beneath(top, relative)
+}
+
+/// The folder holding `path` and its name in it: what is done there is done by its handle.
+fn parent<'a>(top: BorrowedFd, path: &'a Path) -> std::io::Result<(OwnedFd, &'a OsStr)> {
+    let name = path.file_name().ok_or(Errno::INVAL)?;
+    let folder = folder_at(top, path.parent().unwrap_or(Path::new("")))?;
+    Ok((folder, name))
+}
+
+/// Removes the empty folder at `path`.
+fn remove_folder(top: BorrowedFd, path: &Path) -> std::io::Result<()> {
+    let (folder, name) = parent(top, path)?;
+    race(path);
+    Ok(rustix::fs::unlinkat(&folder, name, AtFlags::REMOVEDIR)?)
+}
+
+/// Moves the entry at `path` below `kept`, where the user finds what the put-back removed.
+fn keep(
+    top: BorrowedFd,
+    path: &Path,
+    kept: &Path,
+    said: &mut Option<PathBuf>,
+) -> std::io::Result<()> {
+    let (folder, name) = parent(top, path)?;
+    let to = crate::nofollow::folder_made(&kept.join(path.parent().unwrap_or(Path::new(""))))?;
+    *said = Some(kept.to_owned());
+    race(path);
+    match rustix::fs::renameat(&folder, name, &to, name) {
+        Err(Errno::XDEV) => {}
+        moved => return Ok(moved?),
+    }
+    // On another disk, its copy is made first.
+    let stat = rustix::fs::statat(&folder, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    match FileType::from_raw_mode(stat.st_mode) {
+        FileType::RegularFile => {
+            write_new(to.as_fd(), name, &read_file(folder.as_fd(), name)?, 0o600)?
+        }
+        FileType::Symlink => {
+            let target = rustix::fs::readlinkat(&folder, name, Vec::new())?;
+            rustix::fs::symlinkat(target.as_c_str(), &to, name)?;
+        }
+        _ => {}
+    }
+    Ok(rustix::fs::unlinkat(&folder, name, AtFlags::empty())?)
 }
 
 /// `path` with its links followed, as the walk and the home are compared.
@@ -269,34 +320,31 @@ fn login(name: &OsStr) -> bool {
     })
 }
 
-/// What is at `at`, its last part not followed.
-fn kind_of(at: &Path) -> Option<Kind> {
-    let meta = std::fs::symlink_metadata(at).ok()?;
-    let kind = meta.file_type();
-    Some(if kind.is_dir() {
-        Kind::Folder
-    } else if kind.is_symlink() {
-        Kind::Link(std::fs::read_link(at).ok()?)
-    } else if kind.is_file() {
-        Kind::File {
-            len: meta.len(),
-            modified: (meta.mtime(), meta.mtime_nsec()),
-            changed: (meta.ctime(), meta.ctime_nsec()),
-            inode: meta.ino(),
-            mode: meta.mode() & 0o7777,
+/// What the entry `name` of `folder` is, not followed.
+fn kind_of(folder: BorrowedFd, name: &OsStr) -> Option<Kind> {
+    let stat = rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+    Some(match FileType::from_raw_mode(stat.st_mode) {
+        FileType::Directory => Kind::Folder,
+        FileType::Symlink => {
+            let target = rustix::fs::readlinkat(folder, name, Vec::new()).ok()?;
+            Kind::Link(PathBuf::from(OsString::from_vec(target.into_bytes())))
         }
-    } else {
-        Kind::Special
+        FileType::RegularFile => Kind::File {
+            len: stat.st_size as u64,
+            modified: (stat.st_mtime as i64, stat.st_mtime_nsec as i64),
+            changed: (stat.st_ctime as i64, stat.st_ctime_nsec as i64),
+            inode: stat.st_ino as u64,
+            mode: stat.st_mode as u32 & 0o7777,
+        },
+        _ => Kind::Special,
     })
 }
 
-/// The content of the file at `at`: never through a link, never waiting on a pipe put there
-/// since it was looked at.
-fn read_file(at: &Path) -> std::io::Result<Vec<u8>> {
-    let mut file = std::fs::File::options()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
-        .open(at)?;
+/// The content of the file `name` of `folder`: never through a link, never waiting on a pipe
+/// put there since it was looked at.
+fn read_file(folder: BorrowedFd, name: &OsStr) -> std::io::Result<Vec<u8>> {
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | crate::nofollow::READ;
+    let mut file = std::fs::File::from(rustix::fs::openat(folder, name, flags, Mode::empty())?);
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::other("not a file"));
     }
@@ -305,59 +353,81 @@ fn read_file(at: &Path) -> std::io::Result<Vec<u8>> {
     Ok(content)
 }
 
-/// Writes a file that is not there yet, never through a link.
-fn write_new(at: &Path, content: &[u8], mode: u32) -> std::io::Result<()> {
-    let mut file = std::fs::File::options()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(at)?;
+/// Writes the file `name` of `folder`, which is not there yet, never through a link.
+fn write_new(folder: BorrowedFd, name: &OsStr, content: &[u8], mode: u32) -> std::io::Result<()> {
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut file = std::fs::File::from(rustix::fs::openat(
+        folder,
+        name,
+        flags,
+        Mode::from_raw_mode(0o600),
+    )?);
     file.write_all(content)?;
     file.set_permissions(std::fs::Permissions::from_mode(mode))
 }
 
 /// Every entry of an agent folder below `root`, relative to it: `.git`, the home's and `kept`
-/// left out, links not followed, and no login file of an agent folder, which is never read. Whether every
-/// entry of the place was looked at.
-fn walk(root: &Path, home: Option<&Path>, kept: &Path) -> (BTreeMap<PathBuf, Kind>, bool) {
+/// left out, links not followed, and no login file of an agent folder, which is never read; with
+/// `contents`, those of the files not too large to keep. Each folder is opened below the place
+/// without going through a link, and what is in it looked at by its handle. Whether every entry
+/// of the place was looked at.
+fn walk(
+    root: &Path,
+    home: Option<&Path>,
+    kept: &Path,
+    mut contents: Option<&mut BTreeMap<PathBuf, Vec<u8>>>,
+) -> (BTreeMap<PathBuf, Kind>, bool) {
     let mut entries = BTreeMap::new();
+    let Ok(top) = open_root(root) else {
+        return (entries, true);
+    };
     let mut seen = 0;
     let mut pending = vec![(PathBuf::new(), false)];
     while let Some((folder, agent)) = pending.pop() {
-        let Ok(read) = std::fs::read_dir(root.join(&folder)) else {
+        race(&folder);
+        let Ok(opened) = folder_at(top.as_fd(), &folder) else {
+            continue;
+        };
+        let Ok(read) = rustix::fs::Dir::read_from(&opened) else {
             continue;
         };
         for entry in read.flatten() {
+            let name = OsStr::from_bytes(entry.file_name().to_bytes());
+            if name == "." || name == ".." {
+                continue;
+            }
             seen += 1;
             if seen > ENTRIES_MAX {
                 return (entries, false);
             }
-            let name = entry.file_name();
-            let path = folder.join(&name);
-            let Ok(kind) = entry.file_type() else {
+            let path = folder.join(name);
+            let Some(kind) = kind_of(opened.as_fd(), name) else {
                 continue;
             };
-            let home_s = agent_folder(&name) && home.is_some_and(|home| root.join(&folder) == home);
+            let home_s = agent_folder(name) && home.is_some_and(|home| root.join(&folder) == home);
             if (!agent && name.as_encoded_bytes().eq_ignore_ascii_case(b".git"))
                 || home_s
                 || root.join(&path) == kept
             {
                 continue;
             }
-            let agent = agent || agent_folder(&name);
-            if agent && login(&name) {
+            let agent = agent || agent_folder(name);
+            if agent && login(name) {
                 continue;
             }
-            if kind.is_dir() {
+            if kind == Kind::Folder {
                 pending.push((path.clone(), agent));
             }
             if !agent {
                 continue;
             }
-            if let Some(kind) = kind_of(&entry.path()) {
-                entries.insert(path, kind);
+            if let (Some(contents), Kind::File { len, .. }) = (contents.as_deref_mut(), &kind)
+                && *len <= KEPT_MAX
+                && let Ok(content) = read_file(opened.as_fd(), name)
+            {
+                contents.insert(path.clone(), content);
             }
+            entries.insert(path, kind);
         }
     }
     (entries, true)
@@ -749,6 +819,84 @@ mod tests {
         made(&small.join("README.md"), "\n");
         let snapshot = Snapshot::take(&small, None, &dir.path().join("kept"));
         assert_eq!(said(&snapshot.restore("run")), None);
+    }
+
+    /// Runs `swap` once, the first time the walk or the put-back reaches `at`.
+    fn racing(at: &'static str, swap: impl FnOnce() + 'static) {
+        let mut swap = Some(swap);
+        RACE.with(|race| {
+            *race.borrow_mut() = Some(Box::new(move |path: &Path| {
+                if path == Path::new(at)
+                    && let Some(swap) = swap.take()
+                {
+                    swap();
+                }
+            }))
+        });
+    }
+
+    /// `folder` moved aside and made a link to `to`.
+    fn swapped(folder: PathBuf, to: PathBuf) -> impl FnOnce() + 'static {
+        move || {
+            std::fs::rename(&folder, folder.with_extension("aside")).unwrap();
+            std::os::unix::fs::symlink(&to, &folder).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_folder_made_a_link_while_the_walk_reaches_it_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let home = dir.path().join("home");
+        made(&root.join("docs/README.md"), "\n");
+        made(
+            &home.join(".claude/settings.json"),
+            "{\"theme\": \"mine\"}\n",
+        );
+        racing("docs", swapped(root.join("docs"), home.clone()));
+
+        let snapshot = Snapshot::take(&root, None, &dir.path().join("kept"));
+
+        assert!(snapshot.entries.is_empty(), "{:?}", snapshot.entries.keys());
+        assert!(snapshot.contents.is_empty());
+    }
+
+    #[test]
+    fn a_folder_made_a_link_while_the_put_back_acts_is_not_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let home = dir.path().join("home");
+        made(&root.join("docs/.claude/settings.json"), "{}\n");
+        made(
+            &home.join(".claude/settings.json"),
+            "{\"theme\": \"mine\"}\n",
+        );
+        let snapshot = Snapshot::take(&root, None, &dir.path().join("kept"));
+
+        made(
+            &root.join("docs/.claude/settings.json"),
+            "{\"hooks\": {}}\n",
+        );
+        racing(
+            "docs/.claude/settings.json",
+            swapped(root.join("docs"), home.clone()),
+        );
+        let restored = snapshot.restore("run");
+
+        assert_eq!(
+            std::fs::read_to_string(home.join(".claude/settings.json")).unwrap(),
+            "{\"theme\": \"mine\"}\n"
+        );
+        assert_eq!(std::fs::read_dir(home.join(".claude")).unwrap().count(), 1);
+        // What the run wrote was taken from the folder the check found, moved aside since; the
+        // link is not gone through to write it back.
+        assert!(!root.join("docs.aside/.claude/settings.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("kept/run/docs/.claude/settings.json"))
+                .unwrap(),
+            "{\"hooks\": {}}\n"
+        );
+        assert_eq!(restored.left, ["docs/.claude/settings.json"]);
     }
 
     #[tokio::test]
