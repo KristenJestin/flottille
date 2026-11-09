@@ -676,7 +676,10 @@ impl Shell {
             None => {
                 let (shell, project) = (this.clone(), opened.project.clone());
                 let session = id.clone();
-                let reply = cx.new(|cx| Reply::new(shell, session, project, window, cx));
+                let extensions = self.extensions.downgrade();
+                let reply = cx.new(|cx| {
+                    Reply::new(shell, session, project, window, cx).with_extensions(extensions)
+                });
                 self._drafts.push(cx.observe(&reply, |shell, reply, cx| {
                     let session = reply.read(cx).session().to_owned();
                     shell.say_draft(&session, cx);

@@ -8390,6 +8390,8 @@ pub struct Reply {
     dismissed: bool,
     /// Review is on in the project: the `/` list offers `/review`.
     review: bool,
+    /// What the window knows of the parts of Flottille the user can turn off.
+    extensions: WeakEntity<crate::extensions::Registry>,
     field: Entity<TextareaState>,
     options: Entity<SessionOptions>,
     /// What the root does while its turn runs, in the bar under the field.
@@ -8487,6 +8489,7 @@ impl Reply {
             highlighted: 0,
             dismissed: false,
             review: false,
+            extensions: WeakEntity::new_invalid(),
             field,
             options,
             status_line: cx.new(|_| StatusLine::new()),
@@ -8829,6 +8832,12 @@ impl Reply {
         self.slash.is_some() && !self.dismissed
     }
 
+    /// The composer, knowing what the window knows of the parts the user can turn off.
+    pub fn with_extensions(mut self, extensions: WeakEntity<crate::extensions::Registry>) -> Self {
+        self.extensions = extensions;
+        self
+    }
+
     /// The message changed, its cursor at its end: a text set from code says it here.
     pub fn typed(&mut self, text: &str, cx: &mut Context<Self>) {
         self.typed_at(text, text.len(), cx);
@@ -8847,11 +8856,10 @@ impl Reply {
             .map_or(text.len(), |at| cursor + at);
         let slash = text[start..end].strip_prefix('/').map(str::to_owned);
         self.slash_at = start..end;
-        // `/review` is offered while Review is on in the project.
-        self.review = self.shell.upgrade().is_some_and(|shell| {
-            shell
-                .read(cx)
-                .extensions()
+        // `/review` is offered while Review is on in the project. Not read through the shell,
+        // which may be the one setting the text.
+        self.review = self.extensions.upgrade().is_some_and(|extensions| {
+            extensions
                 .read(cx)
                 .active(crate::extensions::review::NAME, &self.project)
         });
