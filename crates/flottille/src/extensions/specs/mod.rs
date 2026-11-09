@@ -333,13 +333,13 @@ struct Decision {
     amended: Vec<Amended>,
 }
 
-/// An amendment accepted on an item: when, and the text it had before, none for an item it
-/// added.
+/// An amendment accepted on an item: when, and what it read before, none for an item it added:
+/// the text of a C, the question, decision and options set aside of a D (`item_of`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Amended {
     at: u64,
-    was: Option<String>,
+    was: Option<Value>,
 }
 
 /// "decided during development, 2026-11-08", of the last amendment accepted on an item.
@@ -1528,7 +1528,10 @@ fn accept(
                     .find(|c| c.id == item)
                     .ok_or_else(|| gone(&item))?;
                 let was = std::mem::replace(&mut c.text, text.clone());
-                c.amended.push(Amended { at, was: Some(was) });
+                c.amended.push(Amended {
+                    at,
+                    was: Some(Value::String(was)),
+                });
                 item
             }
             None => {
@@ -1553,10 +1556,7 @@ fn accept(
                 .find(|d| d.id == item)
                 .ok_or_else(|| gone(&item))?;
             let mut amended = std::mem::take(&mut d.amended);
-            amended.push(Amended {
-                at,
-                was: Some(d.decision.clone()),
-            });
+            amended.push(Amended { at, was: item_was });
             *d = decision_of(asked, item.clone(), amended)?;
             item
         }

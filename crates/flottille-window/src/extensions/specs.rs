@@ -823,7 +823,8 @@ pub struct Amendment {
 }
 
 /// What a development decided of an item: the day of the last amendment accepted on it, and its
-/// text before, none for an item an amendment added.
+/// text before, none for an item an amendment added: a D's says its question, its decision and
+/// the options it set aside.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Decided {
     pub day: String,
@@ -836,7 +837,29 @@ impl Decided {
         let said = crate::session::said_at(last["at"].as_u64().unwrap_or_default());
         Some(Self {
             day: said.split(", ").next().unwrap_or(&said).to_owned(),
-            was: last["was"].as_str().map(str::to_owned),
+            was: match &last["was"] {
+                Value::String(text) => Some(text.clone()),
+                Value::Object(d) => {
+                    let text = |key: &str| d.get(key).and_then(Value::as_str).unwrap_or_default();
+                    let set_aside: Vec<&str> = d
+                        .get("set_aside")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    Some(match set_aside.is_empty() {
+                        true => format!("{} {}", text("question"), text("decision")),
+                        false => format!(
+                            "{} {} Set aside: {}.",
+                            text("question"),
+                            text("decision"),
+                            set_aside.join(", ")
+                        ),
+                    })
+                }
+                _ => None,
+            },
         })
     }
 
@@ -2563,5 +2586,17 @@ mod tests {
         );
         assert!(spec(0, false).not_ready().is_some());
         assert_eq!(spec(0, true).not_ready(), None);
+    }
+
+    #[test]
+    fn a_changed_decision_shows_its_old_question_and_set_aside_options() {
+        let d = json!({"id": "D1", "amended": [{"at": 0, "was": {
+            "question": "Where do the filters go?", "decision": "Above the list.",
+            "set_aside": ["In a side panel"]}}]});
+
+        assert_eq!(
+            Decided::of(&d).unwrap().was.as_deref(),
+            Some("Where do the filters go? Above the list. Set aside: In a side panel.")
+        );
     }
 }

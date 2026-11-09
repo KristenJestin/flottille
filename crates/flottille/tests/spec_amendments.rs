@@ -305,7 +305,7 @@ fn a_changed_item_keeps_its_identifier_and_its_old_text() {
     let d = &shown["decisions"][0];
     assert_eq!(d["id"], "D1", "{shown}");
     assert_eq!(d["decision"], "Above the list, as chips.");
-    assert_eq!(d["amended"][0]["was"], "Above the list.");
+    assert_eq!(d["amended"][0]["was"]["decision"], "Above the list.");
     assert_eq!(shown["behaviour"].as_array().unwrap().len(), 1);
 
     // A new one afterwards takes the next identifier.
@@ -570,4 +570,30 @@ fn accepting_an_amendment_while_the_spec_is_in_draft_is_refused() {
     assert_eq!(amendments(&user, spec)[0]["state"], "pending");
     // Refusing it stays possible.
     answer(&user, spec, n, "refuse");
+}
+
+#[test]
+fn a_changed_decision_keeps_its_question_and_set_aside_options() {
+    let user = user();
+    let (spec, _, mcp) = developed(&user);
+    done(amend(
+        &mcp,
+        spec,
+        json!({"section": "decisions",
+            "content": {"id": "D1", "question": "How are the filters shown?",
+                "decision": "As chips.", "set_aside": ["As fields"]},
+            "why": "Chips rather than fields."}),
+    ));
+    let n = amendments(&user, spec)[0]["amendment"].as_u64().unwrap();
+
+    answer(&user, spec, n, "accept");
+
+    let d = &show(&user, spec)["decisions"][0];
+    assert_eq!(d["question"], "How are the filters shown?", "{d}");
+    assert_eq!(
+        d["amended"][0]["was"],
+        json!({"question": "Where do the filters go?", "decision": "Above the list.",
+            "set_aside": ["In a side panel"]}),
+        "{d}"
+    );
 }
