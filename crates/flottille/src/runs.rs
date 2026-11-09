@@ -541,9 +541,9 @@ pub async fn run(
         url_error,
         workspace: None,
     };
-    // A line the gate let through at once only reads, or writes the files it names; a task may
-    // run anything.
-    let guarded = match approved || run.name.is_some() {
+    // A line the gate let through at once only reads, or writes the files it names; a task, or
+    // a line of the same words, may run anything.
+    let guarded = match approved || run.name.is_some() || a_task(daemon, place, &words) {
         true => Some(guard(daemon, place, &id).await),
         false => None,
     };
@@ -931,6 +931,16 @@ async fn guard(daemon: &Daemon, place: &Place, id: &str) -> Guard {
         .guards
         .enter(&place.root, place.home.as_deref(), &kept, id)
         .await
+}
+
+/// Whether `words` are the line of one of the project's tasks, which the gate lets through as it.
+fn a_task(daemon: &Daemon, place: &Place, words: &[String]) -> bool {
+    projects::load_project(daemon, &place.project).is_ok_and(|project| {
+        project
+            .tasks
+            .values()
+            .any(|task| split_line(&task.line).is_ok_and(|line| line == words))
+    })
 }
 
 /// Whether the run is still starting, not ready yet.
