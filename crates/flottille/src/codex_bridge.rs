@@ -582,7 +582,7 @@ impl Bridge {
     }
 
     /// A tool of Codex's own started: its turn is interrupted, and the prompt fails. Outside a
-    /// prompt, the next one fails, and the thread is not resumed: either way, the agent fails.
+    /// prompt, the next one fails. Either way the agent fails and the thread is not resumed.
     async fn breached(&mut self, item: &Value, turn_id: Option<&str>) {
         let what = match item["type"].as_str() {
             Some("mcpToolCall") => format!(
@@ -599,26 +599,26 @@ impl Bridge {
         let started = match self.turn.as_mut() {
             Some(turn) if turn.breach.is_some() => return,
             Some(turn) => {
-                turn.breach = Some(breach);
+                turn.breach = Some(breach.clone());
                 // Interrupted once: the answer to `turn/start` finds the turn named.
                 turn.turn = turn.turn.clone().or(turn_id.map(str::to_owned));
                 turn.turn.clone()
             }
             None if self.breach.is_some() => return,
             None => {
-                if let Some(codex) = self
-                    .codex
-                    .as_ref()
-                    .filter(|c| claude::is_session_id(&c.thread))
-                {
-                    let marks = codex::breaches(&self.paths);
-                    let _ = std::fs::create_dir_all(&marks)
-                        .and_then(|()| std::fs::write(marks.join(&codex.thread), &breach));
-                }
-                self.breach = Some(breach);
+                self.breach = Some(breach.clone());
                 turn_id.map(str::to_owned)
             }
         };
+        if let Some(codex) = self
+            .codex
+            .as_ref()
+            .filter(|c| claude::is_session_id(&c.thread))
+        {
+            let marks = codex::breaches(&self.paths);
+            let _ = std::fs::create_dir_all(&marks)
+                .and_then(|()| std::fs::write(marks.join(&codex.thread), &breach));
+        }
         if let Some(started) = started {
             self.interrupt(started).await;
         }

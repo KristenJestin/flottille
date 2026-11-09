@@ -2220,7 +2220,8 @@ pub fn root_of(daemon: &Daemon, id: &str) -> String {
 }
 
 /// Whether the agent's session is kept for `agent.resume`: a root that ended or failed (a failure
-/// rarely takes the agent's own session with it, and one that did fails again at its next start)
+/// rarely takes the agent's own session with it, and one that did fails again at its next start,
+/// but for a breach of the bare mode, which `resume_refusal` refuses)
 /// whose agent said it resumes or loads sessions, and that opened one. Flottille forgets it
 /// `KEPT_MS` after the root ended (`forget_kept_sessions`).
 pub fn keeps_session(agent: &Agent) -> bool {
@@ -2235,6 +2236,12 @@ pub const KEPT_MS: u64 = 7 * 24 * 3_600_000;
 pub fn resume_refusal(daemon: &Daemon, agent: &Agent) -> Option<&'static str> {
     if !keeps_session(agent) {
         return Some("its agent can neither resume nor load its session, or it was forgotten");
+    }
+    if agent.native_id.as_deref().is_some_and(|session| {
+        agent.provider == crate::codex::PROVIDER.name
+            && crate::codex::breached(&daemon.paths, session)
+    }) {
+        return Some("its agent started a tool its bare mode shuts off: its session cannot go on");
     }
     // Gone, or made again under the same name since: not the place the session worked in.
     let Ok(project) = projects::load_project(daemon, &agent.project) else {
