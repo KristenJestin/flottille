@@ -66,8 +66,8 @@ pub enum AgentAction {
         /// The ask's number, as `flottille inbox` gives it (default: its oldest open one)
         #[arg(long, value_name = "N")]
         question: Option<u64>,
-        /// `<n>=<text>`, the answer to its question n (from 1), once per question; a single
-        /// answer to a single question needs no number
+        /// `<n>=<text>`, the answer to its question n (from 1), once per question; the answer
+        /// to a single question is the whole text, with no number
         #[arg(long, value_name = "N=TEXT", required = true)]
         answer: Vec<String>,
         #[arg(long)]
@@ -725,30 +725,31 @@ fn doctor_text(report: &Value) -> String {
 }
 
 /// The answers `--answer` gives, one per question of an ask of `count`: `<n>=<text>` each, or
-/// the text alone for a single question.
+/// for a single question the whole text, whatever it starts with.
 fn answers_of(
     count: usize,
     given: &[String],
 ) -> std::result::Result<Vec<flottille_core::question::Answer>, String> {
     let mut answers = vec![flottille_core::question::Answer::default(); count];
+    let mut given_for = vec![false; count];
     for one in given {
-        let numbered = one
-            .split_once('=')
-            .and_then(|(n, text)| Some((n.trim().parse::<usize>().ok()?, text)));
-        let (n, text) = match numbered {
-            Some(found) => found,
-            None if count == 1 => (1, one.as_str()),
-            None => {
-                return Err(format!(
-                    "`{one}`: say which question it answers, as `1={one}`"
-                ));
-            }
+        let (n, text) = if count == 1 {
+            (1, one.as_str())
+        } else {
+            one.split_once('=')
+                .and_then(|(n, text)| Some((n.trim().parse::<usize>().ok()?, text)))
+                .ok_or_else(|| format!("`{one}`: say which question it answers, as `1={one}`"))?
         };
-        let slot = n
+        let at = n
             .checked_sub(1)
-            .and_then(|at| answers.get_mut(at))
+            .filter(|at| *at < count)
             .ok_or_else(|| format!("the ask has {count} questions: no question {n}"))?;
-        slot.text = text.trim().to_owned();
+        if std::mem::replace(&mut given_for[at], true) {
+            return Err(format!(
+                "question {n} is answered twice: give it one `--answer`"
+            ));
+        }
+        answers[at].text = text.trim().to_owned();
     }
     if let Some(at) = answers.iter().position(|a| a.text.is_empty()) {
         return Err(format!(
@@ -1003,7 +1004,6 @@ mod tests {
         let texts: Vec<&str> = three.iter().map(|a| a.text.as_str()).collect();
         assert_eq!(texts, ["Yes", "Export orders", "Alice, Carol"]);
         assert_eq!(answers_of(1, &["Blue.".into()]).unwrap()[0].text, "Blue.");
-        assert_eq!(answers_of(1, &["1=Blue.".into()]).unwrap()[0].text, "Blue.");
         assert!(
             answers_of(3, &["Yes".into()])
                 .unwrap_err()
@@ -1019,5 +1019,24 @@ mod tests {
                 .unwrap_err()
                 .contains("no question 5")
         );
+    }
+
+    #[test]
+    fn a_single_question_answer_that_starts_with_a_number_and_an_equal_sign_is_the_answer() {
+        assert_eq!(answers_of(1, &["2=two".into()]).unwrap()[0].text, "2=two");
+        assert_eq!(
+            answers_of(1, &["1=Blue.".into()]).unwrap()[0].text,
+            "1=Blue."
+        );
+    }
+
+    #[test]
+    fn an_answer_given_twice_to_a_question_is_refused() {
+        let refused = answers_of(2, &["1=Yes".into(), "1=No".into(), "2=Fine".into()]).unwrap_err();
+        assert!(
+            refused.contains("question 1") && refused.contains("twice"),
+            "{refused}"
+        );
+        assert!(answers_of(1, &["Blue.".into(), "Red.".into()]).is_err());
     }
 }

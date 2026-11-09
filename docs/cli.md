@@ -632,8 +632,9 @@ We picked PostgreSQL.
 ### `flottille agent answer <agent> --answer "<n>=<text>"…`
 
 Answers an ask of a root agent (`agent.answer`): one `--answer` per question, `<n>` its number from
-1 as `flottille inbox` shows it; a single answer to an ask of a single question needs no number
-(`--answer "Blue."`). `--question <n>` names the ask by the number `flottille inbox` gives it; left
+1 as `flottille inbox` shows it, each question once (a number given twice is refused); the answer to
+an ask of a single question is the whole text, with no number (`--answer "Blue."`, and `--answer
+"2=two"` answers `2=two`). `--question <n>` names the ask by the number `flottille inbox` gives it; left
 out, the oldest open one. The words go as written (several lines in one argument are kept); an
 option is answered by writing its label. The agent gets one message quoting each question with its
 answer under it, and its other asks still wait. `--json` prints what the daemon answered.
