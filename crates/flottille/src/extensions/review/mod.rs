@@ -406,6 +406,17 @@ fn kind_of(daemon: &Daemon, agent: &str) -> Option<&'static str> {
 fn fact(daemon: &Daemon, agent: &str) -> Option<Value> {
     let (review, kind, pass) = review_of_agent(daemon, agent)?;
     let (done, findings) = progress(daemon, &review);
+    // The pilot's carries the review's findings, `info` included, for its line to show them.
+    let shown: Vec<Finding> = match kind.as_str() {
+        "pilot" => in_space(daemon, |space| {
+            Ok((findings_of(space, &review.session)?, None))
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|finding| finding.review == review.id)
+        .collect(),
+        _ => Vec::new(),
+    };
     Some(json!({
         "review": review.id,
         "kind": kind,
@@ -414,6 +425,7 @@ fn fact(daemon: &Daemon, agent: &str) -> Option<Value> {
         "state": review.state,
         "passes": {"done": done, "total": review.passes.len()},
         "findings": findings,
+        "shown": shown,
         "changed": review.changed,
     }))
 }
@@ -641,7 +653,7 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
                 let event = space.append_event(
                     "review.started",
                     json!({"review": id, "project": project.name, "session": session.id,
-                        "pilot": pilot.id, "round": round, "passes": passes}),
+                        "agent": pilot.id, "round": round, "passes": passes}),
                 )?;
                 Ok((id, Some(event)))
             })
@@ -976,9 +988,16 @@ fn settle(daemon: &Daemon, asked: Settle) -> std::result::Result<Value, Failure>
         if changed == 0 {
             return Ok((false, None));
         }
+        let pilot: Option<String> = space.tables().query_row(
+            "SELECT r.pilot FROM ext_review_findings f JOIN ext_review_reviews r \
+             ON r.id = f.review WHERE f.session = ?1 AND f.key = ?2",
+            params![asked.session, asked.finding],
+            |row| row.get(0),
+        )?;
         let event = space.append_event(
             "review.finding_changed",
-            json!({"session": asked.session, "finding": asked.finding, "status": asked.status}),
+            json!({"session": asked.session, "finding": asked.finding, "status": asked.status,
+                "agent": pilot}),
         )?;
         Ok((true, Some(event)))
     })?;
@@ -1071,9 +1090,9 @@ fn agent_ended(daemon: &Arc<Daemon>, data: &Value) {
     if kind != "pilot" {
         let _ = in_space(daemon, |space| {
             let event = space.append_event(
-                "review.changed",
+                "review.progress",
                 json!({"review": review.id, "project": review.project,
-                    "session": review.session}),
+                    "session": review.session, "agent": review.pilot}),
             )?;
             Ok(((), Some(event)))
         });
@@ -1092,7 +1111,7 @@ fn agent_ended(daemon: &Arc<Daemon>, data: &Value) {
         let event = space.append_event(
             "review.failed",
             json!({"review": review.id, "project": review.project, "session": review.session,
-                "why": reason}),
+                "agent": review.pilot, "why": reason}),
         )?;
         Ok((true, Some(event)))
     })
@@ -1282,9 +1301,9 @@ async fn run_pass(
                     params![child.id, review.id, pass],
                 )?;
                 let event = space.append_event(
-                    "review.changed",
+                    "review.progress",
                     json!({"review": review.id, "project": review.project,
-                        "session": review.session}),
+                        "session": review.session, "agent": review.pilot}),
                 )?;
                 Ok(((), Some(event)))
             })
@@ -1457,7 +1476,7 @@ async fn report(
         let event = space.append_event(
             "review.reported",
             json!({"review": review.id, "project": review.project, "session": review.session,
-                "round": review.round,
+                "agent": review.pilot, "round": review.round,
                 "findings": kept.iter().filter(|f| delivered(f)).count(),
                 "shown": kept.len(), "changed": changed}),
         )?;

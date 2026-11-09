@@ -6329,7 +6329,8 @@ pub struct RailAgent {
     pub extensions: serde_json::Value,
 }
 
-/// A row of the rail: an agent, or the folded row that gathers the ended children of `parent`.
+/// A row of the rail: an agent, the folded row that gathers the ended children of `parent`, or the
+/// folded "Review" line that gathers a review's agents, its pilot and the pilot's passes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RailRow {
     Agent(String),
@@ -6339,6 +6340,17 @@ pub enum RailRow {
         count: usize,
         open: bool,
     },
+    Review {
+        pilot: String,
+        /// The agents behind the line: the pilot and its passes.
+        count: usize,
+        open: bool,
+    },
+}
+
+/// The key a review's line is kept open under, beside the "ended" rows' parents.
+pub fn review_key(pilot: &str) -> String {
+    format!("review:{pilot}")
 }
 
 /// What [`rail_rows`] needs of an agent.
@@ -6346,6 +6358,8 @@ struct Node<'a> {
     id: &'a str,
     parent: Option<&'a str>,
     ended: bool,
+    /// It is the pilot of a review: it and its passes are one line.
+    pilot: bool,
 }
 
 /// The rail's rows, in tree order. A child that ended is left out and counted in the "ended" row
@@ -6370,6 +6384,20 @@ fn rail_rows(nodes: &[Node], open: &HashSet<String>) -> Vec<RailRow> {
     fn walk(nodes: &[Node], open: &HashSet<String>, parent: &str, rows: &mut Vec<RailRow>) {
         let mut gathered: Vec<&str> = Vec::new();
         for child in children(nodes, parent) {
+            if child.pilot {
+                let mut behind = vec![child.id];
+                descendants(nodes, child.id, &mut behind);
+                let open = open.contains(&review_key(child.id));
+                rows.push(RailRow::Review {
+                    pilot: child.id.to_owned(),
+                    count: behind.len(),
+                    open,
+                });
+                if open {
+                    rows.extend(behind.into_iter().map(|id| RailRow::Agent(id.to_owned())));
+                }
+                continue;
+            }
             if child.ended && all_ended(nodes, child.id) {
                 gathered.push(child.id);
                 descendants(nodes, child.id, &mut gathered);
@@ -6402,6 +6430,100 @@ fn rail_rows(nodes: &[Node], open: &HashSet<String>) -> Vec<RailRow> {
         walk(nodes, open, top.id, &mut rows);
     }
     rows
+}
+
+/// What a review's line says of it, from its pilot's facts: `Review · 3/4 passes · 2 findings`,
+/// and how it ended once it did.
+pub fn review_said(facts: &serde_json::Value) -> String {
+    let review = &facts["review"];
+    let mut said = format!(
+        "Review · {}/{} passes",
+        review["passes"]["done"].as_u64().unwrap_or(0),
+        review["passes"]["total"].as_u64().unwrap_or(0)
+    );
+    match review["state"].as_str() {
+        Some("done") => {
+            let found = review["findings"].as_u64().unwrap_or(0);
+            said.push_str(&format!(
+                " · {found} finding{}",
+                if found == 1 { "" } else { "s" }
+            ));
+        }
+        Some("failed") => said.push_str(" · ended without its findings"),
+        _ => {}
+    }
+    if review["changed"].is_string() {
+        said.push_str(" · the workspace changed");
+    }
+    said
+}
+
+/// The findings of a review, under its line: each its identifier, severity and confidence, its
+/// place, what is wrong, and its status, which fades to a new one; each enters as it comes.
+fn review_findings(pilot: &str, facts: &serde_json::Value, p: Palette) -> Vec<AnyElement> {
+    let text = |value: &serde_json::Value| value.as_str().unwrap_or_default().to_owned();
+    facts["review"]["shown"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(at, finding)| {
+            let id = text(&finding["id"]);
+            let place = match (finding["file"].as_str(), finding["lines"].as_str()) {
+                (Some(file), Some(lines)) => format!(" · {file}:{lines}"),
+                (Some(file), None) => format!(" · {file}"),
+                _ => String::new(),
+            };
+            let head = format!(
+                "{id} · {} · {}{place}",
+                text(&finding["severity"]),
+                text(&finding["confidence"])
+            );
+            let said = text(&finding["text"]);
+            let status = match finding["status"].as_str() {
+                Some("settle") => "to settle with you".to_owned(),
+                Some(status) => status.to_owned(),
+                None => String::new(),
+            };
+            let label = format!("{head} · {status}: {said}");
+            enter(
+                ElementId::Name(format!("rail-finding-{pilot}-{id}").into()),
+                at,
+                div()
+                    .id(ElementId::Name(
+                        format!("rail-finding-row-{pilot}-{id}").into(),
+                    ))
+                    .py(space::XS)
+                    .px(space::SM)
+                    .flex()
+                    .flex_col()
+                    .aria_label(label)
+                    .child(
+                        div()
+                            .flex()
+                            .gap(space::SM)
+                            .text_size(px(11.))
+                            .text_color(p.faint)
+                            .child(head)
+                            .child(changing(
+                                ElementId::Name(format!("rail-finding-status-{pilot}-{id}").into()),
+                                status,
+                                |status| div().child(status).into_any_element(),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(p.text)
+                            .text_ellipsis()
+                            .overflow_hidden()
+                            .child(said),
+                    )
+                    .test_support(),
+            )
+            .into_any_element()
+        })
+        .collect()
 }
 
 /// A count of tokens as the row says it: `812`, `45k`, `1.2M`.
@@ -6670,6 +6792,7 @@ impl SessionRail {
                 id: &a.id,
                 parent: a.parent.as_deref(),
                 ended: a.ended,
+                pilot: a.extensions["review"]["kind"] == "pilot",
             })
             .collect();
         rail_rows(&nodes, open)
@@ -6842,13 +6965,18 @@ impl Render for SessionRail {
         let turns: HashMap<String, f32> = listed
             .iter()
             .filter_map(|row| match row {
-                RailRow::Ended { parent, .. } => Some(parent.clone()),
-                _ => None,
+                RailRow::Ended { parent, .. } => {
+                    Some((parent.clone(), format!("rail-ended-{parent}")))
+                }
+                RailRow::Review { pilot, .. } => {
+                    Some((review_key(pilot), format!("rail-review-{pilot}")))
+                }
+                RailRow::Agent(_) => None,
             })
-            .map(|parent| {
-                let open = self.open_ended.contains(&parent);
-                let id = ElementId::Name(format!("rail-ended-{parent}").into());
-                (parent, turning(id, open, window, cx))
+            .map(|(key, id)| {
+                let open = self.open_ended.contains(&key);
+                let id = ElementId::Name(id.into());
+                (key, turning(id, open, window, cx))
             })
             .collect();
         let agent_menu = self.agent_menu.clone();
@@ -7193,6 +7321,35 @@ impl Render for SessionRail {
                 cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)),
             ))
         };
+        // A review's line says its state; a new state fades in as it changes.
+        let review_line = |pilot: &str, open: bool, turn: f32, cx: &Context<Self>| {
+            let depth = self
+                .agents
+                .iter()
+                .find(|a| a.id == pilot)
+                .map_or(1, |a| a.depth);
+            let indent = space::LG * depth as f32;
+            let said = SharedString::from(
+                self.agents
+                    .iter()
+                    .find(|a| a.id == pilot)
+                    .map_or_else(|| "Review".to_owned(), |a| review_said(&a.extensions)),
+            );
+            let key = review_key(pilot);
+            div().pl(indent).child(runs::ended_row(
+                ElementId::Name(format!("rail-review-{pilot}").into()),
+                said.clone(),
+                changing(
+                    ElementId::Name(format!("rail-review-state-{pilot}").into()),
+                    said,
+                    |said| div().child(said).into_any_element(),
+                ),
+                open,
+                turn,
+                p,
+                cx.listener(move |this, _, _, cx| this.toggle_ended(&key, cx)),
+            ))
+        };
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut listed = listed.into_iter();
         while let Some(row) = listed.next() {
@@ -7232,7 +7389,7 @@ impl Render for SessionRail {
                                 let agent = self.agents.iter().find(|a| a.id == id)?;
                                 Some(agent_row(agent, window, cx).into_any_element())
                             }
-                            RailRow::Ended { .. } => None,
+                            RailRow::Ended { .. } | RailRow::Review { .. } => None,
                         })
                         .collect();
                     let Some(fold) = self.ended_folds.get(&parent) else {
@@ -7242,6 +7399,56 @@ impl Render for SessionRail {
                         fold_frame(
                             ElementId::Name(format!("rail-ended-children-{parent}").into()),
                             self.open_ended.contains(&parent),
+                            fold.motion.is_running(now),
+                            fold.motion.value(now),
+                            &fold.height,
+                            div().flex().flex_col().children(children),
+                        )
+                        .into_any_element(),
+                    );
+                }
+                RailRow::Review { pilot, count, open } => {
+                    let key = review_key(&pilot);
+                    rows.push(
+                        review_line(
+                            &pilot,
+                            self.open_ended.contains(&key),
+                            turns.get(&key).copied().unwrap_or(0.0),
+                            cx,
+                        )
+                        .into_any_element(),
+                    );
+                    if !open {
+                        continue;
+                    }
+                    // The pilot and its passes behind the line follow it, and fold with it, then
+                    // the review's findings.
+                    let mut children: Vec<AnyElement> = listed
+                        .by_ref()
+                        .take(count)
+                        .filter_map(|row| match row {
+                            RailRow::Agent(id) => {
+                                let agent = self.agents.iter().find(|a| a.id == id)?;
+                                Some(agent_row(agent, window, cx).into_any_element())
+                            }
+                            RailRow::Ended { .. } | RailRow::Review { .. } => None,
+                        })
+                        .collect();
+                    if let Some(pilot_agent) = self.agents.iter().find(|a| a.id == pilot) {
+                        let indent = space::LG * (pilot_agent.depth as f32 + 1.0);
+                        children.extend(
+                            review_findings(&pilot, &pilot_agent.extensions, p)
+                                .into_iter()
+                                .map(|row| div().pl(indent).child(row).into_any_element()),
+                        );
+                    }
+                    let Some(fold) = self.ended_folds.get(&key) else {
+                        continue;
+                    };
+                    rows.push(
+                        fold_frame(
+                            ElementId::Name(format!("rail-review-children-{pilot}").into()),
+                            self.open_ended.contains(&key),
                             fold.motion.is_running(now),
                             fold.motion.value(now),
                             &fold.height,
@@ -9543,7 +9750,62 @@ mod tests {
     }
 
     fn node<'a>(id: &'a str, parent: Option<&'a str>, ended: bool) -> Node<'a> {
-        Node { id, parent, ended }
+        Node {
+            id,
+            parent,
+            ended,
+            pilot: false,
+        }
+    }
+
+    #[test]
+    fn a_review_s_agents_are_one_folded_line_ended_or_not() {
+        let nodes = [
+            node("lead", None, false),
+            Node {
+                pilot: true,
+                ..node("pilot", Some("lead"), false)
+            },
+            node("bugs", Some("pilot"), true),
+            node("standards", Some("pilot"), false),
+            node("helper", Some("lead"), false),
+        ];
+        assert_eq!(
+            rail_rows(&nodes, &HashSet::new()),
+            [
+                agent_row("lead"),
+                RailRow::Review {
+                    pilot: "pilot".into(),
+                    count: 3,
+                    open: false
+                },
+                agent_row("helper"),
+            ]
+        );
+        let open: HashSet<String> = [review_key("pilot")].into();
+        assert_eq!(
+            rail_rows(&nodes, &open)[1..5],
+            [
+                RailRow::Review {
+                    pilot: "pilot".into(),
+                    count: 3,
+                    open: true
+                },
+                agent_row("pilot"),
+                agent_row("bugs"),
+                agent_row("standards"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_review_s_line_says_its_passes_and_its_findings() {
+        let running = serde_json::json!({"review": {"state": "running",
+            "passes": {"done": 1, "total": 2}, "findings": 0, "changed": null}});
+        assert_eq!(review_said(&running), "Review · 1/2 passes");
+        let done = serde_json::json!({"review": {"state": "done",
+            "passes": {"done": 3, "total": 4}, "findings": 2, "changed": null}});
+        assert_eq!(review_said(&done), "Review · 3/4 passes · 2 findings");
     }
 
     fn agent_row(id: &str) -> RailRow {
