@@ -217,9 +217,16 @@ fn the_jira_tracker_shows_the_worklog_entry_and_saves_it(cx: &mut TestAppContext
     let file = std::fs::read_to_string(user.project_file("app")).unwrap();
     assert!(!file.contains(SECRET), "{file}");
 
-    // None, chosen again, takes it off.
+    // None, chosen again, takes it off. The saved file is read again and the dialog's choices come
+    // from the daemon: a fixed settle polls neither, so each is waited for.
+    until(&shell, cx, "the saved settings are read again", |cx| {
+        page.read_with(cx, |page, cx| page.has_read(cx) && page.dialog().is_none())
+    });
     settle(cx);
     cx.update(|window, cx| window.click("tracker-row", cx));
+    until(&shell, cx, "the dialog shows the entry again", |cx| {
+        has("tracker-worklog", cx)
+    });
     settle(cx);
     cx.update(|window, cx| window.click("tracker-worklog", cx));
     settle(cx);
