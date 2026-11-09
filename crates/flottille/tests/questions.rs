@@ -62,6 +62,11 @@ fn asks_then_works(questions: &[&str]) -> Value {
     asks_then_works_steps(steps)
 }
 
+/// The same, the agent making this one call (an `ask`) instead.
+fn asks_then_works_with(call: Value) -> Value {
+    asks_then_works_steps(vec![call])
+}
+
 fn asks_then_works_steps(mut steps: Vec<Value>) -> Value {
     steps.push(json!({"mcp": {"tool": "fs_list", "arguments": {"path": "."}}}));
     steps.push(json!({"hold": "release"}));
@@ -863,6 +868,29 @@ fn a_withdrawn_answer_lets_the_question_be_answered_again() {
     });
     assert!(prompts(&user).iter().all(|p| !p.contains("Red")));
     eventually("no longer open", || open_seqs(&user, &id).is_empty());
+}
+
+#[test]
+fn a_several_question_ask_moved_to_the_user_keeps_its_questions_and_options() {
+    let user = User::with_fake_agent();
+    let (_, (session, _)) = asking_with(
+        &user,
+        "led",
+        "full",
+        asks_then_works_with(three_questions()),
+    );
+    user.call("agent.detach", json!({"agent": session}))
+        .unwrap();
+
+    eventually("the ask moved to the user", || {
+        !open_seqs(&user, &session).is_empty()
+    });
+    let entry = root_of_tree(&user, &session)["questions"][0].clone();
+    let questions = entry["questions"].as_array().unwrap();
+    assert_eq!(questions.len(), 3, "{entry}");
+    assert_eq!(questions[0]["options"][1]["label"], "Not yet", "{entry}");
+    assert_eq!(questions[2]["multiple"], true, "{entry}");
+    release(&user);
 }
 
 #[test]

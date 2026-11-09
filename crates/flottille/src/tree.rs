@@ -1703,7 +1703,8 @@ pub fn questions_to_user(daemon: &Daemon, session: &Agent, pilot: &str) -> usize
                 AgentChange::default(),
                 Some((
                     "agent.asked",
-                    json!({"agent": session.id, "question": question["question"], "to": "user",
+                    json!({"agent": session.id, "question": question["question"],
+                        "questions": question["questions"], "to": "user",
                         "pilot": null, "moved_from": pilot}),
                 )),
             )?;
