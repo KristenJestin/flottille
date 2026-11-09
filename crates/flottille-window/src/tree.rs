@@ -4,6 +4,7 @@
 //! a folded project, and the "Ended" group, show the strongest mark of what they hold.
 
 use std::collections::HashSet;
+use std::f32::consts::FRAC_PI_2;
 
 use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, PANEL};
@@ -15,9 +16,9 @@ use flottille_ui::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
-    TestSupportExt as _, WeakEntity, Window, div, px, relative,
+    TestSupportExt as _, Transformation, WeakEntity, Window, div, px, radians, relative,
 };
 
 use crate::actions::Command;
@@ -1172,43 +1173,6 @@ impl Render for SessionRow {
                 row.expanded(self.open)
                     .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
             });
-        // A led row is indented under its pilot's and starts with a mark that names it; both
-        // move over PANEL as the row comes under its pilot or leaves it.
-        let led = fade(
-            ElementId::Name(format!("session-led-fade-{}", self.id).into()),
-            self.led_by.is_some(),
-            PANEL,
-            window,
-            cx,
-        );
-        if led > 0.0 {
-            let p = palette(cx);
-            let mark = tipped(
-                div()
-                    .id(session_led_id(&self.id))
-                    .flex()
-                    .items_center()
-                    .h(px(MARK))
-                    .aria_label(self.led_said.clone())
-                    .child(
-                        flottille_ui::icon(Icon::Agents)
-                            .size(px(12.))
-                            .text_color(p.faint),
-                    ),
-                self.led_said.clone(),
-                MARK,
-                window,
-                cx,
-            );
-            row = row.leading(
-                div()
-                    .flex_none()
-                    .w(px(LED_MARK * led))
-                    .overflow_hidden()
-                    .opacity(led)
-                    .child(mark),
-            );
-        }
         let when = match &self.scope {
             Some(scope) => SharedString::from(format!("{scope} · {}", self.ago)),
             None => self.ago.clone(),
@@ -1285,15 +1249,17 @@ impl Render for SessionRow {
             None => (TWO_LINES - (FIRST + LINE)) / 2. + FIRST / 2.,
             Some(_) => 14.,
         };
+        let arrow = (tied > 0.0).then(|| self.led_arrow(window, cx));
         div()
             .relative()
             .pl(space::XL * (self.tie_shown.depth() as f32 * tied))
-            .when(tied > 0.0, |d| {
+            .when_some(arrow, |d, arrow| {
                 d.child(tree_tie(
                     session_id(&self.id),
                     &self.tie_shown,
                     first_line,
                     tied,
+                    arrow,
                     cx,
                 ))
             })
@@ -1301,13 +1267,35 @@ impl Render for SessionRow {
     }
 }
 
-/// The width of the mark a led session's row starts with.
-const LED_MARK: f32 = 14.;
-
 /// The words the pencil of a draft says.
 const DRAFT_SAID: &str = "Draft not sent";
 
 impl SessionRow {
+    /// The arrowhead that ends the connector of a led row, saying who leads it.
+    fn led_arrow(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        tipped(
+            div()
+                .id(session_led_id(&self.id))
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(12.))
+                .aria_label(self.led_said.clone())
+                .child(
+                    flottille_ui::icon(Icon::Chevron)
+                        .size(px(12.))
+                        .text_color(p.faint)
+                        .with_transformation(Transformation::rotate(radians(-FRAC_PI_2))),
+                ),
+            self.led_said.clone(),
+            12.,
+            window,
+            cx,
+        )
+        .into_any_element()
+    }
+
     /// The pencil of an unsent draft, beside the row's own mark: its ink warms on the pointer.
     fn draft_mark(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
