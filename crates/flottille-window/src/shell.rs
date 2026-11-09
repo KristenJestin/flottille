@@ -1494,6 +1494,16 @@ impl Shell {
                     );
                 }
             }
+            Outcome::Guidance {
+                name,
+                written,
+                shown,
+            } => {
+                let editor = self.extensions.read(cx).guidance(&name).cloned();
+                if let Some(editor) = editor {
+                    editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
+                }
+            }
             Outcome::JudgeGuidance { written, shown } => {
                 let editor = self.settings.read(cx).judge_guidance().clone();
                 editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));

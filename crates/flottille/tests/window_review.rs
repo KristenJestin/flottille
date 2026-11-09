@@ -13,6 +13,7 @@ use common::mcp::Mcp;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::session::{RailRow, SessionPage};
+use flottille_window::shell::Selection;
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -292,4 +293,88 @@ fn slash_review_in_the_composer_starts_a_review_and_sends_nothing(cx: &mut TestA
         !prompts.iter().any(|p| p.to_string().contains("/review")),
         "the agent read it"
     );
+}
+
+fn review_listed(user: &User) -> Value {
+    user.call("extension.list", json!({})).unwrap()["extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "review")
+        .cloned()
+        .unwrap()
+}
+
+/// One frame, 16 ms on: how many elements it drew that move.
+fn step(cx: &mut VisualTestContext) -> usize {
+    cx.executor().advance_clock(Duration::from_millis(16));
+    let drawn = cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    drawn
+}
+
+#[gpui_kit::test]
+fn review_s_tab_has_its_switch_its_passes_its_slots_and_its_guidance(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    shell.update_in(cx, |s, window, cx| s.open(Selection::Settings, window, cx));
+    until(&shell, cx, "the Review tab is offered", |cx| {
+        present(cx, "settings-tabs-review")
+    });
+    cx.update(|window, cx| window.click("settings-tabs-review", cx));
+    settle(cx);
+    // Off: the switch and its one line.
+    assert_eq!(label(cx, "review-switch-label").as_deref(), Some("On"));
+    assert!(!present(cx, "review-setting-passes-label"));
+    assert!(!present(cx, "review-guidance-text"));
+
+    cx.update(|window, cx| window.click("review-switch", cx));
+    until(&shell, cx, "the daemon has it on", |_| {
+        review_listed(&user)["enabled"] == true
+    });
+    until(&shell, cx, "the settings unfold", |cx| {
+        present(cx, "review-setting-passes-label")
+    });
+    assert!(step(cx) + step(cx) > 0, "they unfold");
+    settle(cx);
+    for id in [
+        "review-setting-passes-spec",
+        "review-setting-passes-bugs",
+        "review-setting-passes-standards",
+        "review-setting-passes-security",
+        "review-setting-bugs_model-select",
+        "review-setting-verifier_model-select",
+        "review-guidance-text",
+        "review-guidance-save",
+    ] {
+        assert!(present(cx, id), "{id}");
+    }
+
+    // A pass switched on is the daemon's, in the declaration's order.
+    cx.update(|window, cx| window.click("review-setting-passes-security", cx));
+    until(&shell, cx, "the passes are kept", |_| {
+        review_listed(&user)["settings"][0]["value"]
+            == json!(["spec", "bugs", "standards", "security"])
+    });
+
+    // The guidance is the daemon's to keep, as the judge's is.
+    let editor = shell
+        .read_with(cx, |s, cx| {
+            s.extensions().read(cx).guidance("review").cloned()
+        })
+        .unwrap();
+    until(&shell, cx, "the guidance is read", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    let field = editor.read_with(cx, |e, _| e.field().cloned()).unwrap();
+    field.update_in(cx, |field, window, cx| {
+        field.set_value("Look at the migrations first.", window, cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("review-guidance-save", cx));
+    until(&shell, cx, "the guidance is kept", |_| {
+        user.call("review.show", json!({})).unwrap()["text"] == "Look at the migrations first."
+    });
 }
