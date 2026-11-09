@@ -3358,6 +3358,23 @@ impl Store {
         Ok(())
     }
 
+    /// What `read` reads of the tables of the extension `name`, confined as in its space, in a
+    /// transaction that keeps nothing: never a write lock taken to read.
+    pub fn read_space<T>(
+        &self,
+        name: &str,
+        read: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        let prefix = prefix_of(name)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let confinement = Confinement::enter(&transaction, &self.confined, prefix)?;
+        let read = read(&transaction);
+        // Before the transaction, rolled back outside the confinement.
+        drop(confinement);
+        drop(transaction);
+        read
+    }
+
     /// The space of the extension `name`: one transaction over its own tables, in which its events
     /// are stored with the change they say. Nothing is kept unless it is committed.
     pub fn space(&mut self, name: &str) -> Result<Space<'_>> {
@@ -6671,6 +6688,38 @@ mod tests {
             .tables()
             .execute("UPDATE ext_test_notes SET at = 1", [])
             .unwrap();
+    }
+
+    #[test]
+    fn an_extension_reads_its_own_tables_without_writing_and_nothing_else() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_notes (text) VALUES ('kept')", [])
+            .unwrap();
+        space.commit().unwrap();
+
+        let read = store.read_space("test", |tables| {
+            tables
+                .execute("INSERT INTO ext_test_notes (text) VALUES ('not kept')", [])
+                .unwrap();
+            Ok(
+                tables.query_row("SELECT count(*) FROM ext_test_notes", [], |row| {
+                    row.get::<_, u64>(0)
+                })?,
+            )
+        });
+        let outside = store.read_space("test", |tables| {
+            Ok(tables.query_row("SELECT count(*) FROM agents", [], |row| {
+                row.get::<_, u64>(0)
+            })?)
+        });
+
+        assert_eq!(read.unwrap(), 2);
+        assert_eq!(notes(&mut store), ["kept"]);
+        assert!(outside.is_err());
     }
 
     fn schema(store: &Store) -> Vec<String> {
