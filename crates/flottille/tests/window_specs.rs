@@ -35,12 +35,13 @@ fn user() -> User {
         .with_env("GIT_SSH_COMMAND", "false")
 }
 
-/// What the fake `gh` answers of an issue of `acme/app`.
+/// What the fake `gh` answers of an issue of `acme/app`: assigned to the user, as the tickets tab
+/// shows the user's own by default.
 fn issue(number: u64, title: &str) -> Value {
     json!({
         "number": number, "title": title, "state": "OPEN", "body": "What is asked.",
         "url": format!("https://github.com/acme/app/issues/{number}"),
-        "author": {"login": "other"}, "assignees": [], "labels": [],
+        "author": {"login": "other"}, "assignees": [{"login": "someone"}], "labels": [],
         "updatedAt": OLD, "comments": []
     })
 }
