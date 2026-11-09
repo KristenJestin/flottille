@@ -6,6 +6,7 @@
 //! own view: a session changing redraws its card, a letter typed in the composer redraws neither.
 
 use crate::state::{AgentState, StateIcon, Status};
+use crate::steps::{StepRow, StepTone};
 use std::collections::HashMap;
 
 use flottille_core::workspace::StepState;
@@ -13,9 +14,9 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::PANEL;
 use flottille_ui::{
     Block, Button, Card, CardHead, Chip, Confirm, Field, FlatRow, FooterAction, Icon, Item,
-    LINE_GAP, LabelledLine, Listing, Menu, Modal, PageHeader, Section, Skeleton, StepRow, StepTone,
-    Toast, Type, awaiting, caption, changing, enter, fade, follow_theme, hoverable, icon,
-    lines_block, palette, presence, presence_of, selectable, space, toast,
+    LINE_GAP, LabelledLine, Listing, Menu, Modal, PageHeader, Section, Skeleton, Toast, Type,
+    awaiting, caption, changing, enter, fade, follow_theme, hoverable, icon, lines_block, palette,
+    presence, presence_of, selectable, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;

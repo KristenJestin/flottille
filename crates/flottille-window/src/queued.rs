@@ -10,12 +10,12 @@
 //! A message sent from the composer while the root works shows here at once, being sent, and
 //! becomes the waiting one in its place once the daemon put it in the queue.
 
+use crate::steps::commanded_text;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use flottille_ui::{
-    Button, Icon, Item, Listing, Placement, changing, commanded_text, icon, palette, presence,
-    space, tipped,
+    Button, Icon, Item, Listing, Placement, changing, icon, palette, presence, space, tipped,
 };
 use gpui_kit::{
     AnyElement, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,

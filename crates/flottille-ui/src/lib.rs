@@ -51,8 +51,7 @@ pub use interact::{
     keys_held, open_overlay, pressable, selectable, text_region, tint,
 };
 pub use lines::{
-    CardHead, Chip, FlatRow, FooterAction, LINE_GAP, LabelledLine, StepRow, StepTone, caption,
-    commanded_text, lines_block,
+    CardHead, Chip, FlatRow, FooterAction, LINE_GAP, LabelledLine, caption, lines_block,
 };
 pub use listing::{Item, Listing, Placement};
 pub use menu::Menu;
