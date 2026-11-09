@@ -245,10 +245,20 @@ fn the_review_s_agents_are_one_folded_line_of_the_tree(cx: &mut TestAppContext) 
         label(cx, &row).is_some_and(|said| said.contains("· dismissed:"))
     });
 
-    // A second click folds it away again.
+    // A second click folds it away again, and nothing moves at rest.
     cx.update(|window, cx| window.click(format!("rail-review-{pilot_id}"), cx));
     settle(cx);
     assert!(!present(cx, &format!("rail-row-{pilot_id}")));
+    at_rest(cx);
+}
+
+fn at_rest(cx: &mut VisualTestContext) {
+    settle(cx);
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves at rest"
+    );
 }
 
 #[gpui_kit::test]
@@ -377,6 +387,7 @@ fn review_s_tab_has_its_switch_its_passes_its_slots_and_its_guidance(cx: &mut Te
     until(&shell, cx, "the guidance is kept", |_| {
         user.call("review.show", json!({})).unwrap()["text"] == "Look at the migrations first."
     });
+    at_rest(cx);
 }
 
 #[gpui_kit::test]
