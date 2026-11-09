@@ -255,104 +255,168 @@ fn tokens(text: &str) -> Vec<(usize, usize)> {
     }
     // A login file's field, from its key to the quote that ends its value: past the text's end
     // while that quote is still coming, even after a whitespace.
-    found.extend(login_fields(text).into_iter().map(|field| {
-        let end = field.value.map_or(text.len() + 1, |(_, end)| end + 1);
-        (field.at, end)
-    }));
+    found.extend(
+        login_fields(text)
+            .into_iter()
+            .map(|field| (field.at, field.end)),
+    );
     found
 }
 
-/// The keys, lowercase and without `_`, whose string value is a token in an agent's login file:
-/// Claude's `.credentials.json` (`accessToken`, `refreshToken`), Codex's `auth.json`
-/// (`id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY`), wherever such a file is
-/// shown (a diff, a stash, a revision of it).
-const LOGIN_KEYS: [&str; 5] = [
-    "accesstoken",
-    "refreshtoken",
-    "idtoken",
-    "openaiapikey",
-    "apikey",
-];
+/// How the keys whose string value is a token end, lowercase and without `_` or `-`: an agent's
+/// login file (Claude's `.credentials.json`: `accessToken`, `refreshToken`; Codex's `auth.json`:
+/// `id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY`) and others like it
+/// (`clientSecret`, `primaryApiKey`), wherever such a file is shown (a diff, a stash, a revision
+/// of it).
+const LOGIN_KEY_ENDS: [&str; 3] = ["token", "apikey", "secret"];
 
-/// A key of `LOGIN_KEYS` in a text, quoted, from its opening quote.
-struct LoginField {
-    at: usize,
-    /// Where its string value is, without its quotes: to its end when it is cut short. `None`
-    /// while the text ends before it starts.
-    value: Option<(usize, usize)>,
+/// Whether `key` names a token (`LOGIN_KEY_ENDS`).
+fn login_key(key: &str) -> bool {
+    let key: String = key
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    LOGIN_KEY_ENDS.iter().any(|end| key.ends_with(end))
 }
 
-/// Each `"<key>": "<value>"` of `text` whose key is in `LOGIN_KEYS`, and one still coming at its
-/// end.
+/// A key of `LOGIN_KEY_ENDS` in a text, quoted, from its opening quote.
+struct LoginField {
+    at: usize,
+    /// Where its string values are, without their quotes, to the text's end when one is cut
+    /// short: one, or a word diff's old and new (`[-"…"-]{+"…"+}`).
+    values: Vec<(usize, usize)>,
+    /// Where the field ends: past the text's end while it may still be coming.
+    end: usize,
+}
+
+/// Each `"<key>": "<value>"` of `text` whose key names a token, and one that may still be
+/// coming at its end. A value may be on the next line of a diff (`+`, `-`), or a word diff's.
 fn login_fields(text: &str) -> Vec<LoginField> {
     let bytes = text.as_bytes();
-    let blank = |at: usize| {
-        (at..text.len())
-            .find(|&at| !bytes[at].is_ascii_whitespace())
-            .unwrap_or(text.len())
+    let len = text.len();
+    let coming = len + 1;
+    // Whitespace, and the `+` or `-` a diff starts a line with.
+    let blank = |mut at: usize| {
+        let mut line = false;
+        while at < len {
+            match bytes[at] {
+                b'\n' => line = true,
+                b'+' | b'-' if line => line = false,
+                byte if byte.is_ascii_whitespace() => line = false,
+                _ => break,
+            }
+            at += 1;
+        }
+        at
     };
+    // The quote that ends a value, or the text's end.
+    let closing = |mut at: usize| {
+        while at < len && !matches!(bytes[at], b'"' | b'\n') {
+            at += if bytes[at] == b'\\' { 2 } else { 1 };
+        }
+        at.min(len)
+    };
+    // Whether the text ends inside `word`, which may then still come.
+    let cut =
+        |at: usize, word: &[u8]| bytes[at..].len() < word.len() && word.starts_with(&bytes[at..]);
     let mut found = Vec::new();
     let mut from = 0;
     while let Some(at) = text[from..].find('"').map(|i| from + i) {
         from = at + 1;
         let after = text[from..]
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .map_or(text.len(), |end| from + end);
-        let key: String = text[from..after]
-            .chars()
-            .filter(|c| *c != '_')
-            .map(|c| c.to_ascii_lowercase())
-            .collect();
-        if after == text.len() {
-            if !key.is_empty() && LOGIN_KEYS.iter().any(|known| known.starts_with(&key)) {
-                found.push(LoginField { at, value: None });
-            }
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-')))
+            .map_or(len, |end| from + end);
+        if after == len {
+            // Any key still coming may end as one.
+            found.push(LoginField {
+                at,
+                values: Vec::new(),
+                end: coming,
+            });
             break;
         }
-        if bytes[after] != b'"' || !LOGIN_KEYS.contains(&key.as_str()) {
+        if bytes[after] != b'"' || !login_key(&text[from..after]) {
             continue;
         }
         let colon = blank(after + 1);
-        if colon == text.len() {
-            found.push(LoginField { at, value: None });
+        if colon == len {
+            found.push(LoginField {
+                at,
+                values: Vec::new(),
+                end: coming,
+            });
             break;
         }
         if bytes[colon] != b':' {
             continue;
         }
-        let quote = blank(colon + 1);
-        if quote == text.len() {
-            found.push(LoginField { at, value: None });
-            break;
+        let mut field = LoginField {
+            at,
+            values: Vec::new(),
+            end: coming,
+        };
+        let mut next = blank(colon + 1);
+        // The value, or a word diff's old one and then its new one.
+        let mut marks: &[&[u8]] = &[b"\"", b"[-\"", b"{+\""];
+        loop {
+            let Some(mark) = marks.iter().find(|mark| bytes[next..].starts_with(mark)) else {
+                if !marks.iter().any(|mark| cut(next, mark)) {
+                    field.end = next;
+                }
+                break;
+            };
+            let start = next + mark.len();
+            let stop = closing(start);
+            field.values.push((start, stop));
+            if stop == len {
+                break;
+            }
+            field.end = stop + 1;
+            let shut: &[u8] = match *mark {
+                b"[-\"" => b"-]",
+                b"{+\"" => b"+}",
+                _ => break,
+            };
+            if cut(stop + 1, shut) {
+                field.end = coming;
+                break;
+            }
+            if !bytes[stop + 1..].starts_with(shut) {
+                break;
+            }
+            field.end = stop + 3;
+            if *mark != b"[-\"" {
+                break;
+            }
+            next = blank(field.end);
+            marks = &[b"{+\""];
         }
-        if bytes[quote] != b'"' {
+        if field.values.is_empty() && field.end != coming {
             continue;
         }
-        let start = quote + 1;
-        let mut end = start;
-        while end < text.len() && !matches!(bytes[end], b'"' | b'\n') {
-            end += if bytes[end] == b'\\' { 2 } else { 1 };
+        from = field.end.min(len).max(from);
+        let done = field.end == coming;
+        found.push(field);
+        if done {
+            break;
         }
-        let end = end.min(text.len());
-        found.push(LoginField {
-            at,
-            value: Some((start, end)),
-        });
-        from = end;
     }
     found
 }
 
-/// The string value of each key of `LOGIN_KEYS`, masked.
+/// The string value of each key that names a token, masked.
 fn mask_login_fields(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut from = 0;
-    for field in login_fields(text) {
-        if let Some((start, end)) = field.value.filter(|(start, end)| end > start) {
-            out.push_str(&text[from..start]);
-            out.push_str(MASK);
-            from = end;
-        }
+    for (start, end) in login_fields(text)
+        .into_iter()
+        .flat_map(|field| field.values)
+        .filter(|(start, end)| end > start)
+    {
+        out.push_str(&text[from..start]);
+        out.push_str(MASK);
+        from = end;
     }
     out.push_str(&text[from..]);
     out
@@ -772,5 +836,34 @@ mod tests {
                 assert_eq!(streamed(LOGINS, &[cut], &BTreeMap::new()), masked, "{cut}");
             }
         }
+    }
+
+    #[test]
+    fn a_token_key_of_any_login_file_is_masked_in_a_diff_and_a_word_diff() {
+        let text = "+  \"clientSecret\": \"fake-client-0123456789\",\n\
+            -  \"primaryApiKey\":\n\
+            -    \"fake-primary-0123456789\",\n\
+            +  \"ACCESS_TOKEN\" :\n+  \"fake-upper-0123456789\"\n\
+            \"accessToken\": [-\"fake-old-0123456789\"-]{+\"fake-new-0123456789\"+},\n\
+            \"refreshToken\": {+\"fake-added-0123456789\"+}\n";
+        let masked = mask(text, &BTreeMap::new());
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("\"accessToken\": [-\"[masked]\"-]{+\"[masked]\"+}"),
+            "{masked}"
+        );
+        for cut in 1..text.len() {
+            assert_eq!(streamed(text, &[cut], &BTreeMap::new()), masked, "{cut}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_key_near_a_token_s_name_is_not_masked() {
+        let text = "{\"token_type\": \"Bearer\", \"tokenizer\": \"cl100k\", \
+            \"secretName\": \"db-password\", \"max_tokens\": 100, \
+            \"description\": \"the access token\", \"tokens\": {}}\n\
+            +    \"note\": [-\"old text\"-]{+\"new text\"+}\n";
+        assert_eq!(mask(text, &BTreeMap::new()), text);
     }
 }
