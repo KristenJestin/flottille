@@ -282,7 +282,15 @@ impl RenderOnce for Section {
                     .test_support(),
             )
             .when_some(self.count, |d, count| {
-                d.child(div().mono(11.).text_color(p.faint).child(count))
+                d.child(
+                    div()
+                        .id(part(&self.id, "count"))
+                        .aria_label(count.clone())
+                        .mono(11.)
+                        .text_color(p.faint)
+                        .child(count)
+                        .test_support(),
+                )
             })
             .when_some(self.tag, |d, tag| {
                 d.child(

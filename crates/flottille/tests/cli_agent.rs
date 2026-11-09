@@ -191,6 +191,26 @@ fn the_cli_starts_a_root_agent_sends_it_a_message_reads_it_sees_its_child_reads_
 }
 
 #[test]
+fn agent_start_takes_the_mode_its_session_starts_in() {
+    let user = user();
+    project(&user);
+    let mode_of = |agent: &Value| {
+        let id = agent["agent"]["id"].as_str().unwrap().to_owned();
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["gate_mode"].clone()
+    };
+
+    for mode in ["ask", "auto", "full"] {
+        let started =
+            json_of(user.run(&["agent", "start", "app", "HANG", "--mode", mode, "--json"]));
+        assert_eq!(mode_of(&started), mode);
+    }
+    let started = json_of(user.run(&["agent", "start", "app", "HANG", "--json"]));
+    assert_eq!(mode_of(&started), "auto", "Auto when no mode is named");
+    let refused = failure_of(user.run(&["agent", "start", "app", "HANG", "--mode", "yolo"]));
+    assert!(refused.contains("ask, auto and full"), "{refused}");
+}
+
+#[test]
 fn agent_run_still_starts_an_agent_and_prints_its_reply() {
     let user = user();
     project(&user);

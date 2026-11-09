@@ -620,7 +620,10 @@ fn a_failed_turn_ends_with_a_failure_and_only_a_sign_in_error_fails_the_prompt()
         .find(|u| u["_meta"]["contextCompaction"].is_object())
         .unwrap();
     assert_eq!(compaction["status"], "completed");
-    assert_eq!(signed.unwrap_err()["message"], "401 Unauthorized");
+    let signed = signed.unwrap_err();
+    assert_eq!(signed["message"], "401 Unauthorized");
+    // Tagged, so that the daemon reads the code, never a number in the text.
+    assert_eq!(signed["data"]["code"], "unauthorized");
 }
 
 #[test]

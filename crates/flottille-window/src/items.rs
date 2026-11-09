@@ -530,7 +530,7 @@ impl ProjectItems {
             read: None,
             tab: Kind::Pulls,
             shown: Shown::Open,
-            mine: false,
+            mine: true,
             query: String::new(),
             search: None,
             repository: None,

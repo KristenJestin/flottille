@@ -1,7 +1,7 @@
 //! The project's conventions in its Settings (`docs/projects.md`, "Branch format" and "Pull
-//! request template"): the regular expression its branches match, under the setup, and
-//! the description of a pull request opened without one, beside the message checks. Each is off
-//! when empty. The window writes nothing itself: Save is the daemon's
+//! request template"): the regular expression its branches match, a field of the Branches
+//! section, and the description of a pull request opened without one, beside the message checks.
+//! Each is off when empty. The window writes nothing itself: Save is the daemon's
 //! (`project.set_conventions`), and the field shows what the daemon says next.
 
 use flottille_ui::{
@@ -39,27 +39,6 @@ impl Kind {
         match self {
             Kind::BranchFormat => "branch-format",
             Kind::PullRequestTemplate => "pull-request-template",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Kind::BranchFormat => "Branch format",
-            Kind::PullRequestTemplate => "Pull request template",
-        }
-    }
-
-    fn sentence(self) -> &'static str {
-        match self {
-            Kind::BranchFormat => {
-                "A regular expression every branch a workspace starts, renames to or pushes must \
-                 match, its refusal naming it. A branch a workspace resumed was named before, \
-                 and is never refused for its name."
-            }
-            Kind::PullRequestTemplate => {
-                "The description of a pull request an agent opens without one, in Markdown. \
-                 Agents are told it exists, so that they fill it rather than replace it."
-            }
         }
     }
 
@@ -342,13 +321,23 @@ impl Render for Convention {
                     .into_any_element()
             }
         };
-        Section::new(format!("{}-section-{project}", kind.id()), kind.title())
-            .sentence(kind.sentence())
-            .child(
-                Field::new(id("field"), kind.label(), control)
-                    .optional()
-                    .hint(kind.hint())
-                    .error(self.problem.clone()),
+        let field = Field::new(id("field"), kind.label(), control)
+            .optional()
+            .hint(kind.hint())
+            .error(self.problem.clone());
+        // The branch format is a field of the page's Branches section, beside the prefix.
+        match kind {
+            Kind::BranchFormat => field.into_any_element(),
+            Kind::PullRequestTemplate => Section::new(
+                format!("{}-section-{project}", kind.id()),
+                "Pull request template",
             )
+            .sentence(
+                "The description of a pull request an agent opens without one, in Markdown. \
+                 Agents are told it exists, so that they fill it rather than replace it.",
+            )
+            .child(field)
+            .into_any_element(),
+        }
     }
 }

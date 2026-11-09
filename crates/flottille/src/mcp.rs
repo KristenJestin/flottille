@@ -96,6 +96,10 @@ const GUIDE: &str = include_str!("../roles/guide.md");
 const LEAVE_WITHDRAWN: &str = "refused: the user withdrew your leave to write to that session \
     while this message was judged; send it again to ask them";
 
+/// An `agent_stop` allowed as the end of a session the caller leads, which it no longer leads:
+/// the user detached it, or it was handed, meanwhile.
+const NO_LONGER_LED: &str = "refused: this agent no longer leads that session, the user took it over while this call was decided; ask again and the user decides";
+
 /// What a call of a session that was replaced is answered.
 /// What a call is answered when its process ended while it was on its way.
 const GONE: &str = "refused: this session's process has ended: its token no longer works; stop \
@@ -105,7 +109,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 31] = [
+const SERVED: [Definition; 32] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -605,13 +609,18 @@ const SERVED: [Definition; 31] = [
         description: "The secrets the user keeps for agents (a tracker's token, a test \
             account's login): list gives each entry's name, what it is for, its URL and its \
             username. A secret is never shown: a tool of Flottille's that needs one takes the \
-            entry's name and puts the secret where it goes itself. {\"action\": \"list\"}.",
+            entry's name and puts the secret where it goes itself. {\"action\": \"list\"}. \
+            ask: only when a refusal says an entry is missing and may be asked for, the user is \
+            asked to set it (answered at once, the user's answer later as a delivery). \
+            {\"action\": \"ask\", \"name\": \"jira-time\", \"why\": \"to log 2h on ABC-1\"}.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list"]}
+                "action": {"type": "string", "enum": ["list", "ask"]},
+                "name": {"type": "string", "description": "ask: the entry a refusal said is missing."},
+                "why": {"type": "string", "description": "ask: what you need it for, for the user."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -721,9 +730,10 @@ const SERVED: [Definition; 31] = [
         title: "Stop a child or end a session",
         description: "Stops one of your children with its own children, deepest first; what was \
             queued for them is dropped. Use it once its report is acted on, or to end a child \
-            going in circles. It also asks to end any session of your project (one you started \
-            for the user, or another): the user decides every time, the result comes later. \
-            Workspaces stay.",
+            going in circles. A session you started as led is yours to end too, once its report is \
+            acted on and its work integrated. It also asks to end any other session of your \
+            project (one you handed to the user, or another): the user decides every time, the \
+            result comes later. Workspaces stay.",
         read_only: false,
         idempotent: true,
         destructive: true,
@@ -856,6 +866,22 @@ const SERVED: [Definition; 31] = [
             }, "additionalProperties": false})
         },
     },
+    Definition {
+        name: "session_title",
+        title: "Title your session",
+        description: "Names your session for the user's sidebar: 3 to 8 words on one line, at \
+            most 60 characters, in the user's language, saying the work. Call it in your first \
+            turn, and again when the work changes; once the user renamed the session it is \
+            refused. {\"title\": \"Rework the login page\"}.",
+        read_only: false,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "title": {"type": "string", "description": "3 to 8 words, one line, at most 60 characters."}
+            }, "required": ["title"], "additionalProperties": false})
+        },
+    },
 ];
 
 /// Whether the tool is one of the core's.
@@ -865,14 +891,32 @@ pub fn serves(name: &str) -> bool {
 
 /// What `ask` says to every caller; where its question goes is said after it, by the caller's
 /// kind (`ask_goes`).
-const ASK: &str = "Puts a question. It does not wait: the answer comes later as a message. Go on \
-    with what does not depend on it, or end your turn saying what you wait for. A question left \
-    in a report or a last message is a follow-up, not a wait: what you need answered goes here.";
+const ASK: &str = "Puts a question, or up to 4 at once: one question per point to decide \
+    ({\"question\": \"…\"}, or {\"questions\": [{\"question\": \"Push the branch?\", \
+    \"options\": [{\"label\": \"Yes\"}, {\"label\": \"Not yet\"}]}, {\"question\": \
+    \"Title of the pull request?\"}]}), with 2 to 4 short options when the answers are known \
+    (multiple: several may be chosen); each can also be answered in words. It does not wait: the \
+    answer comes later as a message. Go on with what does not depend on it, or end your turn \
+    saying what you wait for. A question left in a report or a last message is a follow-up, not \
+    a wait: what you need answered goes here.";
 
 fn question_schema() -> Value {
+    let one = json!({"type": "string"});
     json!({"type": "object", "properties": {
-        "question": {"type": "string"}
-    }, "required": ["question"], "additionalProperties": false})
+        "question": one,
+        "questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": {
+            "type": "object", "properties": {
+                "question": one,
+                "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {
+                    "type": "object", "properties": {
+                        "label": {"type": "string", "description": "A short choice, one line."},
+                        "description": {"type": "string", "description": "One line that says it."}
+                    }, "required": ["label"], "additionalProperties": false
+                }},
+                "multiple": {"type": "boolean", "description": "Several options may be chosen."}
+            }, "required": ["question"], "additionalProperties": false
+        }}
+    }, "additionalProperties": false})
 }
 
 /// The description of `ask` for `agent`: where its question goes, decided by the daemon, never
@@ -1476,7 +1520,7 @@ pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Opti
         project,
         agent.parent.is_none(),
         agent.depth,
-        crate::vault::seen_by(daemon, &project.name),
+        crate::vault::listed_to(daemon, project),
     );
     // The same tools in another order are the same list: a new order would only cost the
     // session its prompt cache.
@@ -2162,6 +2206,12 @@ async fn played_in(
     } else if let Some(why) = removed {
         Outcome::Refused(format!("refused: {why}"))
     } else if grant.tools.contains(&tool) {
+        // A removal's answer to discard covers the state the user was shown: read before its
+        // card, so that anything written since tells.
+        let digest = match removes_a_workspace(tool, &args) {
+            true => crate::actions::removal_digest(daemon, grant, &args).await,
+            false => None,
+        };
         // A write of the project shows what it changes; one that cannot be done is refused
         // before the user is asked anything.
         match crate::actions::prepared(daemon, grant, tool, &args).await {
@@ -2230,6 +2280,8 @@ async fn played_in(
                                 verdict = Some("full");
                                 if let Some(refused) = stale(daemon, grant, tool) {
                                     refused
+                                } else if no_longer_led(daemon, grant, tool, &args) {
+                                    Outcome::Refused(NO_LONGER_LED.into())
                                 } else if removes_a_workspace(tool, &args) {
                                     crate::actions::remove_losing(daemon, grant, args).await
                                 } else {
@@ -2250,6 +2302,9 @@ async fn played_in(
                                     (_, Some(refused)) => refused,
                                     (Some(Err(why)), _) => Outcome::Refused(why),
                                     (Some(Ok(true)), _) => Outcome::Refused(LEAVE_WITHDRAWN.into()),
+                                    _ if no_longer_led(daemon, grant, tool, &args) => {
+                                        Outcome::Refused(NO_LONGER_LED.into())
+                                    }
                                     _ => {
                                         verdict = Some("judged");
                                         let approved = Some(gate::Class::Judge);
@@ -2263,7 +2318,7 @@ async fn played_in(
                             }
                             judged => {
                                 let (outcome, number) = approvals::ask(
-                                    daemon, grant, tool, &args, key, ask, says, judged,
+                                    daemon, grant, tool, &args, key, ask, says, judged, digest,
                                 );
                                 request = number;
                                 outcome
@@ -2332,6 +2387,12 @@ fn is_replaced(daemon: &Daemon, grant: &Grant) -> bool {
 
 /// Why a call that waited (a read, a preparation, the judge) can no longer be performed: its
 /// session was replaced or its workspace is being removed meanwhile. Asked right before it is.
+/// Whether an `agent_stop` let through without the user now ends a session the caller does not
+/// lead: only one it leads was (`gate::end_led`), any other is the user's to allow.
+fn no_longer_led(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> bool {
+    tool == "agent_stop" && crate::tree::ends_session(daemon, grant, args)
+}
+
 fn stale(daemon: &Daemon, grant: &Grant, tool: &str) -> Option<Outcome> {
     if is_replaced(daemon, grant) {
         return Some(Outcome::Refused(REPLACED.into()));
@@ -2444,6 +2505,9 @@ fn verdict_of(
     }
     if tool == "agent_stop" && crate::tree::ends_session(daemon, grant, args) {
         return gate::end_session();
+    }
+    if tool == "agent_stop" && crate::tree::ends_led(daemon, grant, args) {
+        return gate::end_led();
     }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.
@@ -2820,7 +2884,8 @@ fn removes_own_workspace(grant: &Grant, tool: &str, args: &Value) -> bool {
 
 /// Performs a call the user allowed, of its class, recorded as the agent's: the request's answer.
 /// `discarding`, the losses of a workspace's removal the user said to make even with what would
-/// be lost. `first`, the services it was judged again to start first.
+/// be lost, and the workspace's state when it was asked. `first`, the services it was judged
+/// again to start first.
 #[allow(clippy::too_many_arguments)]
 pub async fn performed(
     daemon: &Arc<Daemon>,
@@ -2830,14 +2895,16 @@ pub async fn performed(
     request: u64,
     class: gate::Class,
     first: &[String],
-    discarding: Option<Vec<String>>,
+    discarding: Option<(Vec<String>, String)>,
 ) -> Outcome {
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let cancelled = CancellationToken::new();
     let outcome = match discarding {
-        Some(losses) => crate::actions::remove_discarding(daemon, grant, args, &losses).await,
+        Some((losses, digest)) => {
+            crate::actions::remove_discarding(daemon, grant, args, &losses, &digest).await
+        }
         None => {
             perform(
                 daemon,
@@ -2891,6 +2958,16 @@ fn record(
         "duration_ms": duration, "request": request});
     if let Some(cut) = cut {
         data["cut"] = cut.to_json();
+    }
+    // A time that cannot be logged for want of the project's vault entry: the window offers its
+    // Settings, where the user chooses one.
+    if tool == "tickets"
+        && recorded["action"] == "log_time"
+        && matches!(outcome, Outcome::Refused(_))
+        && crate::projects::load_project(daemon, &grant.place.project)
+            .is_ok_and(|project| crate::tickets::worklog_unset(daemon, &project))
+    {
+        data["setup"] = "time_logging".into();
     }
     // The link of the run a pipeline was started as, for the window to carry.
     if tool == "forge"
@@ -3012,6 +3089,7 @@ async fn performed_once(
         "forge" => crate::forge::forge(daemon, &grant.agent, &grant.place, args).await,
         "tickets" => crate::tickets::tickets(daemon, &grant.agent, &grant.place, args).await,
         "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
+        "session_title" => crate::titles::session_title(daemon, grant, args),
         tool if crate::extensions::gives(tool) => {
             crate::extensions::perform(daemon, grant, tool, args)
         }

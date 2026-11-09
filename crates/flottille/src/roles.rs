@@ -110,7 +110,8 @@ pub fn instructions(role: &Role, session: &Session, files: &[File]) -> String {
     part.push(match session.title {
         None => "You are the root agent of this session: the user started you and writes to \
                  you, and what your children's requests need from the user reaches them through \
-                 you."
+                 you. In your first turn, title the session with session_title, in the user's \
+                 language: 3 to 8 words that say the work."
             .to_owned(),
         Some(title) => format!(
             "Your task: {title}. Your parent launched you for it; you never talk to the user."
@@ -229,6 +230,19 @@ mod tests {
         assert!(at("# How to work") < at("# Your role: worker"));
         assert!(before.contains("Commit only when your brief or the user asks for it"));
         assert!(!after.contains("How to work"));
+    }
+
+    #[test]
+    fn the_leads_guide_says_to_stop_a_led_session_and_remove_its_workspace_once_integrated() {
+        let folder = Path::new("/work/zebra");
+        let text = instructions(role(LEAD).unwrap(), &session(folder), &[]);
+        assert!(
+            text.contains(
+                "A led session stays open after its report: once its work is integrated, stop it \
+                 (`agent_stop`) and remove its workspace (`workspace remove`)"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
@@ -382,6 +396,10 @@ mod tests {
         assert!(!before.contains("zebra"));
         assert!(after.contains("zebra") && after.contains("/work/zebra-login"));
         assert!(after.contains("You are the root"));
+        // The root titles its session in its first turn, in the user's language (#589).
+        assert!(after.contains(
+            "In your first turn, title the session with session_title, in the user's language"
+        ));
 
         let worker = instructions(
             role(WORKER).unwrap(),
@@ -394,6 +412,7 @@ mod tests {
         );
         assert!(worker.contains("# Your role: worker"));
         assert!(worker.contains("Your task: fix the login."));
+        assert!(!worker.contains("session_title"));
         assert!(worker.contains("depth limit"));
         assert!(worker.contains("[flottille:session]") && worker.contains("session_send"));
         // Same role, other session: the same text before the boundary.

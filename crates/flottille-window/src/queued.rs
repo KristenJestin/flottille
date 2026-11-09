@@ -32,12 +32,17 @@ use crate::shell::Shell;
 /// A message waits only while the root's turn runs, so it is always "after this step".
 pub const WAITS: &str = "Queued · after this step";
 pub const WAITS_FULL: &str = "Sent when the agent finishes its step";
+/// The same, while the conversation is compacted: the root has no step to finish.
+pub const WAITS_COMPACTION: &str = "Queued · after the compaction";
+pub const WAITS_COMPACTION_FULL: &str = "Sent when the compaction of the conversation is over";
 
 pub struct QueuedMessages {
     shell: WeakEntity<Shell>,
     /// The session's root: the only agent a message waits for.
     session: String,
     messages: Vec<Queued>,
+    /// The root's conversation is compacted: what waits, waits for that.
+    compacting: bool,
     /// The messages sent from the composer while the root worked, not in the queue yet.
     pending: Vec<Pending>,
     /// The waiting messages that were one of those, by delivery: the key they are drawn under.
@@ -55,6 +60,7 @@ impl QueuedMessages {
             shell,
             session,
             messages: Vec::new(),
+            compacting: false,
             pending: Vec::new(),
             aliases: HashMap::new(),
             list: Listing::default(),
@@ -90,6 +96,13 @@ impl QueuedMessages {
 
     pub fn messages(&self) -> &[Queued] {
         &self.messages
+    }
+
+    pub fn set_compacting(&mut self, compacting: bool, cx: &mut Context<Self>) {
+        if self.compacting != compacting {
+            self.compacting = compacting;
+            cx.notify();
+        }
     }
 
     pub fn set(&mut self, messages: Vec<Queued>, cx: &mut Context<Self>) {
@@ -292,17 +305,30 @@ impl Render for QueuedMessages {
                         .child(said)
                 };
                 let (said, line) = match &entry {
-                    Entry::Waiting(_) => (
-                        SharedString::from(WAITS),
-                        tipped(
-                            line(Icon::Clock, WAITS.into(), p.faint),
-                            WAITS_FULL,
+                    Entry::Waiting(_) => {
+                        let (waits, full) = match self.compacting {
+                            true => (WAITS_COMPACTION, WAITS_COMPACTION_FULL),
+                            false => (WAITS, WAITS_FULL),
+                        };
+                        let tip = tipped(
+                            line(Icon::Clock, waits.into(), p.faint),
+                            full,
                             16.,
                             window,
                             cx,
                         )
-                        .into_any_element(),
-                    ),
+                        .into_any_element();
+                        // What it waits for changes under it: the sentence fades to the next.
+                        (
+                            SharedString::from(waits),
+                            changing(
+                                ElementId::Name(format!("queued-{key}-waits-for").into()),
+                                waits,
+                                move |_| tip,
+                            )
+                            .into_any_element(),
+                        )
+                    }
                     Entry::Sending(Pending {
                         refused: Some(why), ..
                     }) => {

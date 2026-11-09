@@ -210,6 +210,9 @@ pub struct Session {
     /// root's last turn, its creation before either. The sidebar sorts by it: work done during a
     /// turn never moves a row.
     pub exchanged_at: u64,
+    /// When its root ended, in milliseconds since the Unix epoch: its last sign of activity for a
+    /// root that is not over, or whose end was not recorded. The "Ended" group sorts by it.
+    pub ended_at: u64,
     pub created_at: u64,
     /// How many commands the agents of its tree run now.
     pub commands: usize,
@@ -475,9 +478,14 @@ pub fn title_of(brief: &str) -> String {
         .to_owned()
 }
 
-/// The title of the session of root `id`, from its first message; the neutral `agent <id>` while
-/// none says what the work is.
-fn session_title(id: &str, brief: Option<&String>) -> String {
+/// The title of the session of `root`: the one its agent or the user gave it, else the first line
+/// of its first message; the neutral `agent <id>` while none says what the work is.
+fn session_title(root: &Value, id: &str, brief: Option<&String>) -> String {
+    if !root["titled_by"].is_null()
+        && let Some(title) = root["title"].as_str().filter(|title| !title.is_empty())
+    {
+        return title.to_owned();
+    }
     brief
         .map(|brief| title_of(brief))
         .filter(|title| !title.is_empty())
@@ -611,7 +619,8 @@ impl Snapshot {
             let id = agent["id"].as_str().unwrap_or_default();
             let root = root_of(&parents, id);
             // Nothing runs under an agent that ended: whatever its record still says.
-            let busy = matches!(agent["state"].as_str(), Some("starting" | "working"))
+            let busy = (matches!(agent["state"].as_str(), Some("starting" | "working"))
+                || agent["compacting"] == true)
                 && !under_an_ended(&parents, &final_ids, id);
             let active = agent["active_at"]
                 .as_u64()
@@ -622,6 +631,11 @@ impl Snapshot {
             entry.2 += 1;
             entry.3 += usize::from(!ended(agent));
         }
+        let compacting: HashSet<&str> = agents
+            .iter()
+            .filter(|agent| agent["compacting"] == true)
+            .map(|agent| root_of(&parents, agent["id"].as_str().unwrap_or_default()))
+            .collect();
         let running = list(answers.commands, "commands");
         let commands_of = |key: &str, name: &str| {
             running
@@ -688,20 +702,30 @@ impl Snapshot {
                 let id = text(agent, "id");
                 let (busy, active_at, size, live) =
                     trees.get(id.as_str()).copied().unwrap_or_default();
+                // Between turns, it waits for its quota's reset.
+                let quota = (agent["state"] == "idle")
+                    .then(|| crate::session_link::Quota::of(&agent["quota"]))
+                    .flatten();
                 let mark = if ended(agent) {
                     None
                 } else if answers.needs_user.contains(&id) {
                     Some(AgentState::NeedsYou)
                 } else if busy {
                     Some(AgentState::Running)
-                } else if waiting.contains(id.as_str()) {
+                } else if waiting.contains(id.as_str()) || quota.is_some() {
                     Some(AgentState::Waiting)
                 } else {
                     None
                 };
                 let mark_said = match mark {
                     None => String::new(),
+                    Some(AgentState::Running) if compacting.contains(id.as_str()) => {
+                        "Compacting".to_owned()
+                    }
                     Some(AgentState::Running) => "Running".to_owned(),
+                    Some(AgentState::Waiting) if let Some(quota) = quota => {
+                        crate::session::out_of_quota(quota.reset_at)
+                    }
                     Some(AgentState::Waiting) => waiting_for
                         .get(id.as_str())
                         .cloned()
@@ -715,7 +739,7 @@ impl Snapshot {
                     },
                 };
                 Session {
-                    title: session_title(&id, answers.briefs.get(&id)),
+                    title: session_title(agent, &id, answers.briefs.get(&id)),
                     project: text(agent, "project"),
                     place: agent["workspace"].as_str().map(str::to_owned),
                     mark,
@@ -728,6 +752,7 @@ impl Snapshot {
                     exchanged_at: agent["exchanged_at"]
                         .as_u64()
                         .unwrap_or_else(|| number(agent, "created_at")),
+                    ended_at: agent["ended_at"].as_u64().unwrap_or(active_at),
                     created_at: number(agent, "created_at"),
                     commands: commands_of("root", &id),
                     started_by: agent["launched_by"].as_str().map(name_of),
@@ -826,6 +851,13 @@ impl Snapshot {
                 .then(a.id.cmp(&b.id))
         });
         live
+    }
+
+    /// The sessions that ended, whatever their project, the most recent end first.
+    pub fn ended_sessions(&self) -> Vec<&Session> {
+        let mut ended: Vec<&Session> = self.sessions.iter().filter(|s| s.ended).collect();
+        ended.sort_by(|a, b| b.ended_at.cmp(&a.ended_at).then(a.id.cmp(&b.id)));
+        ended
     }
 
     pub fn session(&self, id: &str) -> Option<&Session> {
@@ -1130,6 +1162,29 @@ mod tests {
             subscriptions: &json!({"subscriptions": []}),
         });
         assert_eq!(snapshot.sessions[0].title, "agent r2");
+    }
+
+    #[test]
+    fn until_titled_a_session_keeps_the_first_line_of_its_message() {
+        let mut titled = agent("r1", None, "idle", None);
+        let untitled = build(
+            json!({"agents": [titled.clone()]}),
+            json!({"requests": []}),
+            &[],
+        );
+        assert_eq!(untitled.sessions[0].title, "Fix the login");
+        titled["title"] = json!("Rework the login");
+        titled["titled_by"] = json!("agent");
+        let snapshot = build(
+            json!({"agents": [titled.clone()]}),
+            json!({"requests": []}),
+            &[],
+        );
+        assert_eq!(snapshot.sessions[0].title, "Rework the login");
+        titled["title"] = json!("Login, again");
+        titled["titled_by"] = json!("user");
+        let snapshot = build(json!({"agents": [titled]}), json!({"requests": []}), &[]);
+        assert_eq!(snapshot.sessions[0].title, "Login, again");
     }
 
     #[test]

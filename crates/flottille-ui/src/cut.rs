@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use gpui_kit::{
     AnyElement, App, DefiniteLength, Div, ElementId, InteractiveElement, IntoElement,
-    ParentElement, Pixels, SharedString, Stateful, Styled, TestSupportExt, Window, canvas, px,
+    ParentElement, Pixels, SharedString, Stateful, StatefulInteractiveElement, Styled,
+    TestSupportExt, Window, canvas, px,
 };
 
 use crate::button::tipped;
@@ -84,5 +85,101 @@ pub fn tipped_when_cut(
         tipped(element, text, now.height.into(), window, cx).into_any_element()
     } else {
         element.test_support().into_any_element()
+    }
+}
+
+/// How many characters of a title a sentence that is only a string (a toast, a menu entry, a
+/// tooltip) quotes before it cuts it with an ellipsis.
+pub const QUOTED_CHARS: usize = 40;
+
+/// A title quoted in a sentence that is only a string: its first line, cut at [`QUOTED_CHARS`]
+/// with an ellipsis, so that it never wraps the sentence onto lines of its own.
+pub fn quoted_title(title: &str) -> String {
+    let line = title.lines().next().unwrap_or_default().trim();
+    let more = title.trim().lines().nth(1).is_some();
+    let mut chars = line.chars();
+    let cut: String = chars.by_ref().take(QUOTED_CHARS).collect();
+    if chars.next().is_some() || more {
+        format!("{}…", cut.trim_end())
+    } else {
+        cut
+    }
+}
+
+/// A sentence that quotes a session's title: `before`, the title, then `after`, on one line. The
+/// title takes what room the words leave, in the window's emphasis (medium, in the text's ink), cut
+/// with an ellipsis and said whole in its tooltip when cut; it never wraps the sentence. The
+/// element is `id`, labelled with the whole sentence; the title is `<id>-title`. Style the size and
+/// colour of the words on a parent: they inherit it.
+pub fn quoted(
+    id: impl Into<SharedString>,
+    before: &str,
+    title: &str,
+    after: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    use gpui_kit::FontWeight;
+    let id: SharedString = id.into();
+    let p = crate::theme::palette(cx);
+    let title: SharedString = title
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
+        .into();
+    let whole = format!("{before}{title}{after}");
+    let words = |text: &str| {
+        (!text.is_empty()).then(|| {
+            gpui_kit::div()
+                .flex_none()
+                .whitespace_nowrap()
+                .child(SharedString::from(text.replace(' ', "\u{a0}")))
+        })
+    };
+    let quoted = tipped_when_cut(
+        gpui_kit::div()
+            .id(ElementId::Name(format!("{id}-title").into()))
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(p.text)
+            .child(title.clone()),
+        title,
+        window,
+        cx,
+    );
+    gpui_kit::div()
+        .id(ElementId::Name(id))
+        .min_w_0()
+        .flex()
+        .items_baseline()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .aria_label(SharedString::from(whole))
+        .children(words(before))
+        .child(quoted)
+        .children(words(after))
+        .test_support()
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_quoted_title_is_its_first_line_cut_with_an_ellipsis() {
+        assert_eq!(quoted_title("Fix the login"), "Fix the login");
+        assert_eq!(quoted_title("Fix the login\nand more"), "Fix the login…");
+        let long = "Rework every page of the site with a new design system and fonts";
+        let cut = quoted_title(long);
+        assert!(
+            cut.ends_with('…') && cut.chars().count() <= QUOTED_CHARS + 1,
+            "{cut}"
+        );
     }
 }

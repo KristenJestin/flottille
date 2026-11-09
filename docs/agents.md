@@ -117,7 +117,8 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   session set on nothing is set to what it stands for, by its name ("The options", below).
 - **The models**: what a session of the provider's agent offers in its config options (the
   `model` option's values and their names, and the `thought_level` option's for the model the
-  session has), kept by the daemon per provider (`provider_models` in the store), read as soon as
+  session has, and the efforts each value says for itself in its `_meta.flottille.efforts`, as
+  the Claude bridge does for every model, `[]` for one without), kept by the daemon per provider (`provider_models` in the store), read as soon as
   the provider is enabled and its program is there (below), and learned again from every session
   that opens. They are kept with the program they came from (its path and modification
   time) and the names of the provider's API keys set (never their values): with another version
@@ -163,7 +164,13 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   date suffix (`-YYYYMMDD`) is that model (`claude-haiku-4-5` for `claude-haiku-4-5-20251001`),
   and its agent's choice, the Auto judge's (`provider.set_judge`) and the session's own check
   hold the listed id. An id that two listed models answer to is taken for none. The efforts of a model are `null` until a session
-  had that model. An effort asked without a model is checked against the default model's
+  had that model, or, for Claude, until a listing or any session said them all: its bridge gives
+  every model's from `claude`'s answer to `initialize`, so that no model is ever set to learn
+  them. Setting a model is no free probe: `claude` may check a model id it has not checked yet
+  with a one-token request to the API (`set_model`'s check of 2.1.312). While a Claude model's
+  efforts are `null` for the version there is now, the daemon lists its models again, once per
+  state of the provider; the window shows the effort picker's skeleton while a listing runs
+  (`models_learning` of `provider.list`, `provider.models_learning`). An effort asked without a model is checked against the default model's
   efforts, when they are known; until then it is taken, and a session that does not offer it
   fails the agent.
 - **Refusals** name what is available: `there is no provider gemini: the providers are claude,
@@ -199,8 +206,14 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   A new session whose model or effort is not chosen (nor waiting, below) and that the agent left
   on its own choice (`currentValue` `default`) is set to that choice by its name, checked the same
   way: the model the agent says `default` stands for (`recommendedValue`; `default` itself when it
-  runs a model no other value does), else the first model it lists; the effort it says, else the middle of the levels the model offers (the upper of the two
-  middles). The window shows these same names, never that a provider chooses.
+  runs a model no other value does, or when its description names the model it runs and no
+  `recommendedValue` is given, as Claude's adapter does when no other row runs that model), else
+  the first model it lists; the effort it says, else the middle of the levels the model offers (the upper of the two
+  middles). The window shows these same names, never that a provider chooses. The row of the
+  provider's own choice is named by its model, never by the adapter's "Default (recommended)":
+  by its description when it names a model ("Opus 5.5 (1M context)"), else by the model Flottille
+  applies, else "<Provider>'s model"; a name that says "default" is never kept, a stored one
+  included (the window names it the same way until a session says the models again).
   **Changed between turns** (`agent.options`, `flottille agent options`, the session page's
   pickers, `agent_send`'s `model` and `effort`): the model and the effort of a running agent
   change in the same session of the same CLI, never its provider (a provider change needs a new
@@ -226,6 +239,24 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`), or `interrupted` when the process
   died during it. Prompts sent while a turn runs wait their turn.
 - **A cancel** sends `session/cancel` while a turn runs; the turn then ends `cancelled`.
+- **A failed turn**: a prompt the agent answers with an error fails the agent, unless the
+  provider says its login is gone (`crates/flottille/src/turn_failures.rs`, one recogniser per
+  provider). The bridges pass the provider's code as the error's `data.code`, which is what is
+  read: Claude's `authentication_failed` or `oauth_org_not_allowed` (its words, `Please run
+  /login`…, only when it gave no code), Codex's `unauthorized` (never its text: a number in it
+  means nothing). A service unreachable, overloaded or failing never fails a prompt: the bridges
+  end that turn `end_turn` with a `sessionFailure`, and the session goes on. A login gone ends
+  the turn `failed`: what it was sent is given back (`delivery.given_back`, queued again), the
+  session stays, its process is let go as after an idle release (`agent.released`, reason
+  `failed`), and the agent is idle with a `state_reason` that says what to do (`Claude's login
+  expired: sign in again (run claude and /login), then send your message again`), which the
+  session's state line says. Then nothing starts it but the user: what is queued for it waits,
+  however it was rung, until the user writes to it or to its tree's root, which clears that
+  line on the root and on every agent of its tree waiting on a login, and rings them. Their next
+  prompt starts a process that resumes or loads the session, with what waited. A child's parent
+  is told (`child-idle`) that the child cannot work until the user signs in again and not to
+  write to it until then: what it sends waits. What makes the session unusable still fails it:
+  the process cannot start, its session cannot be opened, the connection breaks.
 - **The agent's own permission prompts** (`session/request_permission`) are answered at once:
   a tool of the agent's own list, named by the provider's own field (Claude:
   `_meta.claudeCode.toolName`), is allowed once; anything else is rejected, a request with no tool
@@ -615,8 +646,9 @@ bridge runs one session.
   category `limit` when the provider refused it for a limit (a `rate_limit_event` rejected, an
   error `rate_limit`, `billing_error` or `account_on_hold`, or Claude Code's own message for a
   spent usage), `service` otherwise. The session lives on, as with Claude Code's own ACP
-  adapter. Only a signed-out `claude` (`Please run /login`, an error `authentication_failed`)
-  fails the prompt, and so the agent: it cannot go on until the user signs in again.
+  adapter. Only a signed-out `claude` (`Please run /login`, an error `authentication_failed` or
+  `oauth_org_not_allowed`) fails the prompt, the error's kind as its `data.code` when it named
+  one: it cannot go on until the user signs in again ("A failed turn", above).
 - **A cancel** (`session/cancel`) is an `interrupt` control request.
 - **Claude's permission prompts** (`can_use_tool`) become `session/request_permission` (the tool
   in `_meta.claudeCode.toolName`, the tool use's id, options `allow_once` and `reject_once`); the
@@ -635,7 +667,8 @@ bridge runs one session.
   list.
 - **The effort** is an option (`effort`, category `thought_level`) when the model set has effort
   levels (`supportsEffort`, `supportedEffortLevels` in the same answer): `default` and those
-  levels, set with an `apply_flag_settings` control request (`effortLevel`, `null` for
+  levels, which each value of the `model` option also says for its own model in
+  `_meta.flottille.efforts` (`[]` for a model without), set with an `apply_flag_settings` control request (`effortLevel`, `null` for
   `default`), the session's own flag layer, as `--effort` would. A model without the level set
   takes `default` back. There is no mode option: `agent.start` refuses a `mode`, since a
   permission mode of Claude Code's could only loosen Flottille's gate.
@@ -687,7 +720,7 @@ servers are Flottille's HTTP one alone). One bridge runs one session.
   `cancelled` for an interrupted turn, `end_turn` otherwise. A failed turn ends `end_turn` too,
   after a `sessionFailure` of severity `error` with its message, category `limit` for
   `usageLimitExceeded` and `rateLimitExceeded`, `service` otherwise; only a signed-out Codex
-  (`unauthorized`) fails the prompt, and so the agent.
+  (`unauthorized`) fails the prompt, with `data.code` `unauthorized` ("A failed turn", above).
 - **A cancel** (`session/cancel`) is a `turn/interrupt`.
 - **The model** is an option (`model`) whose values are the models `model/list` gave, hidden ones
   left out, the thread's own first set; **the effort** an option (`effort`, category
@@ -811,20 +844,23 @@ ends; a handed one is the user's.
   pending requests it made or held are cancelled (`approval.cancelled`: the user never sees them),
   its process and its runs are stopped. Workspaces stay. Nothing is delivered to an agent that
   ended. What Flottille keeps of its session goes (the bridge's history, Codex's
-  thread), but for a root that ended (not failed) whose agent resumes or loads sessions: that one
+  thread), but for a root that ended or failed whose agent resumes or loads sessions: that one
   is kept, so that the user can resume the root on it. It holds the whole conversation, what the
   agent's tools printed included (masked as the daemon masks what it keeps), and it is kept 7
   days after the root ended: then the sweep forgets it, and the root can be resumed no more.
   Once its process is gone, the root's `agent.released` (reason `stopped`) says it can be resumed.
-- **Resuming** an ended root (`agent.resume`, `docs/protocol.md`) makes it idle again, with its
+- **Resuming** an ended or failed root (`agent.resume`, `docs/protocol.md`) makes it idle again, with its
   id, its epoch (it is the same session, and its last process's token was revoked when it
   stopped), its conversation and its session; the next message starts its process, which resumes
   or loads the session as after an idle release. That message comes after a `resume` delivery,
-  queued without waking it: the user stopped it, and the requests of its own that were cancelled
+  queued without waking it: the user stopped it (or it failed, and why), and the requests of its own that were cancelled
   then, never executed. Its children stay ended: a resumed root is an ordinary session, in the mode it had, and so are the children it launches. It is refused while its
   last process is still stopping, and when its workspace or its project is gone (one made again
-  under the same name is another). A failed root is not resumed: its session could not go on, and
-  went.
+  under the same name is another). A failed root is resumed too: a failure rarely takes the
+  agent's own session with it (a login that expired before the failed turns of `turn_failures`
+  existed), and one that did fails again at its next start. A root that failed before its session
+  opened has none to resume, and a Codex root whose Codex started a tool of its own (a breach of
+  bare mode, during a turn or outside one) is not resumed: the bridge marked its thread.
 - **A report** (`report`, at most 10,000 characters) of a child goes to its parent at once, and
   the child ends when its turn does, or 2 minutes later if its turn goes on. A root's report is
   kept and the root stays.

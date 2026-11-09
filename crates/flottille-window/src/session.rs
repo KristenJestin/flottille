@@ -26,10 +26,10 @@ use flottille_ui::card::Block as CardBlock;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Confirm, Drawer, Field, Icon, ListRow, Listing, Menu, Modal,
-    Palette, Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Switch, Toast, Type, awaiting,
-    changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence,
-    presence_of, section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
+    AgentState, Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette,
+    Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter,
+    fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence, presence_of,
+    section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -47,12 +47,13 @@ use gpui_kit::{
     canvas, div, list, point, px, radians,
 };
 
-use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer};
+use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer, RunFrom};
 use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::CommandInfo;
 use crate::conversation::{
-    Activity, Block, COMPACTED_KIND, Call, CallState, Change, Conversation, DiffLine, Ending,
-    STARTED_SESSION_KIND, Summary, USER, WOKEN_BY_KIND, in_sight, is_hidden,
+    Activity, Block, COMPACTED_KIND, COMPACTION_FAILED_KIND, Call, CallState, Change, Conversation,
+    DiffLine, Ending, STARTED_SESSION_KIND, Summary, TIME_LOGGING_KIND, USER, VaultAsk,
+    WOKEN_BY_KIND, in_sight, is_hidden,
 };
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
@@ -62,11 +63,13 @@ use crate::model::Place;
 use crate::open::Opener;
 use crate::picture_viewer::PictureViewer;
 use crate::project::removal_refused;
+use crate::project_settings::Reveal as ProjectReveal;
 use crate::providers::Providers;
+use crate::question_card::QuestionCard;
 use crate::queued::QueuedMessages;
 use crate::runs::{self, CommandList, CommandPanel, EndedFold, ended_row, rail_label};
 use crate::session_link::{
-    self, ForgeFacts, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink,
+    self, ForgeFacts, PlaceFacts, PullRequest, Quota, RepositoryFacts, Request, SessionLink,
     SessionUpdate, TicketFacts, TreeAgent, Where,
 };
 use crate::session_options::{Runs, SessionOptions};
@@ -98,8 +101,14 @@ pub fn end_sentence(count: usize) -> String {
 /// The reply field's placeholder and its send button's tooltip: the field writes to the root.
 pub const REPLY_PLACEHOLDER: &str = "Reply…";
 pub const SEND: &str = "Send";
-/// The composer's toggle while the root's prompt cache expired, and what it does.
-pub const COMPACT_BEFORE_SENDING: &str = "Compact before sending";
+/// What the chip that resumes the session at its quota's reset does (its tooltip).
+const QUOTA_HINT: &str = "Its quota is spent: at the reset, Flottille tells it to continue where it stopped. Only this session; Settings, Sessions holds the default.";
+/// The composer's chip while the root's prompt cache expired, and what it does (its tooltip).
+pub const COMPACT_CHIP: &str = "Compact";
+/// The room the chip takes at rest (padding and its word): how wide it is while it opens and folds.
+const COMPACT_CHIP_WIDTH: f32 = 80.;
+/// The same for `Resume at 13:00`.
+const QUOTA_CHIP_WIDTH: f32 = 136.;
 const COMPACT_HINT: &str = "Its prompt cache expired: a summary makes the next turn read a short history instead of the whole conversation at full price.";
 /// The composer's button that interrupts the turn that runs.
 pub const STOP: &str = "Stop the turn";
@@ -115,6 +124,9 @@ pub const NOT_SENT_LINE: &str = "Not sent";
 pub const RETRY: &str = "Retry";
 /// Why a message the daemon took is not sent after all: the agent failed, or ended, first.
 pub const AGENT_FAILED: &str = "the agent failed before it read it";
+/// What the step of a compaction says while it runs, and when its agent ended before it did.
+const COMPACTING: &str = "Compacting the conversation";
+const COMPACTION_STOPPED: &str = "Compaction interrupted";
 pub const AGENT_ENDED: &str = "the session ended before the agent read it";
 pub const NEVER_READ: &str = "the agent ended before it read it";
 pub const NOT_INTERRUPTED: &str = "The turn was not interrupted";
@@ -126,14 +138,32 @@ pub fn state_of(agent: &TreeAgent) -> AgentState {
         "ended" if agent.state_reason.as_deref() == Some("it reported") => AgentState::Completed,
         "ended" => AgentState::Stopped,
         _ if agent.parent.is_none() && agent.needs_user => AgentState::NeedsYou,
+        // Not idle, nor waiting for what happens outside: it works on its conversation.
+        _ if agent.compacting => AgentState::Running,
         _ if agent.parent.is_some() && agent.waiting_on.as_deref() == Some("parent") => {
             AgentState::Waiting
         }
         // Between turns, for what happens outside: a pull request's checks, a review.
         _ if agent.waiting_on.as_deref() == Some("subscription") => AgentState::Waiting,
+        // Between turns, for its quota's reset.
+        "idle" if agent.quota.is_some() => AgentState::Waiting,
         "starting" | "working" => AgentState::Running,
         _ => AgentState::Idle,
     }
+}
+
+/// How a session waiting for its quota's reset says its state: `Out of quota, resets at 13:00`,
+/// the reset in the machine's local time, or `Out of quota` when it is unknown.
+pub fn out_of_quota(reset_at: Option<u64>) -> String {
+    match reset_at {
+        Some(at) => format!("Out of quota, resets at {}", clock(at)),
+        None => "Out of quota".to_owned(),
+    }
+}
+
+/// The composer's switch while the session waits for a known reset: `Resume at 13:00`.
+pub fn resume_at(reset_at: u64) -> String {
+    format!("Resume at {}", clock(reset_at))
 }
 
 /// How the page names an agent: its role for the root, its task's title for a child.
@@ -321,6 +351,9 @@ pub const RELOADS_AFTER_TURN: &str = "Reloads after this turn";
 /// The toast of a reload asked between turns: the tools come with the next message, which
 /// starts the next process.
 pub const RELOADED: &str = "Tools reload at its next message";
+
+/// The entry of the rail's menu that detaches the session from the agent that started it.
+pub const DETACH: &str = "Detach from its lead";
 
 /// The entry of the session's menu that compacts its conversation now, or once its turn ends.
 pub const COMPACT: &str = "Compact conversation";
@@ -520,6 +553,25 @@ impl SessionPage {
 
     pub fn id(&self) -> &str {
         &self.opened.id
+    }
+
+    pub fn project(&self) -> &str {
+        &self.opened.project
+    }
+
+    /// The rail's Run a task: the task starts as the user's in the session's place, and its row
+    /// unfolds into the Runs once the daemon lists it.
+    pub fn run_task(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.perform(
+            Command::RunTask {
+                project: self.opened.project.clone(),
+                name: name.to_owned(),
+                from: RunFrom::Session {
+                    workspace: self.opened.place.clone(),
+                },
+            },
+            cx,
+        );
     }
 
     /// The session's state, as the shell's tree draws it.
@@ -846,8 +898,20 @@ impl SessionPage {
         if !self.says_by(&started_by, &led_by) {
             self.opened.started_by = started_by;
             self.opened.led_by = led_by;
+            let by = self.opened.started_by.clone();
+            self.rail
+                .update(cx, |rail, cx| rail.set_detach(by.as_deref(), cx));
             cx.notify();
         }
+    }
+
+    /// "Detach from its lead" in the rail's menu: the same command as the sidebar row's.
+    pub fn detach(&mut self, cx: &mut Context<Self>) {
+        let Some(from) = self.opened.started_by.clone() else {
+            return;
+        };
+        let session = self.opened.id.clone();
+        self.perform(Command::Detach { session, from }, cx);
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -1476,10 +1540,23 @@ impl SessionPage {
             let images = root.images;
             let queued = root.queued.clone();
             self.queued.update(cx, |list, cx| list.set(queued, cx));
+            let compacting = root.compacting;
+            self.queued
+                .update(cx, |list, cx| list.set_compacting(compacting, cx));
             self.sync_pending(cx);
             self.fetch_pictures(cx);
+            // Between turns, why its last turn failed and its session stayed (`agent.released`,
+            // reason `failed`): said once, in the state line.
+            let stayed = (root.state == "idle")
+                .then(|| root.state_reason.clone())
+                .flatten();
+            let quota = (state_of(root) == AgentState::Waiting)
+                .then_some(root.quota)
+                .flatten();
             self.reply.update(cx, |reply, cx| {
+                reply.set_quota(quota, cx);
                 reply.set_images(images);
+                reply.set_stayed(stayed, cx);
                 reply.set_running(running, cx)
             });
         }
@@ -1502,6 +1579,11 @@ impl SessionPage {
                     context_tokens: agent.context_tokens,
                     doing: agent.doing.clone(),
                     waits_on_subscription: agent.waiting_on.as_deref() == Some("subscription"),
+                    compacting: agent.compacting,
+                    out_of_quota: (state_of(agent) == AgentState::Waiting)
+                        .then_some(agent.quota)
+                        .flatten()
+                        .map(|quota| out_of_quota(quota.reset_at)),
                     status,
                     extensions: agent.extensions.clone(),
                 })
@@ -1566,35 +1648,18 @@ impl SessionPage {
         }
     }
 
-    /// The user answers the question of `seq` from its card: a message to the root, which
-    /// names the question when several wait.
-    pub fn answer_question(&mut self, seq: u64, answer: String, cx: &mut Context<Self>) {
-        let open = self
-            .tree
-            .iter()
-            .find(|a| a.parent.is_none())
-            .map(|root| root.questions.clone())
-            .unwrap_or_default();
-        // A message of the user answers every question open: it quotes each when several wait.
-        let message = match open.len() > 1 {
-            true => {
-                let quoted: Vec<String> = open
-                    .iter()
-                    .map(|q| format!("> {}", q.text.lines().next().unwrap_or_default()))
-                    .collect();
-                format!("{}\n\n{answer}", quoted.join("\n>\n"))
-            }
-            false => answer,
-        };
-        let mut seqs: Vec<u64> = open.iter().map(|q| q.seq).collect();
-        if !seqs.contains(&seq) {
-            seqs.push(seq);
-        }
+    /// The user answers the ask of `seq` from its card, one answer per question: the daemon
+    /// sends the root one message quoting each (`agent.answer`).
+    pub fn answer_question(
+        &mut self,
+        seq: u64,
+        answers: Vec<flottille_core::question::Answer>,
+        cx: &mut Context<Self>,
+    ) {
         let command = Command::AnswerQuestion {
             session: self.opened.id.clone(),
             seq,
-            seqs,
-            message,
+            answers,
         };
         self.shell
             .update(cx, |shell, _| shell.perform(command))
@@ -1606,7 +1671,7 @@ impl SessionPage {
         &mut self,
         seq: u64,
         refused: Option<String>,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let rows = self.conversation.read(cx).rows.clone();
@@ -1617,16 +1682,28 @@ impl SessionPage {
                 .flatten()
         });
         if let Some(answer) = answer {
-            answer.update(cx, |answer, cx| answer.answered(refused, window, cx));
+            answer.update(cx, |answer, cx| answer.answered(refused, cx));
         }
     }
 
-    /// How many questions of the root wait for the user's answer.
-    fn open_questions(&self) -> usize {
-        self.tree
-            .iter()
-            .find(|a| a.parent.is_none())
-            .map_or(0, |root| root.questions.len())
+    /// What the daemon answered to the answer of the request `ask` for a vault entry.
+    pub fn vault_answered(
+        &mut self,
+        ask: u64,
+        refused: Option<String>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.conversation.read(cx).rows.clone();
+        let fields = rows.iter().find_map(|row| {
+            let row = row.read(cx);
+            matches!(&*row.block, Block::VaultAsk(a) if a.seq == ask)
+                .then(|| row.vault_ask.clone())
+                .flatten()
+        });
+        if let Some(fields) = fields {
+            fields.update(cx, |fields, cx| fields.answered(refused, cx));
+        }
     }
 
     /// Whether the question of `seq` waits for the user's answer, as the daemon says it.
@@ -1677,10 +1754,6 @@ impl SessionPage {
                 let row = view.rows[at].clone();
                 view.touched += 1;
                 if let Block::Question { seq, .. } = *row.read(cx).block {
-                    if let Some(answer) = row.read(cx).answer.clone() {
-                        let open = self.open_questions();
-                        answer.update(cx, |answer, cx| answer.set_open(open, cx));
-                    }
                     let asking = self.asking(seq);
                     if row.read(cx).asking != asking {
                         row.update(cx, |row, cx| row.set_asking(asking, cx));
@@ -1827,12 +1900,29 @@ impl Render for SessionPage {
                     .text_ellipsis()
                     .text_size(px(14.))
                     .semibold()
+                    // A title its agent or the user gives fades in over the one before.
+                    .opacity(flottille_ui::changed(
+                        &"session-title".into(),
+                        &SharedString::from(self.opened.title.clone()),
+                        window,
+                        cx,
+                    ))
                     .aria_label(SharedString::from(self.opened.title.clone()))
                     .child(SharedString::from(self.opened.title.clone())),
                 SharedString::from(self.opened.title.clone()),
                 window,
                 cx,
             ))
+            .child({
+                let (shell, id) = (self.shell.clone(), self.opened.id.clone());
+                Button::icon("session-rename", Icon::Edit, "Rename the session").on_click(
+                    move |_, window, cx| {
+                        shell
+                            .update(cx, |shell, cx| shell.rename_of(&id, window, cx))
+                            .ok();
+                    },
+                )
+            })
             .child(
                 div()
                     .id("session-place")
@@ -1868,7 +1958,7 @@ impl Render for SessionPage {
                     .test_support()
             }))
             .when(!wide, |d| {
-                let mut agents = Button::icon("open-rail", Icon::Agents, "Agents")
+                let mut agents = Button::icon("open-rail", Icon::PanelRight, "Session details")
                     .on_click(move |_, _, cx| drawer.update(cx, |d, cx| d.open(cx)));
                 if self.needs_you {
                     agents = agents.badge(Badge::alert());
@@ -1928,7 +2018,7 @@ impl Render for SessionPage {
                     .led_by
                     .as_ref()
                     .filter(|_| root)
-                    .map(|by| format!("{LED_NOTE}; {by} is not asked.").into()),
+                    .map(|_| LED_NOTE.into()),
                 move |said| {
                     div()
                         .id("session-led-note")
@@ -3247,7 +3337,9 @@ impl ConversationView {
                 .card()
                 .is_some_and(|card| card.decision.is_none()),
             Block::Command(card) => card.ending == Ending::Running,
-            Block::Question { .. } => self.rows[at].read(cx).asking,
+            // Answered from its card, it stays in sight, folded to its answers.
+            Block::Question { answers, .. } => self.rows[at].read(cx).asking || answers.is_some(),
+            Block::VaultAsk(ask) => ask.open,
             _ => false,
         }
     }
@@ -3566,7 +3658,10 @@ const FRAME: Duration = Duration::from_millis(16);
 /// Whether a notice is a delivery the agent was sent, folded to one line, rather than the
 /// agent's own end or resumption, or a session it started, said whole.
 fn is_delivery(kind: &str) -> bool {
-    !matches!(kind, "failed" | "ended" | "resumed" | STARTED_SESSION_KIND)
+    !matches!(
+        kind,
+        "failed" | "ended" | "resumed" | STARTED_SESSION_KIND | COMPACTION_FAILED_KIND
+    )
 }
 
 /// The pieces of a group's line: how many steps (of the part read, when its start is on an
@@ -3733,8 +3828,10 @@ pub struct Row {
     pills: HashMap<String, Entity<Pill>>,
     /// Its question waits for the user's answer, as the daemon says: its card shows.
     asking: bool,
-    /// The field that answers its question, made when the card first shows.
-    answer: Option<Entity<AnswerBox>>,
+    /// The blocks that answer its ask, made when the card first shows.
+    answer: Option<Entity<QuestionCard>>,
+    /// The fields of its request for a vault entry, made when the card first shows.
+    vault_ask: Option<Entity<crate::vault_ask::VaultAskBox>>,
     /// It is a message the user sent from the composer: being sent, refused, or recorded since.
     sent: Option<Sent>,
     /// The lines of a card of links, and the pictures among them.
@@ -3811,6 +3908,7 @@ impl Row {
                 pills: HashMap::new(),
                 asking,
                 answer: None,
+                vault_ask: None,
                 sent: None,
                 links: LinksCard::default(),
                 renders: 0,
@@ -3985,8 +4083,8 @@ impl Row {
         &self.block
     }
 
-    /// The field that answers its question, once its card showed.
-    pub fn answer(&self) -> Option<&Entity<AnswerBox>> {
+    /// The blocks that answer its ask, once its card showed.
+    pub fn answer(&self) -> Option<&Entity<QuestionCard>> {
         self.answer.as_ref()
     }
 
@@ -4016,6 +4114,19 @@ impl Row {
                 .and_then(|card| card.record().or_else(|| card.source.clone())),
             _ => None,
         }
+    }
+
+    /// The head of a compaction that runs: its label, then how long it has taken.
+    pub fn compaction_head(&self, cx: &gpui_kit::App) -> Option<String> {
+        let Block::Compacting { .. } = &*self.block else {
+            return None;
+        };
+        let (label, timer) = self.thinking.as_ref()?;
+        Some(format!(
+            "{} {}",
+            label.read(cx).text(),
+            timer.read(cx).time()
+        ))
     }
 
     /// The head of a thought: what its label says, then the time it took when one is shown.
@@ -4214,6 +4325,28 @@ impl Row {
                     Some(_) => {}
                 }
             }
+            Block::Compacting { since, until } => {
+                let (since, until) = (*since, *until);
+                let said = match until {
+                    None => COMPACTING,
+                    Some(_) => COMPACTION_STOPPED,
+                };
+                match &self.thinking {
+                    None => {
+                        let label = cx.new(|cx| PulsingLabel::new(said, until.is_none(), cx));
+                        let timer = cx.new(|cx| ThinkingTimer::new(since, until, cx));
+                        self.thinking = Some((label, timer));
+                    }
+                    Some((label, timer)) if until.is_some() => {
+                        label.update(cx, |label, cx| {
+                            label.set_active(false, cx);
+                            label.set_text(said, cx);
+                        });
+                        timer.update(cx, |timer, cx| timer.end(until, cx));
+                    }
+                    Some(_) => {}
+                }
+            }
             Block::Steps { calls } => {
                 for (at, call) in calls.iter().enumerate() {
                     let state = call_state(call);
@@ -4235,6 +4368,10 @@ impl Row {
         }
         if !matches!(block, Block::Approval { .. }) {
             self.card = None;
+        }
+        // A step that ran and became its mark keeps no timer.
+        if !matches!(block, Block::Thought { .. } | Block::Compacting { .. }) {
+            self.thinking = None;
         }
         self.block = Rc::new(block);
         cx.notify();
@@ -4847,7 +4984,15 @@ impl Render for Row {
                                         .px(space::SM)
                                         .mono(11.5)
                                         .text_color(p.faint)
-                                        .child(SharedString::from(from))
+                                        // "started by <title>" is one line, cut: never wrapped.
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .child(SharedString::from(from)),
+                                        )
                                         .test_support(),
                                 )
                             })
@@ -5131,6 +5276,28 @@ impl Render for Row {
                     ))
                     .test_support()
                     .into_any_element()
+            }
+            // A step like a thought's, with no text to open: a pulsing label and its timer, which
+            // the mark of the compaction replaces in this row.
+            Block::Compacting { .. } => {
+                let (label, timer) = self.thinking.clone().expect("a compaction has its timer");
+                let said = SharedString::from(label.read(cx).text().to_owned());
+                let step = id("compaction");
+                changing(id("compaction-swap"), "step", move |_| {
+                    div()
+                        .id(step)
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .text_size(px(13.))
+                        .text_color(p.faint)
+                        .aria_label(said)
+                        .child(label)
+                        .child(timer)
+                        .test_support()
+                        .into_any_element()
+                })
+                .into_any_element()
             }
             Block::Text { .. } => {
                 let author = self.author().map(|me| {
@@ -5525,18 +5692,84 @@ impl Render for Row {
                 });
                 self.links.draw(self.at, links, &open, cx)
             }
+            // A time not logged for want of the project's vault entry: the line, and the way to
+            // the project's Settings where the user chooses one.
+            Block::Notice { kind, text } if kind == TIME_LOGGING_KIND => {
+                let opened = self.page.upgrade().map(|page| {
+                    (
+                        page.read(cx).shell.clone(),
+                        page.read(cx).project().to_owned(),
+                    )
+                });
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(space::LG)
+                    .child(
+                        div()
+                            .id(id("notice"))
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .gap(space::SM)
+                            .mono(12.)
+                            .text_color(p.faint)
+                            .aria_label(SharedString::from(text.clone()))
+                            .child(div().flex_none().child(SharedString::from(kind.clone())))
+                            .child(div().min_w_0().child(SharedString::from(text.clone())))
+                            .test_support(),
+                    )
+                    .child(
+                        div().flex_none().child(
+                            Button::secondary(id("time-logging-setup"), "Set up time logging")
+                                .on_click(move |_, window, cx| {
+                                    if let Some((shell, project)) = &opened {
+                                        shell
+                                            .update(cx, |shell, cx| {
+                                                shell.open_project_settings_at(
+                                                    project,
+                                                    ProjectReveal::Tracker,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })
+                                            .ok();
+                                    }
+                                }),
+                        ),
+                    )
+                    .into_any_element()
+            }
             // The agent's own end is shown whole: a failure's reason, what was not done and why.
-            Block::Notice { kind, text } if !is_delivery(kind) => div()
-                .id(id("notice"))
-                .flex()
-                .gap(space::SM)
-                .mono(12.)
-                .text_color(p.faint)
-                .aria_label(SharedString::from(text.clone()))
-                .child(div().flex_none().child(SharedString::from(kind.clone())))
-                .child(div().min_w_0().child(SharedString::from(text.clone())))
-                .test_support()
-                .into_any_element(),
+            Block::Notice { kind, text } if !is_delivery(kind) => {
+                let failed = kind == COMPACTION_FAILED_KIND;
+                let line = div()
+                    .id(id("notice"))
+                    .flex()
+                    .gap(space::SM)
+                    .mono(12.)
+                    .text_color(if failed { p.fail } else { p.faint })
+                    .aria_label(SharedString::from(text.clone()))
+                    .child(div().flex_none().child(SharedString::from(kind.clone())))
+                    .child(
+                        div()
+                            .min_w_0()
+                            // A session's title is one line, cut; a failure's reason is whole.
+                            .when(kind == STARTED_SESSION_KIND, |d| {
+                                d.overflow_hidden().whitespace_nowrap().text_ellipsis()
+                            })
+                            .child(SharedString::from(text.clone())),
+                    )
+                    .test_support()
+                    .into_any_element();
+                // The error line takes the place of the step that ran, fading in.
+                match failed {
+                    true => changing(id("compaction-swap"), kind.clone(), move |_| line)
+                        .into_any_element(),
+                    false => line,
+                }
+            }
             // A delivery is one line, its kind and its first words, its whole text folded under
             // it until a click opens it; what woke the agent is its own line, the forge's text
             // folded under it.
@@ -5588,7 +5821,7 @@ impl Render for Row {
                             cx.notify();
                         }))
                     });
-                div()
+                let notice = div()
                     .id(id("notice"))
                     .flex()
                     .flex_col()
@@ -5609,7 +5842,13 @@ impl Render for Row {
                             .test_support(),
                     ))
                     .test_support()
-                    .into_any_element()
+                    .into_any_element();
+                // The mark takes the place of the step that ran, fading in.
+                match kind == COMPACTED_KIND {
+                    true => changing(id("compaction-swap"), kind.clone(), move |_| notice)
+                        .into_any_element(),
+                    false => notice,
+                }
             }
             // Folded to its path and its count until a click opens it.
             Block::Diff { path, lines } => {
@@ -5697,8 +5936,14 @@ impl Render for Row {
                     .into_any_element()
             }
             Block::Approval { number } => self.render_card(*number, window, cx).into_any_element(),
-            Block::Question { seq, .. } => self.render_question(*seq, window, cx),
-            Block::Asked { .. } => self.render_asked(),
+            Block::Question {
+                seq,
+                questions,
+                answers,
+                ..
+            } => self.render_question(*seq, questions, answers.as_deref(), window, cx),
+            Block::Asked { .. } => self.render_asked(cx),
+            Block::VaultAsk(ask) => self.render_vault_ask(ask.clone(), window, cx),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
             Block::Command(result) => {
@@ -5824,10 +6069,13 @@ impl Row {
 impl Row {
     /// A question the led session asked its pilot: a card that says so, with no answer box, the
     /// pilot's to answer.
-    fn render_asked(&self) -> AnyElement {
+    fn render_asked(&self, cx: &App) -> AnyElement {
         let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
         Card::new()
-            .title(SharedString::from(format!("{} asks its pilot", self.me)))
+            .title(SharedString::from(format!(
+                "{} asks its pilot",
+                flottille_ui::quoted_title(&self.title(cx))
+            )))
             .meta(self.when.map(clock).unwrap_or_default())
             .child(
                 div()
@@ -5844,67 +6092,107 @@ impl Row {
             .into_any_element()
     }
 
-    /// A question the agent asked the user, in full, with the field that answers it: it unfolds
-    /// where it was asked while the daemon says it waits, and folds away once the answer is
-    /// taken.
+    /// The agent's request for a vault entry: what Flottille prefilled, the agent's reason, and
+    /// the masked field of the secret; it folds away once answered.
+    fn render_vault_ask(
+        &mut self,
+        ask: VaultAsk,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let fields = match &self.vault_ask {
+            Some(fields) => fields.clone(),
+            None => {
+                let Some((session, shell)) = self.page.upgrade().map(|page| {
+                    let page = page.read(cx);
+                    (page.id().to_owned(), page.shell.clone())
+                }) else {
+                    return div().into_any_element();
+                };
+                let at = self.at;
+                let made = ask.clone();
+                let fields = cx.new(|cx| {
+                    crate::vault_ask::VaultAskBox::new(at, made, session, shell, window, cx)
+                });
+                self.vault_ask = Some(fields.clone());
+                fields
+            }
+        };
+        let when = SharedString::from(self.when.map(clock).unwrap_or_default());
+        let title = flottille_ui::quoted_title(&self.title(cx));
+        crate::vault_ask::card(self.at, &title, when, &ask, fields, cx)
+    }
+
+    /// The fields of its request for a vault entry, once its card showed.
+    pub fn vault_ask(&self) -> Option<&Entity<crate::vault_ask::VaultAskBox>> {
+        self.vault_ask.as_ref()
+    }
+
+    /// An ask of the agent to the user, each question with what answers it: it unfolds where
+    /// it was asked while the daemon says it waits, and once the agent took the answers given
+    /// from it, folds to them (an ask answered by a message of the user folds away).
     fn render_question(
         &mut self,
         seq: u64,
+        questions: &[flottille_core::question::Question],
+        answers: Option<&[flottille_core::question::Answer]>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
+        let title = self.title(cx);
+        let when = SharedString::from(self.when.map(clock).unwrap_or_default());
         let answer = match &self.answer {
             Some(answer) => answer.clone(),
             None => {
                 let page = self.page.clone();
-                let (session, open) = page
+                let session = page
                     .upgrade()
-                    .map(|page| {
-                        let page = page.read(cx);
-                        (page.id().to_owned(), page.open_questions())
-                    })
+                    .map(|page| page.read(cx).id().to_owned())
                     .unwrap_or_default();
+                let (at, asked) = (self.at, questions.to_vec());
                 let answer =
-                    cx.new(|cx| AnswerBox::new(self.at, seq, session, open, page, window, cx));
+                    cx.new(|cx| QuestionCard::new(at, seq, session, asked, page, window, cx));
                 self.answer = Some(answer.clone());
                 answer
             }
         };
-        let card = Card::new()
-            .title(SharedString::from(format!("{} asks you", self.me)))
-            .meta(self.when.map(clock).unwrap_or_default())
-            .child(
-                div()
-                    .id(id("question-text"))
-                    .px(space::LG)
-                    .pt(space::MD)
-                    .child(markdown_view(
-                        id("question-region"),
-                        &self.markdown,
-                        self.scope,
-                    ))
-                    .test_support(),
-            )
-            .child(div().px(space::LG).py(space::MD).child(answer));
+        answer.update(cx, |card, _| card.set_answered(answers.is_some()));
+        let open = crate::question_card::open_card(self.at, &title, when.clone(), answer);
+        let answered = answers.map(|answers| {
+            crate::question_card::answered_card(self.at, &title, when, questions, answers, cx)
+        });
         div()
             .id(id("question"))
-            .child(presence(id("question-open"), self.asking, card))
+            .child(presence(id("question-open"), self.asking, open))
+            .when_some(answered, |d, answered| {
+                d.child(presence(id("question-answered"), !self.asking, answered))
+            })
             .test_support()
             .into_any_element()
+    }
+
+    /// The session's title, which names who asks on a question's card.
+    fn title(&self, cx: &App) -> String {
+        self.page
+            .upgrade()
+            .map(|page| page.read(cx).opened.title.clone())
+            .unwrap_or_else(|| self.me.clone())
     }
 }
 
 /// What a led session's page says above its composer, before its pilot's name.
-pub const LED_NOTE: &str = "Your messages reach this session directly";
+/// The line above a led session's composer: it names no session, whose title would make it a
+/// paragraph.
+pub const LED_NOTE: &str = "Your messages go straight to this session; its lead is not asked.";
 
 impl SessionPage {
     /// Who leads the session (`led by …`) or started it (`started by …`), small, beside its
     /// place; it fades and narrows away when the session is detached.
     fn by_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let said = match (&self.opened.led_by, &self.opened.started_by) {
-            (Some(by), _) => Some((format!("led by {by}"), "session-led-by")),
-            (None, Some(by)) => Some((format!("started by {by}"), "session-started-by")),
+            (Some(by), _) => Some((by.clone(), "session-led-by")),
+            (None, Some(by)) => Some((by.clone(), "session-started-by")),
             (None, None) => None,
         };
         if let Some((said, id)) = &said {
@@ -5921,199 +6209,21 @@ impl SessionPage {
             .overflow_hidden()
             .opacity(t)
             .when(t < 1.0, |d| d.max_w(px(320. * t)))
-            .child(tipped_when_cut(
-                div()
-                    .id(id)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(12.))
-                    .text_color(p.faint)
-                    .aria_label(said.clone())
-                    .child(said.clone()),
-                said,
+            .text_size(px(12.))
+            .text_color(p.faint)
+            // The title on one line, cut, in emphasis: never a sentence wrapped around it.
+            .child(flottille_ui::quoted(
+                id,
+                match id {
+                    "session-led-by" => "led by ",
+                    _ => "started by ",
+                },
+                &said,
+                "",
                 window,
                 cx,
             ))
             .into_any_element()
-    }
-}
-
-/// What a question's card says once its answer was sent while the agent works: a message of the
-/// user waits for the end of the agent's turn (or "Send now" under the conversation), and the
-/// card folds away once the agent took it.
-pub const ANSWER_WAITS: &str =
-    "Your answer is sent: it waits under the conversation until the agent's turn ends.";
-
-/// What each card says while several questions wait: a message of the user answers them all.
-pub const ANSWERS_ALL: &str =
-    "Several questions wait: your answer goes to all of them, and quotes each.";
-
-/// The questions whose answer the user sent, by session: the window keeps them, so that a page
-/// opened again, or a history read again, does not ask for an answer twice.
-#[derive(Default)]
-struct SentAnswers(HashSet<(String, u64)>);
-
-impl gpui_kit::Global for SentAnswers {}
-
-/// The answer to the questions `seqs` of `session` was taken by the daemon.
-pub fn answers_sent(session: &str, seqs: &[u64], cx: &mut App) {
-    let sent = &mut cx.default_global::<SentAnswers>().0;
-    sent.extend(seqs.iter().map(|&seq| (session.to_owned(), seq)));
-}
-
-/// The field that answers a question, in its own view: its caret blinks without drawing the row.
-pub struct AnswerBox {
-    at: usize,
-    seq: u64,
-    session: String,
-    /// How many questions of the session wait: its answer goes to all of them.
-    open: usize,
-    page: WeakEntity<SessionPage>,
-    field: Entity<InputState>,
-    has_text: bool,
-    sending: bool,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl AnswerBox {
-    fn new(
-        at: usize,
-        seq: u64,
-        session: String,
-        open: usize,
-        page: WeakEntity<SessionPage>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let field = cx.new(|cx| {
-            let mut field = InputState::new(window, cx).placeholder("Your answer");
-            follow_theme(&mut field, cx);
-            field
-        });
-        let mut subscriptions = vec![cx.subscribe_in(
-            &field,
-            window,
-            |this: &mut Self, field, event, _, cx| match event {
-                InputEvent::Change => {
-                    this.has_text = !field.read(cx).value().trim().is_empty();
-                    cx.notify();
-                }
-                InputEvent::PressEnter { .. } => this.send(cx),
-                _ => {}
-            },
-        )];
-        subscriptions.push(cx.observe_global::<SentAnswers>(|_, cx| cx.notify()));
-        AnswerBox {
-            at,
-            seq,
-            session,
-            open,
-            page,
-            field,
-            has_text: false,
-            sending: false,
-            _subscriptions: subscriptions,
-        }
-    }
-
-    /// How many questions of the session wait now.
-    fn set_open(&mut self, open: usize, cx: &mut Context<Self>) {
-        if self.open != open {
-            self.open = open;
-            cx.notify();
-        }
-    }
-
-    pub fn field(&self) -> &Entity<InputState> {
-        &self.field
-    }
-
-    /// Whether the answer to its question went: the field gives way to a line saying it waits.
-    pub fn is_sent(&self, cx: &App) -> bool {
-        cx.try_global::<SentAnswers>()
-            .is_some_and(|sent| sent.0.contains(&(self.session.clone(), self.seq)))
-    }
-
-    /// Sends what the field holds to the root, as a message.
-    pub fn send(&mut self, cx: &mut Context<Self>) {
-        let typed = self.field.read(cx).value().trim().to_owned();
-        if typed.is_empty() || self.sending {
-            return;
-        }
-        self.sending = true;
-        let seq = self.seq;
-        self.page
-            .update(cx, |page, cx| page.answer_question(seq, typed, cx))
-            .ok();
-        cx.notify();
-    }
-
-    fn answered(&mut self, refused: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        self.sending = false;
-        match refused {
-            None => {
-                self.has_text = false;
-                self.field
-                    .update(cx, |field, cx| field.set_value("", window, cx));
-            }
-            Some(why) => toast(Toast::failure("The answer was not sent").detail(why), cx),
-        }
-        cx.notify();
-    }
-}
-
-impl Render for AnswerBox {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
-        let frame = div()
-            .id(id("answer-frame"))
-            .h(px(34.))
-            .px(space::MD)
-            .rounded(px(8.))
-            .bg(p.field)
-            .border_1()
-            .border_color(p.line2)
-            .flex()
-            .items_center()
-            .text_size(px(13.))
-            .child(Input::new(&self.field))
-            .test_support();
-        let send = Button::primary(id("answer-send"), "Answer")
-            .disabled(!self.has_text || self.sending)
-            .on_click(cx.listener(|this, _, _, cx| this.send(cx)));
-        let field = Field::new(
-            id("answer-field"),
-            "Your answer",
-            div()
-                .flex()
-                .items_center()
-                .gap(space::SM)
-                .child(div().flex_1().min_w_0().child(frame))
-                .child(send),
-        );
-        let all = div()
-            .id(id("answer-all"))
-            .pb(space::SM)
-            .text_size(px(12.5))
-            .text_color(p.mute)
-            .aria_label(ANSWERS_ALL)
-            .child(ANSWERS_ALL)
-            .test_support();
-        let waits = div()
-            .id(id("answer-waits"))
-            .text_size(px(12.5))
-            .text_color(p.faint)
-            .aria_label(ANSWER_WAITS)
-            .child(ANSWER_WAITS)
-            .test_support();
-        let sent = self.is_sent(cx);
-        div()
-            .child(presence(id("answer-several"), self.open > 1 && !sent, all))
-            .child(presence(id("answer-open"), !sent, field))
-            .child(presence(id("answer-sent"), sent, waits))
     }
 }
 
@@ -6210,6 +6320,10 @@ pub struct RailAgent {
     pub doing: String,
     /// It waits between turns for what happens outside (`doing` says what).
     pub waits_on_subscription: bool,
+    /// Flottille compacts its conversation.
+    pub compacting: bool,
+    /// Between turns, it waits for its quota's reset: how its state says it.
+    pub out_of_quota: Option<String>,
     pub status: Entity<Status>,
     /// What the parts of Flottille the user can turn off say of it (`agent.tree`).
     pub extensions: serde_json::Value,
@@ -6321,8 +6435,14 @@ pub struct SessionRail {
     place_known: bool,
     /// The "⋯" menu of the WORKSPACE section.
     menu: Entity<Menu>,
-    /// The "⋯" menu of the root's row: it ends the session.
+    /// A ticket is linked to the place (or its tracker is being read), as the menu says.
+    linked: bool,
+    /// The place is a workspace, which the menu can remove.
+    removable: bool,
+    /// The "⋯" menu of the root's row: it reloads, compacts, detaches and ends the session.
     agent_menu: Entity<Menu>,
+    /// The agent that started the session, which the menu detaches it from.
+    detach: Option<String>,
     /// The commands of the session's tree.
     commands: Entity<CommandList>,
     /// What the agents of the session's tree wait for outside Flottille.
@@ -6354,72 +6474,27 @@ pub struct SessionRail {
 }
 
 impl SessionRail {
+    /// The "⋯" menu of the root's row.
+    pub fn agent_menu(&self) -> &Entity<Menu> {
+        &self.agent_menu
+    }
+
+    /// The "⋯" menu of the Workspace section.
+    pub fn workspace_menu(&self) -> &Entity<Menu> {
+        &self.menu
+    }
+
     fn new(
         page: WeakEntity<SessionPage>,
         root: String,
         opened: &Opened,
         cx: &mut Context<Self>,
     ) -> Self {
-        let editor = page.clone();
-        let ender = page.clone();
-        let reloader = page.clone();
-        let compactor = page.clone();
-        let agent_menu = cx.new(|cx| {
-            Menu::new("rail-agent-menu", "Session actions", cx)
-                .entry(
-                    "rail-agent-reload-tools",
-                    RELOAD_TOOLS,
-                    Some(Icon::Restart),
-                    move |_, cx| {
-                        reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
-                    },
-                )
-                .entry(
-                    "rail-agent-compact",
-                    COMPACT,
-                    Some(Icon::Restart),
-                    move |_, cx| {
-                        compactor.update(cx, |page, cx| page.compact(cx)).ok();
-                    },
-                )
-                .entry(
-                    "rail-agent-end",
-                    "End session…",
-                    Some(Icon::Stop),
-                    move |_, cx| {
-                        ender.update(cx, |page, cx| page.ask_end(cx)).ok();
-                    },
-                )
-        });
         let rail = cx.entity().downgrade();
-        let unlinks = rail.clone();
-        let removes = rail.clone();
         let removable = opened.place.is_some();
-        let menu = cx.new(|cx| {
-            workspace_menu(
-                "workspace-menu",
-                WorkspaceActions {
-                    open_in_editor: Box::new(move |cx| {
-                        editor.update(cx, |page, _| page.open_in_editor()).ok();
-                    }),
-                    link_ticket: Some(Box::new(move |cx| {
-                        rail.update(cx, |rail, cx| rail.start_linking(cx)).ok();
-                    })),
-                    unlink_ticket: Some(Box::new(move |cx| {
-                        unlinks
-                            .update(cx, |rail, cx| rail.link_ticket(None, cx))
-                            .ok();
-                    })),
-                    // A session in the project's folder has no workspace to remove.
-                    remove: removable.then(|| -> WorkspaceAction {
-                        Box::new(move |cx| {
-                            removes.update(cx, |rail, cx| rail.ask_removal(cx)).ok();
-                        })
-                    }),
-                },
-                cx,
-            )
-        });
+        let detach = opened.started_by.clone();
+        let agent_menu = cx.new(|cx| agent_menu(&page, detach.as_deref(), cx));
+        let menu = cx.new(|cx| workspace_menu_of(&page, &rail, removable, false, cx));
         let commands = cx.new(|_| CommandList::new(page.clone()).of_agent(root.clone()));
         let subscriptions = cx.new(|_| SubscriptionList::new(page.clone()));
         let leaves = cx.new(|_| LeaveList::new(page.clone(), root.clone()));
@@ -6438,7 +6513,10 @@ impl SessionRail {
             gauges: HashMap::new(),
             last_runs: HashMap::new(),
             menu,
+            linked: false,
+            removable,
             agent_menu,
+            detach,
             selected: root,
             workspace: opened.place.clone(),
             project: opened.project.clone(),
@@ -6455,6 +6533,33 @@ impl SessionRail {
             removed: false,
             renders: 0,
         }
+    }
+
+    /// Who started the session, as the daemon says now: the agent's menu offers Detach from it
+    /// while there is one.
+    pub fn set_detach(&mut self, by: Option<&str>, cx: &mut Context<Self>) {
+        if self.detach.as_deref() == by {
+            return;
+        }
+        self.detach = by.map(str::to_owned);
+        let (page, detach) = (self.page.clone(), self.detach.clone());
+        self.agent_menu = cx.new(|cx| agent_menu(&page, detach.as_deref(), cx));
+        cx.notify();
+    }
+
+    /// The Workspace menu says what applies to the ticket: it is made again when a ticket is
+    /// linked or unlinked.
+    fn sync_menu(&mut self, cx: &mut Context<Self>) {
+        let linked = self
+            .place
+            .as_ref()
+            .is_some_and(|place| place.ticket.is_some() || place.ticket_pending);
+        if self.linked == linked {
+            return;
+        }
+        self.linked = linked;
+        let (page, rail, removable) = (self.page.clone(), cx.entity().downgrade(), self.removable);
+        self.menu = cx.new(|cx| workspace_menu_of(&page, &rail, removable, linked, cx));
     }
 
     /// "Remove workspace…": the confirmation opens, unless the workspace is already going.
@@ -6660,6 +6765,7 @@ impl SessionRail {
         let first = !std::mem::replace(&mut self.place_known, true);
         if self.place != place || first {
             self.place = place;
+            self.sync_menu(cx);
             cx.notify();
         }
     }
@@ -6695,6 +6801,7 @@ impl SessionRail {
         if place.ticket_pending || place.ticket != ticket {
             place.ticket = ticket;
             place.ticket_pending = false;
+            self.sync_menu(cx);
             cx.notify();
         }
     }
@@ -6813,12 +6920,18 @@ impl Render for SessionRail {
                     }),
                 ),
             };
-            let waiting_line = agent.waits_on_subscription.then(|| {
-                SharedString::from(match wakes.get(&agent.id) {
-                    Some(at) => format!("waiting: wake at {}", clock(*at)),
-                    None => agent.doing.clone(),
-                })
-            });
+            let waiting_line =
+                (agent.waits_on_subscription || agent.compacting || agent.out_of_quota.is_some())
+                    .then(|| {
+                        SharedString::from(match wakes.get(&agent.id) {
+                            _ if agent.compacting => COMPACTING.to_owned(),
+                            _ if agent.out_of_quota.is_some() => {
+                                agent.out_of_quota.clone().unwrap_or_default()
+                            }
+                            Some(at) => format!("waiting: wake at {}", clock(*at)),
+                            None => agent.doing.clone(),
+                        })
+                    });
             // A child with task runs going says how many; a click opens it with its Runs section.
             let chip_t = counts.get(&agent.id).copied().unwrap_or_default();
             let runs_chip = (kid && chip_t > 0.).then(|| {
@@ -7795,10 +7908,97 @@ fn fact_line(
         .test_support()
 }
 
+/// The "⋯" menu of the root's row in the rail: each action has its own icon, and Detach is
+/// there while an agent that started the session (`detach`) still has it, as in the sidebar.
+fn agent_menu(
+    page: &WeakEntity<SessionPage>,
+    detach: Option<&str>,
+    cx: &mut Context<Menu>,
+) -> Menu {
+    let (reloader, compactor, detacher, ender) =
+        (page.clone(), page.clone(), page.clone(), page.clone());
+    let mut menu = Menu::new("rail-agent-menu", "Session actions", cx)
+        .entry(
+            "rail-agent-reload-tools",
+            RELOAD_TOOLS,
+            Some(Icon::Restart),
+            move |_, cx| {
+                reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
+            },
+        )
+        .entry(
+            "rail-agent-compact",
+            COMPACT,
+            Some(Icon::Fold),
+            move |_, cx| {
+                compactor.update(cx, |page, cx| page.compact(cx)).ok();
+            },
+        );
+    if let Some(by) = detach {
+        menu = menu
+            .entry(
+                "rail-agent-detach",
+                DETACH,
+                Some(Icon::Detach),
+                move |_, cx| {
+                    detacher.update(cx, |page, cx| page.detach(cx)).ok();
+                },
+            )
+            .detail(by.to_owned());
+    }
+    menu.entry(
+        "rail-agent-end",
+        "End session…",
+        Some(Icon::Stop),
+        move |_, cx| {
+            ender.update(cx, |page, cx| page.ask_end(cx)).ok();
+        },
+    )
+}
+
+/// The rail's Workspace "⋯" menu, for a ticket linked or not.
+fn workspace_menu_of(
+    page: &WeakEntity<SessionPage>,
+    rail: &WeakEntity<SessionRail>,
+    removable: bool,
+    linked: bool,
+    cx: &mut Context<Menu>,
+) -> Menu {
+    let editor = page.clone();
+    let (linking, unlinks, removes) = (rail.clone(), rail.clone(), rail.clone());
+    workspace_menu(
+        "workspace-menu",
+        WorkspaceActions {
+            open_in_editor: Box::new(move |cx| {
+                editor.update(cx, |page, _| page.open_in_editor()).ok();
+            }),
+            ticket_linked: linked,
+            link_ticket: Some(Box::new(move |cx| {
+                linking.update(cx, |rail, cx| rail.start_linking(cx)).ok();
+            })),
+            unlink_ticket: Some(Box::new(move |cx| {
+                unlinks
+                    .update(cx, |rail, cx| rail.link_ticket(None, cx))
+                    .ok();
+            })),
+            // A session in the project's folder has no workspace to remove.
+            remove: removable.then(|| -> WorkspaceAction {
+                Box::new(move |cx| {
+                    removes.update(cx, |rail, cx| rail.ask_removal(cx)).ok();
+                })
+            }),
+        },
+        cx,
+    )
+}
+
 /// What a workspace's "⋯" offers, wherever it is drawn: the rail's Workspace and the workspace's
 /// card on the project page build it with this, so that both say the same.
 pub struct WorkspaceActions {
     pub open_in_editor: WorkspaceAction,
+    /// A ticket is linked to the workspace: its menu offers to change and to unlink it, not to
+    /// link one.
+    pub ticket_linked: bool,
     /// Shows where a ticket is typed; `None` where the workspace links none.
     pub link_ticket: Option<WorkspaceAction>,
     pub unlink_ticket: Option<WorkspaceAction>,
@@ -7824,6 +8024,7 @@ pub(crate) fn removal_toast(name: &str, refused: Option<&str>) -> Toast {
 pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu>) -> Menu {
     let WorkspaceActions {
         open_in_editor,
+        ticket_linked,
         link_ticket,
         unlink_ticket,
         remove,
@@ -7840,18 +8041,19 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
         move |_, cx| open_in_editor(cx),
     );
     if let Some(link) = link_ticket {
-        menu = menu.entry(
-            "workspace-link-ticket",
-            "Link a ticket…",
-            Some(Icon::Ticket),
-            move |_, cx| link(cx),
-        );
+        let (label, glyph) = match ticket_linked {
+            true => ("Change the ticket…", Icon::Change),
+            false => ("Link a ticket…", Icon::Ticket),
+        };
+        menu = menu.entry("workspace-link-ticket", label, Some(glyph), move |_, cx| {
+            link(cx)
+        });
     }
-    if let Some(unlink) = unlink_ticket {
+    if let Some(unlink) = unlink_ticket.filter(|_| ticket_linked) {
         menu = menu.entry(
             "workspace-unlink-ticket",
             "Unlink the ticket",
-            None,
+            Some(Icon::Unlink),
             move |_, cx| unlink(cx),
         );
     }
@@ -7983,6 +8185,8 @@ pub struct Reply {
     options: Entity<SessionOptions>,
     /// What the root does while its turn runs, in the bar under the field.
     status_line: Entity<StatusLine>,
+    /// Why the root's last turn failed while its session stayed, until a turn starts again.
+    stayed: Option<String>,
     pub mode: Entity<ModeSwitch>,
     has_text: bool,
     focused: bool,
@@ -7996,6 +8200,12 @@ pub struct Reply {
     compact_offered: bool,
     /// Whether that toggle is ticked: from the setting, then as the user leaves it.
     compact: bool,
+    /// The root waits for a known quota reset: the composer offers to resume at it.
+    quota: Option<Quota>,
+    /// The last wait that was offered: the chip keeps its words and its fill while it fades out.
+    quota_last: Option<Quota>,
+    /// The switch flipped, until the daemon answers: what it was asked to become.
+    quota_pending: Option<bool>,
     /// The messages sent and not recorded yet, the oldest first: each shows from the moment it
     /// is sent, and one the daemon refused stays until it is sent again or taken back.
     pending: Vec<Pending>,
@@ -8070,6 +8280,7 @@ impl Reply {
             field,
             options,
             status_line: cx.new(|_| StatusLine::new()),
+            stayed: None,
             mode,
             has_text: false,
             focused: false,
@@ -8080,6 +8291,9 @@ impl Reply {
             next_pending: 0,
             compact_offered: false,
             compact: false,
+            quota: None,
+            quota_last: None,
+            quota_pending: None,
             left: HashMap::new(),
             activity: None,
             attached: Attachments::default(),
@@ -8129,12 +8343,21 @@ impl Reply {
         self.attached.is_scaling()
     }
 
-    /// The line above the field while a turn runs: what the root does.
+    /// The line above the field: what the root does while a turn runs, else why its last turn
+    /// failed while its session stayed.
     pub fn status(&self) -> Option<String> {
-        self.activity
-            .as_ref()
-            .filter(|_| self.running)
-            .map(Activity::line)
+        match self.running {
+            true => self.activity.as_ref().map(Activity::line),
+            false => self.stayed.clone(),
+        }
+    }
+
+    fn set_stayed(&mut self, stayed: Option<String>, cx: &mut Context<Self>) {
+        if self.stayed != stayed {
+            self.stayed = stayed;
+            self.sync_status(cx);
+            cx.notify();
+        }
     }
 
     fn set_activity(&mut self, activity: Option<Activity>, cx: &mut Context<Self>) {
@@ -8201,24 +8424,124 @@ impl Reply {
         cx.notify();
     }
 
-    /// Compact before sending, under the field while the root's cache expired: it unfolds and
-    /// folds away with its gap.
-    fn render_compact(&self, cx: &mut Context<Self>) -> AnyElement {
-        presence(
-            "reply-compact",
+    /// Compact before sending, a chip in the toolbar while the root's cache expired: its room
+    /// opens and it fades in, folds and fades out; its fill follows the toggle. At rest it is
+    /// its natural width, and the explanation is its tooltip.
+    fn render_compact(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let shown = fade(
+            "reply-compact-shown",
             self.compact_offered,
+            PANEL,
+            window,
+            cx,
+        );
+        if !self.compact_offered && shown == 0.0 {
+            return None;
+        }
+        Some(
             div()
-                .id("reply-compact-line")
-                .pt(space::SM)
-                .px(space::XS)
+                .flex_none()
+                .opacity(shown)
+                .when(shown < 1.0, |d| {
+                    d.w(px(COMPACT_CHIP_WIDTH) * shown).overflow_hidden()
+                })
                 .child(
-                    Switch::new("reply-compact-toggle", self.compact, COMPACT_BEFORE_SENDING)
-                        .hint(COMPACT_HINT)
+                    Button::choice("reply-compact", COMPACT_CHIP, self.compact)
+                        .tooltip(COMPACT_HINT)
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_compact(cx))),
                 )
-                .test_support(),
+                .into_any_element(),
         )
-        .into_any_element()
+    }
+
+    /// The root's wait for its quota's reset, as the tree says it: the switch shows while the
+    /// reset is known.
+    pub fn set_quota(&mut self, quota: Option<Quota>, cx: &mut Context<Self>) {
+        let quota = quota.filter(|quota| quota.reset_at.is_some());
+        if self.quota != quota {
+            self.quota = quota;
+            self.quota_last = quota.or(self.quota_last);
+            cx.notify();
+        }
+    }
+
+    /// Whether the switch shows, and whether it is on: what it was asked to become while the
+    /// daemon has not answered.
+    pub fn quota_offer(&self) -> Option<bool> {
+        self.quota
+            .map(|quota| self.quota_pending.unwrap_or(quota.resume))
+    }
+
+    pub fn toggle_quota(&mut self, cx: &mut Context<Self>) {
+        let Some(on) = self.quota_offer() else {
+            return;
+        };
+        if self.quota_pending.is_some() {
+            return;
+        }
+        self.quota_pending = Some(!on);
+        let command = Command::QuotaResume {
+            session: self.session.clone(),
+            resume: !on,
+        };
+        self.shell
+            .update(cx, |shell, _| shell.perform(command))
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon's answer to a flip: taken, the tree says it next; refused, the switch goes
+    /// back and a toast says why.
+    pub fn quota_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        let asked = self.quota_pending.take();
+        match refused {
+            None => {
+                if let (Some(quota), Some(asked)) = (&mut self.quota, asked) {
+                    quota.resume = asked;
+                }
+            }
+            Some(why) => toast(
+                Toast::failure("The resume at the reset was not changed").detail(why),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// Resume at the reset, a quiet chip at the end of the toolbar's controls while the root waits
+    /// for its quota: its room opens and it fades in, folds and fades out; its ground follows the
+    /// choice (never the accent fill) and its label the reset. At rest it is its natural width, and the explanation is its tooltip.
+    fn render_quota(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let offered = self.quota.is_some();
+        let shown = fade("reply-quota-shown", offered, PANEL, window, cx);
+        if !offered && shown == 0.0 {
+            return None;
+        }
+        let on = self
+            .quota_offer()
+            .or(self.quota_last.map(|quota| quota.resume));
+        let label = self
+            .quota
+            .or(self.quota_last)
+            .and_then(|quota| quota.reset_at)
+            .map(resume_at)
+            .unwrap_or_default();
+        Some(
+            div()
+                .flex_none()
+                .opacity(shown)
+                .when(shown < 1.0, |d| {
+                    d.w(px(QUOTA_CHIP_WIDTH) * shown).overflow_hidden()
+                })
+                .child(
+                    Button::choice("reply-quota", label, on.unwrap_or(false))
+                        .ghost()
+                        .tooltip(QUOTA_HINT)
+                        .disabled(self.quota_pending.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_quota(cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
@@ -8506,41 +8829,54 @@ impl Reply {
                 cx.reduce_motion(),
             );
         }
-        let rows: Vec<AnyElement> = self
+        // The composer's own commands sit under their heading, the project's under theirs: the
+        // note about the project's commands belongs to the second one alone.
+        let mut builtin: Vec<AnyElement> = Vec::new();
+        let mut project: Vec<AnyElement> = Vec::new();
+        for row in self.slash_rows.rows() {
+            let (name, description) = row.value.clone();
+            let is_builtin = name == RELOAD_COMMAND;
+            let picked = name.clone();
+            let mut line = ListRow::new(
+                ElementId::Name(format!("slash-{name}").into()),
+                format!("/{name}"),
+            )
+            .line(description)
+            .selected(open && on.as_ref().is_some_and(|(on, _)| *on == name));
+            if open && !row.placement.is_gone() {
+                line = line.on_click(
+                    cx.listener(move |this, _, window, cx| this.pick(&picked, window, cx)),
+                );
+            }
+            let item = flottille_ui::Item::new(
+                ElementId::Name(format!("slash-item-{name}").into()),
+                row.placement,
+                line,
+            )
+            .gap(space::XS)
+            .into_any_element();
+            if is_builtin {
+                builtin.push(item);
+            } else {
+                project.push(item);
+            }
+        }
+        let builtin_listed = self
             .slash_rows
             .rows()
-            .map(|row| {
-                let (name, description) = row.value.clone();
-                let picked = name.clone();
-                let mut line = ListRow::new(
-                    ElementId::Name(format!("slash-{name}").into()),
-                    format!("/{name}"),
-                )
-                .line(description)
-                .selected(open && on.as_ref().is_some_and(|(on, _)| *on == name));
-                if open && !row.placement.is_gone() {
-                    line = line.on_click(
-                        cx.listener(move |this, _, window, cx| this.pick(&picked, window, cx)),
-                    );
-                }
-                flottille_ui::Item::new(
-                    ElementId::Name(format!("slash-item-{name}").into()),
-                    row.placement,
-                    line,
-                )
-                .gap(space::XS)
-                .into_any_element()
-            })
-            .collect();
-        let listed = !self.slash_rows.is_empty();
+            .any(|row| row.value.0 == RELOAD_COMMAND && !row.placement.is_gone());
+        let project_listed = self
+            .slash_rows
+            .rows()
+            .any(|row| row.value.0 != RELOAD_COMMAND && !row.placement.is_gone());
         let note = div()
             .id("slash-none")
-            .aria_label("This project has no command yet: add one in its settings.")
+            .aria_label("No command of this project yet: add one in its settings.")
             .px(space::MD)
             .py(space::SM)
             .text_size(px(12.5))
             .text_color(p.faint)
-            .child("This project has no command yet: add one in its settings.")
+            .child("No command of this project yet: add one in its settings.")
             .test_support();
         let card = div()
             .id("slash-list")
@@ -8554,8 +8890,24 @@ impl Reply {
             .flex()
             .flex_col()
             .gap(space::XS)
-            .child(presence("slash-label", listed, section_label("Commands", cx)).gap(space::XS))
-            .children(rows)
+            .child(
+                presence(
+                    "slash-builtin-label",
+                    builtin_listed,
+                    section_label("Flottille", cx),
+                )
+                .gap(space::XS),
+            )
+            .children(builtin)
+            .child(
+                presence(
+                    "slash-project-label",
+                    project_listed || none,
+                    section_label("This project", cx),
+                )
+                .gap(space::XS),
+            )
+            .children(project)
             .child(presence("slash-note", none, note).gap(space::XS))
             .test_support();
         div()
@@ -8848,7 +9200,6 @@ impl Render for Reply {
                     .test_support(),
             )
             .child(chips)
-            .child(self.render_compact(cx))
             .child(
                 div()
                     .flex()
@@ -8858,7 +9209,10 @@ impl Render for Reply {
                     .px(space::XS)
                     .child(self.options.clone())
                     .child(self.mode.clone())
+                    .children(self.render_compact(window, cx))
                     .child(Attachments::button(cx, Self::attached_of))
+                    // An optional chip goes after the fixed controls: its arrival moves none.
+                    .children(self.render_quota(window, cx))
                     // What the root does while its turn runs, where the line above the field was.
                     .child(
                         div()
@@ -9141,6 +9495,8 @@ mod tests {
             tools_outdated: false,
             tools_reload: false,
             extensions: serde_json::Value::Null,
+            compacting: false,
+            quota: None,
         }
     }
 

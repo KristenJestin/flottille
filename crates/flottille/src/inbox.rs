@@ -46,6 +46,7 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
                 "agent.asked",
                 "agent.failed",
                 "session.following_paused",
+                "vault.asked",
             ],
             asked.after.unwrap_or(0),
         )
@@ -54,6 +55,9 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
     let resumed = daemon.read(|store| {
         store.events_named(&["session.following_resumed"], asked.after.unwrap_or(0))
     })?;
+    // A request for a vault entry the user answered says so too.
+    let answered = daemon
+        .read(|store| store.events_named(&["vault.ask_answered"], asked.after.unwrap_or(0)))?;
     let mut entries = Vec::new();
     for event in events {
         let kind = match (event.name.as_str(), &event.data["to"]) {
@@ -61,6 +65,7 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             ("agent.asked", to) if to == "user" => "question",
             ("agent.failed", _) => "failure",
             ("session.following_paused", _) => "paused",
+            ("vault.asked", _) => "vault",
             _ => continue,
         };
         let Some(id) = event.data["agent"].as_str() else {
@@ -70,12 +75,13 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
         let Some(agent) = agent.filter(|agent| agent.parent.is_none()) else {
             continue;
         };
-        let resolved = kind == "paused"
+        let resolved = (kind == "paused"
             && resumed.iter().any(|later| {
                 later.seq > event.seq
                     && later.data["agent"] == event.data["agent"]
                     && later.data["follower"] == event.data["follower"]
-            });
+            }))
+            || (kind == "vault" && answered.iter().any(|later| later.data["ask"] == event.seq));
         let paused = format!(
             "The session {} and the agent {} that started it have written to each other {} times \
              without you: the agent no longer wakes at the end of this session's turns. Write a \
@@ -93,12 +99,22 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             "paused" => json!(paused),
             "report" => event.data["text"].clone(),
             "question" => event.data["question"].clone(),
+            "vault" => json!(format!(
+                "It asks you to set the vault entry {} of {}: {}",
+                event.data["name"].as_str().unwrap_or_default(),
+                event.data["project"].as_str().unwrap_or_default(),
+                event.data["why"].as_str().unwrap_or_default()
+            )),
             _ => event.data["reason"].clone(),
         };
         entries.push(json!({
             "seq": event.seq, "at": event.at, "kind": kind, "agent": agent.id,
             "project": agent.project, "workspace": agent.workspace, "text": text,
         }));
+        if kind == "question" {
+            entries.last_mut().unwrap()["questions"] =
+                json!(flottille_core::question::of(&event.data));
+        }
         if resolved {
             entries.last_mut().unwrap()["resolved"] = json!(true);
         }

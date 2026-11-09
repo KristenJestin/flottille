@@ -107,6 +107,7 @@ fn list(daemon: &Daemon, asked: List) -> Answer {
         };
         return Ok(json!({"commands": users(project, asked.ended)?}));
     }
+    let mut commands: Vec<Value> = Vec::new();
     let (ids, ended_listed) = match (&asked.tree, &asked.project) {
         (Some(agent), _) => {
             if !by_id.contains_key(agent.as_str()) {
@@ -118,6 +119,14 @@ fn list(daemon: &Daemon, asked: List) -> Answer {
             let root = tree::root_of(daemon, agent);
             // The commands of a session that ended go with it.
             let over = by_id.get(root.as_str()).is_some_and(|a| a.state.is_final());
+            // The tasks the user ran in the session's place, from its rail or the project page.
+            if let Some(root) = by_id.get(root.as_str()) {
+                commands.extend(
+                    users(&root.project, asked.ended && !over)?
+                        .into_iter()
+                        .filter(|run| run["workspace"].as_str() == root.workspace.as_deref()),
+                );
+            }
             (tree::ids(daemon, &root)?, asked.ended && !over)
         }
         (None, Some(project)) => (
@@ -130,7 +139,6 @@ fn list(daemon: &Daemon, asked: List) -> Answer {
         ),
         (None, None) => (agents.iter().map(|a| a.id.clone()).collect(), asked.ended),
     };
-    let mut commands: Vec<Value> = Vec::new();
     // A project's list, and the daemon's, hold the tasks the user ran too, as the left tree marks
     // them.
     match (&asked.tree, &asked.project) {
@@ -184,7 +192,11 @@ fn listed(
         .map(|agent| tree::root_of(daemon, agent))
         .into();
     shown["project"] = run.project.clone().into();
-    shown["workspace"] = agent.and_then(|a| a.workspace.clone()).into();
+    shown["workspace"] = match agent {
+        Some(agent) => agent.workspace.clone(),
+        None => run.workspace.clone(),
+    }
+    .into();
     shown["last_line"] = last_line.into();
     shown["tail"] = tail.into();
     shown

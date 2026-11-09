@@ -38,6 +38,18 @@ pub enum Align {
 
 pub(crate) type Handler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 
+/// How wide a list is: a picker's list has the width its owner gave it, a menu's is as wide as
+/// its longest row, at least `Fit.0` and at most [`MENU_MAX`] (less in a narrow window), so that
+/// a label never wraps and is cut only when it could not fit the window.
+#[derive(Clone, Copy)]
+pub(crate) enum Width {
+    Fixed(Pixels),
+    Fit(Pixels),
+}
+
+/// The widest a menu grows: a longer label is cut with an ellipsis.
+const MENU_MAX: f32 = 420.;
+
 #[derive(IntoElement)]
 pub struct Dropdown {
     id: ElementId,
@@ -184,7 +196,15 @@ impl RenderOnce for Dropdown {
         // While it closes, nothing is over the window to take a click.
         let dismiss = self.open.then_some(self.on_toggle).flatten();
         root.child(list_overlay(
-            &self.id, TRIGGER, self.align, self.width, self.items, dismiss, t, window, cx,
+            &self.id,
+            TRIGGER,
+            self.align,
+            Width::Fixed(self.width),
+            self.items,
+            dismiss,
+            t,
+            window,
+            cx,
         ))
     }
 }
@@ -198,7 +218,7 @@ pub(crate) fn list_overlay(
     id: &ElementId,
     trigger: f32,
     align: Align,
-    width: Pixels,
+    width: Width,
     items: Vec<AnyElement>,
     dismiss: Option<Handler>,
     fade: f32,
@@ -237,7 +257,12 @@ pub(crate) fn list_overlay(
         .when(fade < 1.0, |d| {
             d.relative().top(px(RISE * (1.0 - fade))).opacity(fade)
         })
-        .w(width)
+        .map(|d| match width {
+            Width::Fixed(width) => d.w(width),
+            Width::Fit(least) => d
+                .min_w(least)
+                .max_w(px(MENU_MAX).min(viewport.width - px(16.))),
+        })
         .p(px(4.))
         .rounded(px(10.))
         .bg(p.card)
@@ -293,6 +318,8 @@ pub struct MenuItem {
     label: SharedString,
     leading: Option<Icon>,
     note: Option<SharedString>,
+    detail: Option<SharedString>,
+    slot: bool,
     selected: bool,
     danger: bool,
     on_click: Option<Handler>,
@@ -305,10 +332,25 @@ impl MenuItem {
             label: label.into(),
             leading: None,
             note: None,
+            detail: None,
+            slot: false,
             selected: false,
             danger: false,
             on_click: None,
         }
+    }
+
+    /// A second, fainter line under the label, cut to one line: what the entry acts on.
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    /// Keeps the icon's room when the entry has no icon, so that its label starts where the
+    /// labels of the entries that have one start.
+    pub fn slot(mut self) -> Self {
+        self.slot = true;
+        self
     }
 
     /// In the failure colour: the "Remove…" of a "⋯" menu, which opens a confirmation.
@@ -349,6 +391,9 @@ impl RenderOnce for MenuItem {
             (true, false) => (p.mute, p.text, p.hover),
         };
         let selected = self.selected;
+        let label = self.label;
+        let label_id = ElementId::Name(format!("{}-label", id_text(&self.id)).into());
+        let detail_id = ElementId::Name(format!("{}-detail", id_text(&self.id)).into());
         let item = div()
             .id(self.id)
             .flex_none()
@@ -360,14 +405,57 @@ impl RenderOnce for MenuItem {
             .items_center()
             .gap(px(8.))
             .text_size(px(13.))
-            .when_some(self.leading, |d, glyph| {
-                d.child(
-                    icon(glyph)
-                        .size(px(14. * glyph.scale()))
-                        .text_color(p.faint),
-                )
+            // The icon has a cell of its own, 14 px wide whatever the glyph's scale (the stop's
+            // is larger), so that every label starts at the same x.
+            .map(|d| match (self.leading, self.slot) {
+                (None, false) => d,
+                (leading, _) => d.child(
+                    div()
+                        .w(px(14.))
+                        .h(px(14.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .children(leading.map(|glyph| {
+                            icon(glyph)
+                                .size(px(14. * glyph.scale()))
+                                .text_color(p.faint)
+                        })),
+                ),
             })
-            .child(div().flex_1().min_w_0().child(self.label))
+            // An entry is one line: a label is cut, never wrapped, when it cannot fit.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id(label_id)
+                            .aria_label(label.clone())
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(label)
+                            .test_support(),
+                    )
+                    .when_some(self.detail, |d, detail| {
+                        d.child(
+                            div()
+                                .id(detail_id)
+                                .aria_label(detail.clone())
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(11.5))
+                                .text_color(p.faint)
+                                .child(detail)
+                                .test_support(),
+                        )
+                    }),
+            )
             .when_some(self.note, |d, note| {
                 d.child(div().flex_none().mono(11.).text_color(p.faint).child(note))
             })

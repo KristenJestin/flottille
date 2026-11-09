@@ -69,8 +69,30 @@ pub struct TreeAgent {
     pub tools_outdated: bool,
     /// A reload of its tools waits for its next process (`agent.reload_tools`).
     pub tools_reload: bool,
+    /// Flottille compacts its conversation: the compactor works, or it writes its handoff.
+    pub compacting: bool,
+    /// The root waits for its quota's reset (`docs/design.md` §5.9).
+    pub quota: Option<Quota>,
     /// What the parts of Flottille the user can turn off say of it, each under its name.
     pub extensions: Value,
+}
+
+/// A root's wait for its quota's reset.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Quota {
+    /// When it resets; `None` when its provider's words could not be read.
+    pub reset_at: Option<u64>,
+    /// Whether the daemon resumes the session then.
+    pub resume: bool,
+}
+
+impl Quota {
+    pub fn of(value: &Value) -> Option<Quota> {
+        value.is_object().then(|| Quota {
+            reset_at: value["reset_at"].as_u64(),
+            resume: value["resume"] == true,
+        })
+    }
 }
 
 /// A change of model and effort waiting for the end of the turn.
@@ -156,6 +178,8 @@ impl TreeAgent {
             tools_outdated: agent["tools_outdated"] == true,
             tools_reload: agent["tools_reload"] == true,
             extensions: entry["extensions"].clone(),
+            compacting: agent["compacting"] == true,
+            quota: Quota::of(&agent["quota"]),
         }
     }
 }
@@ -546,12 +570,21 @@ const TREE_EVENTS: &[&str] = &[
     "agent.asked",
     // A question answered: its card folds away.
     "agent.answered",
+    // A request for a vault entry, and its answer, which folds its card away.
+    "vault.asked",
+    "vault.ask_answered",
     // The rail's gauge of each agent's context.
     "agent.usage",
     // The line that says the session runs an older list of tools.
     "agent.tools_outdated",
     // The line that says the tools reload after this turn.
     "agent.tools_reload",
+    // The session says it compacts while it does, and what waits says it waits for that.
+    "agent.compacting",
+    "agent.compacted",
+    // The session waits for its quota's reset, or no longer does.
+    "agent.quota",
+    "agent.compaction_failed",
     "delivery.queued",
     // A waiting message taken back leaves the queue under the conversation.
     "delivery.withdrawn",
@@ -782,6 +815,13 @@ impl Link {
                 && data["project"] == self.place.project.as_str()
             {
                 stale.mark(false, false, true, false);
+            }
+            // A task the user ran in the project may be one of this place's, which the rail lists.
+            if name.starts_with("run.")
+                && data["agent"].is_null()
+                && data["project"] == self.place.project.as_str()
+            {
+                stale.mark(false, false, false, true);
             }
             // A leave names two sessions, and goes with the end of either, the other one too.
             let root = self.root.as_str();

@@ -62,6 +62,7 @@ pub static PROVIDER: Provider = Provider {
     takes_new_tools: false,
     // It keeps the list it first read: `notifications/tools/list_changed` is not taken by default.
     lists_tools_again: false,
+    says_every_effort: false,
     // OpenAI keeps a prompt's prefix "5 to 10 minutes of inactivity, up to an hour off-peak": no
     // lifetime to count on (`docs/agents.md`).
     cache_lifetime: || None,
@@ -192,10 +193,15 @@ fn forget_session(paths: &Paths, session: &str) {
     });
 }
 
-/// Where the bridge marks a thread in which Codex started a tool of its own outside a prompt, so
-/// that its session is not resumed.
+/// Where the bridge marks a thread in which Codex started a tool of its own, so that its session
+/// is not resumed.
 pub fn breaches(paths: &Paths) -> PathBuf {
     folder(paths).join("breaches")
+}
+
+/// Whether Codex started a tool of its own in that session.
+pub fn breached(paths: &Paths, session: &str) -> bool {
+    crate::claude::is_session_id(session) && breaches(paths).join(session).exists()
 }
 
 fn forget_agent(_paths: &Paths, _agent: &str) {}

@@ -58,8 +58,9 @@ The project's file was edited: the daemon noticed it at its next request about p
 
 ### `project.removed`
 
-The project was removed (`project.remove`), or its file is gone. Only Flottille's configuration is
-removed, never the folder.
+The project was removed (`project.remove`), or its file is gone. Never its folder: a removal
+emits it last, after the events of what it stopped and removed (`agent.ended`, `run.ended`,
+`workspace.removed`).
 
 | Field | |
 |---|---|
@@ -89,6 +90,17 @@ again.
 | Field | |
 |---|---|
 | `name` | The provider's name. |
+
+### `provider.models_learning`
+
+The daemon started listing a provider's models (`"learning": true`), or the listing ended,
+whatever its outcome (`"learning": false`). The window shows the effort picker's skeleton for a
+model whose efforts are not known while it lists, and reads the providers again.
+
+| Field | |
+|---|---|
+| `name` | The provider's name. |
+| `learning` | Whether the listing runs. |
 
 ### `provider.judge_changed`
 
@@ -207,6 +219,18 @@ secret.
 | `name` | The entry. |
 | `project` | The only project whose agents see it, `null` for every project. |
 | `removed` | `true` when it was removed; absent when it was set. |
+
+### `vault.asked`, `vault.ask_joined`, `vault.ask_answered`
+
+An agent asked the user for a vault entry a feature of Flottille names and that is missing
+(`vault {action: "ask"}`, `docs/vault.md`, "Asking the user for an entry"), an event of that
+agent. `vault.asked` opens the request, numbered by its `seq`: `agent`, `project`, `name`, `why`
+(the agent's reason), and what Flottille prefilled, `description` and `takes_username`, and
+`taken` when another project already uses the name (the sentence the request is refused with).
+`vault.ask_joined` is another agent's ask while it is open: `agent`, `ask` (the request's
+number), `project`, `name`, `why`. `vault.ask_answered`, an event of the agent that opened it,
+closes it: `ask`, `project`, `name`, `entry` (the entry set, which is not `name` when the user
+chose another), `outcome` (`set` or `dismissed`). Never a secret.
 
 ### `workspace.created`
 
@@ -423,7 +447,7 @@ A turn starts with this message.
 | `agent` | |
 | `text` | The message. |
 | `images` | The names of the images that went with it, when some did (`agent.image` gives each back). An image that did not go is said in `text` instead. |
-| `deliveries` | The ids of the deliveries the message is made of, in order: one per delivery of `text` (the id `agent.send` answered for a message of the user). An event written before it was kept has none. |
+| `deliveries` | The ids of the deliveries the message is made of, in order: one per delivery of `text` (the id `agent.send` answered for a message of the user). An event written before it was kept has none. A delivery that only gives a new session the conversation again after a compaction (its brief, the summary, the latest messages, or the handoff) has an id ending in `-replay` (`brief-<agent>-<epoch>-replay`): it is part of the compaction, not something anyone said, and a reader that shows what was sent leaves its section of `text` out. |
 | `typed` | When a delivery of the message used commands (`docs/commands.md`): one entry per delivery of `text`, in order, `{"text", "commands"}` for one that used commands (what was typed, masked, and the names of the commands in the order of their first use), `null` for the others. Left out when none did; an event written before it was kept has none. |
 
 #### `agent.user_message`, `agent.message`, `agent.thought`
@@ -450,6 +474,19 @@ A tool call the agent makes, or a change of one (`update`).
 | `update` | False when the call appears, true for a change of it. |
 | `title`, `kind`, `status`, `locations`, `content`, `raw_input`, `raw_output` | As the agent sent them, each only when it did; `status` is `pending`, `in_progress`, `completed` or `failed`. |
 
+#### `agent.compacting`
+
+Flottille's compaction of the agent began (`docs/design.md` §5.8): the compactor was started, or
+the agent was asked for its handoff. The window shows a step that runs from it, until
+`agent.compacted` or `agent.compaction_failed` ends it. The agent's CLI compacting on its own
+says nothing before: only `agent.compacted`.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `source` | `compactor`, or `agent` when it writes its own handoff (`summary = "agent"`). |
+| `before` | The tokens of the context in use, as the last `agent.usage` said. |
+
 #### `agent.compacted`
 
 The agent's context was compacted: by its own CLI, or by Flottille (`docs/design.md` §5.8), whose
@@ -468,13 +505,26 @@ compactor summarised it before the agent went on in a new session.
 #### `agent.cache_expired`
 
 The prompt cache of the agent, at rest, expired, and its context is past the minimum size of the
-compaction around the expiry (`docs/design.md` §5.8, 6): the composer shows **Compact before
-sending** until the agent's next turn or compaction. Said once per expiry.
+compaction around the expiry (`docs/design.md` §5.8, 6): the composer's toolbar shows its **Compact**
+chip until the agent's next turn or compaction. Said once per expiry.
 
 | Field | |
 |---|---|
 | `agent` | |
-| `compact` | The setting `after_expiry` when it was said: whether the toggle starts ticked. |
+| `compact` | The setting `after_expiry` when it was said: whether the chip starts ticked. |
+
+#### `agent.quota`
+
+A root's wait for its quota's reset began, changed or ended (`docs/design.md` §5.9).
+
+| Field | |
+|---|---|
+| `agent` | |
+| `limited` | `true` while it waits; `false` once the wait ended. |
+| `reset_at` | While it waits: the reset, in milliseconds since the epoch; `null` when the provider's words could not be read. |
+| `resume` | While it waits: the user's choice for this session, `null` to follow the setting. |
+| `limited_at` | While it waits: when the provider said it. |
+| `why` | Once it ended: `the user wrote`, `a turn ran`, `resumed` or `the quota reset`. |
 
 #### `agent.compaction_failed`
 
@@ -537,6 +587,7 @@ activity.
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
 | `link` | Only for a `forge` `run` that was done and whose answer gave the run's link: that link. |
 | `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
+| `setup` | Only on a `tickets` `log_time` that was refused for want of the project's vault entry (none named, one the project does not see, or one with no username): `time_logging`. The window says it in the conversation, with a button to the project's Settings, Tracker (`docs/tickets.md`, "Logging time"). |
 
 #### `agent.link_shown`
 
@@ -662,7 +713,7 @@ it was performed for an allowed request.
 | Field | |
 |---|---|
 | `agent` | |
-| `stop_reason` | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`, or `interrupted` when its process died during the turn. |
+| `stop_reason` | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`, `interrupted` when its process died during the turn, or `failed` when the agent failed the prompt for a reason that leaves its session usable (`docs/agents.md`, "A failed turn"). |
 | `usage` | The turn's token counts when the agent gave them, else `null`. |
 
 #### `agent.released`
@@ -672,7 +723,7 @@ Its process was let go; the next message starts it again.
 | Field | |
 |---|---|
 | `agent` | |
-| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone), `reload` (the user reloaded its tools, `agent.reload_tools`) or `stopped` (an ended root whose session is kept: it can be resumed now, `agent.resume`). |
+| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone), `reload` (the user reloaded its tools, `agent.reload_tools`), `failed` (its turn failed for a reason that leaves its session usable: its `state_reason` says it until the next prompt, `docs/agents.md`, "A failed turn") or `stopped` (an ended or failed root whose session is kept: it can be resumed now, `agent.resume`). |
 
 #### `agent.died`
 
@@ -783,10 +834,23 @@ closed by it.
 | Field | |
 |---|---|
 | `agent` | |
-| `question` | Masked. |
+| `question` | The ask as one text, masked: a single question without options is its own text; several are numbered, each option listed under its question (what a parent or a pilot reads). |
+| `questions` | Each question, masked: `{"question", "options"?: [{"label", "description"?}], "multiple"?}`. An event written before an ask could hold several has none: read it as the single question `question`, without options. |
 | `to` | `user`, `parent` or `pilot`. |
 | `pilot` | With `to` `pilot`: the pilot's id; `null` otherwise. |
 | `moved_from` | Present on a question to the pilot moved to the user: the pilot's id. |
+
+#### `agent.titled`
+
+A session was named (`docs/tools.md`, "The session's title"): by its agent (`session_title`), or by
+the user (`agent.rename`), whose title then stays. The window's sidebar, header, quick switcher and
+notifications follow it.
+
+| Field | |
+|---|---|
+| `agent` | The session's root. |
+| `title` | Masked. |
+| `by` | `agent` or `user`. |
 
 #### `agent.detached`
 
@@ -812,14 +876,17 @@ on), and it is told so once by a `handed` delivery.
 
 A question of the agent may no longer wait: it took a message of the user (a root) or of its
 parent (a child) while a question of its waited, or its session was replaced or resumed while one
-did. It tells a client to read the root's open questions again (`agent.tree`, `questions`); it does
-not say which are open, the store does: a question is answered once the root took a message of the
-user written after it, and none asked before a replacement or a resume waits.
+did, or the user answered an ask from its card (`agent.answer`). It tells a client to read the
+root's open questions again (`agent.tree`, `questions`); it does not say which are open, the store
+does: an ask is answered once the root took a message of the user written after it (an answer from
+an ask's card answers that ask alone), and none asked before a replacement or a resume waits.
 
 | Field | |
 |---|---|
 | `agent` | |
-| `why` | `replaced` or `resumed`, when that is why; absent for a message taken. |
+| `why` | `replaced` or `resumed`, when that is why; absent otherwise. |
+| `asked` | With `agent.answer`: the number of the `agent.asked` event it answers. |
+| `answers` | With `agent.answer`: one per question, in order, `{"choices"?, "text"?}`, the words masked. The window's card shows them, folded, once the agent took them. |
 
 #### `agent.stuck`
 

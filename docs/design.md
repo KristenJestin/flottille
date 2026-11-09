@@ -234,24 +234,33 @@ Flottille's own tools:
   and the mode of that session's tree; framed as that session's data, never instructions; judged
   in Ask and Auto; a session of another project is refused. Without `session` (or with the
   caller's own id) it reads this session: its id, its role and its tree's mode, asked of nobody.
+- `session_title {title}` (a root): names its session for the user, 3 to 8 words on one line, at
+  most 60 characters, in its first turn and again when the work changes, until the user renames
+  it (`docs/tools.md`, "The session's title").
 - `agent_send {agent_id, message}`: a message to one of the caller's children.
 - `agent_status {agent_id?, action?, detail?, after?}`: for one child or all of them: state, what
   it is doing now (thinking, in a tool call, which command runs and for how long, waiting for
   approval #n, waiting on the provider), time since its last sign of activity, context use; the
   last few messages for one child, or for all with `detail: full`. `action: conversation`: a
   page of the child's conversation.
-- `agent_stop {agent_id}`: stops the child and its own tree.
+- `agent_stop {agent_id}`: stops the child and its own tree; also ends a session the caller
+  started as `led`, judged as any call of its tree, and asks the user to end any other session
+  of the project (§7.2).
 - `report {text}`: the caller is done; its report goes to its parent at once and the session ends
   (see 5.3). A root agent's report goes to the user.
-- `ask {question}`: a question, answered later as a delivery (never blocks), to whom the daemon
+- `ask {question}` or `ask {questions}`: one question or up to 4, each with 2 to 4 options when
+  the answers are known, answered later as a delivery (never blocks), to whom the daemon
   decides for the caller: a child's to its parent, delivered as `child-question` and answered with
   `agent_send`; a led session's to its pilot, which is woken at the turn's end and answers with
   `session_send` (the session shows as waiting on its pilot); any other root's to the user. A
   question to the user is open at once, whatever the agent does next: in the inbox, as "needs you"
-  on its session's row, as a card at its place in the conversation with the field that answers it
-  (the call's own line says `asked you: <its first line>`), and in what `session_read` gives,
-  until the agent takes a message of the user written after it (one message answers every question
-  open then), or its session is replaced or resumed.
+  on its session's row, as a card at its place in the conversation named after the session, with
+  a block per question (its options as chips, a field of several lines) and one Answer (the call's
+  own line says `asked you: <its first line>`), and in what `session_read` gives, until the agent
+  takes the answer from that card (`agent.answer`: one message quoting each question with its
+  answer, which answers that ask alone, the card then folded to the answers) or a message of the
+  user written after it (which answers every question open then), or its session is replaced or
+  resumed. A parent or a pilot reads a several-question ask numbered, and answers it in words.
   `ask_user` and `ask_parent`, the names it replaced, are answered for one release, routed as
   `ask` is.
 - `approval_answer {request_id, decision: forward | deny, why}`: answer a request held for the
@@ -262,9 +271,9 @@ The tool list of a session is its role's, and changes only when the role's does 
 `reference/hemera.md` §7): a project that declares or drops a forge or a tracker, a new version.
 A running session is then told (`notifications/tools/list_changed`) and served the new list, or
 said to run an older one until a restart (`docs/tools.md`, "When the tools change"). It depends
-on what the agent can do: every agent gets `ask`, a root `session_send`, `session_read`, `skills`,
-`commands`, `setup` and `project`; a child, whatever its role, gets no `agent_*` tools
-and no `approval_answer`. A root lead has 25 tools, a child 14; one more each when the
+on what the agent can do: every agent gets `ask`, a root `session_send`, `session_read`,
+`session_title`, `skills`, `commands`, `setup` and `project`; a child, whatever its role, gets no `agent_*` tools
+and no `approval_answer`. A root lead has 27 tools, a child 14; one more each when the
 project's repositories declare a forge (`forge`), one more when it declares a tracker
 (`tickets`), whatever the place (`reference/mcp.md` §4).
 
@@ -327,6 +336,12 @@ and that still wait, whole. It is a following, a subscription that has no end of
 `docs/tools.md`, "Following a session"). Two sessions that write to each other five times
 without the user pause it. A pilot that ends leaves its led sessions going on, handed to the
 user.
+
+A led session stays open after its report: once its work is integrated, its pilot stops it and
+removes its workspace. When a led session reported, is idle and its workspace's branch is
+contained in another branch of the repository, its pilot is reminded once, by `led-integrated`
+(`"Login" (agent …) reported and its branch is in main: stop it and remove its workspace?`),
+checked at the end of a turn of either.
 
 ### 5.3 What the parent is told
 
@@ -479,9 +494,12 @@ agent wrote is data.
    its brief, the summary, then its latest messages word for word. The summary, masked of the
    daemon's secrets, comes in a block of its own (`<earlier_conversation_summary>`, every `<`
    escaped) under a line that says a model wrote it from the earlier conversation: data, not the
-   user's words nor Flottille's instructions. `agent.compacted` says it, with
+   user's words nor Flottille's instructions. `agent.compacting` says it began, so that the
+   window shows the compaction as a step that runs; `agent.compacted` says it is done, with
    the sizes before and after and the summary; the conversation shows it as one line,
-   `Conversation compacted · 152k → 9k tokens`, which unfolds to the summary.
+   `Conversation compacted · 152k → 9k tokens`, which unfolds to the summary. What is sent to the new session is part of the compaction:
+   the conversation, `agent show` and `session_read` never show it as messages, and a
+   message the user wrote meanwhile stays where it is (`docs/events.md`, `agent.prompted`).
 5. **A failure** changes nothing: the agent goes on in its session, `agent.compaction_failed` and
    the developer log say why, and the CLI's own compaction stays the safety net. With a compactor
    chosen, each CLI is set to compact as late as it allows (`docs/agents.md`, "Compaction").
@@ -496,11 +514,14 @@ agent wrote is data.
    not seen, for a context that did not grow since the session started or its last compaction
    failed, nor for a provider whose cache lifetime is not established (`docs/agents.md`, "The
    prompt cache's lifetime"); the Compaction tab says each provider's. Once an agent's cache
-   expired, the composer shows **Compact before sending**, ticked from the setting: unticked, the
-   message goes to the session as it is; ticked, it compacts first even with the setting off. A
+   expired, the composer's toolbar shows a **Compact** chip beside the mode, ticked from the setting
+   (its tooltip says why): unticked, the message goes to the session as it is; ticked, it
+   compacts first even with the setting off. The composer keeps its height: an option of the
+   composer is a control of its toolbar, never a block above it. A
    message from Flottille itself (a child's news, a delivery) follows the setting.
 7. **The agent's own handoff**: **Summary written by** (`summary` in `compaction.toml`) is the
-   compactor (the default, all of the above) or **the agent itself**. Then, at the same moments
+   compactor (the default, all of the above, shown in the window as **A model you choose**) or
+   **the session's own agent**. Then, at the same moments
    (the threshold at the end of a turn, or asked by hand) and with no compactor needed, Flottille
    sends the agent a message of its own, shown as Flottille's and never as the user's, that asks
    for its handoff in a fixed shape: its task, the decisions and why, the files touched, what is
@@ -518,6 +539,37 @@ agent wrote is data.
    (70 % by default, 50 % to 95 %): #405 asked for its own, at 90 %, and was built on this one
    rather than add a second. The triggers around the cache's expiry stay the compactor's, when
    one is chosen: a handoff would read the whole history again at full price.
+
+### 5.9 A spent quota
+
+When an agent's quota runs out, its provider ends the turn with words of its own, for Claude
+"You've hit your weekly limit · resets 1pm (Europe/Paris)", and the agent is idle like one that
+finished its work. Flottille tells them apart by what the provider reports, never by what the agent
+says: at the end of each turn of a root, the limits its provider reported during it
+(`agent.provider_limit`) go through that provider's recogniser (Claude's reads the reset after
+`resets`; another provider's wording is one more recogniser). A reported limit makes the session
+**wait for its reset**: the instant read from the words, the next occurrence of that time of day
+(on that date when they give one) in the zone they name in brackets, the machine's when they name
+none, or the one passed up to ten minutes ago when the provider's clock is late; unknown when the
+words cannot be read. The wait is stored (`quota_waits`), so a restart keeps it, and it is said by
+`agent.quota` and in `agent.list`, `agent.tree` and `agent.show` (`quota`: `reset_at`, `resume`).
+
+The window says it as the session's state, once: waiting, its words `Out of quota, resets at
+13:00` (the reset in the user's local time; `Out of quota` when unknown), on the session's row in
+the sidebar and in the rail of its page, in place of idle.
+
+A setting resumes the session at its reset, **off by default**: "Resume sessions when the quota
+resets", `resume_at_reset` of `sessions.toml`, set in Settings, Sessions, or by `sessions.set`.
+While a session waits for a known reset, its composer's toolbar shows a chip, `Resume at 13:00`,
+beside Compact, ticked or not from that setting, which the user toggles for this session alone
+(`agent.quota_resume`). When it is on, the sweep (no timer of its own) delivers the session one message at the reset plus a
+minute, `Your quota has reset: continue where you stopped.` (a `quota-reset` delivery, never the
+user's), and the session runs again. The wait for that instant is taken in one write, so the
+message goes once; a reset that could not be read resumes nothing; a reset that came while it is
+off ends the wait and sends nothing. A reset already past when the daemon starts is looked at
+then: it resumes at once when allowed. The wait ends with a message of the user's (which starts a
+turn anyway), a turn that ran without the limit, the reset, and the end of the session. Only a
+root waits: a child's limit is its parent's to read (§5.3).
 
 ## 6. Projects and workspaces
 
@@ -560,7 +612,9 @@ by `reference/multi-repo-case.md`:
 - **Copy of ignored files**: `copy` steps take globs (`.env`, `.env.*`), per repository, never
   overwrite.
 - **Removal** refuses a worktree with uncommitted files **or commits not on any remote**
-  (`git log HEAD --not --remotes`), names them, and never forces.
+  (`git log HEAD --not --remotes`), names them, and never forces. Commits contained in another
+  local branch of the repository (`git merge-base --is-ancestor`) are integrated, not lost: the
+  removal goes on, and deletes the branch saying where it is (`it is integrated into dev`).
 
 Agents are placed in a workspace or in the main checkout; what each may do there is the gate's
 (§7).
@@ -603,7 +657,11 @@ a malformed call, a login printed, the daemon driven from a command.
 ### 7.1 The mode and the judge
 
 Each session is in **Ask**, **Auto** or **Full**, a small three-choice control in the composer's
-bar. A session the user starts starts in Auto, never in Full. A tree has one mode, its
+bar, the same in the composer that starts a session. A session the user starts starts in Auto
+unless the user chose another mode in that composer (or `flottille agent start --mode`), and the
+mode is the root's before its first message, so that even the first turn's calls follow it. That
+composer is back on Auto each time it is shown and after each start: a choice never carries over to
+the next session, so that Full is never on by mistake. A tree has one mode, its
 root's, stored with the root and read at each call: a switch reaches every agent of the tree at
 once, children included. Only the user changes it, in the window or with
 `flottille agent mode <agent> ask|auto|full` (`agent.mode`, which switches the tree's root
@@ -774,7 +832,9 @@ who asked:
   talk to each other").
   Ending a session that is not the agent's own child (`agent_stop`) is held for the user the same
   way, in every mode, Full included, and every time: nothing is kept (`docs/tools.md`, "Ending
-  another session").
+  another session"). The one exception is a session the agent itself started as `led`, which it
+  pilots: that one is its own to end, judged as any call in the tree's mode. A session the user
+  opened, or a `handed` one, stays the user's.
 - **A child's request is held by its parent**, as a `child-asks` delivery. The parent denies it or
   forwards it with one sentence of why (`approval_answer`); forwarding passes it to the parent's
   own parent, one level at a time, and from the root to the user, with every reason given on the
@@ -861,17 +921,27 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   turn, its creation before either: the session that last had one on top. Work done during a turn
   never moves a row, so two sessions working at once keep their places; a state is drawn by the
   row's mark, never by reordering). There is no row for `main` nor for a workspace: workspaces live on the project
-  page, and one with no session is not in the sidebar. A session is titled by the first line of
+  page, and one with no session is not in the sidebar. A session is titled by the title its agent
+  gives it in its first turn (`session_title`, 3 to 8 words, `docs/tools.md`, "The session's
+  title") or the user gives it (`Rename…` in its row's "⋯" menu and its header, a dialog with a
+  labelled field; the user's title always wins), and until then by the first line of
   its first message that says what the work is (a greeting or a single word does not: the session
-  is `agent <id>` until a later message of the user does); a session an agent started says it in
+  is `agent <id>` until a later message of the user does); a new title fades in over the old one in
+  the row and the header; a session an agent started says it in
   its page's header, "started by <agent>", not in the sidebar. A session an agent leads (`led`)
   is the one exception to the flat list: its row sits right under its pilot's session's row,
-  indented, starting with a mark whose tooltip says "led by <pilot>"; the pilot's row gains a
-  chevron that folds its led rows away with it, and each led row keeps its own mark, unread dot
-  and draft pencil. Its page's header says "led by <pilot>", and a line above its composer says
-  that the user's messages reach it directly and the pilot is not asked. The row's "⋯" menu of a
-  session an agent started offers "Detach from <agent>" (`agent.detach`, a toast says the
-  result): the row slides back among the project's sessions, its indent and mark fade, and the
+  indented one step, tied to it by a `↳` connector (the line from the pilot turning into the row)
+  whose arrowhead has the tooltip "led by <pilot>"; only a led row is indented, every root's title
+  starts at the same x. The pilot's row gains a chevron, at the end of the row beside its time and
+  "⋯", that folds its led rows away with it; folded, its state mark is the most urgent of its own
+  and its hidden led sessions' (waits for the user, then running, then its own), nothing else is
+  added to the row; each led row keeps its own unread dot and draft pencil. Its page's header says "led by <pilot>", and a line above its composer says
+  "Your messages go straight to this session; its lead is not asked." (it names no session: a
+  sentence of the window that quotes a session's title shows it on one line at most, cut with an
+  ellipsis, in emphasis, never wrapped into the sentence). The row's "⋯" menu of a
+  session an agent started offers "Detach from its lead" (`agent.detach`, a toast says the
+  result; the lead's title is a second, fainter line of the entry, cut to one line, never wrapped; the
+  agent's "⋯" menu in the session's rail offers the same action while the session is led): the row slides back among the project's sessions, its indent and mark fade, and the
   header's line and the note fold away. A question a led session asks its pilot shows in its
   conversation as a card, "<session> asks its pilot", with no answer box. Each session takes
   **two lines**:
@@ -925,7 +995,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   (the program's own page, and a command to copy where one fits most systems) or the command to
   sign in, with a Check again (`forges.md`; Flottille installs nothing), its Skills (a path picked in the project folder, or a text;
   added, edited, removed), its Commands (added from a list of the templates and a blank one,
-  edited, removed), its Tasks (a line, where it runs and its flags), its Setup (steps added,
+  edited, removed), its Tasks (a line, where it runs and its flags; a task's "⋯" holds Run, which runs it in the
+  project folder, beside Edit and Remove), its Setup (steps added,
   edited, removed and reordered, each with its kind, where it is done and its time limit), then
   its Rules (the global rules above, read-only and folded, with a link to edit them; a switch,
   "Use only this project's rules"; the project's text editor, Reset to default, and a line saying
@@ -940,7 +1011,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
   guidance (its editor, Reset to default, Save and its line on when a change applies; a link to the
   guidance opens this tab with the guidance in view), then the providers, the
-  Rules for every project, edited the same way as the guidance, the Sessions (a switch, "End inactive sessions", off by default; switched on it chooses 7 days and a select of the days unfolds under it: 1, 3, 7, 14, 30, 60 or 90, and what a file edited by hand says; `sessions.set`, §5.7), the Appearance (the window's colours: Omarchy
+  Rules for every project, edited the same way as the guidance, the Sessions (a switch, "End inactive sessions", off by default; switched on it chooses 7 days and a select of the days unfolds under it: 1, 3, 7, 14, 30, 60 or 90, and what a file edited by hand says; `sessions.set`, §5.7; and under it a switch, "Resume sessions when the quota resets", off by default, §5.9), the Appearance (the window's colours: Omarchy
   or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
   the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
   switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge
@@ -999,7 +1070,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   nothing under the bar), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
-  Link a ticket…, Unlink the ticket and, for a session in a workspace, Remove workspace…, which
+  Link a ticket… (Change the ticket… once one is linked), Unlink the ticket (only while one is linked) and, for a session in a workspace, Remove workspace…, which
   asks as the card does, the dialog refusing it, with the sessions named, while sessions not ended work there; while it runs the section says it is
   being removed, and once removed it folds away, the page staying) and facts, its runs, then, pinned at the very bottom and
   folding away when nothing waits, "Waiting for you", the one place of the page that says the user
@@ -1012,20 +1083,31 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
   place in the sidebar for the "Ended" group, folded, pinned at the bottom of the sidebar
-  whatever the tree's length and unfolding upward over it (its rows say their project), and its
+  whatever the tree's length and unfolding upward over it (its rows say their project). Unfolded
+  it takes at most eight rows, or 35% of the window's height when that is less, and its rows
+  scroll inside it, the most recently ended first; and its
   page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
   (`agent.resume`), enabled once its process is gone, which brings the composer back; that bar is
-  where it says it ended, not its header, and its conversation says it ended, then resumed. Selecting a child shows its
+  where it says it ended, not its header, and its conversation says it ended, then resumed. A
+  failed root whose session is known shows Resume too. A turn that failed for a reason that
+  leaves the session usable (an expired login, `docs/agents.md`, "A failed turn") ends nothing:
+  the composer stays and the state line above its field says it once (`Claude's login expired:
+  sign in again (run claude and /login), then send your message again`), fading in, and out once
+  a turn runs again. Selecting a child shows its
   conversation read-only;
 - the runs of the agents (`docs/tools.md`, "Tasks and runs"): the rail's **Runs** section lists
   the **task** runs of the agent shown (the root by default, the child once the user opens it from
-  the Agents list; a run belongs to the agent that started it) (it is not called "Commands", which
+  the Agents list; a run belongs to the agent that started it), and the tasks the user ran in the
+  session's place, whichever agent is shown (it is not called "Commands", which
   are the project's `/name` instructions), running first, each with its line, who started it (the
   agent, and the task), how long, its last output line and Stop, then the last five that ended,
   greyed, folded under `N ended` (unfolded by a click, as the Agents' `N ended`), with how they
   ended. A one-off line (`run {"line": …}`) is not listed, running or ended: its card in the
-  conversation is where it is seen, and the section folds away when there is no task run. A child
+  conversation is where it is seen, and the section folds away when there is no task run and the
+  project has no task. Its title holds **Run a task**, which opens the list of the project's tasks;
+  picking one runs it as the user, in the session's workspace (or the project folder), without the
+  gate (`task.run`), and its row unfolds into the section. A child
   with task runs still going says so on its row in the Agents list (`2 runs`), and a click opens
   that child with its Runs section; a click on a run opens its drawer (the same on the project
   page, which lists only the tasks the user ran there): its command, its
@@ -1121,9 +1203,10 @@ nothing built, in [`extensions.md`](extensions.md).
 - Children cap 12 per project, no depth, quiet interval 20 min.
 - Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
   only warned about.
-- A session the user starts starts in Auto, and a tree has one mode, its root's, read at each call; Auto
-  without a judge asks the user as Ask does. Full is chosen by the user for a session already
-  started, never at its start; a session an agent starts takes its launcher's mode, Full included. A user who never chose a judge gets the smallest model
+- A session the user starts starts in Auto unless the user chose its mode in the composer that
+  starts it, which is back on Auto after each start, and a tree has one mode, its root's, read at
+  each call; Auto without a judge asks the user as Ask does. Only the user chooses Full, at a
+  session's start or later; a session an agent starts takes its launcher's mode, Full included. A user who never chose a judge gets the smallest model
   of the first provider installed and signed in, among those listed (Claude's `haiku`); one that is
   not listed gets nothing picked.
 - One judge process per judgement, stopped after it, rather than one kept warm: nothing of a

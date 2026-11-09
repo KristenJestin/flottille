@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use flottille_core::protocol::Event;
+use flottille_core::question;
 use serde_json::Value;
 
 use crate::runs::CommandRow;
@@ -61,6 +62,12 @@ pub enum Block {
         since: u64,
         until: Option<u64>,
     },
+    /// Flottille's compaction of the conversation, running while `until` is `None`; it becomes
+    /// the compacted mark (or the line that says it failed) in the same row when it ends.
+    Compacting {
+        since: u64,
+        until: Option<u64>,
+    },
     /// What it said.
     Text {
         text: String,
@@ -94,17 +101,26 @@ pub enum Block {
     Approval {
         number: u64,
     },
-    /// A question the agent asked the user with `ask_user`: `seq` is its `agent.asked` event,
-    /// which the daemon's open questions name while it waits for the answer.
+    /// A question the agent asked the user with `ask`: `seq` is its `agent.asked` event,
+    /// which the daemon's open questions name while it waits for the answer. `text` is the ask
+    /// as one text; `questions` each of its questions, with its options.
     Question {
         seq: u64,
         text: String,
+        questions: Vec<question::Question>,
+        /// The user's answers, once given from its card (`agent.answered`): the card stays,
+        /// folded to them, once the agent took them.
+        answers: Option<Vec<question::Answer>>,
     },
     /// A question a led session asked its pilot with `ask`: the pilot answers it; the card only
     /// shows the user what was asked.
     Asked {
         text: String,
     },
+    /// The agent asked the user for a vault entry a feature of Flottille names and that is
+    /// missing (`vault.asked`): what Flottille prefilled and the agent's reason. `open` until the
+    /// daemon says it was answered (`vault.ask_answered`).
+    VaultAsk(VaultAsk),
     /// A command's result.
     Command(CommandCard),
     /// A request whose answer came as a card below: the line that told it was asked and decided
@@ -112,6 +128,22 @@ pub enum Block {
     Answered {
         number: u64,
     },
+}
+
+/// A request for a vault entry, as its card shows it: never a secret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultAsk {
+    /// The number of its `vault.asked` event: the request's number.
+    pub seq: u64,
+    pub name: String,
+    pub project: String,
+    pub description: String,
+    pub takes_username: bool,
+    /// Why the name cannot be set for the project, as the daemon refuses with it: another
+    /// project uses it.
+    pub taken: Option<String>,
+    pub why: String,
+    pub open: bool,
 }
 
 /// A link an agent handed the user: one line of a card of links. `whence` is the address's host,
@@ -241,19 +273,36 @@ pub fn in_sight(block: &Block) -> bool {
         | Block::Message { .. }
         | Block::Relayed { .. }
         | Block::SubAgents
-        | Block::Links { .. } => true,
+        | Block::Links { .. }
+        | Block::Compacting { .. } => true,
         Block::Notice { kind, .. } => {
             matches!(
                 kind.as_str(),
-                "failed" | "ended" | "resumed" | COMPACTED_KIND
+                "failed"
+                    | "ended"
+                    | "resumed"
+                    | COMPACTED_KIND
+                    | COMPACTION_FAILED_KIND
+                    | TIME_LOGGING_KIND
             )
         }
         _ => false,
     }
 }
 
+/// The kind of the line that says a time was not logged for want of the project's vault entry,
+/// with the button that opens its Settings at Tracker.
+pub const TIME_LOGGING_KIND: &str = "time logging";
+
+/// What that line says: the window first, the file second (`docs/tickets.md`, "Logging time").
+const TIME_LOGGING_TEXT: &str = "Not logged: this project has no vault entry to log time with. \
+    Choose one in its Settings, Tracker, or write worklog_token in its file.";
+
 /// The kind of the line a compaction of the conversation is.
 pub const COMPACTED_KIND: &str = "compacted";
+
+/// The kind of the line that says a compaction of the conversation failed.
+pub const COMPACTION_FAILED_KIND: &str = "compaction failed";
 
 /// A compaction's line, then the summary Flottille's compactor wrote: `Conversation compacted ·
 /// 150k → 9k tokens`. One by the agent's own CLI has no summary to show.
@@ -624,6 +673,14 @@ impl Conversation {
             changes.extend(self.add_approval(number));
         }
         changes.extend(self.fold(event));
+        // A time that could not be logged for want of the project's vault entry: its line, with
+        // the button to the project's Settings, comes after the step that was refused.
+        if event.name == "agent.tool_served" && event.data["setup"] == "time_logging" {
+            changes.extend(self.push(Block::Notice {
+                kind: TIME_LOGGING_KIND.into(),
+                text: TIME_LOGGING_TEXT.into(),
+            }));
+        }
         self.last_at = Some(event.at);
         changes
     }
@@ -736,6 +793,16 @@ impl Conversation {
                 // The delivery of a picture sent alone, for the bubble its thumbnails make.
                 let mut alone = None;
                 for (at, (kind, body)) in sections(&text("text")).into_iter().enumerate() {
+                    // What a compaction sends the new session again is the `compacted` line's
+                    // business: nobody said it.
+                    if delivery(at).is_some_and(|id| is_replay(&id)) {
+                        continue;
+                    }
+                    // An answer from a question's card shows in that card, under each question:
+                    // the quotes are Flottille's, not the user's words.
+                    if delivery(at).is_some_and(|id| question::answered_ask(&id).is_some()) {
+                        continue;
+                    }
                     // A picture sent alone has no words: its thumbnails are the message.
                     if body.trim().is_empty() && !names.is_empty() {
                         alone = alone.or_else(|| delivery(at));
@@ -870,8 +937,24 @@ impl Conversation {
                 changes.extend(self.push(Block::Question {
                     seq: event.seq,
                     text: text("question"),
+                    questions: question::of(data),
+                    answers: None,
                 }));
                 changes
+            }
+            // The answers the user gave from a question's card: the card shows them.
+            "agent.answered" if data["asked"].is_u64() => {
+                let asked = data["asked"].as_u64();
+                let at = self.blocks.iter().position(
+                    |block| matches!(block, Block::Question { seq, .. } if Some(*seq) == asked),
+                );
+                match at.map(|at| (at, &mut self.blocks[at])) {
+                    Some((at, Block::Question { answers, .. })) => {
+                        *answers = Some(question::answers_of(data));
+                        vec![Change::Changed(at)]
+                    }
+                    _ => Vec::new(),
+                }
             }
             "agent.asked" if data["to"] == "pilot" => {
                 let mut changes = self.close(Some(event.at));
@@ -880,6 +963,34 @@ impl Conversation {
                 }));
                 changes
             }
+            "vault.asked" => {
+                let mut changes = self.close(Some(event.at));
+                changes.extend(self.push(Block::VaultAsk(VaultAsk {
+                    seq: event.seq,
+                    name: text("name"),
+                    project: text("project"),
+                    description: text("description"),
+                    takes_username: data["takes_username"] == true,
+                    taken: data["taken"].as_str().map(str::to_owned),
+                    why: text("why"),
+                    open: true,
+                })));
+                changes
+            }
+            "vault.ask_answered" => {
+                let at = self.blocks.iter().position(
+                    |block| matches!(block, Block::VaultAsk(ask) if data["ask"] == ask.seq),
+                );
+                match at {
+                    Some(at) => {
+                        if let Block::VaultAsk(ask) = &mut self.blocks[at] {
+                            ask.open = false;
+                        }
+                        vec![Change::Changed(at)]
+                    }
+                    None => Vec::new(),
+                }
+            }
             "approval.requested" if data["held_by"] == "user" => {
                 let number = data["number"].as_u64().unwrap_or(0);
                 self.add_approval(number)
@@ -887,11 +998,15 @@ impl Conversation {
             "agent.turn_ended" | "agent.died" => {
                 let mut changes = self.close(Some(event.at));
                 changes.extend(self.interrupt(event.at));
+                if event.name == "agent.died" {
+                    changes.extend(self.stop_compaction(event.at));
+                }
                 changes
             }
             "agent.failed" | "agent.ended" => {
                 let mut changes = self.close(Some(event.at));
                 changes.extend(self.interrupt(event.at));
+                changes.extend(self.stop_compaction(event.at));
                 let kind = event.name.trim_start_matches("agent.").to_owned();
                 changes.extend(self.push(Block::Notice {
                     kind,
@@ -899,10 +1014,28 @@ impl Conversation {
                 }));
                 changes
             }
-            // One line, its summary folded under it.
-            "agent.compacted" => self.push(Block::Notice {
+            // One step that runs; a replay of the event does not make a second.
+            "agent.compacting" => match self.compaction() {
+                Some(_) => Vec::new(),
+                None => {
+                    let mut changes = self.close(Some(event.at));
+                    changes.extend(self.push(Block::Compacting {
+                        since: event.at,
+                        until: None,
+                    }));
+                    changes
+                }
+            },
+            // One line, its summary folded under it: in the row of the step that ran, if any.
+            "agent.compacted" => self.end_compaction(Block::Notice {
                 kind: COMPACTED_KIND.into(),
                 text: compacted_text(data),
+            }),
+            // An agent that wrote no handoff is told by the mark that follows.
+            "agent.compaction_failed" if data["source"] == "agent" => Vec::new(),
+            "agent.compaction_failed" => self.end_compaction(Block::Notice {
+                kind: COMPACTION_FAILED_KIND.into(),
+                text: format!("The conversation was not compacted: {}", text("reason")),
             }),
             "agent.resumed" => self.push(Block::Notice {
                 kind: "resumed".into(),
@@ -945,6 +1078,36 @@ impl Conversation {
             changes.extend(self.push(Block::SubAgents));
         }
         changes
+    }
+
+    /// The agent is gone: the compaction that ran will not end.
+    fn stop_compaction(&mut self, at: u64) -> Vec<Change> {
+        let Some(row) = self.compaction() else {
+            return Vec::new();
+        };
+        if let Block::Compacting { until, .. } = &mut self.blocks[row] {
+            *until = Some(at);
+        }
+        vec![Change::Changed(row)]
+    }
+
+    /// The row of the compaction that runs, if one does.
+    fn compaction(&self) -> Option<usize> {
+        self.blocks
+            .iter()
+            .rposition(|block| matches!(block, Block::Compacting { until: None, .. }))
+    }
+
+    /// The compaction ended: its row becomes `block`; a compaction nobody announced (by the
+    /// agent's own CLI) is a row of its own.
+    fn end_compaction(&mut self, block: Block) -> Vec<Change> {
+        match self.compaction() {
+            Some(at) => {
+                self.blocks[at] = block;
+                vec![Change::Changed(at)]
+            }
+            None => self.push(block),
+        }
     }
 
     fn end_thought(&mut self, at: u64) -> Vec<Change> {
@@ -1229,7 +1392,7 @@ impl Conversation {
                     .rsplit_once(WHERE_QUESTIONS_GO)
                     .map_or(text, |(brief, _)| brief);
                 Block::Message {
-                    from: format!("started by {who}"),
+                    from: format!("started by {}", flottille_ui::quoted_title(who)),
                     text: text.to_owned(),
                     images: Vec::new(),
                     commands: None,
@@ -1375,7 +1538,7 @@ pub const STARTED_SESSION_KIND: &str = "started session";
 fn started_session(title: String) -> Block {
     Block::Notice {
         kind: STARTED_SESSION_KIND.into(),
-        text: title,
+        text: flottille_ui::quoted_title(&title),
     }
 }
 
@@ -1632,31 +1795,8 @@ fn diff_of(input: &Value) -> Option<Block> {
     Some(Block::Diff { path, lines })
 }
 
-/// The deliveries of a prompt, each `(kind, body)`: the daemon starts each with a line
-/// `[flottille:<kind>]`, which no data can forge (it escapes the marker in every body). Text
-/// before the first marker is of no kind.
-pub fn sections(text: &str) -> Vec<(String, String)> {
-    let mut found: Vec<(String, Vec<&str>)> = Vec::new();
-    for line in text.lines() {
-        match marker(line) {
-            Some(kind) => found.push((kind.to_owned(), Vec::new())),
-            None => match found.last_mut() {
-                Some((_, lines)) => lines.push(line),
-                None => found.push((String::new(), vec![line])),
-            },
-        }
-    }
-    found
-        .into_iter()
-        .map(|(kind, lines)| (kind, lines.join("\n").trim().to_owned()))
-        .filter(|(kind, body)| !kind.is_empty() || !body.is_empty())
-        .collect()
-}
-
-fn marker(line: &str) -> Option<&str> {
-    let kind = line.strip_prefix("[flottille:")?.strip_suffix(']')?;
-    (!kind.is_empty() && kind.chars().all(|c| c.is_ascii_lowercase() || c == '-')).then_some(kind)
-}
+use flottille_core::prompt::is_replay;
+pub use flottille_core::prompt::sections;
 
 /// Whether an event is the user's own message starting a turn of the root (not a delivery: a
 /// command that ended, a child's report, an answer to a request): a text with no marker, or one
@@ -1734,6 +1874,130 @@ mod tests {
             kind: COMPACTED_KIND.into(),
             text: String::new()
         }));
+    }
+
+    #[test]
+    fn a_compaction_that_starts_is_a_step_that_runs_in_sight() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(1, "agent.message", json!({"text": "Done."})));
+        let changes = c.apply(&event(
+            2,
+            "agent.compacting",
+            json!({"source": "compactor", "before": 150_000}),
+        ));
+        assert_eq!(changes, vec![Change::Added]);
+        assert_eq!(
+            c.blocks()[1],
+            Block::Compacting {
+                since: 200,
+                until: None
+            }
+        );
+        assert!(in_sight(&c.blocks()[1]), "not folded into a group of steps");
+        // Read again (a replay, a second page): one step, not two.
+        assert!(
+            c.apply(&event(
+                3,
+                "agent.compacting",
+                json!({"source": "compactor"})
+            ))
+            .is_empty()
+        );
+        assert_eq!(c.blocks().len(), 2);
+    }
+
+    #[test]
+    fn a_compaction_that_ends_folds_the_step_into_the_compacted_mark() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(
+            1,
+            "agent.compacting",
+            json!({"source": "compactor"}),
+        ));
+        let changes = c.apply(&event(
+            2,
+            "agent.compacted",
+            json!({"by": "flottille", "before": 152_400, "after": 9_100, "summary": "S"}),
+        ));
+        assert_eq!(changes, vec![Change::Changed(0)], "the same row");
+        assert_eq!(
+            c.blocks(),
+            [Block::Notice {
+                kind: COMPACTED_KIND.into(),
+                text: "Conversation compacted · 152k → 9k tokens\nS".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_compaction_by_the_cli_has_no_step_before_its_mark() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(1, "agent.compacted", json!({})));
+        assert_eq!(c.blocks().len(), 1);
+        assert!(matches!(&c.blocks()[0], Block::Notice { kind, .. } if kind == COMPACTED_KIND));
+    }
+
+    #[test]
+    fn a_compaction_that_fails_says_so_in_an_error_line() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(
+            1,
+            "agent.compacting",
+            json!({"source": "compactor"}),
+        ));
+        let changes = c.apply(&event(
+            2,
+            "agent.compaction_failed",
+            json!({"reason": "the compactor did not answer", "used": 150_000}),
+        ));
+        assert_eq!(changes, vec![Change::Changed(0)]);
+        let failed = Block::Notice {
+            kind: COMPACTION_FAILED_KIND.into(),
+            text: "The conversation was not compacted: the compactor did not answer".into(),
+        };
+        assert_eq!(c.blocks(), std::slice::from_ref(&failed));
+        assert!(in_sight(&failed));
+    }
+
+    #[test]
+    fn an_agent_whose_handoff_failed_gets_one_mark_that_says_the_handoff_is_missing() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(1, "agent.compacting", json!({"source": "agent"})));
+        assert!(
+            c.apply(&event(
+                2,
+                "agent.compaction_failed",
+                json!({"reason": "the agent wrote no handoff", "source": "agent"})
+            ))
+            .is_empty(),
+            "the mark that follows says it"
+        );
+        c.apply(&event(
+            3,
+            "agent.compacted",
+            json!({"by": "flottille", "missing": true, "summary": null}),
+        ));
+        assert_eq!(c.blocks().len(), 1);
+        assert!(matches!(&c.blocks()[0], Block::Notice { kind, text }
+                if kind == COMPACTED_KIND && text.contains("handoff is missing")));
+    }
+
+    #[test]
+    fn a_step_that_runs_when_the_agent_ends_stops_running() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(
+            1,
+            "agent.compacting",
+            json!({"source": "compactor"}),
+        ));
+        c.apply(&event(2, "agent.died", json!({})));
+        assert_eq!(
+            c.blocks()[0],
+            Block::Compacting {
+                since: 100,
+                until: Some(200)
+            }
+        );
     }
 
     #[test]
@@ -2111,7 +2375,12 @@ mod tests {
                 },
                 Block::Question {
                     seq: 2,
-                    text: "Cover the logout too?".into()
+                    text: "Cover the logout too?".into(),
+                    questions: vec![question::Question {
+                        question: "Cover the logout too?".into(),
+                        ..question::Question::default()
+                    }],
+                    answers: None,
                 }
             ]
         );
@@ -2520,6 +2789,52 @@ mod tests {
             Activity::Thinking,
             "its call is done, the next is awaited"
         );
+    }
+
+    #[test]
+    fn what_a_compaction_sends_again_is_not_a_message_but_what_the_user_wrote_stays() {
+        let mut c = Conversation::new("lead".into(), None);
+        c.apply(&event(
+            1,
+            "agent.prompted",
+            json!({"text": "[flottille:brief]\nadd the page", "deliveries": ["brief-a-0"]}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.compacted",
+            json!({"by": "flottille", "summary": "S"}),
+        ));
+        let before = c.blocks().len();
+        // The new session's first prompt: its brief, the summary, and a message written meanwhile.
+        c.apply(&event(
+            3,
+            "agent.prompted",
+            json!({
+                "text": "[flottille:brief]\nadd the page\n\n[flottille:resume]\nS\n\n[flottille:user]\nand a footer",
+                "deliveries": ["brief-a-1-replay", "resume-a-1-replay", "d7"],
+                "images": ["kept.png"],
+            }),
+        ));
+        let said: Vec<&Block> = c.blocks()[before..].iter().collect();
+        assert_eq!(
+            said,
+            [&Block::Message {
+                from: USER.into(),
+                text: "and a footer".into(),
+                images: vec!["kept.png".into()],
+                commands: None,
+            }]
+        );
+        // A prompt that is only the replay adds nothing.
+        c.apply(&event(
+            4,
+            "agent.prompted",
+            json!({
+                "text": "[flottille:brief]\nadd the page\n\n[flottille:resume]\nS",
+                "deliveries": ["brief-a-2-replay", "resume-a-2-replay"],
+            }),
+        ));
+        assert_eq!(c.blocks().len(), before + 1);
     }
 
     #[test]

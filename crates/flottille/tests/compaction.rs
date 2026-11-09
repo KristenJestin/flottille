@@ -1109,3 +1109,200 @@ fn a_codex_agent_and_an_opencode_agent_hand_off_the_same_way() {
         });
     }
 }
+
+/// The agent's entry in its own tree, as `agent.tree` gives it.
+fn entry(user: &User, agent: &str) -> Value {
+    user.call("agent.tree", json!({"agent": agent})).unwrap()["agents"][0].clone()
+}
+
+#[test]
+fn a_compaction_says_it_started_and_the_tree_says_it_runs() {
+    let user = user_with(json!([{"hold": "release"}, {"say": SUMMARY}]), "");
+    let agent = session(&user, "add the login page FULL");
+    eventually("the compactor at work", || {
+        compactor_prompts(&user).len() == 1
+    });
+
+    let started = events(&user, &agent, "agent.compacting");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["source"], "compactor", "{started:?}");
+    assert_eq!(started[0]["before"], 150_000, "{started:?}");
+    assert!(compacted(&user, &agent).is_empty(), "it is not over yet");
+    let running = entry(&user, &agent);
+    assert_eq!(running["agent"]["compacting"], true, "{running}");
+    assert!(
+        running["doing"]
+            .as_str()
+            .unwrap()
+            .starts_with("compacting the conversation"),
+        "{running}"
+    );
+
+    std::fs::write(user.path("fake-compactor/release"), "").unwrap();
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    assert_eq!(events(&user, &agent, "agent.compacting").len(), 1);
+    eventually("the tree says it is over", || {
+        entry(&user, &agent)["agent"]["compacting"] == false
+    });
+}
+
+#[test]
+fn a_failed_compaction_said_it_started_first_and_the_tree_stops_saying_it_runs() {
+    let user = user_with(json!([{"die": 3}]), "");
+    let agent = session(&user, "add the login page FULL");
+    eventually("the failure", || !failed(&user, &agent).is_empty());
+
+    assert_eq!(events(&user, &agent, "agent.compacting").len(), 1);
+    let seqs = |name: &str| -> u64 {
+        user.call("agent.show", json!({"agent": agent})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .map(|e| e["seq"].as_u64().unwrap())
+            .unwrap()
+    };
+    assert!(seqs("agent.compacting") < seqs("agent.compaction_failed"));
+    assert_eq!(entry(&user, &agent)["agent"]["compacting"], false);
+}
+
+#[test]
+fn an_agent_writing_its_handoff_is_compacting_too() {
+    let user = handing_user(json!([{"say": HANDOFF}]));
+    let agent = session(&user, "add the login page FULL");
+    eventually("the handoff", || !compacted(&user, &agent).is_empty());
+
+    let started = events(&user, &agent, "agent.compacting");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["source"], "agent", "{started:?}");
+}
+
+// What Flottille sends the new session after a compaction (#613) is never a message of the user's.
+
+/// Waits until a prompt of the agent held `text`, and every prompt it was given has had its turn.
+fn settled(user: &User, agent: &str, text: &str) {
+    eventually(text, || {
+        let prompted = events(user, agent, "agent.prompted");
+        prompted
+            .iter()
+            .any(|e| e["text"].as_str().unwrap().contains(text))
+            && turns_ended(user, agent) == prompted.len()
+            && user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"] == "idle"
+    });
+}
+
+/// What the agent's prompts say the user and Flottille sent, as a conversation shows it: the
+/// sections of every `agent.prompted` event but those that replay the conversation after a
+/// compaction, as `(kind, text)`.
+fn sent(user: &User, agent: &str) -> Vec<(String, String)> {
+    let shown = user.call("agent.show", json!({"agent": agent})).unwrap();
+    shown["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == "agent.prompted")
+        .flat_map(|e| {
+            let text = flottille_core::prompt::without_replay(&e["data"]);
+            flottille_core::prompt::sections(&text)
+        })
+        .collect()
+}
+
+/// The texts of what the user wrote, in order: their first message and those after.
+fn written(user: &User, agent: &str) -> Vec<String> {
+    sent(user, agent)
+        .into_iter()
+        .filter(|(kind, _)| matches!(kind.as_str(), "" | "user" | "brief"))
+        .map(|(_, text)| text)
+        .collect()
+}
+
+#[test]
+fn a_compaction_by_the_compactor_replays_nothing_as_a_message_of_the_user() {
+    // The compactor takes its time, so that the user writes while it works, and again after.
+    let user = user_with(json!([{"hold": "release"}, {"say": SUMMARY}]), "");
+    let agent = session(&user, "add the login page FULL");
+    eventually("the compactor at work", || {
+        compactor_prompts(&user).len() == 1
+    });
+    send(&user, &agent, "and mind the footer");
+    std::fs::write(user.path("fake-compactor/release"), "").unwrap();
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    settled(&user, &agent, "and mind the footer");
+    send(&user, &agent, "one more thing");
+    settled(&user, &agent, "one more thing");
+
+    assert_eq!(
+        written(&user, &agent),
+        [
+            "add the login page FULL",
+            "and mind the footer",
+            "one more thing"
+        ],
+        "{:?}",
+        sent(&user, &agent)
+    );
+    // The new session did receive the brief and the summary: only the conversation leaves them out.
+    assert!(prompts(&user).iter().any(|p| p.contains(SUMMARY)));
+    let all = sent(&user, &agent);
+    assert!(
+        all.iter().all(|(_, text)| !text.contains(SUMMARY)),
+        "{all:?}"
+    );
+}
+
+#[test]
+fn a_compaction_by_the_agent_replays_nothing_as_a_message_of_the_user() {
+    let user = handing_user(json!([{"say": HANDOFF}]));
+    let agent = session(&user, "add the login page FULL");
+    eventually("the handoff", || !compacted(&user, &agent).is_empty());
+    send(&user, &agent, "go on");
+    settled(&user, &agent, "go on");
+
+    assert_eq!(
+        written(&user, &agent),
+        ["add the login page FULL", "go on"],
+        "{:?}",
+        sent(&user, &agent)
+    );
+    // Its own handoff is Flottille's word to it, asked for in the old session, and nothing else.
+    let kinds: Vec<String> = sent(&user, &agent).into_iter().map(|(k, _)| k).collect();
+    assert!(kinds.iter().all(|k| k != "resume"), "{kinds:?}");
+}
+
+#[test]
+fn the_text_of_an_agent_read_by_the_cli_has_the_brief_once_after_a_compaction() {
+    let user = user();
+    let agent = session(&user, "add the login page FULL");
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    send(&user, &agent, "go on");
+    settled(&user, &agent, "go on");
+
+    let output = user.run(&["agent", "show", &agent]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(text.matches("add the login page").count(), 1, "{text}");
+    assert_eq!(text.matches("go on").count(), 1, "{text}");
+}
+
+#[test]
+fn a_session_read_by_another_agent_has_the_brief_once_after_a_compaction() {
+    let user = user();
+    let (reader, mcp) = session_with_mcp(&user, "lead the work");
+    eventually("the reader's turn", || turns_ended(&user, &reader) == 1);
+    user.call("agent.mode", json!({"agent": reader, "mode": "full"}))
+        .unwrap();
+    let agent = session_in(&user, "add the login page FULL");
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    send(&user, &agent, "go on");
+    settled(&user, &agent, "go on");
+
+    let page = mcp.call("session_read", json!({"session": agent}));
+    assert!(!page.error, "{}", page.text);
+    assert_eq!(
+        page.text.matches("add the login page").count(),
+        1,
+        "{}",
+        page.text
+    );
+    assert_eq!(page.text.matches("go on").count(), 1, "{}", page.text);
+}

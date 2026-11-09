@@ -22,8 +22,13 @@ pub struct Agent {
     pub depth: u32,
     /// Grows with each replacement: a call of an earlier session is refused.
     pub epoch: u64,
-    /// What its parent named its task; `None` for a root.
+    /// What its parent named its task; for a root, the title its agent or the user gave its
+    /// session (`titled_by`), `None` while it keeps the first line of its first message.
     pub title: Option<String>,
+    /// Who named the session: `"agent"` (`session_title`) or `"user"` (`agent.rename`), whose
+    /// title always wins; `None` for a child and a session not named yet.
+    #[serde(default)]
+    pub titled_by: Option<String>,
     /// What a new session of it starts from: its parent's brief, or the user's first message.
     pub brief: Option<String>,
     /// When it called `report`.
@@ -92,8 +97,9 @@ pub struct Agent {
 
 /// A session's mode (`docs/design.md` §7): in Ask a call to judge comes to the user; in Auto the
 /// judge decides it; in Full every call the gate would hold passes, base ones too, and what the
-/// gate refuses stays refused. A session the user starts starts in Auto, never in Full; one an
-/// agent starts takes its launcher's tree's mode, and a child runs in its root's.
+/// gate refuses stays refused. A session the user starts starts in Auto unless the user names
+/// another mode; one an agent starts takes its launcher's tree's mode, and a child runs in its
+/// root's.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateMode {

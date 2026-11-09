@@ -6,7 +6,7 @@ mod common;
 
 use common::{Desktop, advance, init, pending_frames};
 use flottille_ui::motion::{HOVER, TOOLTIP};
-use flottille_ui::{Card, Icon, icon, path_line};
+use flottille_ui::{Card, Icon, MenuItem, icon, path_line};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     Bounds, Context, InteractiveElement, IntoElement, ParentElement, Pixels, Render, Styled,
@@ -213,4 +213,32 @@ fn a_long_card_title_stays_inside_the_card(cx: &mut TestAppContext) {
         "the count keeps its room: {meta:?}"
     );
     assert!(meta.top() < px(30.), "on the first line: {meta:?}");
+}
+
+#[gpui_kit::test]
+fn a_menu_entry_that_quotes_a_session_title_stays_on_one_line(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    let (_, cx) = cx.add_window_view(|_, _| Menu);
+    cx.simulate_resize(size(px(800.), px(400.)));
+    cx.update(|window, cx| window.render_frame(cx));
+    let (entry, frame) = (bounds(cx, "entry"), bounds(cx, "frame"));
+    // One line is the entry's minimum height (30 px); a second would add about 20.
+    assert!(entry.size.height < px(36.), "{entry:?} is one line");
+    assert!(entry.right() <= frame.right(), "{entry:?} in {frame:?}");
+}
+
+/// An entry as the tree's row menu builds it, in a menu 220 px wide.
+struct Menu;
+
+impl Render for Menu {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("frame")
+            .w(px(220.))
+            .test_support()
+            .child(MenuItem::new(
+                "entry",
+                "Detach from Bring every route of the public API under the new guard",
+            ))
+    }
 }

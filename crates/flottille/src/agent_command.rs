@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 use flottille_core::paths::Paths;
-use flottille_core::protocol::{AgentName, AgentRun, AgentSend};
+use flottille_core::protocol::{AgentName, AgentRename, AgentRun, AgentSend};
 use serde_json::Value;
 
 use crate::chat;
@@ -36,6 +36,9 @@ pub enum AgentAction {
         /// Its role: lead (default) or worker
         #[arg(long)]
         role: Option<String>,
+        /// The session's mode from its first message: ask, auto (default) or full
+        #[arg(long)]
+        mode: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -54,6 +57,19 @@ pub enum AgentAction {
         #[arg(long)]
         no_compact: bool,
         /// Print the answer (with --follow, once the turn ended)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Answer a question a root agent asked you: one answer per question of its ask
+    Answer {
+        agent: String,
+        /// The ask's number, as `flottille inbox` gives it (default: its oldest open one)
+        #[arg(long, value_name = "N")]
+        question: Option<u64>,
+        /// `<n>=<text>`, the answer to its question n (from 1), once per question; the answer
+        /// to a single question is the whole text, with no number
+        #[arg(long, value_name = "N=TEXT", required = true)]
+        answer: Vec<String>,
         #[arg(long)]
         json: bool,
     },
@@ -94,6 +110,14 @@ pub enum AgentAction {
     /// Start an ended root again on its own session
     Resume {
         agent: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Name a session: your title replaces the first line of its message and its agent's, and
+    /// its agent can no longer change it
+    Rename {
+        agent: String,
+        title: String,
         #[arg(long)]
         json: bool,
     },
@@ -191,6 +215,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
             model,
             effort,
             role,
+            mode,
             json,
         } => {
             let started = Client::connect_or_start(paths)?.request(
@@ -202,6 +227,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     model,
                     effort,
                     mode: None,
+                    gate_mode: mode,
                     role,
                     message,
                     images: Vec::new(),
@@ -264,6 +290,52 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 );
             }
             Ok(code)
+        }
+        AgentAction::Answer {
+            agent,
+            question,
+            answer,
+            json,
+        } => {
+            let mut client = Client::connect_or_start(paths)?;
+            let tree = client.request(
+                "agent.tree",
+                serde_json::to_value(AgentName {
+                    agent: agent.clone(),
+                    after: None,
+                })?,
+            )?;
+            let open: Vec<Value> = tree["agents"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|entry| entry["agent"]["id"] == agent.as_str())
+                .flat_map(|entry| entry["questions"].as_array().cloned().unwrap_or_default())
+                .collect();
+            let asked = match question {
+                Some(n) => open.iter().find(|q| q["seq"] == n),
+                None => open.first(),
+            }
+            .ok_or_else(|| match question {
+                Some(n) => format!("question {n} of agent {agent} does not wait for an answer"),
+                None => format!("agent {agent} has no question waiting for you"),
+            })?;
+            let questions = flottille_core::question::of(asked);
+            let answers = answers_of(questions.len(), &answer)?;
+            let seq = asked["seq"].as_u64().unwrap_or_default();
+            let sent = client.request(
+                "agent.answer",
+                serde_json::json!({"agent": agent, "question": seq, "answers": answers}),
+            )?;
+            if json {
+                println!("{sent}");
+            } else {
+                println!(
+                    "Answered question {seq} of agent {agent}: it reads your answer after the \
+                     turn that runs, if one does."
+                );
+            }
+            Ok(ExitCode::SUCCESS)
         }
         AgentAction::Unqueue {
             agent,
@@ -347,6 +419,22 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     "Resumed agent {} on its own session; it is {} now. Its next message starts it.",
                     text(&resumed["agent"], "id"),
                     text(&resumed["agent"], "state")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Rename { agent, title, json } => {
+            let renamed = Client::connect_or_start(paths)?.request(
+                "agent.rename",
+                serde_json::to_value(AgentRename { agent, title })?,
+            )?;
+            if json {
+                println!("{renamed}");
+            } else {
+                println!(
+                    "Renamed agent {}: \"{}\".",
+                    text(&renamed, "agent"),
+                    text(&renamed, "title")
                 );
             }
             Ok(ExitCode::SUCCESS)
@@ -487,6 +575,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 model,
                 effort,
                 mode: None,
+                gate_mode: None,
                 role: None,
                 message,
                 images: Vec::new(),
@@ -633,6 +722,43 @@ fn doctor_text(report: &Value) -> String {
         }
     }
     shown
+}
+
+/// The answers `--answer` gives, one per question of an ask of `count`: `<n>=<text>` each, or
+/// for a single question the whole text, whatever it starts with.
+fn answers_of(
+    count: usize,
+    given: &[String],
+) -> std::result::Result<Vec<flottille_core::question::Answer>, String> {
+    let mut answers = vec![flottille_core::question::Answer::default(); count];
+    let mut given_for = vec![false; count];
+    for one in given {
+        let (n, text) = if count == 1 {
+            (1, one.as_str())
+        } else {
+            one.split_once('=')
+                .and_then(|(n, text)| Some((n.trim().parse::<usize>().ok()?, text)))
+                .ok_or_else(|| format!("`{one}`: say which question it answers, as `1={one}`"))?
+        };
+        let at = n
+            .checked_sub(1)
+            .filter(|at| *at < count)
+            .ok_or_else(|| format!("the ask has {count} questions: no question {n}"))?;
+        if std::mem::replace(&mut given_for[at], true) {
+            return Err(format!(
+                "question {n} is answered twice: give it one `--answer`"
+            ));
+        }
+        answers[at].text = text.trim().to_owned();
+    }
+    if let Some(at) = answers.iter().position(|a| a.text.is_empty()) {
+        return Err(format!(
+            "question {} has no answer: give `--answer {}=…`",
+            at + 1,
+            at + 1
+        ));
+    }
+    Ok(answers)
 }
 
 pub(crate) fn text<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -800,8 +926,13 @@ fn show_text(shown: &Value) -> String {
         } else {
             ""
         };
+        // What a compaction sends the new session again is not something the user said.
+        let sent = (name == "agent.prompted").then(|| flottille_core::prompt::without_replay(data));
+        if sent.as_deref() == Some("") {
+            continue;
+        }
         let said = match name {
-            "agent.prompted" => Some(("you", text(data, "text"))),
+            "agent.prompted" => Some(("you", sent.as_deref().unwrap_or_default())),
             "agent.user_message" => Some(("you", text(data, "text"))),
             "agent.message" => Some(("agent", text(data, "text"))),
             _ => None,
@@ -853,4 +984,59 @@ fn show_text(shown: &Value) -> String {
     }
     out.push('\n');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_answer_takes_an_answer_per_question_and_a_single_one_alone() {
+        let three = answers_of(
+            3,
+            &[
+                "2=Export orders".into(),
+                "1=Yes".into(),
+                "3=Alice, Carol".into(),
+            ],
+        )
+        .unwrap();
+        let texts: Vec<&str> = three.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(texts, ["Yes", "Export orders", "Alice, Carol"]);
+        assert_eq!(answers_of(1, &["Blue.".into()]).unwrap()[0].text, "Blue.");
+        assert!(
+            answers_of(3, &["Yes".into()])
+                .unwrap_err()
+                .contains("1=Yes")
+        );
+        assert!(
+            answers_of(2, &["1=Yes".into()])
+                .unwrap_err()
+                .contains("question 2")
+        );
+        assert!(
+            answers_of(2, &["5=Yes".into()])
+                .unwrap_err()
+                .contains("no question 5")
+        );
+    }
+
+    #[test]
+    fn a_single_question_answer_that_starts_with_a_number_and_an_equal_sign_is_the_answer() {
+        assert_eq!(answers_of(1, &["2=two".into()]).unwrap()[0].text, "2=two");
+        assert_eq!(
+            answers_of(1, &["1=Blue.".into()]).unwrap()[0].text,
+            "1=Blue."
+        );
+    }
+
+    #[test]
+    fn an_answer_given_twice_to_a_question_is_refused() {
+        let refused = answers_of(2, &["1=Yes".into(), "1=No".into(), "2=Fine".into()]).unwrap_err();
+        assert!(
+            refused.contains("question 1") && refused.contains("twice"),
+            "{refused}"
+        );
+        assert!(answers_of(1, &["Blue.".into(), "Red.".into()]).is_err());
+    }
 }

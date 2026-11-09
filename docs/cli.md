@@ -429,13 +429,26 @@ $ flottille project check shop
 Project shop: the repositories match the configuration.
 ```
 
-### `flottille project remove <name>`
+### `flottille project remove <name> [--discard [--yes]]`
 
-Forgets the project: its configuration file, never its folder.
+Stops the project's agents and command runs, removes its workspaces and forgets its configuration,
+never its folder nor its repositories (`docs/projects.md`, "Removing a project"). A workspace
+holding work not committed or not pushed is kept and named with why, unless `--discard`, which
+removes it too and loses that work: it first prints what each workspace would lose
+(`project.removal`), then asks `Discard it and remove the project? [y/N]`; anything but a yes
+removes nothing, and with nothing to read an answer from (an input that is not a terminal and
+closed) it refuses and says `--yes`, which discards without asking. Only what was printed is
+discarded: a workspace that changed meanwhile, a file written in included, is kept. When no
+workspace would lose anything, nothing is asked. `--json` prints `project.remove`.
 
 ```
 $ flottille project remove shop
 Removed project shop. Its folder was not touched.
+Stopped the agent 3f9a1c2b7d10 (Fix the login).
+Stopped the command run 8c1d0e5f2a47 (pnpm dev).
+Removed the workspace login.
+Kept the workspace draft: notes.txt holds work that is not committed.
+A workspace kept stays on disk with its branch: save its work, then remove it with `flottille workspace remove <project> <name>`.
 ```
 
 ## Skills
@@ -717,8 +730,9 @@ Starts a root agent and gives it its first message, then returns at once: the ag
 own. `--workspace <name>` runs it in a ready workspace (the project folder otherwise),
 `--provider <provider>` on a provider (the project's otherwise, for the agent's life), `--model
 <model>` asks for a model (the project's otherwise; never replaced by another), `--effort
-<effort>` for an effort of the model, `--role lead|worker` (`lead` by default). A provider that is
-not ready, or a model or an effort it is known not to offer, is refused with a sentence that names
+<effort>` for an effort of the model, `--role lead|worker` (`lead` by default), `--mode
+ask|auto|full` for the session's mode, its gate's from its first message (`auto` by default,
+design §7.1; another word is refused). A provider that is not ready, or a model or an effort it is known not to offer, is refused with a sentence that names
 what is available.
 `--json` prints `agent.start`: `{"agent": {...}, "after": <n>}`, where `after` is the event number
 to follow it from (`flottille watch --after <n>`, `flottille agent read <id> --after <n>`).
@@ -732,7 +746,7 @@ Follow it with `flottille agent read bd7ed8152969`, or `flottille watch --after 
 ### `flottille agent run <project> <message>`
 
 `start`, then follows the agent and prints its reply until its first turn ends: for trying an
-agent by hand. Same options as `start`, except `--role`. `--json` prints nothing while the turn
+agent by hand. Same options as `start`, except `--role` and `--mode`. `--json` prints nothing while the turn
 runs, then the agent alone, the object under `agent` in `agent show --json` (its id is `.id`, not
 `.agent.id`). (It is `start` followed by `watch`, nothing more.) It follows
 the turn as `send --follow` does, below.
@@ -783,6 +797,21 @@ Compaction, "Compact a session resumed after its cache expired"). Left out, the 
 ```
 $ flottille agent send bd7ed8152969 "Which database did we pick?" --follow
 We picked PostgreSQL.
+```
+
+### `flottille agent answer <agent> --answer "<n>=<text>"…`
+
+Answers an ask of a root agent (`agent.answer`): one `--answer` per question, `<n>` its number from
+1 as `flottille inbox` shows it, each question once (a number given twice is refused); the answer to
+an ask of a single question is the whole text, with no number (`--answer "Blue."`, and `--answer
+"2=two"` answers `2=two`). `--question <n>` names the ask by the number `flottille inbox` gives it; left
+out, the oldest open one. The words go as written (several lines in one argument are kept); an
+option is answered by writing its label. The agent gets one message quoting each question with its
+answer under it, and its other asks still wait. `--json` prints what the daemon answered.
+
+```
+$ flottille agent answer 298a0599b45c --answer "1=Yes" --answer "2=Export orders as CSV"
+Answered question 33 of agent 298a0599b45c: it reads your answer after the turn that runs, if one does.
 ```
 
 ### `flottille agent unqueue <agent> <delivery>`
@@ -923,10 +952,23 @@ $ flottille agent resume bd7ed8152969
 Resumed agent bd7ed8152969 on its own session; it is idle now. Its next message starts it.
 ```
 
+### `flottille agent rename <agent> <title>`
+
+Names a session (`agent.rename`, `docs/protocol.md`; the window's session header and row menu
+have `Rename…`): the title replaces the first line of its first message and any title its agent
+gave, and its agent can no longer change it (`docs/tools.md`, "The session's title"). `--json`
+prints `{"agent", "title", "by": "user"}`. Refused, saying why, for an empty title, one on several
+lines, and a child, whose title is its `agent_launch` title.
+
+```
+$ flottille agent rename bd7ed8152969 "Release notes"
+Renamed agent bd7ed8152969: "Release notes".
+```
+
 ### `flottille agent detach <agent>`
 
 Takes a session an agent started (led or handed) away from that agent (`agent.detach`,
-`docs/protocol.md`; the window's session menu has `Detach from <pilot>`): it becomes the user's
+`docs/protocol.md`; the window's session menu has `Detach from its lead`): it becomes the user's
 alone, at once. The agent's subscription ends and it is told once; the session's questions come to
 the user, the two need the user's leave to write to each other, and the session may start
 sessions as its mode allows. There is no undo. `--json` prints `{"agent": {...}}`, with
@@ -1012,7 +1054,7 @@ What your **root** agents sent you, oldest first. An entry is one of:
 | Kind | What it is | The event it comes from |
 |---|---|---|
 | `report` | the root called `report`: it is done, and says what it did | `agent.reported` |
-| `question` | the root called `ask`: it asks you something and goes on without waiting; answer it with `flottille agent send`, which ends its wait for you | `agent.asked` (`to` is `user`) |
+| `question` | the root called `ask`: it asks you one thing or several (numbered, each with its options) and goes on without waiting; answer each with `flottille agent answer`, which ends its wait for you (`flottille agent send` answers every question open, in one message) | `agent.asked` (`to` is `user`) |
 | `failure` | the root cannot go on: its process could not start, its session could not open, an option it was asked is not one it offers, it was replaced too often (twice in 30 minutes), or its new workspace could not be prepared (`docs/events.md` also lists "its parent failed", which only concerns a child) | `agent.failed` |
 
 A child's report, question or failure goes to its parent, never to the inbox. The requests a gate
@@ -1022,13 +1064,16 @@ The inbox is a view of the stored events (`docs/events.md`), not a store of its 
 marked read. Without `--after`, it lists the last `--limit` entries (50 by default); with
 `--after <n>`, the first `--limit` entries after the event number `n`, so that a client reads on
 from the last `seq` it saw. `--json` prints `inbox.list`: `{"entries": [{"seq", "at", "kind",
-"agent", "project", "workspace", "text"}]}`, `text` being the report, the question or the reason.
+"agent", "project", "workspace", "text"}]}`, `text` being the report, the question or the reason;
+a question also has `questions`, each with its options.
 
 ```
 $ flottille inbox
 #33 question of agent 298a0599b45c (shop):
-    Which database should the app use?
-Answer a question with `flottille agent send <agent> <message>`; `flottille inbox --after <n>` lists what came since.
+    1. Push `feat/42-export` and open the pull request?
+       Options: Yes; Not yet (Keep it local)
+    2. Title of the pull request?
+Answer a question with `flottille agent answer <agent> --question <n> --answer "1=…"`, one --answer per question; `flottille inbox --after <n>` lists what came since.
 ```
 
 ### `flottille runs list [project]`

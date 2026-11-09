@@ -7,6 +7,12 @@ on:
     branches: [main, dev, "feat/**", "fix/**"]
   workflow_dispatch:
 
+# A push makes the runs of the same ref's older pushes useless: they are cancelled, so that the
+# queue holds only what is current. Not on dev and main, whose runs publish and always finish.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' && github.ref != 'refs/heads/main' }}
+
 jobs:
   commit-messages:
     # A feature branch's commits are judged on its pull request, as before its pushes ran here.
@@ -81,20 +87,19 @@ jobs:
   # The packages (docs/releases.md): main is stable, dev beta, a feature branch its own alpha.
   # `build` runs the branch's code with a token that can only read; `publish`, once `verify`
   # passed on the pushed commit, runs none of it and alone may write the releases and the tags.
+  # main is built when the `Release` workflow (release.yml) starts this one on it: the ref it moved
+  # with its own token started no push run.
   build:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     # Old enough a C library that the binary runs on current Arch and Debian stable.
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-      # To find the pull request a push to main squashed.
-      pull-requests: read
     outputs:
       skip: ${{ steps.version.outputs.skip }}
       channel: ${{ steps.version.outputs.channel }}
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
-      released: ${{ steps.version.outputs.released }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,24 +107,18 @@ jobs:
           persist-credentials: false
       - name: The channel and the version
         id: version
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           skip() { echo "::notice::$1: nothing is published."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; }
           at=$GITHUB_SHA
           case "$GITHUB_REF_NAME" in
             main)
               channel=stable
-              # A release is the pull request dev → main merged by squash: its version is the one
-              # the head of dev it squashed had, without the pre-release.
-              at=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq "[.[] | select(.merge_commit_sha == \"$GITHUB_SHA\" and .base.ref == \"main\" and .head.ref == \"dev\" and .head.repo.full_name == \"$GITHUB_REPOSITORY\")][0].head.sha // empty")
-              # No other push to main is expected: a lookup that found nothing is an error, and a
-              # pull request GitHub had not indexed yet is found when the run is run again.
-              if [ -z "$at" ]; then
-                echo "::error::$GITHUB_SHA is not the squash of a pull request from dev into main, as far as GitHub's API says now. Run this run again (gh run rerun $GITHUB_RUN_ID) to look again; nothing was published."
+              # A release is main moved forward to a commit of dev, which is the commit released:
+              # its version is the one its beta had, without the pre-release.
+              if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/dev; then
+                echo "::error::$GITHUB_SHA is not a commit of dev: main is released by the Release workflow only (docs/releases.md), nothing was published."
                 exit 1
               fi
-              git cat-file -e "$at^{commit}" 2>/dev/null || git fetch --quiet origin "$at"
               ;;
             dev) channel=beta ;;
             *) channel=alpha ;;
@@ -139,7 +138,6 @@ jobs:
             echo "channel=$channel"
             echo "version=$version"
             echo "tag=$tag"
-            if [ "$channel" = stable ]; then echo "released=$at"; fi
           } >> "$GITHUB_OUTPUT"
       - name: Have the window's system libraries
         if: steps.version.outputs.skip != 'true'
@@ -183,7 +181,7 @@ jobs:
 
   publish:
     needs: [verify, build]
-    if: github.event_name == 'push' && needs.build.outputs.skip != 'true'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.build.outputs.skip != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -206,7 +204,6 @@ jobs:
           CHANNEL: ${{ needs.build.outputs.channel }}
           VERSION: ${{ needs.build.outputs.version }}
           TAG: ${{ needs.build.outputs.tag }}
-          RELEASED: ${{ needs.build.outputs.released }}
         run: |
           # Read right before publishing: a push over this commit publishes itself, after it, and
           # a deleted branch publishes nothing.
@@ -217,7 +214,7 @@ jobs:
           else
             cat "$RUNNER_TEMP/tip.err" >&2; exit 1
           fi
-          title="Flottille $VERSION"
+          title="Flottille v$VERSION"
           # A release run again: published, it stays (stable, beta) or is replaced in place
           # (alpha); a draft left by a failed upload is made again.
           state=missing
@@ -226,17 +223,9 @@ jobs:
           fi
           case "$CHANNEL" in
             stable | beta)
-              # A stable release run again still records itself in dev's history, the step after.
-              if [ "$CHANNEL" = stable ]; then echo "record=true" >> "$GITHUB_OUTPUT"; fi
               if [ "$state" = published ]; then echo "::notice::$TAG is already published."; exit 0; fi
               if [ "$CHANNEL" = stable ]; then
-                # The mark the next betas count from: the head of dev this release squashed. The
-                # exit status says whether it exists: an error's JSON is not filtered by --jq.
-                if marked=$(gh api "repos/$GH_REPO/git/ref/tags/released/$TAG" --jq .object.sha 2> /dev/null); then
-                  if [ "$marked" != "$RELEASED" ]; then echo "::error::released/$TAG marks $marked, not $RELEASED."; exit 1; fi
-                else
-                  gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/released/$TAG" -f sha="$RELEASED" > /dev/null
-                fi
+                # On the commit released, the same on main and on dev: the next betas count from it.
                 gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --latest
               else
                 gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --prerelease --latest=false
@@ -258,38 +247,3 @@ jobs:
               fi
               ;;
           esac
-      # The squash on main never reaches dev: without a common base, the next release pull
-      # request conflicts on every file. A merge of the squash that keeps dev's tree (what
-      # `git merge -s ours` makes) gives it one, and changes no file. Made through the API, as
-      # this job runs no git; on dev's current head, which is still right if it moved, since
-      # dev's files are kept. Pushed with this job's token, it starts no run.
-      - name: Record the release in dev's history
-        if: steps.publish.outputs.record == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.build.outputs.version }}
-          TAG: ${{ needs.build.outputs.tag }}
-        run: |
-          message="chore(repo): record the $VERSION release in dev's history"
-          for attempt in 1 2 3; do
-            dev=$(gh api "repos/$GH_REPO/git/ref/heads/dev" --jq .object.sha)
-            # Recorded already (a run run again): the squash is in dev's history.
-            status=$(gh api "repos/$GH_REPO/compare/$GITHUB_SHA...$dev" --jq .status)
-            if [ "$status" = ahead ] || [ "$status" = identical ]; then
-              echo "::notice::$GITHUB_SHA is already in dev's history."; exit 0
-            fi
-            tree=$(gh api "repos/$GH_REPO/git/commits/$dev" --jq .tree.sha)
-            merge=$(gh api "repos/$GH_REPO/git/commits" -f message="$message" -f tree="$tree" \
-              -f "parents[]=$dev" -f "parents[]=$GITHUB_SHA" \
-              -f "author[name]=github-actions[bot]" \
-              -f "author[email]=41898282+github-actions[bot]@users.noreply.github.com" --jq .sha)
-            # Not forced: a dev that moved meanwhile refuses it, and the merge is made again.
-            if gh api -X PATCH "repos/$GH_REPO/git/refs/heads/dev" -f sha="$merge" -F force=false > /dev/null 2> "$RUNNER_TEMP/record.err"; then
-              echo "::notice::$VERSION recorded in dev's history: $merge."; exit 0
-            fi
-            cat "$RUNNER_TEMP/record.err" >&2
-          done
-          # The commands are in docs/releases.md: this job holds no git command line, not even in a message.
-          echo "::error::$TAG is published, but dev does not hold it, and the next release pull request will conflict on every file. Record it by hand on dev, as docs/releases.md says (\"If the record fails\"): a merge -s ours of $GITHUB_SHA with the message \"$message\", pushed to dev."
-          exit 1

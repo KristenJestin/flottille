@@ -81,6 +81,7 @@ durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms,
 | a line whose text changes while its view stays (the folder a setting results in) | `changing(id, text, build)`: it fades back in over `HOVER` when the text differs from the last frame's; build it on every frame |
 | a block whose height follows its content (a field that wraps its text and grows by a line) | `growing(id, element)`: it eases to the new height over `PANEL`, also when it shrinks; build it on every frame; `<id>` is the animated frame, so its bounds are the height drawn |
 | the rows of a list that comes from elsewhere | `Listing::sync` on each render, each row drawn inside an `Item`: it unfolds when it arrives, folds away when it leaves (it stays drawn until then), slides when it moves |
+| the sessions a session leads, under its row | the sidebar's `Level` draws them as `Item`s that unfold from nothing and fold away (`framed` leaves `.rising()` to the rows that arrive at full size); each is tied to the row above by `tree_tie(row, &Tie, first_line, shown, cx)`, a thin line in `p.line` that comes down and turns right into the row (├ with a line going on below, └ for the last one, a line past it for each ancestor with a sibling below), drawn inside the row so it folds and fades with it; `<row>-tie` says `Branch` or `Last branch` |
 | a level that folds | `Fold` (a view) or `fold_frame` |
 | a part that waits for a slow read, then shows it | `awaiting(id, pending, Skeleton, content)`: the skeleton fades out and the content in at the same place, the height easing from one to the other (to nothing when nothing came); build it on every frame |
 | a panel over the page (a menu, a drawer, a modal, the bell's list) | rises a little and fades in, fades out, and stays drawn until it has |
@@ -131,6 +132,11 @@ the wrong code first).
    (**[test]** `PageHeader` refuses a third). A destructive action is never a visible button in a
    page or a row: it is a "Remove…" item of a "⋯" menu, last. A label never repeats a name the
    title already says.
+   A "⋯" menu (`Menu`) is as wide as its longest label: an entry is one line, cut only when it
+   could not fit the window; every entry has an icon of its own (the menu refuses two entries
+   with the same one; the destructive entry's is the bin), the labels start at one x, and an entry
+   offers only what applies (a second, fainter line may say what it acts on, never wrapped).
+   **[test]** `crates/flottille-ui/tests/menus.rs`.
 2. **One confirmation: a modal dialog.** Its title is the question with the object's name, then
    one sentence of consequence, Cancel and the danger button; Escape and the scrim cancel; when
    the action cannot be done, the dialog says why and its button is disabled. Never a button that

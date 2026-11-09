@@ -355,6 +355,100 @@ fn the_user_s_run_of_a_task_runs_in_the_project_folder_and_its_output_is_listed(
 }
 
 #[test]
+fn the_user_s_run_from_a_session_s_rail_runs_in_its_workspace_and_is_listed_with_its_runs() {
+    let user = user();
+    project(&user);
+    user.call("task.add", add_say()).unwrap();
+    user.call(
+        "workspace.create",
+        json!({"project": "app", "name": "login"}),
+    )
+    .unwrap();
+    let show = || {
+        user.call("workspace.show", json!({"project": "app", "name": "login"}))
+            .unwrap()
+    };
+    eventually("the workspace", || show()["state"] == "ready");
+    let workspace = PathBuf::from(show()["folder"].as_str().unwrap());
+    let lead = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "login", "message": "hello"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (main_lead, _) = root(&user);
+
+    let answer = user
+        .call(
+            "task.run",
+            json!({"project": "app", "name": "say", "workspace": "login"}),
+        )
+        .unwrap();
+    let run = answer["run"].as_str().unwrap().to_owned();
+    let tree = |agent: &str| {
+        user.call("run.list", json!({"tree": agent, "ended": true}))
+            .unwrap()["commands"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    eventually("the run's end in the session's list", || {
+        tree(&lead)
+            .iter()
+            .any(|r| r["run"] == run.as_str() && r["state"] != "running")
+    });
+    // Recorded as an agent's run is, the user's: no agent, the workspace's folder and name.
+    let listed = tree(&lead);
+    let row = listed.iter().find(|r| r["run"] == run.as_str()).unwrap();
+    assert_eq!(row["agent"], Value::Null, "{row}");
+    assert_eq!(row["root"], Value::Null, "{row}");
+    assert_eq!(row["project"], "app");
+    assert_eq!(row["workspace"], "login", "{row}");
+    assert_eq!(row["name"], "say");
+    assert_eq!(
+        std::fs::canonicalize(row["folder"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(&workspace).unwrap()
+    );
+    assert_eq!(row["last_line"], "second", "{row}");
+    assert!(
+        !tree(&main_lead).iter().any(|r| r["run"] == run.as_str()),
+        "a session in another place does not list it"
+    );
+    // The user is never held, and no agent is told of the user's run.
+    assert!(no_request(&user));
+    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let deliveries = store.last_deliveries(&lead, 50).unwrap();
+    assert!(
+        !deliveries.iter().any(|d| d.body.contains(&run)),
+        "{deliveries:?}"
+    );
+
+    // Restarted, it runs again in the workspace.
+    let restarted = user.call("run.restart", json!({"run": run})).unwrap();
+    let again = restarted["run"]["run"].as_str().unwrap().to_owned();
+    assert_eq!(
+        std::fs::canonicalize(restarted["run"]["folder"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(&workspace).unwrap(),
+        "{restarted}"
+    );
+    eventually("the restarted run in the session's list", || {
+        tree(&lead).iter().any(|r| r["run"] == again.as_str())
+    });
+
+    let unknown = user
+        .call(
+            "task.run",
+            json!({"project": "app", "name": "say", "workspace": "nope"}),
+        )
+        .unwrap_err();
+    assert!(unknown.1.contains("no workspace named nope"), "{unknown:?}");
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[test]
 fn a_setup_edited_in_the_window_is_played_by_a_new_workspace() {
     let user = user();
     project(&user);

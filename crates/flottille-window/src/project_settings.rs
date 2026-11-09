@@ -13,13 +13,14 @@
 use std::collections::HashMap;
 
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
-use flottille_core::project::cycle_sentence;
+use flottille_core::project::{branch_matches, cycle_sentence};
 use flottille_ui::{
     Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, Section,
-    Select, SelectOption, Switch, Tabs, Toast, Type, enter, follow_theme, hoverable, icon, palette,
-    presence, presence_of, space, toast,
+    Select, SelectOption, Switch, Tabs, Toast, Type, changing, enter, follow_theme, hoverable,
+    icon, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
@@ -32,13 +33,15 @@ use crate::commands::{CommandsSection, boxed, menu_of, problem_line};
 use crate::conventions::{Convention, Kind};
 use crate::message_checks::MessageChecks;
 use crate::programs::{ProgramChecks, program_block};
-use crate::project::repository_label;
+use crate::project::{only_at_root, repository_label};
+use crate::project_removal::ProjectRemoval;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
 use crate::rules::RulesEditor;
 use crate::setup::SetupSection;
 use crate::shell::Shell;
 use crate::skills::SkillsSection;
 use crate::tasks::TasksSection;
+use crate::vault::VaultEntry;
 use crate::workspaces_folder::WorkspacesFolder;
 
 /// A text field in Flottille's colours.
@@ -384,6 +387,10 @@ pub struct ProjectSettingsPage {
     forge_kind: ForgeKind,
     tracker_kind: TrackerKind,
     tracker_repository: Option<String>,
+    /// The vault entry the dialog logs time with; none when it chooses none.
+    worklog: Option<String>,
+    /// The vault's entries as last listed (their metadata, never a secret): the project sees some.
+    vault: Vec<VaultEntry>,
     /// The repository dialog's base branches and dependencies, as edited and not yet saved.
     bases: Vec<String>,
     base_rows: Listing<String>,
@@ -394,9 +401,8 @@ pub struct ProjectSettingsPage {
     fields: Option<Fields>,
     dialog_error: Option<SharedString>,
     saving: Option<Saving>,
-    confirming_remove: bool,
-    removing: bool,
-    removed: Option<String>,
+    /// The confirmation of its removal, which reads what the removal would do.
+    removal: Entity<ProjectRemoval>,
     narrow: bool,
     /// This project's own rules (`docs/projects.md`, "Rules").
     rules: Entity<RulesEditor>,
@@ -461,6 +467,7 @@ impl ProjectSettingsPage {
             reading.update(cx, |section, cx| section.read(cx));
         });
         let this = cx.entity().downgrade();
+        let removal = cx.new(|_| ProjectRemoval::new(shell.clone(), name.clone()));
         let more = cx.new(|cx| {
             Menu::new("project-more", "More", cx).danger(
                 "remove-project",
@@ -478,6 +485,8 @@ impl ProjectSettingsPage {
             cx.observe(&commands, |_, _, cx| cx.notify()),
             cx.observe(&tasks, |_, _, cx| cx.notify()),
             cx.observe(&setup, |_, _, cx| cx.notify()),
+            // The prefix warns when the format refuses it.
+            cx.observe(&branch_format, |_, _, cx| cx.notify()),
         ];
         Self {
             shell,
@@ -500,6 +509,8 @@ impl ProjectSettingsPage {
             forge_kind: ForgeKind::None,
             tracker_kind: TrackerKind::None,
             tracker_repository: None,
+            worklog: None,
+            vault: Vec::new(),
             bases: Vec::new(),
             base_rows: Listing::default(),
             base_error: None,
@@ -508,9 +519,7 @@ impl ProjectSettingsPage {
             fields: None,
             dialog_error: None,
             saving: None,
-            confirming_remove: false,
-            removing: false,
-            removed: None,
+            removal,
             narrow: false,
             rules,
             message_checks,
@@ -673,12 +682,17 @@ impl ProjectSettingsPage {
         self.forge_kind
     }
 
-    pub fn is_confirming_removal(&self) -> bool {
-        self.confirming_remove
+    pub fn is_confirming_removal(&self, cx: &App) -> bool {
+        self.removal.read(cx).is_open()
     }
 
-    pub fn removal_refused(&self) -> Option<&str> {
-        self.removed.as_deref()
+    pub fn removal_refused<'a>(&self, cx: &'a App) -> Option<&'a str> {
+        self.removal.read(cx).refused()
+    }
+
+    /// The confirmation of the project's removal.
+    pub fn removal(&self) -> &Entity<ProjectRemoval> {
+        &self.removal
     }
 
     pub fn site_field(&self) -> Option<&Entity<InputState>> {
@@ -1108,6 +1122,10 @@ impl ProjectSettingsPage {
             Some(ProjectTracker::Github { repository }) => Some(repository.clone()),
             _ => None,
         };
+        self.worklog = match &self.tracker {
+            Some(ProjectTracker::Jira { worklog_token, .. }) => worklog_token.clone(),
+            _ => None,
+        };
         self.dialog = Some(Dialog::Tracker);
         self.dialog_error = None;
         cx.notify();
@@ -1134,6 +1152,49 @@ impl ProjectSettingsPage {
     pub fn choose_tracker_repository(&mut self, path: String, cx: &mut Context<Self>) {
         self.tracker_repository = Some(path);
         cx.notify();
+    }
+
+    /// The entry the dialog logs time with, `None` for none.
+    pub fn choose_worklog(&mut self, entry: Option<String>, cx: &mut Context<Self>) {
+        self.worklog = entry;
+        cx.notify();
+    }
+
+    /// The entry the dialog logs time with.
+    pub fn worklog_choice(&self) -> Option<String> {
+        self.worklog.clone()
+    }
+
+    /// The vault's entries, as the daemon lists them: the select offers those the project sees.
+    pub fn vault_listed(&mut self, entries: &[VaultEntry], cx: &mut Context<Self>) {
+        self.vault = entries.to_vec();
+        cx.notify();
+    }
+
+    /// What the `Log time with` select offers, each as its key and its label: none first, then
+    /// the entries the project sees (its own and the global ones) by name, with their username.
+    /// The entry the file names stays in the list when the project does not see it, said so.
+    pub fn worklog_options(&self) -> Vec<(String, String)> {
+        let mut seen: Vec<&VaultEntry> = self
+            .vault
+            .iter()
+            .filter(|entry| entry.project.as_deref().is_none_or(|p| p == self.name))
+            .collect();
+        seen.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut options = vec![("none".to_owned(), "None".to_owned())];
+        options.extend(seen.into_iter().map(|entry| {
+            let account = match entry.username.as_deref().map(str::trim) {
+                Some(account) if !account.is_empty() => account,
+                _ => "no username",
+            };
+            (entry.name.clone(), format!("{} · {account}", entry.name))
+        }));
+        if let Some(chosen) = &self.worklog
+            && !options.iter().any(|(key, _)| key == chosen)
+        {
+            options.push((chosen.clone(), format!("{chosen} · not in the vault")));
+        }
+        options
     }
 
     /// The repositories whose forge is GitHub: those whose issues can be the tracker.
@@ -1224,14 +1285,7 @@ impl ProjectSettingsPage {
                             .filter(|key| !key.is_empty())
                             .map(str::to_owned)
                             .collect(),
-                        // Not a field of this dialog: the project's file names it, and a save
-                        // keeps it.
-                        worklog_token: match &self.tracker {
-                            Some(ProjectTracker::Jira { worklog_token, .. }) => {
-                                worklog_token.clone()
-                            }
-                            _ => None,
-                        },
+                        worklog_token: self.worklog.clone(),
                     }),
                 };
                 let settings = self.params(None, None, Some(tracker));
@@ -1241,33 +1295,9 @@ impl ProjectSettingsPage {
         }
     }
 
-    /// Asks to remove the project, in a confirmation.
+    /// Asks to remove the project, in a confirmation that says what the removal would do.
     pub fn ask_removal(&mut self, cx: &mut Context<Self>) {
-        self.confirming_remove = true;
-        cx.notify();
-    }
-
-    fn remove(&mut self, cx: &mut Context<Self>) {
-        self.removing = true;
-        self.confirming_remove = false;
-        self.removed = None;
-        let command = Command::RemoveProject(self.name.clone());
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
-        cx.notify();
-    }
-
-    /// The daemon refused to forget the project, and why; a removal done closes the page.
-    pub fn remove_refused(&mut self, why: String, cx: &mut Context<Self>) {
-        self.removing = false;
-        toast(
-            Toast::failure(format!("The project {} was not removed", self.name))
-                .detail(why.clone()),
-            cx,
-        );
-        self.removed = Some(why);
-        cx.notify();
+        self.removal.update(cx, |removal, cx| removal.ask(cx));
     }
 
     fn repository_menu(&mut self, path: &str, cx: &mut Context<Self>) -> Entity<Menu> {
@@ -1558,11 +1588,18 @@ impl ProjectSettingsPage {
         let checking = self.programs.read(cx).is_checking();
         // From what the project declares, not from a read: one that failed is asked again.
         let forges = self.forms.iter().any(|form| form.declared.is_some());
-        Section::new("repositories", "Repositories")
-            .count(count.to_string())
-            .sentence(
-                "The git repositories of the project folder. A workspace takes a worktree of each.",
-            )
+        // The folder is the only repository: the section does not read as a list of one.
+        let alone = read.as_ref().is_some_and(|read| {
+            let paths: Vec<_> = read.listed.iter().map(|info| info.path.clone()).collect();
+            only_at_root(&paths)
+        });
+        let section = Section::new("repositories", "Repositories")
+            .when(!alone, |section| section.count(count.to_string()))
+            .sentence(if alone {
+                "The project folder is a git repository. A workspace takes a worktree of it."
+            } else {
+                "The git repositories of the project folder. A workspace takes a worktree of each."
+            })
             .action(
                 Button::quiet("check-forge-programs", "Check programs")
                     .leading(Icon::Search)
@@ -1603,11 +1640,19 @@ impl ProjectSettingsPage {
                 )
                 .gap(space::MD),
             )
-            .child(problem_line("repositories-problem", problem, space::MD, cx))
+            .child(problem_line("repositories-problem", problem, space::MD, cx));
+        // Adding a second repository (or removing the last other) changes the section's words:
+        // it fades back in rather than swapping them at once.
+        changing(
+            "repositories-framing",
+            if alone { "alone" } else { "several" },
+            move |_| section.into_any_element(),
+        )
     }
 
-    /// The branch prefix of the project's workspaces: a field with its Save, empty allowed.
-    fn branch_prefix_section(
+    /// The branches of the project's workspaces: the prefix, a field with its Save, empty
+    /// allowed, then the format every branch must match.
+    fn branches_section(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1635,30 +1680,52 @@ impl ProjectSettingsPage {
         let save = Button::primary(id("save"), "Save")
             .disabled(!self.branch_prefix_savable(cx))
             .on_click(cx.listener(|this, _, _, cx| this.save_branch_prefix(cx)));
-        Section::new(
-            format!("branch-prefix-section-{}", self.name),
-            "Branch prefix",
-        )
-        .sentence(
-            "A new workspace is on the branch <prefix>/<name> unless one is given. Leave it \
-                 empty for the workspace's name alone, as a repository that names its branches \
-                 after tickets wants. Workspaces that exist keep their branch.",
-        )
-        .child(Field::new(
-            id("field"),
-            "Branch prefix",
-            div()
-                .flex()
-                .items_center()
-                .gap(space::SM)
-                .child(
+        let warning = self.prefix_refused(cx).map(|prefix| {
+            SharedString::from(format!(
+                "New workspaces get {prefix}/…, which the branch format refuses."
+            ))
+        });
+        Section::new(format!("branches-section-{}", self.name), "Branches")
+            .sentence(
+                "How a new workspace's branch is named: its prefix, then the format every branch \
+                 a workspace starts, renames to or pushes must match. A branch a workspace \
+                 resumed is never refused for its name.",
+            )
+            .child(
+                Field::new(
+                    id("field"),
+                    "Branch prefix",
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(field_frame(id("input"), &field, cx)),
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(field_frame(id("input"), &field, cx)),
+                        )
+                        .child(save),
                 )
-                .child(save),
-        ))
+                .hint(
+                    "A new workspace is on the branch <prefix>/<name> unless one is given. Leave \
+                     it empty for the workspace's name alone, as a repository that names its \
+                     branches after tickets wants. Workspaces that exist keep their branch.",
+                )
+                .warning(warning),
+            )
+            .child(self.branch_format.clone())
+    }
+
+    /// The prefix typed when the branch a new workspace gets by default, `<prefix>/` and a ticket's
+    /// name, is one the saved branch format refuses.
+    fn prefix_refused(&self, cx: &App) -> Option<String> {
+        let prefix = self.branch_prefix_typed(cx).trim().to_owned();
+        let format = self.branch_format.read(cx).saved().unwrap_or_default();
+        (!prefix.is_empty()
+            && !format.is_empty()
+            && !branch_matches(format, &format!("{prefix}/ABC-1-example")))
+        .then_some(prefix)
     }
 
     fn tracker_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1930,6 +1997,7 @@ impl ProjectSettingsPage {
             }
             _ => None,
         };
+        let worklog = self.worklog_field(cx);
         let error = problem_line(
             "settings-modal-error",
             self.dialog_error.clone(),
@@ -2126,7 +2194,8 @@ impl ProjectSettingsPage {
                                         "A ticket is a key of one of these projects (ABC-123), \
                                          read with acli when it is signed in to this site.",
                                     ),
-                                ),
+                                )
+                                .child(worklog),
                         )
                         .gap(space::LG),
                     )
@@ -2136,28 +2205,57 @@ impl ProjectSettingsPage {
         }
     }
 
-    fn confirm(&self, cx: &mut Context<Self>) -> flottille_ui::Confirm {
-        let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
-        flottille_ui::Confirm::new(
-            "project-removal",
-            format!("Remove the project {}?", self.name),
+    /// `Log time with`: the vault entry whose token logs time on Jira, and the way to add one.
+    fn worklog_field(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let options = self.worklog_options();
+        let chosen = self
+            .worklog
+            .as_ref()
+            .and_then(|name| options.iter().position(|(key, _)| key == name))
+            .unwrap_or(0);
+        let keys: Vec<String> = options.iter().map(|(key, _)| key.clone()).collect();
+        let this = cx.entity().downgrade();
+        let select = Select::new(
+            "tracker-worklog",
+            options.into_iter().map(|(key, label)| {
+                SelectOption::new(SharedString::from(key), SharedString::from(label))
+            }),
+            chosen,
         )
-        .sentence(
-            "Flottille forgets it and its file. The folder and its repositories are not touched.",
-        )
-        .action("Remove project")
-        .open(self.confirming_remove)
-        .on_confirm(move |_, cx| {
-            this.update(cx, |this, cx| this.remove(cx)).ok();
-        })
-        .on_cancel(move |_, cx| {
-            again
-                .update(cx, |this, cx| {
-                    this.confirming_remove = false;
-                    cx.notify();
-                })
+        .on_choose(move |index, _, cx| {
+            let entry = (index > 0).then(|| keys[index].clone());
+            this.update(cx, |this, cx| this.choose_worklog(entry, cx))
                 .ok();
-        })
+        });
+        let (shell, project) = (self.shell.clone(), self.name.clone());
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .child(
+                Field::new("tracker-worklog-field", "Log time with", select)
+                    .hint("A Jira API token in the vault, its username your Jira e-mail."),
+            )
+            .child(
+                div().flex().child(hoverable(
+                    div()
+                        .id("tracker-worklog-add")
+                        .aria_label("Add one in the vault")
+                        .text_size(px(12.))
+                        .text_color(p.run)
+                        .cursor_pointer()
+                        .child("Add one in the vault")
+                        .on_click(move |_: &ClickEvent, window, cx| {
+                            shell
+                                .update(cx, |shell, cx| {
+                                    shell.add_vault_entry_for(&project, window, cx)
+                                })
+                                .ok();
+                        }),
+                    move |link, t| link.bg(p.hover.opacity(t)),
+                )),
+            )
     }
 
     /// Where it was opened at, from the project page.
@@ -2309,10 +2407,8 @@ impl Render for ProjectSettingsPage {
                 .flex_col()
                 .gap(space::XXL)
                 .child(self.workspaces.clone())
-                .child(self.branch_prefix_section(window, cx))
+                .child(self.branches_section(window, cx))
                 .child(self.setup.clone())
-                // Under the setup, which stays where its tab shows it first.
-                .child(self.branch_format.clone())
                 .into_any_element(),
             // What checks the agents' messages belongs with how they are told to work.
             div()
@@ -2380,7 +2476,7 @@ impl Render for ProjectSettingsPage {
                 .child(element)
         };
         let modal = self.dialog_modal(cx).into_any_element();
-        let confirm = self.confirm(cx);
+        let confirm = self.removal.clone();
         // The header and the tabs stay in place; the section under them scrolls.
         let top = div()
             .w_full()

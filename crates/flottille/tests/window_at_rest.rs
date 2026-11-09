@@ -170,6 +170,36 @@ fn the_window_draws_no_frame_at_rest_on_the_project_page(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_add_a_project_with_its_folder_detected(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    let folder = user.path("work/other");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "other\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| s.add_project(window, cx));
+    let form = shell.read_with(cx, |s, _| s.add_project_form().clone());
+    cx.update(|window, cx| form.update(cx, |f, cx| f.set_folder(folder.clone(), window, cx)));
+    until(&shell, cx, "the folder is detected", |cx| {
+        form.read_with(cx, |f, _| f.detected().is_some())
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_the_project_page_with_a_picture_attached(
     cx: &mut TestAppContext,
 ) {
@@ -237,6 +267,53 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_rules_and_message_checks(
     until(&shell, cx, "the message checks are shown", |cx| {
         cx.update(|window, _| window.try_find("message-checks-text-app").is_some())
     });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_task_s_copy_dialog(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "check", "line": "cargo test"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("app".into()), window, cx)
+    });
+    until(&shell, cx, "the project's settings are read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_settings_page()
+                .is_some_and(|page| page.read(cx).is_loaded())
+        })
+    });
+    cx.update(|window, cx| window.click("project-settings-tabs-tasks", cx));
+    until(&shell, cx, "the task is listed", |cx| {
+        cx.update(|window, _| window.try_find("task-more-check").is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("task-more-check", cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("copy-task-check", cx));
+    until(
+        &shell,
+        cx,
+        "the dialog says there is no other project",
+        |cx| cx.update(|window, _| window.try_find("task-copy-none-line").is_some()),
+    );
     settle(&shell, cx);
 
     assert_eq!(

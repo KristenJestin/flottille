@@ -48,8 +48,13 @@
 //!   it opens.
 //! - `die_on_open`: exit with that code on `session/new`, `session/load` or `session/resume`: an
 //!   agent whose process dies before it takes a prompt.
+//! - `open_error`: answer `session/new`, `session/load` and `session/resume` with an error of that
+//!   message: an agent that cannot open a session at all.
 //! - `models`, `efforts`: the values of the `model` and `thought_level` options, the first one
 //!   current; no effort option without `efforts`.
+//! - `model_rows`: the name and the description a model's row carries, by value (`{"default":
+//!   {"name": "Default (recommended)", "description": "Opus 5.5 (1M context)"}}`), as Claude's
+//!   adapter words its `default`; a model with no entry here is named by its value.
 //! - `refuse`: values the options list but `session/set_config_option` refuses, as an agent whose
 //!   catalogue lists a model its account cannot take.
 //! - `broken`: values `session/set_config_option` answers with an internal error, as an agent
@@ -58,13 +63,17 @@
 //!   "fake-small"}`), as an agent that falls back to another model.
 //! - `model_efforts`: the efforts of each model that has its own (`{"fake-large": ["low"]}`), the
 //!   others having `efforts`; a model set keeps the effort when it has it, else its first.
+//! - `said_efforts`: each model's row says that model's efforts in its `_meta`
+//!   (`{"flottille": {"efforts": [...]}}`), as Flottille's Claude bridge does (false by default).
 //! - `set_wait`: milliseconds `session/set_config_option` waits before it answers (none by
 //!   default).
 //! - `turns`: a prompt plays the first turn whose `when` is in its text; a prompt matching none is
 //!   answered `ok`. `stop` is the stop reason (`end_turn` by default). A turn with `"times": n`
 //!   is played n times at most, by every process of the folder together: after that it is skipped,
 //!   and the prompt plays the next turn that matches. `answer_usage` is the `usage` its answer
-//!   carries, as OpenCode's does (none by default).
+//!   carries, as OpenCode's does (none by default). A turn with `"error": "message"` plays its
+//!   steps, then answers the prompt with an error of that message, as an adapter whose provider
+//!   failed the turn (Claude's bridge, signed out) does.
 //!
 //! The steps of a turn, in order:
 //!
@@ -250,6 +259,9 @@ impl Agent {
         if opens && let Some(code) = self.script["die_on_open"].as_i64() {
             std::process::exit(code as i32);
         }
+        if opens && let Some(message) = self.script["open_error"].as_str() {
+            return Err(message.to_owned());
+        }
         if self.script["stall"] == true
             && method.starts_with("session/")
             && method != "session/prompt"
@@ -380,6 +392,9 @@ impl Agent {
                     .map(|(_, turn)| turn.clone())
                     .unwrap_or_else(|| json!({"do": [{"say": "ok"}]}));
                 let stop = self.play(&session, &text, &turn, answered, cancelled);
+                if let Some(message) = turn["error"].as_str() {
+                    return Err(message.to_owned());
+                }
                 let mut answer = json!({"stopReason": stop});
                 if let Some(usage) = turn.get("answer_usage") {
                     answer["usage"] = usage.clone();
@@ -717,9 +732,24 @@ impl Agent {
                 .map(str::to_owned)
                 .or_else(|| values.first().cloned())
                 .unwrap_or_default();
+            let rows = &self.script["model_rows"];
+            let row = |v: &String| {
+                let mut row = json!({"value": v, "name": v});
+                if id == "model" {
+                    for key in ["name", "description"] {
+                        if let Some(said) = rows[v.as_str()].get(key) {
+                            row[key] = said.clone();
+                        }
+                    }
+                    if self.script["said_efforts"] == true {
+                        row["_meta"] = json!({"flottille": {"efforts": self.efforts_of(v)}});
+                    }
+                }
+                row
+            };
             json!({"id": id, "name": name, "category": category, "type": "select",
                 "currentValue": value,
-                "options": values.iter().map(|v| json!({"value": v, "name": v})).collect::<Vec<_>>()})
+                "options": values.iter().map(row).collect::<Vec<_>>()})
         };
         let mut options = vec![select(
             "model",
@@ -752,8 +782,13 @@ impl Agent {
                     .cloned()
             })
             .unwrap_or_default();
-        match &self.script["model_efforts"][model.as_str()] {
-            Value::Array(_) => self.values(&self.script["model_efforts"][model.as_str()], "effort"),
+        self.efforts_of(&model)
+    }
+
+    /// The efforts of a model: its own, else `efforts`.
+    fn efforts_of(&self, model: &str) -> Vec<String> {
+        match &self.script["model_efforts"][model] {
+            Value::Array(_) => self.values(&self.script["model_efforts"][model], "effort"),
             _ => self.values(&self.script["efforts"], "effort"),
         }
     }

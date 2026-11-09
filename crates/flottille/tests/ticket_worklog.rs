@@ -384,6 +384,12 @@ fn log_time_without_a_configured_entry_is_refused() {
     for how in ["worklog_token", "[tracker]", "vault"] {
         assert!(said.contains(how), "{how} is not said: {said}");
     }
+    // The window first, the file second: the user's way is the project's Settings.
+    let (window, file) = (said.find("Settings"), said.find("worklog_token"));
+    assert!(
+        window.is_some() && window < file,
+        "the window is not said before the file: {said}"
+    );
 
     // An entry named, but not in the vault (or not seen by the project), is refused too.
     user.call(

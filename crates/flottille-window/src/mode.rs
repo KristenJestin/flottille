@@ -1,7 +1,9 @@
 //! The session's mode in the composer's bar: a small Ask | Auto | Full control, which only the
 //! user changes (`agent.mode`). In Auto without a judge chosen, calls to judge come to the user as
 //! in Ask: a warning icon beside the control says so in a tooltip and leads to Settings. Full, where
-//! nothing is asked, is drawn in the alarm colour so that it is never on by mistake.
+//! nothing is asked, is drawn in the alarm colour so that it is never on by mistake. The composer
+//! that starts a session has the same control, local: it sends nothing, and the mode it holds is
+//! what the session starts in.
 
 use flottille_ui::motion::PANEL;
 use flottille_ui::{Button, Icon, Segmented, enter, fade, palette, space};
@@ -24,10 +26,14 @@ pub const NO_JUDGE: &str =
 const MODES: [(&str, &str); 3] = [("ask", "Ask"), ("auto", "Auto"), ("full", "Full")];
 /// Full's place in [`MODES`].
 const FULL: usize = 2;
+const AUTO: &str = "auto";
 
 pub struct ModeSwitch {
     shell: WeakEntity<Shell>,
-    /// The root agent, whose mode its whole tree takes at its start.
+    /// The ids of its elements, `reply-mode` or `start-mode`.
+    prefix: &'static str,
+    /// The root agent, whose mode its whole tree takes at its start; empty when the control is
+    /// the composer's that starts a session, which has none yet.
     session: String,
     /// `ask`, `auto` or `full`, as the tree last said it; `None` until it is read.
     mode: Option<String>,
@@ -41,6 +47,7 @@ impl ModeSwitch {
     pub fn new(shell: WeakEntity<Shell>, session: String) -> Self {
         Self {
             shell,
+            prefix: "reply-mode",
             session,
             mode: None,
             pending: None,
@@ -48,6 +55,21 @@ impl ModeSwitch {
             judge_chosen: true,
             refused: None,
         }
+    }
+
+    /// The control of the composer that starts a session: on Auto, and the mode chosen is the one
+    /// the session starts in.
+    pub fn local(shell: WeakEntity<Shell>) -> Self {
+        Self {
+            prefix: "start-mode",
+            mode: Some(AUTO.to_owned()),
+            ..Self::new(shell, String::new())
+        }
+    }
+
+    /// Back on Auto: a choice never waits for a later session.
+    pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.set_mode(Some(AUTO.to_owned()), cx);
     }
 
     /// The mode shown: the one asked for while the daemon has not said it.
@@ -100,6 +122,10 @@ impl ModeSwitch {
 
     /// The user chose `wanted` (`ask`, `auto` or `full`) in the control.
     pub fn choose(&mut self, wanted: &str, cx: &mut Context<Self>) {
+        // Nothing runs yet: the choice is the mode the session starts in, and goes nowhere.
+        if self.session.is_empty() {
+            return self.set_mode(Some(wanted.to_owned()), cx);
+        }
         if self.pending.is_some() || self.mode.as_deref().is_none_or(|mode| mode == wanted) {
             return;
         }
@@ -123,7 +149,9 @@ impl Render for ModeSwitch {
             .iter()
             .position(|(mode, _)| self.mode() == Some(*mode))
             .unwrap_or(0);
-        let control = Segmented::new("reply-mode", "Mode", MODES, chosen)
+        let prefix = self.prefix;
+        let id = move |suffix: &str| SharedString::from(format!("{prefix}{suffix}"));
+        let control = Segmented::new(id(""), "Mode", MODES, chosen)
             .alarm(FULL)
             .disabled(self.mode.is_none() || self.pending.is_some())
             .on_choose({
@@ -134,16 +162,10 @@ impl Render for ModeSwitch {
                 }
             });
         // The warning comes and goes beside the control: its room opens and its icon fades in.
-        let warn = fade(
-            "reply-mode-warning-shown",
-            self.no_judge(),
-            PANEL,
-            window,
-            cx,
-        );
+        let warn = fade(id("-warning-shown"), self.no_judge(), PANEL, window, cx);
         let shell = self.shell.clone();
         div()
-            .id("reply-mode-bar")
+            .id(id("-bar"))
             .h(px(28.))
             .px(space::SM)
             .flex()
@@ -158,7 +180,7 @@ impl Render for ModeSwitch {
                         .opacity(warn)
                         .overflow_hidden()
                         .child(
-                            Button::icon("reply-mode-warning", Icon::Warning, NO_JUDGE).on_click(
+                            Button::icon(id("-warning"), Icon::Warning, NO_JUDGE).on_click(
                                 move |_, window, cx| {
                                     shell
                                         .update(cx, |shell, cx| {
@@ -173,10 +195,10 @@ impl Render for ModeSwitch {
             // A refusal is a word beside the control, not a block: it fades in and does not fold.
             .when_some(self.said(), |d, said| {
                 d.child(enter(
-                    "reply-mode-said-enter",
+                    id("-said-enter"),
                     0,
                     div()
-                        .id("reply-mode-said")
+                        .id(id("-said"))
                         .ml(px(8.))
                         .text_color(p.fail)
                         .child(SharedString::from(said))

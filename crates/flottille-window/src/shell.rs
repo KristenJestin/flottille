@@ -10,8 +10,8 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, StateIcon, Status,
-    ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon,
-    keys_held, open_overlay, palette, presence, pressable, space,
+    Tie, Toast, ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays,
+    icon, keys_held, open_overlay, palette, presence, pressable, space, toast,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
@@ -19,11 +19,13 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle,
     InteractiveElement, IntoElement, KeyDownEvent, Modifiers, MouseButton, NavigationDirection,
-    ParentElement, PathBuilder, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Task, TestSupportExt as _, WeakEntity, Window, canvas, div, point, px,
+    ParentElement, PathBuilder, PathStyle, Pixels, Render, SharedString,
+    StatefulInteractiveElement, StrokeOptions, Styled, Subscription, Task, TestSupportExt as _,
+    WeakEntity, Window, canvas, div, point, px,
 };
+use lyon_tessellation::{LineCap, LineJoin};
 
-use crate::actions::{Actions, Command, Details, Outcome, Pick};
+use crate::actions::{Actions, Command, Details, Outcome, Pick, RunFrom};
 use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::extensions::Registry;
@@ -36,6 +38,7 @@ use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine};
 use crate::project_settings::ProjectSettingsPage;
 use crate::providers::Providers;
+use crate::rename::RenameSession;
 use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;
@@ -200,6 +203,8 @@ pub struct Shell {
     project_settings: Option<Entity<ProjectSettingsPage>>,
     /// The form that adds a project, one for the window's life.
     add_project: Entity<AddProject>,
+    /// The dialog that renames a session.
+    rename: Entity<RenameSession>,
     /// The quick switcher (Ctrl K): sessions, projects and actions found by what is typed.
     switcher: Entity<Switcher>,
     /// What the window knows of the parts of Flottille it draws in its places (Specs).
@@ -304,6 +309,10 @@ impl Shell {
             let this = this.clone();
             cx.new(|cx| AddProject::new(this, window, cx))
         };
+        let rename = {
+            let this = this.clone();
+            cx.new(|cx| RenameSession::new(this, window, cx))
+        };
         let focus = cx.focus_handle();
         let switcher = {
             let (this, focus) = (this.clone(), focus.clone());
@@ -374,6 +383,7 @@ impl Shell {
             texts_due: true,
             project_settings: None,
             add_project,
+            rename,
             switcher,
             extensions,
             spec_page: None,
@@ -424,6 +434,8 @@ impl Shell {
             )
         });
         let forms = forms.clone();
+        // Shown, the composer is on Auto: a mode chosen for one session never reaches the next.
+        forms.0.update(cx, |composer, cx| composer.reset_mode(cx));
         if let Some(project) = self.snapshot.projects.iter().find(|p| &p.name == name) {
             let (repositories, default_set) = (
                 project.repositories.clone(),
@@ -463,6 +475,8 @@ impl Shell {
         self.perform(Command::WorkspacesFolderRead {
             project: Some(name.clone()),
         });
+        // The Tracker's select offers the entries the project sees.
+        self.perform(Command::Vault);
         self.project_settings = Some(made.clone());
         Some(made)
     }
@@ -477,6 +491,20 @@ impl Shell {
         self.left.update(cx, |drawer, cx| drawer.close(cx));
         self.add_project
             .update(cx, |form, cx| form.open(window, cx));
+    }
+
+    /// The dialog that renames a session.
+    pub fn rename_form(&self) -> &Entity<RenameSession> {
+        &self.rename
+    }
+
+    /// "Rename…" in a session's row or header: the dialog, its field holding the title it has.
+    pub fn rename_of(&mut self, session: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(title) = self.snapshot.session(session).map(|s| s.title.clone()) else {
+            return;
+        };
+        self.rename
+            .update(cx, |form, cx| form.open(session, &title, window, cx));
     }
 
     /// The quick switcher.
@@ -671,6 +699,9 @@ impl Shell {
             shell.history.show_agent(&session, agent);
         }));
         self.session_page = Some(page.clone());
+        // The rail's Run a task lists the project's tasks.
+        let project = page.read(cx).project().to_owned();
+        self.actions.send(Command::Tasks { project });
         Some(page)
     }
 
@@ -943,15 +974,27 @@ impl Shell {
                     page.update(cx, |page, cx| page.picture_read(name, image, cx));
                 }
             }
+            Outcome::VaultAnswered {
+                session,
+                ask,
+                refused,
+            } => {
+                if let Some(page) = self
+                    .session_page
+                    .clone()
+                    .filter(|page| page.read(cx).id() == session)
+                {
+                    page.update(cx, |page, cx| page.vault_answered(ask, refused, window, cx));
+                }
+            }
             Outcome::QuestionAnswered {
                 session,
                 seq,
-                seqs,
                 refused,
             } => {
                 // Kept by the window, not the page: a page opened again knows it was sent.
                 if refused.is_none() {
-                    crate::session::answers_sent(&session, &seqs, cx);
+                    crate::question_card::answers_sent(&session, seq, cx);
                 }
                 if let Some(page) = self
                     .session_page
@@ -1045,10 +1088,18 @@ impl Shell {
                     page.update(cx, |page, cx| page.resumed(refused, cx));
                 }
             }
+            Outcome::Renamed { refused } => flottille_ui::toast(
+                match refused {
+                    None => flottille_ui::Toast::success("Session renamed"),
+                    Some(why) => flottille_ui::Toast::failure("Session not renamed").detail(why),
+                },
+                cx,
+            ),
             Outcome::Detached { from, refused } => flottille_ui::toast(
                 match refused {
-                    None => flottille_ui::Toast::success(format!("Detached from {from}")),
-                    Some(why) => flottille_ui::Toast::failure(format!("Not detached from {from}"))
+                    None => flottille_ui::Toast::success("Detached from ").quoting(&from),
+                    Some(why) => flottille_ui::Toast::failure("Not detached from ")
+                        .quoting(&from)
                         .detail(why),
                 },
                 cx,
@@ -1067,6 +1118,11 @@ impl Shell {
                         flottille_ui::Toast::failure(crate::session::NOT_RELOADED).detail(why),
                         cx,
                     );
+                }
+            }
+            Outcome::QuotaResumed { session, refused } => {
+                if let Some(reply) = self.replies.get(&session) {
+                    reply.update(cx, |reply, cx| reply.quota_answered(refused, cx));
                 }
             }
             Outcome::ModeSet { session, refused } => {
@@ -1220,15 +1276,29 @@ impl Shell {
             }
             // Detect again is the settings' own read of the repositories now.
             Outcome::ProjectChecked { .. } => {}
-            Outcome::ProjectRemoved { project, refused } => match refused {
-                Some(why) => {
-                    if let Some(page) = self.project_settings.clone()
-                        && page.read(cx).name() == project
-                    {
-                        page.update(cx, |page, cx| page.remove_refused(why, cx));
-                    }
+            Outcome::RemovalRead {
+                project,
+                serial,
+                read,
+            } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let removal = page.read(cx).removal().clone();
+                    removal.update(cx, |removal, cx| removal.answered(serial, read, cx));
                 }
-                None => {
+            }
+            Outcome::ProjectRemoved { project, result } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let removal = page.read(cx).removal().clone();
+                    removal.update(cx, |removal, cx| removal.removed(result.clone(), cx));
+                } else if let Ok(done) = &result {
+                    // The page was left meanwhile: the toast is said all the same.
+                    let mut said = Toast::success(format!("The project {project} was removed"));
+                    if let Some(detail) = crate::project_removal::done_said(done) {
+                        said = said.detail(detail);
+                    }
+                    toast(said, cx);
+                }
+                if result.is_ok() {
                     self.forms.remove(&project);
                     self.snapshot.projects.retain(|p| p.name != project);
                     let next = self.snapshot.projects.first().map(|p| p.name.clone());
@@ -1245,10 +1315,10 @@ impl Shell {
                         }
                     }
                 }
-            },
-            Outcome::ProjectDetected { read, .. } => {
+            }
+            Outcome::ProjectDetected { seq, read, .. } => {
                 self.add_project
-                    .update(cx, |form, cx| form.detect_answered(read, cx));
+                    .update(cx, |form, cx| form.detect_answered(seq, read, cx));
             }
             Outcome::ProjectAdded { read, .. } => {
                 let added = self
@@ -1314,12 +1384,25 @@ impl Shell {
                 }
             }
             Outcome::Vault { listed } => {
+                // A project's Tracker offers the entries it sees to log time with.
+                if let (Some(page), Ok(entries)) = (self.project_settings.clone(), &listed) {
+                    page.update(cx, |page, cx| page.vault_listed(entries, cx));
+                }
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.listed(listed, cx));
             }
             Outcome::VaultWritten { refused } => {
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.written(refused, cx));
+                // An entry added from a project's Tracker: back to it.
+                if let Some(project) = section.update(cx, |section, _| section.take_return()) {
+                    self.open_project_settings_at(
+                        &project,
+                        crate::project_settings::Reveal::Tracker,
+                        window,
+                        cx,
+                    );
+                }
             }
             Outcome::Developer { written, shown } => {
                 self.settings
@@ -1526,6 +1609,15 @@ impl Shell {
                     let section = page.read(cx).tasks().clone();
                     section.update(cx, |section, cx| section.listed(listed.clone(), cx));
                 }
+                // The rail of a session of the project offers them to run.
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).project() == project
+                    && let Ok(tasks) = &listed
+                {
+                    let names = tasks.iter().map(|task| task.name.clone()).collect();
+                    let list = page.read(cx).commands(cx);
+                    list.update(cx, |list, cx| list.set_tasks(names, cx));
+                }
                 if let Some(tasks) = self.project_tasks_of(&project, cx) {
                     tasks.update(cx, |tasks, cx| tasks.listed(listed, cx));
                 }
@@ -1562,13 +1654,19 @@ impl Shell {
             Outcome::TaskRun {
                 project,
                 name,
+                from,
                 refused,
-            } => {
-                if let Some(tasks) = self.project_tasks_of(&project, cx) {
-                    let _ = name;
-                    tasks.update(cx, |tasks, cx| tasks.started(refused, cx));
+            } => match from {
+                RunFrom::Page => {
+                    if let Some(tasks) = self.project_tasks_of(&project, cx) {
+                        tasks.update(cx, |tasks, cx| tasks.started(refused, cx));
+                    }
                 }
-            }
+                RunFrom::Settings => crate::tasks::ran(&name, None, refused, cx),
+                RunFrom::Session { workspace } => {
+                    crate::tasks::ran(&name, Some(workspace.as_deref()), refused, cx);
+                }
+            },
             Outcome::ProjectRuns {
                 project,
                 listed,
@@ -2020,9 +2118,9 @@ impl Shell {
             projects.insert(project.name.clone(), node);
         }
         // The ended sessions leave their places for one folded group below every project.
-        let ended = snapshot.sessions.iter().filter(|session| session.ended);
+        let ended = snapshot.ended_sessions();
         let mut marks = Vec::new();
-        let rows = self.session_rows(ended, &mut sessions, &mut marks, now, cx);
+        let rows = self.session_rows(ended.iter().copied(), &mut sessions, &mut marks, now, cx);
         let present = !rows.is_empty();
         if self.ended.is_none() && present {
             self.ended = Some(cx.new(EndedNode::new));
@@ -2412,6 +2510,19 @@ impl Shell {
         }
     }
 
+    /// A project's Tracker `Add one in the vault`: Settings, Vault, on a new entry. Closed, it
+    /// goes back to the project's Tracker.
+    pub fn add_vault_entry_for(
+        &mut self,
+        project: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
+        let vault = self.settings.read(cx).vault().clone();
+        vault.update(cx, |vault, cx| vault.add_for(project, window, cx));
+    }
+
     /// Opens Settings at a section: its tab is the one chosen.
     pub fn open_settings_at(
         &mut self,
@@ -2783,6 +2894,7 @@ impl Render for Shell {
                 d.child(self.notice_card(false, compaction_notice, text, cx))
             })
             .child(self.add_project.clone())
+            .child(self.rename.clone())
             .child(self.switcher.clone())
             .when(bell_drawn, |d| {
                 let scrim = div()
@@ -3135,30 +3247,56 @@ impl Render for BellList {
     }
 }
 
-/// The Flottille mark: a hull and two sails, drawn in a 16-unit box.
+/// The Flottille mark, drawn as `assets/brand/mark.svg` draws it: its geometry, in that file's
+/// 64-unit box. The sails are filled triangles with a round-joined outline; the hull is one
+/// curved stroke with round ends.
+const MARK_SAILS: [[(f32, f32); 3]; 2] = [
+    [(19., 8.), (19., 38.), (37., 38.)],
+    [(44., 19.), (44., 38.), (57., 38.)],
+];
+const MARK_SAIL_OUTLINE: f32 = 4.;
+const MARK_HULL: [(f32, f32); 4] = [(7., 46.), (20., 53.5), (44., 53.5), (57., 46.)];
+const MARK_HULL_STROKE: f32 = 6.4;
+
+/// The Flottille mark in the box it is given: two filled sails over one curved hull.
 fn logo(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
     canvas(
         |_, _, _| {},
         move |bounds: Bounds<Pixels>, _, window, _| {
-            let unit = f32::from(bounds.size.width) / 16.0;
-            let at = |x: f32, y: f32| {
+            let unit = f32::from(bounds.size.width) / 64.0;
+            let at = |(x, y): (f32, f32)| {
                 point(
                     bounds.origin.x + px(x * unit),
                     bounds.origin.y + px(y * unit),
                 )
             };
-            let mut path = PathBuilder::stroke(px(1.7 * unit));
-            path.move_to(at(2.0, 11.5));
-            path.cubic_bezier_to(at(14.0, 11.5), at(4.5, 13.1), at(11.5, 13.1));
-            path.move_to(at(5.5, 10.0));
-            path.line_to(at(5.5, 3.0));
-            path.line_to(at(9.5, 8.5));
-            path.line_to(at(5.5, 8.5));
-            path.move_to(at(10.5, 10.0));
-            path.line_to(at(10.5, 5.5));
-            path.line_to(at(13.0, 9.0));
-            path.line_to(at(10.5, 9.0));
-            if let Ok(path) = path.build() {
+            let stroke = |width: f32| {
+                PathBuilder::fill().with_style(PathStyle::Stroke(
+                    StrokeOptions::default()
+                        .with_line_width(width * unit)
+                        .with_line_join(LineJoin::Round)
+                        .with_line_cap(LineCap::Round),
+                ))
+            };
+            for sail in MARK_SAILS {
+                let mut fill = PathBuilder::fill();
+                let mut outline = stroke(MARK_SAIL_OUTLINE);
+                for builder in [&mut fill, &mut outline] {
+                    builder.move_to(at(sail[0]));
+                    builder.line_to(at(sail[1]));
+                    builder.line_to(at(sail[2]));
+                    builder.close();
+                }
+                for builder in [fill, outline] {
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, color);
+                    }
+                }
+            }
+            let mut hull = stroke(MARK_HULL_STROKE);
+            hull.move_to(at(MARK_HULL[0]));
+            hull.cubic_bezier_to(at(MARK_HULL[3]), at(MARK_HULL[1]), at(MARK_HULL[2]));
+            if let Ok(path) = hull.build() {
                 window.paint_path(path, color);
             }
         },
@@ -3183,13 +3321,14 @@ fn nested(
         .collect();
     let mut out = Vec::new();
     let mut placed = HashSet::new();
-    // Depth first from each session no other leads; `shown` is false under a folded row.
-    let mut stack: Vec<(usize, bool)> = (0..live.len())
+    // Depth first from each session no other leads; `shown` is false under a folded row. The tie
+    // of a row is the lines the rows above it go on with and whether it is its pilot's last.
+    let mut stack: Vec<(usize, bool, Option<Tie>)> = (0..live.len())
         .rev()
         .filter(|&at| pilots[at].is_none())
-        .map(|at| (at, true))
+        .map(|at| (at, true, None))
         .collect();
-    while let Some((at, shown)) = stack.pop() {
+    while let Some((at, shown, tie)) = stack.pop() {
         if !placed.insert(at) {
             continue;
         }
@@ -3198,17 +3337,95 @@ fn nested(
         if row.read(cx).led_by() != led_by {
             row.update(cx, |row, cx| row.set_led_by(led_by, cx));
         }
+        if row.read(cx).tie() != tie.as_ref() {
+            let tie = tie.clone();
+            row.update(cx, |row, cx| row.set_tie(tie, cx));
+        }
         let led: Vec<usize> = (0..live.len())
             .filter(|&other| pilots[other] == Some(at))
             .collect();
         if row.read(cx).leads() != led.len() {
             row.update(cx, |row, cx| row.set_leads(led.len(), cx));
         }
+        // Folded, the row shows what the sessions it hides ask of the user.
+        let hidden = match row.read(cx).is_open() {
+            true => None,
+            false => {
+                let mut below = led.clone();
+                let mut marks = Vec::new();
+                while let Some(at) = below.pop() {
+                    marks.extend(live[at].mark);
+                    below.extend((0..live.len()).filter(|&other| pilots[other] == Some(at)));
+                }
+                AgentState::strongest(marks)
+            }
+        };
+        if row.read(cx).hidden() != hidden {
+            row.update(cx, |row, cx| row.set_hidden(hidden, cx));
+        }
         if shown {
             out.push(row.clone());
         }
         let open = shown && row.read(cx).is_open();
-        stack.extend(led.into_iter().rev().map(|other| (other, open)));
+        // A child's line goes on past its own children's rows while it has a sibling below.
+        let through = match &tie {
+            Some(tie) => [tie.through.clone(), vec![!tie.last]].concat(),
+            None => Vec::new(),
+        };
+        let last = led.len().saturating_sub(1);
+        stack.extend(led.into_iter().enumerate().rev().map(|(place, other)| {
+            let tie = Tie {
+                through: through.clone(),
+                last: place == last,
+            };
+            (other, open, Some(tie))
+        }));
     }
     out
+}
+
+#[cfg(test)]
+mod mark {
+    use super::*;
+
+    /// The numbers of the first attribute `name="…"` of each element that has one.
+    fn attributes(svg: &str, name: &str) -> Vec<String> {
+        let key = format!(" {name}=\"");
+        svg.match_indices(&key)
+            .map(|(at, _)| {
+                let rest = &svg[at + key.len()..];
+                rest[..rest.find('"').unwrap()].to_owned()
+            })
+            .collect()
+    }
+
+    fn numbers(path: &str) -> Vec<f32> {
+        path.split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+            .filter(|n| !n.is_empty())
+            .map(|n| n.parse().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn the_corner_mark_is_the_brand_mark() {
+        let svg = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/brand/mark.svg"
+        ))
+        .unwrap();
+        let paths = attributes(&svg, "d");
+        assert_eq!(paths.len(), 3, "two sails and a hull: {paths:?}");
+        let flat = |points: &[(f32, f32)]| -> Vec<f32> {
+            points.iter().flat_map(|&(x, y)| [x, y]).collect()
+        };
+        assert_eq!(numbers(&paths[0]), flat(&MARK_SAILS[0]));
+        assert_eq!(numbers(&paths[1]), flat(&MARK_SAILS[1]));
+        assert_eq!(numbers(&paths[2]), flat(&MARK_HULL));
+        // Sails are filled and outlined; the hull is a stroke alone.
+        assert_eq!(attributes(&svg, "fill"), ["#ececec", "#ececec", "none"]);
+        let widths = attributes(&svg, "stroke-width");
+        let outline = MARK_SAIL_OUTLINE.to_string();
+        assert_eq!(widths[..2], [outline.clone(), outline]);
+        assert_eq!(widths[2], MARK_HULL_STROKE.to_string());
+    }
 }

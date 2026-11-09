@@ -52,7 +52,7 @@ const REFUSED: &str = "Refused: this agent can use Flottille's tools only.";
 
 /// How Claude Code's own messages for a spent usage start, as the pinned version's Agent SDK
 /// lists them (`USAGE_LIMIT_ERROR_PREFIXES`).
-const USAGE_LIMIT: [&str; 12] = [
+pub(crate) const USAGE_LIMIT: [&str; 12] = [
     "You've hit your",
     "You've reached your",
     "You're out of usage credits",
@@ -304,6 +304,16 @@ impl Bridge {
 
     async fn fail(&mut self, id: Value, (code, message): Failure) {
         self.send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}))
+            .await;
+    }
+
+    /// A failed prompt whose reason the provider named: its kind goes as `data.code`.
+    async fn fail_coded(&mut self, id: Value, message: String, code: Option<&str>) {
+        let mut error = json!({"code": INTERNAL, "message": message});
+        if let Some(code) = code {
+            error["data"] = json!({"code": code});
+        }
+        self.send(json!({"jsonrpc": "2.0", "id": id, "error": error}))
             .await;
     }
 
@@ -1018,14 +1028,16 @@ impl Bridge {
                 _ => message["subtype"].as_str().unwrap_or("error").to_owned(),
             };
             let error = turn.error.as_deref();
-            // Signed out: the agent cannot go on until the user signs in again.
-            if text.contains("Please run /login")
-                || matches!(
-                    error,
-                    Some("authentication_failed" | "oauth_org_not_allowed")
-                )
-            {
-                return self.fail(turn.id, (INTERNAL, text)).await;
+            // Signed out: the agent cannot go on until the user signs in again. Its kind goes
+            // with the failure, which the daemon reads rather than the text.
+            let signed_out = matches!(
+                error,
+                Some("authentication_failed" | "oauth_org_not_allowed")
+            );
+            if signed_out || text.contains("Please run /login") {
+                return self
+                    .fail_coded(turn.id, text, error.filter(|_| signed_out))
+                    .await;
             }
             // Any other error ends the turn, the session alive, as Claude Code's own adapter
             // ends it for a client that takes session failures.
@@ -1203,8 +1215,11 @@ fn arguments(options: &Options, config: &Path, new: bool, session: &str) -> Vec<
     args
 }
 
-/// The session's options: the models `claude` listed, and the effort levels of the one set when
-/// it has any.
+/// The session's options: the models `claude` listed, each with its effort levels in `_meta`
+/// (`[]` for one without), and the effort levels of the one set when it has any. ACP says only
+/// the current model's efforts; `claude`'s `initialize` says every model's, so the daemon learns
+/// them all from a session without setting a model, which `claude` may check with a request to
+/// the API (`docs/agents.md`, "The models").
 fn config_options(claude: &Claude) -> Value {
     let mut models: Vec<Value> = claude
         .models
@@ -1212,7 +1227,9 @@ fn config_options(claude: &Claude) -> Value {
         .filter_map(|model| {
             let value = model["value"].as_str()?;
             let name = model["displayName"].as_str().unwrap_or(value);
-            Some(json!({"value": value, "name": name}))
+            let efforts = effort_levels(&claude.models, value).unwrap_or_default();
+            Some(json!({"value": value, "name": name,
+                "_meta": {"flottille": {"efforts": efforts}}}))
         })
         .collect();
     if !models.iter().any(|m| m["value"] == "default") {

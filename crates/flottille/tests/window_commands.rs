@@ -1108,7 +1108,7 @@ fn the_command_modal_follows_new_output_and_stops_the_command(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
-fn started_by_is_cut_to_two_lines_in_the_panel(cx: &mut TestAppContext) {
+fn started_by_quotes_the_session_on_one_line_in_the_panel(cx: &mut TestAppContext) {
     let user = user();
     let (lead, mcp, _) = lead_saying(
         &user,
@@ -1119,10 +1119,9 @@ fn started_by_is_cut_to_two_lines_in_the_panel(cx: &mut TestAppContext) {
     let (run, _, _, cx) = panel_of_server(&user, &lead, &mcp, cx);
 
     let by = label(cx, "run-fact-by").unwrap();
-    assert!(
-        by.chars().count() > 120,
-        "a long first message, in full: {by}"
-    );
+    // A session's title quoted in a sentence is one line, cut to the room the words leave, and
+    // the sentence says it whole (#589).
+    assert!(by.ends_with("for the team"), "the sentence is whole: {by}");
     let (line, cut) = cx.update(|window, _| {
         (
             f32::from(window.find("run-fact-where").bounds().size.height),
@@ -1130,23 +1129,27 @@ fn started_by_is_cut_to_two_lines_in_the_panel(cx: &mut TestAppContext) {
         )
     });
     assert!(
-        cut <= line * 2. + 1.,
-        "{cut}px is more than two lines of {line}px"
+        cut <= line + 1.,
+        "{cut}px is more than one line of {line}px"
     );
-    assert!(cut > line + 1., "and it did take its second line: {cut}px");
-    // The modal shows it whole.
+
+    // The modal says the same: its title has the room of a modal, but is one line too, so that a
+    // title never wraps a sentence wherever it is quoted.
     cx.update(|window, cx| window.click("run-drawer-expand", cx));
     settle(cx);
     let (whole, one_line) = cx.update(|window, _| {
+        let said = window.find("run-modal-fact-by-said-title").bounds();
+        let fact = window.find("run-modal-fact-by").bounds();
+        assert!(said.right() <= fact.right(), "{said:?} in {fact:?}");
         (
-            f32::from(window.find("run-modal-fact-by").bounds().size.height),
+            f32::from(fact.size.height),
             f32::from(window.find("run-modal-fact-where").bounds().size.height),
         )
     });
     assert_eq!(label(cx, "run-modal-fact-by").unwrap(), by);
     assert!(
-        whole <= one_line * 2. + 1.,
-        "the facts are on one or two lines: {whole}px"
+        whole <= one_line + 1.,
+        "{whole}px is more than one line of {one_line}px"
     );
     ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
 }
@@ -1406,7 +1409,7 @@ fn a_starting_server_shows_its_spinner_then_a_live_dot_once_ready(cx: &mut TestA
     );
     std::fs::write(workspace.join("go"), "").unwrap();
     until(&shell, cx, "the row says it is ready", |cx| {
-        label(cx, &who).is_some_and(|who| who == "task web · ready")
+        label(cx, &who).is_some_and(|who| who == "task web")
     });
     settle(cx);
 
@@ -1416,6 +1419,66 @@ fn a_starting_server_shows_its_spinner_then_a_live_dot_once_ready(cx: &mut TestA
         "the live dot"
     );
     ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn a_ready_runs_line_does_not_say_ready(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, workspace) = lead(&user);
+    let run = start(&mcp, "web");
+    std::fs::write(workspace.join("go"), "").unwrap();
+    let (shell, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the row shows its ready dot", |cx| {
+        label(cx, &format!("command-mark-{run}")).as_deref() == Some("ready")
+    });
+    settle(cx);
+
+    assert!(
+        cx.update(|window, _| window.try_find(format!("command-dot-{run}")).is_some()),
+        "the green dot says it is ready"
+    );
+    assert_eq!(
+        label(cx, &format!("command-who-{run}")).unwrap(),
+        "task web",
+        "the dot says ready: the line does not repeat it"
+    );
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn a_ready_server_on_the_project_page_does_not_say_ready_in_its_detail(cx: &mut TestAppContext) {
+    let user = user();
+    lead(&user);
+    let folder = user.path("work/app");
+    let script = folder.join("booting.sh");
+    std::fs::write(&script, SCRIPTS[7].1).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(folder.join("go"), "").unwrap();
+    let run = user
+        .call("task.run", json!({"project": "app", "name": "web"}))
+        .unwrap()["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, cx) = window(&user, 1280., cx);
+    // The runs come last on the page: tall enough to hold them.
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    shell.update_in(cx, |s, window, cx| {
+        s.open(
+            flottille_window::shell::Selection::Project("app".into()),
+            window,
+            cx,
+        )
+    });
+    until(&shell, cx, "the project page shows the run ready", |cx| {
+        label(cx, &format!("project-run-mark-{run}")).as_deref() == Some("ready")
+    });
+    settle(cx);
+
+    let detail = label(cx, &format!("command-{run}-detail")).unwrap();
+    assert!(detail.starts_with("task web · "), "{detail}");
+    assert!(!detail.contains("ready"), "the dot says it: {detail}");
+    user.call("run.stop", json!({"run": run})).unwrap();
 }
 
 #[gpui_kit::test]
@@ -1483,7 +1546,7 @@ fn the_drawer_of_a_ready_server_says_ready_and_links_its_address(cx: &mut TestAp
     let (shell, cx) = open_session(&user, &lead, cx);
     let page = session_page(&shell, cx);
     until(&shell, cx, "the row says it is ready", |cx| {
-        label(cx, &format!("command-who-{run}")).is_some_and(|who| who == "task web · ready")
+        label(cx, &format!("command-who-{run}")).is_some_and(|who| who == "task web")
     });
     settle(cx);
 
@@ -1762,6 +1825,10 @@ fn the_runs_section_lists_task_runs_only(cx: &mut TestAppContext) {
 fn no_task_run_folds_the_runs_section_away(cx: &mut TestAppContext) {
     let user = user();
     let (lead, _, shell, cx) = with_a_child(&user, cx);
+    let page = session_page(&shell, cx);
+    let list = page.read_with(cx, |page, cx| page.commands(cx));
+    // A project with no task: nothing to run from the section either.
+    list.update(cx, |list, cx| list.set_tasks(Vec::new(), cx));
     list_runs(
         &shell,
         vec![run_of("r-task", &lead, Some("server"), true, 1)],
@@ -1777,6 +1844,116 @@ fn no_task_run_folds_the_runs_section_away(cx: &mut TestAppContext) {
 
     list_runs(&shell, vec![], cx);
     assert!(!has(cx, "rail-runs"));
+
+    list.update(cx, |list, cx| list.set_tasks(vec!["server".into()], cx));
+    settle(cx);
+    assert!(
+        has(cx, "rail-runs") && has(cx, "rail-run-task"),
+        "the project has a task: the section stays for its Run a task"
+    );
+}
+
+// The user runs a task from the rail (#601): it starts in the session's workspace, as a run of
+// the user's, and its row unfolds into the Runs.
+
+#[gpui_kit::test]
+fn run_a_task_from_the_rail_starts_it_in_the_session_s_workspace(cx: &mut TestAppContext) {
+    let user = user().with_fake_escalation();
+    let (lead, _, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail offers the project's tasks", |cx| {
+        has(cx, "rail-run-task")
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("rail-run-task", cx));
+    settle(cx);
+    assert!(has(cx, "rail-run-task-menu"), "the list of the tasks opens");
+    cx.update(|window, cx| window.click("rail-run-task-server", cx));
+    until(&shell, cx, "the user's run is listed in the rail", |cx| {
+        commands(&page, cx)
+            .iter()
+            .any(|row| row.name.as_deref() == Some("server") && row.agent.is_empty())
+    });
+    let row = commands(&page, cx)
+        .into_iter()
+        .find(|row| row.name.as_deref() == Some("server"))
+        .unwrap();
+    assert_eq!(row.workspace.as_deref(), Some("w"), "{row:?}");
+    assert!(row.running(), "a server keeps running: {row:?}");
+    until(&shell, cx, "its row is drawn with its Stop", |cx| {
+        has(cx, &format!("command-{}", row.run)) && has(cx, &format!("command-stop-{}", row.run))
+    });
+    settle(cx);
+    assert!(
+        !has(cx, "rail-run-task-menu"),
+        "the list closed once a task was picked"
+    );
+    user.call("run.stop", json!({"run": row.run})).unwrap();
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[gpui_kit::test]
+fn run_a_task_is_an_icon_button_at_the_end_of_the_runs_heading(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the rail offers the project's tasks", |cx| {
+        has(cx, "rail-run-task")
+    });
+    settle(cx);
+
+    let button = bounds_of(cx, "rail-run-task").expect("the button is drawn");
+    let title = bounds_of(cx, "rail-runs-title").expect("the heading row is drawn");
+    assert_eq!(
+        (f32::from(button.size.width), f32::from(button.size.height)),
+        (28., 28.),
+        "an icon button is a 28 px square, not a select that fills the row"
+    );
+    assert!(
+        (f32::from(title.right()) - f32::from(button.right())).abs() < 1.,
+        "it ends the heading row: {button:?} in {title:?}"
+    );
+    assert!(
+        !has(cx, "rail-run-task-menu"),
+        "the list of the tasks is closed at rest"
+    );
+}
+
+#[gpui_kit::test]
+fn a_run_the_user_started_unfolds_into_the_runs(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _, shell, cx) = with_a_child(&user, cx);
+    list_runs(
+        &shell,
+        vec![run_of("r-agent", &lead, Some("fails"), true, 1)],
+        cx,
+    );
+    let page = session_page(&shell, cx);
+    let list = page.read_with(cx, |page, cx| page.commands(cx));
+    list.update(cx, |list, cx| {
+        list.set(
+            vec![
+                run_of("r-agent", &lead, Some("fails"), true, 1),
+                run_of("r-user", "", Some("server"), true, 2),
+            ],
+            cx,
+        )
+    });
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let arriving = bounds_of(cx, "command-item-r-user").expect("its row is drawn at once");
+    settle(cx);
+    let settled = bounds_of(cx, "command-item-r-user").unwrap();
+    assert!(
+        arriving.size.height < settled.size.height,
+        "it unfolds: {arriving:?} then {settled:?}"
+    );
+    assert_eq!(
+        label(cx, "command-who-r-user").as_deref(),
+        Some("task server · you")
+    );
 }
 
 #[gpui_kit::test]

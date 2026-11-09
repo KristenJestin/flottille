@@ -4,20 +4,27 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use flottille_core::agent::Agent;
 use flottille_core::declared::RepositoryForge;
 use flottille_core::detect;
 use flottille_core::paths::Paths;
 use flottille_core::project::{Project, slug, valid_name};
 use flottille_core::protocol::{
-    Conventions, MessageChecks, ProjectFolder, ProjectName, ProjectRepository, ProjectSettings,
+    Conventions, MessageChecks, ProjectFolder, ProjectName, ProjectRemove, ProjectRepository,
+    ProjectSettings, ShownWorkspace,
 };
 use flottille_core::registry::Registry;
+use flottille_core::run::Run;
+use flottille_core::store::Store;
+use flottille_core::workspace::Workspace;
 use flottille_core::{Error, Result};
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::git::{self, Class};
+use crate::{tree, workspaces};
 
 /// An error answer: a code of `docs/protocol.md` and a sentence.
 pub struct Failure {
@@ -135,15 +142,6 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
             )?;
             Ok(serde_json::to_value(project)?)
         }
-        "project.remove" => {
-            let ProjectName { name } = serde_json::from_value(params)?;
-            if !projects.registry.remove(&name)? {
-                return Err(not_found(&name));
-            }
-            projects.known.remove(&name);
-            emit(daemon, "project.removed", json!({"name": name}))?;
-            Ok(json!({"removed": name}))
-        }
         "project.check" => {
             let ProjectName { name } = serde_json::from_value(params)?;
             let project = load(projects, &name)?;
@@ -166,6 +164,301 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
             format!("unknown method `{method}`"),
         )),
     }
+}
+
+// Removal (`docs/projects.md`, "Removing a project").
+
+/// How long a removal waits for the processes of the project's agents to be gone once they
+/// were stopped: each has its own grace, and they stop together.
+const RELEASE_WAIT: Duration = Duration::from_secs(15);
+
+/// The refusal of anything that would start in a project being removed (an agent, a workspace,
+/// a command run) or edit its file.
+pub fn refuse_removing(daemon: &Daemon, project: &str) -> std::result::Result<(), Failure> {
+    match daemon.removing_projects.lock().unwrap().contains(project) {
+        true => Err(Failure::refused(format!(
+            "project {project} is being removed: nothing starts in it and its file is not edited"
+        ))),
+        false => Ok(()),
+    }
+}
+
+/// The agents of the project that have not ended, the shallowest first.
+fn live_agents(daemon: &Daemon, project: &str) -> std::result::Result<Vec<Agent>, Failure> {
+    let mut agents: Vec<Agent> = daemon
+        .read(Store::agents)?
+        .into_iter()
+        .filter(|agent| agent.project == project && !agent.state.is_final())
+        .collect();
+    agents.sort_by_key(|agent| agent.depth);
+    Ok(agents)
+}
+
+fn running_runs(daemon: &Daemon, project: &str) -> std::result::Result<Vec<Run>, Failure> {
+    Ok(daemon
+        .read(Store::running_runs)?
+        .into_iter()
+        .filter(|run| run.project == project)
+        .collect())
+}
+
+/// The project's workspaces, by name.
+fn workspaces_of(daemon: &Daemon, project: &str) -> std::result::Result<Vec<Workspace>, Failure> {
+    let mut workspaces = daemon.read(|store| store.workspaces(Some(project)))?;
+    workspaces.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(workspaces)
+}
+
+fn agent_json(agent: &Agent) -> Value {
+    json!({"id": agent.id, "title": agent.title, "parent": agent.parent})
+}
+
+fn run_json(run: &Run) -> Value {
+    json!({"run": run.id, "name": run.name, "line": run.line, "agent": run.agent})
+}
+
+/// `project.removal`: what removing the project would do, asked before it is: its sessions and
+/// command runs still running, and each workspace with what removing it would lose.
+pub async fn removal(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    let ProjectName { name } = serde_json::from_value(params)?;
+    load_project(&daemon, &name)?;
+    let sessions: Vec<Value> = live_agents(&daemon, &name)?
+        .iter()
+        .filter(|agent| agent.parent.is_none())
+        .map(agent_json)
+        .collect();
+    let runs: Vec<Value> = running_runs(&daemon, &name)?.iter().map(run_json).collect();
+    let mut workspaces = Vec::new();
+    for workspace in workspaces_of(&daemon, &name)? {
+        let (state, losses) = match workspaces::loss_state(&daemon, &workspace).await {
+            Ok(found) => found,
+            Err(failure) => ("unknown", vec![failure.message]),
+        };
+        // A state not read matches none: the workspace is kept.
+        let digest = workspaces::digest(&workspace).await.unwrap_or_default();
+        workspaces.push(json!({
+            "name": workspace.name,
+            "branch": workspace.branch,
+            "state": state,
+            "losses": losses,
+            "digest": digest,
+        }));
+    }
+    Ok(json!({
+        "name": name,
+        "sessions": sessions,
+        "runs": runs,
+        "workspaces": workspaces,
+    }))
+}
+
+/// `project.remove`: stops the project's agents, then its command runs, removes its workspaces
+/// (those that would lose work only with `discard`), then forgets it. Its folder and the
+/// checkouts of its repositories are never touched. Nothing starts in it meanwhile.
+pub async fn remove(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    let ProjectRemove { name, discard } = serde_json::from_value(params)?;
+    load_project(&daemon, &name)?;
+    // Marked before anything is stopped: nothing may start between a stop and the mark.
+    if !daemon
+        .removing_projects
+        .lock()
+        .unwrap()
+        .insert(name.clone())
+    {
+        return Err(Failure::refused(format!(
+            "project {name} is being removed already"
+        )));
+    }
+    let removed = remove_marked(&daemon, &name, discard.as_deref()).await;
+    daemon.removing_projects.lock().unwrap().remove(&name);
+    removed
+}
+
+/// What a removal did so far, for its result or for the failure that stopped it partway.
+#[derive(Default)]
+struct Done {
+    agents: Vec<Value>,
+    runs: Vec<Value>,
+    removed: Vec<Value>,
+    kept: Vec<Value>,
+}
+
+impl Done {
+    /// The failure of a removal stopped partway: what failed, what was done, and that the
+    /// project is still known.
+    fn partway(&self, name: &str, failed: &str) -> Failure {
+        let names = |list: &[Value], key: &str| {
+            list.iter()
+                .map(|entry| entry[key].as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut done = Vec::new();
+        if !self.agents.is_empty() {
+            done.push(format!("stopped the agents {}", names(&self.agents, "id")));
+        }
+        if !self.runs.is_empty() {
+            done.push(format!(
+                "stopped the command runs {}",
+                names(&self.runs, "run")
+            ));
+        }
+        if !self.removed.is_empty() {
+            done.push(format!(
+                "removed the workspaces {}",
+                names(&self.removed, "name")
+            ));
+        }
+        let done = match done.is_empty() {
+            true => "nothing was done".to_owned(),
+            false => format!("done: {}", done.join("; ")),
+        };
+        Failure::refused(format!(
+            "project {name} is not removed, it is still known: {failed}; {done}"
+        ))
+    }
+}
+
+async fn remove_marked(
+    daemon: &Arc<Daemon>,
+    name: &str,
+    discard: Option<&[ShownWorkspace]>,
+) -> std::result::Result<Value, Failure> {
+    let mut done = Done::default();
+    // Read before the agents stop, whose runs end with them: all are said stopped. None starts
+    // after it, the project being marked.
+    let runs = running_runs(daemon, name)?;
+
+    // The roots first: each ends with its tree, as Stop does.
+    let agents = live_agents(daemon, name)?;
+    for agent in &agents {
+        let live = daemon
+            .read(|store| store.agent(&agent.id))?
+            .is_some_and(|agent| !agent.state.is_final());
+        if live {
+            tree::stop_tree(
+                daemon,
+                &agent.id,
+                "stopped by the user: its project was removed",
+            );
+        }
+    }
+    done.agents = agents.iter().map(agent_json).collect();
+    // A workspace is removed once nothing of an agent's runs in it any more: every agent of the
+    // project, ended ones too, whose process an earlier removal's wait may have outlived.
+    let all: Vec<Agent> = daemon
+        .read(Store::agents)?
+        .into_iter()
+        .filter(|agent| agent.project == name)
+        .collect();
+    let deadline = Instant::now() + RELEASE_WAIT;
+    loop {
+        let stopping: Vec<&str> = all
+            .iter()
+            .filter(|agent| crate::agents::stopping(daemon, &agent.id))
+            .map(|agent| agent.id.as_str())
+            .collect();
+        if stopping.is_empty() {
+            break;
+        }
+        if Instant::now() > deadline {
+            return Err(done.partway(
+                name,
+                &format!("the agents {} are still stopping", stopping.join(", ")),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let left = live_agents(daemon, name)?;
+    if !left.is_empty() {
+        let ids: Vec<&str> = left.iter().map(|agent| agent.id.as_str()).collect();
+        return Err(done.partway(
+            name,
+            &format!("the agents {} are still running", ids.join(", ")),
+        ));
+    }
+
+    let going = running_runs(daemon, name)?;
+    futures::future::join_all(
+        going
+            .iter()
+            .map(|run| crate::runs::stop_by_user(daemon, &run.id)),
+    )
+    .await;
+    done.runs = runs.iter().map(run_json).collect();
+    let left = running_runs(daemon, name)?;
+    if !left.is_empty() {
+        let ids: Vec<&str> = left.iter().map(|run| run.id.as_str()).collect();
+        return Err(done.partway(
+            name,
+            &format!("the command runs {} are still running", ids.join(", ")),
+        ));
+    }
+
+    let mut failed = Vec::new();
+    for workspace in workspaces_of(daemon, name)? {
+        // A workspace whose losses cannot be read is kept: nothing is lost on a guess.
+        let read = match workspaces::loss_state(daemon, &workspace).await {
+            Ok((_, losses)) => workspaces::digest(&workspace)
+                .await
+                .map(|digest| (losses, digest)),
+            Err(failure) => Err(failure),
+        };
+        let (losses, digest) = match read {
+            Ok(read) => read,
+            Err(failure) => {
+                done.kept
+                    .push(json!({"name": workspace.name, "why": [failure.message]}));
+                continue;
+            }
+        };
+        if !losses.is_empty() {
+            let Some(shown) = discard else {
+                done.kept
+                    .push(json!({"name": workspace.name, "why": losses}));
+                continue;
+            };
+            // The user discards what they were shown, never what appeared since, nor what was
+            // written since in a file they were shown.
+            let seen = shown.iter().find(|shown| {
+                shown.name == workspace.name
+                    && shown.digest == digest
+                    && losses.iter().all(|loss| shown.losses.contains(loss))
+            });
+            if seen.is_none() {
+                done.kept.push(json!({
+                    "name": workspace.name,
+                    "why": losses,
+                    "changed": true,
+                }));
+                continue;
+            }
+        }
+        let approved = (!losses.is_empty()).then_some((losses.as_slice(), digest.as_str()));
+        match workspaces::remove_with_project(daemon.clone(), &workspace, approved).await {
+            Ok(removed) => done.removed.push(json!({
+                "name": workspace.name,
+                "branch": workspace.branch,
+                "branches": removed["branches"],
+            })),
+            Err(failure) => failed.push(failure.message),
+        }
+    }
+    if !failed.is_empty() {
+        return Err(done.partway(name, &failed.join("; ")));
+    }
+
+    let mut projects = daemon.projects.lock().unwrap();
+    if !projects.registry.remove(name)? {
+        return Err(done.partway(name, "its file is gone already"));
+    }
+    projects.known.remove(name);
+    emit(daemon, "project.removed", json!({"name": name}))?;
+    Ok(json!({
+        "removed": name,
+        "stopped": {"agents": done.agents, "runs": done.runs},
+        "workspaces": {"removed": done.removed, "kept": done.kept},
+    }))
 }
 
 /// `project.show`: the project, and the branch each repository's checkout in the project folder
@@ -842,6 +1135,7 @@ pub fn rewrite(
     let mut projects = daemon.projects.lock().unwrap();
     let projects = &mut *projects;
     let project = load(projects, name)?;
+    refuse_removing(daemon, name)?;
     let file = projects.registry.file(name);
     let unavailable = |error: std::io::Error| {
         Failure::new("unavailable", format!("projects/{name}.toml: {error}"))

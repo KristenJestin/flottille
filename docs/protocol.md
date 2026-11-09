@@ -194,10 +194,43 @@ Registers the folder: writes `projects/<name>.toml` with the repositories detect
 remote `origin` and the base rule `["main"]`, and answers the project. Nothing is written in the
 folder or its repositories.
 
+#### `project.removal`
+
+`{"name"}`. What removing the project would do, changing nothing (`docs/projects.md`, "Removing a
+project"): `{"name", "sessions": [{"id", "title", "parent"}], "runs": [{"run", "name", "line",
+"agent"}], "workspaces": [{"name", "branch", "state", "losses", "digest"}]}`. `sessions` are its roots not
+ended, `runs` its command runs still running, `workspaces` by name, each `state` `clean`,
+`uncommitted` (files not committed, whatever else), `unpushed` (only commits on no remote) or
+`unknown` (its state could not be read, `losses` saying why), `losses` the sentences
+`workspace.remove` would refuse with, `digest` an opaque string for the state its worktrees were
+read in (each one's commit, `git status` and the content of each file that names), empty when it
+could not be read. `not-found` when there is no such project.
+
 #### `project.remove`
 
-`{"name"}`. Removes the project's file; the result is `{"removed": "<name>"}`. The folder and its
-repositories are never touched. `not-found` when there is no such file.
+`{"name", "discard"?: [{"name", "losses", "digest"}]}`. Stops the project's agents (roots and children) and
+waits for their processes, stops its command runs, removes its workspaces that would lose
+nothing, then removes the project's file (`docs/projects.md`, "Removing a project"). `discard` is
+what the user was shown and agreed to lose: the workspaces of `project.removal`, each with its
+`losses` and its `digest` as given there (`digest` is required). A workspace that would lose work
+is removed too only when it is listed, each of its losses now is among those listed and its digest
+now is the one listed, read again right before its forced removal; otherwise it is kept, with
+`"changed": true`. A file not committed is one loss whatever it holds: the digest is what tells
+that more was written in it since.
+The result says what was done:
+
+```json
+{"removed": "shop",
+ "stopped": {"agents": [{"id", "title", "parent"}], "runs": [{"run", "name", "line", "agent"}]},
+ "workspaces": {"removed": [{"name", "branch", "branches"}], "kept": [{"name", "why": ["…"], "changed"?: true}]}}
+```
+
+`branches` as `workspace.remove` gives them. The folder and its repositories' checkouts are never
+touched. Meanwhile nothing starts in the project: `agent.run`, `agent.start`, `agent.resume`,
+`workspace.create`, `task.run` and every edit of the project's file are `refused`, "project
+<name> is being removed". `not-found`
+when there is no such project; `refused` when it is being removed already, or when a step failed
+partway, the project still known and the sentence saying what failed and what was done.
 
 #### `project.check`
 
@@ -611,16 +644,19 @@ door alone reaches them: no tool of an agent does.
 
 `sessions.show` and `sessions.set` read and keep after how many days without activity the daemon
 ends a root session (`docs/design.md` §5.7): `end_inactive_days` in `sessions.toml` of Flottille's
-configuration folder.
+configuration folder; and whether a session waiting for its quota's reset is resumed at it
+(`docs/design.md` §5.9): `resume_at_reset`, `true` or `false`, false when it is absent.
 
-- `sessions.show` answers `{"days"}`: a number of days from 1 to 90, or `"off"` (no file, no key,
-  or the word). `invalid-config` when the file cannot be read, names another key, or holds a value
-  that is neither `"off"` nor a whole number from 1 to 90.
-- `sessions.set {days}` takes a number of days or `"off"`, writes the file
-  (`end_inactive_days = 7`, or `end_inactive_days = "off"`) and answers as `sessions.show`;
-  `invalid-params` for anything else, a number out of the range and a missing `days` included (a
-  client leaves null fields out, so `"off"` is a word). The window sends 7 when the user first
-  turns it on.
+- `sessions.show` answers `{"days", "resume"}`: a number of days from 1 to 90, or `"off"` (no
+  file, no key, or the word), and a boolean. `invalid-config` when the file cannot be read, names
+  another key, or holds a value that is neither `"off"` nor a whole number from 1 to 90, or a
+  `resume_at_reset` that is not a boolean.
+- `sessions.set {days?, resume?}` takes a number of days or `"off"`, a boolean, or both, keeps
+  what it is not given as the file says, writes the file (`end_inactive_days = 7`, or
+  `end_inactive_days = "off"`, then `resume_at_reset = true` when it is on) and answers as
+  `sessions.show`; `invalid-params` for anything else, a number out of the range and neither field
+  given included (a client leaves null fields out, so `"off"` is a word). The window sends 7 when
+  the user first turns the ending on.
 
 The daemon reads the file when a check is due, at its start and about once an hour. `sessions.set`
 emits `sessions.changed` with what it answers. The user's door alone reaches them: no tool of an
@@ -658,7 +694,8 @@ reaches them: no tool of an agent does.
 
 The user's secrets, kept by the keyring, that agents use and never see (`docs/vault.md`). No
 method answers a secret, and an error about a call that carried one never repeats it. The user's
-door alone reaches them: an agent's only part is the `vault` tool, which lists.
+door alone reaches them: an agent's only part is the `vault` tool, which lists, and asks the user
+for an entry a feature names and that is missing.
 
 - `vault.list {project?}` answers `{"entries": [{"name", "description", "url", "username",
   "project"}]}`, by name; with `project`, the entries its agents see (its own and every project's).
@@ -673,7 +710,26 @@ door alone reaches them: an agent's only part is the `vault` tool, which lists.
   (locked), the entry then left whole.
 
 Both writes emit `vault.changed`, and give the agents of every project the tools their roles have
-now (`vault` is listed to an agent whose project sees an entry).
+now (`vault` is listed to an agent whose project sees an entry, or misses one a feature names). A
+set answers the open requests for that entry whose project now sees it (`set`).
+
+The requests agents made for a missing entry (`docs/vault.md`, "Asking the user for an entry"):
+
+- `vault.asks` answers `{"asks": [{"ask", "at", "agent", "project", "name", "why", "description",
+  "takes_username", "taken", "joined"}]}`, the open requests, oldest first; `ask` is the number of
+  its `vault.asked` event, `taken` why its name cannot be set for the project (another project
+  uses it), `null` otherwise, `joined` the agents whose ask joined it.
+- `vault.ask_set {ask, secret, username?, name?}` sets the entry as `vault.set` does, with the
+  description and the project the request holds, under `name` when given, else the name it
+  holds; `refused` without a username when `takes_username`, and as `vault.set`; `refused` with
+  `` `<name>` is used by the project <other>: choose another name`` (`every project` for a global
+  entry) when an entry of that name exists and is not the project's: a request never changes an
+  existing entry's project; `not-found` when no such request is open. Each agent that asked is
+  handed a `vault` delivery, `the user set the vault entry <name>`, which says the project's
+  setting still names the entry asked when the user chose another name.
+- `vault.ask_dismiss {ask}` closes it, answers `{"dismissed": <request>}`, and hands each agent
+  `the user dismissed the request …`. The entry is not asked for again by this project until the
+  project's settings change (`project.changed`) or the entry is set (`vault.changed`).
 
 ### The skill methods
 
@@ -1068,16 +1124,26 @@ name, or `needs` names a service `services.toml` does not hold.
 (`repository: null` puts it back at the top; `ready` or `url` `null` or `""` removes it). Answers
 the task.
 
+#### `task.copy`
+
+`{"project", "name", "to"}`: writes the task in the project `to`, as `task.add` writes it (same
+name, line and flags), and answers it with `"project"` the target. Its `repository` is kept when
+`to` has a repository of that path, else it runs at the top of the place. `refused` when `to` has
+a task of that name, when `to` is `project`, or while `to` is being removed; `not-found` for a
+project or a task that does not exist.
+
 #### `task.remove`
 
 `{"project", "name"}`: `{"project", "removed": "<name>"}`. `refused` while a setup step runs it.
 
 #### `task.run`
 
-`{"project", "name"}`: `{"project", "name", "run"}`, at once. The user runs the task in the
-project folder with the project's variables, as a run of no agent: no gate, no delivery
-(`docs/tools.md`, "Tasks and runs"). A task that keeps running (`serve`) and already runs for the
-user is joined: its run is answered. It is followed with the run methods. The services the task
+`{"project", "name", "workspace"?}`: `{"project", "name", "run"}`, at once. The user runs the task
+in the project folder with the project's variables, or with `workspace` in that workspace with its
+own (a session's rail runs it in the session's workspace), as a run of no agent: no gate, no
+delivery (`docs/tools.md`, "Tasks and runs"). A task that keeps running (`serve`) and already runs
+for the user in the same place is joined: its run is answered. `refused` when the project has no
+such workspace. It is followed with the run methods. The services the task
 needs are started first and waited for (`docs/projects.md`, "Services"): `refused` naming the
 service that failed, or was not ready in time, and why.
 
@@ -1236,8 +1302,10 @@ there. An agent in a result:
 
 `workspace` is `null` for the project folder itself. `state` is `starting` (its process starts
 and its session opens), `working` (a turn runs), `idle` (between turns, its process running or
-released), or one of the final states: `ended`, `failed` (`state_reason` says why). A final state
-is never left, but for an ended root the user resumes (`agent.resume`).
+released; its `state_reason` says why its last turn failed when that left its session usable,
+`docs/agents.md`, "A failed turn"), or one of the final states: `ended`, `failed` (`state_reason`
+says why). A final state is never left, but for an ended or failed root the user resumes
+(`agent.resume`).
 `provider` is the provider it runs on, for life (`docs/agents.md`, "Providers"). `chosen` is what
 was asked, or the project's default model, `null` for the agent's default; `taken` what the agent reported
 at the last start of its process; `reopens` whether its agent offered to resume or load a session
@@ -1249,7 +1317,10 @@ what the agent does during a turn never moves it, which is what a list of sessio
 it (`docs/tools.md`, "When the tools change"); `tools_outdated` says whether its running session
 runs an older list than that. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
-(each replacement adds one), `title` and `brief` a child's task, `launched_by` the id of the agent
+(each replacement adds one), `title` and `brief` a child's task, or for a root the title its
+agent or the user named its session with (`docs/tools.md`, "The session's title"), `titled_by`
+who did (`agent` or `user`; `null` for a child and a session not named yet, which keeps the first
+line of its first message), `launched_by` the id of the agent
 that started a root for the user (`null` for a root the user started, and for a child), whose
 `brief` is then that agent's first message, never the user's, `led` whether that agent leads it
 (`led_by` its id, `null` for a session handed to the user, `docs/tools.md`, "Sessions an agent
@@ -1258,16 +1329,21 @@ then `null`), `reported_at` when it reported,
 `quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
 it waits for an answer: a child's from its parent, a led session's from its pilot, any other
 root's from the user, until that one writes to
-it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask` or `auto`
+it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask`, `auto` or `full`
 (`agent.mode`).
 
 Each method answers `not-found` when the agent does not exist.
 
 #### `agent.start`
 
-`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "role"?, "message", "images"?}`.
+`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "gate_mode"?, "role"?, "message", "images"?}`.
 Creates a root agent in the project folder or the workspace, and gives it its first message:
-`{"agent", "after"}`. `images` is as in `agent.send`, and goes with the first message; with
+`{"agent", "after"}`. `gate_mode` is the session's mode (`ask`, `auto` or `full`, `docs/design.md`
+§7.1), `auto` when left out: it is the root's before its first message is given, so that the
+first turn's calls already follow it. Only the user's door names it: `agent.start` is answered on
+the user's socket alone (a client an agent started is refused), and no tool of an agent, nor the
+pilot door's `agent_start`, takes a mode. `invalid-params` for another mode, and nothing is
+started. `images` is as in `agent.send`, and goes with the first message; with
 images, the message may be empty (pictures alone are a first message). They are judged and stored
 before the agent exists, so that one refused, or one that cannot be stored, starts none, and a
 session replaced is given them again with its first message. A provider whose last agent that
@@ -1300,7 +1376,7 @@ agent at the same time.
 `refused` when the agent is in a final state, the message is empty, or the agent is a child: only
 its parent writes to it, and the sentence names its root.
 
-`compact` is the composer's **Compact before sending**: when the agent's prompt cache expired
+`compact` is the composer's **Compact** chip (compact before sending): when the agent's prompt cache expired
 (`agent.cache_expired`), `true` compacts it before the turn the message starts and `false` sends it
 to the session as it is, whatever the setting `after_expiry`; left out, the setting decides.
 
@@ -1323,6 +1399,25 @@ agent turns out to take no images, none is sent and the text of the turn ends wi
 `[image <name> is missing]` in the text. Merged queued messages make one prompt of 20 images and
 10 MiB at most (the first message is always whole); the others wait for the next turn. The
 images of an agent go with it: when it ends for good, or 7 days after a root that can be resumed.
+
+#### `agent.answer`
+
+`{"agent", "question", "answers"}`. The user's answers to an ask of the root (`docs/tools.md`,
+"ask"): `question` is the number of its `agent.asked` event (`questions` of `agent.tree`), and
+`answers` one per question, in order, each `{"choices"?, "text"?}`: the labels of the options
+chosen (one at most when the question is not `multiple`) and the user's own words (several lines
+allowed), at least one of the two. The daemon sends the root one message (a `user` delivery, as
+`agent.send` does, its id `answer-<question>-…`) that quotes each question and gives its answer
+under it (the options chosen on one line, the words after); a single question without options is
+answered by the words alone, as a message always answered it. It answers that ask alone: the
+root's other asks still wait. The answers are kept with the ask (`agent.answered`, `asked` and
+`answers`), and the window shows them on the ask's card instead of a message of the user. It
+answers as `agent.send`: `{"agent", "after", "delivery"}`. `refused` when the ask does not wait for
+the user's answer (answered, replaced, never asked of the user), when an answer to it waits or was
+taken already (one withdrawn with `agent.unqueue` does not count, the ask may be answered again), when
+the answers do not fit its questions (`1 answers for 3 questions: answer each`, `question 2 has no
+answer`, `question 1 has no option Maybe`, `question 1 takes one option`), for a child, or for an
+agent in a final state.
 
 #### `agent.unqueue`
 
@@ -1362,14 +1457,14 @@ names its root).
 
 #### `agent.resume`
 
-`{"agent"}`. Starts an ended root again on its own session: `{"agent"}`, the root once idle again
+`{"agent"}`. Starts an ended or failed root again on its own session: `{"agent"}`, the root once idle again
 (`agent.resumed`, `docs/events.md`). It keeps its id, its epoch, its conversation and its session;
 nothing is sent to it, and the next message (`agent.send`) starts its process, which resumes or
 loads the session as after an idle release (`docs/agents.md`, "How an agent runs"). Its children
 stay ended. Its next prompt starts with a
-`resume` delivery saying the user stopped it and naming its requests cancelled then. `refused`
-for a child (the sentence names its root), an agent that has not ended, a failed one (its session
-went with it), one whose agent can neither resume nor load a session, that never opened one or
+`resume` delivery saying the user stopped it, or that it failed and why, and naming its requests
+cancelled then. `refused` for a child (the sentence names its root), an agent that has not ended,
+one whose agent can neither resume nor load a session, that never opened one or
 whose session was forgotten (7 days after it ended), one whose workspace or project is gone: what
 `resumable` says, in short (`agent.tree`); and one whose last process is still stopping
 (`stopping`), with a sentence to try again in a moment.
@@ -1400,6 +1495,15 @@ needs no threshold, no margin and no notice seen. `agent.compacted` says it is d
 which case nothing changed. `refused` when there is no compactor (none chosen, or none could be
 picked), and for an agent in a final state.
 
+#### `agent.rename`
+
+`{"agent", "title"}`. The user names a session (`docs/tools.md`, "The session's title"): the title
+replaces the first line of its first message and any its agent gave, and from then on the agent's
+`session_title` is refused; the user may rename it again. The title is trimmed and masked of
+secrets; an empty one or one on several lines is refused (`invalid-params`), and so is a child,
+whose title is its `agent_launch` title. `agent.titled` is emitted with `by` `user`. Answers
+`{"agent", "title", "by": "user"}`.
+
 #### `agent.detach`
 
 `{"agent"}`. Takes a session an agent started (`launched_by`, led or handed) away from that agent,
@@ -1418,11 +1522,18 @@ agent started (a root of the user's, a child) and for one already detached. Ther
 call to judge and every base call passes without a request, and what the gate refuses stays
 refused. A tree has one mode, its root's: a
 child named switches its root, and every agent of the tree reads the root's mode at each call
-(an agent's `gate_mode` is its root's). A new session starts in `auto`, never `full` (a session an
-agent starts from a tree in `full` starts in `auto`), and the mode is kept when it resumes. Answers `{"agent"}`, the root, with its `gate_mode`, and emits
+(an agent's `gate_mode` is its root's). A new session starts in `auto` unless the user's `agent.start`
+names its `gate_mode`, and a session an agent starts takes the mode of the tree that started it
+(no tool of an agent names one); the mode is kept when it resumes. Answers `{"agent"}`, the root, with its `gate_mode`, and emits
 `agent.gate_mode_changed` for the root (`docs/events.md`).
 `invalid-params` for another mode, `not-found` for an agent that does not exist. The user's door
 alone reaches it: no tool of an agent changes a mode.
+
+#### `agent.quota_resume`
+
+`{"agent", "resume"}`: whether this session, which waits for its quota's reset, is resumed at it
+(`docs/design.md` §5.9), whatever the setting says. Answers `{"quota"}` as `agent.show` says it,
+and emits `agent.quota`. Refused for a session that does not wait and for a child.
 
 #### `agent.options`
 
@@ -1452,20 +1563,22 @@ the session has not taken yet, `null` when nothing waits; `resumable`: whether `
 whether the process of an agent that ended is still stopping; `images`: as in the agent's full
 form; `tools_outdated`: whether its running session runs an older list of tools than its role
 has, which a restart replaces, `docs/tools.md`, "When the tools change"; `tools_reload`: whether
-a reload of its tools waits for its next process, `agent.reload_tools`); `doing` a sentence of what it does
-(`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
+a reload of its tools waits for its next process, `agent.reload_tools`; `compacting`: whether Flottille's compaction of it runs, the compactor at work or the agent writing its handoff, from `agent.compacting` to `agent.compacted` or `agent.compaction_failed`; `quota`: `null`, or while the root waits for its quota's reset `{"reset_at", "resume", "limited_at"}`, `resume` whether it will be resumed then, `docs/design.md` §5.9); `doing` a sentence of what it does
+(`working`, `idle`, `compacting the conversation`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `pilot` for a
 led session whose question waits for its pilot, `user` for a root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
 says `waiting for #12: checks`, `#12 of api` when the project has several repositories, `waiting for its wake in 20 min`), else `null`; `needs_user`, for the root, whether a request of its tree or its
 own question waits for the user; `questions`, for a root, its questions to the user that wait for
-the answer, the oldest first, each `{"seq", "at", "question"}` (the number of its `agent.asked`
-event, when it was asked, the question masked): each asked while the root waits that no message of
-the user written after it, and taken by the root, answered, and that no replacement or resume of
-its session came after (a message written before a question does not answer it), empty once it
-ended; `context`, how much of its context the agent used at its last
+the answer, the oldest first, each `{"seq", "at", "question", "questions"}` (the number of its
+`agent.asked` event, when it was asked, the ask as one text and each of its questions with their
+options, masked, as `agent.asked` has them): each asked while the root waits that no message of
+the user written after it, and taken by the root, answered (an answer from an ask's card,
+`agent.answer`, answers that ask alone), and that no replacement or resume of its session came
+after (a message written before a question does not answer it), empty once it ended; `context`, how much of its context the agent used at its last
 report (`agent.usage`), in percent, `null` before one and while the window's size is not known;
 `context_tokens`, the tokens its context holds at that report, `null` before one; `queued`, for the root, the messages the
-user wrote to it that wait for it to read them between its turns, the oldest first, each
+user wrote to it that wait for it to read them between its turns (an answer to an ask, which waits
+on the ask's card, is not one of them), the oldest first, each
 `{"delivery", "text", "images", "pictures", "at"}` (its text masked as it is stored, how many pictures go with
 it and their names, which `agent.image` reads back, when it was written), empty for a child. For a
 message that used commands (`docs/commands.md`), `text` is what the user typed, `commands` the
@@ -1542,7 +1655,8 @@ The commands the agents run with `run` (`docs/tools.md`), and the tasks the user
 ```
 
 `name` is the task it runs, `null` for a line of the agent's. `agent` and `root` are `null` for a
-task the user ran; `project` is always the project's. `state` is `running`,
+task the user ran; `project` is always the project's; `workspace` is its agent's, or for a task the
+user ran, the one it runs in (`null` in the project folder). `state` is `running`,
 `exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `ready` is
 `null` for a run of a task that says no ready, else `starting`, `ready` or `missed` (it ended before
 it was ready); `url` its address, `url_error` why it has none when its task's line for it failed
@@ -1556,7 +1670,8 @@ card in the conversation shows folded, a running command's as well as one that e
 
 `{"project"?, "tree"?, "ended"?, "user"?}`. `{"commands": [...]}`: the commands running, oldest
 first. With `project`, the project's, the user's included; with `tree`, an agent's id, those of the
-agents of its root's tree; without either, every one. With `user` (and `project`, required), only
+agents of its root's tree and the tasks the user ran in the root's place (its workspace, or the
+project folder); without either, every one. With `user` (and `project`, required), only
 the tasks the user ran in the project, as its page lists them. With `ended`, the commands that ended and were not dismissed come after them,
 the last 30 to have ended at most, and none for a tree whose root ended or failed: they go with
 their session, and the daemon forgets them when the session is over for good (`docs/tools.md`)
@@ -1678,6 +1793,7 @@ when they name none:
       "models": [{"id": "sonnet", "name": "Sonnet", "efforts": ["low", "medium", "high"], "default": true},
                  {"id": "opus", "name": "Opus", "efforts": null}],
       "models_outdated": false,
+      "models_learning": false,
       "images": true
     },
     {"name": "opencode", "title": "OpenCode", "enabled": false, "ready": false,
@@ -1701,18 +1817,22 @@ sure: a version other than the one Flottille was checked against, no sign-in it 
 program standing for the provider (`docs/agents.md`, "For tests and development"). `models` is
 `null` until the daemon read them from the provider's agent (as soon as it is enabled and ready, with
 no prompt) or a session said them, and `efforts` of a model `null` until a
-session had that model; `name` is what the provider shows the model by; `default` is there, `true`,
+session had that model (Claude's say every model's: `[]` for one without); `name` is what the provider shows the model by; `default` is there, `true`,
 on the model a new session takes when none is asked, once one said it: what the provider's
 `default` stands for, else its first model listed, the model Flottille sets (`docs/agents.md`,
 "The options"). A provider's own `default`
 value that names the model it stands for (`_meta.jetbrains.air.recommendedValue` of the `model`
 option) is an alias: it stays listed with `stands_for`, that model's id, and the model it stands
 for is the `default` one, with the alias's `efforts`. A `default` whose `recommendedValue` is
-itself runs a model no other value does: it is no alias, and is the `default` one, by its name. `default_effort` is the effort a model runs
+itself runs a model no other value does: it is no alias, and is the `default` one, by its name (the
+model its description names, never the adapter's "Default (recommended)"; the same when the
+description names a model and no `recommendedValue` is given). `default_effort` is the effort a model runs
 with when none is asked, once a new session none was set on said it by its name (Claude says it
 as `default` only: never there for Claude). `models_outdated` is `true`
 when they were said by another version of the program or with other API keys set: they are listed
-as they were, but refuse no model and no effort until a session says them again. `project` is there only when one is named; its `provider` is `null` when
+as they were, but refuse no model and no effort until a session says them again.
+`models_learning` is `true` while the daemon lists the provider's models
+(`provider.models_learning`). `project` is there only when one is named; its `provider` is `null` when
 none is enabled, its `model` `null` when the project names none. `judge` is the Auto judge the user
 chose (`provider.set_judge`) or Flottille picked, its `model` `null` for the provider's default,
 `"picked": true` while the user has not seen the notice of a judge Flottille picked, or `null` when
@@ -1772,10 +1892,13 @@ changes when the judge was not picked.
 `{"after"?, "limit"?}`. What the root agents sent to the user: `{"entries": [...]}`, oldest first.
 An entry is `{"seq", "at", "kind", "agent", "project", "workspace", "text"}`, made from an event of
 a root agent (`docs/events.md`): `report` (`agent.reported`, `text` its report), `question`
-(`agent.asked` to the user, `text` its question), `failure` (`agent.failed`, `text` its reason) or
+(`agent.asked` to the user, `text` the ask as one text, its questions numbered, and `questions`
+each of them with its options, as `agent.asked` has them), `failure` (`agent.failed`, `text` its reason) or
 `paused` (`session.following_paused`: two sessions talk to each other without the user, `text` says
-which and how to resume; `agent` is the followed session). A pause that resumed since is
-`"resolved": true`, its `text` ending `It has resumed since.`
+which and how to resume; `agent` is the followed session) or `vault` (`vault.asked`, `text` the
+entry, its project and the agent's reason). A pause that resumed since is `"resolved": true`, its
+`text` ending `It has resumed since.`; a request for a vault entry the user answered is
+`"resolved": true` too.
 A child's own go to its parent and are not here. Without `after`, the last `limit` entries (50 by
 default); with it, the first `limit` entries numbered after it. Nothing is marked read: the inbox
 is a view of the stored events.

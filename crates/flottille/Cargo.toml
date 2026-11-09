@@ -19,6 +19,9 @@ http = "1.4.0"
 http-body-util = "0.1.3"
 hyper = { version = "1.12.0", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
+# Already in the tree (env_logger's): the zone a provider names its quota's reset in
+# (`quota.rs`), from the system's time zone database.
+jiff = "0.2.38"
 libc = "0.2.191"
 # The vault's keyring: the Secret Service. Already built for the window (GPUI Fast keeps its
 # credentials with it), with the same features: nothing more is compiled.

@@ -70,10 +70,31 @@ pub struct ProjectFolder {
     pub repositories: Option<Vec<String>>,
 }
 
-/// The parameters of `project.show`, `project.remove` and `project.check`.
+/// The parameters of `project.show`, `project.removal` and `project.check`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectName {
     pub name: String,
+}
+
+/// The parameters of `project.remove`: with `discard`, the workspaces that would lose work are
+/// removed too, as long as what they would lose is within what the user was shown.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectRemove {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discard: Option<Vec<ShownWorkspace>>,
+}
+
+/// A workspace as `project.removal` showed it: what removing it would lose, then, and its
+/// `digest`, the state it was read in, as given.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShownWorkspace {
+    pub name: String,
+    #[serde(default)]
+    pub losses: Vec<String>,
+    pub digest: String,
 }
 
 /// The parameters of `project.add_repository` and `project.remove_repository`: a repository's
@@ -243,6 +264,10 @@ pub struct AgentRun {
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// The session's mode, `ask`, `auto` or `full` (`auto` when left out): the root's before its
+    /// first message is given. Not `mode`, which is a provider's permission mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_mode: Option<String>,
     /// `lead` when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -266,6 +291,16 @@ pub struct AgentSend {
     /// (false), whatever the setting; the setting decides when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact: Option<bool>,
+}
+
+/// The parameters of `agent.answer`: the user's answers to an ask of the root, one per question
+/// in order (`question` is the number of its `agent.asked` event).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAnswer {
+    pub agent: String,
+    pub question: u64,
+    pub answers: Vec<crate::question::Answer>,
 }
 
 /// An image sent with a message: its MIME type and its bytes in base64.
@@ -308,6 +343,14 @@ pub struct AgentName {
     /// out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<u64>,
+}
+
+/// The parameters of `agent.rename`: the user names a session.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRename {
+    pub agent: String,
+    pub title: String,
 }
 
 impl Message {

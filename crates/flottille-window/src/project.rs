@@ -9,11 +9,12 @@ use std::collections::HashMap;
 
 use flottille_core::workspace::StepState;
 use flottille_ui::color::mix;
+use flottille_ui::motion::PANEL;
 use flottille_ui::{
     AgentState, Block, Button, Card, CardHead, Chip, Confirm, Field, FlatRow, FooterAction, Icon,
     Item, LINE_GAP, LabelledLine, Listing, Menu, Modal, PageHeader, Section, Skeleton, StateIcon,
-    Status, StepRow, StepTone, Toast, Type, awaiting, caption, enter, follow_theme, hoverable,
-    icon, lines_block, palette, presence, presence_of, selectable, space, toast,
+    Status, StepRow, StepTone, Toast, Type, awaiting, caption, changing, enter, fade, follow_theme,
+    hoverable, icon, lines_block, palette, presence, presence_of, selectable, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -92,6 +93,12 @@ pub fn repository_label(project: &str, path: &str) -> String {
         "." => project.to_owned(),
         path => path.to_owned(),
     }
+}
+
+/// Whether the project's folder is its only repository: then the repositories are not "one among
+/// several", and the screens that name the one a thing happens in have nothing to name.
+pub fn only_at_root(repositories: &[String]) -> bool {
+    matches!(repositories, [only] if only == ".")
 }
 
 /// A folder as the page shows it: under the home folder, from `~`.
@@ -321,6 +328,7 @@ impl ProjectPage {
             if card.read(cx).facts != facts {
                 card.update(cx, |card, cx| {
                     card.facts = facts;
+                    card.sync_menu(cx);
                     cx.notify();
                 });
             }
@@ -634,6 +642,8 @@ pub struct PlaceCard {
     /// menu opens and closes.
     session_menus: HashMap<String, (Entity<Menu>, Subscription)>,
     menu: Option<Entity<Menu>>,
+    /// A ticket is linked (or being read), as the menu says.
+    linked: bool,
     /// "Link a ticket" is open, its field made the first time.
     linking: bool,
     ticket_field: Option<Entity<InputState>>,
@@ -651,39 +661,11 @@ impl PlaceCard {
         data: PlaceData,
         cx: &mut Context<Self>,
     ) -> Self {
-        let menu = data.place.clone().map(|name| {
-            let this = cx.entity().downgrade();
-            let (opening, linking, removing) = (this.clone(), this.clone(), this);
-            cx.new(|cx| {
-                workspace_menu(
-                    &format!("workspace-menu-{name}"),
-                    WorkspaceActions {
-                        open_in_editor: Box::new(move |cx| {
-                            opening.update(cx, |card, cx| card.open_in_editor(cx)).ok();
-                        }),
-                        link_ticket: Some(Box::new(move |cx| {
-                            linking
-                                .update(cx, |card, cx| {
-                                    card.linking = true;
-                                    card.ticket_error = None;
-                                    cx.notify();
-                                })
-                                .ok();
-                        })),
-                        unlink_ticket: None,
-                        remove: Some(Box::new(move |cx| {
-                            removing
-                                .update(cx, |card, cx| {
-                                    card.confirming = true;
-                                    cx.notify();
-                                })
-                                .ok();
-                        })),
-                    },
-                    cx,
-                )
-            })
-        });
+        let this = cx.entity().downgrade();
+        let menu = data
+            .place
+            .clone()
+            .map(|name| cx.new(|cx| Self::workspace_menu(&this, &name, false, cx)));
         let mut card = Self {
             shell,
             project,
@@ -702,6 +684,7 @@ impl PlaceCard {
             session_rows: Listing::default(),
             session_menus: HashMap::new(),
             menu,
+            linked: false,
             linking: false,
             ticket_field: None,
             ticket_error: None,
@@ -748,6 +731,55 @@ impl PlaceCard {
 
     pub fn renders(&self) -> usize {
         self.renders
+    }
+
+    /// The workspace's "⋯" menu, for a ticket linked or not.
+    fn workspace_menu(
+        this: &WeakEntity<Self>,
+        name: &str,
+        linked: bool,
+        cx: &mut Context<Menu>,
+    ) -> Menu {
+        let (opening, linking, removing) = (this.clone(), this.clone(), this.clone());
+        workspace_menu(
+            &format!("workspace-menu-{name}"),
+            WorkspaceActions {
+                open_in_editor: Box::new(move |cx| {
+                    opening.update(cx, |card, cx| card.open_in_editor(cx)).ok();
+                }),
+                ticket_linked: linked,
+                link_ticket: Some(Box::new(move |cx| {
+                    linking
+                        .update(cx, |card, cx| {
+                            card.linking = true;
+                            card.ticket_error = None;
+                            cx.notify();
+                        })
+                        .ok();
+                })),
+                unlink_ticket: None,
+                remove: Some(Box::new(move |cx| {
+                    removing
+                        .update(cx, |card, cx| {
+                            card.confirming = true;
+                            cx.notify();
+                        })
+                        .ok();
+                })),
+            },
+            cx,
+        )
+    }
+
+    /// The menu says what applies to the ticket: it is made again when one is linked.
+    fn sync_menu(&mut self, cx: &mut Context<Self>) {
+        let linked = self.facts.ticket.is_some() || self.facts.ticket_pending;
+        let Some(name) = self.data.place.clone().filter(|_| self.linked != linked) else {
+            return;
+        };
+        self.linked = linked;
+        let this = cx.entity().downgrade();
+        self.menu = Some(cx.new(|cx| Self::workspace_menu(&this, &name, linked, cx)));
     }
 
     fn set(&mut self, data: PlaceData, cx: &mut Context<Self>) {
@@ -2022,6 +2054,8 @@ impl Render for NewWorkspace {
         let repositories = {
             // A row per repository: taken or not (when there is a choice), and its base.
             let several = self.repositories.len() > 1;
+            // The folder is the only repository: there is nothing to tell it from.
+            let alone = only_at_root(&self.repositories);
             let rows: Vec<_> = self
                 .repositories
                 .clone()
@@ -2063,8 +2097,27 @@ impl Render for NewWorkspace {
                             .border_color(mix(p.field_line, p.focus_line, taken))
                             .text_color(mix(p.faint, p.text, taken))
                     });
-                    div().flex().items_start().gap(space::SM).child(chip).child(
-                        div().flex_1().min_w_0().child(presence(
+                    // The chip's width and ink follow whether it names anything.
+                    let named = fade(
+                        ElementId::Name(format!("new-workspace-take-{path}-named").into()),
+                        !alone,
+                        PANEL,
+                        window,
+                        cx,
+                    );
+                    div()
+                        .flex()
+                        .items_start()
+                        .child(
+                            div()
+                                .flex_none()
+                                .overflow_hidden()
+                                .w((px(140.) + space::SM) * named)
+                                .pr(space::SM)
+                                .opacity(named)
+                                .when(named > 0., |d| d.child(chip)),
+                        )
+                        .child(div().flex_1().min_w_0().child(presence(
                             ElementId::Name(format!("new-workspace-base-{path}-block").into()),
                             taken,
                             input_frame(
@@ -2072,8 +2125,7 @@ impl Render for NewWorkspace {
                                 &base,
                                 cx,
                             ),
-                        )),
-                    )
+                        )))
                 })
                 .collect();
             div()
@@ -2114,14 +2166,16 @@ impl Render for NewWorkspace {
                     .children(preview),
             )
             .when(!self.repositories.is_empty(), |modal| {
-                modal.child(
-                    Field::new(
-                        "new-workspace-takes",
-                        "Repositories and their bases",
-                        repositories,
-                    )
-                    .hint("The base is the project's rule when left empty."),
-                )
+                let label = if only_at_root(&self.repositories) {
+                    "Base branch"
+                } else {
+                    "Repositories and their bases"
+                };
+                modal.child(changing("new-workspace-takes-block", label, move |label| {
+                    Field::new("new-workspace-takes", label, repositories)
+                        .hint("The base is the project's rule when left empty.")
+                        .into_any_element()
+                }))
             })
             .child(
                 Field::new(

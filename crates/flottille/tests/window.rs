@@ -160,6 +160,31 @@ fn until(
     }
 }
 
+/// [`until`] for what the window reads on a timer of its own (the page's runs, each second): the
+/// test clock does not follow real time while the window is drawn, so the time that passes in
+/// each wait passes on it too, as it would in a real window.
+fn until_time_passes(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    what: &str,
+    check: impl Fn(&mut VisualTestContext) -> bool,
+) {
+    const STEP: Duration = Duration::from_millis(25);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        if check(cx) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{what} never happened");
+        std::thread::sleep(STEP);
+        cx.executor().advance_clock(STEP);
+    }
+}
+
 /// A fresh read of what the shell shows, on a connection of its own.
 fn fresh(user: &User) -> flottille_window::model::Snapshot {
     link::read_once((user.connector())().unwrap()).unwrap()
@@ -554,6 +579,55 @@ fn below_860_the_tree_is_a_drawer_opened_by_the_menu_button(cx: &mut TestAppCont
     });
     cx.update(|window, cx| window.render_frame(cx));
     assert!(cx.update(|window, _| window.try_find("open-rail").is_none()));
+}
+
+#[gpui_kit::test]
+fn the_narrow_session_opens_its_rail_with_a_panel_icon_labelled_session_details(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let id = start(&user, "atlas", None, "On a portrait screen");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 720., cx);
+    until(&shell, cx, "the session is known", |cx| {
+        shell.read_with(cx, |s, _| s.session(&id).is_some())
+    });
+    cx.update(|window, cx| window.click("open-tree", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the session's page is open", |cx| {
+        session_page(&shell, cx).read_with(cx, |page, cx| {
+            !page.conversation().read(cx).rows().is_empty()
+        })
+    });
+    let page = session_page(&shell, cx);
+    cx.update(|window, cx| window.render_frame(cx));
+
+    assert!(
+        cx.update(|window, _| window.try_find(Icon::PanelRight.glyph_id()).is_some()),
+        "the rail button draws the panel icon"
+    );
+    assert!(
+        !page.read_with(cx, |p, cx| p.drawer().read(cx).is_open()),
+        "the rail is closed at first"
+    );
+
+    cx.update(|window, cx| window.hover("open-rail", cx));
+    settle(cx);
+    settle(cx);
+    let tip = cx.update(|window, _| {
+        window
+            .try_find("open-rail-tooltip")
+            .and_then(|found| found.label().map(str::to_owned))
+    });
+    assert_eq!(tip.as_deref(), Some("Session details"));
+
+    cx.update(|window, cx| window.click("open-rail", cx));
+    settle(cx);
+    assert!(
+        page.read_with(cx, |p, cx| p.drawer().read(cx).is_open()),
+        "a click opens the rail"
+    );
 }
 
 /// Lets a drawer's slide end.
@@ -4019,7 +4093,7 @@ fn choosing_a_settings_tab_slides_the_marker_and_brings_the_section_in(cx: &mut 
 }
 
 #[gpui_kit::test]
-fn the_providers_tab_says_how_many_providers_there_are(cx: &mut TestAppContext) {
+fn the_providers_tab_counts_the_providers_in_use_not_the_rows(cx: &mut TestAppContext) {
     let user = providers_user();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
@@ -4028,18 +4102,77 @@ fn the_providers_tab_says_how_many_providers_there_are(cx: &mut TestAppContext) 
     });
     settle(cx);
     let listed = page.read_with(cx, |p, _| p.providers().list.len());
-    assert!(listed > 0, "the daemon lists providers");
-    let count = |key: &str, cx: &mut VisualTestContext| {
-        let id = format!("settings-tabs-{key}-count");
-        cx.update(|window, _| {
-            window
-                .try_find(id)
-                .and_then(|found| found.label().map(str::to_owned))
-        })
-    };
-    assert_eq!(count("providers", cx), Some(listed.to_string()));
+    assert!(listed > 1, "the daemon lists several providers");
+    let count =
+        |key: &str, cx: &mut VisualTestContext| text_of(&format!("settings-tabs-{key}-count"), cx);
+    let in_use = page.read_with(cx, |p, _| p.providers().offered().count());
+    assert_eq!(count("providers", cx), Some(in_use.to_string()));
     for key in ["judge", "rules", "developer"] {
         assert_eq!(count(key, cx), None, "{key} has no count");
+    }
+    // One switched off: the tab and the heading count one fewer, the rows stay as many.
+    choose_settings_tab("providers", cx);
+    cx.update(|window, cx| window.click("provider-switch-opencode", cx));
+    until(&shell, cx, "the tab counts the one left", |cx| {
+        text_of("settings-tabs-providers-count", cx) == Some((in_use - 1).to_string())
+    });
+    assert_eq!(
+        text_of("providers-count", cx),
+        Some((in_use - 1).to_string()),
+        "the heading counts the same"
+    );
+    assert_eq!(page.read_with(cx, |p, _| p.providers().list.len()), listed);
+}
+
+#[gpui_kit::test]
+fn a_provider_s_switch_says_what_it_does_whether_it_is_on_or_off(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    choose_settings_tab("providers", cx);
+    until(&shell, cx, "the providers are listed", |cx| {
+        page.read_with(cx, |p, _| p.switch_on("opencode"))
+    });
+    settle(cx);
+    assert_eq!(
+        text_of("provider-switch-opencode-label", cx).as_deref(),
+        Some("Use")
+    );
+    cx.update(|window, cx| window.click("provider-switch-opencode", cx));
+    until(&shell, cx, "the switch is off", |cx| {
+        !page.read_with(cx, |p, _| {
+            p.switch_on("opencode") || p.is_pending("opencode")
+        })
+    });
+    settle(cx);
+    assert_eq!(
+        text_of("provider-switch-opencode-label", cx).as_deref(),
+        Some("Use"),
+        "an off switch does not read Enabled"
+    );
+}
+
+#[gpui_kit::test]
+fn a_disabled_provider_s_row_says_not_used_and_never_the_config_file(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    choose_settings_tab("providers", cx);
+    until(&shell, cx, "the providers are listed", |cx| {
+        page.read_with(cx, |p, _| p.switch_on("opencode"))
+    });
+    settle(cx);
+    assert_eq!(
+        text_of("provider-state-opencode", cx).as_deref(),
+        Some("Ready")
+    );
+    cx.update(|window, cx| window.click("provider-switch-opencode", cx));
+    until(&shell, cx, "the row says it is not used", |cx| {
+        text_of("provider-state-opencode", cx).as_deref() == Some("Not used")
+    });
+    for line in said_of(&page, "opencode", cx) {
+        assert!(!line.contains("providers.toml"), "{line}");
+        assert!(!line.contains("enabled ="), "{line}");
     }
 }
 
@@ -4088,7 +4221,7 @@ fn disabling_one_in_settings_removes_it_from_the_composer_s_picker(cx: &mut Test
     until(&shell, cx, "the page shows it disabled", |cx| {
         said_of(&page, "opencode", cx)
             .iter()
-            .any(|line| line.starts_with("opencode is not enabled"))
+            .any(|line| line == "Not used")
     });
 
     let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
@@ -4129,6 +4262,8 @@ fn choosing_the_other_and_a_model_starts_the_session_on_them_and_the_tree_shows_
     cx.update(|window, cx| window.click("provider-choice-opencode", cx));
     cx.update(|window, cx| window.click("model-picker", cx));
     cx.update(|window, cx| window.click("model-choice-open/small", cx));
+    // The effort picker's room opens as the model's efforts come.
+    settle(cx);
     cx.update(|window, cx| window.click("effort-picker", cx));
     cx.update(|window, cx| window.click("effort-choice-high", cx));
     type_task("Please launch a helper", cx);
@@ -4368,6 +4503,8 @@ fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_s
         assert!(window.try_find("model-choice-fake-large").is_some());
     });
     cx.update(|window, cx| window.click("model-choice-fake-large", cx));
+    // The effort picker's room opens as the model's efforts come.
+    settle(cx);
     cx.update(|window, cx| window.click("effort-picker", cx));
     cx.update(|window, cx| window.click("effort-choice-high", cx));
 
@@ -4549,7 +4686,7 @@ fn a_slow_provider_list_answer_that_arrives_after_a_newer_one_changes_nothing(
     until(&shell, cx, "the newer read shows opencode disabled", |cx| {
         said_of(&page, "opencode", cx)
             .iter()
-            .any(|line| line.starts_with("opencode is not enabled"))
+            .any(|line| line == "Not used")
     });
 
     until(&shell, cx, "the held answer arrived", |_| {
@@ -4561,7 +4698,7 @@ fn a_slow_provider_list_answer_that_arrives_after_a_newer_one_changes_nothing(
     assert!(
         said_of(&page, "opencode", cx)
             .iter()
-            .any(|line| line.starts_with("opencode is not enabled")),
+            .any(|line| line == "Not used"),
         "{:?}",
         said_of(&page, "opencode", cx)
     );
@@ -4695,7 +4832,7 @@ fn a_switch_to_what_the_file_already_says_ends_without_an_event_and_without_a_pe
             && !page.read_with(cx, |page, _| page.is_pending("opencode"))
             && said_of(&page, "opencode", cx)
                 .iter()
-                .any(|line| line.starts_with("opencode is not enabled"))
+                .any(|line| line == "Not used")
     });
     // A change after it, to read every event up to it.
     user.call("provider.disable", json!({"name": "claude"}))
@@ -4928,7 +5065,8 @@ fn the_project_s_model_still_wins_and_is_marked(cx: &mut TestAppContext) {
     let rows = composer.read_with(cx, |c, _| c.entries(Menu::Model));
     let haiku = rows.iter().find(|e| e.id == "model-choice-haiku").unwrap();
     assert!(haiku.on);
-    assert_eq!(haiku.note.as_deref(), Some("the project's"));
+    // Haiku has no effort: its row says so, the one place it is said.
+    assert_eq!(haiku.note.as_deref(), Some("the project's · no effort"));
     let fable = rows.iter().find(|e| e.id == "model-choice-fable").unwrap();
     assert!(!fable.on);
     assert_eq!(fable.note.as_deref(), Some("default"));
@@ -8275,6 +8413,50 @@ fn in_main_slash_lists_the_commands_too(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_project_with_no_command_of_its_own_says_so_under_its_heading_only(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "login");
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the built-in command", |cx| {
+        slash_offered(&shell, cx) == ["reload-tools"]
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("slash-builtin-label").visible());
+        assert!(window.find("slash-reload-tools").visible());
+        assert!(window.find("slash-project-label").visible());
+        assert!(window.find("slash-none").visible());
+    });
+}
+
+#[gpui_kit::test]
+fn a_project_with_a_command_shows_its_row_and_no_note(cx: &mut TestAppContext) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the commands", |cx| {
+        slash_offered(&shell, cx).len() == 3
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("slash-builtin-label").visible());
+        assert!(window.find("slash-project-label").visible());
+        assert!(window.find("slash-close").visible());
+        assert!(window.try_find("slash-none").is_none());
+    });
+}
+
+#[gpui_kit::test]
 fn an_unknown_slash_word_is_sent_as_text(cx: &mut TestAppContext) {
     let user = user_with_commands();
     let lead = start(&user, "atlas", Some("login"), "Fix the login");
@@ -9064,7 +9246,8 @@ fn every_switch_of_the_task_dialog_draws_its_label_and_its_hint(cx: &mut TestApp
             "{id}"
         );
     }
-    cx.update(|window, _| assert!(window.find("task-place").visible(), "the place is a select"));
+    // The project's folder is its only repository: the task runs in the place's folder.
+    cx.update(|window, _| assert!(window.try_find("task-place").is_none(), "no place to pick"));
 }
 
 #[gpui_kit::test]
@@ -9283,6 +9466,9 @@ fn choosing_each_tab_shows_its_section_alone(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    // Tall enough that each tab's own section title is on screen: the Setup tab starts with the
+    // folder and the branches before its setup.
+    cx.simulate_resize(size(px(1280.), px(1600.)));
     let page = open_project_settings(&shell, "atlas", cx);
     until(&shell, cx, "every section is read", |cx| {
         page.read_with(cx, |page, cx| page.has_read(cx))
@@ -9331,10 +9517,10 @@ fn a_dialog_opened_from_a_tab_and_closed_brings_back_the_same_tab(cx: &mut TestA
         .unwrap();
     cx.update(|window, cx| window.click("add-task", cx));
     settle(cx);
-    cx.update(|window, _| assert!(window.find("task-place").visible(), "the dialog is open"));
+    cx.update(|window, _| assert!(window.find("task-line").visible(), "the dialog is open"));
     cx.simulate_keystrokes("escape");
     settle(cx);
-    cx.update(|window, _| assert!(window.try_find("task-place").is_none(), "it is closed"));
+    cx.update(|window, _| assert!(window.try_find("task-line").is_none(), "it is closed"));
     assert_eq!(page.read_with(cx, |p, _| p.tab()), tasks);
     assert_eq!(the_section_shown(cx), ["tasks"]);
 }
@@ -9454,7 +9640,7 @@ fn a_project_is_added_from_the_window_detected_again_and_removed(cx: &mut TestAp
     settle(cx);
     cx.update(|window, cx| window.click("remove-project", cx));
     settle(cx);
-    assert!(page.read_with(cx, |p, _| p.is_confirming_removal()));
+    assert!(page.read_with(cx, |p, cx| p.is_confirming_removal(cx)));
     cx.update(|window, cx| window.click("project-removal-action", cx));
     until(&shell, cx, "the project is gone", |cx| {
         shell.read_with(cx, |s, _| {
@@ -9471,6 +9657,91 @@ fn a_project_is_added_from_the_window_detected_again_and_removed(cx: &mut TestAp
         folder.join("README.md").exists(),
         "its folder is left as it is"
     );
+}
+
+#[gpui_kit::test]
+fn the_removal_confirmation_lists_what_runs_and_the_workspaces_states_and_the_switch_discards(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let folder = project(&user, "app");
+    workspace(&user, "app", "clean");
+    workspace(&user, "app", "dirty");
+    let dirty = PathBuf::from(
+        user.call("workspace.show", json!({"project": "app", "name": "dirty"}))
+            .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(dirty.join("draft.txt"), "not committed\n").unwrap();
+    let agent = start(&user, "app", Some("clean"), "hello");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "app", cx);
+
+    cx.update(|window, cx| window.click("project-more", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-project", cx));
+    let removal = page.read_with(cx, |p, _| p.removal().clone());
+    until(&shell, cx, "what the removal does is read", |cx| {
+        removal.read_with(cx, |r, _| r.read().is_some())
+    });
+    settle(cx);
+    let label = |id: &'static str, cx: &mut VisualTestContext| {
+        cx.update(|window, _| window.find(id).label().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    cx.update(|window, _| {
+        assert!(
+            window
+                .find(gpui_kit::ElementId::Name(
+                    format!("project-removal-session-{agent}").into()
+                ))
+                .visible()
+        );
+        assert!(window.find("project-removal-discard").visible());
+    });
+    assert_eq!(
+        label("project-removal-workspace-clean", cx),
+        "clean clean · removed"
+    );
+    assert_eq!(
+        label("project-removal-workspace-dirty", cx),
+        "dirty uncommitted changes · kept"
+    );
+
+    cx.update(|window, cx| window.click("project-removal-discard", cx));
+    settle(cx);
+    assert!(removal.read_with(cx, |r, _| r.discards()));
+    assert_eq!(
+        label("project-removal-workspace-dirty", cx),
+        "dirty uncommitted changes · removed"
+    );
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves once the line changed"
+    );
+
+    // Written after the dialog read it, as an agent still working would: never discarded.
+    let clean = PathBuf::from(
+        user.call("workspace.show", json!({"project": "app", "name": "clean"}))
+            .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(clean.join("late.txt"), "the agent's work\n").unwrap();
+    cx.update(|window, cx| window.click("project-removal-action", cx));
+    toast_said(&shell, "The project app was removed", cx);
+    assert!(!dirty.exists(), "the workspace with unsaved work went too");
+    assert!(
+        clean.join("late.txt").exists(),
+        "what appeared after the dialog read is kept"
+    );
+    assert_eq!(
+        user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"],
+        "ended"
+    );
+    assert!(folder.join("README.md").exists());
 }
 
 #[gpui_kit::test]
@@ -9646,6 +9917,184 @@ fn the_project_at_the_root_of_the_picked_folder_is_named_after_its_folder(cx: &m
         Some("shop"),
         "the window names it after its folder"
     );
+}
+
+/// A throwaway repository with one commit, at `sub` of the user's folder.
+fn repository_at(user: &User, sub: &str) -> PathBuf {
+    let folder = user.path(sub);
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "start\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    folder
+}
+
+/// The window with "Add a project" open on its folder field, and the form.
+fn add_project_open<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    Entity<flottille_window::add_project::AddProject>,
+    &'a mut VisualTestContext,
+) {
+    let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
+    until(&shell, cx, "the window is read", |cx| {
+        cx.update(|window, _| window.try_find("add-first-project").is_some())
+    });
+    cx.update(|window, cx| window.click("add-first-project", cx));
+    settle(cx);
+    let form = shell.read_with(cx, |s, _| s.add_project_form().clone());
+    assert!(form.read_with(cx, |f, _| f.is_open()));
+    (shell, form, cx)
+}
+
+#[gpui_kit::test]
+fn typing_a_folder_and_pausing_shows_what_it_holds_without_a_click(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = repository_at(&user, "work/beta");
+    let (shell, form, cx) = add_project_open(&user, cx);
+
+    cx.simulate_input(folder.to_str().unwrap());
+    assert!(
+        form.read_with(cx, |f, _| f.detected().is_none()),
+        "nothing is asked while the typing goes on"
+    );
+    until_time_passes(&shell, cx, "the folder is detected by itself", |cx| {
+        form.read_with(cx, |f, _| f.detected().is_some())
+    });
+    settle(cx);
+
+    let detected = form.read_with(cx, |f, _| f.detected().cloned().unwrap());
+    assert_eq!(detected.name, "beta");
+    assert_eq!(
+        text_of("add-project-repository-0", cx).as_deref(),
+        Some("beta"),
+        "what it holds is shown under the field"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("add-project-looking").is_none()),
+        "the busy line is gone once it answered"
+    );
+    assert!(
+        user.call("project.list", json!({})).unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "detecting registers nothing"
+    );
+}
+
+#[gpui_kit::test]
+fn a_folder_changed_again_before_the_answer_drops_the_old_answer(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = repository_at(&user, "work/beta");
+    let (shell, form, cx) = add_project_open(&user, cx);
+
+    cx.simulate_input(folder.to_str().unwrap());
+    until_time_passes(&shell, cx, "the first folder is detected", |cx| {
+        form.read_with(cx, |f, _| f.detected().is_some())
+    });
+    let (asked, answer) = form.read_with(cx, |f, _| {
+        let found = f.detected().cloned().unwrap();
+        (
+            f.generation(),
+            json!({"name": found.name, "folder": found.folder, "repositories": found.repositories}),
+        )
+    });
+
+    // The path changes again; the answer to the first one is still on its way.
+    cx.simulate_input("-gone");
+    assert!(
+        form.read_with(cx, |f, _| f.detected().is_none()),
+        "what was detected is for the path it was asked for"
+    );
+    form.update(cx, |f, cx| f.detect_answered(asked, Ok(answer), cx));
+    assert!(
+        form.read_with(cx, |f, _| f.detected().is_none()),
+        "the old answer is dropped"
+    );
+
+    until_time_passes(&shell, cx, "the newer path is answered", |cx| {
+        form.read_with(cx, |f, _| f.error().is_some())
+    });
+    assert!(form.read_with(cx, |f, _| f.detected().is_none()));
+}
+
+#[gpui_kit::test]
+fn browse_detects_the_picked_folder_at_once(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = repository_at(&user, "work/beta");
+    let (shell, form, cx) = add_project_open(&user, cx);
+
+    // `until` lets no time pass on the window's clock: only a detection asked for at once
+    // answers in it.
+    cx.update(|window, cx| {
+        form.update(cx, |f, cx| f.set_folder(folder.clone(), window, cx));
+    });
+    until(
+        &shell,
+        cx,
+        "the picked folder is detected without a pause",
+        |cx| form.read_with(cx, |f, _| f.detected().is_some()),
+    );
+    assert_eq!(
+        form.read_with(cx, |f, _| f.detected().unwrap().name.clone()),
+        "beta"
+    );
+}
+
+#[gpui_kit::test]
+fn add_project_is_disabled_until_a_usable_result(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = repository_at(&user, "work/beta");
+    let (shell, form, cx) = add_project_open(&user, cx);
+    let added = |user: &User| {
+        user.call("project.list", json!({})).unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(
+        text_of("add-project-next", cx).as_deref(),
+        Some("Add project")
+    );
+
+    // Nothing typed, then typed but not yet answered: a click does nothing.
+    cx.update(|window, cx| window.click("add-project-next", cx));
+    cx.simulate_input(user.path("work/missing").to_str().unwrap());
+    cx.update(|window, cx| window.click("add-project-next", cx));
+    for _ in 0..40 {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(added(&user), 0);
+    assert!(
+        form.read_with(cx, |f, _| f.detected().is_none() && f.error().is_none()),
+        "the disabled button asks nothing either: only the pause does"
+    );
+
+    // A folder that cannot be a project: its reason is shown and the button stays disabled.
+    until_time_passes(&shell, cx, "the missing folder is refused", |cx| {
+        form.read_with(cx, |f, _| f.error().is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("add-project-next", cx));
+    settle(cx);
+    assert_eq!(added(&user), 0);
+
+    // A usable folder enables it.
+    cx.update(|window, cx| {
+        form.update(cx, |f, cx| f.set_folder(folder.clone(), window, cx));
+    });
+    until(&shell, cx, "the folder is detected", |cx| {
+        form.read_with(cx, |f, _| f.detected().is_some())
+    });
+    settle(cx);
+    assert!(form.read_with(cx, |f, _| f.error().is_none()));
+    cx.update(|window, cx| window.click("add-project-next", cx));
+    until(&shell, cx, "the project is added", |_| added(&user) == 1);
 }
 
 #[gpui_kit::test]
@@ -10336,6 +10785,115 @@ fn a_task_is_added_edited_and_removed_from_the_tasks_section(cx: &mut TestAppCon
     assert!(!file().contains("tasks"), "{}", file());
 }
 
+/// Opens the "Copy to…" dialog of the task `test` of the tasks section.
+fn copy_dialog_of_test(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    until(shell, cx, "the task is listed", |cx| {
+        !tasks_listed(shell, cx).is_empty()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("task-more-test", cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.find("copy-task-test").visible()));
+    cx.update(|window, cx| window.click("copy-task-test", cx));
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn a_task_s_menu_copies_it_to_another_project_and_a_toast_names_it(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "beacon");
+    project(&user, "cedar");
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "test", "line": "cargo test", "check": true}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+    let section = tasks_section(&shell, cx);
+
+    copy_dialog_of_test(&shell, cx);
+    assert!(section.read_with(cx, |s, _| s.is_copying()));
+    cx.update(|window, _| {
+        // The other projects, not the one the task is in.
+        assert!(window.find("copy-task-to-beacon").visible());
+        assert!(window.find("copy-task-to-cedar").visible());
+        assert!(
+            window
+                .try_find("copy-task-to-atlas")
+                .is_none_or(|row| !row.visible())
+        );
+        assert!(
+            window
+                .try_find("task-copy-none-line")
+                .is_none_or(|line| !line.visible())
+        );
+    });
+
+    cx.update(|window, cx| window.click("copy-task-to-beacon", cx));
+    toast_said(&shell, "Task test copied to beacon", cx);
+    settle(cx);
+    assert!(!section.read_with(cx, |s, _| s.is_copying()));
+    let file = |name: &str| std::fs::read_to_string(user.project_file(name)).unwrap();
+    assert!(
+        file("beacon").contains("[tasks.test]"),
+        "{}",
+        file("beacon")
+    );
+    assert!(file("beacon").contains("line = \"cargo test\""));
+    assert!(file("beacon").contains("check = true"));
+    assert!(!file("cedar").contains("tasks"), "{}", file("cedar"));
+}
+
+#[gpui_kit::test]
+fn the_copy_dialog_says_once_that_there_is_no_other_project(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "test", "line": "cargo test"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+
+    copy_dialog_of_test(&shell, cx);
+    cx.update(|window, _| {
+        assert!(window.find("task-copy-none-line").visible());
+        assert!(
+            window
+                .try_find("task-copy-list")
+                .is_none_or(|list| !list.visible())
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_name_the_other_project_has_is_refused_in_a_toast(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    project(&user, "beacon");
+    for (name, line) in [("atlas", "cargo test"), ("beacon", "make test")] {
+        user.call(
+            "task.add",
+            json!({"project": name, "name": "test", "line": line}),
+        )
+        .unwrap();
+    }
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+    let before = std::fs::read_to_string(user.project_file("beacon")).unwrap();
+
+    copy_dialog_of_test(&shell, cx);
+    cx.update(|window, cx| window.click("copy-task-to-beacon", cx));
+    toast_said(&shell, "Task test was not copied to beacon", cx);
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("beacon")).unwrap(),
+        before
+    );
+}
+
 #[gpui_kit::test]
 fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
     use flottille_window::tasks::{AddressKind, ReadyKind};
@@ -10552,7 +11110,7 @@ fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut
     settle(cx);
 
     cx.update(|window, cx| window.click("run-task-say", cx));
-    until(&shell, cx, "its run ended and is listed", |cx| {
+    until_time_passes(&shell, cx, "its run ended and is listed", |cx| {
         tasks.read_with(cx, |t, cx| {
             t.commands()
                 .read(cx)
@@ -10579,6 +11137,51 @@ fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut
     // The same drawer as the session's: the user started it, in the project folder.
     assert_eq!(text_of("run-fact-by", cx).as_deref(), Some("you"));
     assert_eq!(text_of("run-fact-where", cx).as_deref(), Some("main"));
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[gpui_kit::test]
+fn run_in_a_task_s_menu_in_the_settings_starts_it_in_the_project_folder(cx: &mut TestAppContext) {
+    let user = user().with_fake_escalation();
+    let folder = project(&user, "atlas");
+    let say = folder.join("say.sh");
+    std::fs::write(&say, "#!/bin/sh\necho first\necho second\n").unwrap();
+    std::fs::set_permissions(&say, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "say", "line": "./say.sh"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+    until(&shell, cx, "the task is listed", |cx| {
+        !tasks_listed(&shell, cx).is_empty()
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("task-more-say", cx));
+    settle(cx);
+    // Run comes first, beside Edit, and Remove… stays last.
+    cx.update(|window, cx| window.click("menu-run-task-say", cx));
+    toast_said(&shell, "say started", cx);
+    let runs = || {
+        user.call(
+            "run.list",
+            json!({"project": "atlas", "user": true, "ended": true}),
+        )
+        .unwrap()["commands"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    until(&shell, cx, "the user's run is listed", |_| {
+        runs()
+            .iter()
+            .any(|r| r["name"] == "say" && r["state"] != "running")
+    });
+    let run = runs().into_iter().find(|r| r["name"] == "say").unwrap();
+    assert_eq!(run["agent"], serde_json::Value::Null, "{run}");
+    assert_eq!(run["folder"], folder.to_str().unwrap(), "{run}");
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }
 
@@ -11430,7 +12033,7 @@ fn a_run_row_opens_the_run_drawer_and_escape_closes_it(cx: &mut TestAppContext) 
     });
     settle(cx);
     cx.update(|window, cx| window.click("run-task-say", cx));
-    until(&shell, cx, "its run ended and is listed", |cx| {
+    until_time_passes(&shell, cx, "its run ended and is listed", |cx| {
         tasks.read_with(cx, |t, cx| {
             t.commands()
                 .read(cx)
@@ -11473,6 +12076,46 @@ fn a_run_row_opens_the_run_drawer_and_escape_closes_it(cx: &mut TestAppContext) 
     assert!(tasks.read_with(cx, |t, cx| t.panel().read(cx).run().is_none()));
     // Gone, it asks for no frame: nothing is drawn at rest.
     assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+}
+
+#[gpui_kit::test]
+fn a_run_listed_while_running_is_listed_again_once_it_ended(cx: &mut TestAppContext) {
+    let user = user().with_fake_escalation();
+    let folder = project(&user, "atlas");
+    let hold = folder.join("hold.sh");
+    std::fs::write(&hold, "#!/bin/sh\nwhile [ ! -e go ]; do sleep 0.05; done\n").unwrap();
+    std::fs::set_permissions(&hold, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "hold", "line": "./hold.sh"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    open_project(&shell, "atlas", cx);
+    let tasks = page_of(&shell, cx).read_with(cx, |page, _| page.tasks().clone());
+    until(&shell, cx, "the task is shown", |cx| {
+        tasks.read_with(cx, |t, _| t.tasks().is_some_and(|t| !t.is_empty()))
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("run-task-hold", cx));
+    until(&shell, cx, "its run is listed running", |cx| {
+        tasks.read_with(cx, |t, cx| {
+            t.commands().read(cx).rows().iter().any(|row| row.running())
+        })
+    });
+
+    std::fs::write(folder.join("go"), "").unwrap();
+
+    until_time_passes(&shell, cx, "its run ended and is listed", |cx| {
+        tasks.read_with(cx, |t, cx| {
+            t.commands()
+                .read(cx)
+                .rows()
+                .iter()
+                .all(|row| !row.running())
+        })
+    });
 }
 
 #[gpui_kit::test]
@@ -11894,6 +12537,93 @@ fn the_branch_prefix_field_of_the_project_s_settings_accepts_an_empty_prefix(
     assert!(text.contains("branch_prefix = \"\"\n"), "{text}");
     toast_said(&shell, "Branch prefix saved", cx);
     assert!(!page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
+}
+
+#[gpui_kit::test]
+fn the_branch_prefix_and_format_are_in_one_section(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(1600.)));
+    open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+
+    // One section titled once, its two fields labelled once, no section of their own.
+    assert_eq!(
+        text_of("branches-section-atlas-title", cx),
+        Some("Branches".to_owned())
+    );
+    assert_eq!(
+        text_of("branch-prefix-field-atlas-label", cx),
+        Some("Branch prefix".to_owned())
+    );
+    assert_eq!(
+        text_of("branch-format-field-atlas-label", cx),
+        Some("Branch format".to_owned())
+    );
+    cx.update(|window, _| {
+        for gone in [
+            "branch-prefix-section-atlas-title",
+            "branch-format-section-atlas-title",
+        ] {
+            assert!(window.try_find(gone).is_none(), "{gone} is still drawn");
+        }
+        // In order: the section, the prefix, the format, and the setup only after them.
+        let y = |id| window.find(id).bounds().origin.y;
+        assert!(y("branches-section-atlas-title") < y("branch-prefix-field-atlas-label"));
+        assert!(y("branch-prefix-field-atlas-label") < y("branch-format-field-atlas-label"));
+        assert!(y("branch-format-field-atlas-label") < y("setup-title"));
+    });
+}
+
+#[gpui_kit::test]
+fn a_prefix_the_format_refuses_is_warned_under_the_prefix(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(1600.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+    let warning = "branch-prefix-field-atlas-warning";
+
+    // The prefix alone, or a prefix the format accepts, says nothing.
+    cx.update(|window, _| assert!(window.try_find(warning).is_none()));
+    let format = page.read_with(cx, |page, _| page.convention("branch_format").clone());
+    format.update_in(cx, |s, window, cx| {
+        s.type_text("^(feat|fix|chore)/[A-Z]+-[0-9]+-[a-z0-9-]+$", window, cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("branch-format-save-atlas", cx));
+    until(&shell, cx, "the daemon keeps the format", |cx| {
+        format.read_with(cx, |s, _| s.saved().is_some_and(|saved| !saved.is_empty()))
+    });
+    let field = page
+        .read_with(cx, |page, _| page.branch_prefix_field().cloned())
+        .expect("the field is made once the page is drawn");
+    field.update_in(cx, |field, window, cx| field.set_value("feat", window, cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find(warning).is_none()));
+
+    // A prefix the format refuses is warned about under the prefix, and still savable.
+    field.update_in(cx, |field, window, cx| {
+        field.set_value("feature", window, cx)
+    });
+    settle(cx);
+    assert_eq!(
+        text_of(warning, cx),
+        Some("New workspaces get feature/…, which the branch format refuses.".to_owned())
+    );
+    assert!(page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
+    cx.update(|window, _| {
+        let y = |id| window.find(id).bounds().origin.y;
+        assert!(y("branch-prefix-input-atlas") < y(warning));
+        assert!(y(warning) < y("branch-format-field-atlas-label"));
+    });
+
+    // A prefix the format accepts again takes the warning away.
+    field.update_in(cx, |field, window, cx| field.set_value("fix", window, cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find(warning).is_none()));
 }
 
 #[gpui_kit::test]

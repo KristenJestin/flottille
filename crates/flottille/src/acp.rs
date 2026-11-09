@@ -68,6 +68,9 @@ pub enum Exit {
     /// The user reloads its tools: let go between turns, to be started again on its session with
     /// the tools its role has now.
     Reload,
+    /// Its turn failed for a reason that leaves its session usable (`turn_failures`), which the
+    /// state line says: let go, to be started again on its session by the next prompt.
+    TurnFailed(&'static str),
 }
 
 /// What the session loop tells the agent's owner as it goes.
@@ -110,7 +113,8 @@ pub trait Events: Send + Sync + 'static {
     fn image(&self, name: &str) -> Option<(&'static str, String)>;
     /// `typed`: the prompt's `Prompt::typed`.
     fn turn_started(&self, text: &str, images: &[String], typed: &Value, deliveries: &[String]);
-    /// The end of a turn, with what it used, one entry per model.
+    /// The end of a turn, with what it used, one entry per model. A turn ended `failed` gives
+    /// its deliveries back.
     fn turn_ended(&self, stop_reason: &str, usage: Value, used: Vec<Used>);
     /// The agent's tools as they are now: its role may have gained some since the session began
     /// (`docs/tools.md`, "When the tools change").
@@ -466,7 +470,18 @@ async fn drive(
                     Err(error) => {
                         return match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
                             Ok(Ok(status)) => Ok(Exit::Died(status)),
-                            _ => Err(acp(error)),
+                            _ => match crate::turn_failures::recognise(
+                                provider.name,
+                                error.data.as_ref().and_then(|data| data["code"].as_str()),
+                                &error.message,
+                            ) {
+                                Some(said) => {
+                                    turns.running = false;
+                                    events.turn_ended("failed", Value::Null, Vec::new());
+                                    Ok(Exit::TurnFailed(said))
+                                }
+                                None => Err(acp(error)),
+                            },
                         };
                     }
                 };
@@ -550,7 +565,10 @@ fn own_choice(options: &Value, category: &str) -> Option<String> {
     let offered = providers::values(&option);
     let recommended = option["_meta"]["jetbrains"]["air"]["recommendedValue"].as_str();
     let found = match category {
-        "model" => provider::default_model(offered.iter().map(String::as_str), recommended),
+        "model" => provider::default_model(
+            offered.iter().map(String::as_str),
+            providers::alias_of(&option),
+        ),
         _ => recommended
             .filter(|r| offered.iter().any(|o| o == r))
             .or_else(|| provider::middle_effort(&offered).map(String::as_str)),

@@ -10,7 +10,7 @@ depend on what it can do (`docs/agents.md`): the file and command tools below fo
 do is the gate's business, not the list's), `skills`, `commands`, `setup` and `project` for a root (below,
 "The project"),
 `wake` for every agent ("Waking later"), and the tree's tools (`agent_*`, `report`, `ask`,
-`approval_answer`, and `session_send` and `session_read` for a root).
+`approval_answer`, and `session_send`, `session_read` and `session_title` for a root).
 
 ## The server
 
@@ -757,6 +757,17 @@ removed. No action returns a secret: any other action is refused, saying that a 
 shown and that its name is given to the tool that needs it, which puts the secret where it goes
 itself. A read: the gate allows it in every mode.
 
+**`vault {action: "ask", name, why}`** asks the user for an entry a feature of Flottille names and
+that the project does not see (`docs/vault.md`, "Asking the user for an entry"): the refusal that
+met the missing entry offers it (`tickets log_time`: `… or ask the user for it, who types only the
+secret: vault {action: "ask", name: "jira-time", why: "<what you need it for>"} …`). It answers at
+once; the user's Set or Dismiss comes later as a `vault` delivery that never holds the secret. Any
+other name is refused (`refused: nothing of Flottille's needs a vault entry <name> for this
+project …`), as is an entry the user dismissed until its setting changes; a second ask while one
+is open joins it. The schema has no field for a secret, and an argument it does not know is
+refused. The tool is listed to an agent whose project sees an entry or misses one a feature
+names.
+
 ## The workspace
 
 | Tool | |
@@ -1054,11 +1065,12 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 | `agent_launch {kind, title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, branch?, base?}` | Starts an agent of the `kind` it names, never guessed, and answers at once with its id. **`kind`** is required, one of: **`child`**, a part of the caller's own task, in its place, that it directs and that reports to it; **`led`**, an autonomous job of its own (its own workspace or `main`) that the caller pilots: a real session the user sees under it and may talk to, which asks the caller its questions and wakes it when it asks, reports or ends; **`handed`**, a session the caller starts for the user and then lets go: it is the user's, and the caller hears nothing more of it unless it writes to it ("Sessions an agent starts", below). A launch without `kind` is refused before anything is asked, naming each kind and what it does (`refused: kind is required: say which agent you start. child: …; led: …; handed: …`); `root` and `follow`, which `kind` replaced, are refused the same way, naming `kind` (`refused: root is no longer taken: kind says which agent you start, …`): there is no silent mapping. Its description says each kind in one line, and holds a call of each. A child never works in another place than its parent's: `workspace` and `new_workspace` are a session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "kind": "led", … "workspace": "login" …`); naming the caller's own workspace is its own place. `provider` is the caller's when left out, and the agent's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default for a child) or `lead` (by default for a session); for `led` and `handed`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, `branch` as its branch and `base` (`{"api": "develop"}`) as the base a repository starts from, the same rules as `workspace create`: `<branch prefix>/<name>` when left out, an existing branch resumed, the project's branch format; the card says the branch, and that is the branch made, and each base chosen (`The repository api starts from develop, in place of its base rule`); a base for a repository the workspace does not take, or a name git refuses, is refused before the card, while whether the remote has it is read when the workspace is made (the card touches no network); `branch` and `base` without `new_workspace` are refused naming it; their schema says to name the branch by the repository's convention, with the ticket's key when there is one, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). A child launch is refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). |
 | `session_send {session, text}` (a root) | A message to a session the caller started (`agent_launch` with `led` or `handed`), to the agent that started the caller's session ("Sessions an agent starts", below), or to any other session of its project with the user's leave, asked once per pair ("Sessions that talk to each other"). |
 | `session_read {session?, last?, since?, until?, cursor?}` (a root) | A page of the conversation of another session of the caller's project, framed as that session's data, with the mode of its tree; without `session`, the caller's own id, role and mode ("Sessions that read each other", below). |
+| `session_title {title}` (a root) | Names the caller's session for the user: 3 to 8 words on one line, at most 60 characters ("The session's title", below). |
 | `agent_send {agent_id, message, model?, effort?}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. With `model` or `effort` it also changes the child's, as `agent.options` does for the user (`docs/agents.md`, "The options"): checked as at `agent_launch` (a model or an effort its provider is known not to offer is refused, naming those it offers, and nothing is sent), then set between its turns, before its next prompt. The provider never changes. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
-| `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. `agent_id` may also name a session of the caller's project (one it started, led or handed, or any other): ending it is held for the user every time, in every mode, Full included ("Sessions that talk to each other", "Ending another session"). |
+| `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. `agent_id` may also name a session of the caller's project: one it started as `led` is its own to end, judged as any call in the tree's mode; any other (one it handed, or one it did not start) is held for the user every time, in every mode, Full included ("Sessions that talk to each other", "Ending another session"). |
 | `report {text}` | The caller is done. At most 10,000 characters, so that it rides whole on its parent's results; a longer one is refused, asking for fewer words and a file that holds the details. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
-| `ask {question}` | A question, answered later as a message; the daemon decides where it goes, never the agent, and the tool's description says it for the caller in one sentence chosen by its kind: a **child** asks its parent (`child-question`, answered with `agent_send`; until then the child shows as waiting on its parent); a **led** session asks its pilot (the pilot is woken at the turn's end, "Following a session", and answers with `session_send`; until then the session shows as waiting on its pilot, and the user sees the question in the session too); **any other root** asks the user (`agent.asked`, the inbox). What an agent needs goes here, never in a report or a last message; see "Where a question goes", below. |
+| `ask {question}` or `ask {questions: [{question, options?, multiple?}]}` | One question, or up to 4 at once (more is refused, asking for the rest once these are answered); `question` and `questions` are exclusive. A question's `options` are 2 to 4 short choices, each `{label, description?}` (a label of one line of 60 characters at most, distinct, a description of one line); `multiple` lets the user pick several (refused without options). Every question can also be answered in words. Its description says, in its few sentences, one question per point to decide, with options when the answers are known, and holds a call of each form. Answered later as a message; the daemon decides where it goes, never the agent, and the tool's description says it for the caller in one sentence chosen by its kind: a **child** asks its parent (`child-question`, answered with `agent_send`; until then the child shows as waiting on its parent); a **led** session asks its pilot (the pilot is woken at the turn's end, "Following a session", and answers with `session_send`; until then the session shows as waiting on its pilot, and the user sees the question in the session too); **any other root** asks the user (`agent.asked`, the inbox). A parent and a pilot read the ask as one text, each question numbered with its options under it, and answer in words; the user answers each question apart, on the ask's card in the window or with `flottille agent answer` (`agent.answer`), and the agent gets one message that quotes each question with its answer under it ("Answering an ask", below). What an agent needs goes here, never in a report or a last message; see "Where a question goes", below. |
 | `ask_user {question}`, `ask_parent {question}` | The two names `ask` replaced, kept for one release: no agent is given them, and a call of either is answered, routed as `ask` is, whoever makes it. |
 | `approval_answer {request_id, decision, why}` | Answers a request held for the caller: `deny` (the agent that asked is told, with the why) or `forward` (to the caller's parent with its why, or to the user from a root). There is no way to allow: `allow` is refused as a decision the tool does not have, and a request the caller does not hold, or no longer holds, is refused (`refused: request #n is not held by this agent: …`). |
 
@@ -1155,6 +1167,14 @@ them. It also ends when the session ends or fails (the wake says so), and when t
 It never blocks the inactivity sweep of the pilot (`docs/design.md` §5.7) and does not draw it as
 waiting.
 
+**A led session stays open after its report.** Its pilot reads the report, integrates the work,
+then stops the session (`agent_stop`, its own to end) and removes its workspace (`workspace
+remove`: a branch merged into another local branch is integrated, not lost, "The workspace").
+When a led session has reported, is idle, and its workspace's branch is contained in another
+local branch of one of its repositories, with commits of its own, the pilot is reminded once per
+session, by a delivery `led-integrated` checked at the end of a turn of either: `"Login" (agent
+…) reported and its branch is in main: stop it and remove its workspace?`.
+
 #### Where a question goes
 
 Nothing reads a message to find a question, so each agent is told where one goes: `ask`'s
@@ -1174,10 +1194,41 @@ delivery, or the `handed` or `detached` one, saying how many went). A question l
 follow-up, not a wait. The descriptions of `ask`, `report` and `session_send` say so, under the
 2,048 characters their limit asks.
 
+#### Answering an ask
+
+An ask to the user is answered on its own: several asks waiting are several cards, each answered
+apart (`agent.answer`, `docs/protocol.md`), and an answer from one card answers that ask alone. The
+card names who asks by the session's title (`<title> asks you`), then holds one block per question:
+the question, its options as chips (one or several to choose), and a field of several lines for
+the user's words (`Enter` breaks a line, `Ctrl+Enter` sends; the field grows with its text up to
+eight lines, then scrolls). A choice and words go together. One Answer for the card, enabled once
+every question has a choice or words. The agent gets one message:
+
+```
+> Push `feat/42-export` and open the pull request?
+
+Yes
+Squash it first.
+
+> Title of the pull request?
+
+Export orders as CSV
+
+> Who reviews it?
+
+Alice, Carol
+```
+
+A single question without options is answered by the words alone, as before. What the agent gets
+is Flottille's, not the user's words: the window shows no message of the user for it, but the
+card, folded once the agent took it to the session's title, each question on one line and what the
+user chose and wrote under it. A message the user writes in the composer still answers every ask
+open then, as it always did.
+
 #### Detach
 
 A led or handed session can be **detached** from the agent that started it, by the user, at any
-time: `Detach from <pilot>` in the window's session menu, `flottille agent detach <agent>`, or
+time: `Detach from its lead` in the window's session menus (the sidebar row's and the rail's), `flottille agent detach <agent>`, or
 `agent.detach`. Asked of a session no agent started, or already detached, it is refused, saying
 why. What it does, at once:
 
@@ -1256,11 +1307,16 @@ caller itself (`refused: <id> is your own session: …`), a child of another ses
 is a child of another session: it is stopped by its parent, …`), a session of another project, an
 id that names no agent and a session that ended are refused before anything is asked.
 
-- **The user decides, every time.** Ending one is held for the user in every mode, **Full
+- **A session it leads is its own.** One the caller itself started as `led`, and still leads, is
+  ended without the user's word: judged as any call in the tree's mode (a card in Ask, the judge
+  in Auto, passed in Full), never held "always". It ends as below, its conversation saying `ended
+  by the session that led it, <caller>`, and the caller is answered `Ended the session …`.
+- **The user decides, every time**, for every other: a session the user opened, a `handed` one,
+  one another agent started or leads. Ending one is held for the user in every mode, **Full
   included**, and never reaches the judge; unlike a `session_send` leave, nothing is kept: the
   next one asks again. Its request is an `action` of class `base` whose words name the session,
-  its workspace and who started it, and say what ending does (`End the session "Login" (agent …),
-  in the workspace login, started by this agent: its tree, its runs and what was queued for it
+  its workspace and whose it is, and say what ending does (`End the session "Login" (agent …),
+  in the workspace login, started by this agent and handed to you: yours: its tree, its runs and what was queued for it
   are stopped; its workspace stays`). The call is answered at once that it is held; the result
   comes later as a delivery.
 - **Allowed, it ends as the window's End session ends it** (`tree::stop_tree`): its tree, its
@@ -1326,6 +1382,33 @@ it at once.
   another session of this project: its last 20 messages`). It is never harmless, so that a mode
   that lets it pass can be added without making it pass in Ask or Auto.
 
+#### The session's title
+
+A session is titled by the first line of its first message that says what the work is
+(`docs/design.md` §10, the sidebar) until it is named. Its root's agent names it with
+`session_title {title}`, a tool of its own rather than an action of another, because it is the
+only thing it says about its session: the guide of a root the user started tells it to call it
+in its first turn, in the user's language, with a few words that say the work (`Rework the
+Flottille site`). There is no model call of Flottille's for it: the title is the agent's, in the
+turn it runs anyway, and costs no quota.
+
+- The title is 3 to 8 words, on one line, at most 60 characters; anything else is refused with
+  the reason (`refused: a title is at most 60 characters, this one has 72: …`, `… is one line …`,
+  `… is 3 to 8 words …`). It is masked of the daemon's secrets and of those of the caller's
+  place before it is stored.
+- The agent may call it again when the work changes, as long as the user has not named the
+  session.
+- **The user's title always wins.** The user renames a session from the window (its header and
+  its row's "⋯" menu, a dialog with a labelled field) or the command line (`flottille agent
+  rename`, `agent.rename`). Once they did, `session_title` is refused, saying so (`refused: the
+  user named this session "…", and the user's title stays: do not title it again`). The user may
+  rename it again at any time.
+- Each title given emits `agent.titled {agent, title, by}`, `by` being `agent` or `user`
+  (`docs/events.md`): the sidebar, the session's header, the quick switcher and the notifications
+  follow it without a refresh, and the title fades to the new one in the row and the header.
+- A child has no `session_title`: its title is the one its parent gave with `agent_launch`, and
+  the user does not rename it (`agent.rename` refuses a child).
+
 ## The web
 
 | Tool | |
@@ -1368,8 +1451,9 @@ it at once.
   text, the page's title included, sits in an `<untrusted_web_content>` block nothing in it can
   close. It is masked of the
   daemon's and the place's secrets, and escaped, like every result.
-- **How it fetches**: `http` and `https` only, GET only, with a fixed user agent naming Flottille
-  (`Flottille/<version> (+https://github.com/KristenJestin/flottille)`), no cookies, no
+- **How it fetches**: `http` and `https` only, GET only, with a fixed user agent that names
+  the app and no one (`Mozilla/5.0 (compatible; Flottille)`: the same for every user and version,
+  no link nor version that would tell a site who browses), no cookies, no
   credentials, no header of the agent's, no proxy, and the URL's fragment never sent. At most
   5 MiB downloaded (a longer page stops there and says so; a PDF cut is not read), 30 seconds in
   all, 5 redirects, none from `https` to `http`.
@@ -1757,8 +1841,11 @@ depend on it`.
 
 **The user answers** a request they hold: allow it once, or deny it. A workspace's removal is
 also allowed with the answer to discard what would be lost (`flottille approve <n> --discard`),
-refused for any other request. That answer covers exactly what the card listed: work that appeared
-since is not discarded, the removal is refused and the agent calls again for a new card. Nothing they answer allows
+refused for any other request. That answer covers exactly what the card listed, in the state the
+workspace was in when it was asked (its digest, read before the card and kept with the request, as
+`project.removal` gives one): work that appeared since, more written into a file the card already
+named included, is not discarded, the removal is refused, nothing touched, and the agent calls
+again for a new card. A workspace whose state could not be read then is never forced. Nothing they answer allows
 a later call: the next one goes through the gate again. A request held by an agent is not listed
 for the user and cannot be answered by them.
 

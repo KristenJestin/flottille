@@ -66,6 +66,17 @@ impl Picture {
     }
 }
 
+/// Where the user ran a task from: the answer goes back there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunFrom {
+    /// The project page's Run, in the project folder.
+    Page,
+    /// Run in a task's "⋯" of the project's settings, in the project folder.
+    Settings,
+    /// A session's rail, in the session's workspace (`None`: `main`).
+    Session { workspace: Option<String> },
+}
+
 /// What the user does to a command, as the daemon's `run.*` methods have it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunAct {
@@ -112,6 +123,8 @@ pub enum Command {
         message: String,
         /// The pictures that go with the first message.
         images: Vec<Picture>,
+        /// The mode the session starts in: `ask`, `auto` or `full`.
+        mode: String,
     },
     /// Enables or disables a provider in `providers.toml`.
     SetProvider {
@@ -149,6 +162,10 @@ pub enum Command {
     /// Chooses it (`sessions.set`): `None` is off.
     SessionsSet {
         days: Option<u64>,
+    },
+    /// Chooses whether a session is resumed at its quota's reset (`sessions.set`).
+    ResumeSet {
+        resume: bool,
     },
     /// The window's appearance (`appearance.show`); `seq` numbers the request (see
     /// `Shell::ask_appearance`).
@@ -233,12 +250,24 @@ pub enum Command {
     },
     /// Detects the project's repositories again, against its file.
     CheckProject(String),
-    /// Forgets the project, never its folder.
-    RemoveProject(String),
+    /// What removing the project would do (`project.removal`): read `serial` of its dialog.
+    ReadRemoval {
+        project: String,
+        serial: u64,
+    },
+    /// Removes the project: stops what runs in it, removes its workspaces (with `discard`, the
+    /// workspaces as the dialog showed them, those holding unsaved work too as long as it is what
+    /// was shown) and forgets it, never its folder.
+    RemoveProject {
+        project: String,
+        discard: Option<Vec<flottille_core::protocol::ShownWorkspace>>,
+    },
     /// What registering a folder would register.
     DetectProject {
         folder: String,
         name: Option<String>,
+        /// The form's generation: the answer carries it back.
+        seq: u64,
     },
     /// Registers a folder with the repositories shown.
     AddProject {
@@ -282,6 +311,12 @@ pub enum Command {
     Vault,
     /// An entry set or removed (`vault.set`, `vault.remove`).
     VaultWrite(VaultWrite),
+    /// The user's answer to the request `ask` for a vault entry, from its card in `session`.
+    VaultAnswer {
+        session: String,
+        ask: u64,
+        answer: VaultAnswer,
+    },
     /// The project's skills.
     Skills {
         project: String,
@@ -311,10 +346,11 @@ pub enum Command {
         method: &'static str,
         params: Value,
     },
-    /// Runs a task in the project folder, for the user.
+    /// Runs a task for the user, in the place `from` says.
     RunTask {
         project: String,
         name: String,
+        from: RunFrom,
     },
     /// The tasks the user ran in the project, and the output of the one whose panel is open.
     ProjectRuns {
@@ -415,13 +451,12 @@ pub enum Command {
         /// The composer's Compact before sending, while it shows: the agent's cache expired.
         compact: Option<bool>,
     },
-    /// The user's answer from the card of the question of `seq` the session's root asked: a
-    /// message to the root like any other, which answers every question open then (`seqs`).
+    /// The user's answers from the card of the ask of `seq` the session's root asked, one per
+    /// question (`agent.answer`): it answers that ask alone.
     AnswerQuestion {
         session: String,
         seq: u64,
-        seqs: Vec<u64>,
-        message: String,
+        answers: Vec<flottille_core::question::Answer>,
     },
     /// Takes back a message that waits for the session's root (`edit`: to change it and send it
     /// again). The daemon refuses one the root read first.
@@ -448,6 +483,11 @@ pub enum Command {
     Resume {
         session: String,
     },
+    /// Names a session: the user's title, which its agent can no longer change.
+    Rename {
+        session: String,
+        title: String,
+    },
     /// Detaches a session from the agent that started it, named `from`.
     Detach {
         session: String,
@@ -466,6 +506,11 @@ pub enum Command {
     /// Interrupts the turn the session's root agent runs; the agent stays.
     Interrupt {
         session: String,
+    },
+    /// Whether the session, waiting for its quota's reset, is resumed at it (`agent.quota_resume`).
+    QuotaResume {
+        session: String,
+        resume: bool,
     },
     /// Puts the session in Ask, Auto or Full (`ask`, `auto`, `full`): the user's alone to change.
     SetMode {
@@ -568,6 +613,29 @@ pub enum VaultWrite {
     },
 }
 
+/// The answer a card gives to a request for a vault entry.
+#[derive(Clone, PartialEq)]
+pub enum VaultAnswer {
+    /// The secret typed, the username when the entry takes one, and another name for the entry
+    /// when the one asked is used by another project.
+    Set {
+        secret: String,
+        username: String,
+        name: Option<String>,
+    },
+    Dismiss,
+}
+
+/// What a debug line may say of an answer: never its secret.
+impl std::fmt::Debug for VaultAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VaultAnswer::Set { .. } => f.write_str("Set"),
+            VaultAnswer::Dismiss => f.write_str("Dismiss"),
+        }
+    }
+}
+
 /// What a debug line may say of a write: never its secret.
 impl std::fmt::Debug for VaultWrite {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -580,6 +648,13 @@ impl std::fmt::Debug for VaultWrite {
             VaultWrite::Remove { name } => f.debug_struct("Remove").field("name", name).finish(),
         }
     }
+}
+
+/// The setting of the Sessions tab a choice wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionsSetting {
+    Days,
+    Resume,
 }
 
 /// A change to a project's commands, as the daemon takes it.
@@ -769,14 +844,22 @@ pub enum Outcome {
         project: String,
         read: Result<Value, String>,
     },
-    /// The project was forgotten as asked, or the daemon refused, and why.
+    /// What removing the project would do, or why it cannot be read.
+    RemovalRead {
+        project: String,
+        serial: u64,
+        read: Result<Value, String>,
+    },
+    /// What the removal of the project did, or why the daemon refused it.
     ProjectRemoved {
         project: String,
-        refused: Option<String>,
+        result: Result<Value, String>,
     },
     /// What a folder would register (`project.detect`), or why it cannot be.
     ProjectDetected {
         folder: String,
+        /// The form's generation when it asked: an answer to an older one is dropped.
+        seq: u64,
         read: Result<Value, String>,
     },
     /// A folder was registered (`project.add`'s answer), or why not.
@@ -856,10 +939,11 @@ pub enum Outcome {
         shown: Result<Option<usize>, String>,
     },
     /// After how many days an inactive session is ended as the daemon says it (`None` is off),
-    /// after a read (`written` false) or a choice.
+    /// and whether a session is resumed at its quota's reset, after a read (`written` none) or a
+    /// choice of one of them.
     Sessions {
-        written: bool,
-        shown: Result<Option<u64>, String>,
+        written: Option<SessionsSetting>,
+        shown: Result<(Option<u64>, bool), String>,
     },
     /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
     /// choice.
@@ -944,6 +1028,7 @@ pub enum Outcome {
     TaskRun {
         project: String,
         name: String,
+        from: RunFrom,
         refused: Option<String>,
     },
     /// The tasks the user ran in the project, and the output asked for.
@@ -996,11 +1081,17 @@ pub enum Outcome {
         key: u64,
         answer: Result<crate::session::Accepted, String>,
     },
-    /// The answer from the card of `seq` to the questions `seqs` was taken, or refused with why.
+    /// The answer to the request `ask` for a vault entry was taken, or refused with why (never
+    /// holding the secret: the daemon masks it).
+    VaultAnswered {
+        session: String,
+        ask: u64,
+        refused: Option<String>,
+    },
+    /// The answers from the card of the ask `seq` were taken, or refused with why.
     QuestionAnswered {
         session: String,
         seq: u64,
-        seqs: Vec<u64>,
         refused: Option<String>,
     },
     /// A waiting message was taken back, with its text and pictures, or the daemon refused with
@@ -1027,6 +1118,10 @@ pub enum Outcome {
         session: String,
         refused: Option<String>,
     },
+    /// The session was renamed, or the daemon refused with why.
+    Renamed {
+        refused: Option<String>,
+    },
     /// The session was detached from `from`, or the daemon refused with why.
     Detached {
         from: String,
@@ -1048,6 +1143,12 @@ pub enum Outcome {
     },
     /// The session's turn was interrupted (or none ran), or the daemon refused with why.
     Interrupted {
+        session: String,
+        refused: Option<String>,
+    },
+    /// The session's choice to resume at its quota's reset was taken, or the daemon refused with
+    /// why.
+    QuotaResumed {
         session: String,
         refused: Option<String>,
     },
@@ -1308,6 +1409,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             pick,
             message,
             images,
+            mode,
         } => {
             let workspace = match target {
                 Target::Main => None,
@@ -1316,7 +1418,14 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             match ask_alone(
                 connect,
                 "agent.start",
-                start_params(&project, workspace.as_deref(), &pick, &message, &images),
+                start_params(
+                    &project,
+                    workspace.as_deref(),
+                    &pick,
+                    &message,
+                    &images,
+                    &mode,
+                ),
                 bounds.quick,
             ) {
                 Ok(Ok(started)) => started_outcome(&project, &started),
@@ -1428,17 +1537,22 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 .map(|shown| shown["limit"].as_u64().map(|limit| limit as usize));
             Outcome::ToolResults { written, shown }
         }
-        Command::SessionsRead | Command::SessionsSet { .. } => {
+        Command::SessionsRead | Command::SessionsSet { .. } | Command::ResumeSet { .. } => {
             let (method, params, written) = match command {
                 Command::SessionsSet { days } => (
                     "sessions.set",
                     json!({"days": days.map_or(json!("off"), |d| json!(d))}),
-                    true,
+                    Some(SessionsSetting::Days),
                 ),
-                _ => ("sessions.show", json!({}), false),
+                Command::ResumeSet { resume } => (
+                    "sessions.set",
+                    json!({"resume": resume}),
+                    Some(SessionsSetting::Resume),
+                ),
+                _ => ("sessions.show", json!({}), None),
             };
             let shown = answer(ask_alone(connect, method, params, bounds.quick))
-                .map(|shown| shown["days"].as_u64());
+                .map(|shown| (shown["days"].as_u64(), shown["resume"] == true));
             Outcome::Sessions { written, shown }
         }
         Command::AppearanceRead { seq } | Command::AppearanceSet { seq, .. } => {
@@ -1560,17 +1674,31 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             )),
             project,
         },
-        Command::RemoveProject(project) => Outcome::ProjectRemoved {
-            refused: answer(ask_alone(
+        Command::ReadRemoval { project, serial } => Outcome::RemovalRead {
+            read: answer(ask_alone(
                 connect,
-                "project.remove",
+                "project.removal",
                 json!({"name": project}),
                 bounds.quick,
-            ))
-            .err(),
+            )),
+            project,
+            serial,
+        },
+        // Its agents stop and its worktrees are removed: git's work.
+        Command::RemoveProject { project, discard } => Outcome::ProjectRemoved {
+            result: answer(ask_alone(
+                connect,
+                "project.remove",
+                json!(flottille_core::protocol::ProjectRemove {
+                    name: project.clone(),
+                    discard,
+                }),
+                bounds.slow,
+            )),
             project,
         },
-        Command::DetectProject { folder, name } => Outcome::ProjectDetected {
+        Command::DetectProject { folder, name, seq } => Outcome::ProjectDetected {
+            seq,
             read: answer(ask_alone(
                 connect,
                 "project.detect",
@@ -1701,6 +1829,32 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::VaultWritten { refused }
+        }
+        Command::VaultAnswer {
+            session,
+            ask,
+            answer,
+        } => {
+            let (method, params) = match answer {
+                VaultAnswer::Set {
+                    secret,
+                    username,
+                    name,
+                } => (
+                    "vault.ask_set",
+                    json!({"ask": ask, "secret": secret, "username": username, "name": name}),
+                ),
+                VaultAnswer::Dismiss => ("vault.ask_dismiss", json!({"ask": ask})),
+            };
+            let refused = match ask_alone(connect, method, params, bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::VaultAnswered {
+                session,
+                ask,
+                refused,
+            }
         }
         Command::CommandWrite { project, write } => {
             let (method, params) = command_write(&project, write);
@@ -1932,19 +2086,27 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::TaskWritten { project, refused }
         }
-        Command::RunTask { project, name } => {
-            let refused = match ask_alone(
-                connect,
-                "task.run",
-                json!({"project": project, "name": name}),
-                bounds.quick,
-            ) {
+        Command::RunTask {
+            project,
+            name,
+            from,
+        } => {
+            let mut params = json!({"project": project, "name": name});
+            if let RunFrom::Session {
+                workspace: Some(workspace),
+                ..
+            } = &from
+            {
+                params["workspace"] = workspace.as_str().into();
+            }
+            let refused = match ask_alone(connect, "task.run", params, bounds.quick) {
                 Ok(Ok(_)) => None,
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::TaskRun {
                 project,
                 name,
+                from,
                 refused,
             }
         }
@@ -2083,13 +2245,12 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
         Command::AnswerQuestion {
             session,
             seq,
-            seqs,
-            message,
+            answers,
         } => {
             let refused = match ask_alone(
                 connect,
-                "agent.send",
-                json!({"agent": session, "message": message}),
+                "agent.answer",
+                json!({"agent": session, "question": seq, "answers": answers}),
                 bounds.quick,
             ) {
                 Ok(Ok(_)) => None,
@@ -2098,7 +2259,6 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             Outcome::QuestionAnswered {
                 session,
                 seq,
-                seqs,
                 refused,
             }
         }
@@ -2213,6 +2373,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 refused,
             }
         }
+        Command::Rename { session, title } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.rename",
+                json!({"agent": session, "title": title}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::Renamed { refused }
+        }
         Command::Detach { session, from } => {
             let refused = match ask_alone(
                 connect,
@@ -2241,6 +2413,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 after_turn,
                 refused,
             }
+        }
+        Command::QuotaResume { session, resume } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.quota_resume",
+                json!({"agent": session, "resume": resume}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::QuotaResumed { session, refused }
         }
         Command::SetMode { session, mode } => {
             let refused = match ask_alone(
@@ -2500,6 +2684,7 @@ fn start_params(
     pick: &Pick,
     message: &str,
     images: &[Picture],
+    mode: &str,
 ) -> Value {
     // What is left out is sent as a null, which the daemon reads as absent: its to choose.
     json!({
@@ -2508,6 +2693,7 @@ fn start_params(
         "provider": pick.provider,
         "model": pick.model,
         "effort": pick.effort,
+        "gate_mode": mode,
         "message": message,
         "images": images.iter().map(Picture::to_json).collect::<Vec<_>>(),
     })
@@ -2765,6 +2951,7 @@ mod tests {
             pick: Pick::default(),
             message: "Fix the timeout".into(),
             images: Vec::new(),
+            mode: "auto".into(),
         }
     }
 

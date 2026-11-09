@@ -55,10 +55,19 @@ fn launched(user: &User, mcp: &Mcp, kind: &str, brief: &str) -> String {
 /// What the agent does while it holds: asks `questions`, then reads a folder, then waits for the
 /// test, as an agent that asked and went on with a long command.
 fn asks_then_works(questions: &[&str]) -> Value {
-    let mut steps: Vec<Value> = questions
+    let steps: Vec<Value> = questions
         .iter()
         .map(|q| json!({"mcp": {"tool": "ask_user", "arguments": {"question": q}}}))
         .collect();
+    asks_then_works_steps(steps)
+}
+
+/// The same, the agent making this one call (an `ask`) instead.
+fn asks_then_works_with(call: Value) -> Value {
+    asks_then_works_steps(vec![call])
+}
+
+fn asks_then_works_steps(mut steps: Vec<Value>) -> Value {
     steps.push(json!({"mcp": {"tool": "fs_list", "arguments": {"path": "."}}}));
     steps.push(json!({"hold": "release"}));
     steps.push(json!({"say": "Done for now."}));
@@ -146,8 +155,13 @@ fn asking(user: &User, mode: &str, questions: &[&str]) -> (String, Mcp) {
 
 /// The same, with the lead's id.
 fn asking_for(user: &User, kind: &str, mode: &str, questions: &[&str]) -> (String, (String, Mcp)) {
+    asking_with(user, kind, mode, asks_then_works(questions))
+}
+
+/// The same, the agent playing `script`.
+fn asking_with(user: &User, kind: &str, mode: &str, script: Value) -> (String, (String, Mcp)) {
     project(user);
-    user.fake_script(asks_then_works(questions));
+    user.fake_script(script);
     let (lead, mcp) = lead(user);
     let session = launched(user, &mcp, kind, "Draw the charts.");
     // Each tree keeps its own mode: the user puts the session's in `mode`.
@@ -480,4 +494,423 @@ fn session_read_cuts_each_question_and_counts_them_in_its_page() {
         "{}",
         read.text.chars().count()
     );
+}
+
+/// The three questions of the issue (#637): one with options, one in words, one multiple.
+fn three_questions() -> Value {
+    json!({"mcp": {"tool": "ask", "arguments": {"questions": [
+        {"question": "Push `feat/42-export` and open the pull request?",
+         "options": [{"label": "Yes"}, {"label": "Not yet", "description": "Keep it local"}]},
+        {"question": "Title of the pull request?"},
+        {"question": "Who reviews it?", "multiple": true,
+         "options": [{"label": "Alice"}, {"label": "Bob"}, {"label": "Carol"}]}
+    ]}}})
+}
+
+/// The number of the root's oldest open ask, as its tree says it.
+fn open_seqs(user: &User, id: &str) -> Vec<u64> {
+    root_of_tree(user, id)["questions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|q| q["seq"].as_u64().unwrap())
+        .collect()
+}
+
+fn prompts(user: &User) -> Vec<String> {
+    user.received_requests("session/prompt")
+        .iter()
+        .map(|r| {
+            r["params"]["prompt"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect()
+}
+
+#[test]
+fn the_answer_message_quotes_each_question_and_its_answer() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        json!({"turns": [
+            {"when": "ship it", "do": [three_questions(), {"say": "Asked."}]},
+            {"when": "Export orders as CSV", "do": [{"say": "Shipping."}]}
+        ]}),
+    );
+    send(&user, &id, "ship it");
+    eventually("the ask", || open_seqs(&user, &id).len() == 1);
+    let entry = root_of_tree(&user, &id)["questions"][0].clone();
+    assert_eq!(entry["questions"].as_array().unwrap().len(), 3, "{entry}");
+    eventually("its turn's end", || state(&user, &id) == "idle");
+
+    let seq = open_seqs(&user, &id)[0];
+    user.call(
+        "agent.answer",
+        json!({"agent": id, "question": seq, "answers": [
+            {"choices": ["Yes"], "text": "Squash it first."},
+            {"text": "Export orders as CSV"},
+            {"choices": ["Alice", "Carol"]}
+        ]}),
+    )
+    .unwrap();
+    eventually("the agent took it", || {
+        prompts(&user)
+            .iter()
+            .any(|p| p.contains("Export orders as CSV"))
+    });
+    let prompt = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains("Export orders as CSV"))
+        .unwrap();
+    assert!(
+        prompt.contains(
+            "> Push `feat/42-export` and open the pull request?\n\nYes\nSquash it first.\n\n\
+             > Title of the pull request?\n\nExport orders as CSV\n\n> Who reviews it?\n\n\
+             Alice, Carol"
+        ),
+        "{prompt}"
+    );
+    eventually("no longer open", || open_seqs(&user, &id).is_empty());
+    // The answers are kept with the ask they answer.
+    let answered = Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .last_agent_events(&id, "agent.answered", 10)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.data["asked"] == seq)
+        .expect("the answers kept");
+    assert_eq!(
+        answered.data["answers"][2]["choices"],
+        json!(["Alice", "Carol"])
+    );
+}
+
+#[test]
+fn a_single_question_ask_still_works_as_before() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        json!({"turns": [
+            {"when": "colour", "do": [
+                {"mcp": {"tool": "ask", "arguments": {"question": "Which colour for the axis?"}}},
+                {"say": "Asked."}]},
+            {"when": "Blue", "do": [{"say": "Blue it is."}]}
+        ]}),
+    );
+    send(&user, &id, "colour");
+    eventually("the ask", || open_seqs(&user, &id).len() == 1);
+    eventually("its turn's end", || state(&user, &id) == "idle");
+    assert_eq!(open_of(&user, &id), ["Which colour for the axis?"]);
+    let seq = open_seqs(&user, &id)[0];
+
+    // A single answer, as `agent answer` gives it for a single question.
+    user.call(
+        "agent.answer",
+        json!({"agent": id, "question": seq, "answers": [{"text": "Blue."}]}),
+    )
+    .unwrap();
+    eventually("the agent took it", || {
+        prompts(&user).iter().any(|p| p.contains("Blue."))
+    });
+    let prompt = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains("Blue."))
+        .unwrap();
+    assert!(
+        !prompt.contains("> Which colour"),
+        "the words alone: {prompt}"
+    );
+    eventually("no longer open", || open_seqs(&user, &id).is_empty());
+}
+
+#[test]
+fn a_message_of_the_user_still_answers_every_open_ask() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        json!({"turns": [
+            {"when": "ask twice", "do": [ask("Q1: which chart?"), ask("Q2: which colour?"),
+                {"say": "Asked."}]},
+            {"when": "Bars, blue", "do": [{"say": "Fine."}]}
+        ]}),
+    );
+    send(&user, &id, "ask twice");
+    eventually("both asks", || open_seqs(&user, &id).len() == 2);
+    eventually("its turn's end", || state(&user, &id) == "idle");
+    send(&user, &id, "Bars, blue");
+    eventually("none open", || open_seqs(&user, &id).is_empty());
+}
+
+#[test]
+fn answering_one_ask_leaves_the_other_open() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        json!({"turns": [
+            {"when": "ask twice", "do": [ask("Q1: which chart?"), ask("Q2: which colour?"),
+                {"say": "Asked."}]},
+            {"when": "Bars", "do": [{"say": "Fine."}]}
+        ]}),
+    );
+    send(&user, &id, "ask twice");
+    eventually("both asks", || open_seqs(&user, &id).len() == 2);
+    eventually("its turn's end", || state(&user, &id) == "idle");
+    let seqs = open_seqs(&user, &id);
+    user.call(
+        "agent.answer",
+        json!({"agent": id, "question": seqs[0], "answers": [{"text": "Bars"}]}),
+    )
+    .unwrap();
+    eventually("the agent took it", || {
+        state(&user, &id) == "idle" && prompts(&user).iter().any(|p| p.contains("Bars"))
+    });
+    eventually("the first closed", || open_seqs(&user, &id) == [seqs[1]]);
+    assert_eq!(
+        root_of_tree(&user, &id)["needs_user"],
+        true,
+        "the second waits"
+    );
+}
+
+#[test]
+fn an_answer_that_does_not_fit_its_ask_is_refused() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        json!({"turns": [{"when": "ship it", "do": [three_questions(), {"say": "Asked."}]}]}),
+    );
+    send(&user, &id, "ship it");
+    eventually("the ask", || open_seqs(&user, &id).len() == 1);
+    let seq = open_seqs(&user, &id)[0];
+    let refused = user
+        .call(
+            "agent.answer",
+            json!({"agent": id, "question": seq, "answers": [{"text": "Yes"}]}),
+        )
+        .unwrap_err();
+    assert!(
+        refused.1.contains("1 answers for 3 questions"),
+        "{refused:?}"
+    );
+    let refused = user
+        .call(
+            "agent.answer",
+            json!({"agent": id, "question": seq, "answers": [
+                {"choices": ["Maybe"]}, {"text": "T"}, {"choices": ["Bob"]}]}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("no option Maybe"), "{refused:?}");
+}
+
+#[test]
+fn a_child_s_several_questions_reach_its_parent_numbered() {
+    let user = User::with_fake_agent();
+    project(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "Ship the export.", "do": [three_questions(), {"say": "Asked my parent."}]}
+    ]}));
+    let (lead, mcp) = lead(&user);
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "Export", "brief": "Ship the export.", "kind": "child"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let question = || {
+        Store::open(&user.path("state/flottille/flottille.db"))
+            .unwrap()
+            .last_deliveries(&lead, 64)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.kind == "child-question")
+            .map(|d| d.body)
+    };
+    eventually("the parent is told", || question().is_some());
+    let body = question().unwrap();
+    assert!(
+        body.contains(
+            "1. Push `feat/42-export` and open the pull request?\n   Options: Yes; Not yet \
+             (Keep it local)\n2. Title of the pull request?\n3. Who reviews it?\n   Options \
+             (several may be chosen): Alice; Bob; Carol"
+        ),
+        "{body}"
+    );
+}
+
+#[test]
+fn flottille_agent_answer_answers_each_question_of_an_ask() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        json!({"turns": [
+            {"when": "ship it", "do": [three_questions(), {"say": "Asked."}]},
+            {"when": "Export orders", "do": [{"say": "Shipping."}]}
+        ]}),
+    );
+    send(&user, &id, "ship it");
+    eventually("the ask", || open_seqs(&user, &id).len() == 1);
+    eventually("its turn's end", || state(&user, &id) == "idle");
+    let inbox = user.run(&["inbox"]);
+    let listed = String::from_utf8_lossy(&inbox.stdout);
+    assert!(
+        listed.contains("    2. Title of the pull request?"),
+        "{listed}"
+    );
+    assert!(listed.contains("flottille agent answer"), "{listed}");
+
+    let refused = user.run(&["agent", "answer", &id, "--answer", "Yes"]);
+    assert!(!refused.status.success());
+    let answered = user.run(&[
+        "agent",
+        "answer",
+        &id,
+        "--answer",
+        "1=Yes",
+        "--answer",
+        "2=Export orders",
+        "--answer",
+        "3=Alice, Carol",
+    ]);
+    assert!(answered.status.success(), "{answered:?}");
+    eventually("the agent took it", || {
+        prompts(&user)
+            .iter()
+            .any(|p| p.contains("> Who reviews it?\n\nAlice, Carol"))
+    });
+    eventually("no longer open", || open_seqs(&user, &id).is_empty());
+}
+
+/// The root's turn that asks `ask`, then holds, so that an answer waits under the conversation.
+fn asks_and_holds(ask: Value) -> Value {
+    json!({"turns": [
+        {"when": "go", "do": [ask, {"hold": "release"}, {"say": "Asked."}]},
+        {"when": "Blue", "do": [{"say": "Blue it is."}]}
+    ]})
+}
+
+fn waiting_under(user: &User, id: &str) -> Vec<Value> {
+    root_of_tree(user, id)["queued"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_waiting_card_answer_is_not_listed_as_a_user_message() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        asks_and_holds(json!({"mcp": {"tool": "ask", "arguments": {"question": "Colour?"}}})),
+    );
+    send(&user, &id, "go");
+    eventually("the ask", || open_seqs(&user, &id).len() == 1);
+    let seq = open_seqs(&user, &id)[0];
+    let answered = user
+        .call(
+            "agent.answer",
+            json!({"agent": id, "question": seq, "answers": [{"text": "Blue"}]}),
+        )
+        .unwrap();
+    let waiting = answered["delivery"].as_str().unwrap().to_owned();
+
+    // The answer waits for the turn's end, and the card says so: it is not a message of the
+    // user to cancel, edit or send now.
+    let stored = Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .deliveries(&id, "queued")
+        .unwrap();
+    assert!(stored.iter().any(|d| d.id == waiting), "it waits");
+    let listed = waiting_under(&user, &id);
+    assert!(
+        listed
+            .iter()
+            .all(|queued| queued["delivery"] != waiting.as_str()),
+        "{listed:?}"
+    );
+    release(&user);
+}
+
+#[test]
+fn a_withdrawn_answer_lets_the_question_be_answered_again() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        asks_and_holds(json!({"mcp": {"tool": "ask", "arguments": {"question": "Colour?"}}})),
+    );
+    send(&user, &id, "go");
+    eventually("the ask", || open_seqs(&user, &id).len() == 1);
+    let seq = open_seqs(&user, &id)[0];
+    let first = user
+        .call(
+            "agent.answer",
+            json!({"agent": id, "question": seq, "answers": [{"text": "Red"}]}),
+        )
+        .unwrap();
+    user.call(
+        "agent.unqueue",
+        json!({"agent": id, "delivery": first["delivery"]}),
+    )
+    .unwrap();
+
+    user.call(
+        "agent.answer",
+        json!({"agent": id, "question": seq, "answers": [{"text": "Blue"}]}),
+    )
+    .expect("the question is still open to an answer");
+    release(&user);
+    eventually("the agent took the second", || {
+        prompts(&user).iter().any(|p| p.contains("Blue"))
+    });
+    assert!(prompts(&user).iter().all(|p| !p.contains("Red")));
+    eventually("no longer open", || open_seqs(&user, &id).is_empty());
+}
+
+#[test]
+fn a_several_question_ask_moved_to_the_user_keeps_its_questions_and_options() {
+    let user = User::with_fake_agent();
+    let (_, (session, _)) = asking_with(
+        &user,
+        "led",
+        "full",
+        asks_then_works_with(three_questions()),
+    );
+    user.call("agent.detach", json!({"agent": session}))
+        .unwrap();
+
+    eventually("the ask moved to the user", || {
+        !open_seqs(&user, &session).is_empty()
+    });
+    let entry = root_of_tree(&user, &session)["questions"][0].clone();
+    let questions = entry["questions"].as_array().unwrap();
+    assert_eq!(questions.len(), 3, "{entry}");
+    assert_eq!(questions[0]["options"][1]["label"], "Not yet", "{entry}");
+    assert_eq!(questions[2]["multiple"], true, "{entry}");
+    release(&user);
+}
+
+#[test]
+fn a_second_answer_to_an_ask_whose_answer_waits_is_refused() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        asks_and_holds(json!({"mcp": {"tool": "ask", "arguments": {"question": "Colour?"}}})),
+    );
+    send(&user, &id, "go");
+    eventually("the ask", || open_seqs(&user, &id).len() == 1);
+    let seq = open_seqs(&user, &id)[0];
+    let answer = |text: &str| {
+        user.call(
+            "agent.answer",
+            json!({"agent": id, "question": seq, "answers": [{"text": text}]}),
+        )
+    };
+    answer("Blue").unwrap();
+    let refused = answer("Red").unwrap_err();
+    assert!(refused.1.contains("answered already"), "{refused:?}");
+    release(&user);
 }

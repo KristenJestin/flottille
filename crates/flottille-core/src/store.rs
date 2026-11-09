@@ -693,6 +693,32 @@ const MIGRATIONS: &[&str] = &[
     -- the record once `launched_by` is cleared, and to keep its first message the agent's.
     ALTER TABLE agents ADD COLUMN detached_from TEXT REFERENCES agents (id);
 ",
+    "
+    -- The state of the workspace a removal's request names, read when it was asked: the answer to
+    -- discard removes only that (`docs/workspaces.md`, \"Removal\"). NULL for any other request.
+    ALTER TABLE approval_requests ADD COLUMN digest TEXT;
+",
+    "
+    -- Who named a session (`docs/tools.md`, \"The session's title\"): its agent, with
+    -- `session_title`, or the user, whose title always wins; `NULL` while it keeps the first line
+    -- of its first message.
+    ALTER TABLE agents ADD COLUMN titled_by TEXT;
+",
+    "
+    -- The workspace a task the user ran from a session's rail runs in: that session lists it.
+    ALTER TABLE runs ADD COLUMN workspace TEXT;
+",
+    "
+    -- A session whose provider said its quota is spent waits for its reset (`docs/design.md`
+    -- §5.9): the instant, NULL when it could not be read, and the user's choice for this session
+    -- alone, NULL to follow the app's setting. Kept across restarts; gone with the session.
+    CREATE TABLE quota_waits (
+        agent      TEXT PRIMARY KEY REFERENCES agents (id) ON DELETE CASCADE,
+        reset_at   INTEGER,
+        resume     INTEGER,
+        limited_at INTEGER NOT NULL
+    ) STRICT;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -707,16 +733,16 @@ const EXTENSION_MIGRATIONS: &str = "
 ";
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
-    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place";
+    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place, digest";
 
 const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
-    ended_at, output, dismissed, project, ready, url, url_error";
+    ended_at, output, dismissed, project, ready, url, url_error, workspace";
 
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
     depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
-    launched_by, pending_model, pending_effort, exchanged_at, led, detached_from";
+    launched_by, pending_model, pending_effort, exchanged_at, led, detached_from, titled_by";
 
 const DELIVERY_COLUMNS: &str =
     "id, agent, kind, body, urgency, state, created_at, sent_at, images, typed, commands";
@@ -746,6 +772,34 @@ pub struct AgentChange {
     /// The user detached the session from the agent that started it: `launched_by` is cleared,
     /// `detached_from` keeps that agent (`docs/tools.md`, "Detach").
     pub detached_from: Option<String>,
+}
+
+/// A session waiting for its quota's reset (`docs/design.md` §5.9).
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuotaWait {
+    pub agent: String,
+    /// When the quota resets; `None` when the provider's words could not be read.
+    pub reset_at: Option<u64>,
+    /// The user's choice for this session; `None` follows the app's setting.
+    pub resume: Option<bool>,
+    /// When the provider said it.
+    pub limited_at: u64,
+}
+
+impl QuotaWait {
+    fn of_row(row: &rusqlite::Row) -> rusqlite::Result<QuotaWait> {
+        Ok(QuotaWait {
+            agent: row.get(0)?,
+            reset_at: row.get(1)?,
+            resume: row.get(2)?,
+            limited_at: row.get(3)?,
+        })
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({"agent": self.agent, "limited": true, "reset_at": self.reset_at,
+            "resume": self.resume, "limited_at": self.limited_at})
+    }
 }
 
 /// How many cut tool results of one agent keep their whole text (`docs/tools.md`, "Long
@@ -1168,7 +1222,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40)"
             ),
             params![
                 agent.id,
@@ -1210,6 +1264,7 @@ impl Store {
                 agent.exchanged_at,
                 agent.led,
                 agent.detached_from,
+                agent.titled_by,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -1248,11 +1303,12 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
-    /// The ended roots whose session is kept to be resumed: those the sweep forgets in time.
+    /// The ended or failed roots whose session is kept to be resumed: those the sweep forgets in
+    /// time.
     pub fn kept_sessions(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
-            "SELECT {AGENT_COLUMNS} FROM agents WHERE state = 'ended' AND parent IS NULL \
-             AND reopens = 1 AND native_id IS NOT NULL ORDER BY created_at, id"
+            "SELECT {AGENT_COLUMNS} FROM agents WHERE state IN ('ended', 'failed') \
+             AND parent IS NULL AND reopens = 1 AND native_id IS NOT NULL ORDER BY created_at, id"
         ))?;
         let rows = statement.query_map([], agent_row)?;
         rows.map(|row| row?).collect()
@@ -1283,11 +1339,13 @@ impl Store {
             )?;
         }
         // A leave lasts while both sessions do: one that ends, even to be resumed, takes it.
+        // So does a wait for the quota's reset: an ended session is never resumed by it.
         if change.state.is_some_and(AgentState::is_final) {
             transaction.execute(
                 "DELETE FROM session_leaves WHERE writer = ?1 OR session = ?1",
                 params![id],
             )?;
+            transaction.execute("DELETE FROM quota_waits WHERE agent = ?1", params![id])?;
         }
         if let Some(native_id) = change.native_id {
             transaction.execute(
@@ -1377,6 +1435,28 @@ impl Store {
             .agent(id)?
             .ok_or_else(|| Error::Refused(format!("there is no agent {id}")))?;
         Ok((agent, event))
+    }
+
+    /// Names a session, with its `agent.titled` event, in one transaction: by `"user"` always, by
+    /// `"agent"` only while the user has not named it. `None` when the user's title held.
+    pub fn retitle_agent(&mut self, id: &str, title: &str, by: &str) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE agents SET title = ?2, titled_by = ?3, updated_at = ?4 \
+             WHERE id = ?1 AND (?3 = 'user' OR titled_by IS NOT 'user')",
+            params![id, title, by, now_ms()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let event = append_agent_event(
+            &transaction,
+            id,
+            "agent.titled",
+            json!({"agent": id, "title": title, "by": by}),
+        )?;
+        transaction.commit()?;
+        Ok(Some(event))
     }
 
     /// Gives the agent the tools its role has now, with the agent's event, in one transaction.
@@ -1556,7 +1636,7 @@ impl Store {
         transaction.execute(
             &format!(
                 "INSERT INTO runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
-                 ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
+                 ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
             ),
             params![
                 run.id,
@@ -1575,6 +1655,7 @@ impl Store {
                 run.ready.map(Readiness::as_str),
                 run.url,
                 run.url_error,
+                run.workspace,
             ],
         )?;
         let event = append_event(&transaction, event.0, event.1)?;
@@ -1666,7 +1747,8 @@ impl Store {
     pub fn ended_runs_of(&self, agents: &[String], limit: usize, tail: usize) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
-             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error FROM runs \
+             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error, workspace \
+             FROM runs \
              WHERE agent = ?1 AND state != 'running' AND dismissed = 0 \
              ORDER BY ended_at DESC, id DESC LIMIT ?2"
         ))?;
@@ -1688,7 +1770,8 @@ impl Store {
     pub fn user_runs_of(&self, project: &str, limit: usize, tail: usize) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
-             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error FROM runs \
+             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error, workspace \
+             FROM runs \
              WHERE agent IS NULL AND project = ?1 AND (state = 'running' OR (dismissed = 0 \
              AND id IN (SELECT id FROM runs WHERE agent IS NULL AND project = ?1 \
              AND state != 'running' AND dismissed = 0 ORDER BY ended_at DESC, id DESC LIMIT ?2))) \
@@ -1825,8 +1908,9 @@ impl Store {
         let number: u64 = transaction.query_row(
             "INSERT INTO approval_requests (agent, call_key, tool, arguments, shown, reasons, \
              sensitive, identity, held_by, forwards, state, created_at, kind, says, judgement, \
-             place) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, 'pending', ?10, ?11, ?12, ?13, ?14) \
+             place, digest) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, 'pending', ?10, ?11, ?12, ?13, ?14, \
+             ?15) \
              RETURNING number",
             params![
                 asked.agent,
@@ -1847,6 +1931,7 @@ impl Store {
                     .map(serde_json::to_string)
                     .transpose()?,
                 asked.place,
+                asked.digest,
             ],
             |row| row.get(0),
         )?;
@@ -2145,6 +2230,17 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Whether a message of the user whose id starts with `prefix` waits for the agent or was
+    /// taken by it: one withdrawn is neither.
+    pub fn user_message_taken_or_waiting(&self, agent: &str, prefix: &str) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM deliveries WHERE agent = ?1 AND kind = 'user' \
+             AND substr(id, 1, length(?2)) = ?2 AND state IN ('queued', 'sending', 'sent'))",
+            params![agent, prefix],
+            |row| row.get(0),
+        )?)
+    }
+
     /// The agent's last deliveries of `kind`, newest first.
     pub fn last_deliveries_of(
         &self,
@@ -2355,6 +2451,103 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The session `agent` waits for its quota's reset at `reset_at` (`None`: it could not be
+    /// read), and its `agent.quota` event. A wait already there takes the new instant and keeps
+    /// the user's choice for this session.
+    pub fn limit_quota(
+        &mut self,
+        agent: &str,
+        reset_at: Option<u64>,
+    ) -> Result<(QuotaWait, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let wait = transaction.query_row(
+            "INSERT INTO quota_waits (agent, reset_at, resume, limited_at) VALUES (?1, ?2, NULL, ?3) \
+             ON CONFLICT (agent) DO UPDATE SET reset_at = excluded.reset_at, \
+             limited_at = excluded.limited_at \
+             RETURNING agent, reset_at, resume, limited_at",
+            params![agent, reset_at, now_ms()],
+            QuotaWait::of_row,
+        )?;
+        let event = append_event(&transaction, "agent.quota", wait.to_json())?;
+        transaction.commit()?;
+        Ok((wait, Some(event)))
+    }
+
+    /// The session's wait for its quota's reset, if it waits.
+    pub fn quota_wait(&self, agent: &str) -> Result<Option<QuotaWait>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT agent, reset_at, resume, limited_at FROM quota_waits WHERE agent = ?1",
+                params![agent],
+                QuotaWait::of_row,
+            )
+            .optional()?)
+    }
+
+    /// Every session waiting for its quota's reset.
+    pub fn quota_waits(&self) -> Result<Vec<QuotaWait>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT agent, reset_at, resume, limited_at FROM quota_waits ORDER BY limited_at",
+        )?;
+        let rows = statement.query_map([], QuotaWait::of_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The user's choice to resume this session at its reset or not; `None` when it does not
+    /// wait.
+    pub fn choose_quota_resume(
+        &mut self,
+        agent: &str,
+        resume: bool,
+    ) -> Result<(Option<QuotaWait>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let wait = transaction
+            .query_row(
+                "UPDATE quota_waits SET resume = ?2 WHERE agent = ?1 \
+                 RETURNING agent, reset_at, resume, limited_at",
+                params![agent, resume],
+                QuotaWait::of_row,
+            )
+            .optional()?;
+        let Some(wait) = wait else {
+            return Ok((None, None));
+        };
+        let event = append_event(&transaction, "agent.quota", wait.to_json())?;
+        transaction.commit()?;
+        Ok((Some(wait), Some(event)))
+    }
+
+    /// The session no longer waits for its quota (`why`); with `reset_at`, only the wait for that
+    /// instant goes, so that two takers never both take it. Whether a wait went.
+    pub fn end_quota_wait(
+        &mut self,
+        agent: &str,
+        reset_at: Option<u64>,
+        why: &str,
+    ) -> Result<(bool, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let gone = match reset_at {
+            Some(at) => transaction.execute(
+                "DELETE FROM quota_waits WHERE agent = ?1 AND reset_at = ?2",
+                params![agent, at],
+            )?,
+            None => {
+                transaction.execute("DELETE FROM quota_waits WHERE agent = ?1", params![agent])?
+            }
+        };
+        if gone == 0 {
+            return Ok((false, None));
+        }
+        let event = append_event(
+            &transaction,
+            "agent.quota",
+            json!({"agent": agent, "limited": false, "why": why}),
+        )?;
+        transaction.commit()?;
+        Ok((true, Some(event)))
     }
 
     /// The vault's entries, by name.
@@ -3057,15 +3250,15 @@ impl Store {
         Ok((agent, event))
     }
 
-    /// An ended root starts again on its own session, with its `agent.resumed` event: idle, its
-    /// end and its reason forgotten, its epoch and its session kept. `None` when it is not ended
-    /// (a failed agent stays failed).
+    /// An ended or failed root starts again on its own session, with its `agent.resumed` event:
+    /// idle, its end and its reason forgotten, its epoch and its session kept. `None` when it is
+    /// neither.
     pub fn resume_agent(&mut self, id: &str) -> Result<Option<(Agent, Event)>> {
         let transaction = self.connection.transaction()?;
         let changed = transaction.execute(
             "UPDATE agents SET state = 'idle', state_reason = NULL, ended_at = NULL, \
              reported_at = NULL, quiet_turns = 0, waiting_on_answer = 0, updated_at = ?2 \
-             WHERE id = ?1 AND state = 'ended'",
+             WHERE id = ?1 AND state IN ('ended', 'failed')",
             params![id, now_ms()],
         )?;
         if changed == 0 {
@@ -3466,6 +3659,7 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
             .and_then(|ready| Readiness::parse(&ready)),
         url: row.get(14)?,
         url_error: row.get(15)?,
+        workspace: row.get(16)?,
     }))
 }
 
@@ -3536,6 +3730,7 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
         created_at: row.get(13)?,
         decided_at: row.get(14)?,
         place: row.get(18)?,
+        digest: row.get(19)?,
     }))
 }
 
@@ -3661,6 +3856,7 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
         exchanged_at: row.get(36)?,
         led: row.get(37)?,
         detached_from: text(38)?,
+        titled_by: text(39)?,
     }))
 }
 
@@ -4393,6 +4589,7 @@ mod tests {
             launched_by: None,
             led: false,
             detached_from: None,
+            titled_by: None,
         }
     }
 
@@ -4450,7 +4647,11 @@ mod tests {
         let ids = |agents: Vec<Agent>| agents.into_iter().map(|a| a.id).collect::<Vec<_>>();
 
         assert_eq!(ids(store.live_agents().unwrap()), ["running00000"]);
-        assert_eq!(ids(store.kept_sessions().unwrap()), ["kept00000000"]);
+        // A failed root keeps its session too: it can be resumed (#631).
+        assert_eq!(
+            ids(store.kept_sessions().unwrap()),
+            ["failed000000", "kept00000000"]
+        );
     }
 
     #[test]
@@ -4481,7 +4682,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ended_agent_is_resumed_on_its_session_and_a_failed_one_is_not() {
+    fn an_ended_or_failed_agent_is_resumed_on_its_session() {
         let mut store = Store::open_in_memory().unwrap();
         let mut agent = an_agent();
         agent.native_id = Some("s1".into());
@@ -4512,11 +4713,10 @@ mod tests {
         assert_eq!(resumed.native_id.as_deref(), Some("s1"));
         assert_eq!(resumed.epoch, agent.epoch);
         assert_eq!(event.name, "agent.resumed");
-        assert_eq!(store.resume_agent(&failed.id).unwrap(), None);
-        assert_eq!(
-            store.agent(&failed.id).unwrap().unwrap().state,
-            AgentState::Failed
-        );
+        // A failed root too (#631): its session is rarely what failed.
+        let (resumed, _) = store.resume_agent(&failed.id).unwrap().unwrap();
+        assert_eq!(resumed.state, AgentState::Idle);
+        assert_eq!(store.resume_agent(&failed.id).unwrap(), None, "once");
     }
 
     #[test]
@@ -5055,6 +5255,7 @@ mod tests {
             ready: None,
             url: None,
             url_error: None,
+            workspace: None,
         };
         for (id, project, at) in [("r1", "app", 5), ("r2", "app", 6), ("r3", "other", 7)] {
             store
@@ -5619,6 +5820,7 @@ mod tests {
             created_at: 0,
             decided_at: None,
             place: None,
+            digest: None,
         }
     }
 
@@ -5945,6 +6147,7 @@ mod tests {
             ready: None,
             url: None,
             url_error: None,
+            workspace: None,
         };
         store.create_run(&run, ("run.started", json!({}))).unwrap();
         assert_eq!(store.run("r1").unwrap().unwrap(), run);
@@ -6003,6 +6206,7 @@ mod tests {
             ready: Some(Readiness::Starting),
             url: Some("https://w.app.localhost".into()),
             url_error: None,
+            workspace: None,
         };
         for id in ["r1", "r2"] {
             store
@@ -6071,6 +6275,7 @@ mod tests {
                 ready: None,
                 url: None,
                 url_error: None,
+                workspace: None,
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }
@@ -6132,6 +6337,7 @@ mod tests {
                 ready: None,
                 url: None,
                 url_error: None,
+                workspace: None,
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }
