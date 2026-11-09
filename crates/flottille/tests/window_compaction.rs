@@ -209,6 +209,33 @@ fn the_compaction_tab_shows_the_compactor_its_settings_and_its_guidance(cx: &mut
 }
 
 #[gpui_kit::test]
+fn the_summary_choices_are_named_in_the_users_words(cx: &mut TestAppContext) {
+    let user = user("");
+    let (shell, cx) = window(&user, cx);
+    open_compaction_tab(&shell, cx);
+
+    // The select's menu names each choice by what it does, with its one line.
+    cx.update(|window, cx| window.click("compaction-summary", cx));
+    settle(cx);
+    assert_eq!(
+        label(cx, "compaction-summary-compactor").as_deref(),
+        Some("A model you choose")
+    );
+    assert_eq!(
+        label(cx, "compaction-summary-compactor-line").as_deref(),
+        Some("A separate model summarises the conversation.")
+    );
+    assert_eq!(
+        label(cx, "compaction-summary-agent").as_deref(),
+        Some("The session's own agent")
+    );
+    assert_eq!(
+        label(cx, "compaction-summary-agent-line").as_deref(),
+        Some("The agent summarises its own conversation, in its session.")
+    );
+}
+
+#[gpui_kit::test]
 fn a_compactor_flottille_picked_is_said_once_in_a_notice_that_opens_settings(
     cx: &mut TestAppContext,
 ) {
