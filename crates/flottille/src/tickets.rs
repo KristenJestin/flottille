@@ -41,6 +41,7 @@ mod worklog;
 pub use events::{EVENTS, offer, reference_of, target_named};
 pub use links::checked as checked_links;
 pub use worklog::says as worklog_says;
+pub use worklog::unset as worklog_unset;
 
 /// A call of `acli` is cut after this.
 const ACLI_TIME: Duration = Duration::from_secs(30);

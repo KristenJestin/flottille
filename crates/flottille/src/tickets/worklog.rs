@@ -117,11 +117,12 @@ pub fn unwritable(tracker: &ProjectTracker, args: &Value) -> Option<String> {
     };
     if worklog_token.is_none() {
         return Some(
-            "refused: this project names no vault entry to log time with: the user creates one \
+            "refused: this project names no vault entry to log time with: the user chooses one \
+             in the project's Settings, Tracker (the window offers the way), or creates one \
              (flottille vault set <name> --username <their Jira account e-mail>, the secret \
              being a Jira API token) and writes its name in the project's file, [tracker] \
-             worklog_token = \"<name>\", or says so in the project's Settings; Flottille never \
-             logs time with a sign-in it was not given"
+             worklog_token = \"<name>\"; Flottille never logs time with a sign-in it was not \
+             given"
                 .into(),
         );
     }
@@ -199,8 +200,9 @@ fn entry_of(daemon: &Daemon, project: &Project) -> Result<(String, String), Stri
     let Some(entry) = entry else {
         return Err(format!(
             "refused: the project's worklog_token names the vault entry {name}, and the vault \
-             has none of that name for this project: the user creates it (flottille vault set \
-             {name} --username <their Jira account e-mail>) or corrects the project's tracker{}",
+             has none of that name for this project: the user creates it in Settings, Vault \
+             (or flottille vault set {name} --username <their Jira account e-mail>) or chooses \
+             another in the project's Settings, Tracker, or its file's [tracker]{}",
             vault::offer(daemon, project, name)
         ));
     };
@@ -213,9 +215,16 @@ fn entry_of(daemon: &Daemon, project: &Project) -> Result<(String, String), Stri
         Some(account) => Ok((name.clone(), account.to_owned())),
         None => Err(format!(
             "refused: the vault entry {name} has no username, and Jira's API takes the account's \
-             e-mail with the token: the user sets it again with --username"
+             e-mail with the token: the user sets it again in Settings, Vault (or with --username)"
         )),
     }
+}
+
+/// Whether a Jira project cannot log time for want of its vault entry: none named, one the
+/// project does not see, or one with no username. The window offers the way to its Settings.
+pub fn unset(daemon: &Daemon, project: &Project) -> bool {
+    matches!(project.tracker, Some(ProjectTracker::Jira { .. }))
+        && entry_of(daemon, project).is_err()
 }
 
 /// `tickets log_time`: the worklog posted, once the gate let it through.
