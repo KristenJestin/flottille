@@ -8388,6 +8388,8 @@ pub struct Reply {
     highlighted: usize,
     /// Escape closed the `/` list: it stays closed until the message is no longer a `/` word.
     dismissed: bool,
+    /// Review is on in the project: the `/` list offers `/review`.
+    review: bool,
     field: Entity<TextareaState>,
     options: Entity<SessionOptions>,
     /// What the root does while its turn runs, in the bar under the field.
@@ -8484,6 +8486,7 @@ impl Reply {
             slash_rows: Listing::default(),
             highlighted: 0,
             dismissed: false,
+            review: false,
             field,
             options,
             status_line: cx.new(|_| StatusLine::new()),
@@ -8797,15 +8800,23 @@ impl Reply {
             return Vec::new();
         };
         let typed = typed.to_lowercase();
+        let review = crate::extensions::review::COMMAND;
         commands
             .iter()
             .filter(|p| p.name != RELOAD_COMMAND && p.name.to_lowercase().contains(&typed))
+            .filter(|p| !(self.review && p.name == review))
             .map(|p| (p.name.clone(), p.description.clone()))
             .chain(
                 RELOAD_COMMAND
                     .contains(&typed)
                     .then(|| (RELOAD_COMMAND.to_owned(), RELOAD_COMMAND_LINE.to_owned())),
             )
+            .chain((self.review && review.contains(&typed)).then(|| {
+                (
+                    review.to_owned(),
+                    crate::extensions::review::COMMAND_LINE.to_owned(),
+                )
+            }))
             .collect()
     }
 
@@ -8836,6 +8847,14 @@ impl Reply {
             .map_or(text.len(), |at| cursor + at);
         let slash = text[start..end].strip_prefix('/').map(str::to_owned);
         self.slash_at = start..end;
+        // `/review` is offered while Review is on in the project.
+        self.review = self.shell.upgrade().is_some_and(|shell| {
+            shell
+                .read(cx)
+                .extensions()
+                .read(cx)
+                .active(crate::extensions::review::NAME, &self.project)
+        });
         if slash.is_none() {
             self.dismissed = false;
         }
@@ -8916,6 +8935,17 @@ impl Reply {
         let (before, mut after) = (&now[..at.start], &now[at.end..]);
         if entered {
             after = after.strip_prefix('\n').unwrap_or(after);
+        }
+        if name == crate::extensions::review::COMMAND && self.review {
+            let text = format!("{before}{}", after.trim_start());
+            self.has_text = !text.trim().is_empty();
+            self.field.update(cx, |field, cx| {
+                field.set_value(text.as_str(), window, cx);
+                field.set_selected_range(before.len()..before.len(), cx);
+            });
+            crate::extensions::review::start(&self.shell, &self.session, cx);
+            cx.notify();
+            return;
         }
         if name == RELOAD_COMMAND {
             let text = format!("{before}{}", after.trim_start());
@@ -9042,7 +9072,8 @@ impl Reply {
         let mut project: Vec<AnyElement> = Vec::new();
         for row in self.slash_rows.rows() {
             let (name, description) = row.value.clone();
-            let is_builtin = name == RELOAD_COMMAND;
+            let is_builtin = name == RELOAD_COMMAND
+                || (self.review && name == crate::extensions::review::COMMAND);
             let picked = name.clone();
             let mut line = ListRow::new(
                 ElementId::Name(format!("slash-{name}").into()),
@@ -9068,14 +9099,17 @@ impl Reply {
                 project.push(item);
             }
         }
+        let flottille_s = |name: &str| {
+            name == RELOAD_COMMAND || (self.review && name == crate::extensions::review::COMMAND)
+        };
         let builtin_listed = self
             .slash_rows
             .rows()
-            .any(|row| row.value.0 == RELOAD_COMMAND && !row.placement.is_gone());
+            .any(|row| flottille_s(&row.value.0) && !row.placement.is_gone());
         let project_listed = self
             .slash_rows
             .rows()
-            .any(|row| row.value.0 != RELOAD_COMMAND && !row.placement.is_gone());
+            .any(|row| !flottille_s(&row.value.0) && !row.placement.is_gone());
         let note = div()
             .id("slash-none")
             .aria_label("No command of this project yet: add one in its settings.")

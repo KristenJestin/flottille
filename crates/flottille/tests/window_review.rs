@@ -249,3 +249,47 @@ fn the_review_s_agents_are_one_folded_line_of_the_tree(cx: &mut TestAppContext) 
     settle(cx);
     assert!(!present(cx, &format!("rail-row-{pilot_id}")));
 }
+
+#[gpui_kit::test]
+fn slash_review_in_the_composer_starts_a_review_and_sends_nothing(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let session = session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&session)).is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&session), cx));
+    until(&shell, cx, "the session's page", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    settle(cx);
+
+    // The composer offers it among Flottille's own commands, unfolding into its list.
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/rev");
+    until(&shell, cx, "the list offers it", |cx| {
+        cx.update(|window, _| window.try_find("slash-review").is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("slash-review", cx));
+
+    eventually("the review", || {
+        user.call("review.list", json!({"session": session}))
+            .unwrap()["reviews"]
+            .as_array()
+            .is_some_and(|all| all.len() == 1)
+    });
+    let page = page(&shell, cx);
+    let reply = page.read_with(cx, |page, _| page.reply().cloned()).unwrap();
+    assert_eq!(
+        reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
+        "",
+        "the command is done, not sent"
+    );
+    let prompts: Vec<Value> = user.received_requests("session/prompt");
+    assert!(
+        !prompts.iter().any(|p| p.to_string().contains("/review")),
+        "the agent read it"
+    );
+}

@@ -4,6 +4,7 @@
 //! project tab, a page, an action on a row), shown only where it is on. The window never says what
 //! these parts are called in the code: each is a feature of the app, under its own title.
 
+pub mod review;
 pub mod specs;
 
 use std::collections::HashMap;
@@ -140,6 +141,7 @@ pub enum Then {
         setting: Option<String>,
     },
     Specs(specs::Then),
+    Review(review::Then),
 }
 
 /// How long the events that change what is listed must stop before it is read again: a switch
@@ -373,6 +375,7 @@ impl Registry {
                 cx.notify();
             }
             Then::Specs(then) => specs::answered(self, then, answer, cx),
+            Then::Review(then) => review::answered(self, then, answer, cx),
         }
     }
 
