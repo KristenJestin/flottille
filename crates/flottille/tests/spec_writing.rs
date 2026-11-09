@@ -168,7 +168,12 @@ fn a_root_of_a_project_with_specs_on_has_the_spec_tool() {
         .unwrap();
     assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);
     let actions = tool["inputSchema"]["properties"]["action"]["enum"].clone();
-    assert_eq!(actions, json!(["read", "write", "ask", "questions"]));
+    // `amend` is listed for every root, and refused by the gate to any but the session
+    // developing the spec (`tests/spec_amendments.rs`).
+    assert_eq!(
+        actions,
+        json!(["read", "write", "ask", "questions", "amend"])
+    );
     let made = user
         .call("spec.new", json!({"project": "app", "title": "Login"}))
         .unwrap();

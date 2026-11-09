@@ -108,6 +108,19 @@ pub enum SpecAction {
         #[arg(value_parser = ["take", "overwrite"])]
         choice: String,
     },
+    /// The amendments the session developing the spec proposed, answered or not
+    Amendments {
+        spec: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Accept an amendment into the spec, or refuse it: the development session is told
+    Amendment {
+        #[arg(value_parser = ["accept", "refuse"])]
+        answer: String,
+        spec: u64,
+        amendment: u64,
+    },
     /// Where an internal spec departs from its tickets, offered at Done; --post posts it on them
     /// as a comment, once
     Departures {
@@ -233,6 +246,28 @@ pub fn run(paths: &Paths, action: SpecAction) -> Result<ExitCode> {
             client.request("spec.ticket", json!({"spec": spec, "choice": choice}))?,
             false,
         ),
+        SpecAction::Amendments { spec, json } => {
+            let answer = client.request("spec.amendments", json!({"spec": spec}))?;
+            if json {
+                println!("{answer}");
+            } else {
+                for amendment in answer["amendments"].as_array().into_iter().flatten() {
+                    print!("{}", amendment_text(amendment));
+                }
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        SpecAction::Amendment {
+            answer,
+            spec,
+            amendment,
+        } => (
+            client.request(
+                "spec.amendment",
+                json!({"spec": spec, "amendment": amendment, "answer": answer}),
+            )?,
+            false,
+        ),
         SpecAction::Departures { spec, post, json } => {
             let answer = client.request("spec.departures", json!({"spec": spec, "post": post}))?;
             if json {
@@ -316,6 +351,54 @@ fn departures(answer: &Value) -> String {
     }
 }
 
+/// " (decided during development, 2026-11-08; was: …)" after an item an amendment changed or
+/// added.
+fn decided(item: &Value) -> String {
+    let Some(last) = item["amended"]
+        .as_array()
+        .and_then(|amended| amended.last())
+    else {
+        return String::new();
+    };
+    let day = crate::session_read::shown_date(last["at"].as_u64().unwrap_or_default());
+    match last["was"].as_str() {
+        Some(was) => format!(" (decided during development, {}; was: {was})", &day[..10]),
+        None => format!(" (decided during development, {})", &day[..10]),
+    }
+}
+
+/// An amendment as a text: its number, its state, what it proposes and why.
+fn amendment_text(amendment: &Value) -> String {
+    let field = |key: &str| amendment[key].as_str().unwrap_or_default();
+    let content = &amendment["content"];
+    let what = match (field("section"), amendment["item"].as_str()) {
+        ("behaviour", Some(item)) => format!(
+            "{item} changed: {}",
+            content["text"].as_str().unwrap_or_default()
+        ),
+        ("behaviour", None) => format!(
+            "a C added: {}",
+            content["text"].as_str().unwrap_or_default()
+        ),
+        (_, item) => format!(
+            "{}: {} {}",
+            item.map_or("a D added".to_owned(), |item| format!("{item} changed")),
+            content["question"].as_str().unwrap_or_default(),
+            content["decision"].as_str().unwrap_or_default()
+        ),
+    };
+    let state = match amendment["became"].as_str() {
+        Some(became) => format!("{}, {became}", field("state")),
+        None => field("state").to_owned(),
+    };
+    format!(
+        "Amendment {} ({state}) by session {}: {what}\n  why: {}\n",
+        amendment["amendment"],
+        field("agent"),
+        field("why")
+    )
+}
+
 /// A spec as a text, its sections in their order.
 fn text(spec: &Value) -> String {
     let field = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_owned();
@@ -335,14 +418,20 @@ fn text(spec: &Value) -> String {
     text.push_str(&format!("\nProblem\n{}\n", field(spec, "problem")));
     text.push_str("\nExpected behaviour\n");
     for c in list("behaviour") {
-        text.push_str(&format!("{}: {}\n", field(&c, "id"), field(&c, "text")));
+        text.push_str(&format!(
+            "{}: {}{}\n",
+            field(&c, "id"),
+            field(&c, "text"),
+            decided(&c)
+        ));
     }
     text.push_str("\nDecisions\n");
     for d in list("decisions") {
         text.push_str(&format!(
-            "{}: {}\n  question: {}\n",
+            "{}: {}{}\n  question: {}\n",
             field(&d, "id"),
             field(&d, "decision"),
+            decided(&d),
             field(&d, "question")
         ));
         for option in d["set_aside"].as_array().into_iter().flatten() {
@@ -373,6 +462,13 @@ fn text(spec: &Value) -> String {
     let departures = field(spec, "departures");
     if !departures.is_empty() {
         text.push_str(&format!("\nDepartures from the tickets\n{departures}\n"));
+    }
+    let amendments = list("amendments");
+    if !amendments.is_empty() {
+        text.push_str("\nAmendments\n");
+        for amendment in &amendments {
+            text.push_str(&amendment_text(amendment));
+        }
     }
     for question in list("asked") {
         let state = match question["decision"].as_str() {

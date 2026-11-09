@@ -4,19 +4,21 @@
 //! every gesture is a `spec.*` method of the daemon, its result a toast. Nothing of it shows in a
 //! project where Specs is off.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::f32::consts::FRAC_PI_2;
 
 use flottille_ui::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader,
     RadioChoices, Section, Toast, changing, color, enter, hoverable, icon, palette, presence,
-    presence_of, space, toast,
+    presence_of, space, toast, turning,
 };
 use gpui_kit::base::input::InputState;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div, px,
+    StatefulInteractiveElement, Styled, TestSupportExt as _, Transformation, WeakEntity, Window,
+    div, px, radians,
 };
 use serde_json::{Value, json};
 
@@ -71,6 +73,12 @@ pub enum Then {
     Develop {
         spec: u64,
     },
+    /// The user's answer to an amendment the development session proposed.
+    Amendment {
+        spec: u64,
+        amendment: u64,
+        accept: bool,
+    },
 }
 
 impl Then {
@@ -83,7 +91,8 @@ impl Then {
             | Then::Draft { spec }
             | Then::Ticket { spec, .. }
             | Then::Departures { spec }
-            | Then::Develop { spec } => Some(*spec),
+            | Then::Develop { spec }
+            | Then::Amendment { spec, .. } => Some(*spec),
             Then::Listed { .. } | Then::New | Then::FromTicket { .. } => None,
         }
     }
@@ -271,7 +280,8 @@ pub(super) fn answered(
         | Then::Ready { .. }
         | Then::Draft { .. }
         | Then::Ticket { .. }
-        | Then::Departures { .. } => {
+        | Then::Departures { .. }
+        | Then::Amendment { .. } => {
             if let Err(why) = answer {
                 toast(Toast::failure("The spec was not changed").detail(why), cx);
             }
@@ -799,6 +809,65 @@ pub struct Decision {
     pub set_aside: Vec<String>,
 }
 
+/// An amendment the session developing the spec proposed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Amendment {
+    pub amendment: u64,
+    /// What it does, in words: "C1 changed", "A new D".
+    pub what: String,
+    /// The item as it would read.
+    pub text: String,
+    pub why: String,
+    /// `pending`, `accepted` or `refused`.
+    pub state: String,
+}
+
+/// What a development decided of an item: the day of the last amendment accepted on it, and its
+/// text before, none for an item an amendment added: a D's says its question, its decision and
+/// the options it set aside.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Decided {
+    pub day: String,
+    pub was: Option<String>,
+}
+
+impl Decided {
+    fn of(item: &Value) -> Option<Self> {
+        let last = item["amended"].as_array()?.last()?;
+        let said = crate::session::said_at(last["at"].as_u64().unwrap_or_default());
+        Some(Self {
+            day: said.split(", ").next().unwrap_or(&said).to_owned(),
+            was: match &last["was"] {
+                Value::String(text) => Some(text.clone()),
+                Value::Object(d) => {
+                    let text = |key: &str| d.get(key).and_then(Value::as_str).unwrap_or_default();
+                    let set_aside: Vec<&str> = d
+                        .get("set_aside")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    Some(match set_aside.is_empty() {
+                        true => format!("{} {}", text("question"), text("decision")),
+                        false => format!(
+                            "{} {} Set aside: {}.",
+                            text("question"),
+                            text("decision"),
+                            set_aside.join(", ")
+                        ),
+                    })
+                }
+                _ => None,
+            },
+        })
+    }
+
+    fn said(&self) -> String {
+        format!("Decided during development, {}", self.day)
+    }
+}
+
 /// A spec as `spec.show` gives it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Spec {
@@ -824,6 +893,9 @@ pub struct Spec {
     /// An internal spec's comment of where it departs from its tickets.
     pub departures: String,
     pub departures_posted: bool,
+    pub amendments: Vec<Amendment>,
+    /// The items an accepted amendment changed or added, by identifier.
+    pub decided: Vec<(String, Decided)>,
 }
 
 impl Spec {
@@ -892,7 +964,49 @@ impl Spec {
                 .map(|state| (state.to_owned(), text(&value["ticket_write"]["problem"]))),
             departures: text(&value["departures"]),
             departures_posted: value["departures_posted_at"].is_u64(),
+            amendments: value["amendments"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|a| {
+                    let content = &a["content"];
+                    let behaviour = a["section"] == "behaviour";
+                    let what = match (a["item"].as_str(), behaviour) {
+                        (Some(item), _) => format!("{item} changed"),
+                        (None, true) => "A new C".to_owned(),
+                        (None, false) => "A new D".to_owned(),
+                    };
+                    let proposed = match behaviour {
+                        true => text(&content["text"]),
+                        false => format!(
+                            "{} {}",
+                            text(&content["question"]),
+                            text(&content["decision"])
+                        ),
+                    };
+                    Amendment {
+                        amendment: a["amendment"].as_u64().unwrap_or_default(),
+                        what,
+                        text: proposed,
+                        why: text(&a["why"]),
+                        state: text(&a["state"]),
+                    }
+                })
+                .collect(),
+            decided: ["behaviour", "decisions"]
+                .iter()
+                .flat_map(|section| value[*section].as_array().into_iter().flatten())
+                .filter_map(|item| Some((text(&item["id"]), Decided::of(item)?)))
+                .collect(),
         }
+    }
+
+    /// What a development decided of the item, if an amendment changed or added it.
+    pub fn decided_of(&self, id: &str) -> Option<&Decided> {
+        self.decided
+            .iter()
+            .find(|(item, _)| item == id)
+            .map(|(_, decided)| decided)
     }
 
     /// What its ticket's line says, once a Ready wrote to it or tried.
@@ -939,6 +1053,16 @@ pub struct SpecPage {
     questions: Listing<Question>,
     /// The decisions as drawn: one that comes unfolds.
     decisions: Listing<Decision>,
+    /// The expected behaviour as drawn: a C an amendment adds unfolds.
+    behaviour: Listing<(String, String)>,
+    /// The pending amendments as drawn: one answered folds away.
+    amendments: Listing<Amendment>,
+    /// The amendments whose answer the daemon has not taken yet.
+    amending: Vec<u64>,
+    /// The items whose old text is unfolded.
+    olds: HashSet<String>,
+    /// The refused amendments are unfolded.
+    refused_open: bool,
     /// The text answer of each open question.
     texts: HashMap<u64, Entity<InputState>>,
     /// The questions whose answer the daemon has not taken yet.
@@ -967,6 +1091,11 @@ impl SpecPage {
             shown_at: 0,
             questions: Listing::default(),
             decisions: Listing::default(),
+            behaviour: Listing::default(),
+            amendments: Listing::default(),
+            amending: Vec::new(),
+            olds: HashSet::new(),
+            refused_open: false,
             texts: HashMap::new(),
             answering: Vec::new(),
             moving: false,
@@ -1156,8 +1285,253 @@ impl SpecPage {
                 }
                 cx.notify();
             }
+            Then::Amendment {
+                amendment, accept, ..
+            } => {
+                self.amending.retain(|a| *a != amendment);
+                match answer {
+                    Ok(spec) => {
+                        let spec = Spec::of(&spec);
+                        let (title, detail) = match accept {
+                            true => (
+                                "Amendment accepted",
+                                "It is part of the spec now; the session developing it is told.",
+                            ),
+                            false => (
+                                "Amendment refused",
+                                "The spec is unchanged; the session developing it is told.",
+                            ),
+                        };
+                        toast(Toast::success(title).detail(detail), cx);
+                        self.shown = Some(Ok(spec));
+                    }
+                    Err(why) => toast(
+                        Toast::failure("The amendment was not answered").detail(why),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            }
             Then::Listed { .. } | Then::New | Then::FromTicket { .. } => {}
         }
+    }
+
+    /// Accepts the amendment into the spec, or refuses it.
+    pub fn answer_amendment(&mut self, amendment: u64, accept: bool, cx: &mut Context<Self>) {
+        if self.amending.contains(&amendment) {
+            return;
+        }
+        self.amending.push(amendment);
+        let then = Then::Amendment {
+            spec: self.spec,
+            amendment,
+            accept,
+        };
+        let answer = if accept { "accept" } else { "refuse" };
+        ask(
+            &self.shell,
+            "spec.amendment",
+            json!({"spec": self.spec, "amendment": amendment, "answer": answer}),
+            then,
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// A line that unfolds what it holds when clicked, its chevron turning.
+    fn toggle(
+        &self,
+        id: String,
+        said: String,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        flip: impl Fn(&mut Self) + 'static,
+    ) -> AnyElement {
+        let p = palette(cx);
+        let turn = turning(
+            SharedString::from(format!("{id}-chevron")),
+            open,
+            window,
+            cx,
+        );
+        hoverable(
+            div()
+                .id(SharedString::from(id))
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .aria_label(SharedString::from(said.clone()))
+                .aria_expanded(open)
+                .child(SharedString::from(said))
+                .child(
+                    icon(Icon::Chevron)
+                        .size(px(12.))
+                        .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn))),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    flip(this);
+                    cx.notify();
+                })),
+            move |d, t| d.text_color(color::mix(p.faint, p.mute, t)),
+        )
+        .into_any_element()
+    }
+
+    /// Under an item an amendment changed or added: "Decided during development" with its day,
+    /// and its old text folded, which unfolds on a click. It unfolds when the item gets it.
+    fn decided(
+        &self,
+        key: &str,
+        decided: Option<&Decided>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette(cx);
+        let content = match decided {
+            None => div().into_any_element(),
+            Some(decided) => {
+                let open = self.olds.contains(key);
+                let old = decided
+                    .was
+                    .clone()
+                    .map(|was| {
+                        let item = key.to_owned();
+                        let toggle = self.toggle(
+                            format!("{key}-was-toggle"),
+                            "Old text".to_owned(),
+                            open,
+                            window,
+                            cx,
+                            move |this| {
+                                if !this.olds.remove(&item) {
+                                    this.olds.insert(item.clone());
+                                }
+                            },
+                        );
+                        div().flex().flex_col().child(toggle).child(presence(
+                            SharedString::from(format!("{key}-was")),
+                            open,
+                            div()
+                                .id(SharedString::from(format!("{key}-was-text")))
+                                .aria_label(SharedString::from(was.clone()))
+                                .pt(space::XS)
+                                .text_size(px(12.5))
+                                .text_color(p.faint)
+                                .child(SharedString::from(was))
+                                .test_support(),
+                        ))
+                    })
+                    .map(IntoElement::into_any_element);
+                // Under the item's text, past the column of its number, as `numbered` draws it.
+                div()
+                    .pt(space::XS)
+                    .flex()
+                    .gap(space::MD)
+                    .child(div().flex_none().w(px(32.)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(space::XS)
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("{key}-decided")))
+                                    .aria_label(SharedString::from(decided.said()))
+                                    .text_size(px(12.))
+                                    .text_color(p.mute)
+                                    .child(SharedString::from(decided.said()))
+                                    .test_support(),
+                            )
+                            .children(old),
+                    )
+                    .into_any_element()
+            }
+        };
+        presence(
+            SharedString::from(format!("{key}-decided-block")),
+            decided.is_some(),
+            content,
+        )
+        .into_any_element()
+    }
+
+    /// A pending amendment: what it proposes, why, and Accept or Refuse.
+    fn amendment_card(&self, amendment: &Amendment, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let n = amendment.amendment;
+        let id = format!("spec-amendment-{n}");
+        let busy = self.amending.contains(&n);
+        let this = cx.weak_entity();
+        let accept = Button::primary(SharedString::from(format!("{id}-accept")), "Accept")
+            .disabled(busy)
+            .on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |this, cx| this.answer_amendment(n, true, cx))
+                        .ok();
+                }
+            });
+        let refuse = Button::secondary(SharedString::from(format!("{id}-refuse")), "Refuse")
+            .disabled(busy)
+            .on_click(move |_, _, cx| {
+                this.update(cx, |this, cx| this.answer_amendment(n, false, cx))
+                    .ok();
+            });
+        div()
+            .id(SharedString::from(id.clone()))
+            .aria_label(SharedString::from(format!(
+                "Amendment {n}: {}",
+                amendment.what
+            )))
+            .p(space::LG)
+            .flex()
+            .flex_col()
+            .gap(space::MD)
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(p.faint)
+                    .child(SharedString::from(format!(
+                        "Amendment {n} · {}",
+                        amendment.what
+                    ))),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-text")))
+                    .aria_label(SharedString::from(amendment.text.clone()))
+                    .text_size(px(13.5))
+                    .child(SharedString::from(amendment.text.clone()))
+                    .test_support(),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-why")))
+                    .aria_label(SharedString::from(amendment.why.clone()))
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(SharedString::from(format!("Why: {}", amendment.why)))
+                    .test_support(),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .child(accept)
+                    .child(refuse),
+            )
+            .test_support()
+            .into_any_element()
     }
 
     /// "Launch development": a session for the user, in a new workspace, builds the spec.
@@ -1511,6 +1885,34 @@ impl Render for SpecPage {
             at,
             reduce,
         );
+        let behaviour = spec
+            .as_ref()
+            .map(|spec| spec.behaviour.clone())
+            .unwrap_or_default();
+        self.behaviour.sync(
+            behaviour
+                .into_iter()
+                .map(|(id, text)| (format!("spec-behaviour-{id}"), (id, text))),
+            at,
+            reduce,
+        );
+        let pending: Vec<Amendment> = spec
+            .as_ref()
+            .map(|spec| {
+                spec.amendments
+                    .iter()
+                    .filter(|a| a.state == "pending")
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.amendments.sync(
+            pending
+                .into_iter()
+                .map(|a| (format!("spec-amendment-{}", a.amendment), a)),
+            at,
+            reduce,
+        );
         let title = spec
             .as_ref()
             .map_or_else(|| format!("Spec {}", self.spec), |spec| spec.title.clone());
@@ -1738,31 +2140,76 @@ impl Render for SpecPage {
                 spec.as_ref().map_or("", |spec| spec.problem.as_str()),
                 cx,
             ));
-        let behaviour: Vec<AnyElement> = spec
-            .as_ref()
-            .map(|spec| {
-                spec.behaviour
-                    .iter()
-                    .map(|(id, text)| {
-                        numbered(format!("spec-behaviour-{id}"), id, text.clone(), None, cx)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let behaviour_count = behaviour.len();
+        let rows: Vec<(String, (String, String), flottille_ui::Placement)> = self
+            .behaviour
+            .rows()
+            .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
+            .collect();
+        let mut lines = Vec::new();
+        for (key, (id, text), placement) in rows {
+            let decided = spec.as_ref().and_then(|spec| spec.decided_of(&id)).cloned();
+            let line = div()
+                .flex()
+                .flex_col()
+                .child(numbered(key.clone(), &id, text, None, cx))
+                .child(self.decided(&key, decided.as_ref(), window, cx));
+            lines.push(
+                flottille_ui::Item::new(
+                    ElementId::Name(format!("{key}-item").into()),
+                    placement,
+                    line,
+                )
+                .gap(space::MD)
+                .into_any_element(),
+            );
+        }
+        let behaviour_count = self.behaviour.len();
         let behaviour = Section::new("spec-behaviour", "Expected behaviour")
             .count(behaviour_count.to_string())
             .sentence("Each one sentence that can be checked.")
-            .child(match behaviour.is_empty() {
-                true => paragraph("spec-behaviour-none", "", cx),
-                false => block(behaviour),
-            });
+            .child(presence(
+                "spec-behaviour-none-block",
+                spec.as_ref().is_some_and(|spec| spec.behaviour.is_empty()),
+                paragraph("spec-behaviour-none", "", cx),
+            ))
+            .child(div().flex().flex_col().children(lines));
         let rows: Vec<(String, Decision, flottille_ui::Placement)> = self
             .decisions
             .rows()
             .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
             .collect();
         let decision_count = self.decisions.len();
+        let mut decision_lines = Vec::new();
+        for (key, decision, placement) in rows {
+            let mut below = decision.question.clone();
+            if !decision.set_aside.is_empty() {
+                below = format!("{below} Set aside: {}.", decision.set_aside.join("; "));
+            }
+            let decided = spec
+                .as_ref()
+                .and_then(|spec| spec.decided_of(&decision.id))
+                .cloned();
+            let line = div()
+                .flex()
+                .flex_col()
+                .child(numbered(
+                    key.clone(),
+                    &decision.id,
+                    decision.decision.clone(),
+                    Some(below),
+                    cx,
+                ))
+                .child(self.decided(&key, decided.as_ref(), window, cx));
+            decision_lines.push(
+                flottille_ui::Item::new(
+                    ElementId::Name(format!("{key}-item").into()),
+                    placement,
+                    line,
+                )
+                .gap(space::MD)
+                .into_any_element(),
+            );
+        }
         let decisions = Section::new("spec-decisions", "Decisions")
             .count(decision_count.to_string())
             .sentence("Each with the question it answered and the options set aside.")
@@ -1771,28 +2218,84 @@ impl Render for SpecPage {
                 spec.as_ref().is_some_and(|spec| spec.decisions.is_empty()),
                 paragraph("spec-decisions-none", "", cx),
             ))
-            .child(div().flex().flex_col().children(rows.into_iter().map(
-                |(key, decision, placement)| {
-                    let mut below = decision.question.clone();
-                    if !decision.set_aside.is_empty() {
-                        below = format!("{below} Set aside: {}.", decision.set_aside.join("; "));
-                    }
-                    let line = numbered(
-                        key.clone(),
-                        &decision.id,
-                        decision.decision.clone(),
-                        Some(below),
-                        cx,
-                    );
-                    flottille_ui::Item::new(
-                        ElementId::Name(format!("{key}-item").into()),
-                        placement,
-                        line,
-                    )
-                    .gap(space::MD)
-                    .into_any_element()
-                },
-            )));
+            .child(div().flex().flex_col().children(decision_lines));
+        // The amendments: the pending ones, each accepted or refused in one click, folding away
+        // once answered; the refused ones folded under their own line.
+        let rows: Vec<(String, Amendment, flottille_ui::Placement)> = self
+            .amendments
+            .rows()
+            .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
+            .collect();
+        let cards: Vec<AnyElement> = rows
+            .into_iter()
+            .map(|(key, amendment, placement)| {
+                let card = self.amendment_card(&amendment, cx);
+                flottille_ui::Item::new(
+                    ElementId::Name(format!("{key}-item").into()),
+                    placement,
+                    card,
+                )
+                .gap(space::MD)
+                .into_any_element()
+            })
+            .collect();
+        let refused: Vec<Amendment> = spec
+            .as_ref()
+            .map(|spec| {
+                spec.amendments
+                    .iter()
+                    .filter(|a| a.state == "refused")
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let refused_toggle = self.toggle(
+            "spec-amendments-refused-toggle".to_owned(),
+            format!("Refused ({})", refused.len()),
+            self.refused_open,
+            window,
+            cx,
+            |this| this.refused_open = !this.refused_open,
+        );
+        let refused_lines: Vec<AnyElement> = refused
+            .iter()
+            .map(|a| {
+                let why = format!("{} Why: {}", a.what, a.why);
+                numbered(
+                    format!("spec-amendment-{}-refused", a.amendment),
+                    &a.amendment.to_string(),
+                    a.text.clone(),
+                    Some(why),
+                    cx,
+                )
+            })
+            .collect();
+        let has_amendments = spec
+            .as_ref()
+            .is_some_and(|spec| !spec.amendments.is_empty());
+        let amendments = Section::new("spec-amendments", "Amendments")
+            .count(self.amendments.len().to_string())
+            .sentence(
+                "What the session developing the spec proposes from what you decided. Accepted, \
+                 it is part of the spec, marked as decided during development.",
+            )
+            .child(div().flex().flex_col().children(cards))
+            .child(
+                presence(
+                    "spec-amendments-refused-block",
+                    !refused.is_empty(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(refused_toggle)
+                        .child(presence(
+                            "spec-amendments-refused",
+                            self.refused_open,
+                            div().pt(space::SM).child(block(refused_lines)),
+                        )),
+                )
+                .gap(space::MD),
+            );
         let outside: Vec<AnyElement> = spec
             .as_ref()
             .map(|spec| {
@@ -2022,6 +2525,11 @@ impl Render for SpecPage {
                 enter(key("questions"), 1, questions),
             ))
             .child(presence(
+                "spec-amendments-block",
+                has_amendments,
+                enter(key("amendments"), 1, amendments),
+            ))
+            .child(presence(
                 "spec-body-block",
                 read,
                 div()
@@ -2078,5 +2586,17 @@ mod tests {
         );
         assert!(spec(0, false).not_ready().is_some());
         assert_eq!(spec(0, true).not_ready(), None);
+    }
+
+    #[test]
+    fn a_changed_decision_shows_its_old_question_and_set_aside_options() {
+        let d = json!({"id": "D1", "amended": [{"at": 0, "was": {
+            "question": "Where do the filters go?", "decision": "Above the list.",
+            "set_aside": ["In a side panel"]}}]});
+
+        assert_eq!(
+            Decided::of(&d).unwrap().was.as_deref(),
+            Some("Where do the filters go? Above the list. Set aside: In a side panel.")
+        );
     }
 }
