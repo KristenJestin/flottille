@@ -51,6 +51,12 @@ most for a keyring that asks to be unlocked, then goes on), and a new secret is 
 it is set. A secret replaced or removed stays masked until the daemon restarts: another entry may
 hold the same value.
 
+## Choosing the entry for time logging
+
+A Jira project's Settings, Tracker, names the entry (`docs/projects.md`, "Forges and tracker"): the
+select `Log time with` lists the entries the project sees by name and username, and its link opens
+the vault's new-entry dialog from there.
+
 ## What agents see
 
 The `vault` tool, listed to an agent whose project sees at least one entry (`docs/tools.md`, "The

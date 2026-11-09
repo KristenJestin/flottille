@@ -272,12 +272,25 @@ pub fn in_sight(block: &Block) -> bool {
         Block::Notice { kind, .. } => {
             matches!(
                 kind.as_str(),
-                "failed" | "ended" | "resumed" | COMPACTED_KIND | COMPACTION_FAILED_KIND
+                "failed"
+                    | "ended"
+                    | "resumed"
+                    | COMPACTED_KIND
+                    | COMPACTION_FAILED_KIND
+                    | TIME_LOGGING_KIND
             )
         }
         _ => false,
     }
 }
+
+/// The kind of the line that says a time was not logged for want of the project's vault entry,
+/// with the button that opens its Settings at Tracker.
+pub const TIME_LOGGING_KIND: &str = "time logging";
+
+/// What that line says: the window first, the file second (`docs/tickets.md`, "Logging time").
+const TIME_LOGGING_TEXT: &str = "Not logged: this project has no vault entry to log time with. \
+    Choose one in its Settings, Tracker, or write worklog_token in its file.";
 
 /// The kind of the line a compaction of the conversation is.
 pub const COMPACTED_KIND: &str = "compacted";
@@ -654,6 +667,14 @@ impl Conversation {
             changes.extend(self.add_approval(number));
         }
         changes.extend(self.fold(event));
+        // A time that could not be logged for want of the project's vault entry: its line, with
+        // the button to the project's Settings, comes after the step that was refused.
+        if event.name == "agent.tool_served" && event.data["setup"] == "time_logging" {
+            changes.extend(self.push(Block::Notice {
+                kind: TIME_LOGGING_KIND.into(),
+                text: TIME_LOGGING_TEXT.into(),
+            }));
+        }
         self.last_at = Some(event.at);
         changes
     }

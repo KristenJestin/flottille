@@ -290,7 +290,10 @@ repository"). It is one of:
 `kind = "jira"` with `site` (the Jira Cloud site, `acme.atlassian.net`) and `projects`, the keys of
 its Jira projects (at least one), and optionally `worklog_token`, the name of the vault entry that
 logs time on Jira (`docs/tickets.md`, "Logging time"). A project with no `[tracker]` takes no
-ticket.
+ticket. With Jira chosen, the Tracker dialog has the field `Log time with`: a select of the vault
+entries the project sees (its own and the global ones; name and username, never a secret), `None`
+first, saved as `worklog_token`; under it a link, `Add one in the vault`, opens Settings, Vault on
+a new entry and goes back to the project's Tracker when that dialog closes.
 
 The forges and the tracker are set in the project's **Settings** in the window (the project page's
 header): each repository's forge is pre-filled from its remote's address, nothing is active until
