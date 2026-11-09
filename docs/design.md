@@ -1037,7 +1037,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
   place in the sidebar for the "Ended" group, folded, pinned at the bottom of the sidebar
-  whatever the tree's length and unfolding upward over it (its rows say their project), and its
+  whatever the tree's length and unfolding upward over it (its rows say their project). Unfolded
+  it takes at most eight rows, or 35% of the window's height when that is less, and its rows
+  scroll inside it, the most recently ended first; and its
   page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
   (`agent.resume`), enabled once its process is gone, which brings the composer back; that bar is

@@ -18,7 +18,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
-    TestSupportExt as _, Transformation, WeakEntity, Window, div, px, radians, relative,
+    TestSupportExt as _, Transformation, WeakEntity, Window, div, px, radians,
 };
 
 use crate::actions::Command;
@@ -35,6 +35,11 @@ pub fn project_id(name: &str) -> ElementId {
 /// The element id of the "Ended" group, at the bottom of the tree.
 pub fn ended_id() -> ElementId {
     ElementId::Name("ended".into())
+}
+
+/// The element id of the block inside the "Ended" group that holds its rows and scrolls.
+pub fn ended_scroll_id() -> ElementId {
+    ElementId::Name("ended-sessions".into())
 }
 
 /// The element id of the "⋯" menu a session's row offers.
@@ -374,16 +379,14 @@ impl Render for Sidebar {
         let shell = self.shell.clone();
         let adds = self.shell.clone();
         let ended = self.ended.clone().map(|(group, present)| {
-            // At the panel's bottom, under a line; it takes half the panel at most, and folds
-            // away when its last session leaves.
+            // At the panel's bottom, under a line; its rows scroll inside their own block, and it
+            // folds away when its last session leaves.
             presence(
                 "sidebar-ended",
                 present,
                 div()
                     .id("ended-footer")
                     .flex_none()
-                    .max_h(relative(0.5))
-                    .overflow_y_scroll()
                     .border_t_1()
                     .border_color(p.line)
                     .bg(p.side)
@@ -635,13 +638,33 @@ impl Render for ProjectNode {
 pub struct Level {
     rows: Vec<Entity<SessionRow>>,
     list: Listing<Entity<SessionRow>>,
+    /// Takes at most [`ENDED_ROWS`] rows, or [`ENDED_SHARE`] of the window when that is less, and
+    /// scrolls inside itself beyond it.
+    scrolls: bool,
 }
+
+/// How many rows the "Ended" group shows before it scrolls.
+const ENDED_ROWS: f32 = 8.;
+/// The height of a session's row of one line, which the "Ended" group's rows are.
+const ROW: f32 = 28.;
+/// The share of the window's height the "Ended" group takes at most, when that is less than
+/// [`ENDED_ROWS`] rows.
+const ENDED_SHARE: f32 = 0.35;
 
 impl Level {
     fn new() -> Self {
         Self {
             rows: Vec::new(),
             list: Listing::default(),
+            scrolls: false,
+        }
+    }
+
+    /// The level of the "Ended" group, which scrolls inside itself.
+    fn scrolling() -> Self {
+        Self {
+            scrolls: true,
+            ..Self::new()
         }
     }
 
@@ -654,7 +677,7 @@ impl Level {
 }
 
 impl Render for Level {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = framed(
             &mut self.list,
             &self.rows,
@@ -665,7 +688,18 @@ impl Render for Level {
         if rows.is_empty() {
             return div().into_any_element();
         }
-        tree_children(rows, cx).into_any_element()
+        let rows = tree_children(rows, cx);
+        if !self.scrolls {
+            return rows.into_any_element();
+        }
+        let most = (px(ENDED_ROWS * ROW) + px(4.)).min(window.viewport_size().height * ENDED_SHARE);
+        div()
+            .id(ended_scroll_id())
+            .max_h(most)
+            .overflow_y_scroll()
+            .child(rows)
+            .test_support()
+            .into_any_element()
     }
 }
 
@@ -680,7 +714,7 @@ pub struct EndedNode {
 impl EndedNode {
     /// The group, folded.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let sessions = cx.new(|_| Level::new());
+        let sessions = cx.new(|_| Level::scrolling());
         let fold = cx.new(|_| Fold::new("fold-ended", sessions.clone(), false));
         Self {
             open: false,

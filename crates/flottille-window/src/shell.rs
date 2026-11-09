@@ -1997,9 +1997,9 @@ impl Shell {
             projects.insert(project.name.clone(), node);
         }
         // The ended sessions leave their places for one folded group below every project.
-        let ended = snapshot.sessions.iter().filter(|session| session.ended);
+        let ended = snapshot.ended_sessions();
         let mut marks = Vec::new();
-        let rows = self.session_rows(ended, &mut sessions, &mut marks, now, cx);
+        let rows = self.session_rows(ended.iter().copied(), &mut sessions, &mut marks, now, cx);
         let present = !rows.is_empty();
         if self.ended.is_none() && present {
             self.ended = Some(cx.new(EndedNode::new));
