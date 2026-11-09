@@ -897,8 +897,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   indented one step, tied to it by a `↳` connector (the line from the pilot turning into the row)
   whose arrowhead has the tooltip "led by <pilot>"; only a led row is indented, every root's title
   starts at the same x. The pilot's row gains a chevron, at the end of the row beside its time and
-  "⋯", that folds its led rows away with it, and each led row keeps its own unread dot and draft
-  pencil. Its page's header says "led by <pilot>", and a line above its composer says
+  "⋯", that folds its led rows away with it; folded, its state mark is the most urgent of its own
+  and its hidden led sessions' (waits for the user, then running, then its own), nothing else is
+  added to the row; each led row keeps its own unread dot and draft pencil. Its page's header says "led by <pilot>", and a line above its composer says
   "Your messages go straight to this session; its lead is not asked." (it names no session: a
   sentence of the window that quotes a session's title shows it on one line at most, cut with an
   ellipsis, in emphasis, never wrapped into the sentence). The row's "⋯" menu of a

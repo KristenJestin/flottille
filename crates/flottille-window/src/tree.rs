@@ -825,6 +825,11 @@ pub struct SessionRow {
     led_by: Option<SharedString>,
     /// What the mark said last, kept while it fades out.
     led_said: SharedString,
+    /// The state of the session itself, which the mark shows unless it hides a led session that
+    /// asks more of the user.
+    own: Option<AgentState>,
+    /// The most urgent state of the led sessions its folded row hides.
+    hidden: Option<AgentState>,
     /// How many led sessions sit under its row, and whether they are unfolded.
     leads: usize,
     open: bool,
@@ -868,6 +873,8 @@ impl SessionRow {
             menu: None,
             led_by: None,
             led_said: SharedString::default(),
+            own: None,
+            hidden: None,
             leads: 0,
             open: true,
             tie: None,
@@ -917,6 +924,27 @@ impl SessionRow {
             self.leads = leads;
             cx.notify();
         }
+    }
+
+    /// What its folded row hides.
+    pub fn hidden(&self) -> Option<AgentState> {
+        self.hidden
+    }
+
+    /// The most urgent state among the led sessions its folded row hides: the mark shows it when
+    /// it asks more than the session's own. `None` while the row is unfolded.
+    pub fn set_hidden(&mut self, hidden: Option<AgentState>, cx: &mut Context<Self>) {
+        if self.hidden != hidden {
+            self.hidden = hidden;
+            if self.mark.set(self.shown_mark(), cx) {
+                cx.notify();
+            }
+        }
+    }
+
+    /// What the mark shows: waiting for the user beats running, which beats the session's own.
+    fn shown_mark(&self) -> Option<AgentState> {
+        AgentState::strongest(self.own.into_iter().chain(self.hidden)).or(self.own)
     }
 
     /// Whether the led sessions under its row are unfolded.
@@ -1129,7 +1157,7 @@ impl SessionRow {
 
     /// Whether it shows this already.
     pub fn holds(&self, title: &str, mark: Option<AgentState>, active_at: u64) -> bool {
-        self.title.as_ref() == title && self.mark.shown == mark && self.active_at == active_at
+        self.title.as_ref() == title && self.own == mark && self.active_at == active_at
     }
 
     pub fn set(
@@ -1140,7 +1168,8 @@ impl SessionRow {
         now: u64,
         cx: &mut Context<Self>,
     ) {
-        let mut changed = self.mark.set(mark, cx);
+        self.own = mark;
+        let mut changed = self.mark.set(self.shown_mark(), cx);
         if self.title.as_ref() != title {
             self.title = SharedString::from(title.to_owned());
             changed = true;

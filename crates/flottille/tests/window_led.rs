@@ -595,3 +595,58 @@ fn a_led_session_is_offset_one_step_and_draws_its_connector(cx: &mut TestAppCont
     assert!(near(turn.bottom() - px(0.5), docs.center().y));
     assert!(label(cx, tie_id(session_id(&lone))).is_none());
 }
+
+fn mark_of(
+    shell: &Entity<Shell>,
+    id: &str,
+    cx: &mut VisualTestContext,
+) -> Option<flottille_ui::AgentState> {
+    shell.read_with(cx, |s, cx| {
+        s.session(id).and_then(|row| row.read(cx).mark())
+    })
+}
+
+#[gpui_kit::test]
+fn a_folded_root_shows_that_a_led_session_runs(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "begin the docs session", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "led"}}}]},
+        {"when": "Write the docs", "do": [{"hang": true}]}
+    ]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let (lead, led) = lead_and_led(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the led session runs", |cx| {
+        mark_of(&shell, &led, cx) == Some(flottille_ui::AgentState::Running)
+    });
+    settle(cx);
+
+    // Unfolded, each row shows its own: the led session spins, its pilot waits for it.
+    assert_eq!(
+        mark_of(&shell, &lead, cx),
+        Some(flottille_ui::AgentState::Waiting)
+    );
+
+    // Folded, the pilot's row shows what its hidden led session does.
+    cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
+    settle(cx);
+    assert_eq!(listed(&shell, cx), std::slice::from_ref(&lead));
+    assert_eq!(
+        mark_of(&shell, &lead, cx),
+        Some(flottille_ui::AgentState::Running),
+        "the folded root spins for the session it hides"
+    );
+
+    // Unfolded again, nothing changes: the pilot waits, the led session spins.
+    cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
+    settle(cx);
+    assert_eq!(
+        mark_of(&shell, &lead, cx),
+        Some(flottille_ui::AgentState::Waiting)
+    );
+    assert_eq!(
+        mark_of(&shell, &led, cx),
+        Some(flottille_ui::AgentState::Running)
+    );
+}
