@@ -68,6 +68,14 @@ struct AgentShow {
     before: Option<u64>,
 }
 
+/// `agent.quota_resume`'s parameters: whether the session is resumed at its quota's reset.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentQuotaResume {
+    agent: String,
+    resume: bool,
+}
+
 /// A depth an agent may have, at most: a root is at 0, and a child, at 1, starts none
 /// (`docs/design.md` §5.1).
 pub const DEPTH_LIMIT: u32 = 1;
@@ -158,7 +166,14 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 Failure::new("unavailable", "the message could not be stored")
             })?;
             crate::subscriptions::user_wrote(daemon, &agent.id);
+            crate::quota::user_wrote(daemon, &agent.id);
             Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
+        }
+        "agent.quota_resume" => {
+            let asked: AgentQuotaResume = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            refuse_child(daemon, &agent, "chooses when it resumes")?;
+            crate::quota::choose(daemon, &agent, asked.resume)
         }
         "agent.unqueue" => {
             let asked: AgentUnqueue = serde_json::from_value(params)?;
@@ -398,6 +413,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
             shown["tools_reload"] = reloading(daemon, &agent.id).into();
             shown["led_by"] = json!(agent.launched_by.as_ref().filter(|_| agent.led));
+            shown["quota"] = crate::quota::shown(daemon, &agent);
             Ok(json!({"agent": shown, "events": events, "more": more}))
         }
         method => Err(Failure::new(
@@ -2019,6 +2035,9 @@ impl acp::Events for Recorder {
         let _ = self
             .daemon
             .read(|store| store.deliveries_taken(&self.agent));
+        // Before the agent is idle: the sweep takes the waits of idle sessions only, and this turn
+        // may have ended an old wait or made a new one.
+        crate::quota::turn_ended(&self.daemon, &self.agent);
         change(
             &self.daemon,
             &self.agent,

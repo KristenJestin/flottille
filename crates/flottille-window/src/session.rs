@@ -67,7 +67,7 @@ use crate::providers::Providers;
 use crate::queued::QueuedMessages;
 use crate::runs::{self, CommandList, CommandPanel, EndedFold, ended_row, rail_label};
 use crate::session_link::{
-    self, ForgeFacts, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink,
+    self, ForgeFacts, PlaceFacts, PullRequest, Quota, RepositoryFacts, Request, SessionLink,
     SessionUpdate, TicketFacts, TreeAgent, Where,
 };
 use crate::session_options::{Runs, SessionOptions};
@@ -99,10 +99,14 @@ pub fn end_sentence(count: usize) -> String {
 /// The reply field's placeholder and its send button's tooltip: the field writes to the root.
 pub const REPLY_PLACEHOLDER: &str = "Reply…";
 pub const SEND: &str = "Send";
+/// What the chip that resumes the session at its quota's reset does (its tooltip).
+const QUOTA_HINT: &str = "Its quota is spent: at the reset, Flottille tells it to continue where it stopped. Only this session; Settings, Sessions holds the default.";
 /// The composer's chip while the root's prompt cache expired, and what it does (its tooltip).
 pub const COMPACT_CHIP: &str = "Compact";
 /// The room the chip takes at rest (padding and its word): how wide it is while it opens and folds.
 const COMPACT_CHIP_WIDTH: f32 = 80.;
+/// The same for `Resume at 13:00`.
+const QUOTA_CHIP_WIDTH: f32 = 136.;
 const COMPACT_HINT: &str = "Its prompt cache expired: a summary makes the next turn read a short history instead of the whole conversation at full price.";
 /// The composer's button that interrupts the turn that runs.
 pub const STOP: &str = "Stop the turn";
@@ -139,9 +143,25 @@ pub fn state_of(agent: &TreeAgent) -> AgentState {
         }
         // Between turns, for what happens outside: a pull request's checks, a review.
         _ if agent.waiting_on.as_deref() == Some("subscription") => AgentState::Waiting,
+        // Between turns, for its quota's reset.
+        "idle" if agent.quota.is_some() => AgentState::Waiting,
         "starting" | "working" => AgentState::Running,
         _ => AgentState::Idle,
     }
+}
+
+/// How a session waiting for its quota's reset says its state: `Out of quota, resets at 13:00`,
+/// the reset in the machine's local time, or `Out of quota` when it is unknown.
+pub fn out_of_quota(reset_at: Option<u64>) -> String {
+    match reset_at {
+        Some(at) => format!("Out of quota, resets at {}", clock(at)),
+        None => "Out of quota".to_owned(),
+    }
+}
+
+/// The composer's switch while the session waits for a known reset: `Resume at 13:00`.
+pub fn resume_at(reset_at: u64) -> String {
+    format!("Resume at {}", clock(reset_at))
 }
 
 /// How the page names an agent: its role for the root, its task's title for a child.
@@ -1523,7 +1543,11 @@ impl SessionPage {
                 .update(cx, |list, cx| list.set_compacting(compacting, cx));
             self.sync_pending(cx);
             self.fetch_pictures(cx);
+            let quota = (state_of(root) == AgentState::Waiting)
+                .then_some(root.quota)
+                .flatten();
             self.reply.update(cx, |reply, cx| {
+                reply.set_quota(quota, cx);
                 reply.set_images(images);
                 reply.set_running(running, cx)
             });
@@ -1548,6 +1572,10 @@ impl SessionPage {
                     doing: agent.doing.clone(),
                     waits_on_subscription: agent.waiting_on.as_deref() == Some("subscription"),
                     compacting: agent.compacting,
+                    out_of_quota: (state_of(agent) == AgentState::Waiting)
+                        .then_some(agent.quota)
+                        .flatten()
+                        .map(|quota| out_of_quota(quota.reset_at)),
                     status,
                 })
             })
@@ -6433,6 +6461,8 @@ pub struct RailAgent {
     pub waits_on_subscription: bool,
     /// Flottille compacts its conversation.
     pub compacting: bool,
+    /// Between turns, it waits for its quota's reset: how its state says it.
+    pub out_of_quota: Option<String>,
     pub status: Entity<Status>,
 }
 
@@ -7024,13 +7054,18 @@ impl Render for SessionRail {
                     }),
                 ),
             };
-            let waiting_line = (agent.waits_on_subscription || agent.compacting).then(|| {
-                SharedString::from(match wakes.get(&agent.id) {
-                    _ if agent.compacting => COMPACTING.to_owned(),
-                    Some(at) => format!("waiting: wake at {}", clock(*at)),
-                    None => agent.doing.clone(),
-                })
-            });
+            let waiting_line =
+                (agent.waits_on_subscription || agent.compacting || agent.out_of_quota.is_some())
+                    .then(|| {
+                        SharedString::from(match wakes.get(&agent.id) {
+                            _ if agent.compacting => COMPACTING.to_owned(),
+                            _ if agent.out_of_quota.is_some() => {
+                                agent.out_of_quota.clone().unwrap_or_default()
+                            }
+                            Some(at) => format!("waiting: wake at {}", clock(*at)),
+                            None => agent.doing.clone(),
+                        })
+                    });
             // A child with task runs going says how many; a click opens it with its Runs section.
             let chip_t = counts.get(&agent.id).copied().unwrap_or_default();
             let runs_chip = (kid && chip_t > 0.).then(|| {
@@ -8268,6 +8303,12 @@ pub struct Reply {
     compact_offered: bool,
     /// Whether that toggle is ticked: from the setting, then as the user leaves it.
     compact: bool,
+    /// The root waits for a known quota reset: the composer offers to resume at it.
+    quota: Option<Quota>,
+    /// The last wait that was offered: the chip keeps its words and its fill while it fades out.
+    quota_last: Option<Quota>,
+    /// The switch flipped, until the daemon answers: what it was asked to become.
+    quota_pending: Option<bool>,
     /// The messages sent and not recorded yet, the oldest first: each shows from the moment it
     /// is sent, and one the daemon refused stays until it is sent again or taken back.
     pending: Vec<Pending>,
@@ -8352,6 +8393,9 @@ impl Reply {
             next_pending: 0,
             compact_offered: false,
             compact: false,
+            quota: None,
+            quota_last: None,
+            quota_pending: None,
             left: HashMap::new(),
             activity: None,
             attached: Attachments::default(),
@@ -8498,6 +8542,96 @@ impl Reply {
                     Button::choice("reply-compact", COMPACT_CHIP, self.compact)
                         .tooltip(COMPACT_HINT)
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_compact(cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The root's wait for its quota's reset, as the tree says it: the switch shows while the
+    /// reset is known.
+    pub fn set_quota(&mut self, quota: Option<Quota>, cx: &mut Context<Self>) {
+        let quota = quota.filter(|quota| quota.reset_at.is_some());
+        if self.quota != quota {
+            self.quota = quota;
+            self.quota_last = quota.or(self.quota_last);
+            cx.notify();
+        }
+    }
+
+    /// Whether the switch shows, and whether it is on: what it was asked to become while the
+    /// daemon has not answered.
+    pub fn quota_offer(&self) -> Option<bool> {
+        self.quota
+            .map(|quota| self.quota_pending.unwrap_or(quota.resume))
+    }
+
+    pub fn toggle_quota(&mut self, cx: &mut Context<Self>) {
+        let Some(on) = self.quota_offer() else {
+            return;
+        };
+        if self.quota_pending.is_some() {
+            return;
+        }
+        self.quota_pending = Some(!on);
+        let command = Command::QuotaResume {
+            session: self.session.clone(),
+            resume: !on,
+        };
+        self.shell
+            .update(cx, |shell, _| shell.perform(command))
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon's answer to a flip: taken, the tree says it next; refused, the switch goes
+    /// back and a toast says why.
+    pub fn quota_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        let asked = self.quota_pending.take();
+        match refused {
+            None => {
+                if let (Some(quota), Some(asked)) = (&mut self.quota, asked) {
+                    quota.resume = asked;
+                }
+            }
+            Some(why) => toast(
+                Toast::failure("The resume at the reset was not changed").detail(why),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// Resume at the reset, a quiet chip at the end of the toolbar's controls while the root waits
+    /// for its quota: its room opens and it fades in, folds and fades out; its ground follows the
+    /// choice (never the accent fill) and its label the reset. At rest it is its natural width, and the explanation is its tooltip.
+    fn render_quota(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let offered = self.quota.is_some();
+        let shown = fade("reply-quota-shown", offered, PANEL, window, cx);
+        if !offered && shown == 0.0 {
+            return None;
+        }
+        let on = self
+            .quota_offer()
+            .or(self.quota_last.map(|quota| quota.resume));
+        let label = self
+            .quota
+            .or(self.quota_last)
+            .and_then(|quota| quota.reset_at)
+            .map(resume_at)
+            .unwrap_or_default();
+        Some(
+            div()
+                .flex_none()
+                .opacity(shown)
+                .when(shown < 1.0, |d| {
+                    d.w(px(QUOTA_CHIP_WIDTH) * shown).overflow_hidden()
+                })
+                .child(
+                    Button::choice("reply-quota", label, on.unwrap_or(false))
+                        .ghost()
+                        .tooltip(QUOTA_HINT)
+                        .disabled(self.quota_pending.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_quota(cx))),
                 )
                 .into_any_element(),
         )
@@ -9170,6 +9304,8 @@ impl Render for Reply {
                     .child(self.mode.clone())
                     .children(self.render_compact(window, cx))
                     .child(Attachments::button(cx, Self::attached_of))
+                    // An optional chip goes after the fixed controls: its arrival moves none.
+                    .children(self.render_quota(window, cx))
                     // What the root does while its turn runs, where the line above the field was.
                     .child(
                         div()
@@ -9452,6 +9588,7 @@ mod tests {
             tools_outdated: false,
             tools_reload: false,
             compacting: false,
+            quota: None,
         }
     }
 

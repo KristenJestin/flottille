@@ -471,6 +471,19 @@ chip until the agent's next turn or compaction. Said once per expiry.
 | `agent` | |
 | `compact` | The setting `after_expiry` when it was said: whether the chip starts ticked. |
 
+#### `agent.quota`
+
+A root's wait for its quota's reset began, changed or ended (`docs/design.md` §5.9).
+
+| Field | |
+|---|---|
+| `agent` | |
+| `limited` | `true` while it waits; `false` once the wait ended. |
+| `reset_at` | While it waits: the reset, in milliseconds since the epoch; `null` when the provider's words could not be read. |
+| `resume` | While it waits: the user's choice for this session, `null` to follow the setting. |
+| `limited_at` | While it waits: when the provider said it. |
+| `why` | Once it ended: `the user wrote`, `a turn ran`, `resumed` or `the quota reset`. |
+
 #### `agent.compaction_failed`
 
 Flottille's compaction of the agent failed, and changed nothing: the agent goes on in its

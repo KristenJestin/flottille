@@ -52,7 +52,7 @@ const REFUSED: &str = "Refused: this agent can use Flottille's tools only.";
 
 /// How Claude Code's own messages for a spent usage start, as the pinned version's Agent SDK
 /// lists them (`USAGE_LIMIT_ERROR_PREFIXES`).
-const USAGE_LIMIT: [&str; 12] = [
+pub(crate) const USAGE_LIMIT: [&str; 12] = [
     "You've hit your",
     "You've reached your",
     "You're out of usage credits",

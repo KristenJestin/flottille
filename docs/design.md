@@ -536,6 +536,37 @@ agent wrote is data.
    rather than add a second. The triggers around the cache's expiry stay the compactor's, when
    one is chosen: a handoff would read the whole history again at full price.
 
+### 5.9 A spent quota
+
+When an agent's quota runs out, its provider ends the turn with words of its own, for Claude
+"You've hit your weekly limit · resets 1pm (Europe/Paris)", and the agent is idle like one that
+finished its work. Flottille tells them apart by what the provider reports, never by what the agent
+says: at the end of each turn of a root, the limits its provider reported during it
+(`agent.provider_limit`) go through that provider's recogniser (Claude's reads the reset after
+`resets`; another provider's wording is one more recogniser). A reported limit makes the session
+**wait for its reset**: the instant read from the words, the next occurrence of that time of day
+(on that date when they give one) in the zone they name in brackets, the machine's when they name
+none, or the one passed up to ten minutes ago when the provider's clock is late; unknown when the
+words cannot be read. The wait is stored (`quota_waits`), so a restart keeps it, and it is said by
+`agent.quota` and in `agent.list`, `agent.tree` and `agent.show` (`quota`: `reset_at`, `resume`).
+
+The window says it as the session's state, once: waiting, its words `Out of quota, resets at
+13:00` (the reset in the user's local time; `Out of quota` when unknown), on the session's row in
+the sidebar and in the rail of its page, in place of idle.
+
+A setting resumes the session at its reset, **off by default**: "Resume sessions when the quota
+resets", `resume_at_reset` of `sessions.toml`, set in Settings, Sessions, or by `sessions.set`.
+While a session waits for a known reset, its composer's toolbar shows a chip, `Resume at 13:00`,
+beside Compact, ticked or not from that setting, which the user toggles for this session alone
+(`agent.quota_resume`). When it is on, the sweep (no timer of its own) delivers the session one message at the reset plus a
+minute, `Your quota has reset: continue where you stopped.` (a `quota-reset` delivery, never the
+user's), and the session runs again. The wait for that instant is taken in one write, so the
+message goes once; a reset that could not be read resumes nothing; a reset that came while it is
+off ends the wait and sends nothing. A reset already past when the daemon starts is looked at
+then: it resumes at once when allowed. The wait ends with a message of the user's (which starts a
+turn anyway), a turn that ran without the limit, the reset, and the end of the session. Only a
+root waits: a child's limit is its parent's to read (§5.3).
+
 ## 6. Projects and workspaces
 
 ### 6.1 Projects
@@ -965,7 +996,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
   guidance (its editor, Reset to default, Save and its line on when a change applies; a link to the
   guidance opens this tab with the guidance in view), then the providers, the
-  Rules for every project, edited the same way as the guidance, the Sessions (a switch, "End inactive sessions", off by default; switched on it chooses 7 days and a select of the days unfolds under it: 1, 3, 7, 14, 30, 60 or 90, and what a file edited by hand says; `sessions.set`, §5.7), the Appearance (the window's colours: Omarchy
+  Rules for every project, edited the same way as the guidance, the Sessions (a switch, "End inactive sessions", off by default; switched on it chooses 7 days and a select of the days unfolds under it: 1, 3, 7, 14, 30, 60 or 90, and what a file edited by hand says; `sessions.set`, §5.7; and under it a switch, "Resume sessions when the quota resets", off by default, §5.9), the Appearance (the window's colours: Omarchy
   or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
   the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
   switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge
