@@ -498,8 +498,9 @@ An amendment is kept with the spec (`ext_specs_amendments`), pending, accepted o
 spec's page shows the pending ones with Accept and Refuse, the refused ones folded, and an item an
 amendment changed with its old text folded under the new one. `flottille spec amendments` and
 `spec amendment accept|refuse` are the command line's. An accepted amendment is the one write the
-lock lets through past Draft. Whoever reads the spec afterwards (`spec.show`, `read`, the ticket
-written at the next Ready) reads it as it is now, each changed or added item marked.
+lock lets through past Draft, refused while the spec is a Draft and when its item changed since it
+was proposed, which it would undo. Whoever reads the spec afterwards (`spec.show`, `read`, the
+ticket written at the next Ready) reads it as it is now, each changed or added item marked.
 
 **The ticket side** (S4, built; `docs/tickets.md`, "What a spec writes"). What leaves Flottille
 carries nothing of it: the description written and the comment posted have no marker nor footer,

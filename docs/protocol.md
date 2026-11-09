@@ -540,12 +540,16 @@ an item no amendment touched has no `amended`.
   (`pending`, `accepted` or `refused`), "became" (the identifier it took once accepted),
   "proposed_at", "answered_at"}`, answered ones kept.
 - `spec.amendment {spec, amendment, answer: "accept" | "refuse"}`: the user's answer. Accepted, the
-  amendment is written into the spec whatever its status but Done, the one write the lock lets
-  through: a changed item keeps its identifier, its old text kept in `amended`; a new one takes the
-  next identifier. Refused, the spec is unchanged and the amendment kept. The session that proposed
-  it is told the answer with a delivery (`[flottille:specs]`). `refused` for an amendment already
-  answered, an accept of a spec that is Done, and one whose item is no longer in the spec. Answers
-  the spec.
+  amendment is written into the spec whatever its status but Draft and Done, the one write the
+  lock lets through: a changed item keeps its identifier, its old text kept in `amended`; a new
+  one takes the next identifier. Refused, the spec is unchanged and the amendment kept. The
+  session that proposed it is told the answer with a delivery (`[flottille:specs]`). `refused` for
+  an amendment already answered, an accept of a spec that is Done, of a spec back to Draft
+  (`spec 3 is back to Draft: make it Ready again before you accept an amendment, or refuse it`),
+  one whose item is no longer in the spec, and one whose item changed since it was proposed, by
+  another amendment or a rewrite in Draft, which accepting it would undo (`C1 of spec 3 changed
+  since amendment 2 was proposed: it would undo what was written since; refuse it`). Answers the
+  spec.
 
 **The statuses read from what Flottille sees.** A spec under development is **In progress** while
 its development session runs, **Review** while a pull request of a development's branch is open,

@@ -112,7 +112,8 @@ pub const EXTENSION: Extension = Extension {
     ",
         "
     -- An amendment a development session proposed: a C or a D added (no item) or changed (the
-    -- item), as JSON, with why; the user accepts or refuses it. Kept once answered: an accepted
+    -- item, and the item as it read then, as JSON: accepted, it would undo whatever changed it
+    -- since), as JSON, with why; the user accepts or refuses it. Kept once answered: an accepted
     -- one says the identifier it took, a refused one stays on the spec's page.
     CREATE TABLE ext_specs_amendments (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,6 +121,7 @@ pub const EXTENSION: Extension = Extension {
         agent       TEXT NOT NULL,
         section     TEXT NOT NULL,
         item        TEXT,
+        item_was    TEXT,
         content     TEXT NOT NULL,
         why         TEXT NOT NULL,
         state       TEXT NOT NULL,
@@ -439,6 +441,8 @@ struct Amendment {
     section: String,
     /// The item it changes; none for one it adds.
     item: Option<String>,
+    /// The item as it read when proposed (`item_of`).
+    item_was: Option<Value>,
     /// The item as proposed: `{text}` for a C, `{question, decision, set_aside}` for a D.
     content: Value,
     why: String,
@@ -469,8 +473,8 @@ impl Amendment {
 
 fn amendments_of(space: &Space, id: u64) -> Result<Vec<Amendment>> {
     let mut statement = space.tables().prepare(
-        "SELECT id, agent, section, item, content, why, state, became, proposed_at, answered_at \
-         FROM ext_specs_amendments WHERE spec = ?1 ORDER BY id",
+        "SELECT id, agent, section, item, content, why, state, became, proposed_at, answered_at, \
+         item_was FROM ext_specs_amendments WHERE spec = ?1 ORDER BY id",
     )?;
     let rows = statement
         .query_map([id], |row| {
@@ -480,6 +484,7 @@ fn amendments_of(space: &Space, id: u64) -> Result<Vec<Amendment>> {
                     agent: row.get(1)?,
                     section: row.get(2)?,
                     item: row.get(3)?,
+                    item_was: None,
                     content: Value::Null,
                     why: row.get(5)?,
                     state: row.get(6)?,
@@ -488,13 +493,15 @@ fn amendments_of(space: &Space, id: u64) -> Result<Vec<Amendment>> {
                     answered_at: row.get(9)?,
                 },
                 row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     rows.into_iter()
-        .map(|(amendment, content)| {
+        .map(|(amendment, content, item_was)| {
             Ok(Amendment {
                 content: serde_json::from_str(&content)?,
+                item_was: item_was.as_deref().map(serde_json::from_str).transpose()?,
                 ..amendment
             })
         })
@@ -1416,6 +1423,7 @@ fn answer_amendment(
         let proposed = (
             amendment.section.clone(),
             amendment.item.clone(),
+            amendment.item_was.clone(),
             amendment.content.clone(),
         );
         let at = now_ms();
@@ -1430,12 +1438,21 @@ fn answer_amendment(
                 ),
             ),
             Answered::Accept => {
-                if spec.status == Status::Done {
-                    return Err(Error::Refused(format!(
-                        "spec {id} is Done: its pull requests are merged; refuse the amendment"
-                    )));
+                match spec.status {
+                    Status::Done => {
+                        return Err(Error::Refused(format!(
+                            "spec {id} is Done: its pull requests are merged; refuse the amendment"
+                        )));
+                    }
+                    Status::Draft => {
+                        return Err(Error::Refused(format!(
+                            "spec {id} is back to Draft: make it Ready again before you accept \
+                             an amendment, or refuse it"
+                        )));
+                    }
+                    _ => {}
                 }
-                let (became, said) = accept(&mut spec, proposed, at)?;
+                let (became, said) = accept(&mut spec, n, proposed, at)?;
                 space.tables().execute(
                     "UPDATE ext_specs_specs SET content = ?2, last_c = ?3, last_d = ?4, \
                      updated_at = ?5 WHERE id = ?1",
@@ -1478,9 +1495,11 @@ fn answer_amendment(
 
 /// An amendment written into the spec: the item it changes keeps its identifier, its old text
 /// kept; a new one takes the next identifier. Its identifier, and the item as it now reads.
+/// Refused when the item changed since it was proposed: accepted, it would undo that change.
 fn accept(
     spec: &mut Spec,
-    (section, item, content): (String, Option<String>, Value),
+    n: u64,
+    (section, item, item_was, content): (String, Option<String>, Option<Value>, Value),
     at: u64,
 ) -> Result<(String, String)> {
     let id_of_spec = spec.id;
@@ -1489,6 +1508,15 @@ fn accept(
             "{item} is no longer in spec {id_of_spec}: refuse the amendment"
         ))
     };
+    if let Some(item) = &item {
+        let now = item_of(spec, &section, item).ok_or_else(|| gone(item))?;
+        if item_was.as_ref() != Some(&now) {
+            return Err(Error::Refused(format!(
+                "{item} of spec {id_of_spec} changed since amendment {n} was proposed: it would \
+                 undo what was written since; refuse it"
+            )));
+        }
+    }
     let content_of = &mut spec.content;
     if section == "behaviour" {
         let text = content["text"].as_str().unwrap_or_default().to_owned();
@@ -2476,6 +2504,22 @@ fn amends(daemon: &Daemon, spec: &Spec, agent: &str) -> std::result::Result<(), 
     }
 }
 
+/// A C or a D of the spec as it reads now, in the shape an amendment proposes it: `{text}` for a
+/// C, `{question, decision, set_aside}` for a D. None for an item the spec does not hold.
+fn item_of(spec: &Spec, section: &str, item: &str) -> Option<Value> {
+    match section {
+        "behaviour" => spec
+            .content
+            .behaviour
+            .iter()
+            .find(|c| c.id == item)
+            .map(|c| json!({"text": c.text})),
+        _ => spec.content.decisions.iter().find(|d| d.id == item).map(
+            |d| json!({"question": d.question, "decision": d.decision, "set_aside": d.set_aside}),
+        ),
+    }
+}
+
 /// An amendment as the development session proposes it: the item it changes, if any, and the
 /// item as it would be, checked as `write` checks it.
 fn proposal(
@@ -2758,6 +2802,9 @@ fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
                 Ok(proposed) => proposed,
                 Err(why) => return Outcome::Refused(format!("refused: {why}")),
             };
+            // `amends` was checked outside this transaction. Only Draft is checked again: a spec
+            // Done meanwhile refuses the acceptance, and an amendment of a development that ended
+            // meanwhile waits for the user like any other, its item checked when accepted.
             let proposed = daemon.write(|store| {
                 let space = store.space(EXTENSION.name)?;
                 let spec =
@@ -2769,13 +2816,17 @@ fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
                     )));
                 }
                 space.tables().execute(
-                    "INSERT INTO ext_specs_amendments (spec, agent, section, item, content, why, \
-                     state, proposed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
+                    "INSERT INTO ext_specs_amendments (spec, agent, section, item, item_was, \
+                     content, why, state, proposed_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)",
                     params![
                         id,
                         agent,
                         section,
                         item,
+                        item.as_deref()
+                            .and_then(|item| item_of(&spec, &section, item))
+                            .map(|was| was.to_string()),
                         serde_json::to_string(&content)?,
                         why,
                         now_ms()

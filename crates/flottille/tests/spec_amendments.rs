@@ -461,3 +461,113 @@ fn a_session_whose_development_ended_cannot_amend() {
     // The session developing it now proposes it.
     done(amend(&mcp, spec, chips()));
 }
+
+/// A C1 changed: the amendment's number.
+fn change_c1(user: &User, mcp: &Mcp, spec: u64, text: &str) -> u64 {
+    done(amend(
+        mcp,
+        spec,
+        json!({"section": "behaviour", "content": {"id": "C1", "text": text},
+            "why": "The user said so."}),
+    ));
+    amendments(user, spec).last().unwrap()["amendment"]
+        .as_u64()
+        .unwrap()
+}
+
+#[test]
+fn accepting_an_amendment_whose_item_changed_since_is_refused() {
+    let user = user();
+    let (spec, _, mcp) = developed(&user);
+
+    // Two amendments of C1: the newer accepted first.
+    let older = change_c1(
+        &user,
+        &mcp,
+        spec,
+        "The orders list filters by status with fields.",
+    );
+    let newer = change_c1(
+        &user,
+        &mcp,
+        spec,
+        "The orders list filters by status with chips.",
+    );
+    answer(&user, spec, newer, "accept");
+    let (code, message) = user
+        .call(
+            "spec.amendment",
+            json!({"spec": spec, "amendment": older, "answer": "accept"}),
+        )
+        .unwrap_err();
+    assert_eq!(code, "refused", "{message}");
+    assert_eq!(
+        message,
+        format!(
+            "C1 of spec {spec} changed since amendment {older} was proposed: it would undo what \
+             was written since; refuse it"
+        )
+    );
+    let shown = show(&user, spec);
+    assert_eq!(
+        shown["behaviour"][0]["text"], "The orders list filters by status with chips.",
+        "{shown}"
+    );
+    assert_eq!(amendments(&user, spec)[0]["state"], "pending");
+
+    // C1 rewritten while the spec was back to Draft.
+    let pending = change_c1(&user, &mcp, spec, "The orders list filters by date.");
+    user.call("spec.draft", json!({"spec": spec})).unwrap();
+    user.call(
+        "spec.write",
+        json!({"spec": spec, "section": "behaviour",
+            "content": [{"id": "C1", "text": "The orders list filters by status and date."}]}),
+    )
+    .unwrap();
+    user.call("spec.ready", json!({"spec": spec})).unwrap();
+    let (code, message) = user
+        .call(
+            "spec.amendment",
+            json!({"spec": spec, "amendment": pending, "answer": "accept"}),
+        )
+        .unwrap_err();
+    assert_eq!(code, "refused", "{message}");
+    assert!(
+        message.starts_with(&format!("C1 of spec {spec} changed since")),
+        "{message}"
+    );
+    assert_eq!(
+        show(&user, spec)["behaviour"][0]["text"],
+        "The orders list filters by status and date."
+    );
+}
+
+#[test]
+fn accepting_an_amendment_while_the_spec_is_in_draft_is_refused() {
+    let user = user();
+    let (spec, _, mcp) = developed(&user);
+    done(amend(&mcp, spec, chips()));
+    let n = amendments(&user, spec)[0]["amendment"].as_u64().unwrap();
+    user.call("spec.draft", json!({"spec": spec})).unwrap();
+    let before = show(&user, spec);
+
+    let (code, message) = user
+        .call(
+            "spec.amendment",
+            json!({"spec": spec, "amendment": n, "answer": "accept"}),
+        )
+        .unwrap_err();
+
+    assert_eq!(code, "refused", "{message}");
+    assert_eq!(
+        message,
+        format!(
+            "spec {spec} is back to Draft: make it Ready again before you accept an amendment, \
+             or refuse it"
+        )
+    );
+    assert_eq!(show(&user, spec)["behaviour"], before["behaviour"]);
+    assert_eq!(amendments(&user, spec)[0]["state"], "pending");
+    // Refusing it stays possible.
+    answer(&user, spec, n, "refuse");
+}
