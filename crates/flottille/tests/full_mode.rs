@@ -1174,3 +1174,74 @@ fn a_staged_credentials_file_is_masked_in_a_diff() {
         assert!(!run.output.contains("fake-"), "{}", run.output);
     }
 }
+
+#[test]
+fn git_merge_planting_claude_settings_is_put_back() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    user.git(&folder, &["checkout", "--quiet", "-b", "hooked"]);
+    std::fs::create_dir_all(folder.join(".claude")).unwrap();
+    std::fs::write(folder.join(".claude/settings.json"), HOOK).unwrap();
+    std::fs::write(folder.join("feature.md"), "feature\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "hooks"]);
+    user.git(&folder, &["checkout", "--quiet", "-"]);
+
+    let said = done(mcp.call("run", json!({"line": "git merge --ff-only hooked"})));
+
+    put_back(&said, ".claude/settings.json");
+    assert!(!folder.join(".claude").exists(), "{said}");
+    assert!(folder.join("feature.md").exists());
+}
+
+#[test]
+fn git_stash_pop_planting_claude_settings_is_put_back() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    std::fs::create_dir_all(folder.join(".claude")).unwrap();
+    std::fs::write(folder.join(".claude/settings.json"), HOOK).unwrap();
+    user.git(
+        &folder,
+        &["stash", "push", "--quiet", "--include-untracked"],
+    );
+    assert!(!folder.join(".claude").exists());
+
+    let said = done(mcp.call("run", json!({"line": "git stash pop"})));
+
+    put_back(&said, ".claude/settings.json");
+    assert!(!folder.join(".claude").exists(), "{said}");
+}
+
+#[test]
+fn tar_x_planting_claude_settings_is_put_back() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    let packed = user.path("packed");
+    std::fs::create_dir_all(packed.join(".claude")).unwrap();
+    std::fs::write(packed.join(".claude/settings.json"), HOOK).unwrap();
+    std::fs::write(packed.join("notes.md"), "notes\n").unwrap();
+    let made = std::process::Command::new("tar")
+        .arg("cf")
+        .arg(folder.join("hooks.tar"))
+        .args(["-C", packed.to_str().unwrap(), ".claude", "notes.md"])
+        .status()
+        .unwrap();
+    assert!(made.success());
+
+    let said = done(mcp.call("run", json!({"line": "tar xf hooks.tar"})));
+
+    put_back(&said, ".claude/settings.json");
+    assert!(!folder.join(".claude").exists(), "{said}");
+    assert!(folder.join("notes.md").exists());
+    // What it put back is kept for the user.
+    assert!(said.contains("agent-folders"), "{said}");
+}
