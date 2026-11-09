@@ -3,6 +3,8 @@
 //!
 //! The error is the form's own validation (a field left empty, a name taken): it unfolds under
 //! its field and folds away when it goes. The result of an action is a toast, not an error here.
+//! A warning is the same line in the wait colour, for a value that is accepted and still deserves
+//! a word.
 
 use std::sync::Arc;
 
@@ -59,11 +61,12 @@ pub struct Field {
     hint: Option<SharedString>,
     hint_mono: bool,
     error: Option<SharedString>,
+    warning: Option<SharedString>,
 }
 
 impl Field {
-    /// `control` labelled `label`: the field `id`, its label `<id>-label`, its hint `<id>-hint`
-    /// and its error `<id>-error`.
+    /// `control` labelled `label`: the field `id`, its label `<id>-label`, its hint `<id>-hint`,
+    /// its error `<id>-error` and its warning `<id>-warning`.
     pub fn new(
         id: impl Into<ElementId>,
         label: impl Into<SharedString>,
@@ -77,6 +80,7 @@ impl Field {
             hint: None,
             hint_mono: false,
             error: None,
+            warning: None,
         }
     }
 
@@ -101,6 +105,13 @@ impl Field {
     /// The form's own complaint about this value, under it until it changes.
     pub fn error(mut self, error: Option<SharedString>) -> Self {
         self.error = error;
+        self
+    }
+
+    /// A word about a value that is accepted, under the control like an error but in the wait
+    /// colour: it unfolds and folds away as the value changes.
+    pub fn warning(mut self, warning: Option<SharedString>) -> Self {
+        self.warning = warning;
         self
     }
 }
@@ -159,6 +170,23 @@ impl RenderOnce for Field {
                 .into_any_element()
         })
         .gap(px(6.));
+        let warning_id = part(&self.id, "warning");
+        let warning = presence_of(
+            part(&self.id, "warning-fold"),
+            self.warning,
+            move |warning| {
+                div()
+                    .id(warning_id)
+                    .aria_label(warning.clone())
+                    .text_size(px(12.))
+                    .line_height(px(17.))
+                    .text_color(p.wait)
+                    .child(warning)
+                    .test_support()
+                    .into_any_element()
+            },
+        )
+        .gap(px(6.));
         div()
             .id(self.id)
             .flex()
@@ -168,5 +196,6 @@ impl RenderOnce for Field {
             .child(self.control)
             .children(hint)
             .child(error)
+            .child(warning)
     }
 }

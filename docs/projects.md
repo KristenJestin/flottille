@@ -34,8 +34,10 @@ It defaults to a slug of the project's name, and a file that does not hold the k
 may be empty (`branch_prefix = ""`): the branch is then the workspace's name alone, never
 `/<name>`, for a team whose branches follow the tickets (`fix/ABC-12-…`), which an agent gives
 with `branch` (`docs/workspaces.md`). Only a space is refused (`branch_prefix: must not hold
-spaces`). The project's Settings, Setup tab, "Branch prefix", edits it, an empty field included
-(`project.set_settings`, `branch_prefix`); the workspaces that exist keep their branch.
+spaces`). The project's Settings, Setup tab, Branches section, "Branch prefix", edits it, an empty field
+included (`project.set_settings`, `branch_prefix`); the workspaces that exist keep their branch.
+A prefix whose default branch (`<prefix>/ABC-1-example`) the branch format refuses is warned about
+under the field, as a warning and not a refusal.
 
 **The branch format** is a regular expression a branch must match, off by default
 (`branch_format = '^(feat|fix|chore)/[A-Z]+-[0-9]+-[a-z0-9-]+$'`; it is not anchored unless it
@@ -55,7 +57,7 @@ or as last fetched): the creation then decides, once it knows which repositories
 creation refuses a branch named outside the format that no repository has, nor its remote (listed,
 not fetched), before it fetches any base. A
 pattern that is not a regular expression is refused when the file is read and when it is saved,
-with the reason. The project's Settings, Setup tab, "Branch format", under the setup,
+with the reason. The project's Settings, Setup tab, Branches section, "Branch format", under the prefix,
 edits it (`project.set_conventions`, `docs/protocol.md`); empty turns it off. Agents read it with
 `project settings`.
 
