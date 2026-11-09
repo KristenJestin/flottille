@@ -900,8 +900,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   "Your messages go straight to this session; its lead is not asked." (it names no session: a
   sentence of the window that quotes a session's title shows it on one line at most, cut with an
   ellipsis, in emphasis, never wrapped into the sentence). The row's "⋯" menu of a
-  session an agent started offers "Detach from <agent>" (`agent.detach`, a toast says the
-  result): the row slides back among the project's sessions, its indent and mark fade, and the
+  session an agent started offers "Detach from its lead" (`agent.detach`, a toast says the
+  result; the lead's title is a second, fainter line of the entry, cut to one line, never wrapped; the
+  agent's "⋯" menu in the session's rail offers the same action while the session is led): the row slides back among the project's sessions, its indent and mark fade, and the
   header's line and the note fold away. A question a led session asks its pilot shows in its
   conversation as a card, "<session> asks its pilot", with no answer box. Each session takes
   **two lines**:
@@ -1022,7 +1023,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   nothing under the bar), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
-  Link a ticket…, Unlink the ticket and, for a session in a workspace, Remove workspace…, which
+  Link a ticket… (Change the ticket… once one is linked), Unlink the ticket (only while one is linked) and, for a session in a workspace, Remove workspace…, which
   asks as the card does, the dialog refusing it, with the sessions named, while sessions not ended work there; while it runs the section says it is
   being removed, and once removed it folds away, the page staying) and facts, its runs, then, pinned at the very bottom and
   folding away when nothing waits, "Waiting for you", the one place of the page that says the user
