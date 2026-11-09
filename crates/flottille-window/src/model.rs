@@ -210,6 +210,9 @@ pub struct Session {
     /// root's last turn, its creation before either. The sidebar sorts by it: work done during a
     /// turn never moves a row.
     pub exchanged_at: u64,
+    /// When its root ended, in milliseconds since the Unix epoch: its last sign of activity for a
+    /// root that is not over, or whose end was not recorded. The "Ended" group sorts by it.
+    pub ended_at: u64,
     pub created_at: u64,
     /// How many commands the agents of its tree run now.
     pub commands: usize,
@@ -749,6 +752,7 @@ impl Snapshot {
                     exchanged_at: agent["exchanged_at"]
                         .as_u64()
                         .unwrap_or_else(|| number(agent, "created_at")),
+                    ended_at: agent["ended_at"].as_u64().unwrap_or(active_at),
                     created_at: number(agent, "created_at"),
                     commands: commands_of("root", &id),
                     started_by: agent["launched_by"].as_str().map(name_of),
@@ -847,6 +851,13 @@ impl Snapshot {
                 .then(a.id.cmp(&b.id))
         });
         live
+    }
+
+    /// The sessions that ended, whatever their project, the most recent end first.
+    pub fn ended_sessions(&self) -> Vec<&Session> {
+        let mut ended: Vec<&Session> = self.sessions.iter().filter(|s| s.ended).collect();
+        ended.sort_by(|a, b| b.ended_at.cmp(&a.ended_at).then(a.id.cmp(&b.id)));
+        ended
     }
 
     pub fn session(&self, id: &str) -> Option<&Session> {

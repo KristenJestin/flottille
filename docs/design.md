@@ -926,9 +926,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the row and the header; a session an agent started says it in
   its page's header, "started by <agent>", not in the sidebar. A session an agent leads (`led`)
   is the one exception to the flat list: its row sits right under its pilot's session's row,
-  indented, starting with a mark whose tooltip says "led by <pilot>"; the pilot's row gains a
-  chevron that folds its led rows away with it, and each led row keeps its own mark, unread dot
-  and draft pencil. Its page's header says "led by <pilot>", and a line above its composer says
+  indented one step, tied to it by a `↳` connector (the line from the pilot turning into the row)
+  whose arrowhead has the tooltip "led by <pilot>"; only a led row is indented, every root's title
+  starts at the same x. The pilot's row gains a chevron, at the end of the row beside its time and
+  "⋯", that folds its led rows away with it; folded, its state mark is the most urgent of its own
+  and its hidden led sessions' (waits for the user, then running, then its own), nothing else is
+  added to the row; each led row keeps its own unread dot and draft pencil. Its page's header says "led by <pilot>", and a line above its composer says
   "Your messages go straight to this session; its lead is not asked." (it names no session: a
   sentence of the window that quotes a session's title shows it on one line at most, cut with an
   ellipsis, in emphasis, never wrapped into the sentence). The row's "⋯" menu of a
@@ -1068,7 +1071,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
   place in the sidebar for the "Ended" group, folded, pinned at the bottom of the sidebar
-  whatever the tree's length and unfolding upward over it (its rows say their project), and its
+  whatever the tree's length and unfolding upward over it (its rows say their project). Unfolded
+  it takes at most eight rows, or 35% of the window's height when that is less, and its rows
+  scroll inside it, the most recently ended first; and its
   page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
   (`agent.resume`), enabled once its process is gone, which brings the composer back; that bar is

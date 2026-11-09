@@ -4,6 +4,7 @@
 //! a folded project, and the "Ended" group, show the strongest mark of what they hold.
 
 use std::collections::HashSet;
+use std::f32::consts::FRAC_PI_2;
 
 use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, PANEL};
@@ -15,9 +16,9 @@ use flottille_ui::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
-    TestSupportExt as _, WeakEntity, Window, div, px, relative,
+    TestSupportExt as _, Transformation, WeakEntity, Window, div, px, radians,
 };
 
 use crate::actions::Command;
@@ -34,6 +35,11 @@ pub fn project_id(name: &str) -> ElementId {
 /// The element id of the "Ended" group, at the bottom of the tree.
 pub fn ended_id() -> ElementId {
     ElementId::Name("ended".into())
+}
+
+/// The element id of the block inside the "Ended" group that holds its rows and scrolls.
+pub fn ended_scroll_id() -> ElementId {
+    ElementId::Name("ended-sessions".into())
 }
 
 /// The element id of the "⋯" menu a session's row offers.
@@ -373,16 +379,14 @@ impl Render for Sidebar {
         let shell = self.shell.clone();
         let adds = self.shell.clone();
         let ended = self.ended.clone().map(|(group, present)| {
-            // At the panel's bottom, under a line; it takes half the panel at most, and folds
-            // away when its last session leaves.
+            // At the panel's bottom, under a line; its rows scroll inside their own block, and it
+            // folds away when its last session leaves.
             presence(
                 "sidebar-ended",
                 present,
                 div()
                     .id("ended-footer")
                     .flex_none()
-                    .max_h(relative(0.5))
-                    .overflow_y_scroll()
                     .border_t_1()
                     .border_color(p.line)
                     .bg(p.side)
@@ -634,13 +638,33 @@ impl Render for ProjectNode {
 pub struct Level {
     rows: Vec<Entity<SessionRow>>,
     list: Listing<Entity<SessionRow>>,
+    /// Takes at most [`ENDED_ROWS`] rows, or [`ENDED_SHARE`] of the window when that is less, and
+    /// scrolls inside itself beyond it.
+    scrolls: bool,
 }
+
+/// How many rows the "Ended" group shows before it scrolls.
+const ENDED_ROWS: f32 = 8.;
+/// The height of a session's row of one line, which the "Ended" group's rows are.
+const ROW: f32 = 28.;
+/// The share of the window's height the "Ended" group takes at most, when that is less than
+/// [`ENDED_ROWS`] rows.
+const ENDED_SHARE: f32 = 0.35;
 
 impl Level {
     fn new() -> Self {
         Self {
             rows: Vec::new(),
             list: Listing::default(),
+            scrolls: false,
+        }
+    }
+
+    /// The level of the "Ended" group, which scrolls inside itself.
+    fn scrolling() -> Self {
+        Self {
+            scrolls: true,
+            ..Self::new()
         }
     }
 
@@ -653,7 +677,7 @@ impl Level {
 }
 
 impl Render for Level {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = framed(
             &mut self.list,
             &self.rows,
@@ -664,7 +688,18 @@ impl Render for Level {
         if rows.is_empty() {
             return div().into_any_element();
         }
-        tree_children(rows, cx).into_any_element()
+        let rows = tree_children(rows, cx);
+        if !self.scrolls {
+            return rows.into_any_element();
+        }
+        let most = (px(ENDED_ROWS * ROW) + px(4.)).min(window.viewport_size().height * ENDED_SHARE);
+        div()
+            .id(ended_scroll_id())
+            .max_h(most)
+            .overflow_y_scroll()
+            .child(rows)
+            .test_support()
+            .into_any_element()
     }
 }
 
@@ -679,7 +714,7 @@ pub struct EndedNode {
 impl EndedNode {
     /// The group, folded.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let sessions = cx.new(|_| Level::new());
+        let sessions = cx.new(|_| Level::scrolling());
         let fold = cx.new(|_| Fold::new("fold-ended", sessions.clone(), false));
         Self {
             open: false,
@@ -790,6 +825,11 @@ pub struct SessionRow {
     led_by: Option<SharedString>,
     /// What the mark said last, kept while it fades out.
     led_said: SharedString,
+    /// The state of the session itself, which the mark shows unless it hides a led session that
+    /// asks more of the user.
+    own: Option<AgentState>,
+    /// The most urgent state of the led sessions its folded row hides.
+    hidden: Option<AgentState>,
     /// How many led sessions sit under its row, and whether they are unfolded.
     leads: usize,
     open: bool,
@@ -833,6 +873,8 @@ impl SessionRow {
             menu: None,
             led_by: None,
             led_said: SharedString::default(),
+            own: None,
+            hidden: None,
             leads: 0,
             open: true,
             tie: None,
@@ -882,6 +924,27 @@ impl SessionRow {
             self.leads = leads;
             cx.notify();
         }
+    }
+
+    /// What its folded row hides.
+    pub fn hidden(&self) -> Option<AgentState> {
+        self.hidden
+    }
+
+    /// The most urgent state among the led sessions its folded row hides: the mark shows it when
+    /// it asks more than the session's own. `None` while the row is unfolded.
+    pub fn set_hidden(&mut self, hidden: Option<AgentState>, cx: &mut Context<Self>) {
+        if self.hidden != hidden {
+            self.hidden = hidden;
+            if self.mark.set(self.shown_mark(), cx) {
+                cx.notify();
+            }
+        }
+    }
+
+    /// What the mark shows: waiting for the user beats running, which beats the session's own.
+    fn shown_mark(&self) -> Option<AgentState> {
+        AgentState::strongest(self.own.into_iter().chain(self.hidden)).or(self.own)
     }
 
     /// Whether the led sessions under its row are unfolded.
@@ -1101,7 +1164,7 @@ impl SessionRow {
 
     /// Whether it shows this already.
     pub fn holds(&self, title: &str, mark: Option<AgentState>, active_at: u64) -> bool {
-        self.title.as_ref() == title && self.mark.shown == mark && self.active_at == active_at
+        self.title.as_ref() == title && self.own == mark && self.active_at == active_at
     }
 
     pub fn set(
@@ -1112,7 +1175,8 @@ impl SessionRow {
         now: u64,
         cx: &mut Context<Self>,
     ) {
-        let mut changed = self.mark.set(mark, cx);
+        self.own = mark;
+        let mut changed = self.mark.set(self.shown_mark(), cx);
         if self.title.as_ref() != title {
             self.title = SharedString::from(title.to_owned());
             changed = true;
@@ -1179,43 +1243,6 @@ impl Render for SessionRow {
                 row.expanded(self.open)
                     .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
             });
-        // A led row is indented under its pilot's and starts with a mark that names it; both
-        // move over PANEL as the row comes under its pilot or leaves it.
-        let led = fade(
-            ElementId::Name(format!("session-led-fade-{}", self.id).into()),
-            self.led_by.is_some(),
-            PANEL,
-            window,
-            cx,
-        );
-        if led > 0.0 {
-            let p = palette(cx);
-            let mark = tipped(
-                div()
-                    .id(session_led_id(&self.id))
-                    .flex()
-                    .items_center()
-                    .h(px(MARK))
-                    .aria_label(self.led_said.clone())
-                    .child(
-                        flottille_ui::icon(Icon::Agents)
-                            .size(px(12.))
-                            .text_color(p.faint),
-                    ),
-                self.led_said.clone(),
-                MARK,
-                window,
-                cx,
-            );
-            row = row.leading(
-                div()
-                    .flex_none()
-                    .w(px(LED_MARK * led))
-                    .overflow_hidden()
-                    .opacity(led)
-                    .child(mark),
-            );
-        }
         let when = match &self.scope {
             Some(scope) => SharedString::from(format!("{scope} · {}", self.ago)),
             None => self.ago.clone(),
@@ -1292,15 +1319,17 @@ impl Render for SessionRow {
             None => (TWO_LINES - (FIRST + LINE)) / 2. + FIRST / 2.,
             Some(_) => 14.,
         };
+        let arrow = (tied > 0.0).then(|| self.led_arrow(window, cx));
         div()
             .relative()
             .pl(space::XL * (self.tie_shown.depth() as f32 * tied))
-            .when(tied > 0.0, |d| {
+            .when_some(arrow, |d, arrow| {
                 d.child(tree_tie(
                     session_id(&self.id),
                     &self.tie_shown,
                     first_line,
                     tied,
+                    arrow,
                     cx,
                 ))
             })
@@ -1308,13 +1337,35 @@ impl Render for SessionRow {
     }
 }
 
-/// The width of the mark a led session's row starts with.
-const LED_MARK: f32 = 14.;
-
 /// The words the pencil of a draft says.
 const DRAFT_SAID: &str = "Draft not sent";
 
 impl SessionRow {
+    /// The arrowhead that ends the connector of a led row, saying who leads it.
+    fn led_arrow(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        tipped(
+            div()
+                .id(session_led_id(&self.id))
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(12.))
+                .aria_label(self.led_said.clone())
+                .child(
+                    flottille_ui::icon(Icon::Chevron)
+                        .size(px(12.))
+                        .text_color(p.faint)
+                        .with_transformation(Transformation::rotate(radians(-FRAC_PI_2))),
+                ),
+            self.led_said.clone(),
+            12.,
+            window,
+            cx,
+        )
+        .into_any_element()
+    }
+
     /// The pencil of an unsent draft, beside the row's own mark: its ink warms on the pointer.
     fn draft_mark(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);

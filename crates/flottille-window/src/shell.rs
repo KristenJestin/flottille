@@ -2002,9 +2002,9 @@ impl Shell {
             projects.insert(project.name.clone(), node);
         }
         // The ended sessions leave their places for one folded group below every project.
-        let ended = snapshot.sessions.iter().filter(|session| session.ended);
+        let ended = snapshot.ended_sessions();
         let mut marks = Vec::new();
-        let rows = self.session_rows(ended, &mut sessions, &mut marks, now, cx);
+        let rows = self.session_rows(ended.iter().copied(), &mut sessions, &mut marks, now, cx);
         let present = !rows.is_empty();
         if self.ended.is_none() && present {
             self.ended = Some(cx.new(EndedNode::new));
@@ -3196,6 +3196,22 @@ fn nested(
             .collect();
         if row.read(cx).leads() != led.len() {
             row.update(cx, |row, cx| row.set_leads(led.len(), cx));
+        }
+        // Folded, the row shows what the sessions it hides ask of the user.
+        let hidden = match row.read(cx).is_open() {
+            true => None,
+            false => {
+                let mut below = led.clone();
+                let mut marks = Vec::new();
+                while let Some(at) = below.pop() {
+                    marks.extend(live[at].mark);
+                    below.extend((0..live.len()).filter(|&other| pilots[other] == Some(at)));
+                }
+                AgentState::strongest(marks)
+            }
+        };
+        if row.read(cx).hidden() != hidden {
+            row.update(cx, |row, cx| row.set_hidden(hidden, cx));
         }
         if shown {
             out.push(row.clone());
