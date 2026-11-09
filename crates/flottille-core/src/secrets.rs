@@ -117,7 +117,7 @@ impl Secrets {
         for value in &self.all() {
             masked = masked.replace(value.as_str(), MASK);
         }
-        mask_tokens(&mask_private_keys(&masked))
+        mask_tokens(&mask_login_fields(&mask_private_keys(&masked)))
     }
 
     /// How much of `text`, a message still streaming, is settled: masked alone, it reads as it will
@@ -253,7 +253,194 @@ fn tokens(text: &str) -> Vec<(usize, usize)> {
         }
         previous = Some(c);
     }
+    // A login file's field, from its key to the quote that ends its value: past the text's end
+    // while that quote is still coming, even after a whitespace.
+    found.extend(
+        login_fields(text)
+            .into_iter()
+            .map(|field| (field.at, field.end)),
+    );
     found
+}
+
+/// How the keys whose string value is a token end, lowercase and without `_` or `-`: an agent's
+/// login file (Claude's `.credentials.json`: `accessToken`, `refreshToken`; Codex's `auth.json`:
+/// `id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY`) and others like it
+/// (`clientSecret`, `primaryApiKey`), wherever such a file is shown (a diff, a stash, a revision
+/// of it).
+const LOGIN_KEY_ENDS: [&str; 3] = ["token", "apikey", "secret"];
+
+/// Whether `key` names a token (`LOGIN_KEY_ENDS`).
+fn login_key(key: &str) -> bool {
+    let key: String = key
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    LOGIN_KEY_ENDS.iter().any(|end| key.ends_with(end))
+}
+
+/// A key of `LOGIN_KEY_ENDS` in a text, quoted, from its opening quote.
+struct LoginField {
+    at: usize,
+    /// Where its string values are, without their quotes, to the text's end when one is cut
+    /// short: one, or a word diff's old and new (`[-"…"-]{+"…"+}`).
+    values: Vec<(usize, usize)>,
+    /// Where the field ends: past the text's end while it may still be coming.
+    end: usize,
+}
+
+/// Each `"<key>": "<value>"` of `text` whose key names a token, and one that may still be
+/// coming at its end. A value may be on the next line of a diff (`+`, `-`), or a word diff's.
+fn login_fields(text: &str) -> Vec<LoginField> {
+    let bytes = text.as_bytes();
+    let len = text.len();
+    let coming = len + 1;
+    // Whitespace, and the `+` or `-` a diff starts a line with.
+    let blank = |mut at: usize| {
+        let mut line = false;
+        while at < len {
+            match bytes[at] {
+                b'\n' => line = true,
+                b'+' | b'-' if line => line = false,
+                byte if byte.is_ascii_whitespace() => line = false,
+                _ => break,
+            }
+            at += 1;
+        }
+        at
+    };
+    // The quote that ends a value, or the text's end.
+    let closing = |mut at: usize| {
+        while at < len && !matches!(bytes[at], b'"' | b'\n') {
+            at += if bytes[at] == b'\\' { 2 } else { 1 };
+        }
+        at.min(len)
+    };
+    // Whether the text ends inside `word`, which may then still come.
+    let cut =
+        |at: usize, word: &[u8]| bytes[at..].len() < word.len() && word.starts_with(&bytes[at..]);
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find('"').map(|i| from + i) {
+        from = at + 1;
+        let after = text[from..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-')))
+            .map_or(len, |end| from + end);
+        if after == len {
+            // Any key still coming may end as one.
+            found.push(LoginField {
+                at,
+                values: Vec::new(),
+                end: coming,
+            });
+            break;
+        }
+        if bytes[after] != b'"' || !login_key(&text[from..after]) {
+            continue;
+        }
+        let colon = blank(after + 1);
+        if colon == len {
+            found.push(LoginField {
+                at,
+                values: Vec::new(),
+                end: coming,
+            });
+            break;
+        }
+        if bytes[colon] != b':' {
+            continue;
+        }
+        let mut field = LoginField {
+            at,
+            values: Vec::new(),
+            end: coming,
+        };
+        let mut next = blank(colon + 1);
+        // The value, or a word diff's old one and then its new one.
+        let mut marks: &[&[u8]] = &[b"\"", b"[-\"", b"{+\""];
+        loop {
+            let Some(mark) = marks.iter().find(|mark| bytes[next..].starts_with(mark)) else {
+                if !marks.iter().any(|mark| cut(next, mark)) {
+                    field.end = next;
+                }
+                break;
+            };
+            let start = next + mark.len();
+            let stop = closing(start);
+            field.values.push((start, stop));
+            if stop == len {
+                field.end = coming;
+                break;
+            }
+            field.end = stop + 1;
+            // The rest of the value's word: a word diff's word runs to a whitespace (`"…",-]`).
+            let word = stop
+                + 1
+                + bytes[stop + 1..]
+                    .iter()
+                    .position(u8::is_ascii_whitespace)
+                    .unwrap_or(len - stop - 1);
+            let shut: &[u8] = match *mark {
+                b"[-\"" => b"-]",
+                b"{+\"" => b"+}",
+                // A porcelain word diff puts the old value on a line of its own after `-`, and
+                // the new one on the next, after `+`.
+                _ if next >= 2 && &bytes[next - 2..next] == b"\n-" => {
+                    if word == len || cut(word, b"\n+\"") {
+                        field.end = coming;
+                        break;
+                    }
+                    if !bytes[word..].starts_with(b"\n+\"") {
+                        break;
+                    }
+                    next = word + 2;
+                    marks = &[b"\""];
+                    continue;
+                }
+                _ => break,
+            };
+            let Some(shut_at) = (stop + 1..=word).find(|&at| bytes[at..].starts_with(shut)) else {
+                if word == len || cut(word, shut) {
+                    field.end = coming;
+                }
+                break;
+            };
+            field.end = shut_at + 2;
+            if *mark != b"[-\"" {
+                break;
+            }
+            next = blank(field.end);
+            marks = &[b"{+\""];
+        }
+        if field.values.is_empty() && field.end != coming {
+            continue;
+        }
+        from = field.end.min(len).max(from);
+        let done = field.end == coming;
+        found.push(field);
+        if done {
+            break;
+        }
+    }
+    found
+}
+
+/// The string value of each key that names a token, masked.
+fn mask_login_fields(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    for (start, end) in login_fields(text)
+        .into_iter()
+        .flat_map(|field| field.values)
+        .filter(|(start, end)| end > start)
+    {
+        out.push_str(&text[from..start]);
+        out.push_str(MASK);
+        from = end;
+    }
+    out.push_str(&text[from..]);
+    out
 }
 
 /// Whether `text` starts like a known kind of token or a JWT, at the start of a word.
@@ -641,5 +828,83 @@ mod tests {
             "token=[masked] ok"
         );
         assert_eq!(mask("risk-taking sk-short", &env), "risk-taking sk-short");
+    }
+
+    /// A Claude login file and a Codex one, their tokens invented and of no known prefix.
+    const LOGINS: &str = "{\"claudeAiOauth\":{\"accessToken\":\"fake-access-0123456789abcdef\",\
+        \"refreshToken\":\"fake-refresh-0123456789abcdef\",\"expiresAt\":1762700000000}}\n\
+        +{\n+  \"OPENAI_API_KEY\": \"fake-key-0123456789abcdef\",\n+  \"tokens\": {\n\
+        +    \"id_token\": \"fake-id-0123456789abcdef\",\n\
+        +    \"access_token\" : \"fake-codex-access-0123456789\",\n\
+        +    \"refresh_token\":\"fake-codex-refresh-0123456789\",\n\
+        +    \"account_id\": \"account-1\"\n+  }\n+}\n";
+
+    #[test]
+    fn the_tokens_of_an_agent_s_login_file_are_masked_wherever_they_appear() {
+        let masked = mask(LOGINS, &BTreeMap::new());
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(masked.contains("\"accessToken\":\"[masked]\""), "{masked}");
+        assert!(
+            masked.contains("\"refresh_token\":\"[masked]\""),
+            "{masked}"
+        );
+        assert!(masked.contains("\"expiresAt\":1762700000000"), "{masked}");
+        assert!(masked.contains("\"account_id\": \"account-1\""), "{masked}");
+        // Streamed in any pieces, it reads the same.
+        for cut in 1..LOGINS.len() {
+            if LOGINS.is_char_boundary(cut) {
+                assert_eq!(streamed(LOGINS, &[cut], &BTreeMap::new()), masked, "{cut}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_token_key_of_any_login_file_is_masked_in_a_diff_and_a_word_diff() {
+        let text = "+  \"clientSecret\": \"fake-client-0123456789\",\n\
+            -  \"primaryApiKey\":\n\
+            -    \"fake-primary-0123456789\",\n\
+            +  \"ACCESS_TOKEN\" :\n+  \"fake-upper-0123456789\"\n\
+            \"accessToken\": [-\"fake-old-0123456789\"-]{+\"fake-new-0123456789\"+},\n\
+            \"refreshToken\": {+\"fake-added-0123456789\"+}\n";
+        let masked = mask(text, &BTreeMap::new());
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("\"accessToken\": [-\"[masked]\"-]{+\"[masked]\"+}"),
+            "{masked}"
+        );
+        for cut in 1..text.len() {
+            assert_eq!(streamed(text, &[cut], &BTreeMap::new()), masked, "{cut}");
+        }
+    }
+
+    #[test]
+    fn a_token_value_with_its_comma_is_masked_in_a_word_diff_and_a_porcelain_one() {
+        // A word diff's word runs to the next whitespace: the comma after a value is in it.
+        let text = "\"accessToken\": [-\"fake-old-0123456789\",-]{+\"fake-new-0123456789\",+}\n\
+            \"refreshToken\": [-\"fake-old-9876543210\"-]{+\"fake-new-9876543210\"},+}\n\
+            @@ -2 +2 @@\n \"id_token\": \n-\"fake-porcelain-old-0123\",\n+\"fake-porcelain-new-0123\",\n~\n\
+             \"note\": \n-\"old text\"\n+\"new text\"\n~\n";
+        let masked = mask(text, &BTreeMap::new());
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("\"accessToken\": [-\"[masked]\",-]{+\"[masked]\",+}"),
+            "{masked}"
+        );
+        assert!(masked.contains("-\"old text\"\n+\"new text\""), "{masked}");
+        for cut in 1..text.len() {
+            assert_eq!(streamed(text, &[cut], &BTreeMap::new()), masked, "{cut}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_key_near_a_token_s_name_is_not_masked() {
+        let text = "{\"token_type\": \"Bearer\", \"tokenizer\": \"cl100k\", \
+            \"secretName\": \"db-password\", \"max_tokens\": 100, \
+            \"description\": \"the access token\", \"tokens\": {}}\n\
+            +    \"note\": [-\"old text\"-]{+\"new text\"+}\n";
+        assert_eq!(mask(text, &BTreeMap::new()), text);
     }
 }

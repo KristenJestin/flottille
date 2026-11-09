@@ -28,6 +28,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::agent_folders::Guard;
 use crate::agents::{signal_group, start_time};
 use crate::daemon::Daemon;
 use crate::deliveries;
@@ -80,6 +81,8 @@ pub struct Live {
     /// the user), its project and its name: a second waits while the services it needs start,
     /// then joins the first.
     serving: Mutex<HashMap<Serving, Arc<tokio::sync::Mutex<()>>>>,
+    /// The agent folders of each place an agent's run goes on in (`agent_folders`).
+    guards: crate::agent_folders::Guards,
 }
 
 /// A task that keeps running, by its owner, its project and its name.
@@ -132,6 +135,8 @@ struct Going {
     notify: AtomicBool,
     /// Told when it is ready, for what waits on it (a service a task needs).
     readied: Notify,
+    /// The agent folders of an agent's place as they were before it, put back once it ends.
+    guarded: Mutex<Option<Guard>>,
 }
 
 /// How a run is told ready: its probe, and whether its agent asked to be told.
@@ -536,6 +541,12 @@ pub async fn run(
         url_error,
         workspace: None,
     };
+    // A line the gate let through at once only reads, or writes the files it names; a task, or
+    // a line of the same words, may run anything.
+    let guarded = match approved || run.name.is_some() || a_task(daemon, place, &words) {
+        true => Some(guard(daemon, place, &id).await),
+        false => None,
+    };
     if let Err(why) = start(
         daemon,
         run,
@@ -544,6 +555,7 @@ pub async fn run(
         secret_values,
         Phase::Waited,
         Readying { probe, notify },
+        guarded,
     ) {
         return Outcome::Failed(why);
     }
@@ -651,6 +663,7 @@ pub async fn run_for_user(
             probe,
             notify: false,
         },
+        None,
     )?;
     Ok(id)
 }
@@ -821,6 +834,7 @@ async fn remote_kept(
 /// Spawns the run, records it, and leaves a task of its own to follow it to its end. `phase` is
 /// what it is in from the start: a run that ends at once must find it already detached to have
 /// its end delivered.
+#[allow(clippy::too_many_arguments)]
 fn start(
     daemon: &Arc<Daemon>,
     run: Run,
@@ -829,6 +843,7 @@ fn start(
     secrets: Vec<String>,
     phase: Phase,
     readying: Readying,
+    guarded: Option<Guard>,
 ) -> Result<(), String> {
     crate::projects::refuse_removing(daemon, &run.project).map_err(|refused| refused.message)?;
     let (reader, writer) = std::io::pipe().map_err(|e| format!("cannot run it: {e}"))?;
@@ -890,6 +905,7 @@ fn start(
         unseen: Mutex::default(),
         notify: AtomicBool::new(readying.notify),
         readied: Notify::new(),
+        guarded: Mutex::new(guarded),
     });
     daemon
         .mcp
@@ -903,6 +919,33 @@ fn start(
     }
     tokio::spawn(follow(daemon.clone(), going, child, pid, reader));
     Ok(())
+}
+
+/// The agent folders of an agent's place before one of its runs: the gate refuses every write
+/// there it sees, and a line may write there without naming one (`agent_folders`).
+async fn guard(daemon: &Daemon, place: &Place, id: &str) -> Guard {
+    let kept = daemon.paths.state.join("agent-folders");
+    let tops: Vec<std::path::PathBuf> = place
+        .repositories
+        .iter()
+        .map(|(_, folder)| folder.clone())
+        .collect();
+    daemon
+        .mcp
+        .runs
+        .guards
+        .enter(&place.root, &tops, place.home.as_deref(), &kept, id)
+        .await
+}
+
+/// Whether `words` are the line of one of the project's tasks, which the gate lets through as it.
+fn a_task(daemon: &Daemon, place: &Place, words: &[String]) -> bool {
+    projects::load_project(daemon, &place.project).is_ok_and(|project| {
+        project
+            .tasks
+            .values()
+            .any(|task| split_line(&task.line).is_ok_and(|line| line == words))
+    })
 }
 
 /// Whether the run is still starting, not ready yet.
@@ -1065,6 +1108,25 @@ async fn follow(
             break;
         }
         going.output.lock().unwrap().push(&buffer[..read]);
+    }
+    // What it wrote in an agent folder of its place without naming it is put back, and its
+    // result says so. A place too large to check all of is the user's to hear of too: the agent
+    // may not tell them.
+    let guarded = going.guarded.lock().unwrap().take();
+    if let Some(guard) = guarded
+        && let Some(restored) = guard.leave().await
+    {
+        if restored.unchecked {
+            let run = &going.run;
+            let data = json!({"agent": run.agent, "project": run.project, "run": run.id,
+                "folder": run.folder});
+            if let Err(error) = daemon.emit("run.agent_folders_unchecked", data) {
+                eprintln!("flottille daemon: run {}: {error}", run.id);
+            }
+        }
+        if let Some(said) = crate::agent_folders::said(&restored) {
+            going.output.lock().unwrap().push(said.as_bytes());
+        }
     }
     let end = match status {
         Some(status) => End {
@@ -1456,7 +1518,20 @@ pub async fn restart_by_user(
             .as_ref()
             .is_some_and(|going| going.notify.load(Ordering::SeqCst)),
     };
-    if let Err(why) = start(daemon, run, words, env, secret_values, phase, readying) {
+    let guarded = match owner {
+        Some(_) => Some(guard(daemon, &place, &id).await),
+        None => None,
+    };
+    if let Err(why) = start(
+        daemon,
+        run,
+        words,
+        env,
+        secret_values,
+        phase,
+        readying,
+        guarded,
+    ) {
         // The stop was the user's and its end was not told: the agent hears of both.
         if stopped && let Some(agent) = &owner {
             let body = format!(
@@ -2000,6 +2075,7 @@ pub(crate) fn start_service(
             probe: start.probe,
             notify: false,
         },
+        None,
     )?;
     Ok(id)
 }

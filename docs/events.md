@@ -930,6 +930,18 @@ ended.
 A restart (`run.restart`) is a `run.ended` with state `stopped` for the first run, if it ran, then a
 `run.started` for the new one, of the same `agent`, `project` and `name`.
 
+#### `run.agent_folders_unchecked`
+
+An agent's run ended in a place too large for the daemon to check all its agent folders after it
+(`docs/design.md` §7.1): those right in the place and in its repositories were, one further down
+past 500,000 entries was not. `flottille inbox` lists it as an entry of kind `unchecked`
+(`docs/protocol.md`, `inbox.list`), for a child's run too.
+
+| Field | |
+|---|---|
+| `agent`, `project`, `run` | |
+| `folder` | Where it ran. |
+
 #### `run.dismissed`
 
 The user dismissed a command that ended (`run.dismiss`): it is no longer listed.
