@@ -180,12 +180,18 @@ the wrong code first).
     when its read ends or by its reason when it failed. A skeleton is `Skeleton`, wrapped in
     `awaiting`: it pulses slowly (no shimmer), and the content crossfades into it. **[test]**
     `crates/flottille-ui/tests/skeletons.rs`.
+12. **The composer's toolbar**: Send is its only primary; a control that applies only in some
+    states (Compact) stays in its place, disabled with its reason as tooltip, and a chip that
+    exists only in some states (`Resume at …`) goes at the end of the row, after the fixed
+    controls, and animates in, so that nothing moves; a short row (under 740 px) gives the chips
+    their icons, never an overflow. **[test]** `window_compaction.rs`, `window_quota.rs` (a 1280
+    px window), `window_rules.rs`.
 
 The components that hold them:
 
 | Component | What it is for |
 |---|---|
-| `Button::{primary, secondary, quiet, danger, icon}` | rule 1; `.leading(Icon)`, `.disabled(bool)`, `.badge(Badge)` |
+| `Button::{primary, secondary, quiet, danger, icon}` | rule 1; `.leading(Icon)`, `.icon_only(bool)` (a short row gives a chip its icon), `.disabled(bool)`, `.badge(Badge)` |
 | `PageHeader::new(id, title)` | `.path(p)`, `.crumb(el)`, `.below(el)`, `.action(id, label, Option<Icon>, f)` twice at most, `.more(Entity<Menu>)` |
 | `Section::new(id, title)` | `.count(c)`, `.sentence(s)`, `.action(Button)`, then its children |
 | `Menu::new(..).entry(..).danger(id, label, f)` | a "⋯" menu; danger entries come last, after a line |

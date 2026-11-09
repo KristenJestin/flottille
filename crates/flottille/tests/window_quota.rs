@@ -262,13 +262,45 @@ fn the_composer_chip_shows_in_the_toolbar_only_while_the_reset_is_known(cx: &mut
 }
 
 #[gpui_kit::test]
+fn the_toolbar_never_overflows_the_composer_at_1280_px_with_the_resume_chip(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (id, _) = spent(&user);
+    let (shell, cx) = window(&user, cx);
+    let page = open_session(&shell, &id, cx);
+    until(&shell, cx, "the chip is offered", |cx| {
+        offer(&page, cx).is_some()
+    });
+    settle(cx);
+    assert!(visible(cx, "reply-quota"));
+    let (composer, send, chip, attach) = cx.update(|window, _| {
+        (
+            window.find("reply").bounds(),
+            window.find("reply-send").bounds(),
+            window.find("reply-quota").bounds(),
+            window.find("attach").bounds(),
+        )
+    });
+    assert_eq!(
+        composer.size.width,
+        px(646.),
+        "the composer of a 1280 px window"
+    );
+    assert!(
+        send.right() <= composer.right(),
+        "Send ends {:?} past the composer's edge",
+        send.right() - composer.right()
+    );
+    assert!(chip.right() <= send.left(), "the chip stays before Send");
+    assert!(attach.right() <= chip.left(), "after the fixed controls");
+}
+
+#[gpui_kit::test]
 fn the_composer_chip_fades_out_when_the_wait_ends(cx: &mut TestAppContext) {
     let user = user();
     let (id, reset) = spent(&user);
     let (shell, cx) = window(&user, cx);
-    // Wide enough for the whole toolbar with the chip: in a 646 px composer the pickers, Attach,
-    // the chip and Send need 20 px more than the row has.
-    cx.simulate_resize(size(px(1600.), px(1600.)));
     let page = open_session(&shell, &id, cx);
     until(&shell, cx, "the chip is offered", |cx| {
         offer(&page, cx).is_some()
