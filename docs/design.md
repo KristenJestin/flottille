@@ -248,15 +248,19 @@ Flottille's own tools:
   of the project (§7.2).
 - `report {text}`: the caller is done; its report goes to its parent at once and the session ends
   (see 5.3). A root agent's report goes to the user.
-- `ask {question}`: a question, answered later as a delivery (never blocks), to whom the daemon
+- `ask {question}` or `ask {questions}`: one question or up to 4, each with 2 to 4 options when
+  the answers are known, answered later as a delivery (never blocks), to whom the daemon
   decides for the caller: a child's to its parent, delivered as `child-question` and answered with
   `agent_send`; a led session's to its pilot, which is woken at the turn's end and answers with
   `session_send` (the session shows as waiting on its pilot); any other root's to the user. A
   question to the user is open at once, whatever the agent does next: in the inbox, as "needs you"
-  on its session's row, as a card at its place in the conversation with the field that answers it
-  (the call's own line says `asked you: <its first line>`), and in what `session_read` gives,
-  until the agent takes a message of the user written after it (one message answers every question
-  open then), or its session is replaced or resumed.
+  on its session's row, as a card at its place in the conversation named after the session, with
+  a block per question (its options as chips, a field of several lines) and one Answer (the call's
+  own line says `asked you: <its first line>`), and in what `session_read` gives, until the agent
+  takes the answer from that card (`agent.answer`: one message quoting each question with its
+  answer, which answers that ask alone, the card then folded to the answers) or a message of the
+  user written after it (which answers every question open then), or its session is replaced or
+  resumed. A parent or a pilot reads a several-question ask numbered, and answers it in words.
   `ask_user` and `ask_parent`, the names it replaced, are answered for one release, routed as
   `ask` is.
 - `approval_answer {request_id, decision: forward | deny, why}`: answer a request held for the

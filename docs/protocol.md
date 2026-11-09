@@ -1231,6 +1231,24 @@ agent turns out to take no images, none is sent and the text of the turn ends wi
 10 MiB at most (the first message is always whole); the others wait for the next turn. The
 images of an agent go with it: when it ends for good, or 7 days after a root that can be resumed.
 
+#### `agent.answer`
+
+`{"agent", "question", "answers"}`. The user's answers to an ask of the root (`docs/tools.md`,
+"ask"): `question` is the number of its `agent.asked` event (`questions` of `agent.tree`), and
+`answers` one per question, in order, each `{"choices"?, "text"?}`: the labels of the options
+chosen (one at most when the question is not `multiple`) and the user's own words (several lines
+allowed), at least one of the two. The daemon sends the root one message (a `user` delivery, as
+`agent.send` does, its id `answer-<question>-…`) that quotes each question and gives its answer
+under it (the options chosen on one line, the words after); a single question without options is
+answered by the words alone, as a message always answered it. It answers that ask alone: the
+root's other asks still wait. The answers are kept with the ask (`agent.answered`, `asked` and
+`answers`), and the window shows them on the ask's card instead of a message of the user. It
+answers as `agent.send`: `{"agent", "after", "delivery"}`. `refused` when the ask does not wait for
+the user's answer (answered, replaced, never asked of the user), when it was answered already, when
+the answers do not fit its questions (`1 answers for 3 questions: answer each`, `question 2 has no
+answer`, `question 1 has no option Maybe`, `question 1 takes one option`), for a child, or for an
+agent in a final state.
+
 #### `agent.unqueue`
 
 `{"agent", "delivery", "images"?}`. Takes back a message the user wrote to a root that still waits
@@ -1375,11 +1393,12 @@ a reload of its tools waits for its next process, `agent.reload_tools`; `compact
 led session whose question waits for its pilot, `user` for a root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
 says `waiting for #12: checks`, `#12 of api` when the project has several repositories, `waiting for its wake in 20 min`), else `null`; `needs_user`, for the root, whether a request of its tree or its
 own question waits for the user; `questions`, for a root, its questions to the user that wait for
-the answer, the oldest first, each `{"seq", "at", "question"}` (the number of its `agent.asked`
-event, when it was asked, the question masked): each asked while the root waits that no message of
-the user written after it, and taken by the root, answered, and that no replacement or resume of
-its session came after (a message written before a question does not answer it), empty once it
-ended; `context`, how much of its context the agent used at its last
+the answer, the oldest first, each `{"seq", "at", "question", "questions"}` (the number of its
+`agent.asked` event, when it was asked, the ask as one text and each of its questions with their
+options, masked, as `agent.asked` has them): each asked while the root waits that no message of
+the user written after it, and taken by the root, answered (an answer from an ask's card,
+`agent.answer`, answers that ask alone), and that no replacement or resume of its session came
+after (a message written before a question does not answer it), empty once it ended; `context`, how much of its context the agent used at its last
 report (`agent.usage`), in percent, `null` before one and while the window's size is not known;
 `context_tokens`, the tokens its context holds at that report, `null` before one; `queued`, for the root, the messages the
 user wrote to it that wait for it to read them between its turns, the oldest first, each
@@ -1694,7 +1713,8 @@ changes when the judge was not picked.
 `{"after"?, "limit"?}`. What the root agents sent to the user: `{"entries": [...]}`, oldest first.
 An entry is `{"seq", "at", "kind", "agent", "project", "workspace", "text"}`, made from an event of
 a root agent (`docs/events.md`): `report` (`agent.reported`, `text` its report), `question`
-(`agent.asked` to the user, `text` its question), `failure` (`agent.failed`, `text` its reason) or
+(`agent.asked` to the user, `text` the ask as one text, its questions numbered, and `questions`
+each of them with its options, as `agent.asked` has them), `failure` (`agent.failed`, `text` its reason) or
 `paused` (`session.following_paused`: two sessions talk to each other without the user, `text` says
 which and how to resume; `agent` is the followed session) or `vault` (`vault.asked`, `text` the
 entry, its project and the agent's reason). A pause that resumed since is `"resolved": true`, its
