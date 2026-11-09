@@ -75,8 +75,14 @@ jobs:
         run: cargo fmt --check
       - if: steps.cargo.outputs.present == 'true'
         run: cargo clippy --all-targets --locked -- -D warnings
+      # nextest runs the tests of every binary in parallel, where `cargo test` runs the binaries
+      # one after another. A prebuilt binary, pinned: nothing is compiled for it at every run.
       - if: steps.cargo.outputs.present == 'true'
-        run: cargo test --locked
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-nextest@0.9.151
+      - if: steps.cargo.outputs.present == 'true'
+        run: cargo nextest run --locked --workspace
       # The margin left on the runner, read even when a step above failed.
       - name: Disk left
         if: always()
