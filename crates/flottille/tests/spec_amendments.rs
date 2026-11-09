@@ -424,3 +424,40 @@ fn amend_is_refused_while_the_spec_is_draft() {
     );
     assert_eq!(amendments(&user, spec), Vec::<Value>::new());
 }
+
+#[test]
+fn a_session_whose_development_ended_cannot_amend() {
+    let user = user();
+    let (spec, first, _) = developed(&user);
+    user.call("agent.stop", json!({"agent": first})).unwrap();
+    eventually("the spec back to ready", || {
+        show(&user, spec)["status"] == "ready"
+    });
+    let (second, mcp) = develop(&user, spec);
+
+    // The user resumes the first session while the second develops the spec.
+    let resumed = user.received_requests("session/resume").len();
+    user.call("agent.resume", json!({"agent": first})).unwrap();
+    user.call("agent.send", json!({"agent": first, "message": "go on"}))
+        .unwrap();
+    eventually("the first session resumed", || {
+        user.received_requests("session/resume").len() > resumed
+    });
+    let server = &user.received_requests("session/resume")[resumed]["params"]["mcpServers"][0];
+    let old = Mcp::initialize(
+        server["url"].as_str().unwrap(),
+        server["headers"][0]["value"].as_str().unwrap(),
+    );
+
+    let text = refused(amend(&old, spec, chips()));
+
+    assert!(
+        text.starts_with(&format!(
+            "refused: spec {spec} is developed by session {second}"
+        )),
+        "{text}"
+    );
+    assert_eq!(amendments(&user, spec), Vec::<Value>::new());
+    // The session developing it now proposes it.
+    done(amend(&mcp, spec, chips()));
+}

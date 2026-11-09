@@ -1019,8 +1019,9 @@ change" says, and called through the gate as every other.
 - **Who writes.** A spec is written by the session "New spec" or "Write the spec" started for it
   (its `writer`); `write` and `ask` by another session, or of a spec with no writing session, are
   refused: `spec 3 is written by session …: this session does not write it`.
-- **Who amends.** Only the session developing the spec (the one "Launch development" started) has
-  `amend` of it: another root's is refused (`spec 3 is developed by session …: only the session
+- **Who amends.** Only the session developing the spec now (the one its last "Launch development"
+  started, while it runs) has `amend` of it: another root's, a session of an earlier development
+  resumed included, is refused (`spec 3 is developed by session …: only the session
   developing a spec proposes an amendment to it`), a child has no `spec` at all, nor has the pilot
   door. While the spec is back to Draft it is refused (`the spec is back to draft: spec 3 is a
   Draft, …`), and once it is Done. An amendment is the one write past Draft, and only through the

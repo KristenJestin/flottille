@@ -2441,8 +2441,9 @@ fn tool_gate(daemon: &Daemon, grant: &Grant, args: &Value) -> std::result::Resul
     }
 }
 
-/// Whether the session may propose an amendment to the spec: it develops it, and the spec is not
-/// back to Draft nor Done. The one write past Draft, and only through the user's acceptance.
+/// Whether the session may propose an amendment to the spec: it develops it now, its last
+/// development and running, and the spec is not back to Draft nor Done. The one write past
+/// Draft, and only through the user's acceptance.
 fn amends(daemon: &Daemon, spec: &Spec, agent: &str) -> std::result::Result<(), String> {
     let id = spec.id;
     let developments = daemon
@@ -2451,11 +2452,10 @@ fn amends(daemon: &Daemon, spec: &Spec, agent: &str) -> std::result::Result<(), 
             Ok((developments_of(&space, id)?, None::<Event>))
         })
         .map_err(|error| error.to_string())?;
-    if !developments
-        .iter()
-        .any(|development| development.agent == agent)
-    {
-        return Err(match running(daemon, &developments) {
+    // A session of an earlier development, resumed, does not develop the spec any more.
+    let last = &developments[developments.len().saturating_sub(1)..];
+    if running(daemon, last).as_deref() != Some(agent) {
+        return Err(match running(daemon, last) {
             Some(developer) => format!(
                 "spec {id} is developed by session {developer}: only the session developing a \
                  spec proposes an amendment to it"
