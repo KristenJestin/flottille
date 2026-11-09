@@ -739,14 +739,18 @@ line names, every program a wrapper or a runner runs included:
   run changed in the agent folders of its place is put back as it was once the run ends, and
   its result says it was refused, naming the files. Only the runs of a line the gate held (to
   judge or base, whoever let it through) and the runs of a task are guarded so: a line it let
-  through at once only reads, or writes the files it names. Runs that overlap in a place share
-  one guard: the first notes the agent folders, the last to end puts them back, and its result
-  says so. What the put-back removes or overwrites is moved to Flottille's state folder
+  through at once only reads, or writes the files it names. Runs that overlap in a place, or in
+  places one inside the other (a repository's folder in its project's), share one guard: the
+  first notes the agent folders, a run in an outer place takes in what the inner ones noted,
+  the last to end puts them back, and its result says so. What the put-back removes or overwrites is moved to Flottille's state folder
   (`agent-folders/<run>`), which the result names: a user's own edit there during the run is
   undone, never lost. It writes nothing below a folder that is no longer a real one (a link
-  made since, to the home or anywhere): that entry is said as not put back. A place of more
-  than 500,000 entries is looked at up to that bound, and the result says its agent folders
-  could not all be checked. What this does not cover: a process that outlives its run (one that
+  made since, to the home or anywhere): that entry is said as not put back; each folder is
+  opened by its handle, never through a link, so one made a link while the put-back goes on
+  leads it nowhere. The agent folders right in the place and in each of its repositories are
+  always looked at whole; the rest of a place of more than 500,000 entries is looked at up to
+  that bound, and the result says its agent folders could not all be checked, as does an entry
+  of the user's inbox (`run.agent_folders_unchecked`). What this does not cover: a process that outlives its run (one that
   left the run's session, `setsid`), a long `serve` run until it ends, and a run going on when
   the daemon stops or crashes; the files also exist while the run goes on;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:

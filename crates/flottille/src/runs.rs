@@ -1110,13 +1110,23 @@ async fn follow(
         going.output.lock().unwrap().push(&buffer[..read]);
     }
     // What it wrote in an agent folder of its place without naming it is put back, and its
-    // result says so.
+    // result says so. A place too large to check all of is the user's to hear of too: the agent
+    // may not tell them.
     let guarded = going.guarded.lock().unwrap().take();
     if let Some(guard) = guarded
         && let Some(restored) = guard.leave().await
-        && let Some(said) = crate::agent_folders::said(&restored)
     {
-        going.output.lock().unwrap().push(said.as_bytes());
+        if restored.unchecked {
+            let run = &going.run;
+            let data = json!({"agent": run.agent, "project": run.project, "run": run.id,
+                "folder": run.folder});
+            if let Err(error) = daemon.emit("run.agent_folders_unchecked", data) {
+                eprintln!("flottille daemon: run {}: {error}", run.id);
+            }
+        }
+        if let Some(said) = crate::agent_folders::said(&restored) {
+            going.output.lock().unwrap().push(said.as_bytes());
+        }
     }
     let end = match status {
         Some(status) => End {

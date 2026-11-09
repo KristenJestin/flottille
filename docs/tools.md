@@ -1572,10 +1572,12 @@ says who answers a call to judge (`docs/design.md` §7.1).
      with `flottille: refused: this run wrote in a repository's agent folder (…): …; Flottille put
      back as they were: …; what it removed or replaced there is kept in
      <state>/agent-folders/<run>; ask the user to make the change`. Runs that overlap in a place
-     share it: the first notes, the last to end puts back and says so. Nothing is written or
+     share it, and so do runs in places one inside the other: the first notes, the last to end
+     puts back and says so. Nothing is written or
      removed below a folder that is no longer a real one (`Flottille could not put back: …, tell
-     the user`). Past 500,000 entries in the place, the rest is not looked at and the output says
-     `the agent folders of this place could not all be checked`. What is outside the agent
+     the user`). The agent folders right in the place and in its repositories are always looked
+     at; past 500,000 entries in the place, the rest is not, and the output says `the agent
+     folders of this place could not all be checked`, which the user's inbox says too. What is outside the agent
      folders stays as the run left it (the branch checked out, the commit made);
    - a program that reads or prints a login: `gh`/`glab auth token`, `aws configure get` or
      `export-credentials`, `aws ecr get-login-password`, `aws sts get-session-token`,

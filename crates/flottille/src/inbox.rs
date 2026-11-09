@@ -47,6 +47,7 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
                 "agent.failed",
                 "session.following_paused",
                 "vault.asked",
+                "run.agent_folders_unchecked",
             ],
             asked.after.unwrap_or(0),
         )
@@ -66,13 +67,16 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             ("agent.failed", _) => "failure",
             ("session.following_paused", _) => "paused",
             ("vault.asked", _) => "vault",
+            ("run.agent_folders_unchecked", _) => "unchecked",
             _ => continue,
         };
         let Some(id) = event.data["agent"].as_str() else {
             continue;
         };
         let agent: Option<Agent> = daemon.read(|store| store.agent(id))?;
-        let Some(agent) = agent.filter(|agent| agent.parent.is_none()) else {
+        // The daemon's own word of a child's run is the user's to hear too.
+        let Some(agent) = agent.filter(|agent| agent.parent.is_none() || kind == "unchecked")
+        else {
             continue;
         };
         let resolved = (kind == "paused"
@@ -99,6 +103,15 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             "paused" => json!(paused),
             "report" => event.data["text"].clone(),
             "question" => event.data["question"].clone(),
+            "unchecked" => json!(format!(
+                "Its run {} in {} ended in a place too large for Flottille to check all its agent \
+                 folders (.claude, .claude.json, .codex) after it: those right in the place and in \
+                 its repositories were checked and put back, a change in one further down was \
+                 neither seen nor put back. Look there before you open it with an agent's own \
+                 command line.",
+                event.data["run"].as_str().unwrap_or_default(),
+                event.data["folder"].as_str().unwrap_or_default()
+            )),
             "vault" => json!(format!(
                 "It asks you to set the vault entry {} of {}: {}",
                 event.data["name"].as_str().unwrap_or_default(),

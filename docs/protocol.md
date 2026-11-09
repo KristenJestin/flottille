@@ -1730,7 +1730,9 @@ a root agent (`docs/events.md`): `report` (`agent.reported`, `text` its report),
 each of them with its options, as `agent.asked` has them), `failure` (`agent.failed`, `text` its reason) or
 `paused` (`session.following_paused`: two sessions talk to each other without the user, `text` says
 which and how to resume; `agent` is the followed session) or `vault` (`vault.asked`, `text` the
-entry, its project and the agent's reason). A pause that resumed since is `"resolved": true`, its
+entry, its project and the agent's reason) or `unchecked` (`run.agent_folders_unchecked`: a run of
+the agent, a child's too, ended in a place too large for the daemon to check all its agent folders
+after it, `text` says which and where). A pause that resumed since is `"resolved": true`, its
 `text` ending `It has resumed since.`; a request for a vault entry the user answered is
 `"resolved": true` too.
 A child's own go to its parent and are not here. Without `after`, the last `limit` entries (50 by
