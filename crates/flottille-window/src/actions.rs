@@ -200,6 +200,15 @@ pub enum Command {
     JudgeWrite {
         text: Option<String>,
     },
+    /// The guidance of a part of Flottille the user can turn off (`<name>.show`).
+    GuidanceRead {
+        name: String,
+    },
+    /// Saves it (`<name>.set`), or with none resets it (`<name>.reset`).
+    GuidanceWrite {
+        name: String,
+        text: Option<String>,
+    },
     CreateWorkspace {
         project: String,
         name: String,
@@ -966,6 +975,12 @@ pub enum Outcome {
         written: bool,
         shown: Result<Shown, String>,
     },
+    /// The guidance of the part `name` as the daemon says it, after a read or a save or a reset.
+    Guidance {
+        name: String,
+        written: bool,
+        shown: Result<Shown, String>,
+    },
     /// The rules as the daemon says them, after a read (`written` false) or a save or a reset.
     Rules {
         project: Option<String>,
@@ -1484,6 +1499,30 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 written,
                 guidance,
                 shown: answer(ask_alone(connect, method, params, bounds.quick)),
+            }
+        }
+        Command::GuidanceRead { name } => {
+            let shown = ask_alone(connect, &format!("{name}.show"), json!({}), bounds.quick);
+            Outcome::Guidance {
+                name,
+                shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
+                written: false,
+            }
+        }
+        Command::GuidanceWrite { name, text } => {
+            let shown = match &text {
+                Some(text) => ask_alone(
+                    connect,
+                    &format!("{name}.set"),
+                    json!({"text": text}),
+                    bounds.quick,
+                ),
+                None => ask_alone(connect, &format!("{name}.reset"), json!({}), bounds.quick),
+            };
+            Outcome::Guidance {
+                name,
+                shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
+                written: true,
             }
         }
         Command::JudgeRead => {

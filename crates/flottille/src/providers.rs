@@ -617,6 +617,16 @@ pub fn takes_images(daemon: &Daemon, provider: &str) -> Option<bool> {
 
 /// The models a provider's agents offered, when they were read from the version of the provider
 /// there is now: only these refuse a model or an effort.
+/// The model of the provider's list that `asked` names (`listed_model`), once one of its sessions
+/// said what it offers: none before, and none when it offers no such model.
+pub fn offered_model(daemon: &Daemon, provider: &'static Provider, asked: &str) -> Option<String> {
+    let settings = Settings::load(&daemon.paths).ok()?;
+    let check = Check::of(provider, &settings, Version::Skip);
+    let models = known_models(daemon, &check)?;
+    let offered: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
+    provider::listed_model(offered.iter().copied(), asked).map(str::to_owned)
+}
+
 fn known_models(daemon: &Daemon, check: &Check) -> Option<Vec<Value>> {
     last_models(daemon, check).and_then(|(models, current)| current.then_some(models))
 }

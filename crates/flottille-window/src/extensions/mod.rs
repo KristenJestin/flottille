@@ -4,6 +4,7 @@
 //! project tab, a page, an action on a row), shown only where it is on. The window never says what
 //! these parts are called in the code: each is a feature of the app, under its own title.
 
+pub mod review;
 pub mod specs;
 
 use std::collections::HashMap;
@@ -14,13 +15,15 @@ use flottille_ui::{
     space, toast,
 };
 use gpui_kit::{
-    AnyElement, App, Context, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Task, TestSupportExt as _, WeakEntity, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Task, TestSupportExt as _,
+    WeakEntity, div, px,
 };
 use serde_json::{Map, Value, json};
 
 use crate::actions::Command;
 use crate::commands::perform_later;
+use crate::rules::RulesEditor;
 use crate::shell::Shell;
 
 /// One of its settings, as the daemon lists it.
@@ -29,8 +32,11 @@ pub struct Setting {
     pub key: String,
     pub label: String,
     pub hint: String,
-    /// `language`: the kinds come with their first need.
+    /// `language`, `subset` (some of `options`) or `model` (a slot): the kinds come with their
+    /// first need.
     pub kind: String,
+    /// The values a `subset` takes some of, in their order.
+    pub options: Vec<String>,
     /// A project may set its own value.
     pub per_project: bool,
     /// Its global value: its default when not `set`.
@@ -69,6 +75,8 @@ pub struct Listed {
     pub error: Option<String>,
     pub settings: Vec<Setting>,
     pub projects: Vec<InProject>,
+    /// It has a guidance its agents follow, edited in its tab.
+    pub guidance: bool,
 }
 
 impl Listed {
@@ -91,7 +99,16 @@ impl Listed {
                     key: text(&setting["key"]),
                     label: text(&setting["label"]),
                     hint: text(&setting["hint"]),
-                    kind: text(&setting["kind"]),
+                    kind: match &setting["kind"] {
+                        Value::Object(kind) if kind.contains_key("subset") => "subset".into(),
+                        kind => text(kind),
+                    },
+                    options: setting["kind"]["subset"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(text)
+                        .collect(),
                     per_project: setting["per_project"] == true,
                     value: setting["value"].clone(),
                     set: setting["set"] == true,
@@ -109,6 +126,7 @@ impl Listed {
                     error: project["error"].as_str().map(str::to_owned),
                 })
                 .collect(),
+            guidance: value["guidance"] == true,
         }
     }
 
@@ -140,6 +158,7 @@ pub enum Then {
         setting: Option<String>,
     },
     Specs(specs::Then),
+    Review(review::Then),
 }
 
 /// How long the events that change what is listed must stop before it is read again: a switch
@@ -162,6 +181,8 @@ pub struct Registry {
     pending: HashMap<(String, Option<String>), bool>,
     /// What Specs lists of its specs.
     specs: specs::Specs,
+    /// The editor of each one's guidance, by its name, made once it is listed with one.
+    guidance: HashMap<String, Entity<RulesEditor>>,
     quiet: Option<Task<()>>,
 }
 
@@ -176,6 +197,7 @@ impl Registry {
             listed_at: 0,
             pending: HashMap::new(),
             specs: specs::Specs::default(),
+            guidance: HashMap::new(),
             quiet: None,
         }
     }
@@ -248,6 +270,27 @@ impl Registry {
         &self.specs
     }
 
+    /// The editor of `name`'s guidance.
+    pub fn guidance(&self, name: &str) -> Option<&Entity<RulesEditor>> {
+        self.guidance.get(name)
+    }
+
+    /// Each part listed with a guidance has its editor, which reads it again: what is typed in
+    /// it stays.
+    fn read_guidance(&mut self, cx: &mut Context<Self>) {
+        for listed in self.list.iter().filter(|listed| listed.guidance) {
+            let shell = self.shell.clone();
+            let editor = self
+                .guidance
+                .entry(listed.name.clone())
+                .or_insert_with(|| {
+                    cx.new(|_| RulesEditor::part(shell, &listed.name, &listed.title))
+                })
+                .clone();
+            editor.update(cx, |editor, cx| editor.read(cx));
+        }
+    }
+
     /// Whether the switch shows `name` on, globally or in `project`: what it was asked to become
     /// while the daemon has not answered.
     pub fn switch_on(&self, name: &str, project: Option<&str>) -> bool {
@@ -295,7 +338,7 @@ impl Registry {
         name: &str,
         project: Option<&str>,
         setting: &Setting,
-        value: Option<String>,
+        value: Option<Value>,
         cx: &mut Context<Self>,
     ) {
         let command = Command::Ask {
@@ -333,6 +376,7 @@ impl Registry {
                             self.list = list;
                             cx.notify();
                         }
+                        self.read_guidance(cx);
                     }
                     Err(why) => self.error = Some(why),
                 }
@@ -373,6 +417,7 @@ impl Registry {
                 cx.notify();
             }
             Then::Specs(then) => specs::answered(self, then, answer, cx),
+            Then::Review(then) => review::answered(self, then, answer, cx),
         }
     }
 
@@ -411,18 +456,37 @@ fn language_said(tag: &str) -> String {
 }
 
 /// The control of one setting, chosen by its kind (rule 4 of `docs/reference/gpui.md`): a language
-/// is a select, the first option the value it has when none is set here (`default`).
+/// is a select, the first option the value it has when none is set here (`default`); a subset is a
+/// switch for each of its values; a model slot is a select of the models the providers offer, the
+/// first option the default.
+#[allow(clippy::too_many_arguments)]
 fn control(
     registry: &Entity<Registry>,
     name: &str,
     project: Option<&str>,
     setting: &Setting,
-    own: Option<String>,
-    default: String,
+    own: Option<Value>,
+    default: Value,
     id: &str,
+    providers: &crate::providers::Providers,
 ) -> Option<AnyElement> {
+    let (registry, name, project_name, setting_of) = (
+        registry.downgrade(),
+        name.to_owned(),
+        project.map(str::to_owned),
+        setting.clone(),
+    );
+    let set = move |value: Option<Value>, cx: &mut App| {
+        registry
+            .update(cx, |registry, cx| {
+                registry.set(&name, project_name.as_deref(), &setting_of, value, cx)
+            })
+            .ok();
+    };
     match setting.kind.as_str() {
         "language" => {
+            let own = own.as_ref().and_then(Value::as_str).map(str::to_owned);
+            let default = default.as_str().unwrap_or_default().to_owned();
             let mut tags: Vec<String> = LANGUAGES.iter().map(|(t, _)| (*t).to_owned()).collect();
             if let Some(own) = &own
                 && !tags.contains(own)
@@ -441,25 +505,102 @@ fn control(
                 .as_ref()
                 .and_then(|own| tags.iter().position(|tag| tag == own))
                 .map_or(0, |at| at + 1);
-            let (registry, name, project, setting) = (
-                registry.downgrade(),
-                name.to_owned(),
-                project.map(str::to_owned),
-                setting.clone(),
-            );
             let select = Select::new(SharedString::from(format!("{id}-select")), options, chosen)
                 .on_choose(move |at, _, cx| {
-                    let value = at.checked_sub(1).map(|at| tags[at].clone());
-                    registry
-                        .update(cx, |registry, cx| {
-                            registry.set(&name, project.as_deref(), &setting, value, cx)
-                        })
-                        .ok();
+                    set(at.checked_sub(1).map(|at| json!(tags[at])), cx);
+                });
+            Some(select.into_any_element())
+        }
+        "subset" => {
+            let words = |value: &Value| -> Vec<String> {
+                value
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            };
+            let chosen = words(own.as_ref().unwrap_or(&default));
+            let set = std::rc::Rc::new(set);
+            let switches = setting.options.iter().map(|option| {
+                let on = chosen.contains(option);
+                let (set, chosen, option, options) = (
+                    set.clone(),
+                    chosen.clone(),
+                    option.clone(),
+                    setting.options.clone(),
+                );
+                let label = capitalized(&option);
+                Switch::new(SharedString::from(format!("{id}-{option}")), on, label).on_click(
+                    move |_, _, cx| {
+                        let list: Vec<&String> = options
+                            .iter()
+                            .filter(|word| (*word == &option) != chosen.contains(word))
+                            .collect();
+                        set(Some(json!(list)), cx);
+                    },
+                )
+            });
+            Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::SM)
+                    .children(switches)
+                    .into_any_element(),
+            )
+        }
+        "model" => {
+            let mut slots: Vec<(Value, String)> = Vec::new();
+            for provider in providers.offered() {
+                for model in provider.models.iter().flatten() {
+                    slots.push((
+                        json!({"provider": provider.name, "model": model.id}),
+                        format!("{} · {}", provider.title, model.label()),
+                    ));
+                }
+            }
+            if let Some(own) = &own
+                && !slots.iter().any(|(slot, _)| slot == own)
+            {
+                let said = match own["model"].as_str() {
+                    Some(model) => format!("{} · {model}", own["provider"].as_str().unwrap_or("")),
+                    None => format!("{} · its default", own["provider"].as_str().unwrap_or("")),
+                };
+                slots.push((own.clone(), said));
+            }
+            let first = match (project, default.is_null()) {
+                (Some(_), false) => "As in Settings".to_owned(),
+                _ => "The strongest of the session's provider".to_owned(),
+            };
+            let options = std::iter::once(SelectOption::new("default", first)).chain(
+                slots
+                    .iter()
+                    .enumerate()
+                    .map(|(at, (_, said))| SelectOption::new(format!("slot-{at}"), said.clone())),
+            );
+            let chosen = own
+                .as_ref()
+                .and_then(|own| slots.iter().position(|(slot, _)| slot == own))
+                .map_or(0, |at| at + 1);
+            let select = Select::new(SharedString::from(format!("{id}-select")), options, chosen)
+                .on_choose(move |at, _, cx| {
+                    set(at.checked_sub(1).map(|at| slots[at].0.clone()), cx);
                 });
             Some(select.into_any_element())
         }
         _ => None,
     }
+}
+
+/// A value as a switch's label says it: `bugs` is "Bugs".
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// The fields of the settings, each a labelled control, entering one after the other.
@@ -469,26 +610,36 @@ fn fields<'a>(
     project: Option<&str>,
     settings: impl Iterator<Item = &'a Setting>,
     prefix: &str,
+    cx: &App,
 ) -> AnyElement {
     let side = project.and_then(|project| listed.in_project(project));
+    let providers = registry
+        .read(cx)
+        .shell
+        .upgrade()
+        .map(|shell| shell.read(cx).providers().clone())
+        .unwrap_or_default();
     div()
         .flex()
         .flex_col()
         .gap(space::LG)
         .children(settings.enumerate().filter_map(|(at, setting)| {
-            let global = setting.value.as_str().unwrap_or_default().to_owned();
+            let global = setting.value.clone();
             let (own, default) = match side {
                 None => (setting.set.then(|| global.clone()), global),
-                Some(side) => (
-                    side.settings
-                        .get(&setting.key)
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    global,
-                ),
+                Some(side) => (side.settings.get(&setting.key).cloned(), global),
             };
             let id = format!("{prefix}-setting-{}", setting.key);
-            let control = control(registry, &listed.name, project, setting, own, default, &id)?;
+            let control = control(
+                registry,
+                &listed.name,
+                project,
+                setting,
+                own,
+                default,
+                &id,
+                &providers,
+            )?;
             let field = Field::new(
                 SharedString::from(id.clone()),
                 setting.label.clone(),
@@ -573,7 +724,7 @@ pub fn settings_tab(registry: &Entity<Registry>, name: &str, cx: &App) -> Option
         .hint(listed.sentence.clone())
         .disabled(pending)
         .on_click(flip);
-    let settings = fields(registry, &listed, None, listed.settings.iter(), name);
+    let settings = fields(registry, &listed, None, listed.settings.iter(), name, cx);
     let card = card(
         name,
         switch,
@@ -582,9 +733,24 @@ pub fn settings_tab(registry: &Entity<Registry>, name: &str, cx: &App) -> Option
         listed.error.clone(),
         cx,
     );
+    // Its guidance, a section of its own under the settings while it is on, in the editor the
+    // judge's has.
+    let guidance = read.guidance(name).cloned().map(|editor| {
+        presence(
+            SharedString::from(format!("{name}-guidance-block")),
+            on && listed.enabled,
+            editor.into_any_element(),
+        )
+        .gap(space::XXL)
+    });
     Some(
-        Section::new(SharedString::from(name.to_owned()), listed.tab.clone())
-            .child(card)
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                Section::new(SharedString::from(name.to_owned()), listed.tab.clone()).child(card),
+            )
+            .children(guidance)
             .into_any_element(),
     )
 }
@@ -626,6 +792,7 @@ pub fn project_section(
         Some(project),
         listed.settings.iter().filter(|setting| setting.per_project),
         &prefix,
+        cx,
     );
     let error = listed
         .in_project(project)

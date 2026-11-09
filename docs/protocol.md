@@ -453,10 +453,14 @@ in every project, off in a project whose switch says `enabled = false`, and off 
 is off globally, the projects' switches kept.
 
 - `extension.list` answers `{"extensions", "errors"}`: for each extension `{"name", "title",
-  "sentence", "scope", "on_by_default", "place", "enabled", "error", "settings", "projects"}`,
-  `enabled` being the global switch, `error` why `extensions.toml` cannot be used (`null` when it
-  can; the extension is then off), `settings` each `{"key", "label", "hint", "kind",
-  "per_project", "value", "set"}` with its global value (its default when not `set`), and
+  "sentence", "scope", "on_by_default", "place", "enabled", "error", "settings", "projects",
+  "guidance", "commands"}`, `enabled` being the global switch, `error` why `extensions.toml`
+  cannot be used (`null` when it can; the extension is then off), `guidance` whether it has one
+  (`<name>.show`, below), `commands` the words of its composer commands (`["review"]`),
+  `settings` each `{"key", "label", "hint", "kind", "per_project", "value", "set"}` with its
+  global value (its default when not `set`), `kind` being `"language"`, `"model"` (a slot,
+  `{"provider", "model"?, "effort"?}`, `null` for the extension's own choice) or `{"subset": [...]}`
+  (some of those values, in their order), and
   `projects` each `{"project", "enabled", "switch", "settings", "error"}`: whether it is active
   there, the project's own switch (`null` when its file says none) and values. `errors` names the
   projects' `[extensions.<name>]` of an extension Flottille does not know.
@@ -472,6 +476,12 @@ is off globally, the projects' switches kept.
   is `spec.answer`). `refused` for an action the extension does not declare, naming those it does:
   for Specs `new`, `from_ticket`, `answer`, `ready`, `draft`, `ticket`, `departures`, `develop`,
   `amendment`.
+
+- `<name>.show`, `<name>.set {text}`, `<name>.reset`: the guidance of an extension that has one
+  (Review's: `review.show`…), `$XDG_CONFIG_HOME/flottille/<name>.md`, absent while Flottille's
+  default holds. Each answers `{"text", "source", "error", "default"}` as `judge.show` does, and
+  `set` and `reset` emit `<name>.changed`; `set` with an empty text resets it, and refuses a text
+  over the extension's limit (Review: 4,000 characters).
 
 `extension.set` emits `extension.changed`; turning an extension on or off globally gives each
 running session of every project the tools its role has now, before the answer (`docs/tools.md`,
@@ -605,6 +615,33 @@ an amendment answered `spec.changed`; `spec.ready`, `spec.draft`, `spec.develop`
 `spec.status_changed`. The
 user's door alone reaches these methods: an agent has the `spec` tool (`docs/tools.md`, "Specs"),
 whose actions make no spec Ready nor Draft.
+
+### The review methods
+
+Review (`docs/extensions.md`, "Review"), while it is active in the project. The review's agents
+and the findings it delivers are told to the session (`docs/tools.md`, "Review").
+
+- `review.start {agent}`: reviews the session's change, as `/review` in its composer does
+  (`agent.send` of the message `/review` alone, which is never sent to the agent: it answers
+  `{"agent", "after", "delivery": null, "command"}`, `command` this method's answer), the
+  `review` tool and `flottille review`. Answers `{"review", "session", "pilot", "round",
+  "passes", "files"}`: the pilot launched as the session's child, the passes it may run (the spec
+  pass only for a session that develops a spec), the files of the diff. `refused`, before any agent
+  starts, while Review is off in the project, for a child or an ended session, for a session in
+  the project folder, while a review of the session runs, when the diff from the base is empty
+  (or, in a second round, nothing changed and no finding is open), after two rounds, and at the
+  children cap. Also `extension.act {"name": "review", "action": "start", "agent"}`.
+- `review.list {session? | spec? | project?}`: `{"reviews"}`, each `{"review", "project",
+  "session", "workspace", "pilot", "round", "spec", "state", "passes", "passes_done", "files",
+  "changed", "summary", "why", "started_at", "ended_at", "agents", "delivered", "findings"}`:
+  `state` `running`, `done` or `failed` (its pilot ended without reporting, `why`), `changed` what
+  changed in the workspace during it, `agents` its pilot and passes (`{"agent", "kind", "pass"}`),
+  `findings` those it kept, each `{"id", "review", "severity", "confidence", "file", "lines",
+  "concerns", "quote", "text", "case", "status", "settled_in"}`. Nothing of a project where Review
+  is off: its data stays for when it is on again.
+- `review.finding {session, finding, status}`: the user marks a finding `open`, `fixed`,
+  `dismissed` or `settle` (to settle with them); emits `review.finding_changed`.
+- `review.show`, `review.set {text}`, `review.reset`: its guidance (above).
 
 ### The appearance methods
 

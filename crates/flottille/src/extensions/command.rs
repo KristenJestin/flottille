@@ -36,7 +36,32 @@ pub fn run(paths: &Paths, command: Command) -> Result<ExitCode> {
     match command {
         Command::Extension { action } => extension(paths, action),
         Command::Spec { action } => super::specs::command::run(paths, action),
+        Command::Review { session, json } => review(paths, &session, json),
     }
+}
+
+/// `flottille review <session>`: the review starts, or why not, before any agent starts.
+fn review(paths: &Paths, session: &str, json: bool) -> Result<ExitCode> {
+    let mut client = Client::connect_or_start(paths)?;
+    let answer = client.request("review.start", json!({"agent": session}))?;
+    if json {
+        println!("{answer}");
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!(
+        "Started the review of session {session}, round {}: its pilot is agent {}, its passes {}. \
+         The findings are delivered to the session; `flottille agent show {session}` follows it.",
+        answer["round"],
+        answer["pilot"].as_str().unwrap_or_default(),
+        answer["passes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 fn extension(paths: &Paths, action: ExtensionAction) -> Result<ExitCode> {

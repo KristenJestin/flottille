@@ -285,12 +285,13 @@ fn items_of(event: &Event) -> Option<(String, Option<crate::items::ItemKey>)> {
 }
 
 /// Whether an event may change what the window draws in the places of a part of Flottille: one
-/// switched, a spec made or changed, a project's file changed (its own switch is there) or a
-/// project added or removed.
+/// switched, a spec made or changed, a review's guidance or findings changed, a project's file
+/// changed (its own switch is there) or a project added or removed.
 fn extensions_of(event: &Event) -> bool {
     let name = event.name.as_str();
     name == "extension.changed"
         || name.starts_with("spec.")
+        || name.starts_with("review.")
         || matches!(
             name,
             "project.changed" | "project.added" | "project.removed"

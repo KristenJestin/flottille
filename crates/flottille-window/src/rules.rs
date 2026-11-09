@@ -36,6 +36,9 @@ pub const REPEATS: &str = "These rules repeat the global ones; you can remove th
 /// What the compactor's editor says of when a change takes effect.
 pub const COMPACTION_REACH: &str = "A change reaches the next compaction.";
 
+/// What the editor of a part's guidance says of when a change takes effect.
+pub const PART_REACH: &str = "A change reaches the agents started from now on.";
+
 /// What the judge's editor says of when a change takes effect.
 pub const JUDGE_REACH: &str = "A change reaches the next judgement. Calls that always come to you \
                                never reach the judge, whatever this says.";
@@ -102,6 +105,9 @@ pub struct RulesEditor {
     judge: bool,
     /// It edits the compactor's guidance, not the rules.
     compaction: bool,
+    /// It edits the guidance of the part of Flottille of that name (Review's), not the rules:
+    /// its title, as the window says it.
+    part: Option<(String, String)>,
     /// Made when first drawn, since a text field needs a window.
     field: Option<Entity<TextareaState>>,
     shown: Option<Shown>,
@@ -122,6 +128,7 @@ impl RulesEditor {
             project,
             judge: false,
             compaction: false,
+            part: None,
             field: None,
             shown: None,
             waiting: false,
@@ -148,6 +155,19 @@ impl RulesEditor {
         }
     }
 
+    /// The editor of the guidance of the part `name` of Flottille, titled `title`.
+    pub fn part(shell: WeakEntity<Shell>, name: &str, title: &str) -> Self {
+        Self {
+            part: Some((name.to_owned(), title.to_owned())),
+            ..Self::new(shell, None)
+        }
+    }
+
+    /// A guidance, the judge's, the compactor's or a part's, rather than rules.
+    fn is_guidance(&self) -> bool {
+        self.judge || self.compaction || self.part.is_some()
+    }
+
     pub fn is_judge(&self) -> bool {
         self.judge
     }
@@ -163,7 +183,9 @@ impl RulesEditor {
     /// Asks the daemon for the rules.
     pub fn read(&self, cx: &mut Context<Self>) {
         let project = self.project.clone();
-        let command = if self.judge {
+        let command = if let Some((name, _)) = &self.part {
+            Command::GuidanceRead { name: name.clone() }
+        } else if self.judge {
             Command::JudgeRead
         } else if self.compaction {
             Command::CompactionRead
@@ -176,7 +198,12 @@ impl RulesEditor {
     /// Saves `text`, or with none resets to the default.
     fn write(&self, text: Option<String>, cx: &mut Context<Self>) {
         let project = self.project.clone();
-        let command = if self.judge {
+        let command = if let Some((name, _)) = &self.part {
+            Command::GuidanceWrite {
+                name: name.clone(),
+                text,
+            }
+        } else if self.judge {
             Command::JudgeWrite { text }
         } else if self.compaction {
             Command::CompactionGuidance { text }
@@ -270,19 +297,21 @@ impl RulesEditor {
     }
 
     fn make_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextareaState> {
+        let example = if self.part.is_some() {
+            "what its agents should look for"
+        } else if self.judge {
+            "how the judge should weigh a call"
+        } else if self.compaction {
+            "what a summary must keep"
+        } else if self.project.is_some() {
+            "what is particular to this project"
+        } else {
+            "how your agents should work"
+        };
         let field = cx.new(|cx| {
-            let mut field =
-                TextareaState::new(window, cx)
-                    .auto_grow(8, 18)
-                    .placeholder(if self.judge {
-                        "how the judge should weigh a call"
-                    } else if self.compaction {
-                        "what a summary must keep"
-                    } else if self.project.is_some() {
-                        "what is particular to this project"
-                    } else {
-                        "how your agents should work"
-                    });
+            let mut field = TextareaState::new(window, cx)
+                .auto_grow(8, 18)
+                .placeholder(example);
             follow_theme(&mut field, cx);
             field
         });
@@ -310,12 +339,14 @@ impl RulesEditor {
         cx: &mut Context<Self>,
     ) {
         self.waiting = false;
-        let what = if self.judge {
-            "Judge guidance"
+        let what = if let Some((_, title)) = &self.part {
+            format!("{title} guidance")
+        } else if self.judge {
+            "Judge guidance".to_owned()
         } else if self.compaction {
-            "Compaction guidance"
+            "Compaction guidance".to_owned()
         } else {
-            "Rules"
+            "Rules".to_owned()
         };
         let resetting = std::mem::take(&mut self.resetting);
         if written {
@@ -324,7 +355,9 @@ impl RulesEditor {
                 Ok(_) => Toast::success(format!("{what} saved")),
                 Err(why) => Toast::failure(format!("{what} not saved")).detail(why.clone()),
             };
-            let reach = if self.judge {
+            let reach = if self.part.is_some() {
+                "It reaches the agents started from now on."
+            } else if self.judge {
                 "They reach the next judgement."
             } else if self.compaction {
                 "They reach the next compaction."
@@ -405,7 +438,7 @@ impl RulesEditor {
     /// Where the text comes from, in a few words: the section's tag.
     pub fn origin(&self) -> &'static str {
         match (
-            self.judge || self.compaction,
+            self.is_guidance(),
             &self.project,
             self.shown.as_ref().map(|shown| shown.source),
         ) {
@@ -424,6 +457,9 @@ impl RulesEditor {
     fn footer(&self) -> &'static str {
         if self.compaction {
             return COMPACTION_REACH;
+        }
+        if self.part.is_some() {
+            return PART_REACH;
         }
         match (self.judge, &self.project, self.is_own()) {
             (true, _, _) => JUDGE_REACH,
@@ -445,9 +481,12 @@ impl Render for RulesEditor {
         let scope = self.project.clone().unwrap_or_default();
         let judge = self.judge;
         let compaction = self.compaction;
+        let named = self.part.as_ref().map(|(name, _)| name.clone());
         let id = |part: &str| {
             ElementId::Name(
-                if judge {
+                if let Some(name) = &named {
+                    format!("{name}-guidance-{part}")
+                } else if judge {
                     format!("judge-guidance-{part}")
                 } else if compaction {
                     format!("compaction-guidance-{part}")
@@ -508,29 +547,38 @@ impl Render for RulesEditor {
                     .into_any_element()
             }
         };
-        let (title, sentence, section) = match (judge, &self.project) {
+        let (title, sentence, section): (String, &str, String) = match (judge, &self.project) {
+            _ if self.part.is_some() => {
+                let (name, title) = self.part.clone().expect("a part");
+                (
+                    format!("{title} guidance"),
+                    "What its agents are told to look for. It sits inside Flottille's fixed text \
+                     for each of them, which says they modify nothing.",
+                    format!("{name}-guidance"),
+                )
+            }
             _ if compaction => (
-                "Compaction guidance",
+                "Compaction guidance".into(),
                 "What a summary must keep. It sits inside Flottille's fixed text, which says the \
                  summary is data and smaller than what it replaces.",
-                "compaction-guidance",
+                "compaction-guidance".into(),
             ),
             (true, _) => (
-                "Judge guidance",
+                "Judge guidance".into(),
                 "What the judge is told to allow. It can add to the floor (ask for anything \
                  destructive), never lift it.",
-                "guidance",
+                "guidance".into(),
             ),
             (false, Some(_)) => (
-                "Rules",
+                "Rules".into(),
                 "How the project's agents work, after your rules for every project. A change \
                  reaches the agents created from now on.",
-                "rules",
+                "rules".into(),
             ),
             (false, None) => (
-                "Rules",
+                "Rules".into(),
                 "How every project's agents work, unless a project has rules of its own.",
-                "rules",
+                "rules".into(),
             ),
         };
         let project_part = self.project.is_some().then(|| {

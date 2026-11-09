@@ -177,6 +177,31 @@ project: `extension.list` says what it is now.
 | `name` | The extension's (`specs`). |
 | `project` | The project whose file changed; `null` for `extensions.toml`. |
 
+### `review.started`, `review.progress`, `review.reported`, `review.failed`
+
+A review of a session started, launched or ended a pass, reported, or ended without its findings
+(its pilot ended or failed first). `agent` is its pilot, so that a client following the session's
+tree reads it again.
+
+| Field | |
+|---|---|
+| `review`, `project`, `session`, `agent` | |
+| `round`, `passes` | `review.started`: its round (1 or 2) and the passes it may run. |
+| `findings`, `shown`, `changed` | `review.reported`: the findings delivered, those kept (`info` and the others), and what changed in the workspace during it, or `null`. |
+| `why` | `review.failed`. |
+
+### `review.finding_changed`
+
+The user marked a finding (`review.finding`).
+
+| Field | |
+|---|---|
+| `session`, `finding`, `status`, `agent` | `agent` is the pilot of the review that found it. |
+
+### `review.changed`
+
+Review's guidance was saved or reset (`review.set`, `review.reset`).
+
 ### `spec.created`
 
 A spec was started (`spec.new`, `spec.from_ticket`).

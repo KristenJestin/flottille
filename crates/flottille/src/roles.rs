@@ -39,6 +39,15 @@ pub const ROLES: [Role; 2] = [
     },
 ];
 
+/// The role of an agent an extension launched (`docs/extensions.md`, "Agents an extension
+/// launches"): a worker by its name and its tools, told no worker's `ask` nor its end, which its
+/// extension's text says.
+pub const LAUNCHED: Role = Role {
+    name: WORKER,
+    template: include_str!("../roles/launched.md"),
+    project_layer: true,
+};
+
 pub fn role(name: &str) -> Option<&'static Role> {
     ROLES.iter().find(|role| role.name == name)
 }

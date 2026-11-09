@@ -161,7 +161,15 @@ pub const EXTENSION: Extension = Extension {
         ("agent.resumed", development_changed),
     ],
     fact: spec_of_session,
+    launched: launches_none,
+    commands: &[],
+    guidance: None,
 };
+
+/// Specs launches no agent of its own: the sessions it starts are the user's.
+fn launches_none(_: &Daemon, _: &str) -> Option<&'static str> {
+    None
+}
 
 /// What a session started by Specs does: it writes the spec, or develops it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -207,6 +215,48 @@ fn spec_of_session(daemon: &Daemon, agent: &str) -> Option<Value> {
     let spec = read(daemon, id).ok().flatten()?;
     super::active(daemon, &EXTENSION, &spec.project).ok()?;
     Some(json!({"spec": id, "title": spec.title, "status": spec.status, "work": work}))
+}
+
+/// The spec a session develops, as another extension reads it (Review): its id, its title, and its
+/// C and D, each with its text; none when the session develops none or Specs is not active in its
+/// project.
+pub(in crate::extensions) fn developed_by(daemon: &Daemon, agent: &str) -> Option<Developed> {
+    let (id, Work::Developing) = session_of(daemon, agent)? else {
+        return None;
+    };
+    let spec = read(daemon, id).ok().flatten()?;
+    super::active(daemon, &EXTENSION, &spec.project).ok()?;
+    Some(Developed {
+        id,
+        title: spec.title.clone(),
+        behaviour: spec
+            .content
+            .behaviour
+            .iter()
+            .map(|c| (c.id.clone(), c.text.clone()))
+            .collect(),
+        decisions: spec
+            .content
+            .decisions
+            .iter()
+            .map(|d| (d.id.clone(), format!("{} {}", d.question, d.decision)))
+            .collect(),
+        out_of_scope: spec
+            .content
+            .out_of_scope
+            .iter()
+            .map(|o| o.text.clone())
+            .collect(),
+    })
+}
+
+/// A spec as `developed_by` gives it.
+pub(in crate::extensions) struct Developed {
+    pub id: u64,
+    pub title: String,
+    pub behaviour: Vec<(String, String)>,
+    pub decisions: Vec<(String, String)>,
+    pub out_of_scope: Vec<String>,
 }
 
 /// What a root of a project where Specs is active may do with its specs; no action makes a spec
@@ -2690,7 +2740,13 @@ fn masked(value: Value, place: &crate::place::Place) -> Value {
     }
 }
 
-fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
+/// Specs' calls read and write its store, at once.
+fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> super::Called {
+    let outcome = tool_call_now(daemon, grant, args);
+    Box::pin(async move { outcome })
+}
+
+fn tool_call_now(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
     let asked: ToolCall = match crate::mcp::arguments("spec", args) {
         Ok(asked) => asked,
         Err(refused) => return refused,
