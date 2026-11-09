@@ -27,12 +27,20 @@ const ENTRIES_MAX: usize = 500_000;
 const ENTRIES_MAX: usize = 200;
 
 /// `ENTRIES_MAX`, or a daemon's tests' own (`FLOTTILLE_TEST_AGENT_FOLDER_ENTRIES`): a place past
-/// the real one would take them minutes to make.
+/// the real one would take them minutes to make. A release build reads no variable: 0 there
+/// would turn the guard off.
 fn entries_max() -> usize {
-    std::env::var("FLOTTILLE_TEST_AGENT_FOLDER_ENTRIES")
-        .ok()
-        .and_then(|max| max.parse().ok())
-        .unwrap_or(ENTRIES_MAX)
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        #[cfg(debug_assertions)]
+        if let Some(max) = std::env::var("FLOTTILLE_TEST_AGENT_FOLDER_ENTRIES")
+            .ok()
+            .and_then(|max| max.parse().ok())
+        {
+            return max;
+        }
+        ENTRIES_MAX
+    })
 }
 
 /// The largest file of an agent folder kept to be put back: a larger one changed is said, not
@@ -556,7 +564,9 @@ impl Walk<'_> {
                     continue;
                 }
                 let agent = agent || agent_folder(name);
-                if agent && login(name) {
+                // Only a file is a login: a folder of that name is walked, or it would hide
+                // what is planted below it.
+                if agent && login(name) && kind != Kind::Folder {
                     continue;
                 }
                 if kind == Kind::Folder {
@@ -931,6 +941,26 @@ mod tests {
 
         assert!(!odd.exists());
         assert_eq!(restored.put_back.len(), 1);
+    }
+
+    #[test]
+    fn a_folder_named_as_a_login_file_is_walked_and_put_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        made(&root.join(".claude/skills/kept/SKILL.md"), "kept\n");
+        let snapshot = Snapshot::take(root, None, &dir.path().join("kept"));
+
+        // A login file's name on a folder hid all below it, a skill declaring hooks included.
+        made(&root.join(".claude/skills/auth.json/SKILL.md"), "hooks\n");
+        made(
+            &root.join(".claude/agents/.credentials.json/x.md"),
+            "hooks\n",
+        );
+        snapshot.restore("run");
+
+        assert!(!root.join(".claude/skills/auth.json").exists());
+        assert!(!root.join(".claude/agents/.credentials.json").exists());
+        assert!(root.join(".claude/skills/kept/SKILL.md").exists());
     }
 
     #[test]
