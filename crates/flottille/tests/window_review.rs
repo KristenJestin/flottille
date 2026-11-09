@@ -378,3 +378,97 @@ fn review_s_tab_has_its_switch_its_passes_its_slots_and_its_guidance(cx: &mut Te
         user.call("review.show", json!({})).unwrap()["text"] == "Look at the migrations first."
     });
 }
+
+#[gpui_kit::test]
+fn the_findings_are_on_the_spec_s_page(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    // `session` makes the project, its workspace and a change; the spec's development is another
+    // session, in a workspace of its own, which changes the code too.
+    session(&user);
+    user.call("extension.set", json!({"name": "specs", "enabled": true}))
+        .unwrap();
+    let spec = user
+        .call("spec.new", json!({"project": "app", "title": "Magic link"}))
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    for (section, content) in [
+        ("problem", json!("Users forget their passwords.")),
+        (
+            "behaviour",
+            json!([{"text": "A link sent by mail signs the user in once."}]),
+        ),
+        (
+            "verification",
+            json!([{"id": "C1", "text": "Open the link twice: the second is refused."}]),
+        ),
+    ] {
+        user.call(
+            "spec.write",
+            json!({"spec": spec, "section": section, "content": content}),
+        )
+        .unwrap();
+    }
+    user.call("spec.ready", json!({"spec": spec})).unwrap();
+    let developed = user.call("spec.develop", json!({"spec": spec})).unwrap();
+    let developer = developed["agent"].as_str().unwrap().to_owned();
+    let workspace = user
+        .call("agent.show", json!({"agent": developer}))
+        .unwrap()["agent"]["workspace"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the development's workspace", || {
+        user.call(
+            "workspace.show",
+            json!({"project": "app", "name": workspace}),
+        )
+        .unwrap()["state"]
+            == "ready"
+    });
+    let folder = std::path::PathBuf::from(
+        user.call(
+            "workspace.show",
+            json!({"project": "app", "name": workspace}),
+        )
+        .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(folder.join("link.rs"), "pub fn link() {}\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "link"]);
+    let started = user
+        .call("review.start", json!({"agent": developer}))
+        .unwrap();
+    let pilot = pilot(&user);
+    let reported = pilot.call(
+        "review",
+        json!({"action": "report", "findings": [{"severity": "high", "confidence": "confirmed",
+            "concerns": "C1", "quote": "signs the user in once", "file": "link.rs",
+            "lines": "1", "text": "the link signs in twice", "case": "open it twice"}]}),
+    );
+    assert!(!reported.error, "{}", reported.text);
+
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let review = started["review"].as_u64().unwrap();
+    let row = format!("spec-finding-row-{review}-F1");
+    until(&shell, cx, "the spec's page shows the finding", |cx| {
+        shell.update_in(cx, |s, window, cx| {
+            s.open(
+                Selection::Spec {
+                    project: "app".into(),
+                    spec,
+                },
+                window,
+                cx,
+            )
+        });
+        label(cx, &row).is_some()
+    });
+    let said = label(cx, &row).unwrap();
+    assert!(said.contains("C1"), "{said}");
+    assert!(said.contains("the link signs in twice"), "{said}");
+    assert!(said.contains("· open:"), "{said}");
+}

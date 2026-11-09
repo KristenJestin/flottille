@@ -79,6 +79,10 @@ pub enum Then {
         amendment: u64,
         accept: bool,
     },
+    /// `review.list` of the spec: the findings of the reviews of its development.
+    Findings {
+        spec: u64,
+    },
 }
 
 impl Then {
@@ -92,7 +96,8 @@ impl Then {
             | Then::Ticket { spec, .. }
             | Then::Departures { spec }
             | Then::Develop { spec }
-            | Then::Amendment { spec, .. } => Some(*spec),
+            | Then::Amendment { spec, .. }
+            | Then::Findings { spec } => Some(*spec),
             Then::Listed { .. } | Then::New | Then::FromTicket { .. } => None,
         }
     }
@@ -274,6 +279,8 @@ pub(super) fn answered(
             Err(why) => toast(Toast::failure("The spec was not started").detail(why), cx),
         },
         Then::Develop { .. } => developed(&answer, cx),
+        // For a page no longer open.
+        Then::Findings { .. } => {}
         // The page's own, when it is no longer open.
         Then::Shown { .. }
         | Then::Answer { .. }
@@ -1063,6 +1070,9 @@ pub struct SpecPage {
     olds: HashSet<String>,
     /// The refused amendments are unfolded.
     refused_open: bool,
+    /// The findings of the reviews of its development, which the daemon lists while Review is on
+    /// in its project.
+    findings: Vec<Value>,
     /// The text answer of each open question.
     texts: HashMap<u64, Entity<InputState>>,
     /// The questions whose answer the daemon has not taken yet.
@@ -1096,6 +1106,7 @@ impl SpecPage {
             amending: Vec::new(),
             olds: HashSet::new(),
             refused_open: false,
+            findings: Vec::new(),
             texts: HashMap::new(),
             answering: Vec::new(),
             moving: false,
@@ -1153,11 +1164,43 @@ impl SpecPage {
             then,
             cx,
         );
+        // The daemon lists no review of a project where Review is off.
+        let then = Then::Findings { spec: self.spec };
+        ask(
+            &self.shell,
+            "review.list",
+            json!({"spec": self.spec}),
+            then,
+            cx,
+        );
+    }
+
+    /// The findings its page shows.
+    pub fn findings(&self) -> &[Value] {
+        &self.findings
     }
 
     /// What the daemon answered to something the page asked.
     pub fn answered(&mut self, then: Then, answer: Result<Value, String>, cx: &mut Context<Self>) {
         match then {
+            Then::Findings { .. } => {
+                let findings: Vec<Value> = answer
+                    .map(|listed| {
+                        listed["reviews"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|review| {
+                                review["findings"].as_array().cloned().unwrap_or_default()
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if self.findings != findings {
+                    self.findings = findings;
+                    cx.notify();
+                }
+            }
             Then::Shown { asked, .. } => {
                 if asked < self.shown_at {
                     return;
@@ -2530,6 +2573,11 @@ impl Render for SpecPage {
                 enter(key("amendments"), 1, amendments),
             ))
             .child(presence(
+                "spec-findings-block",
+                !self.findings.is_empty(),
+                enter(key("findings"), 1, findings_section(&self.findings, p)),
+            ))
+            .child(presence(
                 "spec-body-block",
                 read,
                 div()
@@ -2561,6 +2609,72 @@ impl Render for SpecPage {
             .child(confirm)
             .child(overwrite_confirm)
     }
+}
+
+/// The findings of the reviews of a spec's development, under its amendments: each its
+/// identifier, severity and confidence, the C or D it is about (or the code), its place, what is
+/// wrong and its status, which fades to a new one; each enters as it comes. Findings block
+/// nothing: they are said here, never asked about.
+fn findings_section(findings: &[Value], p: flottille_ui::Palette) -> Section {
+    let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+    let rows = findings.iter().enumerate().map(|(at, finding)| {
+        let id = text(&finding["id"]);
+        let review = finding["review"].as_u64().unwrap_or_default();
+        let place = match (finding["file"].as_str(), finding["lines"].as_str()) {
+            (Some(file), Some(lines)) => format!(" · {file}:{lines}"),
+            (Some(file), None) => format!(" · {file}"),
+            _ => String::new(),
+        };
+        let concerns = match finding["quote"].as_str() {
+            Some(quote) => format!("{} (\u{201c}{quote}\u{201d})", text(&finding["concerns"])),
+            None => text(&finding["concerns"]),
+        };
+        let head = format!(
+            "{id} · {} · {} · {concerns}{place}",
+            text(&finding["severity"]),
+            text(&finding["confidence"])
+        );
+        let said = text(&finding["text"]);
+        let status = match finding["status"].as_str() {
+            Some("settle") => "to settle with you".to_owned(),
+            Some(status) => status.to_owned(),
+            None => String::new(),
+        };
+        let key = format!("{review}-{id}");
+        enter(
+            SharedString::from(format!("spec-finding-{key}")),
+            at,
+            div()
+                .id(SharedString::from(format!("spec-finding-row-{key}")))
+                .py(space::SM)
+                .flex()
+                .flex_col()
+                .gap(space::XS)
+                .aria_label(SharedString::from(format!("{head} · {status}: {said}")))
+                .child(
+                    div()
+                        .flex()
+                        .gap(space::SM)
+                        .text_size(px(12.))
+                        .text_color(p.faint)
+                        .child(head)
+                        .child(changing(
+                            SharedString::from(format!("spec-finding-status-{key}")),
+                            status,
+                            |status| div().child(status).into_any_element(),
+                        )),
+                )
+                .child(div().text_size(px(13.)).text_color(p.text).child(said))
+                .test_support(),
+        )
+    });
+    Section::new("spec-findings", "Review findings")
+        .count(findings.len().to_string())
+        .sentence(
+            "What the reviews of its development found, each with the C or D it is about. They \
+             block nothing: the session was told those that matter.",
+        )
+        .child(div().flex().flex_col().children(rows))
 }
 
 #[cfg(test)]

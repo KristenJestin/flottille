@@ -966,6 +966,11 @@ fn list(daemon: &Daemon, asked: Listed) -> std::result::Result<Value, Failure> {
         }
         Ok((all, None))
     })?;
+    // Off in a project, Review shows nothing there: its data stays for when it is on again.
+    let reviews: Vec<(Review, Vec<Finding>)> = reviews
+        .into_iter()
+        .filter(|(review, _)| super::active(daemon, &EXTENSION, &review.project).is_ok())
+        .collect();
     Ok(json!({"reviews": reviews
         .iter()
         .map(|(review, findings)| review_json(daemon, review, findings))

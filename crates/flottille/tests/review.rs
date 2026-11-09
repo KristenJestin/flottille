@@ -1018,3 +1018,32 @@ fn a_finding_naming_a_c_the_spec_does_not_have_is_refused() {
     let delivery = delivered(&user);
     assert!(delivery.contains("C1"), "{delivery}");
 }
+
+#[test]
+fn off_in_a_project_review_lists_nothing_there_and_keeps_its_data() {
+    let user = user();
+    let (session, _) = changed_session(&user);
+    start(&user, &session);
+    ok(report(
+        &pilot(&user),
+        json!([finding("low", "confirmed", "KEPT")]),
+    ));
+
+    user.call(
+        "extension.set",
+        json!({"name": "review", "project": "app", "enabled": false}),
+    )
+    .unwrap();
+    assert!(reviews(&user, &session).is_empty());
+    let (_, message) = user
+        .call("review.start", json!({"agent": session}))
+        .unwrap_err();
+    assert!(message.contains("off in project app"), "{message}");
+
+    user.call(
+        "extension.set",
+        json!({"name": "review", "project": "app", "enabled": true}),
+    )
+    .unwrap();
+    assert_eq!(reviews(&user, &session)[0]["findings"][0]["text"], "KEPT");
+}
