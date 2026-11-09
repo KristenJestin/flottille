@@ -180,8 +180,11 @@ impl RenderOnce for TreeRow {
             .when(self.expanded.is_some(), |d| {
                 d.aria_expanded(self.expanded == Some(true))
             });
-        // A session's row turns a chevron when it folds a level of its own (`on_toggle`).
+        // A session's row turns a chevron when it folds a level of its own (`on_toggle`). It sits
+        // after the title, so that every session of a level starts its title at the same x, with
+        // or without children under it.
         let folds = self.on_toggle.is_some();
+        let mut fold = None;
         if let Some(turn) = chevron_turn.filter(|_| project || self.upward || folds) {
             let angle = match self.upward {
                 false => -FRAC_PI_2 * turn,
@@ -192,7 +195,7 @@ impl RenderOnce for TreeRow {
                 .size(px(12.))
                 .text_color(p.faint)
                 .with_transformation(Transformation::rotate(radians(angle)));
-            row = row.child(match self.on_toggle {
+            let chevron = match self.on_toggle {
                 Some(on_toggle) => div()
                     .id(toggle_id(self.id.clone()))
                     .flex_none()
@@ -208,7 +211,11 @@ impl RenderOnce for TreeRow {
                     .test_support()
                     .into_any_element(),
                 None => chevron.into_any_element(),
-            });
+            };
+            match project || self.upward {
+                true => row = row.child(chevron),
+                false => fold = Some(chevron),
+            }
         }
         match self.level {
             TreeLevel::Main => row = row.child(icon(Icon::Folder).text_color(p.faint)),
@@ -257,7 +264,11 @@ impl RenderOnce for TreeRow {
             })
         });
         row = match self.second {
-            None => row.child(title).children(trailing).children(actions),
+            None => row
+                .child(title)
+                .children(trailing)
+                .children(actions)
+                .children(fold),
             Some(second) => row.child(
                 div()
                     .flex_1()
@@ -272,7 +283,8 @@ impl RenderOnce for TreeRow {
                             .h(px(18.))
                             .child(title)
                             .children(trailing)
-                            .children(actions),
+                            .children(actions)
+                            .children(fold),
                     )
                     .child(second),
             ),
@@ -338,12 +350,14 @@ impl Tie {
 
 /// How far each level of led sessions is indented: `space::XL`, the step the window draws it with.
 const TIE_INDENT: f32 = 24.;
-/// Where the connector's first line runs: under the chevron of a row of the first level.
+/// Where the connector's first line runs: under the first letters of a row of the first level.
 const TIE_ROOT: f32 = 14.;
 /// How round the connector turns.
 const TIE_TURN: f32 = 6.;
 /// How far past the indent the connector runs into its row.
 const TIE_INTO: f32 = 4.;
+/// The size of the arrowhead that ends the connector.
+const TIE_HEAD: f32 = 12.;
 
 /// The element id of a row's connector, whose label says whether the row is the last one.
 pub fn tie_id(row: impl Into<ElementId>) -> ElementId {
@@ -372,12 +386,14 @@ pub fn tie_through_id(row: impl Into<ElementId>, level: usize) -> ElementId {
 /// above and turns right into the row, at the middle of its first line (`first_line`, from the
 /// row's top), going on below it while the row has a sibling after it, and the lines of the
 /// ancestors that go on past it. Draw it over the row, in a block that starts where the row's
-/// indent starts; `shown` fades it with the row.
+/// indent starts; `shown` fades it with the row. The line ends in an arrowhead, `head` (`↳`): the
+/// mark that says the row is led, which has the row's tooltip.
 pub fn tree_tie(
     row: impl Into<ElementId>,
     tie: &Tie,
     first_line: f32,
     shown: f32,
+    head: impl IntoElement,
     cx: &App,
 ) -> impl IntoElement {
     let p = palette(cx);
@@ -425,6 +441,13 @@ pub fn tree_tie(
                 .border_color(p.line)
                 .rounded_bl(px(TIE_TURN))
                 .test_support(),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(TIE_INDENT * tie.depth() as f32 + TIE_INTO - TIE_HEAD))
+                .top(px(first_line - TIE_HEAD / 2.))
+                .child(head),
         )
         .when(!tie.last, |d| {
             d.child(

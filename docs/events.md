@@ -471,6 +471,19 @@ chip until the agent's next turn or compaction. Said once per expiry.
 | `agent` | |
 | `compact` | The setting `after_expiry` when it was said: whether the chip starts ticked. |
 
+#### `agent.quota`
+
+A root's wait for its quota's reset began, changed or ended (`docs/design.md` §5.9).
+
+| Field | |
+|---|---|
+| `agent` | |
+| `limited` | `true` while it waits; `false` once the wait ended. |
+| `reset_at` | While it waits: the reset, in milliseconds since the epoch; `null` when the provider's words could not be read. |
+| `resume` | While it waits: the user's choice for this session, `null` to follow the setting. |
+| `limited_at` | While it waits: when the provider said it. |
+| `why` | Once it ended: `the user wrote`, `a turn ran`, `resumed` or `the quota reset`. |
+
 #### `agent.compaction_failed`
 
 Flottille's compaction of the agent failed, and changed nothing: the agent goes on in its
@@ -532,6 +545,7 @@ activity.
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
 | `link` | Only for a `forge` `run` that was done and whose answer gave the run's link: that link. |
 | `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
+| `setup` | Only on a `tickets` `log_time` that was refused for want of the project's vault entry (none named, one the project does not see, or one with no username): `time_logging`. The window says it in the conversation, with a button to the project's Settings, Tracker (`docs/tickets.md`, "Logging time"). |
 
 #### `agent.link_shown`
 
@@ -657,7 +671,7 @@ it was performed for an allowed request.
 | Field | |
 |---|---|
 | `agent` | |
-| `stop_reason` | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`, or `interrupted` when its process died during the turn. |
+| `stop_reason` | `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`, `interrupted` when its process died during the turn, or `failed` when the agent failed the prompt for a reason that leaves its session usable (`docs/agents.md`, "A failed turn"). |
 | `usage` | The turn's token counts when the agent gave them, else `null`. |
 
 #### `agent.released`
@@ -667,7 +681,7 @@ Its process was let go; the next message starts it again.
 | Field | |
 |---|---|
 | `agent` | |
-| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone), `reload` (the user reloaded its tools, `agent.reload_tools`) or `stopped` (an ended root whose session is kept: it can be resumed now, `agent.resume`). |
+| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone), `reload` (the user reloaded its tools, `agent.reload_tools`), `failed` (its turn failed for a reason that leaves its session usable: its `state_reason` says it until the next prompt, `docs/agents.md`, "A failed turn") or `stopped` (an ended or failed root whose session is kept: it can be resumed now, `agent.resume`). |
 
 #### `agent.died`
 

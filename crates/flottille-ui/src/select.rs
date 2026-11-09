@@ -20,7 +20,7 @@ use gpui_kit::{
 };
 
 use crate::color::mix;
-use crate::dropdown::{Align, Handler, list_overlay};
+use crate::dropdown::{Align, Handler, Width, list_overlay};
 use crate::icons::{Icon, icon};
 use crate::interact::{hoverable, selectable};
 use crate::motion::{ENTER, HOVER, Motion};
@@ -291,7 +291,7 @@ impl RenderOnce for Select {
             &self.id,
             HEIGHT,
             Align::Start,
-            width.get(),
+            Width::Fixed(width.get()),
             items,
             dismiss,
             t,

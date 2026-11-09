@@ -397,9 +397,12 @@ fn a_child_session_row_is_tied_to_its_parent_by_a_connector(cx: &mut TestAppCont
         );
     }
 
-    // It comes down from under the parent's chevron, turns right at the middle of the row's
-    // first line, and runs into the row.
-    let chevron = bounds(cx, toggle_id(session_id(&family.lead)));
+    // It comes down from under the parent's title, turns right at the middle of the row's first
+    // line, and runs into the row.
+    let parent = bounds(
+        cx,
+        gpui_kit::ElementId::Name(format!("session-{}-title", family.lead).into()),
+    );
     let row = bounds(cx, session_id(&family.docs));
     let turn = bounds(cx, tie_turn_id(session_id(&family.docs)));
     let title = bounds(
@@ -409,8 +412,8 @@ fn a_child_session_row_is_tied_to_its_parent_by_a_connector(cx: &mut TestAppCont
     let near = |a: gpui_kit::Pixels, b: gpui_kit::Pixels| f32::from(a - b).abs() <= 1.5;
     assert_eq!(turn.top(), row.top(), "it comes down from the row above");
     assert!(
-        near(turn.left() + px(0.5), chevron.center().x),
-        "under the chevron: {turn:?} {chevron:?}"
+        turn.left() > parent.left() && turn.left() < parent.left() + px(12.),
+        "under the start of the parent's title: {turn:?} {parent:?}"
     );
     assert!(
         near(turn.bottom() - px(0.5), title.center().y),
@@ -501,4 +504,149 @@ fn the_connector_folds_away_with_the_children(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.click(toggle_id(session_id(&family.lead)), cx));
     settle(cx);
     assert!(label(cx, tie).is_some(), "back with them");
+}
+
+/// The family and a second root, which leads no one: its id.
+fn the_family_and_a_lone_root<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (Family, String, Entity<Shell>, &'a mut VisualTestContext) {
+    let family = family(user);
+    let lone = user
+        .call(
+            "agent.start",
+            json!({"project": "atlas", "message": "a session of its own"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, cx) = window(user, cx);
+    until(&shell, cx, "the family's rows and the lone root's", |cx| {
+        [&family.docs, &family.spec, &family.tests, &lone]
+            .iter()
+            .all(|id| label(cx, session_id(id)).is_some())
+    });
+    settle(cx);
+    (family, lone, shell, cx)
+}
+
+fn title_of(cx: &mut VisualTestContext, id: &str) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    bounds(
+        cx,
+        gpui_kit::ElementId::Name(format!("session-{id}-title").into()),
+    )
+}
+
+#[gpui_kit::test]
+fn roots_with_and_without_children_share_their_title_offset(cx: &mut TestAppContext) {
+    let user = user();
+    let (family, lone, _shell, cx) = the_family_and_a_lone_root(&user, cx);
+
+    let with = title_of(cx, &family.lead);
+    let without = title_of(cx, &lone);
+    assert_eq!(
+        with.left(),
+        without.left(),
+        "two roots are one level: {with:?} {without:?}"
+    );
+
+    // The chevron is in the row's trailing area, after the title, not before it.
+    let chevron = bounds(cx, toggle_id(session_id(&family.lead)));
+    assert!(
+        chevron.left() >= with.right(),
+        "the chevron is after the title: {chevron:?} {with:?}"
+    );
+    let row = bounds(cx, session_id(&family.lead));
+    assert!(chevron.right() <= row.right());
+}
+
+#[gpui_kit::test]
+fn a_led_session_is_offset_one_step_and_draws_its_connector(cx: &mut TestAppContext) {
+    let user = user();
+    let (family, lone, _shell, cx) = the_family_and_a_lone_root(&user, cx);
+
+    let lead = title_of(cx, &family.lead);
+    let docs = title_of(cx, &family.docs);
+    let spec = title_of(cx, &family.spec);
+    let step = docs.left() - lead.left();
+    assert!(
+        step > px(0.),
+        "a led session is indented: {lead:?} {docs:?}"
+    );
+    assert_eq!(
+        spec.left() - docs.left(),
+        step,
+        "every level is indented by the same step"
+    );
+    assert_eq!(
+        title_of(cx, &lone).left(),
+        lead.left(),
+        "only the led sessions are indented"
+    );
+
+    // The line from its parent turns into the row, ending before its title.
+    let near = |a: gpui_kit::Pixels, b: gpui_kit::Pixels| f32::from(a - b).abs() <= 1.5;
+    let turn = bounds(cx, tie_turn_id(session_id(&family.docs)));
+    assert!(
+        turn.left() >= lead.left() && turn.right() <= docs.left(),
+        "it comes down inside the parent's title and ends before the child's: {turn:?} {lead:?} {docs:?}"
+    );
+    assert!(near(turn.bottom() - px(0.5), docs.center().y));
+    assert!(label(cx, tie_id(session_id(&lone))).is_none());
+}
+
+fn mark_of(
+    shell: &Entity<Shell>,
+    id: &str,
+    cx: &mut VisualTestContext,
+) -> Option<flottille_ui::AgentState> {
+    shell.read_with(cx, |s, cx| {
+        s.session(id).and_then(|row| row.read(cx).mark())
+    })
+}
+
+#[gpui_kit::test]
+fn a_folded_root_shows_that_a_led_session_runs(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "begin the docs session", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "led"}}}]},
+        {"when": "Write the docs", "do": [{"hang": true}]}
+    ]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let (lead, led) = lead_and_led(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the led session runs", |cx| {
+        mark_of(&shell, &led, cx) == Some(flottille_ui::AgentState::Running)
+    });
+    settle(cx);
+
+    // Unfolded, each row shows its own: the led session spins, its pilot waits for it.
+    assert_eq!(
+        mark_of(&shell, &lead, cx),
+        Some(flottille_ui::AgentState::Waiting)
+    );
+
+    // Folded, the pilot's row shows what its hidden led session does.
+    cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
+    settle(cx);
+    assert_eq!(listed(&shell, cx), std::slice::from_ref(&lead));
+    assert_eq!(
+        mark_of(&shell, &lead, cx),
+        Some(flottille_ui::AgentState::Running),
+        "the folded root spins for the session it hides"
+    );
+
+    // Unfolded again, nothing changes: the pilot waits, the led session spins.
+    cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
+    settle(cx);
+    assert_eq!(
+        mark_of(&shell, &lead, cx),
+        Some(flottille_ui::AgentState::Waiting)
+    );
+    assert_eq!(
+        mark_of(&shell, &led, cx),
+        Some(flottille_ui::AgentState::Running)
+    );
 }

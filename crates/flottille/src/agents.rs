@@ -68,6 +68,14 @@ struct AgentShow {
     before: Option<u64>,
 }
 
+/// `agent.quota_resume`'s parameters: whether the session is resumed at its quota's reset.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentQuotaResume {
+    agent: String,
+    resume: bool,
+}
+
 /// A depth an agent may have, at most: a root is at 0, and a child, at 1, starts none
 /// (`docs/design.md` §5.1).
 pub const DEPTH_LIMIT: u32 = 1;
@@ -210,9 +218,17 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 Failure::new("unavailable", "the message could not be stored")
             })?;
             crate::subscriptions::user_wrote(daemon, &agent.id);
+            wake_the_signed_out(daemon, &agent.id);
+            crate::quota::user_wrote(daemon, &agent.id);
             Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
         }
         "agent.answer" => answer(daemon, serde_json::from_value(params)?),
+        "agent.quota_resume" => {
+            let asked: AgentQuotaResume = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            refuse_child(daemon, &agent, "chooses when it resumes")?;
+            crate::quota::choose(daemon, &agent, asked.resume)
+        }
         "agent.unqueue" => {
             let asked: AgentUnqueue = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
@@ -288,6 +304,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             }
             let ended_at = agent.ended_at.unwrap_or(agent.updated_at);
             let waited = agent.waiting_on_answer;
+            let failed = (agent.state == AgentState::Failed)
+                .then(|| agent.state_reason.clone().unwrap_or_default());
             let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
                 Some((agent, event)) => Ok((Some(agent), Some(event))),
                 None => Ok((None, None)),
@@ -298,7 +316,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             if waited {
                 crate::tree::answered(daemon, &agent.id, "resumed");
             }
-            tell_resumed(daemon, &agent, ended_at);
+            tell_resumed(daemon, &agent, ended_at, failed.as_deref());
             Ok(json!({"agent": agent.to_json()}))
         }
         "agent.rename" => {
@@ -451,6 +469,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
             shown["tools_reload"] = reloading(daemon, &agent.id).into();
             shown["led_by"] = json!(agent.launched_by.as_ref().filter(|_| agent.led));
+            shown["quota"] = crate::quota::shown(daemon, &agent);
             Ok(json!({"agent": shown, "events": events, "more": more}))
         }
         method => Err(Failure::new(
@@ -1014,14 +1033,19 @@ fn say_reload(daemon: &Daemon, id: &str, pending: bool) {
 }
 
 /// What a resumed root reads first in its next prompt, without being woken for it: that the user
-/// stopped it, and which of its requests were cancelled then, never to be executed.
-fn tell_resumed(daemon: &Arc<Daemon>, agent: &Agent, ended_at: u64) {
+/// stopped it, or that it failed (`failed`, why), and which of its requests were cancelled then, never to be executed.
+fn tell_resumed(daemon: &Arc<Daemon>, agent: &Agent, ended_at: u64, failed: Option<&str>) {
     let cancelled = daemon
         .read(|store| store.cancelled_requests_of(&agent.id, ended_at))
         .unwrap_or_default();
-    let mut body = "The user stopped you, then resumed you on this session: what you were doing \
-                    was cut. Check the real state of your place before you go on."
-        .to_owned();
+    let stopped = match failed {
+        Some(reason) => format!("Your session failed ({reason}), then the user resumed you on it"),
+        None => "The user stopped you, then resumed you on this session".to_owned(),
+    };
+    let mut body = format!(
+        "{stopped}: what you were doing was cut. Check the real state of your place before you go \
+         on."
+    );
     if !cancelled.is_empty() {
         let named: Vec<String> = cancelled
             .iter()
@@ -1191,7 +1215,11 @@ async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
     loop {
         if turns.queued.is_empty() {
             crate::compaction::before_turn(&daemon, &id);
-            match deliveries::pump(&daemon, &id) {
+            let pumped = match waits_for_the_user(&daemon, &id) {
+                true => None,
+                false => deliveries::pump(&daemon, &id),
+            };
+            match pumped {
                 Some(prompt) => turns.queued.push_back(prompt),
                 None => match orders.recv().await {
                     None | Some(Order::Stop) => return,
@@ -1228,6 +1256,40 @@ async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
                 fail(&daemon, &id, &reason);
                 return;
             }
+        }
+    }
+}
+
+/// Whether the agent's login is gone (`turn_failures`): what is queued for it waits, started on
+/// nothing, until the user writes to it or to its root (`wake_the_signed_out`). A process would
+/// only fail the same way, and a parent writing back at once would loop.
+fn waits_for_the_user(daemon: &Daemon, id: &str) -> bool {
+    daemon
+        .read(|store| store.agent(id))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| {
+            agent.state == AgentState::Idle
+                && agent
+                    .state_reason
+                    .as_deref()
+                    .is_some_and(crate::turn_failures::is_login)
+        })
+}
+
+/// The user wrote to `root`: they may have signed in again. It and the agents of its tree that
+/// wait on a login gone lose that line and are rung, to take what waits for them.
+fn wake_the_signed_out(daemon: &Arc<Daemon>, root: &str) {
+    let tree = daemon
+        .read(|store| store.agent(root))
+        .ok()
+        .flatten()
+        .into_iter()
+        .chain(tree::descendants(daemon, root));
+    for agent in tree {
+        if waits_for_the_user(daemon, &agent.id) {
+            change(daemon, &agent.id, AgentState::Idle, None, None);
+            deliveries::ring(daemon, &agent.id);
         }
     }
 }
@@ -1360,6 +1422,30 @@ async fn process(
                 AgentState::Idle,
                 None,
                 Some(("agent.released", json!({"reason": "reload"}))),
+            );
+            Ok(true)
+        }
+        // Not an end: the session stays, its process goes as after an idle release, and the
+        // state line says why until the next prompt starts it again.
+        Ok(Exit::TurnFailed(said)) => {
+            stop(&mut child, pid).await;
+            change(
+                daemon,
+                &agent.id,
+                AgentState::Idle,
+                Some(said.to_owned()),
+                Some(("agent.released", json!({"reason": "failed"}))),
+            );
+            // Told not to write: nothing it sends starts the child until the user acts.
+            tree::tell_parent(
+                daemon,
+                agent,
+                "child-idle",
+                &format!(
+                    "cannot work until the user signs in again ({said}). Do not write to it until \
+                     then: what you send waits, and goes once the user writes to your tree's root."
+                ),
+                approval::BETWEEN_TURNS,
             );
             Ok(true)
         }
@@ -2069,9 +2155,19 @@ impl acp::Events for Recorder {
     fn turn_ended(&self, stop_reason: &str, usage: Value, used: Vec<Used>) {
         self.said();
         self.record_usage(stop_reason, used);
-        let _ = self
-            .daemon
-            .read(|store| store.deliveries_taken(&self.agent));
+        // A failed turn gives back what it carried: read by no one, it goes with the next one.
+        if stop_reason == "failed" {
+            let _ = self
+                .daemon
+                .write(|store| Ok(((), store.give_back(&self.agent)?)));
+        } else {
+            let _ = self
+                .daemon
+                .read(|store| store.deliveries_taken(&self.agent));
+        }
+        // Before the agent is idle: the sweep takes the waits of idle sessions only, and this turn
+        // may have ended an old wait or made a new one.
+        crate::quota::turn_ended(&self.daemon, &self.agent);
         change(
             &self.daemon,
             &self.agent,

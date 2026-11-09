@@ -4093,7 +4093,7 @@ fn choosing_a_settings_tab_slides_the_marker_and_brings_the_section_in(cx: &mut 
 }
 
 #[gpui_kit::test]
-fn the_providers_tab_says_how_many_providers_there_are(cx: &mut TestAppContext) {
+fn the_providers_tab_counts_the_providers_in_use_not_the_rows(cx: &mut TestAppContext) {
     let user = providers_user();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
@@ -4102,18 +4102,77 @@ fn the_providers_tab_says_how_many_providers_there_are(cx: &mut TestAppContext) 
     });
     settle(cx);
     let listed = page.read_with(cx, |p, _| p.providers().list.len());
-    assert!(listed > 0, "the daemon lists providers");
-    let count = |key: &str, cx: &mut VisualTestContext| {
-        let id = format!("settings-tabs-{key}-count");
-        cx.update(|window, _| {
-            window
-                .try_find(id)
-                .and_then(|found| found.label().map(str::to_owned))
-        })
-    };
-    assert_eq!(count("providers", cx), Some(listed.to_string()));
+    assert!(listed > 1, "the daemon lists several providers");
+    let count =
+        |key: &str, cx: &mut VisualTestContext| text_of(&format!("settings-tabs-{key}-count"), cx);
+    let in_use = page.read_with(cx, |p, _| p.providers().offered().count());
+    assert_eq!(count("providers", cx), Some(in_use.to_string()));
     for key in ["judge", "rules", "developer"] {
         assert_eq!(count(key, cx), None, "{key} has no count");
+    }
+    // One switched off: the tab and the heading count one fewer, the rows stay as many.
+    choose_settings_tab("providers", cx);
+    cx.update(|window, cx| window.click("provider-switch-opencode", cx));
+    until(&shell, cx, "the tab counts the one left", |cx| {
+        text_of("settings-tabs-providers-count", cx) == Some((in_use - 1).to_string())
+    });
+    assert_eq!(
+        text_of("providers-count", cx),
+        Some((in_use - 1).to_string()),
+        "the heading counts the same"
+    );
+    assert_eq!(page.read_with(cx, |p, _| p.providers().list.len()), listed);
+}
+
+#[gpui_kit::test]
+fn a_provider_s_switch_says_what_it_does_whether_it_is_on_or_off(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    choose_settings_tab("providers", cx);
+    until(&shell, cx, "the providers are listed", |cx| {
+        page.read_with(cx, |p, _| p.switch_on("opencode"))
+    });
+    settle(cx);
+    assert_eq!(
+        text_of("provider-switch-opencode-label", cx).as_deref(),
+        Some("Use")
+    );
+    cx.update(|window, cx| window.click("provider-switch-opencode", cx));
+    until(&shell, cx, "the switch is off", |cx| {
+        !page.read_with(cx, |p, _| {
+            p.switch_on("opencode") || p.is_pending("opencode")
+        })
+    });
+    settle(cx);
+    assert_eq!(
+        text_of("provider-switch-opencode-label", cx).as_deref(),
+        Some("Use"),
+        "an off switch does not read Enabled"
+    );
+}
+
+#[gpui_kit::test]
+fn a_disabled_provider_s_row_says_not_used_and_never_the_config_file(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    choose_settings_tab("providers", cx);
+    until(&shell, cx, "the providers are listed", |cx| {
+        page.read_with(cx, |p, _| p.switch_on("opencode"))
+    });
+    settle(cx);
+    assert_eq!(
+        text_of("provider-state-opencode", cx).as_deref(),
+        Some("Ready")
+    );
+    cx.update(|window, cx| window.click("provider-switch-opencode", cx));
+    until(&shell, cx, "the row says it is not used", |cx| {
+        text_of("provider-state-opencode", cx).as_deref() == Some("Not used")
+    });
+    for line in said_of(&page, "opencode", cx) {
+        assert!(!line.contains("providers.toml"), "{line}");
+        assert!(!line.contains("enabled ="), "{line}");
     }
 }
 
@@ -4162,7 +4221,7 @@ fn disabling_one_in_settings_removes_it_from_the_composer_s_picker(cx: &mut Test
     until(&shell, cx, "the page shows it disabled", |cx| {
         said_of(&page, "opencode", cx)
             .iter()
-            .any(|line| line.starts_with("opencode is not enabled"))
+            .any(|line| line == "Not used")
     });
 
     let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
@@ -4627,7 +4686,7 @@ fn a_slow_provider_list_answer_that_arrives_after_a_newer_one_changes_nothing(
     until(&shell, cx, "the newer read shows opencode disabled", |cx| {
         said_of(&page, "opencode", cx)
             .iter()
-            .any(|line| line.starts_with("opencode is not enabled"))
+            .any(|line| line == "Not used")
     });
 
     until(&shell, cx, "the held answer arrived", |_| {
@@ -4639,7 +4698,7 @@ fn a_slow_provider_list_answer_that_arrives_after_a_newer_one_changes_nothing(
     assert!(
         said_of(&page, "opencode", cx)
             .iter()
-            .any(|line| line.starts_with("opencode is not enabled")),
+            .any(|line| line == "Not used"),
         "{:?}",
         said_of(&page, "opencode", cx)
     );
@@ -4773,7 +4832,7 @@ fn a_switch_to_what_the_file_already_says_ends_without_an_event_and_without_a_pe
             && !page.read_with(cx, |page, _| page.is_pending("opencode"))
             && said_of(&page, "opencode", cx)
                 .iter()
-                .any(|line| line.starts_with("opencode is not enabled"))
+                .any(|line| line == "Not used")
     });
     // A change after it, to read every event up to it.
     user.call("provider.disable", json!({"name": "claude"}))

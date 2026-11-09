@@ -453,6 +453,8 @@ impl Shell {
         self.perform(Command::WorkspacesFolderRead {
             project: Some(name.clone()),
         });
+        // The Tracker's select offers the entries the project sees.
+        self.perform(Command::Vault);
         self.project_settings = Some(made.clone());
         Some(made)
     }
@@ -1035,6 +1037,11 @@ impl Shell {
                     );
                 }
             }
+            Outcome::QuotaResumed { session, refused } => {
+                if let Some(reply) = self.replies.get(&session) {
+                    reply.update(cx, |reply, cx| reply.quota_answered(refused, cx));
+                }
+            }
             Outcome::ModeSet { session, refused } => {
                 if let Some(reply) = self.replies.get(&session) {
                     let mode = reply.read(cx).mode.clone();
@@ -1292,12 +1299,25 @@ impl Shell {
                 }
             }
             Outcome::Vault { listed } => {
+                // A project's Tracker offers the entries it sees to log time with.
+                if let (Some(page), Ok(entries)) = (self.project_settings.clone(), &listed) {
+                    page.update(cx, |page, cx| page.vault_listed(entries, cx));
+                }
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.listed(listed, cx));
             }
             Outcome::VaultWritten { refused } => {
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.written(refused, cx));
+                // An entry added from a project's Tracker: back to it.
+                if let Some(project) = section.update(cx, |section, _| section.take_return()) {
+                    self.open_project_settings_at(
+                        &project,
+                        crate::project_settings::Reveal::Tracker,
+                        window,
+                        cx,
+                    );
+                }
             }
             Outcome::Developer { written, shown } => {
                 self.settings
@@ -1996,9 +2016,9 @@ impl Shell {
             projects.insert(project.name.clone(), node);
         }
         // The ended sessions leave their places for one folded group below every project.
-        let ended = snapshot.sessions.iter().filter(|session| session.ended);
+        let ended = snapshot.ended_sessions();
         let mut marks = Vec::new();
-        let rows = self.session_rows(ended, &mut sessions, &mut marks, now, cx);
+        let rows = self.session_rows(ended.iter().copied(), &mut sessions, &mut marks, now, cx);
         let present = !rows.is_empty();
         if self.ended.is_none() && present {
             self.ended = Some(cx.new(EndedNode::new));
@@ -2383,6 +2403,19 @@ impl Shell {
         if let Some(page) = self.settings_of_project(project, cx) {
             page.update(cx, |page, cx| page.reveal(at, cx));
         }
+    }
+
+    /// A project's Tracker `Add one in the vault`: Settings, Vault, on a new entry. Closed, it
+    /// goes back to the project's Tracker.
+    pub fn add_vault_entry_for(
+        &mut self,
+        project: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
+        let vault = self.settings.read(cx).vault().clone();
+        vault.update(cx, |vault, cx| vault.add_for(project, window, cx));
     }
 
     /// Opens Settings at a section: its tab is the one chosen.
@@ -3190,6 +3223,22 @@ fn nested(
             .collect();
         if row.read(cx).leads() != led.len() {
             row.update(cx, |row, cx| row.set_leads(led.len(), cx));
+        }
+        // Folded, the row shows what the sessions it hides ask of the user.
+        let hidden = match row.read(cx).is_open() {
+            true => None,
+            false => {
+                let mut below = led.clone();
+                let mut marks = Vec::new();
+                while let Some(at) = below.pop() {
+                    marks.extend(live[at].mark);
+                    below.extend((0..live.len()).filter(|&other| pilots[other] == Some(at)));
+                }
+                AgentState::strongest(marks)
+            }
+        };
+        if row.read(cx).hidden() != hidden {
+            row.update(cx, |row, cx| row.set_hidden(hidden, cx));
         }
         if shown {
             out.push(row.clone());

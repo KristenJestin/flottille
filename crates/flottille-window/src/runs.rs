@@ -18,9 +18,9 @@ use flottille_core::ansi;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{MODAL, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Align, Button, Dropdown, Icon, Item, Listing, MenuItem, Modal, Palette, Skeleton,
-    StateIcon, Status, Toast, Type, awaiting, changing, fade, fold_frame, hoverable, icon, palette,
-    presence, section_label, space, tipped, tipped_when_cut, toast, turning,
+    AgentState, Button, Icon, Item, Listing, Menu, Modal, Palette, Skeleton, StateIcon, Status,
+    Toast, Type, awaiting, changing, fade, fold_frame, hoverable, icon, palette, presence,
+    section_label, space, tipped, tipped_when_cut, toast, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -769,8 +769,8 @@ pub struct CommandList {
     ticker: Option<Task<()>>,
     /// The project's tasks, which Run a task offers.
     tasks: Vec<String>,
-    /// The list of Run a task is open.
-    picking: bool,
+    /// Run a task's button and the list it opens, made again when the tasks change.
+    picker: Option<Entity<Menu>>,
     renders: usize,
 }
 
@@ -791,7 +791,7 @@ impl CommandList {
             known: false,
             ticker: None,
             tasks: Vec::new(),
-            picking: false,
+            picker: None,
             renders: 0,
         }
     }
@@ -799,43 +799,40 @@ impl CommandList {
     /// The project's tasks, offered by Run a task: the section stays for them when nothing ran.
     pub fn set_tasks(&mut self, tasks: Vec<String>, cx: &mut Context<Self>) {
         if self.tasks != tasks {
-            self.picking &= !tasks.is_empty();
+            self.picker = None;
             self.tasks = tasks;
             cx.notify();
         }
     }
 
-    /// Run a task, in the section's title: the list of the project's tasks, a pick runs one.
-    fn run_picker(&self, cx: &mut Context<Self>) -> Dropdown {
-        let items = self.tasks.iter().map(|name| {
-            let (list, name) = (cx.entity().downgrade(), name.clone());
-            MenuItem::new(
-                ElementId::Name(format!("rail-run-task-{name}").into()),
-                SharedString::from(name.clone()),
-            )
-            .on_click(move |_, cx| {
-                list.update(cx, |list, cx| {
-                    list.picking = false;
-                    list.page.run_task(&name, cx);
-                    cx.notify();
-                })
-                .ok();
+    /// Run a task, an icon button ending the section's title: the list of the project's tasks,
+    /// a pick runs one.
+    fn run_picker(&mut self, cx: &mut Context<Self>) -> Entity<Menu> {
+        if let Some(menu) = &self.picker {
+            return menu.clone();
+        }
+        let list = cx.entity().downgrade();
+        let tasks = self.tasks.clone();
+        let menu = cx.new(|cx| {
+            let menu = Menu::new("rail-run-task", "Run a task", cx)
+                .glyph(Icon::Play)
+                .width(px(220.));
+            tasks.into_iter().fold(menu, |menu, name| {
+                let list = list.clone();
+                let task = name.clone();
+                menu.entry(
+                    ElementId::Name(format!("rail-run-task-{name}").into()),
+                    name,
+                    None,
+                    move |_, cx| {
+                        list.update(cx, |list, cx| list.page.run_task(&task, cx))
+                            .ok();
+                    },
+                )
             })
         });
-        let list = cx.entity().downgrade();
-        Dropdown::new("rail-run-task", "Run a task")
-            .leading(Icon::Play)
-            .align(Align::End)
-            .width(px(220.))
-            .open(self.picking)
-            .on_toggle(move |_, cx| {
-                list.update(cx, |list, cx| {
-                    list.picking = !list.picking;
-                    cx.notify();
-                })
-                .ok();
-            })
-            .items(items)
+        self.picker = Some(menu.clone());
+        menu
     }
 
     /// Lists the runs of `agent` only.
@@ -1187,7 +1184,12 @@ impl Render for CommandList {
             presence(
                 "rail-run-task-shown",
                 !self.tasks.is_empty(),
-                self.run_picker(cx),
+                // The presence frame is as wide as the row: the button goes to its end.
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_end()
+                    .child(self.run_picker(cx)),
             )
             .into_any_element(),
         );

@@ -520,7 +520,8 @@ agent wrote is data.
    composer is a control of its toolbar, never a block above it. A
    message from Flottille itself (a child's news, a delivery) follows the setting.
 7. **The agent's own handoff**: **Summary written by** (`summary` in `compaction.toml`) is the
-   compactor (the default, all of the above) or **the agent itself**. Then, at the same moments
+   compactor (the default, all of the above, shown in the window as **A model you choose**) or
+   **the session's own agent**. Then, at the same moments
    (the threshold at the end of a turn, or asked by hand) and with no compactor needed, Flottille
    sends the agent a message of its own, shown as Flottille's and never as the user's, that asks
    for its handoff in a fixed shape: its task, the decisions and why, the files touched, what is
@@ -538,6 +539,37 @@ agent wrote is data.
    (70 % by default, 50 % to 95 %): #405 asked for its own, at 90 %, and was built on this one
    rather than add a second. The triggers around the cache's expiry stay the compactor's, when
    one is chosen: a handoff would read the whole history again at full price.
+
+### 5.9 A spent quota
+
+When an agent's quota runs out, its provider ends the turn with words of its own, for Claude
+"You've hit your weekly limit · resets 1pm (Europe/Paris)", and the agent is idle like one that
+finished its work. Flottille tells them apart by what the provider reports, never by what the agent
+says: at the end of each turn of a root, the limits its provider reported during it
+(`agent.provider_limit`) go through that provider's recogniser (Claude's reads the reset after
+`resets`; another provider's wording is one more recogniser). A reported limit makes the session
+**wait for its reset**: the instant read from the words, the next occurrence of that time of day
+(on that date when they give one) in the zone they name in brackets, the machine's when they name
+none, or the one passed up to ten minutes ago when the provider's clock is late; unknown when the
+words cannot be read. The wait is stored (`quota_waits`), so a restart keeps it, and it is said by
+`agent.quota` and in `agent.list`, `agent.tree` and `agent.show` (`quota`: `reset_at`, `resume`).
+
+The window says it as the session's state, once: waiting, its words `Out of quota, resets at
+13:00` (the reset in the user's local time; `Out of quota` when unknown), on the session's row in
+the sidebar and in the rail of its page, in place of idle.
+
+A setting resumes the session at its reset, **off by default**: "Resume sessions when the quota
+resets", `resume_at_reset` of `sessions.toml`, set in Settings, Sessions, or by `sessions.set`.
+While a session waits for a known reset, its composer's toolbar shows a chip, `Resume at 13:00`,
+beside Compact, ticked or not from that setting, which the user toggles for this session alone
+(`agent.quota_resume`). When it is on, the sweep (no timer of its own) delivers the session one message at the reset plus a
+minute, `Your quota has reset: continue where you stopped.` (a `quota-reset` delivery, never the
+user's), and the session runs again. The wait for that instant is taken in one write, so the
+message goes once; a reset that could not be read resumes nothing; a reset that came while it is
+off ends the wait and sends nothing. A reset already past when the daemon starts is looked at
+then: it resumes at once when allowed. The wait ends with a message of the user's (which starts a
+turn anyway), a turn that ran without the limit, the reset, and the end of the session. Only a
+root waits: a child's limit is its parent's to read (§5.3).
 
 ## 6. Projects and workspaces
 
@@ -898,14 +930,18 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the row and the header; a session an agent started says it in
   its page's header, "started by <agent>", not in the sidebar. A session an agent leads (`led`)
   is the one exception to the flat list: its row sits right under its pilot's session's row,
-  indented, starting with a mark whose tooltip says "led by <pilot>"; the pilot's row gains a
-  chevron that folds its led rows away with it, and each led row keeps its own mark, unread dot
-  and draft pencil. Its page's header says "led by <pilot>", and a line above its composer says
+  indented one step, tied to it by a `↳` connector (the line from the pilot turning into the row)
+  whose arrowhead has the tooltip "led by <pilot>"; only a led row is indented, every root's title
+  starts at the same x. The pilot's row gains a chevron, at the end of the row beside its time and
+  "⋯", that folds its led rows away with it; folded, its state mark is the most urgent of its own
+  and its hidden led sessions' (waits for the user, then running, then its own), nothing else is
+  added to the row; each led row keeps its own unread dot and draft pencil. Its page's header says "led by <pilot>", and a line above its composer says
   "Your messages go straight to this session; its lead is not asked." (it names no session: a
   sentence of the window that quotes a session's title shows it on one line at most, cut with an
   ellipsis, in emphasis, never wrapped into the sentence). The row's "⋯" menu of a
-  session an agent started offers "Detach from <agent>" (`agent.detach`, a toast says the
-  result): the row slides back among the project's sessions, its indent and mark fade, and the
+  session an agent started offers "Detach from its lead" (`agent.detach`, a toast says the
+  result; the lead's title is a second, fainter line of the entry, cut to one line, never wrapped; the
+  agent's "⋯" menu in the session's rail offers the same action while the session is led): the row slides back among the project's sessions, its indent and mark fade, and the
   header's line and the note fold away. A question a led session asks its pilot shows in its
   conversation as a card, "<session> asks its pilot", with no answer box. Each session takes
   **two lines**:
@@ -967,7 +1003,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
   guidance (its editor, Reset to default, Save and its line on when a change applies; a link to the
   guidance opens this tab with the guidance in view), then the providers, the
-  Rules for every project, edited the same way as the guidance, the Sessions (a switch, "End inactive sessions", off by default; switched on it chooses 7 days and a select of the days unfolds under it: 1, 3, 7, 14, 30, 60 or 90, and what a file edited by hand says; `sessions.set`, §5.7), the Appearance (the window's colours: Omarchy
+  Rules for every project, edited the same way as the guidance, the Sessions (a switch, "End inactive sessions", off by default; switched on it chooses 7 days and a select of the days unfolds under it: 1, 3, 7, 14, 30, 60 or 90, and what a file edited by hand says; `sessions.set`, §5.7; and under it a switch, "Resume sessions when the quota resets", off by default, §5.9), the Appearance (the window's colours: Omarchy
   or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
   the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
   switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge
@@ -1026,7 +1062,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   nothing under the bar), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
-  Link a ticket…, Unlink the ticket and, for a session in a workspace, Remove workspace…, which
+  Link a ticket… (Change the ticket… once one is linked), Unlink the ticket (only while one is linked) and, for a session in a workspace, Remove workspace…, which
   asks as the card does, the dialog refusing it, with the sessions named, while sessions not ended work there; while it runs the section says it is
   being removed, and once removed it folds away, the page staying) and facts, its runs, then, pinned at the very bottom and
   folding away when nothing waits, "Waiting for you", the one place of the page that says the user
@@ -1039,11 +1075,18 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
   place in the sidebar for the "Ended" group, folded, pinned at the bottom of the sidebar
-  whatever the tree's length and unfolding upward over it (its rows say their project), and its
+  whatever the tree's length and unfolding upward over it (its rows say their project). Unfolded
+  it takes at most eight rows, or 35% of the window's height when that is less, and its rows
+  scroll inside it, the most recently ended first; and its
   page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
   (`agent.resume`), enabled once its process is gone, which brings the composer back; that bar is
-  where it says it ended, not its header, and its conversation says it ended, then resumed. Selecting a child shows its
+  where it says it ended, not its header, and its conversation says it ended, then resumed. A
+  failed root whose session is known shows Resume too. A turn that failed for a reason that
+  leaves the session usable (an expired login, `docs/agents.md`, "A failed turn") ends nothing:
+  the composer stays and the state line above its field says it once (`Claude's login expired:
+  sign in again (run claude and /login), then send your message again`), fading in, and out once
+  a turn runs again. Selecting a child shows its
   conversation read-only;
 - the runs of the agents (`docs/tools.md`, "Tasks and runs"): the rail's **Runs** section lists
   the **task** runs of the agent shown (the root by default, the child once the user opens it from

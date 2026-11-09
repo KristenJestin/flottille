@@ -1188,7 +1188,7 @@ open then, as it always did.
 #### Detach
 
 A led or handed session can be **detached** from the agent that started it, by the user, at any
-time: `Detach from <pilot>` in the window's session menu, `flottille agent detach <agent>`, or
+time: `Detach from its lead` in the window's session menus (the sidebar row's and the rail's), `flottille agent detach <agent>`, or
 `agent.detach`. Asked of a session no agent started, or already detached, it is refused, saying
 why. What it does, at once:
 
@@ -1411,8 +1411,9 @@ turn it runs anyway, and costs no quota.
   text, the page's title included, sits in an `<untrusted_web_content>` block nothing in it can
   close. It is masked of the
   daemon's and the place's secrets, and escaped, like every result.
-- **How it fetches**: `http` and `https` only, GET only, with a fixed user agent naming Flottille
-  (`Flottille/<version> (+https://github.com/KristenJestin/flottille)`), no cookies, no
+- **How it fetches**: `http` and `https` only, GET only, with a fixed user agent that names
+  the app and no one (`Mozilla/5.0 (compatible; Flottille)`: the same for every user and version,
+  no link nor version that would tell a site who browses), no cookies, no
   credentials, no header of the agent's, no proxy, and the URL's fragment never sent. At most
   5 MiB downloaded (a longer page stops there and says so; a PDF cut is not read), 30 seconds in
   all, 5 redirects, none from `https` to `http`.

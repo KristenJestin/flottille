@@ -20,6 +20,7 @@ use serde_json::Value;
 
 use crate::actions::{Command, VaultWrite};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
+use crate::project_settings::Reveal as ProjectReveal;
 use crate::shell::Shell;
 
 /// What the section says the vault is for.
@@ -99,6 +100,9 @@ pub struct VaultSection {
     writing: Option<Writing>,
     form_error: Option<SharedString>,
     confirming: Option<String>,
+    /// The project whose Tracker the new-entry dialog was opened from: once it is closed, the
+    /// window goes back there.
+    come_back: Option<String>,
     /// The entry the confirmation names, kept while it fades away.
     asked: String,
     _subscriptions: Vec<Subscription>,
@@ -119,6 +123,7 @@ impl VaultSection {
             writing: None,
             form_error: None,
             confirming: None,
+            come_back: None,
             asked: String::new(),
             _subscriptions: Vec::new(),
         }
@@ -208,6 +213,21 @@ impl VaultSection {
         self.fill(None, window, cx);
     }
 
+    /// "Add one in the vault" of a project's Tracker: the dialog, empty, and back to that
+    /// project's Tracker once it is closed.
+    pub fn add_for(&mut self, project: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.fill(None, window, cx);
+        self.come_back = Some(project.to_owned());
+    }
+
+    /// The project to go back to, once the dialog it was opened for is closed (an entry set).
+    pub fn take_return(&mut self) -> Option<String> {
+        match self.form {
+            Form::Closed => self.come_back.take(),
+            Form::Editing(_) => None,
+        }
+    }
+
     /// "Replace": the dialog on the entry's metadata, its secret to type again.
     pub fn replace(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let entry = self
@@ -222,6 +242,7 @@ impl VaultSection {
     }
 
     fn fill(&mut self, entry: Option<&VaultEntry>, window: &mut Window, cx: &mut Context<Self>) {
+        self.come_back = None;
         let fields = self.fields(window, cx);
         let (name, secret, description, url, username) = (
             fields.name.clone(),
@@ -257,6 +278,13 @@ impl VaultSection {
         self.form_error = None;
         self.clear_secret(window, cx);
         cx.notify();
+        if let Some(project) = self.come_back.take() {
+            self.shell
+                .update(cx, |shell, cx| {
+                    shell.open_project_settings_at(&project, ProjectReveal::Tracker, window, cx)
+                })
+                .ok();
+        }
     }
 
     /// The secret leaves the field as soon as it is sent, or the dialog closed.

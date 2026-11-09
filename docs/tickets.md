@@ -630,7 +630,10 @@ tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "20
   username the account's e-mail; the request is `Basic` over `username:secret`. The daemon reads
   the secret with `vault::secret` for this one request. No entry named, an entry the project does
   not see, or one with no username is refused before anyone is asked, with a sentence that says
-  how to set one up. The token is in no card, result, log, event nor the store: what Jira
+  how to set one up: the window's way first (the project's Settings, Tracker, `Log time with`), the
+  file's second. **The window offers that way**: the refusal's `agent.tool_served` carries
+  `setup: "time_logging"` (`docs/events.md`), and the conversation shows a line and a `Set up
+  time logging` button that opens the project's Settings at Tracker. The token is in no card, result, log, event nor the store: what Jira
   answers is masked of it, and so is every error.
 - **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), logging time with the vault entry `<name>``, so that the user sees which credentials a worklog would use.
 - **GitHub is refused with a sentence** (`GitHub issues have no time tracking`), and so are a

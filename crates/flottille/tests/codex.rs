@@ -200,3 +200,33 @@ fn a_reply_streamed_in_many_deltas_reads_as_one_message() {
         "{said:?}"
     );
 }
+
+#[test]
+fn a_root_failed_on_a_bare_mode_breach_is_not_resumable() {
+    let (user, _) = user_with_codex();
+    user.codex_script(json!({"turns": [{"when": "shell", "do": [
+        {"item": {"type": "commandExecution", "id": "c-1", "command": "ls"}},
+        {"hang": true}]}]}));
+    let (id, after) = run(&user, "shell");
+    events_until(&user, &id, after, "agent.failed");
+    let failed = agent(&user, &id);
+    assert!(failed["native_id"].is_string(), "its session is known");
+    assert!(
+        failed["state_reason"]
+            .as_str()
+            .unwrap()
+            .contains("bare mode"),
+        "{failed}"
+    );
+
+    let listed = user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == id.as_str())
+        .cloned()
+        .unwrap();
+    assert_eq!(listed["resumable"], false);
+    let (_, refusal) = user.call("agent.resume", json!({"agent": id})).unwrap_err();
+    assert!(refusal.contains("bare mode"), "{refusal}");
+}

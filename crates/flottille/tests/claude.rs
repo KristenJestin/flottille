@@ -696,11 +696,14 @@ fn through_the_bridge_a_session_s_history_goes_with_its_replacement() {
     assert!(!first.exists(), "the replaced session's history is removed");
     events_until(&user, &id, after, "agent.failed");
 
+    // The failed root keeps its last session, to be resumed on (#631): the others went.
+    let last = history(&user, &id);
     let folder = user.path("state/flottille/bridge/claude");
     assert!(within_10_s(|| std::fs::read_dir(&folder)
         .unwrap()
-        .next()
-        .is_none()));
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "jsonl"))
+        .all(|entry| entry.path() == last)));
 }
 
 #[test]

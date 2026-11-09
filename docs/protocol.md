@@ -480,16 +480,19 @@ door alone reaches them: no tool of an agent does.
 
 `sessions.show` and `sessions.set` read and keep after how many days without activity the daemon
 ends a root session (`docs/design.md` §5.7): `end_inactive_days` in `sessions.toml` of Flottille's
-configuration folder.
+configuration folder; and whether a session waiting for its quota's reset is resumed at it
+(`docs/design.md` §5.9): `resume_at_reset`, `true` or `false`, false when it is absent.
 
-- `sessions.show` answers `{"days"}`: a number of days from 1 to 90, or `"off"` (no file, no key,
-  or the word). `invalid-config` when the file cannot be read, names another key, or holds a value
-  that is neither `"off"` nor a whole number from 1 to 90.
-- `sessions.set {days}` takes a number of days or `"off"`, writes the file
-  (`end_inactive_days = 7`, or `end_inactive_days = "off"`) and answers as `sessions.show`;
-  `invalid-params` for anything else, a number out of the range and a missing `days` included (a
-  client leaves null fields out, so `"off"` is a word). The window sends 7 when the user first
-  turns it on.
+- `sessions.show` answers `{"days", "resume"}`: a number of days from 1 to 90, or `"off"` (no
+  file, no key, or the word), and a boolean. `invalid-config` when the file cannot be read, names
+  another key, or holds a value that is neither `"off"` nor a whole number from 1 to 90, or a
+  `resume_at_reset` that is not a boolean.
+- `sessions.set {days?, resume?}` takes a number of days or `"off"`, a boolean, or both, keeps
+  what it is not given as the file says, writes the file (`end_inactive_days = 7`, or
+  `end_inactive_days = "off"`, then `resume_at_reset = true` when it is on) and answers as
+  `sessions.show`; `invalid-params` for anything else, a number out of the range and neither field
+  given included (a client leaves null fields out, so `"off"` is a word). The window sends 7 when
+  the user first turns the ending on.
 
 The daemon reads the file when a check is due, at its start and about once an hour. `sessions.set`
 emits `sessions.changed` with what it answers. The user's door alone reaches them: no tool of an
@@ -1135,8 +1138,10 @@ there. An agent in a result:
 
 `workspace` is `null` for the project folder itself. `state` is `starting` (its process starts
 and its session opens), `working` (a turn runs), `idle` (between turns, its process running or
-released), or one of the final states: `ended`, `failed` (`state_reason` says why). A final state
-is never left, but for an ended root the user resumes (`agent.resume`).
+released; its `state_reason` says why its last turn failed when that left its session usable,
+`docs/agents.md`, "A failed turn"), or one of the final states: `ended`, `failed` (`state_reason`
+says why). A final state is never left, but for an ended or failed root the user resumes
+(`agent.resume`).
 `provider` is the provider it runs on, for life (`docs/agents.md`, "Providers"). `chosen` is what
 was asked, or the project's default model, `null` for the agent's default; `taken` what the agent reported
 at the last start of its process; `reopens` whether its agent offered to resume or load a session
@@ -1288,14 +1293,14 @@ names its root).
 
 #### `agent.resume`
 
-`{"agent"}`. Starts an ended root again on its own session: `{"agent"}`, the root once idle again
+`{"agent"}`. Starts an ended or failed root again on its own session: `{"agent"}`, the root once idle again
 (`agent.resumed`, `docs/events.md`). It keeps its id, its epoch, its conversation and its session;
 nothing is sent to it, and the next message (`agent.send`) starts its process, which resumes or
 loads the session as after an idle release (`docs/agents.md`, "How an agent runs"). Its children
 stay ended. Its next prompt starts with a
-`resume` delivery saying the user stopped it and naming its requests cancelled then. `refused`
-for a child (the sentence names its root), an agent that has not ended, a failed one (its session
-went with it), one whose agent can neither resume nor load a session, that never opened one or
+`resume` delivery saying the user stopped it, or that it failed and why, and naming its requests
+cancelled then. `refused` for a child (the sentence names its root), an agent that has not ended,
+one whose agent can neither resume nor load a session, that never opened one or
 whose session was forgotten (7 days after it ended), one whose workspace or project is gone: what
 `resumable` says, in short (`agent.tree`); and one whose last process is still stopping
 (`stopping`), with a sentence to try again in a moment.
@@ -1360,6 +1365,12 @@ names its `gate_mode`, and a session an agent starts takes the mode of the tree 
 `invalid-params` for another mode, `not-found` for an agent that does not exist. The user's door
 alone reaches it: no tool of an agent changes a mode.
 
+#### `agent.quota_resume`
+
+`{"agent", "resume"}`: whether this session, which waits for its quota's reset, is resumed at it
+(`docs/design.md` §5.9), whatever the setting says. Answers `{"quota"}` as `agent.show` says it,
+and emits `agent.quota`. Refused for a session that does not wait and for a child.
+
 #### `agent.options`
 
 `{"agent", "model"?, "effort"?}`, at least one of the two. Changes the model and the effort of a
@@ -1388,7 +1399,7 @@ the session has not taken yet, `null` when nothing waits; `resumable`: whether `
 whether the process of an agent that ended is still stopping; `images`: as in the agent's full
 form; `tools_outdated`: whether its running session runs an older list of tools than its role
 has, which a restart replaces, `docs/tools.md`, "When the tools change"; `tools_reload`: whether
-a reload of its tools waits for its next process, `agent.reload_tools`; `compacting`: whether Flottille's compaction of it runs, the compactor at work or the agent writing its handoff, from `agent.compacting` to `agent.compacted` or `agent.compaction_failed`); `doing` a sentence of what it does
+a reload of its tools waits for its next process, `agent.reload_tools`; `compacting`: whether Flottille's compaction of it runs, the compactor at work or the agent writing its handoff, from `agent.compacting` to `agent.compacted` or `agent.compaction_failed`; `quota`: `null`, or while the root waits for its quota's reset `{"reset_at", "resume", "limited_at"}`, `resume` whether it will be resumed then, `docs/design.md` §5.9); `doing` a sentence of what it does
 (`working`, `idle`, `compacting the conversation`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `pilot` for a
 led session whose question waits for its pilot, `user` for a root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then

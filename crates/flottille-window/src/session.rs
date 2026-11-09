@@ -52,8 +52,8 @@ use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::CommandInfo;
 use crate::conversation::{
     Activity, Block, COMPACTED_KIND, COMPACTION_FAILED_KIND, Call, CallState, Change, Conversation,
-    DiffLine, Ending, STARTED_SESSION_KIND, Summary, USER, VaultAsk, WOKEN_BY_KIND, in_sight,
-    is_hidden,
+    DiffLine, Ending, STARTED_SESSION_KIND, Summary, TIME_LOGGING_KIND, USER, VaultAsk,
+    WOKEN_BY_KIND, in_sight, is_hidden,
 };
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
@@ -63,12 +63,13 @@ use crate::model::Place;
 use crate::open::Opener;
 use crate::picture_viewer::PictureViewer;
 use crate::project::removal_refused;
+use crate::project_settings::Reveal as ProjectReveal;
 use crate::providers::Providers;
 use crate::question_card::QuestionCard;
 use crate::queued::QueuedMessages;
 use crate::runs::{self, CommandList, CommandPanel, EndedFold, ended_row, rail_label};
 use crate::session_link::{
-    self, ForgeFacts, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink,
+    self, ForgeFacts, PlaceFacts, PullRequest, Quota, RepositoryFacts, Request, SessionLink,
     SessionUpdate, TicketFacts, TreeAgent, Where,
 };
 use crate::session_options::{Runs, SessionOptions};
@@ -100,10 +101,14 @@ pub fn end_sentence(count: usize) -> String {
 /// The reply field's placeholder and its send button's tooltip: the field writes to the root.
 pub const REPLY_PLACEHOLDER: &str = "Reply…";
 pub const SEND: &str = "Send";
+/// What the chip that resumes the session at its quota's reset does (its tooltip).
+const QUOTA_HINT: &str = "Its quota is spent: at the reset, Flottille tells it to continue where it stopped. Only this session; Settings, Sessions holds the default.";
 /// The composer's chip while the root's prompt cache expired, and what it does (its tooltip).
 pub const COMPACT_CHIP: &str = "Compact";
 /// The room the chip takes at rest (padding and its word): how wide it is while it opens and folds.
 const COMPACT_CHIP_WIDTH: f32 = 80.;
+/// The same for `Resume at 13:00`.
+const QUOTA_CHIP_WIDTH: f32 = 136.;
 const COMPACT_HINT: &str = "Its prompt cache expired: a summary makes the next turn read a short history instead of the whole conversation at full price.";
 /// The composer's button that interrupts the turn that runs.
 pub const STOP: &str = "Stop the turn";
@@ -140,9 +145,25 @@ pub fn state_of(agent: &TreeAgent) -> AgentState {
         }
         // Between turns, for what happens outside: a pull request's checks, a review.
         _ if agent.waiting_on.as_deref() == Some("subscription") => AgentState::Waiting,
+        // Between turns, for its quota's reset.
+        "idle" if agent.quota.is_some() => AgentState::Waiting,
         "starting" | "working" => AgentState::Running,
         _ => AgentState::Idle,
     }
+}
+
+/// How a session waiting for its quota's reset says its state: `Out of quota, resets at 13:00`,
+/// the reset in the machine's local time, or `Out of quota` when it is unknown.
+pub fn out_of_quota(reset_at: Option<u64>) -> String {
+    match reset_at {
+        Some(at) => format!("Out of quota, resets at {}", clock(at)),
+        None => "Out of quota".to_owned(),
+    }
+}
+
+/// The composer's switch while the session waits for a known reset: `Resume at 13:00`.
+pub fn resume_at(reset_at: u64) -> String {
+    format!("Resume at {}", clock(reset_at))
 }
 
 /// How the page names an agent: its role for the root, its task's title for a child.
@@ -330,6 +351,9 @@ pub const RELOADS_AFTER_TURN: &str = "Reloads after this turn";
 /// The toast of a reload asked between turns: the tools come with the next message, which
 /// starts the next process.
 pub const RELOADED: &str = "Tools reload at its next message";
+
+/// The entry of the rail's menu that detaches the session from the agent that started it.
+pub const DETACH: &str = "Detach from its lead";
 
 /// The entry of the session's menu that compacts its conversation now, or once its turn ends.
 pub const COMPACT: &str = "Compact conversation";
@@ -874,8 +898,20 @@ impl SessionPage {
         if !self.says_by(&started_by, &led_by) {
             self.opened.started_by = started_by;
             self.opened.led_by = led_by;
+            let by = self.opened.started_by.clone();
+            self.rail
+                .update(cx, |rail, cx| rail.set_detach(by.as_deref(), cx));
             cx.notify();
         }
+    }
+
+    /// "Detach from its lead" in the rail's menu: the same command as the sidebar row's.
+    pub fn detach(&mut self, cx: &mut Context<Self>) {
+        let Some(from) = self.opened.started_by.clone() else {
+            return;
+        };
+        let session = self.opened.id.clone();
+        self.perform(Command::Detach { session, from }, cx);
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -1509,8 +1545,18 @@ impl SessionPage {
                 .update(cx, |list, cx| list.set_compacting(compacting, cx));
             self.sync_pending(cx);
             self.fetch_pictures(cx);
+            // Between turns, why its last turn failed and its session stayed (`agent.released`,
+            // reason `failed`): said once, in the state line.
+            let stayed = (root.state == "idle")
+                .then(|| root.state_reason.clone())
+                .flatten();
+            let quota = (state_of(root) == AgentState::Waiting)
+                .then_some(root.quota)
+                .flatten();
             self.reply.update(cx, |reply, cx| {
+                reply.set_quota(quota, cx);
                 reply.set_images(images);
+                reply.set_stayed(stayed, cx);
                 reply.set_running(running, cx)
             });
         }
@@ -1534,6 +1580,10 @@ impl SessionPage {
                     doing: agent.doing.clone(),
                     waits_on_subscription: agent.waiting_on.as_deref() == Some("subscription"),
                     compacting: agent.compacting,
+                    out_of_quota: (state_of(agent) == AgentState::Waiting)
+                        .then_some(agent.quota)
+                        .flatten()
+                        .map(|quota| out_of_quota(quota.reset_at)),
                     status,
                 })
             })
@@ -5641,6 +5691,55 @@ impl Render for Row {
                 });
                 self.links.draw(self.at, links, &open, cx)
             }
+            // A time not logged for want of the project's vault entry: the line, and the way to
+            // the project's Settings where the user chooses one.
+            Block::Notice { kind, text } if kind == TIME_LOGGING_KIND => {
+                let opened = self.page.upgrade().map(|page| {
+                    (
+                        page.read(cx).shell.clone(),
+                        page.read(cx).project().to_owned(),
+                    )
+                });
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(space::LG)
+                    .child(
+                        div()
+                            .id(id("notice"))
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .gap(space::SM)
+                            .mono(12.)
+                            .text_color(p.faint)
+                            .aria_label(SharedString::from(text.clone()))
+                            .child(div().flex_none().child(SharedString::from(kind.clone())))
+                            .child(div().min_w_0().child(SharedString::from(text.clone())))
+                            .test_support(),
+                    )
+                    .child(
+                        div().flex_none().child(
+                            Button::secondary(id("time-logging-setup"), "Set up time logging")
+                                .on_click(move |_, window, cx| {
+                                    if let Some((shell, project)) = &opened {
+                                        shell
+                                            .update(cx, |shell, cx| {
+                                                shell.open_project_settings_at(
+                                                    project,
+                                                    ProjectReveal::Tracker,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })
+                                            .ok();
+                                    }
+                                }),
+                        ),
+                    )
+                    .into_any_element()
+            }
             // The agent's own end is shown whole: a failure's reason, what was not done and why.
             Block::Notice { kind, text } if !is_delivery(kind) => {
                 let failed = kind == COMPACTION_FAILED_KIND;
@@ -6222,6 +6321,8 @@ pub struct RailAgent {
     pub waits_on_subscription: bool,
     /// Flottille compacts its conversation.
     pub compacting: bool,
+    /// Between turns, it waits for its quota's reset: how its state says it.
+    pub out_of_quota: Option<String>,
     pub status: Entity<Status>,
 }
 
@@ -6331,8 +6432,14 @@ pub struct SessionRail {
     place_known: bool,
     /// The "⋯" menu of the WORKSPACE section.
     menu: Entity<Menu>,
-    /// The "⋯" menu of the root's row: it ends the session.
+    /// A ticket is linked to the place (or its tracker is being read), as the menu says.
+    linked: bool,
+    /// The place is a workspace, which the menu can remove.
+    removable: bool,
+    /// The "⋯" menu of the root's row: it reloads, compacts, detaches and ends the session.
     agent_menu: Entity<Menu>,
+    /// The agent that started the session, which the menu detaches it from.
+    detach: Option<String>,
     /// The commands of the session's tree.
     commands: Entity<CommandList>,
     /// What the agents of the session's tree wait for outside Flottille.
@@ -6362,72 +6469,27 @@ pub struct SessionRail {
 }
 
 impl SessionRail {
+    /// The "⋯" menu of the root's row.
+    pub fn agent_menu(&self) -> &Entity<Menu> {
+        &self.agent_menu
+    }
+
+    /// The "⋯" menu of the Workspace section.
+    pub fn workspace_menu(&self) -> &Entity<Menu> {
+        &self.menu
+    }
+
     fn new(
         page: WeakEntity<SessionPage>,
         root: String,
         opened: &Opened,
         cx: &mut Context<Self>,
     ) -> Self {
-        let editor = page.clone();
-        let ender = page.clone();
-        let reloader = page.clone();
-        let compactor = page.clone();
-        let agent_menu = cx.new(|cx| {
-            Menu::new("rail-agent-menu", "Session actions", cx)
-                .entry(
-                    "rail-agent-reload-tools",
-                    RELOAD_TOOLS,
-                    Some(Icon::Restart),
-                    move |_, cx| {
-                        reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
-                    },
-                )
-                .entry(
-                    "rail-agent-compact",
-                    COMPACT,
-                    Some(Icon::Restart),
-                    move |_, cx| {
-                        compactor.update(cx, |page, cx| page.compact(cx)).ok();
-                    },
-                )
-                .entry(
-                    "rail-agent-end",
-                    "End session…",
-                    Some(Icon::Stop),
-                    move |_, cx| {
-                        ender.update(cx, |page, cx| page.ask_end(cx)).ok();
-                    },
-                )
-        });
         let rail = cx.entity().downgrade();
-        let unlinks = rail.clone();
-        let removes = rail.clone();
         let removable = opened.place.is_some();
-        let menu = cx.new(|cx| {
-            workspace_menu(
-                "workspace-menu",
-                WorkspaceActions {
-                    open_in_editor: Box::new(move |cx| {
-                        editor.update(cx, |page, _| page.open_in_editor()).ok();
-                    }),
-                    link_ticket: Some(Box::new(move |cx| {
-                        rail.update(cx, |rail, cx| rail.start_linking(cx)).ok();
-                    })),
-                    unlink_ticket: Some(Box::new(move |cx| {
-                        unlinks
-                            .update(cx, |rail, cx| rail.link_ticket(None, cx))
-                            .ok();
-                    })),
-                    // A session in the project's folder has no workspace to remove.
-                    remove: removable.then(|| -> WorkspaceAction {
-                        Box::new(move |cx| {
-                            removes.update(cx, |rail, cx| rail.ask_removal(cx)).ok();
-                        })
-                    }),
-                },
-                cx,
-            )
-        });
+        let detach = opened.started_by.clone();
+        let agent_menu = cx.new(|cx| agent_menu(&page, detach.as_deref(), cx));
+        let menu = cx.new(|cx| workspace_menu_of(&page, &rail, removable, false, cx));
         let commands = cx.new(|_| CommandList::new(page.clone()).of_agent(root.clone()));
         let subscriptions = cx.new(|_| SubscriptionList::new(page.clone()));
         let leaves = cx.new(|_| LeaveList::new(page.clone(), root.clone()));
@@ -6446,7 +6508,10 @@ impl SessionRail {
             gauges: HashMap::new(),
             last_runs: HashMap::new(),
             menu,
+            linked: false,
+            removable,
             agent_menu,
+            detach,
             selected: root,
             workspace: opened.place.clone(),
             project: opened.project.clone(),
@@ -6462,6 +6527,33 @@ impl SessionRail {
             removed: false,
             renders: 0,
         }
+    }
+
+    /// Who started the session, as the daemon says now: the agent's menu offers Detach from it
+    /// while there is one.
+    pub fn set_detach(&mut self, by: Option<&str>, cx: &mut Context<Self>) {
+        if self.detach.as_deref() == by {
+            return;
+        }
+        self.detach = by.map(str::to_owned);
+        let (page, detach) = (self.page.clone(), self.detach.clone());
+        self.agent_menu = cx.new(|cx| agent_menu(&page, detach.as_deref(), cx));
+        cx.notify();
+    }
+
+    /// The Workspace menu says what applies to the ticket: it is made again when a ticket is
+    /// linked or unlinked.
+    fn sync_menu(&mut self, cx: &mut Context<Self>) {
+        let linked = self
+            .place
+            .as_ref()
+            .is_some_and(|place| place.ticket.is_some() || place.ticket_pending);
+        if self.linked == linked {
+            return;
+        }
+        self.linked = linked;
+        let (page, rail, removable) = (self.page.clone(), cx.entity().downgrade(), self.removable);
+        self.menu = cx.new(|cx| workspace_menu_of(&page, &rail, removable, linked, cx));
     }
 
     /// "Remove workspace…": the confirmation opens, unless the workspace is already going.
@@ -6667,6 +6759,7 @@ impl SessionRail {
         let first = !std::mem::replace(&mut self.place_known, true);
         if self.place != place || first {
             self.place = place;
+            self.sync_menu(cx);
             cx.notify();
         }
     }
@@ -6702,6 +6795,7 @@ impl SessionRail {
         if place.ticket_pending || place.ticket != ticket {
             place.ticket = ticket;
             place.ticket_pending = false;
+            self.sync_menu(cx);
             cx.notify();
         }
     }
@@ -6820,13 +6914,18 @@ impl Render for SessionRail {
                     }),
                 ),
             };
-            let waiting_line = (agent.waits_on_subscription || agent.compacting).then(|| {
-                SharedString::from(match wakes.get(&agent.id) {
-                    _ if agent.compacting => COMPACTING.to_owned(),
-                    Some(at) => format!("waiting: wake at {}", clock(*at)),
-                    None => agent.doing.clone(),
-                })
-            });
+            let waiting_line =
+                (agent.waits_on_subscription || agent.compacting || agent.out_of_quota.is_some())
+                    .then(|| {
+                        SharedString::from(match wakes.get(&agent.id) {
+                            _ if agent.compacting => COMPACTING.to_owned(),
+                            _ if agent.out_of_quota.is_some() => {
+                                agent.out_of_quota.clone().unwrap_or_default()
+                            }
+                            Some(at) => format!("waiting: wake at {}", clock(*at)),
+                            None => agent.doing.clone(),
+                        })
+                    });
             // A child with task runs going says how many; a click opens it with its Runs section.
             let chip_t = counts.get(&agent.id).copied().unwrap_or_default();
             let runs_chip = (kid && chip_t > 0.).then(|| {
@@ -7774,10 +7873,97 @@ fn fact_line(
         .test_support()
 }
 
+/// The "⋯" menu of the root's row in the rail: each action has its own icon, and Detach is
+/// there while an agent that started the session (`detach`) still has it, as in the sidebar.
+fn agent_menu(
+    page: &WeakEntity<SessionPage>,
+    detach: Option<&str>,
+    cx: &mut Context<Menu>,
+) -> Menu {
+    let (reloader, compactor, detacher, ender) =
+        (page.clone(), page.clone(), page.clone(), page.clone());
+    let mut menu = Menu::new("rail-agent-menu", "Session actions", cx)
+        .entry(
+            "rail-agent-reload-tools",
+            RELOAD_TOOLS,
+            Some(Icon::Restart),
+            move |_, cx| {
+                reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
+            },
+        )
+        .entry(
+            "rail-agent-compact",
+            COMPACT,
+            Some(Icon::Fold),
+            move |_, cx| {
+                compactor.update(cx, |page, cx| page.compact(cx)).ok();
+            },
+        );
+    if let Some(by) = detach {
+        menu = menu
+            .entry(
+                "rail-agent-detach",
+                DETACH,
+                Some(Icon::Detach),
+                move |_, cx| {
+                    detacher.update(cx, |page, cx| page.detach(cx)).ok();
+                },
+            )
+            .detail(by.to_owned());
+    }
+    menu.entry(
+        "rail-agent-end",
+        "End session…",
+        Some(Icon::Stop),
+        move |_, cx| {
+            ender.update(cx, |page, cx| page.ask_end(cx)).ok();
+        },
+    )
+}
+
+/// The rail's Workspace "⋯" menu, for a ticket linked or not.
+fn workspace_menu_of(
+    page: &WeakEntity<SessionPage>,
+    rail: &WeakEntity<SessionRail>,
+    removable: bool,
+    linked: bool,
+    cx: &mut Context<Menu>,
+) -> Menu {
+    let editor = page.clone();
+    let (linking, unlinks, removes) = (rail.clone(), rail.clone(), rail.clone());
+    workspace_menu(
+        "workspace-menu",
+        WorkspaceActions {
+            open_in_editor: Box::new(move |cx| {
+                editor.update(cx, |page, _| page.open_in_editor()).ok();
+            }),
+            ticket_linked: linked,
+            link_ticket: Some(Box::new(move |cx| {
+                linking.update(cx, |rail, cx| rail.start_linking(cx)).ok();
+            })),
+            unlink_ticket: Some(Box::new(move |cx| {
+                unlinks
+                    .update(cx, |rail, cx| rail.link_ticket(None, cx))
+                    .ok();
+            })),
+            // A session in the project's folder has no workspace to remove.
+            remove: removable.then(|| -> WorkspaceAction {
+                Box::new(move |cx| {
+                    removes.update(cx, |rail, cx| rail.ask_removal(cx)).ok();
+                })
+            }),
+        },
+        cx,
+    )
+}
+
 /// What a workspace's "⋯" offers, wherever it is drawn: the rail's Workspace and the workspace's
 /// card on the project page build it with this, so that both say the same.
 pub struct WorkspaceActions {
     pub open_in_editor: WorkspaceAction,
+    /// A ticket is linked to the workspace: its menu offers to change and to unlink it, not to
+    /// link one.
+    pub ticket_linked: bool,
     /// Shows where a ticket is typed; `None` where the workspace links none.
     pub link_ticket: Option<WorkspaceAction>,
     pub unlink_ticket: Option<WorkspaceAction>,
@@ -7803,6 +7989,7 @@ pub(crate) fn removal_toast(name: &str, refused: Option<&str>) -> Toast {
 pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu>) -> Menu {
     let WorkspaceActions {
         open_in_editor,
+        ticket_linked,
         link_ticket,
         unlink_ticket,
         remove,
@@ -7819,18 +8006,19 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
         move |_, cx| open_in_editor(cx),
     );
     if let Some(link) = link_ticket {
-        menu = menu.entry(
-            "workspace-link-ticket",
-            "Link a ticket…",
-            Some(Icon::Ticket),
-            move |_, cx| link(cx),
-        );
+        let (label, glyph) = match ticket_linked {
+            true => ("Change the ticket…", Icon::Change),
+            false => ("Link a ticket…", Icon::Ticket),
+        };
+        menu = menu.entry("workspace-link-ticket", label, Some(glyph), move |_, cx| {
+            link(cx)
+        });
     }
-    if let Some(unlink) = unlink_ticket {
+    if let Some(unlink) = unlink_ticket.filter(|_| ticket_linked) {
         menu = menu.entry(
             "workspace-unlink-ticket",
             "Unlink the ticket",
-            None,
+            Some(Icon::Unlink),
             move |_, cx| unlink(cx),
         );
     }
@@ -7962,6 +8150,8 @@ pub struct Reply {
     options: Entity<SessionOptions>,
     /// What the root does while its turn runs, in the bar under the field.
     status_line: Entity<StatusLine>,
+    /// Why the root's last turn failed while its session stayed, until a turn starts again.
+    stayed: Option<String>,
     pub mode: Entity<ModeSwitch>,
     has_text: bool,
     focused: bool,
@@ -7975,6 +8165,12 @@ pub struct Reply {
     compact_offered: bool,
     /// Whether that toggle is ticked: from the setting, then as the user leaves it.
     compact: bool,
+    /// The root waits for a known quota reset: the composer offers to resume at it.
+    quota: Option<Quota>,
+    /// The last wait that was offered: the chip keeps its words and its fill while it fades out.
+    quota_last: Option<Quota>,
+    /// The switch flipped, until the daemon answers: what it was asked to become.
+    quota_pending: Option<bool>,
     /// The messages sent and not recorded yet, the oldest first: each shows from the moment it
     /// is sent, and one the daemon refused stays until it is sent again or taken back.
     pending: Vec<Pending>,
@@ -8049,6 +8245,7 @@ impl Reply {
             field,
             options,
             status_line: cx.new(|_| StatusLine::new()),
+            stayed: None,
             mode,
             has_text: false,
             focused: false,
@@ -8059,6 +8256,9 @@ impl Reply {
             next_pending: 0,
             compact_offered: false,
             compact: false,
+            quota: None,
+            quota_last: None,
+            quota_pending: None,
             left: HashMap::new(),
             activity: None,
             attached: Attachments::default(),
@@ -8108,12 +8308,21 @@ impl Reply {
         self.attached.is_scaling()
     }
 
-    /// The line above the field while a turn runs: what the root does.
+    /// The line above the field: what the root does while a turn runs, else why its last turn
+    /// failed while its session stayed.
     pub fn status(&self) -> Option<String> {
-        self.activity
-            .as_ref()
-            .filter(|_| self.running)
-            .map(Activity::line)
+        match self.running {
+            true => self.activity.as_ref().map(Activity::line),
+            false => self.stayed.clone(),
+        }
+    }
+
+    fn set_stayed(&mut self, stayed: Option<String>, cx: &mut Context<Self>) {
+        if self.stayed != stayed {
+            self.stayed = stayed;
+            self.sync_status(cx);
+            cx.notify();
+        }
     }
 
     fn set_activity(&mut self, activity: Option<Activity>, cx: &mut Context<Self>) {
@@ -8205,6 +8414,96 @@ impl Reply {
                     Button::choice("reply-compact", COMPACT_CHIP, self.compact)
                         .tooltip(COMPACT_HINT)
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_compact(cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The root's wait for its quota's reset, as the tree says it: the switch shows while the
+    /// reset is known.
+    pub fn set_quota(&mut self, quota: Option<Quota>, cx: &mut Context<Self>) {
+        let quota = quota.filter(|quota| quota.reset_at.is_some());
+        if self.quota != quota {
+            self.quota = quota;
+            self.quota_last = quota.or(self.quota_last);
+            cx.notify();
+        }
+    }
+
+    /// Whether the switch shows, and whether it is on: what it was asked to become while the
+    /// daemon has not answered.
+    pub fn quota_offer(&self) -> Option<bool> {
+        self.quota
+            .map(|quota| self.quota_pending.unwrap_or(quota.resume))
+    }
+
+    pub fn toggle_quota(&mut self, cx: &mut Context<Self>) {
+        let Some(on) = self.quota_offer() else {
+            return;
+        };
+        if self.quota_pending.is_some() {
+            return;
+        }
+        self.quota_pending = Some(!on);
+        let command = Command::QuotaResume {
+            session: self.session.clone(),
+            resume: !on,
+        };
+        self.shell
+            .update(cx, |shell, _| shell.perform(command))
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon's answer to a flip: taken, the tree says it next; refused, the switch goes
+    /// back and a toast says why.
+    pub fn quota_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        let asked = self.quota_pending.take();
+        match refused {
+            None => {
+                if let (Some(quota), Some(asked)) = (&mut self.quota, asked) {
+                    quota.resume = asked;
+                }
+            }
+            Some(why) => toast(
+                Toast::failure("The resume at the reset was not changed").detail(why),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// Resume at the reset, a quiet chip at the end of the toolbar's controls while the root waits
+    /// for its quota: its room opens and it fades in, folds and fades out; its ground follows the
+    /// choice (never the accent fill) and its label the reset. At rest it is its natural width, and the explanation is its tooltip.
+    fn render_quota(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let offered = self.quota.is_some();
+        let shown = fade("reply-quota-shown", offered, PANEL, window, cx);
+        if !offered && shown == 0.0 {
+            return None;
+        }
+        let on = self
+            .quota_offer()
+            .or(self.quota_last.map(|quota| quota.resume));
+        let label = self
+            .quota
+            .or(self.quota_last)
+            .and_then(|quota| quota.reset_at)
+            .map(resume_at)
+            .unwrap_or_default();
+        Some(
+            div()
+                .flex_none()
+                .opacity(shown)
+                .when(shown < 1.0, |d| {
+                    d.w(px(QUOTA_CHIP_WIDTH) * shown).overflow_hidden()
+                })
+                .child(
+                    Button::choice("reply-quota", label, on.unwrap_or(false))
+                        .ghost()
+                        .tooltip(QUOTA_HINT)
+                        .disabled(self.quota_pending.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_quota(cx))),
                 )
                 .into_any_element(),
         )
@@ -8877,6 +9176,8 @@ impl Render for Reply {
                     .child(self.mode.clone())
                     .children(self.render_compact(window, cx))
                     .child(Attachments::button(cx, Self::attached_of))
+                    // An optional chip goes after the fixed controls: its arrival moves none.
+                    .children(self.render_quota(window, cx))
                     // What the root does while its turn runs, where the line above the field was.
                     .child(
                         div()
@@ -9159,6 +9460,7 @@ mod tests {
             tools_outdated: false,
             tools_reload: false,
             compacting: false,
+            quota: None,
         }
     }
 
