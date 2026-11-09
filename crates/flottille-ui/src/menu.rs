@@ -34,6 +34,7 @@ struct Entry {
 pub struct Menu {
     id: ElementId,
     tooltip: SharedString,
+    glyph: Icon,
     align: Align,
     width: Pixels,
     entries: Vec<Entry>,
@@ -52,6 +53,7 @@ impl Menu {
         Self {
             id: id.into(),
             tooltip: tooltip.into(),
+            glyph: Icon::More,
             align: Align::End,
             width: px(180.),
             entries: Vec::new(),
@@ -129,6 +131,17 @@ impl Menu {
         self
     }
 
+    /// The button's glyph, "⋯" unless the menu is an action's (Run a task: a play).
+    pub fn glyph(mut self, glyph: Icon) -> Self {
+        self.glyph = glyph;
+        self
+    }
+
+    pub fn width(mut self, width: Pixels) -> Self {
+        self.width = width;
+        self
+    }
+
     pub fn is_open(&self) -> bool {
         self.open
     }
@@ -178,7 +191,7 @@ impl Render for Menu {
             self.fade.settle(now);
         }
         let t = self.fade.value(now);
-        let trigger = Button::icon(self.id.clone(), Icon::More, self.tooltip.clone())
+        let trigger = Button::icon(self.id.clone(), self.glyph, self.tooltip.clone())
             .tooltip_hidden(self.open)
             .on_click(cx.listener(|this, _, window, cx| this.toggle(window, cx)));
         let root = div()
