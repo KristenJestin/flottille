@@ -240,15 +240,23 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   died during it. Prompts sent while a turn runs wait their turn.
 - **A cancel** sends `session/cancel` while a turn runs; the turn then ends `cancelled`.
 - **A failed turn**: a prompt the agent answers with an error fails the agent, unless the
-  provider's words say its session is still usable (`crates/flottille/src/turn_failures.rs`, one
-  list per provider: Claude's login expired or refused, its service unreachable, overloaded or
-  failing; Codex signed out). Then the turn ends `failed`, the session stays, its process is let
-  go as after an idle release (`agent.released`, reason `failed`), and the agent is idle with a
-  `state_reason` that says what to do (`Claude's login expired: sign in again (run claude and
-  /login), then send your message again`), which the session's state line says. The next prompt
-  starts a process that resumes or loads the session, and the reason goes. A child's parent is
-  told (`child-idle`). What makes the session unusable still fails it: the process cannot start,
-  its session cannot be opened, the connection breaks.
+  provider says its login is gone (`crates/flottille/src/turn_failures.rs`, one recogniser per
+  provider). The bridges pass the provider's code as the error's `data.code`, which is what is
+  read: Claude's `authentication_failed` or `oauth_org_not_allowed` (its words, `Please run
+  /login`…, only when it gave no code), Codex's `unauthorized` (never its text: a number in it
+  means nothing). A service unreachable, overloaded or failing never fails a prompt: the bridges
+  end that turn `end_turn` with a `sessionFailure`, and the session goes on. A login gone ends
+  the turn `failed`: what it was sent is given back (`delivery.given_back`, queued again), the
+  session stays, its process is let go as after an idle release (`agent.released`, reason
+  `failed`), and the agent is idle with a `state_reason` that says what to do (`Claude's login
+  expired: sign in again (run claude and /login), then send your message again`), which the
+  session's state line says. Then nothing starts it but the user: what is queued for it waits,
+  however it was rung, until the user writes to it or to its tree's root, which clears that
+  line on the root and on every agent of its tree waiting on a login, and rings them. Their next
+  prompt starts a process that resumes or loads the session, with what waited. A child's parent
+  is told (`child-idle`) that the child cannot work until the user signs in again and not to
+  write to it until then: what it sends waits. What makes the session unusable still fails it:
+  the process cannot start, its session cannot be opened, the connection breaks.
 - **The agent's own permission prompts** (`session/request_permission`) are answered at once:
   a tool of the agent's own list, named by the provider's own field (Claude:
   `_meta.claudeCode.toolName`), is allowed once; anything else is rejected, a request with no tool
@@ -638,8 +646,9 @@ bridge runs one session.
   category `limit` when the provider refused it for a limit (a `rate_limit_event` rejected, an
   error `rate_limit`, `billing_error` or `account_on_hold`, or Claude Code's own message for a
   spent usage), `service` otherwise. The session lives on, as with Claude Code's own ACP
-  adapter. Only a signed-out `claude` (`Please run /login`, an error `authentication_failed`)
-  fails the prompt, and so the agent: it cannot go on until the user signs in again.
+  adapter. Only a signed-out `claude` (`Please run /login`, an error `authentication_failed` or
+  `oauth_org_not_allowed`) fails the prompt, the error's kind as its `data.code` when it named
+  one: it cannot go on until the user signs in again ("A failed turn", above).
 - **A cancel** (`session/cancel`) is an `interrupt` control request.
 - **Claude's permission prompts** (`can_use_tool`) become `session/request_permission` (the tool
   in `_meta.claudeCode.toolName`, the tool use's id, options `allow_once` and `reject_once`); the
@@ -711,7 +720,7 @@ servers are Flottille's HTTP one alone). One bridge runs one session.
   `cancelled` for an interrupted turn, `end_turn` otherwise. A failed turn ends `end_turn` too,
   after a `sessionFailure` of severity `error` with its message, category `limit` for
   `usageLimitExceeded` and `rateLimitExceeded`, `service` otherwise; only a signed-out Codex
-  (`unauthorized`) fails the prompt, and so the agent.
+  (`unauthorized`) fails the prompt, with `data.code` `unauthorized` ("A failed turn", above).
 - **A cancel** (`session/cancel`) is a `turn/interrupt`.
 - **The model** is an option (`model`) whose values are the models `model/list` gave, hidden ones
   left out, the thread's own first set; **the effort** an option (`effort`, category
@@ -850,7 +859,8 @@ ends; a handed one is the user's.
   under the same name is another). A failed root is resumed too: a failure rarely takes the
   agent's own session with it (a login that expired before the failed turns of `turn_failures`
   existed), and one that did fails again at its next start. A root that failed before its session
-  opened has none to resume.
+  opened has none to resume, and a Codex root whose Codex started a tool of its own (a breach of
+  bare mode, during a turn or outside one) is not resumed: the bridge marked its thread.
 - **A report** (`report`, at most 10,000 characters) of a child goes to its parent at once, and
   the child ends when its turn does, or 2 minutes later if its turn goes on. A root's report is
   kept and the root stays.
