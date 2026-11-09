@@ -898,6 +898,10 @@ struct TicketsCall {
     /// its offset; the duration before now when left out).
     duration: Option<String>,
     started: Option<String>,
+    /// A write at the user's gesture (`written_for_user`): its comment is recorded by the id the
+    /// tracker gave, never by its words. Not a field of the tool: an agent cannot ask for it.
+    #[serde(skip)]
+    by_id_only: bool,
 }
 
 /// A field that is there even when it is `null`: `Some(None)` for `null`, `None` when left out.
@@ -2185,12 +2189,10 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
             );
             match (action, body) {
                 ("comment", Some(body)) => {
-                    crate::posts::record_comment(
-                        daemon,
-                        on,
-                        crate::posts::comment_id_in(&said),
-                        body,
-                    );
+                    let id = crate::posts::comment_id_in(&said);
+                    if id.is_some() || !asked.by_id_only {
+                        crate::posts::record_comment(daemon, on, id, body);
+                    }
                 }
                 ("edit", Some(body)) => crate::posts::record_body(daemon, on, body),
                 _ => {}
@@ -2220,7 +2222,8 @@ async fn written_for_user(
     if let Some(refusal) = unwritable(project, &args) {
         return Err(refusal);
     }
-    let asked: TicketsCall = serde_json::from_value(args).map_err(|error| error.to_string())?;
+    let mut asked: TicketsCall = serde_json::from_value(args).map_err(|error| error.to_string())?;
+    asked.by_id_only = true;
     let outcome = match &asked.ticket {
         None => create(daemon, project, &asked).await,
         Some(ticket) => {
@@ -2615,7 +2618,9 @@ async fn write_work_item(
             if let Some(body) = body {
                 let posted = crate::adf::round_trip(body);
                 let id = posted_comment_id(daemon, on, site, &posted).await;
-                crate::posts::record_comment(daemon, on, id, &posted);
+                if id.is_some() || !asked.by_id_only {
+                    crate::posts::record_comment(daemon, on, id, &posted);
+                }
             }
             Outcome::Done(format!("The comment was posted on {key}."))
         }

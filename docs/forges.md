@@ -896,6 +896,9 @@ A comment read back is known as an agent's by its record:
   words is taken: Jira's `created` (`2026-10-01T12:00:00.000+0000`) is not read as a time, so for
   Jira the post claims the first comment of its words.
 
+A comment Flottille posts at the user's gesture (a spec's departures, `extensions.md`) is recorded
+only by its id: where none is found, nothing is recorded.
+
 Only a record that holds a comment's id lets an agent edit or delete that comment (`tickets
 comment_edit`, `comment_delete`, `docs/tickets.md`): words alone never do, a person may write the
 same. An edit replaces the record of the id with the new words; a delete drops it.
