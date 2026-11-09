@@ -618,6 +618,7 @@ fn flush(
         .write_all(|store| Ok(((), store.put_items(&items, events.clone())?)))
         .map_err(|error| format!("the items could not be stored: {error}"))?;
     crate::subscriptions::items(daemon, project, &items, &events);
+    crate::extensions::heard(daemon, &events);
     Ok(true)
 }
 

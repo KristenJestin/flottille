@@ -1,9 +1,12 @@
 //! The store: one SQLite file, its schema brought up to date by numbered migrations.
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
@@ -718,6 +721,17 @@ const MIGRATIONS: &[&str] = &[
 ",
 ];
 
+/// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
+/// tables, `ext_<name>_…`, are brought up to date as the store's are, and kept when it is turned
+/// off. Made at every open after the core's migrations, never as one of them, so that its place
+/// never depends on how many the core has.
+const EXTENSION_MIGRATIONS: &str = "
+    CREATE TABLE IF NOT EXISTS extension_migrations (
+        name    TEXT PRIMARY KEY,
+        applied INTEGER NOT NULL
+    ) STRICT;
+";
+
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
     identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place, digest";
 
@@ -802,7 +816,11 @@ pub enum Kept {
 
 pub struct Store {
     connection: Connection,
+    /// The prefix of the extension whose space the connection is confined to, if one is.
+    confined: Confined,
 }
+
+type Confined = Arc<Mutex<Option<String>>>;
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
@@ -818,7 +836,24 @@ impl Store {
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&mut connection)?;
-        Ok(Store { connection })
+        // A `Transaction` lends only `&Connection`, and an authorizer is set with `&mut`: it is
+        // set once, and lets everything through outside an extension's space.
+        let confined = Confined::default();
+        let held = Arc::clone(&confined);
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            match held
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_deref()
+            {
+                None => Authorization::Allow,
+                Some(prefix) => within(prefix, &context),
+            }
+        }))?;
+        Ok(Store {
+            connection,
+            confined,
+        })
     }
 
     pub fn schema_version(&self) -> Result<usize> {
@@ -3283,6 +3318,286 @@ impl Store {
             .flatten();
         Ok(seq.unwrap_or(0))
     }
+
+    /// Brings the tables of the extension `name` up to date: `migrations` applied in order, those
+    /// already applied never twice, as the store's own are. A migration is never edited once
+    /// released.
+    pub fn migrate_extension(&mut self, name: &str, migrations: &[&str]) -> Result<()> {
+        let prefix = prefix_of(name)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let applied: usize = transaction
+            .query_row(
+                "SELECT applied FROM extension_migrations WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if applied > migrations.len() {
+            return Err(Error::Refused(format!(
+                "the store's tables of {name} are at schema {applied}, made by a newer Flottille \
+                 than this one (schema {})",
+                migrations.len()
+            )));
+        }
+        {
+            let confinement = Confinement::enter(&transaction, &self.confined, prefix)?;
+            for migration in &migrations[applied..] {
+                transaction.execute_batch(migration)?;
+            }
+            confinement.check(&transaction)?;
+        }
+        transaction.execute(
+            "INSERT INTO extension_migrations (name, applied) VALUES (?1, ?2) \
+             ON CONFLICT (name) DO UPDATE SET applied = excluded.applied",
+            params![name, migrations.len()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// What `read` reads of the tables of the extension `name`, confined as in its space, in a
+    /// transaction that keeps nothing: never a write lock taken to read.
+    pub fn read_space<T>(
+        &self,
+        name: &str,
+        read: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        let prefix = prefix_of(name)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let confinement = Confinement::enter(&transaction, &self.confined, prefix)?;
+        let read = read(&transaction);
+        // Before the transaction, rolled back outside the confinement.
+        drop(confinement);
+        drop(transaction);
+        read
+    }
+
+    /// The space of the extension `name`: one transaction over its own tables, in which its events
+    /// are stored with the change they say. Nothing is kept unless it is committed.
+    pub fn space(&mut self, name: &str) -> Result<Space<'_>> {
+        let prefix = prefix_of(name)?;
+        let transaction = self.connection.transaction()?;
+        Ok(Space {
+            confinement: Confinement::enter(&transaction, &self.confined, prefix)?,
+            transaction,
+        })
+    }
+}
+
+/// The prefix of the tables of the extension `name`. A name is letters and digits only: were `a`
+/// and `a_b` both names, `ext_a_b_notes` would be in the space of each.
+fn prefix_of(name: &str) -> Result<String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
+        return Err(Error::Refused(format!(
+            "{name:?}: an extension's name is lower-case letters and digits only"
+        )));
+    }
+    Ok(format!("ext_{name}_"))
+}
+
+/// What an extension may do while it is confined (`docs/extensions.md`, "Data"): make, change,
+/// read and write its own tables, `ext_<name>_…`, and nothing else. The core's tables and another
+/// extension's are refused, as are views (SQLite does not check what a view reads when it is made),
+/// pragmas, attachments and the end of the transaction.
+fn within(prefix: &str, context: &AuthContext<'_>) -> Authorization {
+    let own = |name: &str| name.to_ascii_lowercase().starts_with(prefix);
+    // Making or dropping a table reads and writes the schema's table, which holds no data and
+    // which SQLite never lets a statement write by itself while `writable_schema` is off; pragmas
+    // are refused.
+    // Renaming one rewrites the temporary schema's table as well.
+    let own_or_schema =
+        |name: &str| own(name) || name == "sqlite_master" || name == "sqlite_temp_master";
+    // Renaming or dropping a table with `AUTOINCREMENT` finds and writes its row of
+    // `sqlite_sequence`, which also holds the core's counters: those are checked unchanged before anything is kept
+    // (`Confinement::check`).
+    let own_or_internal = |name: &str| own_or_schema(name) || name == "sqlite_sequence";
+    let allowed = match context.action {
+        AuthAction::CreateTable { table_name }
+        | AuthAction::DropTable { table_name }
+        | AuthAction::AlterTable { table_name, .. } => own(table_name),
+        // `ALTER TABLE` checks the table it changed with `pragma_quick_check`.
+        AuthAction::Read { table_name, .. } => {
+            own_or_internal(table_name) || table_name == "pragma_quick_check"
+        }
+        AuthAction::Pragma {
+            pragma_name: "quick_check",
+            pragma_value: Some(table_name),
+        } => own(table_name),
+        AuthAction::Insert { table_name }
+        | AuthAction::Update { table_name, .. }
+        | AuthAction::Delete { table_name } => own_or_internal(table_name),
+        // The index SQLite makes for a table's own `PRIMARY KEY` or `UNIQUE` is named by it.
+        AuthAction::CreateIndex {
+            index_name,
+            table_name,
+        }
+        | AuthAction::DropIndex {
+            index_name,
+            table_name,
+        } => {
+            own(table_name)
+                && (own(index_name)
+                    || index_name.starts_with(&format!("sqlite_autoindex_{table_name}_")))
+        }
+        AuthAction::CreateTrigger {
+            trigger_name: name,
+            table_name,
+        }
+        | AuthAction::DropTrigger {
+            trigger_name: name,
+            table_name,
+        } => own(name) && own(table_name),
+        // Renaming a table rebuilds its indexes, all of them the space's.
+        AuthAction::Reindex { index_name } => own(index_name),
+        AuthAction::Select | AuthAction::Function { .. } | AuthAction::Recursive => true,
+        _ => false,
+    };
+    if allowed {
+        Authorization::Allow
+    } else {
+        Authorization::Deny
+    }
+}
+
+/// Held while the connection is confined to an extension's space; lifted when dropped.
+struct Confinement {
+    confined: Confined,
+    prefix: String,
+    /// What is not the extension's, as it was when the core last let go: the schema of every
+    /// other table and the counters of `sqlite_sequence`.
+    outside: RefCell<Vec<String>>,
+}
+
+impl Confinement {
+    fn enter(connection: &Connection, confined: &Confined, prefix: String) -> Result<Confinement> {
+        // A statement is authorized when it is prepared: none prepared outside the space is kept
+        // for it to run.
+        connection.flush_prepared_statement_cache();
+        let outside = RefCell::new(outside(connection, &prefix)?);
+        let confinement = Confinement {
+            confined: Arc::clone(confined),
+            prefix,
+            outside,
+        };
+        confinement.set(Some(confinement.prefix.clone()));
+        Ok(confinement)
+    }
+
+    fn set(&self, prefix: Option<String>) {
+        *self.confined.lock().unwrap_or_else(PoisonError::into_inner) = prefix;
+    }
+
+    /// Refuses what the authorizer cannot see: a table renamed out of the space (it is told the old
+    /// name alone), a core counter written, and a table of the space that references one outside
+    /// it, which a deletion of the core would cascade into, running its triggers unconfined.
+    fn check(&self, connection: &Connection) -> Result<()> {
+        self.set(None);
+        let found = self.found(connection);
+        self.set(Some(self.prefix.clone()));
+        found
+    }
+
+    fn found(&self, connection: &Connection) -> Result<()> {
+        if outside(connection, &self.prefix)? != *self.outside.borrow() {
+            return Err(Error::Refused(format!(
+                "an extension changed what is not its own: only tables {}… are its",
+                self.prefix
+            )));
+        }
+        let references: Vec<(String, String)> = connection
+            .prepare(
+                "SELECT t.name, f.\"table\" FROM sqlite_master t, pragma_foreign_key_list(t.name) f \
+                 WHERE t.type = 'table'",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let own = |name: &str| name.to_ascii_lowercase().starts_with(&self.prefix);
+        if let Some((table, target)) = references
+            .iter()
+            .find(|(table, target)| own(table) && !own(target))
+        {
+            return Err(Error::Refused(format!(
+                "{table} references {target}: a table of an extension references its own alone"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Runs `f` as the core, outside the confinement, once what the extension did is checked; what
+    /// the core changes there is the new state to check against, even when `f` fails after a
+    /// write, so that it is never taken for the extension's.
+    fn lifted<T>(&self, connection: &Connection, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.check(connection)?;
+        self.set(None);
+        let result = f();
+        let taken = outside(connection, &self.prefix);
+        self.set(Some(self.prefix.clone()));
+        *self.outside.borrow_mut() = taken?;
+        result
+    }
+}
+
+/// The schema of every table that is not the space's, its indexes and triggers, and the counters
+/// of `sqlite_sequence` that are not the space's, read as the core.
+fn outside(connection: &Connection, prefix: &str) -> Result<Vec<String>> {
+    let rows: Vec<(String, String)> = connection
+        .prepare(
+            "SELECT tbl_name, type || ' ' || name || ' ' || ifnull(sql, '') FROM sqlite_master \
+             UNION ALL SELECT name, 'sequence ' || name || ' ' || seq FROM sqlite_sequence \
+             ORDER BY 2",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(table, _)| !table.to_ascii_lowercase().starts_with(prefix))
+        .map(|(_, row)| row)
+        .collect())
+}
+
+impl Drop for Confinement {
+    fn drop(&mut self) {
+        self.set(None);
+    }
+}
+
+/// An extension's change to its own tables and its events, written together or not at all.
+pub struct Space<'a> {
+    // Declared first, so dropped first: the rollback runs outside the confinement.
+    confinement: Confinement,
+    transaction: rusqlite::Transaction<'a>,
+}
+
+impl Space<'_> {
+    /// Its tables, read and written by the extension alone.
+    pub fn tables(&self) -> &Connection {
+        &self.transaction
+    }
+
+    pub fn append_event(&self, name: &str, data: Value) -> Result<Event> {
+        self.confinement.lifted(&self.transaction, || {
+            append_event(&self.transaction, name, data)
+        })
+    }
+
+    pub fn commit(self) -> Result<()> {
+        let Space {
+            confinement,
+            transaction,
+        } = self;
+        let checked = confinement.check(&transaction);
+        // Before the transaction, kept or rolled back outside the confinement.
+        drop(confinement);
+        checked?;
+        Ok(transaction.commit()?)
+    }
 }
 
 fn append_event(connection: &Connection, name: &str, data: Value) -> Result<Event> {
@@ -3591,7 +3906,22 @@ fn path_text(path: &Path) -> Result<&str> {
 fn migrate(connection: &mut Connection) -> Result<()> {
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let applied: usize = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let mut applied: usize =
+        transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    // The alpha builds of the extensions made their bookkeeping, `extension_schemas`, as the last
+    // numbered migration of their day: that number was the core's next, whose migration such a
+    // store never ran. The table's name says such a store, and its count is moved over.
+    let alpha = transaction
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extension_schemas'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if alpha {
+        applied -= 1;
+    }
     if applied > MIGRATIONS.len() {
         return Err(Error::Refused(format!(
             "the store is at schema {applied}, made by a newer Flottille than this one (schema {})",
@@ -3600,6 +3930,14 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     }
     for migration in &MIGRATIONS[applied..] {
         transaction.execute_batch(migration)?;
+    }
+    transaction.execute_batch(EXTENSION_MIGRATIONS)?;
+    if alpha {
+        transaction.execute_batch(
+            "INSERT INTO extension_migrations (name, applied) \
+                 SELECT name, applied FROM extension_schemas;
+             DROP TABLE extension_schemas;",
+        )?;
     }
     transaction.pragma_update(None, "user_version", MIGRATIONS.len())?;
     transaction.commit()?;
@@ -6307,6 +6645,504 @@ mod tests {
         assert_eq!(keys(&store, Filter::default()), ["1", "3"]);
         assert!(store.items("other", &Filter::default()).unwrap().is_empty());
         assert!(store.cursors("app").unwrap().is_empty());
+    }
+
+    const TABLE: &str =
+        "CREATE TABLE ext_test_notes (id INTEGER PRIMARY KEY, text TEXT NOT NULL) STRICT;";
+    const COLUMN: &str = "ALTER TABLE ext_test_notes ADD COLUMN at INTEGER;";
+
+    fn notes(store: &mut Store) -> Vec<String> {
+        let space = store.space("test").unwrap();
+        let mut statement = space
+            .tables()
+            .prepare("SELECT text FROM ext_test_notes ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_extension_s_migrations_run_in_order_once_and_a_later_one_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let mut store = Store::open(&path).unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_notes (text) VALUES ('kept')", [])
+            .unwrap();
+        space.commit().unwrap();
+        drop(store);
+
+        let mut store = Store::open(&path).unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        store.migrate_extension("test", &[TABLE, COLUMN]).unwrap();
+
+        assert_eq!(notes(&mut store), ["kept"]);
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute("UPDATE ext_test_notes SET at = 1", [])
+            .unwrap();
+    }
+
+    #[test]
+    fn an_extension_reads_its_own_tables_without_writing_and_nothing_else() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_notes (text) VALUES ('kept')", [])
+            .unwrap();
+        space.commit().unwrap();
+
+        let read = store.read_space("test", |tables| {
+            tables
+                .execute("INSERT INTO ext_test_notes (text) VALUES ('not kept')", [])
+                .unwrap();
+            Ok(
+                tables.query_row("SELECT count(*) FROM ext_test_notes", [], |row| {
+                    row.get::<_, u64>(0)
+                })?,
+            )
+        });
+        let outside = store.read_space("test", |tables| {
+            Ok(tables.query_row("SELECT count(*) FROM agents", [], |row| {
+                row.get::<_, u64>(0)
+            })?)
+        });
+
+        assert_eq!(read.unwrap(), 2);
+        assert_eq!(notes(&mut store), ["kept"]);
+        assert!(outside.is_err());
+    }
+
+    fn schema(store: &Store) -> Vec<String> {
+        let mut statement = store
+            .connection
+            .prepare("SELECT ifnull(sql, name) FROM sqlite_master ORDER BY name")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_extension_migration_cannot_touch_a_core_table() {
+        let mut store = Store::open_in_memory().unwrap();
+        let before = schema(&store);
+
+        for migration in [
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY) STRICT;",
+            "ALTER TABLE agents ADD COLUMN note TEXT;",
+            "DROP TABLE events;",
+            "CREATE INDEX ext_test_index ON agents (id);",
+            "CREATE TRIGGER ext_test_trigger AFTER INSERT ON agents BEGIN SELECT 1; END;",
+            "CREATE VIEW ext_test_view AS SELECT * FROM agents;",
+            "INSERT INTO events (name, data, at) VALUES ('forged', '{}', 0);",
+            "DELETE FROM projects;",
+            "PRAGMA foreign_keys = OFF;",
+        ] {
+            let result = store.migrate_extension("test", &[TABLE, migration]);
+            assert!(result.is_err(), "{migration}");
+        }
+
+        assert_eq!(schema(&store), before);
+        assert_eq!(store.last_seq().unwrap(), 0);
+    }
+
+    #[test]
+    fn an_extension_cannot_write_another_extension_s_tables() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        store
+            .migrate_extension(
+                "other",
+                &["CREATE TABLE ext_other_notes (id INTEGER PRIMARY KEY, text TEXT) STRICT;"],
+            )
+            .unwrap();
+        let space = store.space("test").unwrap();
+
+        for statement in [
+            "INSERT INTO ext_other_notes (text) VALUES ('forged')",
+            "UPDATE ext_other_notes SET text = 'forged'",
+            "DELETE FROM ext_other_notes",
+            "DROP TABLE ext_other_notes",
+            "SELECT count(*) FROM ext_other_notes",
+            "SELECT count(*) FROM agents",
+            "DELETE FROM agents",
+            "COMMIT",
+        ] {
+            assert!(
+                space.tables().execute_batch(statement).is_err(),
+                "{statement}"
+            );
+        }
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_notes (text) VALUES ('kept')", [])
+            .unwrap();
+        space.append_event("test.noted", json!({})).unwrap();
+        space.commit().unwrap();
+
+        assert_eq!(notes(&mut store), ["kept"]);
+        assert_eq!(store.last_seq().unwrap(), 1);
+    }
+
+    #[test]
+    fn an_extension_can_drop_and_rename_its_own_tables() {
+        let mut store = Store::open_in_memory().unwrap();
+        let log =
+            "CREATE TABLE ext_test_log (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT) STRICT;
+                   CREATE INDEX ext_test_log_text ON ext_test_log (text);
+                   INSERT INTO ext_test_log (text) VALUES ('kept');";
+        // The rebuild SQLite's documentation gives for a change `ALTER TABLE` cannot make.
+        let rebuild = "CREATE TABLE ext_test_log_new (
+                           id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, at INTEGER
+                       ) STRICT;
+                       INSERT INTO ext_test_log_new (id, text) SELECT id, text FROM ext_test_log;
+                       DROP TABLE ext_test_log;
+                       ALTER TABLE ext_test_log_new RENAME TO ext_test_log;
+                       CREATE INDEX ext_test_log_text ON ext_test_log (text);";
+        let gone = "CREATE TABLE ext_test_gone (id INTEGER PRIMARY KEY AUTOINCREMENT) STRICT;
+                    INSERT INTO ext_test_gone DEFAULT VALUES;
+                    DROP TABLE ext_test_gone;";
+
+        store
+            .migrate_extension("test", &[log, rebuild, gone])
+            .unwrap();
+
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_log (text, at) VALUES ('new', 1)", [])
+            .unwrap();
+        let texts: Vec<String> = space
+            .tables()
+            .prepare("SELECT text FROM ext_test_log ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(texts, ["kept", "new"]);
+    }
+
+    #[test]
+    fn an_extension_cannot_rename_a_table_out_of_its_space() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let before = schema(&store);
+
+        for name in ["notes", "ext_other_notes"] {
+            let rename = format!("ALTER TABLE ext_test_notes RENAME TO {name};");
+            let error = store
+                .migrate_extension("test", &[TABLE, &rename])
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("not its own"),
+                "{rename}: {error}"
+            );
+
+            let space = store.space("test").unwrap();
+            space.tables().execute_batch(&rename).unwrap();
+            let error = space.commit().unwrap_err();
+            assert!(
+                error.to_string().contains("not its own"),
+                "{rename}: {error}"
+            );
+        }
+
+        assert_eq!(schema(&store), before);
+    }
+
+    #[test]
+    fn an_extension_cannot_reset_a_core_counter() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.append_event("test.one", json!({})).unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let reset = "UPDATE sqlite_sequence SET seq = 0 WHERE name = 'events'";
+
+        let space = store.space("test").unwrap();
+        space.tables().execute_batch(reset).unwrap();
+        assert!(space.append_event("test.noted", json!({})).is_err());
+        drop(space);
+        let space = store.space("test").unwrap();
+        space.tables().execute_batch(reset).unwrap();
+        assert!(space.commit().is_err());
+
+        assert_eq!(store.append_event("test.two", json!({})).unwrap().seq, 2);
+    }
+
+    #[test]
+    fn a_core_write_that_fails_partway_in_a_space_is_not_taken_for_the_extension_s() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+
+        let space = store.space("test").unwrap();
+        let failed = space.confinement.lifted(space.tables(), || {
+            append_event(space.tables(), "test.half", json!({}))?;
+            Err::<(), _>(Error::Refused("failed partway".into()))
+        });
+
+        assert!(failed.unwrap_err().to_string().contains("failed partway"));
+        space.commit().unwrap();
+    }
+
+    #[test]
+    fn an_extension_s_table_cannot_reference_a_core_table() {
+        let mut store = Store::open_in_memory().unwrap();
+
+        let result = store.migrate_extension(
+            "test",
+            &["CREATE TABLE ext_test_owned (
+                   id INTEGER PRIMARY KEY, agent TEXT REFERENCES agents (id) ON DELETE CASCADE
+               ) STRICT;"],
+        );
+
+        assert!(result.is_err());
+        store
+            .migrate_extension(
+                "test",
+                &[
+                    TABLE,
+                    "CREATE TABLE ext_test_tags (note INTEGER REFERENCES ext_test_notes (id)) STRICT;",
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn an_extension_s_column_cannot_reference_a_core_table_from_its_space() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let before = schema(&store);
+
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute_batch(
+                "ALTER TABLE ext_test_notes ADD COLUMN agent TEXT REFERENCES agents (id);",
+            )
+            .unwrap();
+        let error = space.commit().unwrap_err();
+
+        assert!(error.to_string().contains("references agents"), "{error}");
+        assert_eq!(schema(&store), before);
+    }
+
+    #[test]
+    fn renaming_an_extension_s_table_carries_its_trigger_and_stays_in_its_space() {
+        let mut store = Store::open_in_memory().unwrap();
+        let counted = "CREATE TABLE ext_test_count (n INTEGER NOT NULL) STRICT;
+                       INSERT INTO ext_test_count VALUES (0);
+                       CREATE TRIGGER ext_test_counted AFTER INSERT ON ext_test_notes
+                           BEGIN UPDATE ext_test_count SET n = n + 1; END;";
+        let rename = "ALTER TABLE ext_test_notes RENAME TO ext_test_kept;";
+
+        store
+            .migrate_extension("test", &[TABLE, counted, rename])
+            .unwrap();
+
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_kept (text) VALUES ('one')", [])
+            .unwrap();
+        let n: i64 = space
+            .tables()
+            .query_row("SELECT n FROM ext_test_count", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        space.commit().unwrap();
+        let on: String = store
+            .connection
+            .query_row(
+                "SELECT tbl_name FROM sqlite_master WHERE name = 'ext_test_counted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(on, "ext_test_kept");
+    }
+
+    #[test]
+    fn an_extension_whose_name_holds_an_underscore_is_refused() {
+        let mut store = Store::open_in_memory().unwrap();
+
+        let error = store.migrate_extension("a_b", &[]).unwrap_err();
+
+        assert!(error.to_string().contains("a_b"), "{error}");
+        assert!(store.space("a_b").is_err());
+    }
+
+    #[test]
+    fn an_extension_whose_name_is_empty_upper_case_or_dashed_is_refused() {
+        let mut store = Store::open_in_memory().unwrap();
+
+        for name in ["", "Test", "a-b"] {
+            let error = store.migrate_extension(name, &[]).unwrap_err();
+            assert!(
+                error.to_string().contains("letters and digits"),
+                "{name}: {error}"
+            );
+            assert!(store.space(name).is_err(), "{name}");
+        }
+        store.migrate_extension("test2", &[]).unwrap();
+    }
+
+    #[test]
+    fn an_extension_s_tables_from_a_newer_flottille_are_refused() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE, COLUMN]).unwrap();
+
+        let error = store.migrate_extension("test", &[TABLE]).unwrap_err();
+
+        assert!(error.to_string().contains("newer Flottille"), "{error}");
+    }
+
+    #[test]
+    fn a_change_of_a_space_and_its_event_are_kept_together_or_not_at_all() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_notes (text) VALUES ('lost')", [])
+            .unwrap();
+        space.append_event("test.noted", json!({})).unwrap();
+        drop(space);
+        assert!(notes(&mut store).is_empty());
+        assert_eq!(store.last_seq().unwrap(), 0);
+
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_notes (text) VALUES ('kept')", [])
+            .unwrap();
+        space.append_event("test.noted", json!({})).unwrap();
+        space.commit().unwrap();
+        assert_eq!(notes(&mut store), ["kept"]);
+        assert_eq!(store.last_seq().unwrap(), 1);
+    }
+
+    /// A store as a build of the core alone leaves it at `version`, with an event.
+    fn a_core_store(path: &Path, version: usize) {
+        let old = Connection::open(path).unwrap();
+        for migration in &MIGRATIONS[..version] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", version).unwrap();
+        append_event(&old, "test.one", json!({})).unwrap();
+    }
+
+    #[test]
+    fn a_store_of_the_previous_schema_keeps_its_data_and_gains_the_extensions_tables() {
+        // At every schema, not only one: where the extensions' bookkeeping is made must never
+        // depend on how many migrations the core has.
+        for version in 1..=MIGRATIONS.len() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("flottille.db");
+            a_core_store(&path, version);
+
+            let mut store = Store::open(&path).unwrap();
+            store.migrate_extension("test", &[TABLE]).unwrap();
+
+            assert_eq!(
+                store.schema_version().unwrap(),
+                MIGRATIONS.len(),
+                "{version}"
+            );
+            assert_eq!(store.last_seq().unwrap(), 1, "{version}");
+            assert!(notes(&mut store).is_empty(), "{version}");
+        }
+    }
+
+    #[test]
+    fn a_store_of_dev_s_latest_schema_gains_the_extensions_table_when_opened() {
+        // The numbered migrations are the core's alone, so a store of the core's latest is this.
+        assert!(!MIGRATIONS.iter().any(|m| m.contains("extension")));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        a_core_store(&path, MIGRATIONS.len());
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO workspaces (project, name, branch, folder, project_folder, \
+                 created_at, variables, repositories) \
+                 VALUES ('app', 'login', 'app/login', '/w', '/p', 100, '{}', '[]');",
+            )
+            .unwrap();
+
+        let mut store = Store::open(&path).unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        assert!(store.workspace("app", "login").unwrap().is_some());
+        assert!(notes(&mut store).is_empty());
+        // Opened again, nothing is made twice and the extension's count is kept.
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        store.migrate_extension("test", &[TABLE, COLUMN]).unwrap();
+        assert!(notes(&mut store).is_empty());
+    }
+
+    #[test]
+    fn a_store_of_this_branch_opens_under_the_latest_dev_schema() {
+        // The alpha builds of the extensions made their bookkeeping as the last numbered
+        // migration: at index 27 first, then at 30, each taking the number the core gave its own
+        // next migration.
+        for core in [27, 30] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("flottille.db");
+            a_core_store(&path, core);
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE extension_schemas (
+                    name    TEXT PRIMARY KEY,
+                    applied INTEGER NOT NULL
+                ) STRICT;",
+            )
+            .unwrap();
+            old.execute_batch(TABLE).unwrap();
+            old.execute(
+                "INSERT INTO extension_schemas (name, applied) VALUES ('test', 1)",
+                [],
+            )
+            .unwrap();
+            old.execute("INSERT INTO ext_test_notes (text) VALUES ('kept')", [])
+                .unwrap();
+            old.pragma_update(None, "user_version", core + 1).unwrap();
+            drop(old);
+
+            let mut store = Store::open(&path).unwrap();
+
+            assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len(), "{core}");
+            // The core's migrations that took the same numbers are applied.
+            for column in [
+                "SELECT place FROM approval_requests",
+                "SELECT ready FROM runs",
+            ] {
+                store.connection.prepare(column).unwrap();
+            }
+            // The extension's count is kept: its first migration is not run again.
+            store.migrate_extension("test", &[TABLE, COLUMN]).unwrap();
+            assert_eq!(notes(&mut store), ["kept"], "{core}");
+            assert_eq!(store.last_seq().unwrap(), 1, "{core}");
+            // Opened again, it is a store like any other.
+            drop(store);
+            assert_eq!(
+                Store::open(&path).unwrap().schema_version().unwrap(),
+                MIGRATIONS.len()
+            );
+        }
     }
 
     #[test]

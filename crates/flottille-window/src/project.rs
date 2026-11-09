@@ -161,7 +161,7 @@ impl ProjectPage {
         cx.defer(move |cx| reading.update(cx, |section, cx| section.read(cx)));
         let items = {
             let (shell, project) = (shell.clone(), name.clone());
-            cx.new(|_| ProjectItems::new(shell, project))
+            cx.new(|cx| ProjectItems::new(shell, project, cx))
         };
         let reading = items.clone();
         cx.defer(move |cx| reading.update(cx, |items, cx| items.read(cx)));

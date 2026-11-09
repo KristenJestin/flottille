@@ -25,6 +25,7 @@ mod daemon;
 mod deliveries;
 mod desktop;
 mod developer;
+mod extensions;
 mod files;
 mod follow;
 mod forge;
@@ -248,6 +249,8 @@ enum Command {
         #[arg(long, num_args = 2, value_names = ["PROJECT", "WORKSPACE"])]
         forge: Vec<String>,
     },
+    #[command(flatten)]
+    Extensions(extensions::Command),
 }
 
 #[derive(Subcommand)]
@@ -403,6 +406,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
         Command::Mcp => pilot::run(&paths)?,
+        Command::Extensions(command) => return extensions::run(&paths, command),
         Command::Update {
             channel,
             branch,

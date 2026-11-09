@@ -43,8 +43,12 @@ fn waiting_on_parent(number: u64) -> String {
     )
 }
 
-/// Who holds an agent's requests: its parent, or the user for a root.
+/// Who holds an agent's requests: its parent, or the user for a root and for an agent an
+/// extension launched, whose parent (the session it reads) has no say in what it does.
 fn holder(daemon: &Daemon, agent: &str) -> String {
+    if crate::extensions::launched(daemon, agent).is_some() {
+        return approval::USER.to_owned();
+    }
     daemon
         .read(|store| store.agent(agent))
         .ok()

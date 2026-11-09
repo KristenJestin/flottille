@@ -768,3 +768,108 @@ fn the_window_draws_no_frame_at_rest_with_a_pilot_and_two_led_sessions_one_folde
         "folded: (frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_spec_page_with_amendments(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent()
+        .with_fetcher()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1")
+        // The development's workspace fetches from `origin`: it reaches no server.
+        .with_env("GIT_SSH_COMMAND", "false");
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.git(
+        &folder,
+        &["remote", "add", "origin", "git@example.com:acme/app.git"],
+    );
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    user.call("extension.set", json!({"name": "specs", "enabled": true}))
+        .unwrap();
+    let spec = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Order filters"}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    user.call(
+        "spec.write",
+        json!({"spec": spec, "section": "behaviour",
+            "content": [{"text": "The orders list filters by status."}]}),
+    )
+    .unwrap();
+    user.call("spec.ready", json!({"spec": spec})).unwrap();
+    let opened = user.received_requests("session/new").len();
+    user.call("spec.develop", json!({"spec": spec})).unwrap();
+    let (url, authorization) = common::mcp::server_of(&user, opened);
+    let developer = common::mcp::Mcp::initialize(&url, &authorization);
+    for content in [
+        json!({"id": "C1", "text": "The orders list filters by status, with chips."}),
+        json!({"text": "Filters are remembered."}),
+        json!({"text": "Filters are shared by link."}),
+    ] {
+        let answer = developer.call(
+            "spec",
+            json!({"action": "amend", "spec": spec, "section": "behaviour",
+                "content": content, "why": "The user chose it."}),
+        );
+        assert!(!answer.error, "{}", answer.text);
+    }
+    let numbers: Vec<u64> =
+        user.call("spec.amendments", json!({"spec": spec})).unwrap()["amendments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["amendment"].as_u64().unwrap())
+            .collect();
+    for (n, answer) in [(numbers[0], "accept"), (numbers[2], "refuse")] {
+        user.call(
+            "spec.amendment",
+            json!({"spec": spec, "amendment": n, "answer": answer}),
+        )
+        .unwrap();
+    }
+    let (shell, cx) = window(&user, cx);
+    // Tall enough that the page's toggles are on screen to be clicked.
+    cx.simulate_resize(size(px(1280.), px(1600.)));
+    until(&shell, cx, "the spec is listed", |cx| {
+        shell.update_in(cx, |s, window, cx| {
+            s.open(
+                Selection::Spec {
+                    project: "app".into(),
+                    spec,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, _| window.try_find("spec-behaviour-C1-was-toggle").is_some())
+    });
+    settle(&shell, cx);
+    // The old text and the refused ones unfolded: what unfolds settles too.
+    for toggle in [
+        "spec-behaviour-C1-was-toggle",
+        "spec-amendments-refused-toggle",
+    ] {
+        cx.update(|window, cx| window.click(toggle.to_owned(), cx));
+    }
+    settle(&shell, cx);
+    assert!(cx.update(|window, _| window.try_find("spec-behaviour-C1-was-text").is_some()));
+    assert!(cx.update(|window, _| {
+        window
+            .try_find(format!("spec-amendment-{}", numbers[1]))
+            .is_some()
+    }));
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}

@@ -167,6 +167,73 @@ workspaces go"); only the workspaces made afterwards follow it.
 |---|---|
 | `project` | The project whose own folder changed, `null` for the default of every project. |
 
+### `extension.changed`
+
+The user switched an extension or changed its settings (`extension.set`), globally or in a
+project: `extension.list` says what it is now.
+
+| Field | |
+|---|---|
+| `name` | The extension's (`specs`). |
+| `project` | The project whose file changed; `null` for `extensions.toml`. |
+
+### `review.started`, `review.progress`, `review.reported`, `review.failed`
+
+A review of a session started, launched or ended a pass, reported, or ended without its findings
+(its pilot ended or failed first). `agent` is its pilot, so that a client following the session's
+tree reads it again.
+
+| Field | |
+|---|---|
+| `review`, `project`, `session`, `agent` | |
+| `round`, `passes` | `review.started`: its round (1 or 2) and the passes it may run. |
+| `findings`, `shown`, `changed` | `review.reported`: the findings delivered, those kept (`info` and the others), and what changed in the workspace during it, or `null`. |
+| `why` | `review.failed`. |
+
+### `review.finding_changed`
+
+The user marked a finding (`review.finding`).
+
+| Field | |
+|---|---|
+| `session`, `finding`, `status`, `agent` | `agent` is the pilot of the review that found it. |
+
+### `review.changed`
+
+Review's guidance was saved or reset (`review.set`, `review.reset`).
+
+### `spec.created`
+
+A spec was started (`spec.new`, `spec.from_ticket`).
+
+| Field | |
+|---|---|
+| `spec` | Its number, never given again. |
+| `project` | |
+| `title` | |
+| `mode` | `alone`, `internal` or `ticket`. |
+| `tickets` | The tickets it covers, as the tracker writes them. |
+
+### `spec.changed`
+
+A Draft was written: a section, its tickets, its questions, or the session that writes it; or a
+Ready spec was written to its ticket, or its departures posted; or its development session proposed
+an amendment, or the user answered one.
+
+| Field | |
+|---|---|
+| `spec`, `project` | |
+| `what` | The section written (`problem`, `behaviour`, `decisions`, `out_of_scope`, `notes`, `verification`, `questions`), `tickets`, `asked` (the writing session asked a wave of questions), `answered` (the user answered one: a `D` was added), `writer` (the session started to write it), `ticket` (a write to its ticket, in the mode `ticket`, with `ticket_write`: `written`, `changed` or `failed`), `departures` (the user posted them), `amendments` (an amendment proposed, or refused), or, for an amendment accepted, the section it wrote (`behaviour` or `decisions`). |
+
+### `spec.status_changed`
+
+| Field | |
+|---|---|
+| `spec`, `project` | |
+| `status` | What it is now: `draft`, `ready` (the user's gestures, or a development that ended with no pull request open), `in_progress` (a development launched, `spec.develop`), `review` (its pull request open), `done` (its pull requests merged). |
+| `was` | What it was. |
+| `agent` | The development session, when `spec.develop` launched it. |
+
 ### `vault.changed`
 
 An entry of the vault was set or removed (`vault.set`, `vault.remove`, `docs/vault.md`). Never a

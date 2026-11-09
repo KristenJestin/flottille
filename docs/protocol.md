@@ -442,6 +442,207 @@ configuration folder.
 `developer.set` emits `developer.changed`. The user's door alone reaches them: no tool of an agent
 does.
 
+### The extension methods
+
+`extension.list` and `extension.set` read and switch the extensions (`docs/extensions.md`):
+`[<name>]` of `extensions.toml` in Flottille's configuration folder, with `enabled` and the
+extension's settings, and a project's own switch and values under `[extensions.<name>]` of its
+file. Both files are refused key by key: an unknown extension, an unknown key, a value of the wrong
+kind, naming the key at fault. An extension is off by default; once on, a project-scoped one is on
+in every project, off in a project whose switch says `enabled = false`, and off everywhere while it
+is off globally, the projects' switches kept.
+
+- `extension.list` answers `{"extensions", "errors"}`: for each extension `{"name", "title",
+  "sentence", "scope", "on_by_default", "place", "enabled", "error", "settings", "projects",
+  "guidance", "commands"}`, `enabled` being the global switch, `error` why `extensions.toml`
+  cannot be used (`null` when it can; the extension is then off), `guidance` whether it has one
+  (`<name>.show`, below), `commands` the words of its composer commands (`["review"]`),
+  `settings` each `{"key", "label", "hint", "kind", "per_project", "value", "set"}` with its
+  global value (its default when not `set`), `kind` being `"language"`, `"model"` (a slot,
+  `{"provider", "model"?, "effort"?}`, `null` for the extension's own choice) or `{"subset": [...]}`
+  (some of those values, in their order), and
+  `projects` each `{"project", "enabled", "switch", "settings", "error"}`: whether it is active
+  there, the project's own switch (`null` when its file says none) and values. `errors` names the
+  projects' `[extensions.<name>]` of an extension Flottille does not know.
+- `extension.set {name, project?, enabled?, settings?}` writes the switch and the settings
+  (a setting `null` goes back to its default), globally or in the project's file, the rest of the
+  file kept; answers the extension as `extension.list` does. `not-found` for an unknown extension,
+  `refused` for a key or a value the declaration does not take, `invalid-config` while the file
+  cannot be read.
+
+- `extension.act {name, action, …}`: a gesture of the user (the Action trigger), answered by the
+  extension's method of that action with the other parameters, as if called by its name
+  (`extension.act {"name": "specs", "action": "answer", "spec": 3, "question": 7, "option": 1}`
+  is `spec.answer`). `refused` for an action the extension does not declare, naming those it does:
+  for Specs `new`, `from_ticket`, `answer`, `ready`, `draft`, `ticket`, `departures`, `develop`,
+  `amendment`.
+
+- `<name>.show`, `<name>.set {text}`, `<name>.reset`: the guidance of an extension that has one
+  (Review's: `review.show`…), `$XDG_CONFIG_HOME/flottille/<name>.md`, absent while Flottille's
+  default holds. Each answers `{"text", "source", "error", "default"}` as `judge.show` does, and
+  `set` and `reset` emit `<name>.changed`; `set` with an empty text resets it, and refuses a text
+  over the extension's limit (Review: 4,000 characters).
+
+`extension.set` emits `extension.changed`; turning an extension on or off globally gives each
+running session of every project the tools its role has now, before the answer (`docs/tools.md`,
+"When the tools change"), and a project's own switch does the same through its file. The user's
+door alone reaches these methods: no tool of an agent does.
+
+### The spec methods
+
+Specs' own (`docs/extensions.md`, "Specs"), each refused while Specs is not active in the spec's
+project, naming the switch. A spec is answered as `{"spec", "project", "title", "mode", "status",
+"language", "tickets", "created_at", "updated_at", "problem", "behaviour", "decisions",
+"out_of_scope", "notes", "verification", "questions", "asked", "writer"}`: `mode` is `alone`,
+`internal` or `ticket`; `status` `draft`, `ready`, `in_progress`, `review` or `done`; `behaviour` a
+list of `{"id", "text"}` (`C1`…), `decisions` of `{"id", "question", "decision", "set_aside"}`
+(`D1`…), `out_of_scope` of `{"text", "reason", "ticket"}`, `verification` of `{"id", "text"}` for a
+`C`, `questions` of texts; `asked` the questions the writing session asked, each `{"question" (its
+number), "text", "options", "recommended", "reason", "state" (`open` or `answered`), "decision"
+(the `D` it became, `null` while open)}`; `writer` the agent id of the session that writes it,
+`null` for a spec no session was started for; `ticket_write` what became of its last write to its
+ticket (mode `ticket`), `{"state": "written" | "changed" | "failed", "problem"}` (what it says:
+where it was written, which ticket changed, why it failed), `null` before a Ready wrote or since a
+Back to draft; `departures` an internal spec's draft comment of where it departs from its tickets,
+and `departures_posted_at` when the user posted it, `null` before; `amendments` those its
+development sessions proposed, as `spec.amendments` gives them. A `C` or a `D` an accepted
+amendment changed or added holds `amended`, a list of `{"at", "was"}`: when it was decided during
+development, and what it read before (the `C`'s text, the `D`'s `{"question", "decision",
+"set_aside"}`), `null` for one it added; an item no amendment touched has no `amended`, and one
+the user rewrites while the spec is a Draft loses it (written again as it was, it keeps it).
+
+- `spec.new {project, title?, idea?, mode?, tickets?}`: a Draft in the project's `language` (its
+  own, else the one of `extensions.toml`, else the user's locale), kept with it. `alone` takes no
+  ticket, `internal` and `ticket` one at least; the mode is `alone` without tickets and
+  `internal` with unless given; a spec `ticket` with no ticket, in a project with a tracker,
+  creates it at its first Ready. A ticket is written as the project's tracker takes it
+  (`docs/tickets.md`); one another spec covers is refused, naming that spec. With `idea` ("New
+  spec"), the title is the idea's first line unless given, and a `lead` session is started for the
+  user in the project's main checkout to write it, its first message Flottille's: the method, then
+  the idea (`docs/extensions.md`, "Writing a spec"). It answers `{"spec", "agent"}`, the spec and
+  the session's agent id; without `idea`, the spec. A title or an idea is needed.
+- `spec.from_ticket {project, ticket, mode?}` ("Write the spec"): reads the ticket on the
+  project's tracker, makes a Draft of it (its title the ticket's, the mode `internal` unless
+  `ticket` is given) and starts its writing session as `spec.new` with `idea` does; the ticket's
+  text follows the method in the first message, framed as data. `refused` for a ticket another spec
+  covers, before anything is read; `unavailable` when the ticket cannot be read, nothing made.
+  Answers `{"spec", "agent"}`.
+- `spec.answer {spec, question, option | text}`: answers a question the writing session asked,
+  with an option (from 1) or a text in the user's own words. The answer becomes the next `D`: the
+  question, the option chosen (or the text), the options set aside (all of them for a text); the
+  question is answered, and the writing session is told with a delivery (`[flottille:specs]`).
+  `refused` for a question already answered, and past Draft. Answers the spec.
+- `spec.list {project?, status?}` answers `{"specs"}`, each `{"spec", "project", "title", "mode",
+  "status", "tickets", "questions", "updated_at", "ticket_write"}` (`questions` counts the open
+  ones), of the
+  projects where Specs is active.
+- `spec.show {spec}` answers the spec.
+- `spec.write {spec, section, content}` writes one section whole and answers the spec:
+  `problem` and `notes` take a text, `behaviour` a list of `{"id"?, "text"}`, `decisions` of
+  `{"id"?, "question", "decision", "set_aside"?}`, `out_of_scope` of `{"text", "reason"?,
+  "ticket"?}` (one of the two at least), `verification` of `{"id", "text"}` naming a `C` the spec
+  has, `questions` a list of texts, `departures` a text, for an internal spec only. An item without `id` gets the next number; one with an `id`
+  names one the spec has now; an identifier removed is never given again, and a `C` removed takes
+  its verification with it.
+- `spec.link {spec, ticket}` and `spec.unlink {spec, ticket}` cover one more ticket, or one no
+  more; the last ticket of a spec `internal` or `ticket` stays.
+- `spec.ready {spec}` moves a Draft to Ready: `refused` while a question is open (one of
+  `questions`, or one asked and not answered) or `behaviour` is empty. In the mode `ticket`, it
+  then reads each ticket again and writes the spec to it (`docs/tickets.md`, "What a spec
+  writes"), or creates its ticket when it has none, and answers once that is done: the spec, with
+  `ticket_write`. A ticket changed since Flottille last read it is not written (`changed`); a
+  write that fails says why (`failed`); the spec stays Ready either way. `spec.draft {spec}` moves
+  a spec that is Ready, In progress or Review back to Draft, and tells its writing session with a
+  delivery; during a development, the session developing it is told too, and `spec`'s `amend` is
+  refused while the spec is a Draft. Its pending amendments stay for the user.
+- `spec.ticket {spec, choice: "take" | "overwrite"}`: the user's choice once `ticket_write` is
+  `changed`. `take` moves the spec back to Draft, keeps the tickets' texts read now as the last
+  read and tells the writing session those texts, framed as data; `overwrite` writes the spec over
+  the change. `refused` for a spec of another mode and while nothing changed; `unavailable` when a
+  ticket cannot be read to be taken, nothing changed. Answers the spec.
+- `spec.departures {spec, post?}`: an internal spec's departures, `{"spec", "departures",
+  "offered" (Done, and something to post), "posted_at", "tickets"}`. With `post`, posts them on each
+  of its tickets as a comment through the tracker's own write, once: `refused` before Done, when
+  empty or already posted, and for a spec of another mode; `unavailable` when the tracker refuses.
+- `spec.develop {spec}`, "Launch development": makes a workspace `spec-<n>` (`spec-<n>-<k>` when
+  that name is taken, `k` from 2: the first free name, whoever made the others) linked to the spec's first ticket (a workspace has one), then starts a
+  `lead` session for the user in it, a root neither led nor handed, whose first message, sent once
+  the workspace is prepared, is the spec as it is, labelled, and what Flottille asks of the work
+  (its pull request's description holds the Problem, the `C` list with their verification, and a
+  link to the spec: its ticket's page in the mode `ticket`, else its number and title). Answers
+  `{"spec", "agent", "workspace", "branch"}`, the spec In progress. `refused` unless the spec is
+  Ready, and while a development of it runs (one at a time); a workspace that cannot be made
+  starts nothing, and a session that cannot start once the workspace is made leaves it, named in
+  the error, without blocking a later launch. The spec's status is read again when its session
+  ends, fails or is resumed, when a pull request of its branch moves, and when it is read
+  (`spec.show`, `spec.list`) after Specs was off. Done is terminal. Nothing calls it on its own at Ready.
+
+- `spec.amendments {spec}` answers `{"spec", "amendments"}`, each `{"amendment" (its number),
+  "agent" (the development session that proposed it), "section" (`behaviour` or `decisions`),
+  "item" (the `C` or `D` it changes, `null` for a new one), "content" (the item proposed:
+  `{"text"}` for a `C`, `{"question", "decision", "set_aside"}` for a `D`), "why", "state"
+  (`pending`, `accepted` or `refused`), "became" (the identifier it took once accepted),
+  "proposed_at", "answered_at"}`, answered ones kept.
+- `spec.amendment {spec, amendment, answer: "accept" | "refuse"}`: the user's answer. Accepted, the
+  amendment is written into the spec whatever its status but Draft and Done, the one write the
+  lock lets through: a changed item keeps its identifier, its old text kept in `amended`; a new
+  one takes the next identifier. Refused, the spec is unchanged and the amendment kept. The
+  session that proposed it is told the answer with a delivery (`[flottille:specs]`). `refused` for
+  an amendment already answered, an accept of a spec that is Done, of a spec back to Draft
+  (`spec 3 is back to Draft: make it Ready again before you accept an amendment, or refuse it`),
+  one whose item is no longer in the spec, and one whose item changed since it was proposed, by
+  another amendment or a rewrite in Draft, which accepting it would undo (`C1 of spec 3 changed
+  since amendment 2 was proposed: it would undo what was written since; refuse it`). Answers the
+  spec.
+
+**The statuses read from what Flottille sees.** A spec under development is **In progress** while
+its development session runs, **Review** while a pull request of a development's branch is open,
+**Done** once those pull requests are merged (a closed one counts for nothing), and back to
+**Ready** when its session ended or failed with none open. It is read again when one of its
+sessions ends or fails (`agent.ended`, `agent.failed`) and when a round of the items sees a pull
+request of its project opened, changed, merged or closed: nothing sets a status and forgets it. A
+Draft is the user's and stays one.
+
+**The lock.** Past Draft, every write to a spec (`spec.write`, `spec.link`, `spec.unlink`,
+`spec.answer`, and the `spec` tool's `write` and `ask`) is refused, whoever asks, the user's door
+included: `spec 3 is Ready: it is locked; send it back to Draft first`. Every write passes one
+check, in the same transaction as the write. The one write past Draft is an amendment the user
+accepts (`spec.amendment`).
+
+`spec.new` and `spec.from_ticket` emit `spec.created`; a write, a question asked or answered, the
+writing session recorded, a write to the ticket, the departures posted, an amendment proposed and
+an amendment answered `spec.changed`; `spec.ready`, `spec.draft`, `spec.develop` and the statuses read from what Flottille sees
+`spec.status_changed`. The
+user's door alone reaches these methods: an agent has the `spec` tool (`docs/tools.md`, "Specs"),
+whose actions make no spec Ready nor Draft.
+
+### The review methods
+
+Review (`docs/extensions.md`, "Review"), while it is active in the project. The review's agents
+and the findings it delivers are told to the session (`docs/tools.md`, "Review").
+
+- `review.start {agent}`: reviews the session's change, as `/review` in its composer does
+  (`agent.send` of the message `/review` alone, which is never sent to the agent: it answers
+  `{"agent", "after", "delivery": null, "command"}`, `command` this method's answer), the
+  `review` tool and `flottille review`. Answers `{"review", "session", "pilot", "round",
+  "passes", "files"}`: the pilot launched as the session's child, the passes it may run (the spec
+  pass only for a session that develops a spec), the files of the diff. `refused`, before any agent
+  starts, while Review is off in the project, for a child or an ended session, for a session in
+  the project folder, while a review of the session runs, when the diff from the base is empty
+  (or, in a second round, nothing changed and no finding is open), after two rounds, and at the
+  children cap. Also `extension.act {"name": "review", "action": "start", "agent"}`.
+- `review.list {session? | spec? | project?}`: `{"reviews"}`, each `{"review", "project",
+  "session", "workspace", "pilot", "round", "spec", "state", "passes", "passes_done", "files",
+  "changed", "summary", "why", "started_at", "ended_at", "agents", "delivered", "findings"}`:
+  `state` `running`, `done` or `failed` (its pilot ended without reporting, `why`), `changed` what
+  changed in the workspace during it, `agents` its pilot and passes (`{"agent", "kind", "pass"}`),
+  `findings` those it kept, each `{"id", "review", "severity", "confidence", "file", "lines",
+  "concerns", "quote", "text", "case", "status", "settled_in"}`. Nothing of a project where Review
+  is off: its data stays for when it is on again.
+- `review.finding {session, finding, status}`: the user marks a finding `open`, `fixed`,
+  `dismissed` or `settle` (to settle with them); emits `review.finding_changed`.
+- `review.show`, `review.set {text}`, `review.reset`: its guidance (above).
+
 ### The appearance methods
 
 `appearance.show` and `appearance.set` read and keep the window's appearance (`docs/design.md`
@@ -1390,7 +1591,7 @@ does it with `agent_send` (`docs/tools.md`).
 #### `agent.tree`
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
-`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "questions", "context", "context_tokens", "queued"}]}`. `agent` is the agent in short
+`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "questions", "context", "context_tokens", "queued", "extensions"}]}`. `agent` is the agent in short
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `detached_from`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
@@ -1419,7 +1620,9 @@ on the ask's card, is not one of them), the oldest first, each
 it and their names, which `agent.image` reads back, when it was written), empty for a child. For a
 message that used commands (`docs/commands.md`), `text` is what the user typed, `commands` the
 names of the commands, in the order of their first use, and `received` what the agent will receive
-for it.
+for it. `extensions` is what the extensions active in its project say of it, each under its name
+(`docs/extensions.md`, "Data"), `{}` when none does: Specs' is `{"spec", "title", "status",
+"work"}`, the spec a session it started writes (`work` `writing`) or develops (`developing`).
 
 #### `agent.read`
 

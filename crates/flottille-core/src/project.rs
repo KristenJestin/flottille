@@ -413,6 +413,10 @@ pub struct Project {
     /// "Rules").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rules: Option<String>,
+    /// Each extension's switch and its own values for the project, by the extension's name, as
+    /// written: the extension checks them against its schema (`docs/extensions.md`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     /// Its agents get its rules alone: the user's global rules are left out (`rules_alone`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rules_alone: bool,
@@ -480,6 +484,8 @@ struct File {
     /// Obsolete: read as nothing, and said (`OBSOLETE_AGENT_ACTIONS`).
     agent_actions: Option<toml::Value>,
     rules: Option<String>,
+    #[serde(default)]
+    extensions: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     rules_alone: bool,
     /// Obsolete: read as nothing, and said (`OBSOLETE_FORGES`).
@@ -565,6 +571,7 @@ impl Project {
             message_checks: Vec::new(),
             tracker: None,
             rules: None,
+            extensions: BTreeMap::new(),
             rules_alone: false,
             obsolete: Vec::new(),
         }
@@ -942,6 +949,7 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         message_checks: file.message_checks,
         tracker,
         rules: file.rules,
+        extensions: file.extensions,
         rules_alone: file.rules_alone,
         obsolete,
     })

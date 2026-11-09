@@ -28,11 +28,21 @@ const SKEW_MS: u64 = 5 * 60_000;
 /// tracker rewrites (see [`plain`]) gone, whitespace one space, and only the first
 /// [`COUNTED_CHARS`] characters counting.
 pub(crate) fn fingerprint(text: &str) -> String {
+    hashed(text, COUNTED_CHARS)
+}
+
+/// The same hash of the whole text: a change past its first words is a change. What says
+/// whether a ticket is still as Flottille last read or wrote it.
+pub(crate) fn whole_fingerprint(text: &str) -> String {
+    hashed(text, usize::MAX)
+}
+
+fn hashed(text: &str, counted: usize) -> String {
     let masked = forge::masked(text);
     let (text, _) = forge::unmarked(&masked);
     let plain = plain(text);
     let words: Vec<&str> = plain.split_whitespace().collect();
-    let counted: String = words.join(" ").chars().take(COUNTED_CHARS).collect();
+    let counted: String = words.join(" ").chars().take(counted).collect();
     Sha256::digest(counted.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))

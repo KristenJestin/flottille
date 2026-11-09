@@ -165,6 +165,7 @@ fn children_status(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent, n
         .unwrap_or_default()
         .into_iter()
         .filter(|child| !child.state.is_final())
+        .filter(|child| !crate::extensions::hidden(daemon, &agent.id, &child.id))
         .collect();
     if children.is_empty() {
         return;

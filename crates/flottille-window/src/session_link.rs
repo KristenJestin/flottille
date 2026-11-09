@@ -73,6 +73,8 @@ pub struct TreeAgent {
     pub compacting: bool,
     /// The root waits for its quota's reset (`docs/design.md` §5.9).
     pub quota: Option<Quota>,
+    /// What the parts of Flottille the user can turn off say of it, each under its name.
+    pub extensions: Value,
 }
 
 /// A root's wait for its quota's reset.
@@ -175,6 +177,7 @@ impl TreeAgent {
                 .collect(),
             tools_outdated: agent["tools_outdated"] == true,
             tools_reload: agent["tools_reload"] == true,
+            extensions: entry["extensions"].clone(),
             compacting: agent["compacting"] == true,
             quota: Quota::of(&agent["quota"]),
         }
@@ -585,6 +588,12 @@ const TREE_EVENTS: &[&str] = &[
     "delivery.queued",
     // A waiting message taken back leaves the queue under the conversation.
     "delivery.withdrawn",
+    // A review's line says its passes and its findings: its pilot is the event's agent.
+    "review.started",
+    "review.progress",
+    "review.reported",
+    "review.failed",
+    "review.finding_changed",
 ];
 
 const FIRST_RETRY: Duration = Duration::from_millis(100);

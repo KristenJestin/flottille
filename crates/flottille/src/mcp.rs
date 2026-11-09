@@ -884,6 +884,11 @@ const SERVED: [Definition; 32] = [
     },
 ];
 
+/// Whether the tool is one of the core's.
+pub fn serves(name: &str) -> bool {
+    SERVED.iter().any(|tool| tool.name == name)
+}
+
 /// What `ask` says to every caller; where its question goes is said after it, by the caller's
 /// kind (`ask_goes`).
 const ASK: &str = "Puts a question, or up to 4 at once: one question per point to decide \
@@ -936,7 +941,10 @@ fn ask_goes(daemon: &Daemon, agent: &str) -> String {
 }
 
 fn definition(name: &str) -> Option<&'static Definition> {
-    SERVED.iter().find(|tool| tool.name == name)
+    SERVED
+        .iter()
+        .find(|tool| tool.name == name)
+        .or_else(|| crate::extensions::definition(name))
 }
 
 /// The tool as a client lists it. `always_load` loads it upfront in Claude Code instead of
@@ -1507,11 +1515,14 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
 pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Option<Agent> {
     let provider = providers::of(agent).ok()?;
     let tools = crate::agents::tools_of(
+        &daemon.paths,
         provider,
         project,
         agent.parent.is_none(),
         agent.depth,
         crate::vault::listed_to(daemon, project),
+        crate::extensions::launched(daemon, &agent.id)
+            .map(|(extension, kind)| (extension.name, kind)),
     );
     // The same tools in another order are the same list: a new order would only cost the
     // session its prompt cache.
@@ -2478,6 +2489,9 @@ fn verdict_of(
     args: &Value,
     first: &[String],
 ) -> gate::Verdict {
+    if let Some(verdict) = crate::extensions::classify(daemon, grant, tool, args) {
+        return verdict;
+    }
     if tool == "web" && crate::show::is(args) {
         return crate::show::verdict(&grant.place, args);
     }
@@ -3078,6 +3092,9 @@ async fn performed_once(
         "tickets" => crate::tickets::tickets(daemon, &grant.agent, &grant.place, args).await,
         "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
         "session_title" => crate::titles::session_title(daemon, grant, args),
+        tool if crate::extensions::gives(tool) => {
+            crate::extensions::perform(daemon, grant, tool, args).await
+        }
         "vault" => crate::vault::tool(daemon, grant, args),
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         tool if crate::actions::TOOLS.contains(&tool) => {

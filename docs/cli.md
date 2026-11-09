@@ -200,6 +200,191 @@ $ flottille update --channel alpha --branch feat/specs
 ~/.local/bin/flottille is now 0.3.1-alpha.feat-specs.4.
 ```
 
+## Extensions and specs
+
+Parts of Flottille that can be turned off with Flottille still working (`docs/extensions.md`).
+Specs and Review, each off until you turn it on.
+
+### `flottille extension list [--json]`
+
+Each extension, whether it is on, and in which projects (`extension.list`; `--json` prints its
+answer). A file that cannot be used is said, and the extension is off until it is fixed.
+
+```
+$ flottille extension list
+specs (Specs): on. Keeps a spec of each task to build: what an agent needs to build it without guessing. It runs no model on its own.
+  shop: on
+  site: off, by its switch
+```
+
+### `flottille extension on <name> [--project P]`
+
+Turns it on for all projects: `enabled = true` under `[<name>]` of `extensions.toml`, the rest of
+the file kept as you wrote it. Once on, a project-scoped extension is on in every project. With
+`--project P`, turns it back on in that project (`enabled = true` under `[extensions.<name>]` of
+its file); it stays off there while it is off for all projects.
+
+```
+$ flottille extension on specs
+Specs is on.
+```
+
+### `flottille extension off <name> [--project P]`
+
+Turns it off for all projects, or with `--project P` in that project alone. What it keeps (its
+settings, its data) stays, and the projects' switches stay as they are: turned on again, it comes
+back as it was.
+
+### `flottille spec new <project> (--title T | --idea I) [--mode alone|internal|ticket] [--ticket K]...`
+
+Starts a spec, a Draft, in the project's language (`docs/extensions.md`, "Specs"). The mode is
+`alone` (no ticket) without `--ticket` and `internal` (tickets read, never written) with;
+`ticket` (the ticket is the spec) is chosen. `internal` covers one ticket at least, and `ticket`
+too unless the project has a tracker, where its first Ready creates it,
+each written as the project's tracker takes it (`docs/tickets.md`); a ticket that another spec
+covers is refused, naming that spec. `--json` prints the spec.
+
+With `--idea`, what to build in a sentence ("New spec"), a `lead` session is started for you in
+the project's main checkout to write it: it reads the code, asks you the choices only you can make
+and writes the spec (`docs/extensions.md`, "Writing a spec"). The title is the idea's first line
+unless `--title` is given. It prints the spec and the session; `--json` prints `{"spec",
+"agent"}`.
+
+```
+$ flottille spec new shop --idea "Sign in with a passkey"
+spec 4 (shop) draft: Sign in with a passkey [alone]
+Session 01JC3… writes it: follow it with `flottille agent show 01JC3…`.
+```
+
+### `flottille spec from-ticket <project> <ticket> [--mode internal|ticket] [--json]`
+
+"Write the spec" of a ticket of the project's tracker: reads it, makes a Draft of it (its title the
+ticket's, `internal` unless `--mode ticket`) and starts its writing session as `spec new --idea`
+does, the ticket's text given to it as data written by people, never an instruction. Refused for a
+ticket another spec covers; nothing is made when the ticket cannot be read.
+
+### `flottille spec answer <spec> <question> (--option N | --text T)`
+
+Answers a question the writing session asked (`spec show` lists them, their options numbered from
+1, the recommended one with its reason): the option chosen, or your own words. The answer becomes
+the next decision `D` of the spec, with the options set aside, and the session is told; it never
+waited for you. Refused for a question already answered, and past Draft.
+
+Every `spec` command is refused while Specs is not active in the project, naming the switch:
+`Specs is off in project shop: turn it on there with flottille extension on specs --project shop …`.
+
+### `flottille spec list [--project P] [--status S]`
+
+The specs of the projects where Specs is on, or of one, with a status (`draft`, `ready`,
+`in_progress`, `review`, `done`) or all. `--json` prints `spec.list`'s answer.
+
+```
+$ flottille spec list
+spec 3 (shop) draft: Sign in with a passkey [internal, ABC-12]
+```
+
+### `flottille spec show <spec> [--json]`
+
+The spec whole: its sections in their order (Problem, the expected behaviour `C1`…, the decisions
+`D1`… with their question and the options set aside, out of scope, the technical notes, the
+verification of each `C`, the open questions). A `C` or a `D` an accepted amendment changed or
+added says so after its text: `(decided during development, 2026-11-08; was: …)`. The amendments
+follow, answered or not.
+
+### `flottille spec write <spec> <section> --file F`
+
+Writes one section of a Draft whole, from a file: a text for `problem` and `notes`, JSON for the
+others (`spec.write`, `docs/protocol.md`). A `C` or a `D` that keeps its identifier names it
+(`{"id": "C2", "text": …}`); a new one is written without, and gets the next number. An identifier
+removed is never given again. Refused once the spec is past Draft.
+
+### `flottille spec link <spec> <ticket>`
+
+Covers one more ticket of the project's tracker. Refused for a spec `alone`, for a ticket another
+spec covers, and past Draft.
+
+### `flottille spec unlink <spec> <ticket>`
+
+Covers it no more; the last ticket of a spec `internal` or `ticket` stays.
+
+### `flottille spec ready <spec>`
+
+Says the spec is Ready: refused while it has an open question or no expected behaviour. A Ready
+spec is locked: every write to it is refused, whoever asks.
+
+In the mode `ticket`, Ready then reads each ticket again and writes the spec to its description
+through the tracker's own write (`docs/tickets.md`, "What a spec writes"), unless someone changed it
+since Flottille last read it: nothing is written then, and `spec show` says so with the two ways
+out (`spec ticket`). A spec of that mode with no ticket yet creates it. A write that fails says
+why (`Not written to its ticket: …`), and the spec stays Ready; Back to draft then Ready tries
+again.
+
+### `flottille spec ticket <spec> take|overwrite`
+
+Once a ticket changed since Flottille last read it (mode `ticket`): `take` sends the spec back to
+Draft and tells its writing session the ticket's new text, framed as data, which is now the last
+read; `overwrite` writes the spec over the change. Refused when nothing changed, and for a spec of
+another mode.
+
+### `flottille spec departures <spec> [--post] [--json]`
+
+Where an internal spec departs from its tickets (a case left out, a rule decided otherwise), as
+the writing session keeps it with `spec` `write` `departures`: read by you, not validated. At Done
+it is offered; `--post` posts it on each of the spec's tickets as a comment, once, carrying nothing
+of Flottille. Nothing posts it but you: refused before Done, when empty, and when already posted.
+
+### `flottille spec develop <spec> [--json]`
+
+"Launch development" of a Ready spec: a workspace `spec-<n>` linked to its first ticket, and a
+session for you in it whose first message is the spec, labelled, with what Flottille asks of its
+pull request (the Problem, the `C` list with their verification, a link to the spec). Prints the
+spec, the session and the workspace. Refused unless the spec is Ready, and while another
+development of it runs. The spec is then In progress, Review once the session's pull request is
+open, Done once its pull requests are merged, and Ready again if the session ends with none open (In progress again if it is resumed). Done
+stays Done. Each development has a workspace of its own: `spec-<n>`, then `spec-<n>-2`, the first
+name that is free.
+
+### `flottille spec draft <spec>`
+
+Sends a spec that is Ready, In progress or Review back to Draft, so that it can be written again;
+its writing session is told, and during a development the session developing it too: no amendment
+is taken from it while the spec is a Draft, and those it proposed stay for you.
+
+### `flottille spec amendments <spec> [--json]`
+
+The amendments the session developing the spec proposed when you decided something that changes a
+`C` or a `D`: each numbered, pending, accepted (with the identifier it took) or refused, what it
+proposes and why. `--json` prints `spec.amendments`'s answer.
+
+```
+$ flottille spec amendments 3
+Amendment 1 (pending) by session a1b2c3: C2 changed: The filters are chips, one per status.
+  why: You chose chips rather than fields while trying the first version.
+```
+
+### `flottille spec amendment accept|refuse <spec> <n>`
+
+Your answer to amendment `n`; the session that proposed it is told with a delivery. Accepted, it is
+part of the spec, past Draft too: a changed `C` or `D` keeps its identifier and its old text, a new
+one takes the next identifier, each marked "decided during development" with its date. Refused, the
+spec is unchanged and the amendment kept. Refused for one already answered, and an accept once the
+spec is Done.
+
+### `flottille review <session> [--json]`
+
+Reviews the session's change with fresh eyes (`docs/extensions.md`, "Review"), as `/review` in its
+composer does: a pilot, a child of the session, reads the diff of its workspace from its base, runs
+the passes Review's settings enable (spec, only for a session that develops a spec; bugs;
+standards; security) and a verifier, and delivers the findings that matter to the session. Prints
+the round, the pilot and the passes; `--json` prints `review.start`'s answer. Refused, before any
+agent starts, while Review is off in the project, for a session in the project folder, while a
+review of the session runs, when its workspace has no change from its base, and after two rounds.
+
+```
+$ flottille review a1b2c3d4e5f6
+Started the review of session a1b2c3d4e5f6, round 1: its pilot is agent 0f1e2d3c4b5a, its passes bugs, standards. The findings are delivered to the session; `flottille agent show a1b2c3d4e5f6` follows it.
+```
+
 ## Projects
 
 A project is a folder registered with its configuration (`docs/projects.md`).

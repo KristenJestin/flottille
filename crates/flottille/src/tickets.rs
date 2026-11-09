@@ -166,7 +166,7 @@ impl Ticket {
 
     /// What `tickets show` answers: the comments themselves only when `full`, otherwise their
     /// number and the way to get them, for the ticket that was named when one was.
-    fn text(&self, full: bool, named: Option<&str>, age: Option<u64>) -> String {
+    pub fn text(&self, full: bool, named: Option<&str>, age: Option<u64>) -> String {
         let again = match named {
             Some(ticket) => format!(
                 "{{\"action\": \"show\", \"ticket\": {}, \"detail\": \"full\"}}",
@@ -898,6 +898,10 @@ struct TicketsCall {
     /// its offset; the duration before now when left out).
     duration: Option<String>,
     started: Option<String>,
+    /// A write at the user's gesture (`written_for_user`): its comment is recorded by the id the
+    /// tracker gave, never by its words. Not a field of the tool: an agent cannot ask for it.
+    #[serde(skip)]
+    by_id_only: bool,
 }
 
 /// A field that is there even when it is `null`: `Some(None)` for `null`, `None` when left out.
@@ -2185,12 +2189,10 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
             );
             match (action, body) {
                 ("comment", Some(body)) => {
-                    crate::posts::record_comment(
-                        daemon,
-                        on,
-                        crate::posts::comment_id_in(&said),
-                        body,
-                    );
+                    let id = crate::posts::comment_id_in(&said);
+                    if id.is_some() || !asked.by_id_only {
+                        crate::posts::record_comment(daemon, on, id, body);
+                    }
                 }
                 ("edit", Some(body)) => crate::posts::record_body(daemon, on, body),
                 _ => {}
@@ -2207,6 +2209,72 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
         }
         Err(why) => Outcome::Failed(why),
     }
+}
+
+/// A write another part of Flottille makes at the user's gesture (a spec written to its ticket, a
+/// comment the user posts): the same write as the agents' `tickets`, recorded the same way, so that
+/// there is one path to a tracker. What it answers, or why nothing was written.
+async fn written_for_user(
+    daemon: &Daemon,
+    project: &Project,
+    args: Value,
+) -> Result<String, String> {
+    if let Some(refusal) = unwritable(project, &args) {
+        return Err(refusal);
+    }
+    let mut asked: TicketsCall = serde_json::from_value(args).map_err(|error| error.to_string())?;
+    asked.by_id_only = true;
+    let outcome = match &asked.ticket {
+        None => create(daemon, project, &asked).await,
+        Some(ticket) => {
+            let key = accepted(project, ticket)?;
+            write(daemon, project, &asked, &key).await
+        }
+    };
+    match outcome {
+        Outcome::Done(said) => Ok(said),
+        Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why) => Err(why),
+    }
+}
+
+/// Writes `body` as the ticket's description.
+pub(crate) async fn edit_description(
+    daemon: &Daemon,
+    project: &Project,
+    key: &Key,
+    body: &str,
+) -> Result<(), String> {
+    let args = json!({"action": "edit", "ticket": key.text(), "body": body});
+    written_for_user(daemon, project, args).await.map(drop)
+}
+
+/// Posts `body` as a comment of the ticket.
+pub(crate) async fn post_comment(
+    daemon: &Daemon,
+    project: &Project,
+    key: &Key,
+    body: &str,
+) -> Result<(), String> {
+    let args = json!({"action": "comment", "ticket": key.text(), "body": body});
+    written_for_user(daemon, project, args).await.map(drop)
+}
+
+/// Creates a ticket of the tracker (its only Jira project), and says which.
+pub(crate) async fn create_ticket(
+    daemon: &Daemon,
+    project: &Project,
+    title: &str,
+    body: &str,
+) -> Result<Key, String> {
+    let args = json!({"action": "create", "title": title, "body": body});
+    let said = written_for_user(daemon, project, args)
+        .await
+        .map_err(|why| format!("no ticket was created: {why}"))?;
+    // Both trackers' answers end with the new ticket's link, whose last part is its key.
+    let last = said.trim().rsplit('/').next().unwrap_or_default();
+    accepted(project, last).map_err(|_| {
+        "a ticket was opened but its key could not be read: link it with `spec link`".to_owned()
+    })
 }
 
 /// `acli <args>` for a write, or a search a write needs: what it printed, or why it failed,
@@ -2550,7 +2618,9 @@ async fn write_work_item(
             if let Some(body) = body {
                 let posted = crate::adf::round_trip(body);
                 let id = posted_comment_id(daemon, on, site, &posted).await;
-                crate::posts::record_comment(daemon, on, id, &posted);
+                if id.is_some() || !asked.by_id_only {
+                    crate::posts::record_comment(daemon, on, id, &posted);
+                }
             }
             Outcome::Done(format!("The comment was posted on {key}."))
         }
@@ -3594,7 +3664,7 @@ mod tests {
     fn a_jira_work_item_lists_its_attachments() {
         let item = json!({"fields": {
             "attachment": [attachment("image-20260101-120000.png", Some("image/png")),
-                attachment("spec.pdf", None)],
+                attachment("design.pdf", None)],
         }});
 
         let ticket = work_item("ABC-1", &item, "acme.atlassian.net");
@@ -3607,7 +3677,7 @@ mod tests {
                  conversation:\n\
                  - image-20260101-120000.png, image/png, 95.4 KiB, by Ana Example, \
                  2026-01-01T12:00:00.000+0100\n\
-                 - spec.pdf, 95.4 KiB, by Ana Example, 2026-01-01T12:00:00.000+0100\n"
+                 - design.pdf, 95.4 KiB, by Ana Example, 2026-01-01T12:00:00.000+0100\n"
             ),
             "{text}"
         );
@@ -3648,14 +3718,14 @@ mod tests {
     #[test]
     fn the_json_of_an_attachment_is_name_type_bytes_author_at() {
         let item = json!({"fields": {
-            "attachment": [attachment("spec.pdf", Some("application/pdf"))],
+            "attachment": [attachment("design.pdf", Some("application/pdf"))],
         }});
 
         let json = work_item("ABC-1", &item, "acme.atlassian.net").to_json();
 
         assert_eq!(
             json["attachments"],
-            json!([{"name": "spec.pdf", "type": "application/pdf", "bytes": 97717,
+            json!([{"name": "design.pdf", "type": "application/pdf", "bytes": 97717,
                 "author": "Ana Example", "at": "2026-01-01T12:00:00.000+0100"}])
         );
     }

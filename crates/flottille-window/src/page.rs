@@ -8,6 +8,7 @@ use gpui_kit::{
 };
 
 use crate::composer::Composer;
+use crate::extensions::specs::SpecPage;
 use crate::model::Place;
 use crate::project::{NewWorkspace, ProjectPage};
 use crate::project_settings::ProjectSettingsPage;
@@ -34,6 +35,11 @@ pub enum Page {
     ProjectSettings {
         name: String,
     },
+    /// A spec's page.
+    Spec {
+        project: String,
+        spec: u64,
+    },
     /// The services of the machine.
     Services,
 }
@@ -50,6 +56,8 @@ pub struct MainArea {
     settings: Entity<SettingsPage>,
     /// The open project's settings page.
     project_settings: Option<Entity<ProjectSettingsPage>>,
+    /// The open spec's page.
+    spec: Option<Entity<SpecPage>>,
     /// The services page, one for the window's life.
     services: Entity<ServicesPage>,
 }
@@ -69,7 +77,21 @@ impl MainArea {
             session: None,
             settings,
             project_settings: None,
+            spec: None,
             services,
+        }
+    }
+
+    /// The spec's page to show, when the next page shown is a spec's.
+    pub fn set_spec_page(&mut self, spec: Option<Entity<SpecPage>>) {
+        self.spec = spec;
+    }
+
+    /// The spec's page, when it is the one shown.
+    pub fn spec_page(&self) -> Option<&Entity<SpecPage>> {
+        match self.page {
+            Page::Spec { .. } => self.spec.as_ref(),
+            _ => None,
         }
     }
 
@@ -141,6 +163,10 @@ impl MainArea {
             Page::Session { .. } => session,
             _ => None,
         };
+        if let Some(spec) = &self.spec {
+            let narrow = self.layout == Layout::Narrow;
+            spec.update(cx, |page, cx| page.set_narrow(narrow, cx));
+        }
         if let Some(session) = &self.session {
             let layout = self.layout;
             session.update(cx, |page, cx| page.set_layout(layout, cx));
@@ -163,6 +189,9 @@ impl MainArea {
             self.services
                 .update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             if let Some(page) = &self.project_settings {
+                page.update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
+            }
+            if let Some(page) = &self.spec {
                 page.update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             }
             cx.notify();
@@ -208,6 +237,7 @@ impl Render for MainArea {
             Page::Settings => root.child(self.settings.clone()),
             Page::Services => root.child(self.services.clone()),
             Page::ProjectSettings { .. } => root.children(self.project_settings.clone()),
+            Page::Spec { .. } => root.children(self.spec.clone()),
         }
     }
 }

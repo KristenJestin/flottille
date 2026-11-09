@@ -1,6 +1,17 @@
 # Extensions
 
-**Status: a proposal, nothing built.** Written from a discussion with the maintainer
+**Status: a proposal, S1 to S5 built.** S1 (#332) built the declaration and the registry,
+activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space and
+the scan that the core names no extension, and Specs in the store with its statuses, lock, three
+modes and tickets, from the command line. S2 (#333) built the tools an extension gives and the
+Action trigger, and writing a spec: the `spec` tool, "New spec" and "Write the spec", questions and
+answers, from the command line and the protocol. S3 (#334) built Specs in the window: the
+renderer of an extension's tab of Settings and of its section of a project's settings, the
+project's Specs tab, "Write the spec" on a ticket's row and a spec's page. S4 (#459) built the
+ticket side. S5 (#336) built "Launch development" and the statuses read from what Flottille sees.
+Review (#338) built the agents an extension launches and the depth exception, the composer
+command, model slots and a subset of values as settings, overridable per project, an extension's
+guidance, and the folded line of the tree; the rest is a proposal. Written from a discussion with the maintainer
 (November 2026), and settled with their answers of 2026-11-03 ("Decisions taken"). No question is
 left open but the one in "Open questions".
 
@@ -137,13 +148,35 @@ asks questions, a development session proposes an amendment). The core adds it t
 lists while the extension is active, through the path a forge or a tracker takes today
 (`tools.md`, "When the tools change"), and removes it the same way. Every call goes through the
 gate like any other; the extension's own refusals (a lock, a status) are the gate's, in every
-mode, Full included.
+mode, Full included. An extension can refuse a call, never let one through on its own: an action
+it does not declare harmless is held as a call to judge, which the mode lets through (Full), asks
+the judge about (Auto) or holds for the user (Ask).
+
+As built: a tool is a `Tool` of the declaration, its MCP definition, `given` (who gets it, `To::Roots`
+for now, and the actions of its `action` argument each may call), `harmless` (the actions that
+read or write Flottille's store and nothing else, as the core's own reads: they pass in every
+mode), a `gate` function (the extension's refusal of a call, or none) and a `call` function.
+`agents::tools_of` adds the tools of the extensions active in the project; the server serves them
+as its own; the gate refuses an action the caller is not given and what the extension's `gate`
+refuses before any mode is looked at, lets a harmless action pass and holds the rest as a call to
+judge. A tool named as a core tool, or as another extension's, stops the daemon at its start
+(`extensions::check_tools`): it never shadows one. Specs declares its four actions harmless: each
+reads or writes a spec in the store.
 
 ### Triggers (Specs)
 
 The extension names what it reacts to and the handler that acts. The core dispatches; the
 handler writes the extension's data, sends a delivery, starts a session or a child, or runs a
 call.
+
+As built, the Action trigger is the declaration's `actions`: each is answered by the extension's
+method `<prefix>.<action>`, reached by its name or through `extension.act {name, action, …}`. The
+frame gives the handlers two acts of the core: `start_session` (a `lead` for the user in the
+project's main checkout, started as `agent_launch` starts a root, its first message the
+extension's, or in a workspace just made, where its first message waits until the workspace is
+prepared; the extension's `before` records it before the agent is written, so that its refusal
+leaves no agent, and its `started` then knows the session as its own, so that a daemon stopped
+before the first message delivers it at its next start) and `tell` (a delivery of the extension's kind, `[flottille:<name>]`).
 
 | Trigger | When the core fires it | First needed by |
 |---|---|---|
@@ -155,6 +188,17 @@ call.
 | **Composer command** | the user typed `/<word>` in a session's composer: run by Flottille, never sent to the agent | Review (`/review`) |
 | **Decide** | the gate holds a call to judge in a tree in Auto. Synchronous: the gate waits for the answer (`allow`, or no verdict, which asks), within the call's time limit. At most one active extension may decide | the judge |
 
+As built, the Core event trigger is the declaration's `heard`: each event name of the core with
+its handler, which the core calls with the event's data once a round of the items stored it
+(`extensions::heard`, from the items' `flush`); the handler checks that its extension is active
+where the event is. Specs hears `item.changed`, `item.commented` and `item.closed` of a ticket a
+spec covers, and tells the session writing that spec while it is a Draft. The core also hands
+`agent.ended` and `agent.failed` (`{agent, project, reason}`) to the extensions as it ends an agent
+(`tree.rs`); Specs hears them and `item.opened`, `item.changed`, `item.merged` and `item.closed`
+of a pull request to read again the status of the specs under development. The rounds keep no description (`docs/tickets.md`), so a description edited alone
+is no event: in the mode "the ticket is the spec", the next Ready finds it by reading the ticket
+again.
+
 A trigger never wakes an agent by itself: when an agent must be told, it is a delivery, as
 everything else (`design.md` §5.2). A handler runs off the daemon's request path except for
 Decide and Before a prompt, which hold what they decide on and nothing else.
@@ -164,11 +208,31 @@ Decide and Before a prompt, which hold what they decide on and nothing else.
 An extension that keeps anything keeps it in **its own space of the store**: tables named
 `ext_<name>_…`, created by migrations the extension declares and the store runs in order with its
 own. Only the extension reads and writes them; the core and the other extensions never do. They
-are kept when the extension is turned off.
+are kept when the extension is turned off. The store holds it: while an extension's migration or
+its space runs, SQLite refuses every statement that makes, changes, reads or writes a table outside
+`ext_<name>_…`, and views, pragmas, attachments and the end of the transaction. What SQLite does
+not say to the check is looked at before anything is kept: a table renamed out of the space, a
+counter of the core changed, a table of the space that references one outside it. With no such
+reference, no deletion of the core cascades into the space, and an extension's triggers fire only
+inside it. A name is lower-case letters and digits only, so that no prefix holds another's (`a`
+and `a_b` would share `ext_a_`). This holds the extension's SQL; its Rust code runs in the daemon
+and is trusted as the core is.
+
+The store counts each extension's applied migrations in `extension_migrations`. That table is made
+when the store opens, after the core's numbered migrations, and never as one of them: a numbered
+migration takes the next number, and while the extensions are built on a branch of their own, the
+core's next migration takes the same number on `dev`. A store that ran one of the two would then
+open as up to date under the other build, and never run the migration it is missing. The alpha
+builds of Specs made this table as their last numbered migration, under the name
+`extension_schemas`. The store recognises such a store by that name: it counts the store one
+migration lower, runs the core's migrations it is missing, and moves the count to
+`extension_migrations`.
 
 An extension may also add facts to what the core says of an agent, under its own name
 (`agent.tree`'s `extensions.<name>`): the spec a session writes or develops, the compaction's
-cache state, a review's progress.
+cache state, a review's progress. As built, the declaration's `fact` gives it for an agent, or
+nothing; the window's session page shows Specs' as a "Spec" line of its rail, which opens the
+spec's page.
 
 **The core names no extension**: a scan of the daemon's core modules refuses an extension's name
 as a module path or an identifier outside `extensions/` and the registry, as the window's rules
@@ -277,8 +341,24 @@ cap, uses the gate, is stopped with its tree, and its results come back as deliv
   queued, as `agent_launch` is), and is stopped with the tree, deepest first.
 
 No other agent gains depth: a worker still has none of the `agent_*` tools, and an extension's
-agent at depth 2 launches nothing. The Review issue writes the exception into `design.md` §5.1
-and `agents.md`, "The tree".
+agent at depth 2 launches nothing. The exception is written into `design.md` §5.1 and `agents.md`,
+"The tree".
+
+As built (#338): the declaration's `launched` says which of its agents an agent is (`pilot`,
+`pass`), and a tool given `To::Launched(kind)` reaches those of that kind. The frame's `launch`
+(`tree::launch_for_extension`) launches one as a child of a root or of an agent the same extension
+launched, 2 deep at most, in its parent's place and its tree's mode, taking the children cap's slot
+first (refused above it, never queued); the extension records the agent as its own before it is
+written. Such an agent is a `worker` with a worker's tools less `ask`, never an `agent_*` tool nor
+`approval_answer`, plus its extension's; its instructions are its own role text
+(`roles/launched.md`: no `ask`, its held calls go to the user, how it ends is its extension's to
+say) and the extension's text, without the files of its place, the project's own rules or its
+skills. One its parent is not told of is refused the tree's `report`, which would reach no one: it
+reports through its extension's tool. Its parent's `agent_*`
+tools do not reach it when the parent is not itself the extension's, which is told nothing of it as
+of a child (`tree::tell_parent`, `agent_status`, the sweep's `children-status`), and the gate
+holds its calls for the user. An extension's tool call is answered by a future
+(`Tool::call`), so that a call may run git without holding the daemon.
 
 ## Activation
 
@@ -344,6 +424,15 @@ with the components every other tab is built from. There is no "Extensions" tab.
 Settings, in order: Judge, Specs, Compaction, Review, Providers, Rules, Appearance, Developer mode.
 The order is a number each declaration gives; a core tab has its own place, and none is moved by
 another's declaration.
+
+As built (S3): the window reads `extension.list` at its start and again on `extension.changed`,
+`spec.*` and a project's change. Its module `crates/flottille-window/src/extensions/` draws an
+extension's tab (after the Judge's, by its order) and its project section (a tab of the project's
+settings after Rules, while it is on globally) from the declaration; a setting is drawn by its
+kind (a language is a select, its first option the value it has when none is set there). Specs'
+project tab is a third tab beside Pull requests and Tickets, its action on a row is the ticket
+row's button, its page opens from a spec's row. Back to draft is one click from Ready, and asks
+in a confirmation from In progress or Review, which only the development (S5) reaches.
 
 Everything in it follows the rules of the window and its motion: the sections of a tab enter one
 after the other, the switch moves over `HOVER`, the settings fold and unfold with the switch, an
@@ -420,6 +509,28 @@ marked "decided during development" with its date, the old text kept. A spec sen
 during its development: the development session is told, and `spec` refuses amendments while it is
 Draft.
 
+As built (S6): `spec`'s `amend` is given to the roots like its other actions, and Specs' gate
+refuses it to any session but the one developing that spec (a child has no `spec`, the pilot door
+neither): the actions of a tool depend on who calls it, and nothing new of the frame was needed.
+An amendment is kept with the spec (`ext_specs_amendments`), pending, accepted or refused; the
+spec's page shows the pending ones with Accept and Refuse, the refused ones folded, and an item an
+amendment changed with its old text folded under the new one. `flottille spec amendments` and
+`spec amendment accept|refuse` are the command line's. An accepted amendment is the one write the
+lock lets through past Draft, refused while the spec is a Draft and when its item changed since it
+was proposed, which it would undo. Whoever reads the spec afterwards (`spec.show`, `read`, the
+ticket written at the next Ready) reads it as it is now, each changed or added item marked.
+
+**The ticket side** (S4, built; `docs/tickets.md`, "What a spec writes"). What leaves Flottille
+carries nothing of it: the description written and the comment posted have no marker nor footer,
+and Flottille knows them by its record (the maintainer's rule of 2026-11-01, over "marked as
+Flottille's"). Ready reads the ticket again first; changed since the last read, nothing is written,
+the spec stays Ready and its page and `flottille spec ticket <spec> take|overwrite` give the user
+the choice: take the change (back to Draft, the writing session told the ticket's new text as
+data) or overwrite the ticket, after a confirmation in the window. A failed write says why, "Not
+written to its ticket", and the spec stays Ready. An internal spec's session keeps its departures
+with `spec` `write` `departures`; at Done the spec's page ("Post as a comment") and `flottille spec
+departures <spec> --post` offer them, and only the user posts them.
+
 **Not in v1**: splitting a spec found too large (split the ticket instead); starting the
 development on its own at Ready.
 
@@ -427,12 +538,12 @@ development on its own at Ready.
 
 | Issue | What of Specs | What of the frame |
 |---|---|---|
-| S1 | the spec in the store, statuses, the lock, the three modes, the link to 0..n tickets, the CLI | the declaration and the registry, activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space, the scan that the core names no extension |
-| S2 | the `spec` tool for a root, "New spec" and "Write the spec", questions and answers, Ready and Draft | tools given by an extension, the Action trigger |
-| S3 | the project's Specs tab, a spec's page, its settings tab | screens: a project tab, a page, an action on a ticket's row, the renderer of an extension's tab and of its project section |
-| S4 | the ticket side of the modes | Core event triggers (a ticket changed) |
-| S5 | launching the development, the statuses read from what Flottille sees | Core event triggers (an agent ended, a pull request opened or merged) |
-| S6 | amendments | nothing new: actions of the tool given by who calls it |
+| S1 (built) | the spec in the store, statuses, the lock, the three modes, the link to 0..n tickets, the CLI | the declaration and the registry, activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space, the scan that the core names no extension |
+| S2 (built) | the `spec` tool for a root, "New spec" and "Write the spec", questions and answers, Ready and Draft | tools given by an extension, the Action trigger |
+| S3 (built) | the project's Specs tab, a spec's page, its settings tab | screens: a project tab, a page, an action on a ticket's row, the renderer of an extension's tab and of its project section |
+| S4 (built) | the ticket side of the modes | Core event triggers (a ticket changed) |
+| S5 (built) | launching the development, the statuses read from what Flottille sees | Core event triggers (an agent ended, a pull request opened or merged) |
+| S6 (built) | amendments | nothing new: actions of the tool given by who calls it |
 
 ### Compaction
 
@@ -498,6 +609,29 @@ or without a spec. Project-scoped.
   only), and an editable guidance in its tab, with Reset to default.
 - **Builds**: agents an extension launches and the depth exception, slots overridable per project,
   the composer command, the folded line of the tree.
+
+As built (#338):
+
+- **Doors.** `review.start {agent}` (and `extension.act`), `/review` alone in a session's composer
+  (`agent.send` runs it and answers with no delivery: the word is never sent to the agent; with
+  more text it is a message like any other), the `review` tool's `start` for a root, the Core
+  event `item.opened` of a pull request whose head is the branch of a workspace a session runs in
+  (refused at the cap, the session is told, `[flottille:review]`; refused for another reason,
+  nothing is said), and `flottille review <session>`. A session in the project folder has no base
+  to read a diff from: refused.
+- **The diff** of each repository of the session's workspace starts at the merge base of its base
+  (`git diff <from>`, uncommitted and untracked files included); a second round starts at the
+  `HEAD` the first one recorded. Each repository's `HEAD` and `git status` are recorded at the
+  start and compared at the report.
+- **Slots.** `<pass>_model` and `verifier_model`, `null` by default: the session's provider on
+  its strongest model (Claude's `opus`; the verifier `sonnet`), once its sessions said they offer
+  it, else the provider's default. The pilot runs on the session's provider, as the strongest.
+- **Findings** are kept per session and named `F1`, `F2`… across rounds; a `rejected` one is not
+  kept. `review.finding` marks one. They show under the review's line of the session's rail and,
+  for a spec's development, on the spec's page.
+- **Guidance**: `review.md`, 4,000 characters, edited in Review's tab.
+- **Data**: `ext_review_reviews`, `ext_review_agents`, `ext_review_findings`. The core's scan
+  looks for `extensions::review` alone, `review` being the forge's word too (`forge::review`).
 
 ### Judge
 
@@ -594,7 +728,8 @@ The maintainer's answers of 2026-11-03.
 
 ## Open questions
 
-1. **Who reaches a review's agents.** They are children of the reviewed session, which today could
+1. **Who reaches a review's agents.** Built as proposed below (#338), to confirm with the
+   maintainer. They are children of the reviewed session, which today could
    read, write to and stop its children with the `agent_*` tools, and would hold their requests.
    Proposed, the simpler and reversible choice: the session's `agent_*` tools do not reach them (a
    change does not steer its own review; the session sees the review through its deliveries and

@@ -101,7 +101,12 @@ pub fn named(agent: &Agent) -> String {
 /// One of the caller's children, or the refusal.
 fn child_of(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Agent, Outcome> {
     match daemon.read(|store| store.agent(id)) {
-        Ok(Some(agent)) if agent.parent.as_deref() == Some(caller.id.as_str()) => Ok(agent),
+        Ok(Some(agent))
+            if agent.parent.as_deref() == Some(caller.id.as_str())
+                && !crate::extensions::hidden(daemon, &caller.id, &agent.id) =>
+        {
+            Ok(agent)
+        }
         Ok(_) => Err(refused(format!(
             "refused: {id} is not one of your children: agent_status lists them"
         ))),
@@ -380,6 +385,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             gate_mode: Some(crate::judge::mode(daemon, &caller.id)),
             launched_by: session.then(|| caller.id.clone()),
             led,
+            launched: None,
         },
     )
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
@@ -466,9 +472,93 @@ impl Drop for Slot<'_> {
     }
 }
 
+/// Launches an agent an extension asked for, as a child of `parent`, in its place and its tree's
+/// mode (`docs/extensions.md`, "Agents an extension launches"): only a root or an agent the same
+/// extension launched has one, 2 deep at most, and it counts in the project's children cap,
+/// refused above it, never queued. `before` runs once the agent is made and before it is written,
+/// so that the extension knows it as its own before its tools are ever read again; its refusal
+/// leaves no agent behind.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_for_extension(
+    daemon: &Arc<Daemon>,
+    extension: &'static str,
+    parent: &Agent,
+    kind: &'static str,
+    title: &str,
+    brief: &str,
+    instructions: String,
+    provider: providers::Asked,
+    before: impl FnOnce(&Agent) -> Result<(), String>,
+) -> Result<Agent, Failure> {
+    let launcher = crate::extensions::launched(daemon, &parent.id);
+    let allowed = match launcher {
+        None => parent.parent.is_none(),
+        Some((owner, _)) => owner.name == extension,
+    };
+    if !allowed {
+        return Err(Failure::refused(format!(
+            "{} cannot have children: only a session, or an agent {extension} launched, does",
+            named(parent)
+        )));
+    }
+    if parent.depth + 1 > EXTENSION_DEPTH_LIMIT {
+        return Err(Failure::refused(format!(
+            "{} is at the depth limit of the agents an extension launches \
+             ({EXTENSION_DEPTH_LIMIT}): it launches nothing",
+            named(parent)
+        )));
+    }
+    let project = projects::load_project(daemon, &parent.project)?;
+    // The cap is a refusal of now, `unavailable`: once a child ends, the launch can be asked again.
+    let _slot = Slot::take(daemon, &project.name, project.max_children).map_err(|refusal| {
+        Failure::new(
+            "unavailable",
+            match refusal {
+                Outcome::Refused(_) => format!(
+                    "the project {} runs its cap of {} children: wait for one of them to end",
+                    project.name, project.max_children
+                ),
+                Outcome::Done(text) | Outcome::Failed(text) | Outcome::Held(text) => text,
+            },
+        )
+    })?;
+    let child = agents::made(
+        daemon,
+        &project,
+        New {
+            id: None,
+            workspace: parent.workspace.clone(),
+            preparing: false,
+            role: &roles::LAUNCHED,
+            parent: Some((parent.id.clone(), parent.depth)),
+            title: Some(title.to_owned()),
+            brief: brief.to_owned(),
+            provider: provider.provider,
+            model: provider.model,
+            effort: provider.effort,
+            gate_mode: Some(crate::judge::mode(daemon, &parent.id)),
+            launched_by: None,
+            led: false,
+            launched: Some(agents::Launched {
+                extension,
+                kind,
+                instructions,
+            }),
+        },
+    )?;
+    before(&child).map_err(Failure::refused)?;
+    agents::write_new(daemon, &child)?;
+    self::brief(daemon, &child);
+    Ok(child)
+}
+
+/// The depth of an agent an extension launched, at most: the session (0), the extension's agent
+/// (1), its own children (2), which launch nothing.
+pub const EXTENSION_DEPTH_LIMIT: u32 = 2;
+
 /// The first message of an agent a launch made: a child's brief, or the first message of a session
-/// an agent started for the user.
-fn brief(daemon: &Arc<Daemon>, child: &Agent) {
+/// an agent or an extension started for the user.
+pub fn brief(daemon: &Arc<Daemon>, child: &Agent) {
     let (kind, body) = first_message(daemon, child);
     deliveries::deliver(
         daemon,
@@ -481,8 +571,8 @@ fn brief(daemon: &Arc<Daemon>, child: &Agent) {
 }
 
 /// At start: an agent whose first message was never delivered (a daemon stopped while its new
-/// workspace was preparing, and the wait for it lived in memory only) gets it, once its
-/// workspace is ready. The delivery's id is the key, so one stored already is not stored twice.
+/// workspace was preparing, and the wait for it lived in memory only, or before an extension's
+/// session was sent its first message) gets it, once its workspace is ready. The delivery's id is the key, so one stored already is not stored twice.
 pub fn brief_at_start(daemon: &Arc<Daemon>) {
     let agents = match daemon.read(|store| store.agents()) {
         Ok(agents) => agents,
@@ -493,8 +583,10 @@ pub fn brief_at_start(daemon: &Arc<Daemon>) {
     };
     for agent in agents {
         // A session the user started has its message delivered where it is made, as theirs.
-        let launched =
-            agent.parent.is_some() || agent.launched_by.is_some() || agent.detached_from.is_some();
+        let launched = agent.parent.is_some()
+            || agent.launched_by.is_some()
+            || agent.detached_from.is_some()
+            || crate::extensions::started(daemon, &agent.id);
         if agent.state.is_final() || agent.brief.is_none() || !launched {
             continue;
         }
@@ -561,7 +653,7 @@ fn where_questions_go(starter: &str, led: bool) -> String {
 
 /// The brief of a child whose new workspace is being prepared, once it is ready; a workspace
 /// that fails fails the child.
-async fn brief_once_ready(daemon: Arc<Daemon>, child: Agent) {
+pub async fn brief_once_ready(daemon: Arc<Daemon>, child: Agent) {
     let name = child.workspace.clone().unwrap_or_default();
     loop {
         let workspace = daemon.read(|store| store.workspace(&child.project, &name));
@@ -885,7 +977,10 @@ fn states(daemon: &Daemon, caller: &Agent, id: Option<String>, full: bool) -> Do
         Some(id) => vec![child_of(daemon, caller, &id)?],
         None => daemon
             .read(|store| store.children(&caller.id))
-            .map_err(failed)?,
+            .map_err(failed)?
+            .into_iter()
+            .filter(|child| !crate::extensions::hidden(daemon, &caller.id, &child.id))
+            .collect(),
     };
     if children.is_empty() {
         return Ok(Outcome::Done("You have no children.".into()));
@@ -1288,6 +1383,15 @@ fn stopped(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Stopped, Outcome
             "refused: {id} names no agent: agent_stop ends one of your children or a session of \
              your project, named by its agent id"
         ))),
+        // The agents an extension launched under the caller are the extension's, not its children.
+        Some(agent)
+            if agent.parent.as_deref() == Some(caller.id.as_str())
+                && crate::extensions::hidden(daemon, &caller.id, &agent.id) =>
+        {
+            Err(refused(format!(
+                "refused: {id} is not one of your children: agent_status lists them"
+            )))
+        }
         Some(agent) if agent.parent.as_deref() == Some(caller.id.as_str()) => {
             Ok(Stopped::Child(agent))
         }
@@ -1422,6 +1526,18 @@ struct Report {
 
 async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value) -> Done {
     let asked: Report = arguments("report", args)?;
+    // An agent an extension launched under a session reports to the extension: the session is
+    // told nothing of it, so the tree's report would reach no one.
+    if let Some(parent) = &caller.parent
+        && crate::extensions::hidden(daemon, parent, &caller.id)
+        && let Some((extension, _)) = crate::extensions::launched(daemon, &caller.id)
+    {
+        return Err(refused(format!(
+            "refused: you report through the tool {0}, {{\"action\": \"report\", …}}, as your \
+             instructions say: report reaches no one from you",
+            extension.name
+        )));
+    }
     if asked.text.trim().is_empty() {
         return Err(refused("refused: the report is empty"));
     }
@@ -1944,6 +2060,11 @@ pub fn tell_parent(daemon: &Arc<Daemon>, child: &Agent, kind: &str, text: &str, 
     let Some(parent) = &child.parent else {
         return;
     };
+    // The agents an extension launched under a session are the extension's: it tells the
+    // session what they found, the session is never told of them as of its children.
+    if crate::extensions::hidden(daemon, parent, &child.id) {
+        return;
+    }
     deliveries::deliver(
         daemon,
         parent,
@@ -2040,6 +2161,13 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         state,
         Some(reason.to_owned()),
         Some((event, json!({"reason": reason}))),
+    );
+    crate::extensions::heard(
+        daemon,
+        &[(
+            event,
+            json!({"agent": id, "project": agent.project, "reason": reason}),
+        )],
     );
     let _ = daemon.write(|store| Ok(((), store.supersede(id)?)));
     // Nobody is left to answer what it asked, nor to answer what it held: nobody sees them.
@@ -2152,7 +2280,11 @@ pub fn after_turn(daemon: &Arc<Daemon>, id: &str, stop_reason: &str) {
     let asking = daemon
         .read(|store| store.pending_requests_of(id))
         .is_ok_and(|requests| !requests.is_empty());
-    if !queued.is_empty() || asking || agent.waiting_on_answer {
+    // An agent whose children still run waits for their reports, which wake it.
+    let children_run = daemon
+        .read(|store| store.children(id))
+        .is_ok_and(|children| children.iter().any(|child| !child.state.is_final()));
+    if !queued.is_empty() || asking || agent.waiting_on_answer || children_run {
         return;
     }
     let quiet = |turns| {
@@ -2606,6 +2738,7 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
             "context": context_used(daemon, &agent),
             "context_tokens": context_tokens(daemon, &agent).map(|(used, _)| used),
             "queued": queued,
+            "extensions": crate::extensions::facts(daemon, &agent.id),
         }));
         let children = daemon.read(|store| store.children(&agent.id))?;
         stack.extend(children.into_iter().rev().map(|child| child.id));

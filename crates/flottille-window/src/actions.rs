@@ -144,6 +144,13 @@ pub enum Command {
     DeveloperSet {
         log: bool,
     },
+    /// A request of a part of Flottille the window draws in its places (`extensions`): what to
+    /// do with the answer is said by `then`.
+    Ask {
+        method: String,
+        params: Value,
+        then: crate::extensions::Then,
+    },
     /// The limit above which a tool result is cut (`tool_results.show`).
     ToolResultsRead,
     /// Chooses it (`tool_results.set`): `None` is Off.
@@ -191,6 +198,15 @@ pub enum Command {
     /// Saves the judge's guidance, or with no text resets it to the default (`judge.set`,
     /// `judge.reset`).
     JudgeWrite {
+        text: Option<String>,
+    },
+    /// The guidance of a part of Flottille the user can turn off (`<name>.show`).
+    GuidanceRead {
+        name: String,
+    },
+    /// Saves it (`<name>.set`), or with none resets it (`<name>.reset`).
+    GuidanceWrite {
+        name: String,
         text: Option<String>,
     },
     CreateWorkspace {
@@ -920,6 +936,11 @@ pub enum Outcome {
         written: bool,
         shown: Result<crate::settings::Developer, String>,
     },
+    /// The daemon's answer to an [`Command::Ask`], or why there is none.
+    Asked {
+        then: crate::extensions::Then,
+        answer: Result<Value, String>,
+    },
     /// The limit of tool results as the daemon says it (`None` is Off), after a read (`written`
     /// false) or a choice.
     ToolResults {
@@ -951,6 +972,12 @@ pub enum Outcome {
     /// The judge's guidance as the daemon says it, after a read (`written` false) or a save or
     /// a reset.
     JudgeGuidance {
+        written: bool,
+        shown: Result<Shown, String>,
+    },
+    /// The guidance of the part `name` as the daemon says it, after a read or a save or a reset.
+    Guidance {
+        name: String,
         written: bool,
         shown: Result<Shown, String>,
     },
@@ -1474,6 +1501,30 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 shown: answer(ask_alone(connect, method, params, bounds.quick)),
             }
         }
+        Command::GuidanceRead { name } => {
+            let shown = ask_alone(connect, &format!("{name}.show"), json!({}), bounds.quick);
+            Outcome::Guidance {
+                name,
+                shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
+                written: false,
+            }
+        }
+        Command::GuidanceWrite { name, text } => {
+            let shown = match &text {
+                Some(text) => ask_alone(
+                    connect,
+                    &format!("{name}.set"),
+                    json!({"text": text}),
+                    bounds.quick,
+                ),
+                None => ask_alone(connect, &format!("{name}.reset"), json!({}), bounds.quick),
+            };
+            Outcome::Guidance {
+                name,
+                shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
+                written: true,
+            }
+        }
         Command::JudgeRead => {
             let shown = ask_alone(connect, "judge.show", json!({}), bounds.quick);
             Outcome::JudgeGuidance {
@@ -1503,6 +1554,14 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 }
             });
             Outcome::Developer { written, shown }
+        }
+        Command::Ask {
+            method,
+            params,
+            then,
+        } => {
+            let answer = answer(ask_alone(connect, &method, params, bounds.quick));
+            Outcome::Asked { then, answer }
         }
         Command::ToolResultsRead | Command::ToolResultsSet { .. } => {
             let (method, params, written) = match command {
