@@ -41,6 +41,7 @@ use crate::setup::SetupSection;
 use crate::shell::Shell;
 use crate::skills::SkillsSection;
 use crate::tasks::TasksSection;
+use crate::vault::VaultEntry;
 use crate::workspaces_folder::WorkspacesFolder;
 
 /// A text field in Flottille's colours.
@@ -383,6 +384,10 @@ pub struct ProjectSettingsPage {
     forge_kind: ForgeKind,
     tracker_kind: TrackerKind,
     tracker_repository: Option<String>,
+    /// The vault entry the dialog logs time with; none when it chooses none.
+    worklog: Option<String>,
+    /// The vault's entries as last listed (their metadata, never a secret): the project sees some.
+    vault: Vec<VaultEntry>,
     /// The repository dialog's base branches and dependencies, as edited and not yet saved.
     bases: Vec<String>,
     base_rows: Listing<String>,
@@ -498,6 +503,8 @@ impl ProjectSettingsPage {
             forge_kind: ForgeKind::None,
             tracker_kind: TrackerKind::None,
             tracker_repository: None,
+            worklog: None,
+            vault: Vec::new(),
             bases: Vec::new(),
             base_rows: Listing::default(),
             base_error: None,
@@ -1109,6 +1116,10 @@ impl ProjectSettingsPage {
             Some(ProjectTracker::Github { repository }) => Some(repository.clone()),
             _ => None,
         };
+        self.worklog = match &self.tracker {
+            Some(ProjectTracker::Jira { worklog_token, .. }) => worklog_token.clone(),
+            _ => None,
+        };
         self.dialog = Some(Dialog::Tracker);
         self.dialog_error = None;
         cx.notify();
@@ -1135,6 +1146,49 @@ impl ProjectSettingsPage {
     pub fn choose_tracker_repository(&mut self, path: String, cx: &mut Context<Self>) {
         self.tracker_repository = Some(path);
         cx.notify();
+    }
+
+    /// The entry the dialog logs time with, `None` for none.
+    pub fn choose_worklog(&mut self, entry: Option<String>, cx: &mut Context<Self>) {
+        self.worklog = entry;
+        cx.notify();
+    }
+
+    /// The entry the dialog logs time with.
+    pub fn worklog_choice(&self) -> Option<String> {
+        self.worklog.clone()
+    }
+
+    /// The vault's entries, as the daemon lists them: the select offers those the project sees.
+    pub fn vault_listed(&mut self, entries: &[VaultEntry], cx: &mut Context<Self>) {
+        self.vault = entries.to_vec();
+        cx.notify();
+    }
+
+    /// What the `Log time with` select offers, each as its key and its label: none first, then
+    /// the entries the project sees (its own and the global ones) by name, with their username.
+    /// The entry the file names stays in the list when the project does not see it, said so.
+    pub fn worklog_options(&self) -> Vec<(String, String)> {
+        let mut seen: Vec<&VaultEntry> = self
+            .vault
+            .iter()
+            .filter(|entry| entry.project.as_deref().is_none_or(|p| p == self.name))
+            .collect();
+        seen.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut options = vec![("none".to_owned(), "None".to_owned())];
+        options.extend(seen.into_iter().map(|entry| {
+            let account = match entry.username.as_deref().map(str::trim) {
+                Some(account) if !account.is_empty() => account,
+                _ => "no username",
+            };
+            (entry.name.clone(), format!("{} · {account}", entry.name))
+        }));
+        if let Some(chosen) = &self.worklog
+            && !options.iter().any(|(key, _)| key == chosen)
+        {
+            options.push((chosen.clone(), format!("{chosen} · not in the vault")));
+        }
+        options
     }
 
     /// The repositories whose forge is GitHub: those whose issues can be the tracker.
@@ -1225,14 +1279,7 @@ impl ProjectSettingsPage {
                             .filter(|key| !key.is_empty())
                             .map(str::to_owned)
                             .collect(),
-                        // Not a field of this dialog: the project's file names it, and a save
-                        // keeps it.
-                        worklog_token: match &self.tracker {
-                            Some(ProjectTracker::Jira { worklog_token, .. }) => {
-                                worklog_token.clone()
-                            }
-                            _ => None,
-                        },
+                        worklog_token: self.worklog.clone(),
                     }),
                 };
                 let settings = self.params(None, None, Some(tracker));
@@ -1921,6 +1968,7 @@ impl ProjectSettingsPage {
             }
             _ => None,
         };
+        let worklog = self.worklog_field(cx);
         let error = problem_line(
             "settings-modal-error",
             self.dialog_error.clone(),
@@ -2117,7 +2165,8 @@ impl ProjectSettingsPage {
                                         "A ticket is a key of one of these projects (ABC-123), \
                                          read with acli when it is signed in to this site.",
                                     ),
-                                ),
+                                )
+                                .child(worklog),
                         )
                         .gap(space::LG),
                     )
@@ -2125,6 +2174,59 @@ impl ProjectSettingsPage {
                     .action(save)
             }
         }
+    }
+
+    /// `Log time with`: the vault entry whose token logs time on Jira, and the way to add one.
+    fn worklog_field(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let options = self.worklog_options();
+        let chosen = self
+            .worklog
+            .as_ref()
+            .and_then(|name| options.iter().position(|(key, _)| key == name))
+            .unwrap_or(0);
+        let keys: Vec<String> = options.iter().map(|(key, _)| key.clone()).collect();
+        let this = cx.entity().downgrade();
+        let select = Select::new(
+            "tracker-worklog",
+            options.into_iter().map(|(key, label)| {
+                SelectOption::new(SharedString::from(key), SharedString::from(label))
+            }),
+            chosen,
+        )
+        .on_choose(move |index, _, cx| {
+            let entry = (index > 0).then(|| keys[index].clone());
+            this.update(cx, |this, cx| this.choose_worklog(entry, cx))
+                .ok();
+        });
+        let (shell, project) = (self.shell.clone(), self.name.clone());
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .child(
+                Field::new("tracker-worklog-field", "Log time with", select)
+                    .hint("A Jira API token in the vault, its username your Jira e-mail."),
+            )
+            .child(
+                div().flex().child(hoverable(
+                    div()
+                        .id("tracker-worklog-add")
+                        .aria_label("Add one in the vault")
+                        .text_size(px(12.))
+                        .text_color(p.run)
+                        .cursor_pointer()
+                        .child("Add one in the vault")
+                        .on_click(move |_: &ClickEvent, window, cx| {
+                            shell
+                                .update(cx, |shell, cx| {
+                                    shell.add_vault_entry_for(&project, window, cx)
+                                })
+                                .ok();
+                        }),
+                    move |link, t| link.bg(p.hover.opacity(t)),
+                )),
+            )
     }
 
     /// Where it was opened at, from the project page.

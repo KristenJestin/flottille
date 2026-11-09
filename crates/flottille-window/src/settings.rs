@@ -153,6 +153,8 @@ pub enum Reveal {
     Rules,
     /// The compaction (the notice of the compactor picked).
     Compaction,
+    /// The vault (a Jira project's link to add the entry it logs time with).
+    Vault,
 }
 
 impl Reveal {
@@ -163,6 +165,7 @@ impl Reveal {
             Reveal::Providers => "providers",
             Reveal::Rules => "rules",
             Reveal::Compaction => "compaction",
+            Reveal::Vault => "vault",
         };
         SECTIONS
             .iter()
@@ -365,7 +368,7 @@ impl SettingsPage {
                 self.scroll.scroll_to_top_of_item(at);
             }
             Reveal::Judge | Reveal::Compaction => self.scroll.set_offset(Point::default()),
-            Reveal::Providers | Reveal::Rules => {}
+            Reveal::Providers | Reveal::Rules | Reveal::Vault => {}
         }
         cx.notify();
     }

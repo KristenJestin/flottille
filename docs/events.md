@@ -545,6 +545,7 @@ activity.
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
 | `link` | Only for a `forge` `run` that was done and whose answer gave the run's link: that link. |
 | `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
+| `setup` | Only on a `tickets` `log_time` that was refused for want of the project's vault entry (none named, one the project does not see, or one with no username): `time_logging`. The window says it in the conversation, with a button to the project's Settings, Tracker (`docs/tickets.md`, "Logging time"). |
 
 #### `agent.link_shown`
 

@@ -52,8 +52,8 @@ use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::CommandInfo;
 use crate::conversation::{
     Activity, Block, COMPACTED_KIND, COMPACTION_FAILED_KIND, Call, CallState, Change, Conversation,
-    DiffLine, Ending, STARTED_SESSION_KIND, Summary, USER, VaultAsk, WOKEN_BY_KIND, in_sight,
-    is_hidden,
+    DiffLine, Ending, STARTED_SESSION_KIND, Summary, TIME_LOGGING_KIND, USER, VaultAsk,
+    WOKEN_BY_KIND, in_sight, is_hidden,
 };
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
@@ -63,6 +63,7 @@ use crate::model::Place;
 use crate::open::Opener;
 use crate::picture_viewer::PictureViewer;
 use crate::project::removal_refused;
+use crate::project_settings::Reveal as ProjectReveal;
 use crate::providers::Providers;
 use crate::queued::QueuedMessages;
 use crate::runs::{self, CommandList, CommandPanel, EndedFold, ended_row, rail_label};
@@ -5716,6 +5717,55 @@ impl Render for Row {
                     .ok();
                 });
                 self.links.draw(self.at, links, &open, cx)
+            }
+            // A time not logged for want of the project's vault entry: the line, and the way to
+            // the project's Settings where the user chooses one.
+            Block::Notice { kind, text } if kind == TIME_LOGGING_KIND => {
+                let opened = self.page.upgrade().map(|page| {
+                    (
+                        page.read(cx).shell.clone(),
+                        page.read(cx).project().to_owned(),
+                    )
+                });
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(space::LG)
+                    .child(
+                        div()
+                            .id(id("notice"))
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .gap(space::SM)
+                            .mono(12.)
+                            .text_color(p.faint)
+                            .aria_label(SharedString::from(text.clone()))
+                            .child(div().flex_none().child(SharedString::from(kind.clone())))
+                            .child(div().min_w_0().child(SharedString::from(text.clone())))
+                            .test_support(),
+                    )
+                    .child(
+                        div().flex_none().child(
+                            Button::secondary(id("time-logging-setup"), "Set up time logging")
+                                .on_click(move |_, window, cx| {
+                                    if let Some((shell, project)) = &opened {
+                                        shell
+                                            .update(cx, |shell, cx| {
+                                                shell.open_project_settings_at(
+                                                    project,
+                                                    ProjectReveal::Tracker,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })
+                                            .ok();
+                                    }
+                                }),
+                        ),
+                    )
+                    .into_any_element()
             }
             // The agent's own end is shown whole: a failure's reason, what was not done and why.
             Block::Notice { kind, text } if !is_delivery(kind) => {

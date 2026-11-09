@@ -2929,6 +2929,16 @@ fn record(
     if let Some(cut) = cut {
         data["cut"] = cut.to_json();
     }
+    // A time that cannot be logged for want of the project's vault entry: the window offers its
+    // Settings, where the user chooses one.
+    if tool == "tickets"
+        && recorded["action"] == "log_time"
+        && matches!(outcome, Outcome::Refused(_))
+        && crate::projects::load_project(daemon, &grant.place.project)
+            .is_ok_and(|project| crate::tickets::worklog_unset(daemon, &project))
+    {
+        data["setup"] = "time_logging".into();
+    }
     // The link of the run a pipeline was started as, for the window to carry.
     if tool == "forge"
         && recorded["action"] == "run"

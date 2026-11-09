@@ -453,6 +453,8 @@ impl Shell {
         self.perform(Command::WorkspacesFolderRead {
             project: Some(name.clone()),
         });
+        // The Tracker's select offers the entries the project sees.
+        self.perform(Command::Vault);
         self.project_settings = Some(made.clone());
         Some(made)
     }
@@ -1298,12 +1300,25 @@ impl Shell {
                 }
             }
             Outcome::Vault { listed } => {
+                // A project's Tracker offers the entries it sees to log time with.
+                if let (Some(page), Ok(entries)) = (self.project_settings.clone(), &listed) {
+                    page.update(cx, |page, cx| page.vault_listed(entries, cx));
+                }
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.listed(listed, cx));
             }
             Outcome::VaultWritten { refused } => {
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.written(refused, cx));
+                // An entry added from a project's Tracker: back to it.
+                if let Some(project) = section.update(cx, |section, _| section.take_return()) {
+                    self.open_project_settings_at(
+                        &project,
+                        crate::project_settings::Reveal::Tracker,
+                        window,
+                        cx,
+                    );
+                }
             }
             Outcome::Developer { written, shown } => {
                 self.settings
@@ -2389,6 +2404,19 @@ impl Shell {
         if let Some(page) = self.settings_of_project(project, cx) {
             page.update(cx, |page, cx| page.reveal(at, cx));
         }
+    }
+
+    /// A project's Tracker `Add one in the vault`: Settings, Vault, on a new entry. Closed, it
+    /// goes back to the project's Tracker.
+    pub fn add_vault_entry_for(
+        &mut self,
+        project: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
+        let vault = self.settings.read(cx).vault().clone();
+        vault.update(cx, |vault, cx| vault.add_for(project, window, cx));
     }
 
     /// Opens Settings at a section: its tab is the one chosen.
