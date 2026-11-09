@@ -115,8 +115,9 @@
 //! prints the script's `boards` of P (`{"ABC": [{"id": 7, "name": "ABC board", "type":
 //! "scrum"}]}`) as Jira's agile page (`{"values": [...], …}`, as a real site printed it), and
 //! `jira board list-sprints --id N [--state a,b] --json` the script's `sprints` of that board
-//! (`{"7": [{"id": 42, "name": "Sprint 42", "state": "active"}]}`) in those states, in the same
-//! page (**assumed**: no real board with sprints could be read); a board with none ends with 1,
+//! (`{"7": [{"id": 42, "name": "Sprint 42", "state": "active"}]}`) in those states, in a page
+//! whose list is under `sprints` (`{"sprints": [...], "isLast", …}`, as `acli` 1.3.39 printed it
+//! on a real board, #657); a board with none ends with 1,
 //! `✗ The board does not support sprints`, as the real one does. A view asked `*navigable` or
 //! `*all` gives every field of the script, and a search's `sprint is not EMPTY` finds the work
 //! items with a field holding sprints (`[{"id", "name", "state", "boardId"}]`).
@@ -663,7 +664,8 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 .collect();
             println!(
                 "{}",
-                json!({"isLast": true, "maxResults": 50, "startAt": 0, "values": sprints})
+                json!({"isLast": true, "maxResults": 50, "startAt": 0, "total": sprints.len(),
+                    "sprints": sprints})
             );
             0
         }

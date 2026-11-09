@@ -47,14 +47,15 @@ struct Board {
     name: String,
 }
 
-/// The list of a page of Jira's agile API (`{"values": [...]}`, as `board search` printed it on a
-/// real site), or a bare list.
+/// The list of a page of Jira's agile API, under `values` (`board search`) or `sprints`
+/// (`list-sprints`), as `acli` 1.3.39 printed them on a real site (#657), or a bare list.
 fn values(said: &str, what: &str) -> Result<Vec<Value>, String> {
     let parsed: Value = serde_json::from_str(said)
         .map_err(|error| format!("acli jira board {what} answered what is not JSON: {error}"))?;
     parsed
         .as_array()
         .or(parsed["values"].as_array())
+        .or(parsed["sprints"].as_array())
         .cloned()
         .ok_or_else(|| format!("acli jira board {what} answered no list"))
 }
@@ -80,8 +81,7 @@ async fn boards_of(project: &str) -> Result<Vec<Board>, String> {
         .collect())
 }
 
-/// The active and future sprints of a board (**assumed** to print Jira's agile page, as `board
-/// search` does: no real board with sprints could be read).
+/// The active and future sprints of a board.
 async fn open_sprints(board: &Board) -> Result<Vec<Sprint>, String> {
     let said = acli_run(&[
         "jira",

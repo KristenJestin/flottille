@@ -508,7 +508,8 @@ fn a_project_s_boards_and_their_open_sprints_follow_the_script() {
     let none: Value = serde_json::from_slice(&none.stdout).unwrap();
     assert_eq!(none["values"], json!([]));
     let open: Value = serde_json::from_slice(&open.stdout).unwrap();
-    let names: Vec<&str> = open["values"]
+    // Under `sprints`, not `values` as the boards' page: as a real board answered (#657).
+    let names: Vec<&str> = open["sprints"]
         .as_array()
         .unwrap()
         .iter()
