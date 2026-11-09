@@ -59,10 +59,10 @@ const READER_ANSWER_BYTES: u64 = 4 * 1024 * 1024;
 /// The hidden subcommand the reader runs as.
 pub const READER: &str = "read-page";
 
-/// The same for every user and every version: a link or a version would tell a site who browses
-/// while Flottille has few users, and follow them from one request to the next. It still says an
-/// agent reads, never a browser.
-const USER_AGENT: &str = "Mozilla/5.0 (compatible; agent)";
+/// The app's name, the same for every user and every version: a link (the repository names its
+/// owner) or a version would tell a site who browses while Flottille has few users. It still says
+/// an agent reads, never a browser.
+const USER_AGENT: &str = "Mozilla/5.0 (compatible; Flottille)";
 const ACCEPT: &str = "text/html,application/xhtml+xml,application/pdf,text/plain,\
     application/json;q=0.9,*/*;q=0.5";
 
@@ -1541,11 +1541,8 @@ mod tests {
             !USER_AGENT.contains(env!("CARGO_PKG_VERSION")),
             "{USER_AGENT}"
         );
-        assert!(
-            !USER_AGENT.to_lowercase().contains("flottille"),
-            "{USER_AGENT}"
-        );
-        assert!(USER_AGENT.contains("agent"), "{USER_AGENT}");
+        assert_eq!(USER_AGENT.matches('/').count(), 1, "{USER_AGENT}");
+        assert!(USER_AGENT.contains("Flottille"), "{USER_AGENT}");
     }
 
     use super::*;
