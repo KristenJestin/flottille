@@ -720,22 +720,28 @@ line names, every program a wrapper or a runner runs included:
   `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.netrc`, `~/.npmrc`,
   `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`,
   `~/.local/share/opencode`, wherever they are along a path, and `/etc/shadow`, `/etc/sudoers`,
-  `/etc/sudoers.d`; the agents' own folders of the home (`~/.claude`, `~/.claude.json`,
-  `~/.codex`), whole, where the path leads included (a link to them, a project that is the home
-  folder);
+  `/etc/sudoers.d`; the agents' own folders of the home (`~/.claude`, `~/.claude.json` and its
+  copies beside it, `~/.claude.json.backup`…, `~/.codex`), whole, where the path leads included (a
+  link to them, a project that is the home folder), and a file of a revision named `rev:path`
+  (`git show HEAD:.claude/.credentials.json`, `git cat-file`, `git diff`) as the path it names;
+  and the open files of any process, the agent's own command line and runs included
+  (`/proc/<pid>/fd`, `map_files`, `/dev/fd/3`), which may be one;
 - **an agent's folder anywhere else** (`.claude`, `.claude.json`, `.codex` of a repository, a
   workspace, a copy in `~/Downloads`): it is a project's configuration, not a login, and is read
   as any file, but a `.credentials.json` or `auth.json` below it is a login's place, and **a
   write there** is refused: its settings and hooks run programs the next time the user opens
   that repository with the agent's own command line, outside the gate, so the agent asks the
-  user to make the change;
+  user to make the change. A line may write there without naming it (a patch applied, a branch
+  checked out or merged, a stash popped, a folder copied, an archive unpacked): what an agent's
+  run changed in the agent folders of its place is put back as it was once the run ends, and
+  its result says it was refused, naming the files;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
   the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program.
   Reading them stays base: a card in Ask and Auto, allowed in Full, since what they hold has its
   secrets masked and the user may want an agent to read a log;
 - **any write through a process's folder in `/proc`** that leads elsewhere (`/proc/<pid>/cwd`,
   `root`, `fd`, `exe`, `map_files`, `/dev/fd/3`): the daemon runs in `/`, so through it any path
-  of the disk. Reading there stays base;
+  of the disk. Reading through `cwd`, `root` or `exe` stays base;
 - **a write of a startup file**, or of a folder above one: `~/.bashrc`, `~/.bash_profile`,
   `~/.bash_login`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin`,
   `~/.config/fish`, `~/.gitconfig`, `~/.config/git`, `~/.config/autostart`,

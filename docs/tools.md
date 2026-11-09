@@ -399,8 +399,11 @@ pending requests.
 - **The output kept** is its last 64 KiB (cut back from a line's start once it passes 80 KiB),
   standard output and error together, masked when shown and when stored: the values of the
   daemon's variables named like secrets, every value of the `KEY=VALUE` lines of the place's
-  `.env` and `.env.*` files (at its top and each repository's), private keys, URL passwords and
-  tokens shaped like the usual providers' (`flottille_core::secrets`).
+  `.env` and `.env.*` files (at its top and each repository's), private keys, URL passwords,
+  tokens shaped like the usual providers', and the string value of the token keys of an
+  agent's login file wherever it is shown (`accessToken`, `refreshToken` of Claude's
+  `.credentials.json`; `id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY` of Codex's
+  `auth.json`; `apiKey`), as in a diff of a staged one (`flottille_core::secrets`).
 - **The environment of a run**: the daemon's, then the place's variables filled
   (`docs/workspaces.md`: a workspace's, frozen when it was made; in the project folder the
   project's, with `{workspace}` = `main`, `{workspace.path}` the folder and `{branch}` empty), and
@@ -1534,12 +1537,19 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `/etc/sudoers`, `/etc/sudoers.d`. Inside the place only what sits below it counts; a path
      outside is checked as written and where it leads, and without a leading `/proc/<process>/root`
      or `cwd`. The agents' own folders of the home (`~/.claude`, `~/.claude.json`, `~/.codex`)
-     are a login's place whole (`refused: X is in a login's place (~/.claude)`), found where any
+     are a login's place whole (`refused: X is in a login's place (~/.claude)`), and so is a copy
+     Claude keeps beside `~/.claude.json` (any name it starts: `~/.claude.json.backup`), found where any
      path leads, inside the place too (a link to them, a project that is the home folder), and
      where they lead when they are links themselves (dotfiles); everywhere when the home is not
      known, or when the path goes through a process's folder in `/proc`; anywhere else such a folder is read as any file, but
      a `.credentials.json` or `auth.json` below it is a login's place
-     (`(.credentials.json in .claude)`);
+     (`(.credentials.json in .claude)`). A `rev:path` word of `git show`, `git cat-file` or
+     `git diff` (`HEAD:.claude/.credentials.json`, `:path` and `:0:path` of the index) is
+     checked as the path it names, here and as a sensitive place;
+   - the open files of any process, read or written, the agent's own command line and its runs
+     included: a path through `/proc/<pid>/fd` or `map_files` (`/proc/self/fd/7`,
+     `/proc/<pid>/task/<tid>/fd`, `/dev/fd/3`), since one of them may be a login: `refused: X goes
+     through /proc/<pid>/fd, a process's open files: …`;
    - a write in an agent's folder that is not the home's (`.claude`, `.claude.json`, `.codex` of
      a repository or anywhere else): by `fs_write` or `fs_edit`, as a path a line that does not
      only read names (a line that writes only the place's files, `git add`, `git rm`,
@@ -1547,7 +1557,15 @@ says who answers a call to judge (`docs/design.md` §7.1).
      run programs the next time the user opens the repository with the agent's own command line,
      outside the gate: `refused: X is in a repository's agent folder (.claude): its settings and
      hooks run programs …; ask the user to make the change; nothing was done`. A line that only
-     reads it (`cat`, `ls`, `grep`, `git show`) is judged as any read;
+     reads it (`cat`, `ls`, `grep`, `git show`) is judged as any read. A line that writes there
+     without naming it (`git apply`, `git checkout <branch>`, `git merge`, `git stash pop`,
+     `cp -r a/. b/`, `tar x`, `unzip`, a script) is undone after it: before each run of an agent,
+     the daemon notes the agent folders of its place (their files' content, `.git` and a login
+     file never read, the home's own left out), and once the run ends it removes what was added
+     there and writes back what was changed or removed; the run's output then ends with
+     `flottille: refused: this run wrote in a repository's agent folder (…): …; Flottille put back
+     as they were: …; ask the user to make the change`. What is outside the agent folders stays
+     as the run left it (the branch checked out, the commit made);
    - a program that reads or prints a login: `gh`/`glab auth token`, `aws configure get` or
      `export-credentials`, `aws ecr get-login-password`, `aws sts get-session-token`,
      `kubectl config view --raw`, `kubectl create token`, `gcloud auth print-*token`,
@@ -1631,9 +1649,9 @@ says who answers a call to judge (`docs/design.md` §7.1).
      folder that is a link, a `..` after a link), against Flottille's folders as named and
      resolved;
    - a path in `/proc` through what of any process leads elsewhere on the disk: its `root`,
-     `cwd`, `fd`, `exe` or `map_files` (`/proc/self/root/…`, `/proc/<pid>/cwd/…`), under any
-     name it is reached by (`/dev/fd/3`, a link to `/proc/self/cwd`; `/dev/stdin` for a file
-     tool). The words of a run that name its own streams or nothing (`/dev/stdin`,
+     `cwd` or `exe` (`/proc/self/root/…`, `/proc/<pid>/cwd/…`), under any name it is reached by
+     (a link to `/proc/self/cwd`); through its `fd` or `map_files` it is refused above
+     (`/dev/fd/3`; `/dev/stdin` for a file tool). The words of a run that name its own streams or nothing (`/dev/stdin`,
      `/dev/stdout`, `/dev/stderr`, `/dev/null`, `/dev/fd/0` to `/dev/fd/2`) are harmless;
    - a path that cannot be followed on the disk (more than 40 links, a folder that cannot be
      read): where it leads is not known;
