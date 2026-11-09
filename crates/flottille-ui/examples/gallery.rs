@@ -12,7 +12,6 @@
 use std::path::PathBuf;
 
 use flottille_ui::omarchy::Environment;
-use flottille_ui::rows::TreeLevel;
 use flottille_ui::{
     Badge, Button, Card, Drawer, Fold, Icon, Icons, ListRow, PulsingLabel, Side, TreeRow, Type,
     enter, icon, meta, palette, section_label, tree_children,
@@ -278,35 +277,32 @@ impl Render for Gallery {
                 .flex()
                 .flex_col()
                 .child(section_label("Projects", cx))
-                .child(TreeRow::new("t-atlas", TreeLevel::Project, "atlas").expanded(true))
+                .child(TreeRow::new("t-atlas", "atlas").top().expanded(true))
                 .child(tree_children(
                     [
-                        TreeRow::new("t-main", TreeLevel::Main, "main").into_any_element(),
+                        TreeRow::new("t-main", "main")
+                            .leading(icon(Icon::Folder).text_color(p.faint))
+                            .into_any_element(),
                         tree_children(
-                            [
-                                TreeRow::new("t-s1", TreeLevel::Session, "Release notes for 2.4")
-                                    .trailing(meta("2d", cx))
-                                    .into_any_element(),
-                            ],
+                            [TreeRow::new("t-s1", "Release notes for 2.4")
+                                .trailing(meta("2d", cx))
+                                .into_any_element()],
                             cx,
                         )
                         .into_any_element(),
-                        TreeRow::new("t-ws", TreeLevel::Workspace, "fix-session-timeout")
+                        TreeRow::new("t-ws", "fix-session-timeout")
+                            .leading(icon(Icon::Branch).text_color(p.faint))
                             .into_any_element(),
                         tree_children(
                             [
-                                TreeRow::new(
-                                    "t-s2",
-                                    TreeLevel::Session,
-                                    "Sessions expire too early",
-                                )
-                                .selected(true)
-                                .trailing(icon(Icon::Bell).text_color(p.wait))
-                                .into_any_element(),
-                                TreeRow::new("t-s3", TreeLevel::Session, "CSV export by tenant")
+                                TreeRow::new("t-s2", "Sessions expire too early")
+                                    .selected(true)
+                                    .trailing(icon(Icon::Bell).text_color(p.wait))
+                                    .into_any_element(),
+                                TreeRow::new("t-s3", "CSV export by tenant")
                                     .trailing(icon(Icon::Running).text_color(p.run))
                                     .into_any_element(),
-                                TreeRow::new("t-s4", TreeLevel::Session, "Review the refresh flow")
+                                TreeRow::new("t-s4", "Review the refresh flow")
                                     .trailing(meta("1h", cx))
                                     .into_any_element(),
                             ],
@@ -317,7 +313,8 @@ impl Render for Gallery {
                     cx,
                 ))
                 .child(
-                    TreeRow::new("t-notes", TreeLevel::Project, "notes-app")
+                    TreeRow::new("t-notes", "notes-app")
+                        .top()
                         .expanded(false)
                         .trailing(icon(Icon::Bell).text_color(p.wait)),
                 ),

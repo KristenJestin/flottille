@@ -920,11 +920,9 @@ struct Titled {
 
 impl Render for Titled {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().w(px(240.)).child(flottille_ui::TreeRow::new(
-            "titled-row",
-            flottille_ui::TreeLevel::Session,
-            self.title.clone(),
-        ))
+        div()
+            .w(px(240.))
+            .child(flottille_ui::TreeRow::new("titled-row", self.title.clone()))
     }
 }
 

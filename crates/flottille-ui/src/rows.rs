@@ -1,8 +1,8 @@
-//! Rows: [`TreeRow`] for the left tree (project › place › session) and [`ListRow`] for a session
-//! in a card, a sub-agent, a running agent, a result of a search.
+//! Rows: [`TreeRow`] for a tree of folding levels and [`ListRow`] for an item of a card or a
+//! result of a search.
 //!
-//! A row's state mark is a [`StateIcon`](crate::StateIcon) or [`Pill`](crate::Pill) view handed in
-//! by the screen, so a state change or a spinner tick redraws that mark and not the row.
+//! A row's status mark is a view handed in by the screen, so a change of the mark or a tick of
+//! its animation redraws that mark and not the row.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -29,21 +29,13 @@ type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 type Decorate = Box<dyn FnOnce(Stateful<Div>) -> Stateful<Div> + 'static>;
 type OnEnter = Box<dyn Fn(&mut App) + 'static>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TreeLevel {
-    /// 32 px, weight 500, a chevron.
-    Project,
-    /// The project's own folder, `main`: a folder icon.
-    Main,
-    /// A workspace: a git-branch icon.
-    Workspace,
-    Session,
-}
-
+/// A row of a tree. The tree has no fixed depth: a row is placed under another with
+/// [`tree_children`], which indents it, and what a level is (a folder, a branch) is said by the
+/// row's [`leading`](Self::leading) mark.
 #[derive(IntoElement)]
 pub struct TreeRow {
     id: ElementId,
-    level: TreeLevel,
+    top: bool,
     title: SharedString,
     expanded: Option<bool>,
     /// A chevron on a row that is no project's, which turns up as what it holds unfolds above it.
@@ -62,16 +54,17 @@ pub struct TreeRow {
 /// The height of a tree row that holds a second line.
 pub const TWO_LINES: f32 = 40.;
 
-/// The element id of a project row's chevron, which folds and unfolds the level below.
+/// The element id of a row's chevron, which folds and unfolds the level below.
 pub fn toggle_id(row: impl Into<ElementId>) -> ElementId {
     ElementId::NamedChild(std::sync::Arc::new(row.into()), "toggle".into())
 }
 
 impl TreeRow {
-    pub fn new(id: impl Into<ElementId>, level: TreeLevel, title: impl Into<SharedString>) -> Self {
+    /// A row of the tree, 28 px high.
+    pub fn new(id: impl Into<ElementId>, title: impl Into<SharedString>) -> Self {
         Self {
             id: id.into(),
-            level,
+            top: false,
             title: title.into(),
             expanded: None,
             upward: false,
@@ -83,6 +76,12 @@ impl TreeRow {
             on_click: None,
             on_toggle: None,
         }
+    }
+
+    /// A row of the first level: 32 px, weight 500, a chevron before its title.
+    pub fn top(mut self) -> Self {
+        self.top = true;
+        self
     }
 
     /// A mark before the title: what kind of row it is, said in its own tooltip.
@@ -98,7 +97,7 @@ impl TreeRow {
         self
     }
 
-    /// Whether the level below is open; a project row turns its chevron with it.
+    /// Whether the level below is open; a first-level row turns its chevron with it.
     pub fn expanded(mut self, expanded: bool) -> Self {
         self.expanded = Some(expanded);
         self
@@ -110,7 +109,7 @@ impl TreeRow {
         self
     }
 
-    /// The open session.
+    /// The open row.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
@@ -146,9 +145,9 @@ impl RenderOnce for TreeRow {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let (state, now) = feel(&self.id, window, cx);
-        let project = self.level == TreeLevel::Project;
+        let top = self.top;
         let chosen = choose(&state, self.selected, window, cx);
-        let ink = if project {
+        let ink = if top {
             p.text
         } else {
             mix(mix(p.mute, p.text, now.hover), p.text, chosen)
@@ -164,8 +163,8 @@ impl RenderOnce for TreeRow {
             .w_full()
             .flex()
             .items_center()
-            .gap(px(if project { 8. } else { 7. }))
-            .h(px(match (project, self.second.is_some()) {
+            .gap(px(if top { 8. } else { 7. }))
+            .h(px(match (top, self.second.is_some()) {
                 (true, _) => 32.,
                 (false, false) => 28.,
                 (false, true) => TWO_LINES,
@@ -175,8 +174,8 @@ impl RenderOnce for TreeRow {
             .bg(background)
             .text_color(ink)
             .ui_text()
-            .text_size(px(if project { 13.5 } else { 13. }))
-            .when(project, |d| d.font_weight(FontWeight::MEDIUM))
+            .text_size(px(if top { 13.5 } else { 13. }))
+            .when(top, |d| d.font_weight(FontWeight::MEDIUM))
             .when(self.expanded.is_some(), |d| {
                 d.aria_expanded(self.expanded == Some(true))
             });
@@ -185,7 +184,7 @@ impl RenderOnce for TreeRow {
         // or without children under it.
         let folds = self.on_toggle.is_some();
         let mut fold = None;
-        if let Some(turn) = chevron_turn.filter(|_| project || self.upward || folds) {
+        if let Some(turn) = chevron_turn.filter(|_| top || self.upward || folds) {
             let angle = match self.upward {
                 false => -FRAC_PI_2 * turn,
                 // Folded (1) points right as a project's does; open (0) points up.
@@ -212,15 +211,10 @@ impl RenderOnce for TreeRow {
                     .into_any_element(),
                 None => chevron.into_any_element(),
             };
-            match project || self.upward {
+            match top || self.upward {
                 true => row = row.child(chevron),
                 false => fold = Some(chevron),
             }
-        }
-        match self.level {
-            TreeLevel::Main => row = row.child(icon(Icon::Folder).text_color(p.faint)),
-            TreeLevel::Workspace => row = row.child(icon(Icon::Branch).text_color(p.faint)),
-            TreeLevel::Project | TreeLevel::Session => {}
         }
         if let Some(leading) = self.leading {
             row = row.child(leading);
