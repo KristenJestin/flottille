@@ -5,7 +5,7 @@
 //! sees, cannot see those, so what the run changed there is undone once it ends and the run's
 //! result says so (`docs/design.md` §7.1).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -25,6 +25,15 @@ use crate::gate::{AGENT_FOLDERS, AGENT_LOGINS};
 const ENTRIES_MAX: usize = 500_000;
 #[cfg(test)]
 const ENTRIES_MAX: usize = 200;
+
+/// `ENTRIES_MAX`, or a daemon's tests' own (`FLOTTILLE_TEST_AGENT_FOLDER_ENTRIES`): a place past
+/// the real one would take them minutes to make.
+fn entries_max() -> usize {
+    std::env::var("FLOTTILLE_TEST_AGENT_FOLDER_ENTRIES")
+        .ok()
+        .and_then(|max| max.parse().ok())
+        .unwrap_or(ENTRIES_MAX)
+}
 
 /// The largest file of an agent folder kept to be put back: a larger one changed is said, not
 /// put back.
@@ -79,6 +88,12 @@ pub struct Snapshot {
     entries: BTreeMap<PathBuf, Kind>,
     /// Whether every entry of the place was looked at.
     complete: bool,
+    /// The place and the folders of its repositories, relative to it: their agent folders are
+    /// looked at first, however large the place.
+    tops: Vec<PathBuf>,
+    /// The tops whose agent folders were all looked at: what is found added in them after the
+    /// run was added, even when the rest of the place could not all be looked at.
+    whole: BTreeSet<PathBuf>,
     /// The content of each file, when it is not too large to keep.
     contents: BTreeMap<PathBuf, Vec<u8>>,
 }
@@ -100,15 +115,17 @@ impl Snapshot {
     /// The agent folders of `root`, the home's and `kept` left out.
     #[cfg(test)]
     pub fn take(root: &Path, home: Option<&Path>, kept: &Path) -> Snapshot {
-        Snapshot::take_around(root, home, kept, &[])
+        Snapshot::take_around(root, home, kept, &[], &[])
     }
 
-    /// `take`, but for each folder of `inside` (relative to `root`), its snapshot as it was
+    /// `take`, the agent folders right in each of `tops` (the place's repositories) looked at
+    /// first, and for each folder of `inside` (relative to `root`), its snapshot as it was
     /// taken, not the disk: a run there may have changed it since.
     fn take_around(
         root: &Path,
         home: Option<&Path>,
         kept: &Path,
+        tops: &[PathBuf],
         inside: &[(PathBuf, Arc<Snapshot>)],
     ) -> Snapshot {
         let root = real(root);
@@ -119,9 +136,29 @@ impl Snapshot {
         };
         let mut contents = BTreeMap::new();
         let skipped: Vec<&Path> = inside.iter().map(|(at, _)| at.as_path()).collect();
-        let (mut entries, mut complete) =
-            walk(&root, home.as_deref(), &kept, &skipped, Some(&mut contents));
+        let mut own_tops = vec![PathBuf::new()];
+        for top in tops {
+            if let Ok(top) = real(top).strip_prefix(&root)
+                && !own_tops.iter().any(|known| known == top)
+                && !skipped.iter().any(|inner| top.starts_with(inner))
+            {
+                own_tops.push(top.to_owned());
+            }
+        }
+        let walked = walk(
+            &root,
+            home.as_deref(),
+            &kept,
+            &own_tops,
+            &skipped,
+            Some(&mut contents),
+        );
+        let (mut entries, mut complete, mut whole) =
+            (walked.entries, walked.complete, walked.whole);
+        let mut tops = own_tops;
         for (at, snapshot) in inside {
+            tops.extend(snapshot.tops.iter().map(|top| at.join(top)));
+            whole.extend(snapshot.whole.iter().map(|top| at.join(top)));
             entries.extend(
                 snapshot
                     .entries
@@ -142,6 +179,8 @@ impl Snapshot {
             kept,
             entries,
             complete,
+            tops,
+            whole,
             contents,
         }
     }
@@ -151,7 +190,15 @@ impl Snapshot {
     /// moved first to the folder `run` of the snapshot's `kept`, never lost.
     pub fn restore(&self, run: &str) -> Restored {
         let kept = &self.kept.join(run);
-        let (after, complete) = walk(&self.root, self.home.as_deref(), &self.kept, &[], None);
+        let walked = walk(
+            &self.root,
+            self.home.as_deref(),
+            &self.kept,
+            &self.tops,
+            &[],
+            None,
+        );
+        let (after, complete) = (walked.entries, walked.complete);
         let mut restored = Restored {
             unchecked: !self.complete || !complete,
             ..Restored::default()
@@ -162,8 +209,12 @@ impl Snapshot {
         let top = top.as_fd();
         let shown = |path: &Path| path.display().to_string();
         // What was added, the deepest first; a folder is said only when nothing below it is.
-        // Past the bound, what the snapshot did not see may have been there before.
-        for (path, kind) in after.iter().rev().filter(|_| self.complete) {
+        // Past the bound, what the snapshot did not see may have been there before, but in the
+        // agent folders of a top it looked at whole.
+        let seen_before = |path: &Path| {
+            self.complete || top_of(path).is_some_and(|top| self.whole.contains(&top))
+        };
+        for (path, kind) in after.iter().rev().filter(|(path, _)| seen_before(path)) {
             if self.entries.contains_key(path) {
                 continue;
             }
@@ -395,73 +446,150 @@ fn write_new(folder: BorrowedFd, name: &OsStr, content: &[u8], mode: u32) -> std
     file.set_permissions(std::fs::Permissions::from_mode(mode))
 }
 
+/// What a walk of the place found.
+struct Walked {
+    /// Every entry of an agent folder, relative to the place.
+    entries: BTreeMap<PathBuf, Kind>,
+    /// Whether every entry of the place was looked at.
+    complete: bool,
+    /// The tops whose agent folders were all looked at, whatever the rest of the place.
+    whole: BTreeSet<PathBuf>,
+}
+
+/// A walk of the place, its folders opened below it without going through a link, and what is
+/// in each looked at by its handle.
+struct Walk<'a> {
+    top: OwnedFd,
+    root: &'a Path,
+    home: Option<&'a Path>,
+    kept: &'a Path,
+    tops: &'a [PathBuf],
+    skipped: &'a [&'a Path],
+    contents: Option<&'a mut BTreeMap<PathBuf, Vec<u8>>>,
+    entries: BTreeMap<PathBuf, Kind>,
+}
+
 /// Every entry of an agent folder below `root`, relative to it: `.git`, the home's, `kept` and
 /// the folders `skipped` left out, links not followed, and no login file of an agent folder,
-/// which is never read; with `contents`, those of the files not too large to keep. Each folder is
-/// opened below the place without going through a link, and what is in it looked at by its
-/// handle. Whether every entry of the place was looked at.
+/// which is never read; with `contents`, those of the files not too large to keep. The agent
+/// folders right in each of `tops` (the place, its repositories) first, with a bound of their
+/// own: those the agent's command line reads when the user opens a repository are looked at
+/// however large the rest of the place.
 fn walk(
     root: &Path,
     home: Option<&Path>,
     kept: &Path,
+    tops: &[PathBuf],
     skipped: &[&Path],
-    mut contents: Option<&mut BTreeMap<PathBuf, Vec<u8>>>,
-) -> (BTreeMap<PathBuf, Kind>, bool) {
-    let mut entries = BTreeMap::new();
+    contents: Option<&mut BTreeMap<PathBuf, Vec<u8>>>,
+) -> Walked {
+    let mut walked = Walked {
+        entries: BTreeMap::new(),
+        complete: true,
+        whole: BTreeSet::new(),
+    };
     let Ok(top) = open_root(root) else {
-        return (entries, true);
+        return walked;
+    };
+    let mut walk = Walk {
+        top,
+        root,
+        home,
+        kept,
+        tops,
+        skipped,
+        contents,
+        entries: BTreeMap::new(),
     };
     let mut seen = 0;
-    let mut pending = vec![(PathBuf::new(), false)];
-    while let Some((folder, agent)) = pending.pop() {
-        race(&folder);
-        let Ok(opened) = folder_at(top.as_fd(), &folder) else {
-            continue;
-        };
-        let Ok(read) = rustix::fs::Dir::read_from(&opened) else {
-            continue;
-        };
-        for entry in read.flatten() {
-            let name = OsStr::from_bytes(entry.file_name().to_bytes());
-            if name == "." || name == ".." {
-                continue;
-            }
-            seen += 1;
-            if seen > ENTRIES_MAX {
-                return (entries, false);
-            }
-            let path = folder.join(name);
-            let Some(kind) = kind_of(opened.as_fd(), name) else {
-                continue;
-            };
-            let home_s = agent_folder(name) && home.is_some_and(|home| root.join(&folder) == home);
-            if (!agent && name.as_encoded_bytes().eq_ignore_ascii_case(b".git"))
-                || home_s
-                || root.join(&path) == kept
-                || skipped.contains(&path.as_path())
-            {
-                continue;
-            }
-            let agent = agent || agent_folder(name);
-            if agent && login(name) {
-                continue;
-            }
-            if kind == Kind::Folder {
-                pending.push((path.clone(), agent));
-            }
-            if !agent {
-                continue;
-            }
-            if let (Some(contents), Kind::File { len, .. }) = (contents.as_deref_mut(), &kind)
-                && *len <= KEPT_MAX
-                && let Ok(content) = read_file(opened.as_fd(), name)
-            {
-                contents.insert(path.clone(), content);
-            }
-            entries.insert(path, kind);
+    for top in tops {
+        if walk.visit(vec![(top.clone(), false)], &mut seen, true) {
+            walked.whole.insert(top.clone());
         }
     }
-    (entries, true)
+    let mut seen = 0;
+    walked.complete = walk.visit(vec![(PathBuf::new(), false)], &mut seen, false)
+        && walked.whole.len() == tops.len();
+    walked.entries = walk.entries;
+    walked
+}
+
+impl Walk<'_> {
+    /// The folders `pending` and what is below them, until `seen` passes the bound: whether it
+    /// did not. With `tops`, only the agent folders right in them; without, the agent folders
+    /// right in a top are left to that walk.
+    fn visit(&mut self, mut pending: Vec<(PathBuf, bool)>, seen: &mut usize, tops: bool) -> bool {
+        while let Some((folder, agent)) = pending.pop() {
+            race(&folder);
+            let Ok(opened) = folder_at(self.top.as_fd(), &folder) else {
+                continue;
+            };
+            let Ok(read) = rustix::fs::Dir::read_from(&opened) else {
+                continue;
+            };
+            let in_top = !agent && self.tops.contains(&folder);
+            for entry in read.flatten() {
+                let name = OsStr::from_bytes(entry.file_name().to_bytes());
+                if name == "." || name == ".." || (!agent && tops && !agent_folder(name)) {
+                    continue;
+                }
+                if !tops && in_top && agent_folder(name) {
+                    continue;
+                }
+                *seen += 1;
+                if *seen > entries_max() {
+                    return false;
+                }
+                let path = folder.join(name);
+                let Some(kind) = kind_of(opened.as_fd(), name) else {
+                    continue;
+                };
+                let home_s = agent_folder(name)
+                    && self
+                        .home
+                        .is_some_and(|home| self.root.join(&folder) == home);
+                if (!agent && name.as_encoded_bytes().eq_ignore_ascii_case(b".git"))
+                    || home_s
+                    || self.root.join(&path) == self.kept
+                    || self.skipped.contains(&path.as_path())
+                {
+                    continue;
+                }
+                let agent = agent || agent_folder(name);
+                if agent && login(name) {
+                    continue;
+                }
+                if kind == Kind::Folder {
+                    pending.push((path.clone(), agent));
+                }
+                if !agent {
+                    continue;
+                }
+                if let (Some(contents), Kind::File { len, .. }) =
+                    (self.contents.as_deref_mut(), &kind)
+                    && *len <= KEPT_MAX
+                    && let Ok(content) = read_file(opened.as_fd(), name)
+                {
+                    contents.insert(path.clone(), content);
+                }
+                self.entries.insert(path, kind);
+            }
+        }
+        true
+    }
+}
+
+/// The top an entry's agent folder is right in, when it is right in one: where the agent folder
+/// starts, less its last part.
+fn top_of(path: &Path) -> Option<PathBuf> {
+    let mut at = PathBuf::new();
+    for part in path.components() {
+        if agent_folder(part.as_os_str()) {
+            return Some(at);
+        }
+        at.push(part);
+    }
+    None
 }
 
 /// What the run's result says of the agent folders it changed, once put back.
@@ -503,13 +631,14 @@ pub fn said(restored: &Restored) -> Option<String> {
     if restored.unchecked {
         text.push_str(&format!(
             "{}the agent folders of this place could not all be checked: it holds more than \
-             {ENTRIES_MAX} entries, and past them a change there is neither seen nor put back, \
-             tell the user",
+             {} entries; those right in it and in its repositories were, a change in one further \
+             down is neither seen nor put back, tell the user",
             if text.is_empty() {
                 "\nflottille: refused: "
             } else {
                 "; "
-            }
+            },
+            entries_max()
         ));
     }
     if text.is_empty() {
@@ -553,7 +682,14 @@ pub struct Guard {
 impl Guards {
     /// Guards the agent folders of `root` while the run `run` goes on there. `kept`, where a
     /// put-back keeps what it removes, a folder per run.
-    pub async fn enter(&self, root: &Path, home: Option<&Path>, kept: &Path, run: &str) -> Guard {
+    pub async fn enter(
+        &self,
+        root: &Path,
+        tops: &[PathBuf],
+        home: Option<&Path>,
+        kept: &Path,
+        run: &str,
+    ) -> Guard {
         let root = real(root);
         let mut groups = self.groups.lock().await;
         let guard = Guard {
@@ -582,11 +718,13 @@ impl Guards {
             })
             .collect();
         let (home, kept, at) = (home.map(Path::to_owned), kept.to_owned(), root.clone());
+        let tops = tops.to_vec();
         let snapshot = tokio::task::spawn_blocking(move || {
             Arc::new(Snapshot::take_around(
                 &at,
                 home.as_deref(),
                 &kept,
+                &tops,
                 &taken_in,
             ))
         })
@@ -967,6 +1105,35 @@ mod tests {
         assert_eq!(restored.left, ["docs/.claude/settings.json"]);
     }
 
+    #[test]
+    fn a_place_past_the_bound_still_puts_back_its_top_agent_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        for n in 0..ENTRIES_MAX {
+            made(&root.join(format!("src/{n}.rs")), "\n");
+        }
+        made(&root.join(".codex/config.toml"), "\n");
+        made(&root.join("app/README.md"), "\n");
+        let snapshot = Snapshot::take_around(
+            &root,
+            None,
+            &dir.path().join("kept"),
+            &[root.join("app")],
+            &[],
+        );
+
+        made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
+        made(&root.join(".codex/hooks/start.sh"), "true\n");
+        made(&root.join("app/.CLAUDE/settings.json"), "{\"hooks\": {}}\n");
+        let restored = snapshot.restore("run");
+
+        assert!(!root.join(".claude").exists(), "{restored:?}");
+        assert!(!root.join("app/.CLAUDE").exists(), "{restored:?}");
+        assert!(!root.join(".codex/hooks").exists(), "{restored:?}");
+        assert!(root.join(".codex/config.toml").exists());
+        assert!(restored.unchecked);
+    }
+
     #[tokio::test]
     async fn nested_places_share_one_guard_and_do_not_put_back_a_planted_hook() {
         let dir = tempfile::tempdir().unwrap();
@@ -978,9 +1145,9 @@ mod tests {
 
         // The outer run starts first and plants; the inner one starts while it goes on.
         let guards = Guards::default();
-        let a = guards.enter(&outer, None, &kept, "a").await;
+        let a = guards.enter(&outer, &[], None, &kept, "a").await;
         made(&planted, "{\"hooks\": {}}\n");
-        let b = guards.enter(&inner, None, &kept, "b").await;
+        let b = guards.enter(&inner, &[], None, &kept, "b").await;
         assert_eq!(a.leave().await, None);
         assert!(planted.exists());
         let restored = b.leave().await.unwrap();
@@ -989,9 +1156,9 @@ mod tests {
 
         // The inner run starts first and plants; the outer one starts while it goes on.
         let guards = Guards::default();
-        let b = guards.enter(&inner, None, &kept, "b2").await;
+        let b = guards.enter(&inner, &[], None, &kept, "b2").await;
         made(&planted, "{\"hooks\": {}}\n");
-        let a = guards.enter(&outer, None, &kept, "a2").await;
+        let a = guards.enter(&outer, &[], None, &kept, "a2").await;
         assert_eq!(b.leave().await, None);
         assert!(planted.exists());
         a.leave().await.unwrap();
@@ -1006,7 +1173,8 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let guard = runtime.block_on(guards.enter(dir.path(), None, &dir.path().join("kept"), "r"));
+        let guard =
+            runtime.block_on(guards.enter(dir.path(), &[], None, &dir.path().join("kept"), "r"));
         drop(runtime);
         drop(guard);
     }
@@ -1020,9 +1188,9 @@ mod tests {
         let kept = dir.path().join("kept");
 
         // P starts and plants a hook; L starts while P goes on.
-        let planting = guards.enter(&root, None, &kept, "p").await;
+        let planting = guards.enter(&root, &[], None, &kept, "p").await;
         made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
-        let later = guards.enter(&root, None, &kept, "l").await;
+        let later = guards.enter(&root, &[], None, &kept, "l").await;
 
         // P ends first: L still goes on, nothing is put back yet.
         assert_eq!(planting.leave().await, None);
@@ -1037,7 +1205,7 @@ mod tests {
         );
 
         // A run that starts after takes a snapshot of its own.
-        let next = guards.enter(&root, None, &kept, "n").await;
+        let next = guards.enter(&root, &[], None, &kept, "n").await;
         made(&root.join(".codex/config.toml"), "\n");
         next.leave().await.unwrap();
         assert!(!root.join(".codex/config.toml").exists());

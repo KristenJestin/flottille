@@ -925,11 +925,16 @@ fn start(
 /// there it sees, and a line may write there without naming one (`agent_folders`).
 async fn guard(daemon: &Daemon, place: &Place, id: &str) -> Guard {
     let kept = daemon.paths.state.join("agent-folders");
+    let tops: Vec<std::path::PathBuf> = place
+        .repositories
+        .iter()
+        .map(|(_, folder)| folder.clone())
+        .collect();
     daemon
         .mcp
         .runs
         .guards
-        .enter(&place.root, place.home.as_deref(), &kept, id)
+        .enter(&place.root, &tops, place.home.as_deref(), &kept, id)
         .await
 }
 
