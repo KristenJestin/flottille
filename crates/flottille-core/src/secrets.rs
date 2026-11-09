@@ -370,22 +370,43 @@ fn login_fields(text: &str) -> Vec<LoginField> {
             let stop = closing(start);
             field.values.push((start, stop));
             if stop == len {
-                break;
-            }
-            field.end = stop + 1;
-            let shut: &[u8] = match *mark {
-                b"[-\"" => b"-]",
-                b"{+\"" => b"+}",
-                _ => break,
-            };
-            if cut(stop + 1, shut) {
                 field.end = coming;
                 break;
             }
-            if !bytes[stop + 1..].starts_with(shut) {
+            field.end = stop + 1;
+            // The rest of the value's word: a word diff's word runs to a whitespace (`"…",-]`).
+            let word = stop
+                + 1
+                + bytes[stop + 1..]
+                    .iter()
+                    .position(u8::is_ascii_whitespace)
+                    .unwrap_or(len - stop - 1);
+            let shut: &[u8] = match *mark {
+                b"[-\"" => b"-]",
+                b"{+\"" => b"+}",
+                // A porcelain word diff puts the old value on a line of its own after `-`, and
+                // the new one on the next, after `+`.
+                _ if next >= 2 && &bytes[next - 2..next] == b"\n-" => {
+                    if word == len || cut(word, b"\n+\"") {
+                        field.end = coming;
+                        break;
+                    }
+                    if !bytes[word..].starts_with(b"\n+\"") {
+                        break;
+                    }
+                    next = word + 2;
+                    marks = &[b"\""];
+                    continue;
+                }
+                _ => break,
+            };
+            let Some(shut_at) = (stop + 1..=word).find(|&at| bytes[at..].starts_with(shut)) else {
+                if word == len || cut(word, shut) {
+                    field.end = coming;
+                }
                 break;
-            }
-            field.end = stop + 3;
+            };
+            field.end = shut_at + 2;
             if *mark != b"[-\"" {
                 break;
             }
@@ -853,6 +874,26 @@ mod tests {
             masked.contains("\"accessToken\": [-\"[masked]\"-]{+\"[masked]\"+}"),
             "{masked}"
         );
+        for cut in 1..text.len() {
+            assert_eq!(streamed(text, &[cut], &BTreeMap::new()), masked, "{cut}");
+        }
+    }
+
+    #[test]
+    fn a_token_value_with_its_comma_is_masked_in_a_word_diff_and_a_porcelain_one() {
+        // A word diff's word runs to the next whitespace: the comma after a value is in it.
+        let text = "\"accessToken\": [-\"fake-old-0123456789\",-]{+\"fake-new-0123456789\",+}\n\
+            \"refreshToken\": [-\"fake-old-9876543210\"-]{+\"fake-new-9876543210\"},+}\n\
+            @@ -2 +2 @@\n \"id_token\": \n-\"fake-porcelain-old-0123\",\n+\"fake-porcelain-new-0123\",\n~\n\
+             \"note\": \n-\"old text\"\n+\"new text\"\n~\n";
+        let masked = mask(text, &BTreeMap::new());
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("\"accessToken\": [-\"[masked]\",-]{+\"[masked]\",+}"),
+            "{masked}"
+        );
+        assert!(masked.contains("-\"old text\"\n+\"new text\""), "{masked}");
         for cut in 1..text.len() {
             assert_eq!(streamed(text, &[cut], &BTreeMap::new()), masked, "{cut}");
         }
