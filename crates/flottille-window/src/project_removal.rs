@@ -4,6 +4,7 @@
 //! workspace with its state, removed or kept, and the choice to also remove those holding unsaved
 //! work. What the removal did is said in a toast.
 
+use crate::glyphs;
 use flottille_core::protocol::ShownWorkspace;
 use flottille_ui::{
     Confirm, Icon, LabelledLine, Skeleton, Switch, Toast, awaiting, caption, changing, enter,
@@ -340,7 +341,7 @@ impl Render for ProjectRemoval {
             .map(|(agent, title)| {
                 line(
                     format!("session-{agent}"),
-                    Icon::Agents,
+                    glyphs::AGENTS,
                     "Session",
                     title.clone(),
                 )

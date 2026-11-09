@@ -3,6 +3,7 @@
 //! edits and removes them in a form with a task's fields. The window writes nothing itself:
 //! every change, start and stop is the daemon's (`service.*`).
 
+use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -885,7 +886,7 @@ impl ServicesPage {
                 ElementId::Name(format!("service-stop-{name}").into()),
                 "Stop",
             )
-            .leading(Icon::Stop)
+            .leading(glyphs::STOP)
             .disabled(waiting)
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();

@@ -4,6 +4,7 @@
 //! lists the agents' commands, each opening its output, live, in the same panel. The window writes
 //! nothing itself: every change and every run is the daemon's (`task.*`, `run.*`).
 
+use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
 use std::time::Duration;
 
@@ -1740,7 +1741,7 @@ impl ProjectTasks {
                     ElementId::Name(format!("command-stop-{}", row.run).into()),
                     "Stop",
                 )
-                .leading(Icon::Stop)
+                .leading(glyphs::STOP)
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     page.update(cx, |tasks, cx| tasks.stop_command(&run, cx))

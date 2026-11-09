@@ -116,7 +116,12 @@ fn every_row_of_a_menu_starts_its_label_at_the_same_x(cx: &mut TestAppContext) {
                 |_, _| {},
             )
             .entry("bare", "Rename…", None, |_, _| {})
-            .entry("end", "End session…", Some(Icon::Stop), |_, _| {})
+            .entry(
+                "end",
+                "End it…",
+                Some(Icon::Filled("icons/solid.svg")),
+                |_, _| {},
+            )
             .danger("remove", "Remove…", |_, _| {})
     });
     let starts: Vec<_> = ["open", "bare", "end", "remove"]

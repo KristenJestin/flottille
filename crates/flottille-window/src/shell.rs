@@ -2,6 +2,7 @@
 //! showing the open page. It follows the daemon through the [`link`](crate::link) and draws
 //! again only the parts a change touches.
 
+use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -3200,8 +3201,8 @@ impl Render for BellList {
                 let leading = match self.marks.get(&item.key) {
                     Some(mark) => mark.clone().into_any_element(),
                     None => icon(match item.key.starts_with("ticket-") {
-                        true => Icon::Ticket,
-                        false => Icon::PullRequest,
+                        true => glyphs::TICKET,
+                        false => glyphs::PULL_REQUEST,
                     })
                     .size(px(14.))
                     .text_color(p.acc)

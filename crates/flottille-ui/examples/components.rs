@@ -127,7 +127,7 @@ impl Render for RunDetail {
                                     .child("Task dev · running for 4m 12s"),
                             ),
                     )
-                    .child(Button::secondary("drawer-stop", "Stop").leading(Icon::Stop))
+                    .child(Button::secondary("drawer-stop", "Stop").leading(Icon::Close))
                     .child(Button::icon("drawer-close", Icon::Close, "Close (Esc)")),
             )
             .child(
@@ -395,12 +395,12 @@ impl Components {
                                     mono("pantry  1 ahead · clean").into_any_element(),
                                 ))
                                 .child(line(
-                                    Icon::PullRequest,
+                                    Icon::Branch,
                                     "Pull request",
                                     mono("#17 merged").into_any_element(),
                                 ))
                                 .child(line(
-                                    Icon::Ticket,
+                                    Icon::Text,
                                     "Ticket",
                                     mono("#9 Help page for the pantry file").into_any_element(),
                                 )),

@@ -245,7 +245,10 @@ impl Render for Gallery {
                         Icon::OpenInEditor,
                         "Open the workspace in your editor",
                     ))
-                    .child(Button::icon("i-agents", Icon::Agents, "Agents").badge(Badge::alert()))
+                    .child(
+                        Button::icon("i-settings", Icon::Settings, "Settings")
+                            .badge(Badge::alert()),
+                    )
                     .child(Button::icon("i-menu", Icon::Menu, "Projects"))
                     .child(div().ml(px(8.)).child(flottille_ui::Tooltip::view(
                         "Open the workspace in your editor".into(),

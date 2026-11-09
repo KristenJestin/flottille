@@ -10,6 +10,7 @@
 //! never writes the project's file: a save asks the daemon (`project.set_settings`), which checks
 //! each forge against its remote and keeps the file's comments.
 
+use crate::glyphs;
 use std::collections::HashMap;
 
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
@@ -1746,7 +1747,7 @@ impl ProjectSettingsPage {
         let (needed, checking) = (self.tracker.is_some(), programs.is_checking());
         let block = program_block("tracker-program", programs.tracker(), &self.shell, cx);
         let row = ListRow::new("tracker-row", kind.label())
-            .leading(icon(Icon::Ticket).size(px(15.)).text_color(p.faint))
+            .leading(icon(glyphs::TICKET).size(px(15.)).text_color(p.faint))
             .detail(SharedString::from(detail))
             .below(div().mt(px(6.)).child(block))
             .on_click(cx.listener(|this, _, window, cx| this.open_tracker(window, cx)));

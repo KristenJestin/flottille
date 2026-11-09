@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Answer, Mcp, server_of};
-use flottille_ui::Icon;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::actions::{RunAct, RunAnswer};
@@ -308,7 +307,7 @@ fn the_rail_lists_a_running_command_with_its_line_who_started_it_and_its_last_li
     assert!(
         cx.update(|window, _| window
             .within(format!("command-stop-{run}"))
-            .try_find(Icon::Stop.glyph_id())
+            .try_find(flottille_window::glyphs::STOP.glyph_id())
             .is_some()),
         "the run row's Stop draws the filled square"
     );

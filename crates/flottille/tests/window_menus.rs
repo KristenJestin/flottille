@@ -184,7 +184,7 @@ fn the_agents_menu_rows_have_distinct_icons(cx: &mut TestAppContext) {
     };
     assert_eq!(icon("rail-agent-reload-tools"), Some(Icon::Restart));
     assert_eq!(icon("rail-agent-compact"), Some(Icon::Fold));
-    assert_eq!(icon("rail-agent-end"), Some(Icon::Stop));
+    assert_eq!(icon("rail-agent-end"), Some(flottille_window::glyphs::STOP));
     let mut icons: Vec<_> = rows.iter().map(|(_, _, icon)| *icon).collect();
     assert!(icons.iter().all(Option::is_some), "an icon on every row");
     icons.sort_by_key(|icon| format!("{icon:?}"));

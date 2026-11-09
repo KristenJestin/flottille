@@ -7336,7 +7336,7 @@ fn stop_during_a_turn_cancels_it_and_the_next_message_is_taken(cx: &mut TestAppC
         assert!(
             window
                 .within("reply-stop")
-                .try_find(Icon::Stop.glyph_id())
+                .try_find(flottille_window::glyphs::STOP.glyph_id())
                 .is_some(),
             "the composer's Stop draws the filled square"
         )

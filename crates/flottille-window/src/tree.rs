@@ -3,6 +3,7 @@
 //! request). Every row is its own view, so one session changing redraws its row and nothing else;
 //! a folded project, and the "Ended" group, show the strongest mark of what they hold.
 
+use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
 use std::collections::HashSet;
 use std::f32::consts::FRAC_PI_2;
@@ -1087,7 +1088,7 @@ impl SessionRow {
                         Actions::End => menu.entry(
                             session_end_id(&id),
                             "End session…",
-                            Some(Icon::Stop),
+                            Some(glyphs::STOP),
                             move |_, cx| {
                                 let id = id.clone();
                                 shell.update(cx, |shell, cx| shell.ask_end_of(&id, cx)).ok();

@@ -6,6 +6,7 @@
 //! This is the data and the logic: what matches, in which order, which result is marked and what
 //! choosing it does. The look is `flottille_ui::Modal::search` over `ListRow`s.
 
+use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
 use std::collections::HashMap;
 
@@ -734,7 +735,7 @@ fn built(target: &Target, found: &Match, now: u64) -> Found {
         } => (
             title,
             format!("{project} · {place}"),
-            Icon::Agents,
+            glyphs::AGENTS,
             Some((*mark, ago(now, *active_at))),
             Then::Open(Selection::Session(id.clone())),
         ),

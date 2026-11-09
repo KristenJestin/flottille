@@ -7,6 +7,7 @@
 //! into the palette's, every other escape sequence dropped (`flottille_core::ansi`). The stored
 //! output is untouched.
 
+use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -986,7 +987,7 @@ impl CommandList {
         };
         let stop = (!ended).then(|| {
             let (page, run) = (self.page.clone(), run.clone());
-            Button::icon(id("stop"), Icon::Stop, "Stop").on_click(move |_, _, cx| {
+            Button::icon(id("stop"), glyphs::STOP, "Stop").on_click(move |_, _, cx| {
                 cx.stop_propagation();
                 page.stop(&run, cx);
             })
@@ -1819,7 +1820,7 @@ impl Render for CommandPanel {
             let stop = (running && !row.step).then(|| {
                 let (page, run) = (owner.clone(), row.run.clone());
                 Button::secondary(format!("{prefix}-stop"), "Stop")
-                    .leading(Icon::Stop)
+                    .leading(glyphs::STOP)
                     .disabled(waiting)
                     .on_click(move |_, _, cx| page.stop(&run, cx))
             });

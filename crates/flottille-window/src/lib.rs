@@ -11,6 +11,7 @@ pub mod composer;
 pub mod conventions;
 pub mod conversation;
 pub mod extensions;
+pub mod glyphs;
 pub mod history;
 pub mod instance;
 pub mod items;
@@ -53,7 +54,6 @@ pub mod vault_ask;
 pub mod waiting;
 pub mod workspaces_folder;
 
-use flottille_ui::Icons;
 use futures::StreamExt as _;
 use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 
@@ -65,33 +65,35 @@ pub use shell::Shell;
 /// starting it when nobody listens. The window comes to the front when `instance` is asked to
 /// raise it (`instance.rs`).
 pub fn run(connect: Connect, instance: Option<Instance>) {
-    gpui_kit::application().with_assets(Icons).run(move |cx| {
-        flottille_ui::init(cx);
-        let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            app_id: Some("flottille".into()),
-            icon: Some(icon()),
-            ..Default::default()
-        };
-        let window = gpui_kit::open_window(options, cx, |window, cx| {
-            // Closing the window ends the program (GPUI Fast differs from GPUI on
-            // `on_window_closed`).
-            window.on_window_should_close(cx, |_, cx| {
-                cx.quit();
-                true
+    gpui_kit::application()
+        .with_assets(glyphs::Assets)
+        .run(move |cx| {
+            flottille_ui::init(cx);
+            let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                app_id: Some("flottille".into()),
+                icon: Some(icon()),
+                ..Default::default()
+            };
+            let window = gpui_kit::open_window(options, cx, |window, cx| {
+                // Closing the window ends the program (GPUI Fast differs from GPUI on
+                // `on_window_closed`).
+                window.on_window_should_close(cx, |_, cx| {
+                    cx.quit();
+                    true
+                });
+                frame_counter(window, cx);
+                if let Some(instance) = instance {
+                    raise_on_request(instance, window, cx);
+                }
+                cx.new(|cx| Shell::new(connect, window, cx))
             });
-            frame_counter(window, cx);
-            if let Some(instance) = instance {
-                raise_on_request(instance, window, cx);
+            if let Err(error) = window {
+                eprintln!("flottille: the window cannot open: {error}");
+                cx.quit();
             }
-            cx.new(|cx| Shell::new(connect, window, cx))
         });
-        if let Err(error) = window {
-            eprintln!("flottille: the window cannot open: {error}");
-            cx.quit();
-        }
-    });
 }
 
 /// The window's icon, the 256 px PNG of the package, decoded once. GPUI uses it on X11 only; on

@@ -1,17 +1,12 @@
-//! One stroked icon family (Lucide), only the icons the window uses embedded, and the few glyphs
-//! of Flottille's own that Lucide has no stroked drawing for.
+//! One stroked icon family (Lucide), only the icons the components use embedded. An application
+//! that needs more declares them itself: another Lucide icon by its name ([`Icon::Lucide`]) or a
+//! glyph of its own ([`Icon::Asset`], [`Icon::Filled`]), and serves their files from the assets it
+//! registers (compose [`Icons`] with them).
 
 use std::borrow::Cow;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{AssetSource, ElementId, Result, SharedString, Styled, Svg, px, svg};
-
-/// The stop action: a small filled square, not Lucide's square in a circle, which blurs into a
-/// muddy ring when it is drawn at 14 px.
-const STOP: (&str, &[u8]) = (
-    "icons/flottille-stop.svg",
-    include_bytes!("../assets/icons/stop.svg"),
-);
 
 gpui_kit::assets::icon_assets!(
     Lucide,
@@ -24,7 +19,6 @@ gpui_kit::assets::icon_assets!(
         Search,
         Bell,
         ExternalLink,
-        Network,
         Menu,
         ArrowUp,
         ArrowDown,
@@ -40,8 +34,6 @@ gpui_kit::assets::icon_assets!(
         FileText,
         Slash,
         Play,
-        GitPullRequest,
-        Ticket,
         GripVertical,
         Copy,
         Clock,
@@ -64,38 +56,50 @@ gpui_kit::assets::icon_assets!(
     ]
 );
 
-/// The assets of the window: the Lucide icons it uses and Flottille's own glyphs.
+/// The assets of the components: the Lucide icons the base set of [`Icon`] uses. An application
+/// registers its own assets, which serve [`Icons`] first or last, with the files of the icons it
+/// adds.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Icons;
 
 impl AssetSource for Icons {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if path == STOP.0 {
-            return Ok(Some(Cow::Borrowed(STOP.1)));
-        }
         Lucide.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let mut paths = Lucide.list(path)?;
-        if STOP.0.starts_with(path) {
-            paths.push(STOP.0.into());
-        }
-        Ok(paths)
+        Lucide.list(path)
     }
 }
 
+/// An icon: one of the base set, or one the application declares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
+    /// Any other Lucide icon, by its file name (`"git-pull-request"`). The application embeds it
+    /// in its assets.
+    Lucide(&'static str),
+    /// A stroked glyph of the application's own: the path of an asset it registers.
+    Asset(&'static str),
+    /// A solid glyph of the application's own, which a button draws larger than a stroked one
+    /// (see [`Icon::scale`]): the path of an asset it registers.
+    Filled(&'static str),
+    /// A folder.
     Folder,
+    /// A branch of a repository.
     Branch,
+    /// A repository, a book of its history.
     Repository,
+    /// Points down; a row turns it as it folds, a picker shows it closed.
     Chevron,
+    /// Adds: a new item.
     Plus,
+    /// Searches.
     Search,
+    /// Notifications.
     Bell,
+    /// Opens something in another program.
     OpenInEditor,
-    Agents,
+    /// Opens a list of places.
     Menu,
     /// The composer's send button.
     Send,
@@ -105,8 +109,6 @@ pub enum Icon {
     Settings,
     /// A "⋯" button: it opens a small menu.
     More,
-    /// The composer's button that interrupts the turn that runs.
-    Stop,
     /// A command is running (the left tree, the rail's Runs).
     Terminal,
     /// A button that moves a row up (a chevron whose tip points up).
@@ -117,18 +119,14 @@ pub enum Icon {
     Check,
     /// Closes or dismisses: a toast, a drawer.
     Close,
-    /// A file of the project.
+    /// A file.
     File,
-    /// A text Flottille keeps.
+    /// A text document.
     Text,
-    /// A command of the project, typed `/name`.
+    /// A command, typed `/name`.
     Slash,
     /// Runs a task.
     Play,
-    /// A pull request.
-    PullRequest,
-    /// A ticket of the tracker.
-    Ticket,
     /// Drag to move.
     Grip,
     /// Copy to the clipboard.
@@ -157,13 +155,13 @@ pub enum Icon {
     Previous,
     /// Goes to the next one: a picture of a message.
     Next,
-    /// Opens the right panel: the session's details (its rail).
+    /// Opens the right panel: the details of what is shown.
     PanelRight,
     /// Folds a conversation into less: Compact.
     Fold,
     /// Cuts a link: a workspace's ticket.
     Unlink,
-    /// Cuts a session off its lead: Detach.
+    /// Cuts one thing off another: Detach.
     Detach,
     /// Removes: the destructive row of a menu.
     Trash,
@@ -172,7 +170,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Self; 46] = [
+    pub const ALL: [Self; 42] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -181,13 +179,11 @@ impl Icon {
         Self::Search,
         Self::Bell,
         Self::OpenInEditor,
-        Self::Agents,
         Self::Menu,
         Self::Send,
         Self::Choose,
         Self::Settings,
         Self::More,
-        Self::Stop,
         Self::Terminal,
         Self::ChevronUp,
         Self::Warning,
@@ -197,8 +193,6 @@ impl Icon {
         Self::Text,
         Self::Slash,
         Self::Play,
-        Self::PullRequest,
-        Self::Ticket,
         Self::Grip,
         Self::Copy,
         Self::Clock,
@@ -221,9 +215,12 @@ impl Icon {
         Self::Change,
     ];
 
+    /// The path of the icon's file in the assets.
     pub fn path(self) -> SharedString {
-        if self == Self::Stop {
-            return STOP.0.into();
+        match self {
+            Self::Lucide(name) => return format!("icons/{name}.svg").into(),
+            Self::Asset(path) | Self::Filled(path) => return path.into(),
+            _ => {}
         }
         match self {
             Self::Folder => IconName::Folder,
@@ -234,13 +231,11 @@ impl Icon {
             Self::Search => IconName::Search,
             Self::Bell => IconName::Bell,
             Self::OpenInEditor => IconName::ExternalLink,
-            Self::Agents => IconName::Network,
             Self::Menu => IconName::Menu,
             Self::Send => IconName::ArrowUp,
             Self::Choose => IconName::ChevronsUpDown,
             Self::Settings => IconName::Settings,
             Self::More => IconName::Ellipsis,
-            Self::Stop => unreachable!("Flottille's own glyph, returned above"),
             Self::Terminal => IconName::Terminal,
             Self::ChevronUp => IconName::ChevronUp,
             Self::Warning => IconName::TriangleAlert,
@@ -250,8 +245,6 @@ impl Icon {
             Self::Text => IconName::FileText,
             Self::Slash => IconName::Slash,
             Self::Play => IconName::Play,
-            Self::PullRequest => IconName::GitPullRequest,
-            Self::Ticket => IconName::Ticket,
             Self::Grip => IconName::GripVertical,
             Self::Copy => IconName::Copy,
             Self::Clock => IconName::Clock,
@@ -272,16 +265,23 @@ impl Icon {
             Self::Detach => IconName::Unplug,
             Self::Trash => IconName::Trash,
             Self::Change => IconName::Replace,
+            Self::Lucide(_) | Self::Asset(_) | Self::Filled(_) => {
+                unreachable!("an icon of the application, returned above")
+            }
         }
         .path()
     }
 }
 
 impl Icon {
-    /// The factor by which a button draws this glyph larger than the others: a filled square
-    /// of 45 % of its box would otherwise look smaller than a stroked glyph of the same box.
+    /// The factor by which a button draws this glyph larger than the others: a small filled
+    /// square would otherwise look smaller than a stroked glyph of the same box.
     pub fn scale(self) -> f32 {
-        if self == Self::Stop { 1.4 } else { 1.0 }
+        if matches!(self, Self::Filled(_)) {
+            1.4
+        } else {
+            1.0
+        }
     }
 
     /// The id of the element that draws this glyph in a button, so a test finds it.
@@ -299,11 +299,6 @@ pub fn icon(icon: Icon) -> Svg {
 mod tests {
     use super::*;
 
-    fn text(icon: Icon) -> String {
-        let bytes = Icons.load(&icon.path()).unwrap().unwrap();
-        String::from_utf8(bytes.into_owned()).unwrap()
-    }
-
     #[test]
     fn every_icon_of_the_list_is_embedded() {
         for icon in Icon::ALL {
@@ -319,38 +314,24 @@ mod tests {
     }
 
     #[test]
-    fn stop_is_a_small_filled_rounded_square_of_flottille_s_own() {
-        let svg = text(Icon::Stop);
-        assert!(svg.contains("fill=\"currentColor\""), "{svg}");
-        assert!(!svg.contains("stroke"), "no outline: {svg}");
-        assert!(!svg.contains("<circle"), "no circle: {svg}");
-        assert!(svg.contains("viewBox=\"0 0 24 24\""));
-        let number = |name: &str| -> f32 {
-            let at = svg.find(&format!(" {name}=\"")).unwrap() + name.len() + 3;
-            svg[at..].split('"').next().unwrap().parse().unwrap()
-        };
-        let side = number("width");
-        assert!((side / 24.0 - 0.45).abs() <= 0.03, "about 45 %: {side}");
-        assert!(number("rx") > 0.0, "rounded corners");
-        assert!(
-            (number("x") + side / 2.0 - 12.0).abs() < 0.01
-                && (number("y") + side / 2.0 - 12.0).abs() < 0.01,
-            "centred"
-        );
+    fn an_icon_of_the_application_is_found_by_its_name_or_its_path() {
+        assert_eq!(Icon::Lucide("network").path(), "icons/network.svg");
+        assert_eq!(Icon::Asset("icons/mark.svg").path(), "icons/mark.svg");
+        assert_eq!(Icon::Filled("icons/solid.svg").path(), "icons/solid.svg");
     }
 
     #[test]
-    fn the_circled_stop_of_lucide_is_not_embedded_any_more() {
-        let listed = Icons.list("").unwrap();
-        assert!(!listed.iter().any(|path| path.contains("circle-stop")));
+    fn only_a_solid_glyph_is_drawn_larger() {
+        assert_eq!(Icon::Filled("icons/solid.svg").scale(), 1.4);
+        assert_eq!(Icon::Asset("icons/mark.svg").scale(), 1.0);
+        assert_eq!(Icon::Plus.scale(), 1.0);
     }
 
     #[test]
-    fn the_stop_action_and_the_ended_mark_are_told_apart() {
-        assert_ne!(Icon::Stop.path(), Icon::Stopped.path());
-        // A small filled square against a large outlined one.
-        assert!(!text(Icon::Stop).contains("stroke"));
-        assert!(text(Icon::Stopped).contains("stroke=\"currentColor\""));
-        assert!(text(Icon::Stopped).contains("fill=\"none\""));
+    fn the_ended_mark_is_a_stroked_outline() {
+        let bytes = Icons.load(&Icon::Stopped.path()).unwrap().unwrap();
+        let text = String::from_utf8(bytes.into_owned()).unwrap();
+        assert!(text.contains("stroke=\"currentColor\""));
+        assert!(text.contains("fill=\"none\""));
     }
 }

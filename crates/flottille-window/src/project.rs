@@ -5,6 +5,7 @@
 //! makes a new one), its pull requests and tickets, then the runs and the tasks. Each card is its
 //! own view: a session changing redraws its card, a letter typed in the composer redraws neither.
 
+use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
 use crate::steps::{StepRow, StepTone};
 use std::collections::HashMap;
@@ -829,7 +830,7 @@ impl PlaceCard {
             Menu::new(card_session_menu_id(&id), "Session actions", cx).entry(
                 card_session_end_id(&id),
                 "End session…",
-                Some(Icon::Stop),
+                Some(glyphs::STOP),
                 {
                     let id = id.clone();
                     move |_, cx| {
@@ -1064,7 +1065,7 @@ impl PlaceCard {
                         };
                         LabelledLine::new(
                             ElementId::Name(format!("pull-{name}-{label}").into()),
-                            Icon::PullRequest,
+                            glyphs::PULL_REQUEST,
                             "Pull request",
                             SharedString::from(pull.label()),
                         )
@@ -1090,7 +1091,7 @@ impl PlaceCard {
                 );
                 let waiting = LabelledLine::new(
                     ElementId::Name(format!("pull-skeleton-{name}-{label}").into()),
-                    Icon::PullRequest,
+                    glyphs::PULL_REQUEST,
                     "Pull request",
                     "Reading…",
                 )
@@ -1118,7 +1119,7 @@ impl PlaceCard {
                             .unwrap_or_default();
                         let mut line = LabelledLine::new(
                             ElementId::Name(format!("ticket-{name}").into()),
-                            Icon::Ticket,
+                            glyphs::TICKET,
                             "Ticket",
                             SharedString::from(format!("{} {title}", ticket.reference)),
                         )
@@ -1143,7 +1144,7 @@ impl PlaceCard {
                 );
                 let waiting = LabelledLine::new(
                     ElementId::Name(format!("ticket-skeleton-{name}").into()),
-                    Icon::Ticket,
+                    glyphs::TICKET,
                     "Ticket",
                     "Reading…",
                 )
@@ -1496,7 +1497,7 @@ impl Render for PlaceCard {
                         .flex()
                         .items_center()
                         .gap(space::XS)
-                        .child(icon(Icon::Agents).size(px(12.)))
+                        .child(icon(glyphs::AGENTS).size(px(12.)))
                         .child(SharedString::from(agents_label(n)))
                         .into_any_element(),
                 };
