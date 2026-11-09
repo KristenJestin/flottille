@@ -307,6 +307,16 @@ impl Bridge {
             .await;
     }
 
+    /// A failed prompt whose reason the provider named: its kind goes as `data.code`.
+    async fn fail_coded(&mut self, id: Value, message: String, code: Option<&str>) {
+        let mut error = json!({"code": INTERNAL, "message": message});
+        if let Some(code) = code {
+            error["data"] = json!({"code": code});
+        }
+        self.send(json!({"jsonrpc": "2.0", "id": id, "error": error}))
+            .await;
+    }
+
     async fn update(&mut self, update: Value) {
         let Some(claude) = &self.claude else { return };
         let session = claude.session.clone();
@@ -1018,14 +1028,16 @@ impl Bridge {
                 _ => message["subtype"].as_str().unwrap_or("error").to_owned(),
             };
             let error = turn.error.as_deref();
-            // Signed out: the agent cannot go on until the user signs in again.
-            if text.contains("Please run /login")
-                || matches!(
-                    error,
-                    Some("authentication_failed" | "oauth_org_not_allowed")
-                )
-            {
-                return self.fail(turn.id, (INTERNAL, text)).await;
+            // Signed out: the agent cannot go on until the user signs in again. Its kind goes
+            // with the failure, which the daemon reads rather than the text.
+            let signed_out = matches!(
+                error,
+                Some("authentication_failed" | "oauth_org_not_allowed")
+            );
+            if signed_out || text.contains("Please run /login") {
+                return self
+                    .fail_coded(turn.id, text, error.filter(|_| signed_out))
+                    .await;
             }
             // Any other error ends the turn, the session alive, as Claude Code's own adapter
             // ends it for a client that takes session failures.

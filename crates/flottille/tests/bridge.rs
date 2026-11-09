@@ -1074,6 +1074,27 @@ fn a_provider_error_ends_the_turn_with_a_failure_and_only_a_sign_in_error_fails_
 }
 
 #[test]
+fn a_sign_in_error_s_code_goes_with_the_failed_prompt() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [
+        {"when": "expired", "do": [], "error": "Something odd happened",
+            "error_kind": "authentication_failed"},
+        {"when": "signed", "do": [], "error": "Invalid API key · Please run /login"}
+    ]}));
+    let mut bridge = Bridge::start(&user);
+    let session = bridge.open(&user, &[]);
+
+    let (expired, _) = bridge.prompt(&session, "expired");
+    let (signed, _) = bridge.prompt(&session, "signed out");
+
+    let expired = expired.unwrap_err();
+    assert_eq!(expired["message"], "Something odd happened");
+    assert_eq!(expired["data"]["code"], "authentication_failed");
+    // Recognised by its words alone: no code to pass.
+    assert!(signed.unwrap_err()["data"].is_null());
+}
+
+#[test]
 fn a_line_of_claude_s_that_is_not_text_is_skipped() {
     let user = User::with_fake_claude();
     user.claude_script(

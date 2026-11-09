@@ -48,6 +48,8 @@
 //!   it opens.
 //! - `die_on_open`: exit with that code on `session/new`, `session/load` or `session/resume`: an
 //!   agent whose process dies before it takes a prompt.
+//! - `open_error`: answer `session/new`, `session/load` and `session/resume` with an error of that
+//!   message: an agent that cannot open a session at all.
 //! - `models`, `efforts`: the values of the `model` and `thought_level` options, the first one
 //!   current; no effort option without `efforts`.
 //! - `model_rows`: the name and the description a model's row carries, by value (`{"default":
@@ -69,7 +71,9 @@
 //!   answered `ok`. `stop` is the stop reason (`end_turn` by default). A turn with `"times": n`
 //!   is played n times at most, by every process of the folder together: after that it is skipped,
 //!   and the prompt plays the next turn that matches. `answer_usage` is the `usage` its answer
-//!   carries, as OpenCode's does (none by default).
+//!   carries, as OpenCode's does (none by default). A turn with `"error": "message"` plays its
+//!   steps, then answers the prompt with an error of that message, as an adapter whose provider
+//!   failed the turn (Claude's bridge, signed out) does.
 //!
 //! The steps of a turn, in order:
 //!
@@ -255,6 +259,9 @@ impl Agent {
         if opens && let Some(code) = self.script["die_on_open"].as_i64() {
             std::process::exit(code as i32);
         }
+        if opens && let Some(message) = self.script["open_error"].as_str() {
+            return Err(message.to_owned());
+        }
         if self.script["stall"] == true
             && method.starts_with("session/")
             && method != "session/prompt"
@@ -385,6 +392,9 @@ impl Agent {
                     .map(|(_, turn)| turn.clone())
                     .unwrap_or_else(|| json!({"do": [{"say": "ok"}]}));
                 let stop = self.play(&session, &text, &turn, answered, cancelled);
+                if let Some(message) = turn["error"].as_str() {
+                    return Err(message.to_owned());
+                }
                 let mut answer = json!({"stopReason": stop});
                 if let Some(usage) = turn.get("answer_usage") {
                     answer["usage"] = usage.clone();

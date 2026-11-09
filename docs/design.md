@@ -1077,7 +1077,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
   (`agent.resume`), enabled once its process is gone, which brings the composer back; that bar is
-  where it says it ended, not its header, and its conversation says it ended, then resumed. Selecting a child shows its
+  where it says it ended, not its header, and its conversation says it ended, then resumed. A
+  failed root whose session is known shows Resume too. A turn that failed for a reason that
+  leaves the session usable (an expired login, `docs/agents.md`, "A failed turn") ends nothing:
+  the composer stays and the state line above its field says it once (`Claude's login expired:
+  sign in again (run claude and /login), then send your message again`), fading in, and out once
+  a turn runs again. Selecting a child shows its
   conversation read-only;
 - the runs of the agents (`docs/tools.md`, "Tasks and runs"): the rail's **Runs** section lists
   the **task** runs of the agent shown (the root by default, the child once the user opens it from
