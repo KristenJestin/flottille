@@ -469,7 +469,11 @@ async fn drive(
                     Err(error) => {
                         return match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
                             Ok(Ok(status)) => Ok(Exit::Died(status)),
-                            _ => match crate::turn_failures::recognise(provider.name, &error.message) {
+                            _ => match crate::turn_failures::recognise(
+                                provider.name,
+                                error.data.as_ref().and_then(|data| data["code"].as_str()),
+                                &error.message,
+                            ) {
                                 Some(said) => {
                                     turns.running = false;
                                     events.turn_ended("failed", Value::Null, Vec::new());

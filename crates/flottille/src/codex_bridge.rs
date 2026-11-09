@@ -690,8 +690,14 @@ impl Bridge {
                     .to_owned();
                 let info = &error["codexErrorInfo"];
                 // Signed out: the agent cannot go on until the user signs in again.
+                // Tagged: the daemon reads the code, never the text.
                 if info == "unauthorized" {
-                    return self.fail(turn.id, (INTERNAL, text)).await;
+                    return self
+                        .send(
+                            json!({"jsonrpc": "2.0", "id": turn.id, "error": {"code": INTERNAL,
+                            "message": text, "data": {"code": "unauthorized"}}}),
+                        )
+                        .await;
                 }
                 let limit = info == "usageLimitExceeded" || info == "rateLimitExceeded";
                 let category = if limit { "limit" } else { "service" };
