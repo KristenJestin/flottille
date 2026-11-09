@@ -350,8 +350,11 @@ As built (#338): the declaration's `launched` says which of its agents an agent 
 launched, 2 deep at most, in its parent's place and its tree's mode, taking the children cap's slot
 first (refused above it, never queued); the extension records the agent as its own before it is
 written. Such an agent is a `worker` with a worker's tools less `ask`, never an `agent_*` tool nor
-`approval_answer`, plus its extension's; its instructions are the role's and the extension's text,
-without the files of its place, the project's own rules or its skills. Its parent's `agent_*`
+`approval_answer`, plus its extension's; its instructions are its own role text
+(`roles/launched.md`: no `ask`, its held calls go to the user, how it ends is its extension's to
+say) and the extension's text, without the files of its place, the project's own rules or its
+skills. One its parent is not told of is refused the tree's `report`, which would reach no one: it
+reports through its extension's tool. Its parent's `agent_*`
 tools do not reach it when the parent is not itself the extension's, which is told nothing of it as
 of a child (`tree::tell_parent`, `agent_status`, the sweep's `children-status`), and the gate
 holds its calls for the user. An extension's tool call is answered by a future

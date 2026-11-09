@@ -3,14 +3,15 @@
 //! that runs its passes as its own children through `review`, then a verifier, and reports the
 //! findings once; Flottille checks them, keeps them and delivers those that matter.
 
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use flottille_core::Result;
 use flottille_core::agent::Agent;
 use flottille_core::protocol::Event;
 use flottille_core::secrets;
 use flottille_core::store::{Space, now_ms};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -94,7 +95,7 @@ pub const EXTENSION: Extension = Extension {
     migrations: &["
     -- A review of a session's change: one round. Its pilot, the passes it may run (JSON), the
     -- files its diff changes (JSON), where the diff starts in each repository (JSON
-    -- [{path, folder, base, from}]), and each repository's HEAD and `git status` before it (JSON
+    -- [{path, folder, base, from, rules_from}]), and each repository's HEAD and `git status` before it (JSON
     -- [{path, head, status}]), compared when it reports.
     CREATE TABLE ext_review_reviews (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -253,6 +254,20 @@ struct Diff {
     folder: String,
     base: String,
     from: String,
+    /// Where the first round's diff started, the base the rules are read from in every round:
+    /// a second round's `from` is a commit of the change. Empty in a review written before it
+    /// was kept, whose first round's `from` is that base.
+    #[serde(default)]
+    rules_from: String,
+}
+
+impl Diff {
+    fn rules_from(&self) -> &str {
+        match self.rules_from.as_str() {
+            "" => &self.from,
+            kept => kept,
+        }
+    }
 }
 
 /// A repository's state, compared after the review.
@@ -289,8 +304,12 @@ fn row(row: &rusqlite::Row) -> rusqlite::Result<Review> {
     })
 }
 
-fn reviews_where(space: &Space, filter: &str, value: &dyn rusqlite::ToSql) -> Result<Vec<Review>> {
-    let mut statement = space.tables().prepare(&format!(
+fn reviews_where(
+    tables: &Connection,
+    filter: &str,
+    value: &dyn rusqlite::ToSql,
+) -> Result<Vec<Review>> {
+    let mut statement = tables.prepare(&format!(
         "SELECT {COLUMNS} FROM ext_review_reviews WHERE {filter} ORDER BY id"
     ))?;
     let found = statement
@@ -316,8 +335,8 @@ struct Finding {
     settled_in: Option<u64>,
 }
 
-fn findings_of(space: &Space, session: &str) -> Result<Vec<Finding>> {
-    let mut statement = space.tables().prepare(
+fn findings_of(tables: &Connection, session: &str) -> Result<Vec<Finding>> {
+    let mut statement = tables.prepare(
         "SELECT key, review, severity, confidence, file, lines, concerns, quote, text, failing, \
          status, settled_in FROM ext_review_findings WHERE session = ?1 ORDER BY id",
     )?;
@@ -355,10 +374,14 @@ fn in_space<T>(
     })
 }
 
+/// What a closure reads of Review's tables, writing nothing.
+fn read<T>(daemon: &Daemon, work: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    daemon.read(|store| store.read_space(EXTENSION.name, work))
+}
+
 fn review_of_agent(daemon: &Daemon, agent: &str) -> Option<(Review, String, Option<String>)> {
-    in_space(daemon, |space| {
-        let found: Option<(u64, String, Option<String>)> = space
-            .tables()
+    read(daemon, |tables| {
+        let found: Option<(u64, String, Option<String>)> = tables
             .query_row(
                 "SELECT review, kind, pass FROM ext_review_agents WHERE agent = ?1",
                 [agent],
@@ -366,10 +389,10 @@ fn review_of_agent(daemon: &Daemon, agent: &str) -> Option<(Review, String, Opti
             )
             .optional()?;
         let Some((id, kind, pass)) = found else {
-            return Ok((None, None));
+            return Ok(None);
         };
-        let review = reviews_where(space, "id = ?1", &id)?.pop();
-        Ok((review.map(|review| (review, kind, pass)), None))
+        let review = reviews_where(tables, "id = ?1", &id)?.pop();
+        Ok(review.map(|review| (review, kind, pass)))
     })
     .ok()
     .flatten()
@@ -377,18 +400,14 @@ fn review_of_agent(daemon: &Daemon, agent: &str) -> Option<(Review, String, Opti
 
 /// Which of Review's agents the agent is: `pilot` or `pass`.
 fn kind_of(daemon: &Daemon, agent: &str) -> Option<&'static str> {
-    let kind: Option<String> = in_space(daemon, |space| {
-        Ok((
-            space
-                .tables()
-                .query_row(
-                    "SELECT kind FROM ext_review_agents WHERE agent = ?1",
-                    [agent],
-                    |row| row.get(0),
-                )
-                .optional()?,
-            None,
-        ))
+    let kind: Option<String> = read(daemon, |tables| {
+        Ok(tables
+            .query_row(
+                "SELECT kind FROM ext_review_agents WHERE agent = ?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .optional()?)
     })
     .ok()
     .flatten();
@@ -408,13 +427,11 @@ fn fact(daemon: &Daemon, agent: &str) -> Option<Value> {
     let (done, findings) = progress(daemon, &review);
     // The pilot's carries the review's findings, `info` included, for its line to show them.
     let shown: Vec<Finding> = match kind.as_str() {
-        "pilot" => in_space(daemon, |space| {
-            Ok((findings_of(space, &review.session)?, None))
-        })
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|finding| finding.review == review.id)
-        .collect(),
+        "pilot" => read(daemon, |tables| findings_of(tables, &review.session))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|finding| finding.review == review.id)
+            .collect(),
         _ => Vec::new(),
     };
     Some(json!({
@@ -432,15 +449,15 @@ fn fact(daemon: &Daemon, agent: &str) -> Option<Value> {
 
 /// The passes of the review that ended or reported, and the findings it delivered.
 fn progress(daemon: &Daemon, review: &Review) -> (usize, usize) {
-    let passes: Vec<String> = in_space(daemon, |space| {
-        let mut statement = space.tables().prepare(
+    let passes: Vec<String> = read(daemon, |tables| {
+        let mut statement = tables.prepare(
             "SELECT agent FROM ext_review_agents WHERE review = ?1 AND kind = 'pass' \
              AND pass != 'verifier'",
         )?;
         let agents = statement
             .query_map([review.id], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?;
-        Ok((agents, None))
+        Ok(agents)
     })
     .unwrap_or_default();
     let done = passes
@@ -453,14 +470,11 @@ fn progress(daemon: &Daemon, review: &Review) -> (usize, usize) {
                 .is_some_and(|agent| agent.state.is_final() || agent.reported_at.is_some())
         })
         .count();
-    let findings = in_space(daemon, |space| {
-        Ok((
-            findings_of(space, &review.session)?
-                .into_iter()
-                .filter(|finding| finding.review == review.id && delivered(finding))
-                .count(),
-            None,
-        ))
+    let findings = read(daemon, |tables| {
+        Ok(findings_of(tables, &review.session)?
+            .into_iter()
+            .filter(|finding| finding.review == review.id && delivered(finding))
+            .count())
     })
     .unwrap_or_default();
     (done, findings)
@@ -472,10 +486,68 @@ fn delivered(finding: &Finding) -> bool {
     finding.severity != "info" && ["confirmed", "plausible"].contains(&finding.confidence.as_str())
 }
 
+/// What a pilot's report and a pass's brief hold at most, in characters, each: they ride whole in a
+/// delivery, as a child's report does.
+const TEXT_CHARS: usize = 20_000;
+
 // Starting a review.
 
-/// Held while a review starts: two asked at once for one session start one.
-static STARTING: Mutex<()> = Mutex::new(());
+/// The sessions whose review is starting: two asked at once for one session start one.
+static STARTING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// A session's place in `STARTING`, given back when its start ends, whichever way.
+struct Starting(String);
+
+impl Starting {
+    fn take(session: &str) -> Option<Starting> {
+        let mut starting = STARTING.lock().unwrap_or_else(PoisonError::into_inner);
+        starting
+            .insert(session.to_owned())
+            .then(|| Starting(session.to_owned()))
+    }
+}
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        STARTING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
+/// A running review whose pilot is gone or ended, which no `agent.ended` failed (a launch that
+/// failed once the review was written, a daemon stopped meanwhile), is failed: it would hold the
+/// session's next review back for ever.
+fn fail_orphans(daemon: &Daemon, reviews: &[Review]) -> Result<()> {
+    for review in reviews.iter().filter(|review| review.state == "running") {
+        let pilot = match &review.pilot {
+            Some(pilot) => daemon.read(|store| store.agent(pilot))?,
+            None => None,
+        };
+        if pilot.is_some_and(|pilot| !pilot.state.is_final()) {
+            continue;
+        }
+        in_space(daemon, |space| {
+            let changed = space.tables().execute(
+                "UPDATE ext_review_reviews SET state = 'failed', why = ?2, ended_at = ?3 \
+                 WHERE id = ?1 AND state = 'running'",
+                params![review.id, "its pilot is gone", now_ms()],
+            )?;
+            if changed == 0 {
+                return Ok(((), None));
+            }
+            let event = space.append_event(
+                "review.failed",
+                json!({"review": review.id, "project": review.project,
+                    "session": review.session, "agent": review.pilot,
+                    "why": "its pilot is gone"}),
+            )?;
+            Ok(((), Some(event)))
+        })?;
+    }
+    Ok(())
+}
 
 /// The review a session asked for, or why not: said before any agent starts.
 async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Value, Failure> {
@@ -506,9 +578,19 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
                 format!("the workspace {workspace_name} of the session is gone"),
             )
         })?;
-    let earlier = in_space(daemon, |space| {
-        Ok((reviews_where(space, "session = ?1", &session.id)?, None))
-    })?;
+    let Some(_starting) = Starting::take(&session.id) else {
+        return Err(Failure::refused(format!(
+            "a review of session {} runs already: its findings come as a delivery",
+            session.id
+        )));
+    };
+    let of_session = |daemon: &Daemon| {
+        read(daemon, |tables| {
+            reviews_where(tables, "session = ?1", &session.id)
+        })
+    };
+    fail_orphans(daemon, &of_session(daemon)?)?;
+    let earlier = of_session(daemon)?;
     if earlier.iter().any(|review| review.state == "running") {
         return Err(Failure::refused(format!(
             "a review of session {} runs already: its findings come as a delivery",
@@ -523,14 +605,11 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
             session.id
         )));
     }
-    let open = in_space(daemon, |space| {
-        Ok((
-            findings_of(space, &session.id)?
-                .into_iter()
-                .filter(|finding| finding.status == "open" && delivered(finding))
-                .collect::<Vec<_>>(),
-            None,
-        ))
+    let open = read(daemon, |tables| {
+        Ok(findings_of(tables, &session.id)?
+            .into_iter()
+            .filter(|finding| finding.status == "open" && delivered(finding))
+            .collect::<Vec<_>>())
     })?;
     // Where the diff starts: the base, or what the first round read.
     let mut diffs = Vec::new();
@@ -538,17 +617,23 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
     let mut before = Vec::new();
     for tree in &workspace.repositories {
         let folder = workspace.folder_of(&tree.path);
-        let from = match done.first() {
+        let base = git_line(&folder, &["merge-base", &tree.base.reference, "HEAD"])
+            .await
+            .unwrap_or_else(|| tree.base.commit.clone());
+        let first = done.first();
+        let from = match first {
             Some(first) => first
                 .before
                 .iter()
                 .find(|snapshot| snapshot.path == tree.path)
-                .map(|snapshot| snapshot.head.clone()),
-            None => git_line(&folder, &["merge-base", &tree.base.reference, "HEAD"])
-                .await
-                .or(Some(tree.base.commit.clone())),
+                .map(|snapshot| snapshot.head.clone())
+                .unwrap_or_else(|| tree.base.commit.clone()),
+            None => base.clone(),
         };
-        let from = from.unwrap_or_else(|| tree.base.commit.clone());
+        // The rules are the base's, never a commit the session made before the first round.
+        let rules_from = first
+            .and_then(|first| first.diffs.iter().find(|diff| diff.path == tree.path))
+            .map_or(base, |diff| diff.rules_from().to_owned());
         let mut changed = git_lines(&folder, &["diff", "--name-only", &from]).await;
         changed.extend(git_lines(&folder, &["ls-files", "--others", "--exclude-standard"]).await);
         for file in changed {
@@ -565,6 +650,7 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
             folder: folder.display().to_string(),
             base: tree.base.branch.clone(),
             from,
+            rules_from,
         });
         before.push(snapshot(&tree.path, &folder).await);
     }
@@ -602,19 +688,6 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
         &open,
     );
     let slot = slot(daemon, &project, session, "pilot")?;
-    let _starting = STARTING.lock().unwrap();
-    let running = in_space(daemon, |space| {
-        Ok((
-            !reviews_where(space, "session = ?1 AND state = 'running'", &session.id)?.is_empty(),
-            None,
-        ))
-    })?;
-    if running {
-        return Err(Failure::refused(format!(
-            "a review of session {} runs already: its findings come as a delivery",
-            session.id
-        )));
-    }
     let mut id = 0;
     let pilot = super::launch(
         daemon,
@@ -661,7 +734,24 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
             Ok(())
         },
     )
-    .map_err(|why| Failure::refused(format!("the review cannot start: {why}")))?;
+    .map_err(|failure| {
+        // Written in `before`, the review whose pilot was never written goes with it.
+        if id != 0 {
+            let _ = in_space(daemon, |space| {
+                space
+                    .tables()
+                    .execute("DELETE FROM ext_review_agents WHERE review = ?1", [id])?;
+                space
+                    .tables()
+                    .execute("DELETE FROM ext_review_reviews WHERE id = ?1", [id])?;
+                Ok(((), None))
+            });
+        }
+        Failure::new(
+            failure.code,
+            format!("the review cannot start: {}", failure.message),
+        )
+    })?;
     Ok(
         json!({"review": id, "session": session.id, "pilot": pilot.id, "round": round,
         "passes": passes, "files": files}),
@@ -912,8 +1002,8 @@ fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
 }
 
 fn review_json(daemon: &Daemon, review: &Review, findings: &[Finding]) -> Value {
-    let agents: Vec<Value> = in_space(daemon, |space| {
-        let mut statement = space.tables().prepare(
+    let agents: Vec<Value> = read(daemon, |tables| {
+        let mut statement = tables.prepare(
             "SELECT agent, kind, pass FROM ext_review_agents WHERE review = ?1 ORDER BY rowid",
         )?;
         let agents = statement
@@ -924,7 +1014,7 @@ fn review_json(daemon: &Daemon, review: &Review, findings: &[Finding]) -> Value 
                 )
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok((agents, None))
+        Ok(agents)
     })
     .unwrap_or_default();
     let (done, delivered) = progress(daemon, review);
@@ -952,19 +1042,19 @@ fn review_json(daemon: &Daemon, review: &Review, findings: &[Finding]) -> Value 
 }
 
 fn list(daemon: &Daemon, asked: Listed) -> std::result::Result<Value, Failure> {
-    let reviews = in_space(daemon, |space| {
+    let reviews = read(daemon, |tables| {
         let reviews = match (&asked.session, asked.spec, &asked.project) {
-            (Some(session), _, _) => reviews_where(space, "session = ?1", session)?,
-            (None, Some(spec), _) => reviews_where(space, "spec = ?1", &spec)?,
-            (None, None, Some(project)) => reviews_where(space, "project = ?1", project)?,
-            (None, None, None) => reviews_where(space, "1 = ?1", &1)?,
+            (Some(session), _, _) => reviews_where(tables, "session = ?1", session)?,
+            (None, Some(spec), _) => reviews_where(tables, "spec = ?1", &spec)?,
+            (None, None, Some(project)) => reviews_where(tables, "project = ?1", project)?,
+            (None, None, None) => reviews_where(tables, "1 = ?1", &1)?,
         };
         let mut all = Vec::new();
         for review in reviews {
-            let findings = findings_of(space, &review.session)?;
+            let findings = findings_of(tables, &review.session)?;
             all.push((review, findings));
         }
-        Ok((all, None))
+        Ok(all)
     })?;
     // Off in a project, Review shows nothing there: its data stays for when it is on again.
     let reviews: Vec<(Review, Vec<Finding>)> = reviews
@@ -1062,8 +1152,9 @@ fn pull_opened(daemon: &Arc<Daemon>, data: &Value) {
     for session in sessions {
         let daemon = daemon.clone();
         tokio::spawn(async move {
+            // The children cap: a refusal of now, the one the session can ask again later.
             if let Err(failure) = start(&daemon, &session).await
-                && failure.message.contains("cap")
+                && failure.code == "unavailable"
             {
                 super::tell(
                     &daemon,
@@ -1237,6 +1328,13 @@ async fn run_pass(
         ));
     }
     let pass = pass.ok_or("run_pass needs pass, the one to run")?;
+    let length = brief.as_deref().map_or(0, |brief| brief.chars().count());
+    if length > TEXT_CHARS {
+        return Err(format!(
+            "the brief is {length} characters, over {TEXT_CHARS}: say what the pass should look \
+             at in fewer words"
+        ));
+    }
     if pass == "spec" && review.spec.is_none() {
         return Err("the session develops no spec: the spec pass is skipped".into());
     }
@@ -1246,19 +1344,15 @@ async fn run_pass(
             review.passes.join(", ")
         ));
     }
-    let ran: bool = in_space(daemon, |space| {
-        Ok((
-            space
-                .tables()
-                .query_row(
-                    "SELECT 1 FROM ext_review_agents WHERE review = ?1 AND pass = ?2",
-                    params![review.id, pass],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some(),
-            None,
-        ))
+    let ran: bool = read(daemon, |tables| {
+        Ok(tables
+            .query_row(
+                "SELECT 1 FROM ext_review_agents WHERE review = ?1 AND pass = ?2",
+                params![review.id, pass],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     })
     .map_err(|error| error.to_string())?;
     if ran {
@@ -1314,7 +1408,8 @@ async fn run_pass(
             })
             .map_err(|error| error.to_string())
         },
-    )?;
+    )
+    .map_err(|failure| failure.message)?;
     Ok(format!(
         "Started the {pass} pass, agent {}: its report comes to you as [flottille:child-report].",
         child.id
@@ -1322,15 +1417,20 @@ async fn run_pass(
 }
 
 /// The project's rules as the base branch has them, in each repository: `CLAUDE.md` else
-/// `AGENTS.md`, never the workspace's, which the change may have rewritten.
+/// `AGENTS.md`, never the workspace's, which the change may have rewritten. A symbolic link, as a
+/// `CLAUDE.md` pointing at `AGENTS.md` is, would give its target's name, not its rules: skipped.
 async fn base_rules(review: &Review) -> String {
     let mut text = String::new();
     for diff in &review.diffs {
         let folder = std::path::Path::new(&diff.folder);
         for name in ["CLAUDE.md", "AGENTS.md"] {
+            let entry = git_line(folder, &["ls-tree", diff.rules_from(), "--", name]).await;
+            if entry.is_none_or(|entry| entry.starts_with("120000 ")) {
+                continue;
+            }
             let shown = crate::git::output(
                 folder,
-                &["show", &format!("{}:{name}", diff.from)],
+                &["show", &format!("{}:{name}", diff.rules_from())],
                 Class::Read,
             )
             .await;
@@ -1366,8 +1466,33 @@ async fn report(
     }
     if review.state != "running" {
         return Err(format!(
-            "the review is {}: it reported already",
+            "the review is {}, no longer running: it takes no report",
             review.state
+        ));
+    }
+    let length = asked.summary.as_deref().map_or(0, |s| s.chars().count())
+        + asked
+            .findings
+            .iter()
+            .map(|finding| {
+                [
+                    Some(&finding.text),
+                    Some(&finding.concerns),
+                    finding.quote.as_ref(),
+                    finding.case.as_ref(),
+                    finding.file.as_ref(),
+                    finding.lines.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .map(|text| text.chars().count())
+                .sum::<usize>()
+            })
+            .sum::<usize>();
+    if length > TEXT_CHARS {
+        return Err(format!(
+            "the report is {length} characters, over {TEXT_CHARS}: say each finding in fewer \
+             words"
         ));
     }
     let spec = review
@@ -1377,10 +1502,8 @@ async fn report(
         checked(finding, &review, spec.as_ref())
             .map_err(|why| format!("finding {}: {why}", at + 1))?;
     }
-    let earlier = in_space(daemon, |space| {
-        Ok((findings_of(space, &review.session)?, None))
-    })
-    .map_err(|error| error.to_string())?;
+    let earlier = read(daemon, |tables| findings_of(tables, &review.session))
+        .map_err(|error| error.to_string())?;
     for previous in &asked.previous {
         if !["fixed", "open"].contains(&previous.status.as_str()) {
             return Err(format!(
@@ -1403,14 +1526,25 @@ async fn report(
     let off = super::active(daemon, &EXTENSION, &review.project).is_err();
     let env = std::env::vars_os().collect();
     let masked = |text: &str| secrets::mask(text, &env);
-    let kept: Vec<Finding> = in_space(daemon, |space| {
+    // Ended first, while still running: a review failed meanwhile, or a report sent at the same
+    // time, leaves it as it is.
+    let kept: Option<Vec<Finding>> = in_space(daemon, |space| {
         if off {
-            space.tables().execute(
+            let changed = space.tables().execute(
                 "UPDATE ext_review_reviews SET state = 'failed', why = ?2, ended_at = ?3 \
-                 WHERE id = ?1",
+                 WHERE id = ?1 AND state = 'running'",
                 params![review.id, "Review was turned off", now_ms()],
             )?;
-            return Ok((Vec::new(), None));
+            return Ok(((changed > 0).then(Vec::new), None));
+        }
+        let summary = asked.summary.as_deref().map(masked);
+        let changed_rows = space.tables().execute(
+            "UPDATE ext_review_reviews SET state = 'done', summary = ?2, changed = ?3, \
+             ended_at = ?4 WHERE id = ?1 AND state = 'running'",
+            params![review.id, summary, changed, now_ms()],
+        )?;
+        if changed_rows == 0 {
+            return Ok((None, None));
         }
         let mut next: u64 = space.tables().query_row(
             "SELECT count(*) FROM ext_review_findings WHERE session = ?1",
@@ -1472,12 +1606,6 @@ async fn report(
                 params![review.session, previous.id, previous.status, review.id],
             )?;
         }
-        let summary = asked.summary.as_deref().map(masked);
-        space.tables().execute(
-            "UPDATE ext_review_reviews SET state = 'done', summary = ?2, changed = ?3, \
-             ended_at = ?4 WHERE id = ?1",
-            params![review.id, summary, changed, now_ms()],
-        )?;
         let event = space.append_event(
             "review.reported",
             json!({"review": review.id, "project": review.project, "session": review.session,
@@ -1485,9 +1613,12 @@ async fn report(
                 "findings": kept.iter().filter(|f| delivered(f)).count(),
                 "shown": kept.len(), "changed": changed}),
         )?;
-        Ok((kept, Some(event)))
+        Ok((Some(kept), Some(event)))
     })
     .map_err(|error| error.to_string())?;
+    let Some(kept) = kept else {
+        return Err("the review is no longer running: it takes no report".into());
+    };
     // Its session ends with its turn, as a child's after `report`; its passes still running stop.
     let _ = super::reported(daemon, &pilot.id);
     for pass in crate::tree::descendants(daemon, &pilot.id) {

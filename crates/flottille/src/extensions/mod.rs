@@ -523,7 +523,8 @@ pub fn hidden(daemon: &Daemon, parent: &str, child: &str) -> bool {
 }
 
 /// Launches an agent of `extension` as a child of `parent` (`tree::launch_for_extension`), on the
-/// model slot given; `before` records it as the extension's.
+/// model slot given; `before` records it as the extension's. Refused at the children cap with
+/// `unavailable`, otherwise with `refused`.
 #[allow(clippy::too_many_arguments)]
 pub fn launch(
     daemon: &Arc<Daemon>,
@@ -535,7 +536,7 @@ pub fn launch(
     instructions: String,
     slot: crate::providers::Asked,
     before: impl FnOnce(&Agent) -> Result<(), String>,
-) -> Result<Agent, String> {
+) -> Result<Agent, Failure> {
     crate::tree::launch_for_extension(
         daemon,
         extension.name,

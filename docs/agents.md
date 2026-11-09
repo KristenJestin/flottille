@@ -916,7 +916,7 @@ is the only thing that wakes an agent.
   (`delivery.*`, `docs/events.md`).
 
 A child that ends a turn without reporting, with nothing to wait for (no request, no question
-held), is reminded once (`reminder`); after a second such turn its parent is told it went idle
+held, no child of its own that still runs), is reminded once (`reminder`); after a second such turn its parent is told it went idle
 (`child-idle`). A delivery other than a reminder starts the count again.
 
 A question waits for its answer from the call (`ask`) until the one asked writes to the agent: a
