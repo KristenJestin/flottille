@@ -180,6 +180,18 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = find(daemon, &asked.agent)?;
             refuse_child(daemon, &agent, "writes to it")?;
             refuse_final(&agent)?;
+            // `/<word>` of an active extension is Flottille's to run, never the agent's to read.
+            if asked.images.is_empty()
+                && let Some(running) =
+                    crate::extensions::typed(daemon, &agent, &asked.message).await
+            {
+                let after = daemon.read(Store::last_seq)?;
+                let done = running.await?;
+                return Ok(
+                    json!({"agent": agent.to_json(), "after": after, "delivery": null,
+                    "command": done}),
+                );
+            }
             if asked.images.is_empty() {
                 refuse_empty(&asked.message)?;
             }
@@ -717,6 +729,7 @@ async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             gate_mode,
             launched_by: None,
             led: false,
+            launched: None,
         },
     )
     .inspect_err(|_| deliveries::forget_images(&daemon.paths, &id))?;
@@ -762,6 +775,19 @@ pub struct New {
     pub launched_by: Option<String>,
     /// That agent leads it (`led`) rather than handing it over.
     pub led: bool,
+    /// An extension launches it (`docs/extensions.md`, "Agents an extension launches"): its
+    /// instructions and tools are the extension's, never the workspace's files.
+    pub launched: Option<Launched>,
+}
+
+/// What an extension says of an agent it launches.
+pub struct Launched {
+    /// The extension's name.
+    pub extension: &'static str,
+    /// Which of its agents it is (`pilot`, `pass`): the tools it gets.
+    pub kind: &'static str,
+    /// The extension's text, after the role's: what it is and what it may do.
+    pub instructions: String,
 }
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
@@ -849,27 +875,49 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         new.parent.is_none(),
         depth,
         crate::vault::listed_to(daemon, project),
+        new.launched
+            .as_ref()
+            .map(|launched| (launched.extension, launched.kind)),
     );
-    let files = roles::project_files(&project.folder, &repositories);
-    let skills: Vec<(String, String)> = project
-        .skills
-        .iter()
-        .map(|(name, skill)| (name.clone(), skill.description.clone()))
-        .collect();
-    let rules = crate::rules::effective(&daemon.paths, project);
-    let instructions = roles::instructions(
+    // An extension's agent reads the change, not the rules it brings: the files of its place and
+    // the project's own rules are left out, and the extension gives what it must read (a review's
+    // standards read from the base branch).
+    let (files, skills, mut rules) = match &new.launched {
+        Some(_) => (
+            Vec::new(),
+            Vec::new(),
+            crate::rules::effective(&daemon.paths, project),
+        ),
+        None => (
+            roles::project_files(&project.folder, &repositories),
+            project
+                .skills
+                .iter()
+                .map(|(name, skill)| (name.clone(), skill.description.clone()))
+                .collect(),
+            crate::rules::effective(&daemon.paths, project),
+        ),
+    };
+    if new.launched.is_some() {
+        rules.own.clear();
+    }
+    let mut instructions = roles::instructions(
         new.role,
         &roles::Session {
             project: &project.name,
             place: &place,
             folder: &folder,
             title: new.title.as_deref(),
-            at_depth_limit,
+            // What an extension's agent may launch, its text says.
+            at_depth_limit: at_depth_limit && new.launched.is_none(),
             skills: &skills,
             rules: &rules,
         },
         &files,
     );
+    if let Some(launched) = &new.launched {
+        instructions.push_str(&format!("\n\n{}", launched.instructions.trim_end()));
+    }
     let agent = Agent {
         id: match new.id {
             Some(id) => id,
@@ -1210,7 +1258,10 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
 
 /// The tools of an agent of `project`, a root or a child at `depth`, as its provider names them:
 /// what its role has in the project as it is now, whether the project sees an entry of the vault,
-/// and what the extensions active there give it.
+/// and what the extensions active there give it. An agent an extension launched (`launched`, the
+/// extension and the kind of its agent) has a worker's tools whatever its depth, without `ask`,
+/// whose answer would come from an agent that has no tool to give it, and the extension's: never
+/// an `agent_*` tool nor `approval_answer`.
 pub fn tools_of(
     paths: &Paths,
     provider: &Provider,
@@ -1218,16 +1269,21 @@ pub fn tools_of(
     root: bool,
     depth: u32,
     vault: bool,
+    launched: Option<(&str, &str)>,
 ) -> Vec<String> {
     let mut tools = provider.tools(
-        root,
-        depth >= DEPTH_LIMIT,
+        root && launched.is_none(),
+        depth >= DEPTH_LIMIT || launched.is_some(),
         project.repositories.iter().any(|r| r.forge.is_some()),
         project.tracker.is_some(),
         vault,
     );
+    if launched.is_some() {
+        let ask = format!("{}ask", provider.tool_prefix);
+        tools.retain(|tool| *tool != ask);
+    }
     tools.extend(
-        crate::extensions::tools_for(paths, project, root)
+        crate::extensions::tools_for(paths, project, root, launched)
             .into_iter()
             .map(|tool| format!("{}{tool}", provider.tool_prefix)),
     );

@@ -897,7 +897,9 @@ fn an_unknown_extension_in_a_project_file_is_reported_in_extension_list() {
         .collect();
     assert_eq!(
         errors,
-        ["projects/app.toml: extensions.notes: unknown extension: the extensions are specs"]
+        [
+            "projects/app.toml: extensions.notes: unknown extension: the extensions are specs, review"
+        ]
     );
     assert_eq!(in_project(specs(&listed), "app")["error"], Value::Null);
 }

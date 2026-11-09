@@ -101,7 +101,12 @@ pub fn named(agent: &Agent) -> String {
 /// One of the caller's children, or the refusal.
 fn child_of(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Agent, Outcome> {
     match daemon.read(|store| store.agent(id)) {
-        Ok(Some(agent)) if agent.parent.as_deref() == Some(caller.id.as_str()) => Ok(agent),
+        Ok(Some(agent))
+            if agent.parent.as_deref() == Some(caller.id.as_str())
+                && !crate::extensions::hidden(daemon, &caller.id, &agent.id) =>
+        {
+            Ok(agent)
+        }
         Ok(_) => Err(refused(format!(
             "refused: {id} is not one of your children: agent_status lists them"
         ))),
@@ -380,6 +385,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             gate_mode: Some(crate::judge::mode(daemon, &caller.id)),
             launched_by: session.then(|| caller.id.clone()),
             led,
+            launched: None,
         },
     )
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
@@ -465,6 +471,89 @@ impl Drop for Slot<'_> {
         }
     }
 }
+
+/// Launches an agent an extension asked for, as a child of `parent`, in its place and its tree's
+/// mode (`docs/extensions.md`, "Agents an extension launches"): only a root or an agent the same
+/// extension launched has one, 2 deep at most, and it counts in the project's children cap,
+/// refused above it, never queued. `before` runs once the agent is made and before it is written,
+/// so that the extension knows it as its own before its tools are ever read again; its refusal
+/// leaves no agent behind.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_for_extension(
+    daemon: &Arc<Daemon>,
+    extension: &'static str,
+    parent: &Agent,
+    kind: &'static str,
+    title: &str,
+    brief: &str,
+    instructions: String,
+    provider: providers::Asked,
+    before: impl FnOnce(&Agent) -> Result<(), String>,
+) -> Result<Agent, String> {
+    let launcher = crate::extensions::launched(daemon, &parent.id);
+    let allowed = match launcher {
+        None => parent.parent.is_none(),
+        Some((owner, _)) => owner.name == extension,
+    };
+    if !allowed {
+        return Err(format!(
+            "{} cannot have children: only a session, or an agent {extension} launched, does",
+            named(parent)
+        ));
+    }
+    if parent.depth + 1 > EXTENSION_DEPTH_LIMIT {
+        return Err(format!(
+            "{} is at the depth limit of the agents an extension launches \
+             ({EXTENSION_DEPTH_LIMIT}): it launches nothing",
+            named(parent)
+        ));
+    }
+    let project = projects::load_project(daemon, &parent.project).map_err(|f| f.message)?;
+    let _slot =
+        Slot::take(daemon, &project.name, project.max_children).map_err(
+            |refusal| match refusal {
+                Outcome::Refused(_) => format!(
+                    "the project {} runs its cap of {} children: wait for one of them to end",
+                    project.name, project.max_children
+                ),
+                Outcome::Done(text) | Outcome::Failed(text) | Outcome::Held(text) => text,
+            },
+        )?;
+    let role = roles::role(roles::WORKER).expect("the worker role");
+    let child = agents::made(
+        daemon,
+        &project,
+        New {
+            id: None,
+            workspace: parent.workspace.clone(),
+            preparing: false,
+            role,
+            parent: Some((parent.id.clone(), parent.depth)),
+            title: Some(title.to_owned()),
+            brief: brief.to_owned(),
+            provider: provider.provider,
+            model: provider.model,
+            effort: provider.effort,
+            gate_mode: Some(crate::judge::mode(daemon, &parent.id)),
+            launched_by: None,
+            led: false,
+            launched: Some(agents::Launched {
+                extension,
+                kind,
+                instructions,
+            }),
+        },
+    )
+    .map_err(|f| f.message)?;
+    before(&child)?;
+    agents::write_new(daemon, &child).map_err(|f| f.message)?;
+    self::brief(daemon, &child);
+    Ok(child)
+}
+
+/// The depth of an agent an extension launched, at most: the session (0), the extension's agent
+/// (1), its own children (2), which launch nothing.
+pub const EXTENSION_DEPTH_LIMIT: u32 = 2;
 
 /// The first message of an agent a launch made: a child's brief, or the first message of a session
 /// an agent or an extension started for the user.
@@ -887,7 +976,10 @@ fn states(daemon: &Daemon, caller: &Agent, id: Option<String>, full: bool) -> Do
         Some(id) => vec![child_of(daemon, caller, &id)?],
         None => daemon
             .read(|store| store.children(&caller.id))
-            .map_err(failed)?,
+            .map_err(failed)?
+            .into_iter()
+            .filter(|child| !crate::extensions::hidden(daemon, &caller.id, &child.id))
+            .collect(),
     };
     if children.is_empty() {
         return Ok(Outcome::Done("You have no children.".into()));
@@ -1946,6 +2038,11 @@ pub fn tell_parent(daemon: &Arc<Daemon>, child: &Agent, kind: &str, text: &str, 
     let Some(parent) = &child.parent else {
         return;
     };
+    // The agents an extension launched under a session are the extension's: it tells the
+    // session what they found, the session is never told of them as of its children.
+    if crate::extensions::hidden(daemon, parent, &child.id) {
+        return;
+    }
     deliveries::deliver(
         daemon,
         parent,

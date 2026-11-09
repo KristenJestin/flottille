@@ -4,6 +4,8 @@
 //! tables.
 
 mod command;
+mod guidance;
+mod review;
 mod specs;
 
 use std::collections::BTreeMap;
@@ -27,12 +29,12 @@ use crate::projects::{self, Failure};
 pub use command::run;
 
 /// Every extension, in the order of their settings' tabs.
-pub const ALL: &[&Extension] = &[&specs::EXTENSION];
+pub const ALL: &[&Extension] = &[&specs::EXTENSION, &review::EXTENSION];
 
 /// The command lines of the extensions, beside the frame's own `extension`.
 #[derive(Subcommand)]
 pub enum Command {
-    /// Turn a part of Flottille on or off, for all projects or one: specs
+    /// Turn a part of Flottille on or off, for all projects or one: specs, review
     Extension {
         #[command(subcommand)]
         action: command::ExtensionAction,
@@ -41,6 +43,13 @@ pub enum Command {
     Spec {
         #[command(subcommand)]
         action: specs::command::SpecAction,
+    },
+    /// Review a session's change with fresh eyes: what is wrong is delivered to it
+    Review {
+        /// The session, by its id
+        session: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -77,6 +86,27 @@ pub struct Extension {
     /// What it adds to what the core says of an agent (`agent.tree`'s `extensions.<name>`), or
     /// nothing.
     pub fact: fn(&Daemon, &str) -> Option<Value>,
+    /// Which of its agents the agent is, when it launched it (`launch`): the kind its tools are
+    /// given to (`To::Launched`).
+    pub launched: fn(&Daemon, &str) -> Option<&'static str>,
+    /// The Composer command trigger: each `/<word>` a session's composer runs as Flottille's,
+    /// never sent to the agent, with its handler, given the session.
+    pub commands: &'static [(&'static str, Typed)],
+    /// Its editable guidance, `<name>.md` beside the settings (`<name>.show`, `.set`, `.reset`).
+    pub guidance: Option<Guidance>,
+}
+
+/// What runs a composer command, given the session it was typed in.
+pub type Typed = fn(Arc<Daemon>, Agent) -> Answered;
+
+/// An extension's guidance (`docs/extensions.md`, "Guidance"): a text its agents follow, inside
+/// its fixed text, which the user edits and resets.
+pub struct Guidance {
+    pub default: &'static str,
+    /// Its length at most, in characters.
+    pub limit: usize,
+    /// How a refusal names it: "your review's guidance".
+    pub named: &'static str,
 }
 
 /// What hears an event of the core: its data, as `flottille watch` prints it.
@@ -96,14 +126,19 @@ pub struct Tool {
     /// included, before anything is asked or run. `Err` is the sentence that says why; `Ok` lets
     /// nothing through on its own, it leaves the call to the gate.
     pub gate: fn(&Daemon, &Grant, &Value) -> Result<(), String>,
-    pub call: fn(&Arc<Daemon>, &Grant, Value) -> Outcome,
+    pub call: fn(&Arc<Daemon>, &Grant, Value) -> Called,
 }
 
-/// Who a tool is given to: the agents an extension launches come with Review.
+/// What a call of an extension's tool answers, once its work is done.
+pub type Called = BoxFuture<'static, Outcome>;
+
+/// Who a tool is given to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum To {
     /// The roots of a project where the extension is active.
     Roots,
+    /// The agents of that kind the extension launched (`Extension::launched`).
+    Launched(&'static str),
 }
 
 /// What an extension touches: Global comes with the compaction.
@@ -134,6 +169,14 @@ pub struct Setting {
 pub enum Kind {
     /// A language tag (`en`, `fr-FR`); by default the user's, the locale of the daemon.
     Language,
+    /// Some of the values `of`, in their order; `default` when none is set.
+    Subset {
+        of: &'static [&'static str],
+        default: &'static [&'static str],
+    },
+    /// A model slot: `{provider, model?, effort?}`, each checked when it is used; none set leaves
+    /// the choice to the extension (`null`).
+    Model,
 }
 
 /// What an extension's method answers, once its work is done.
@@ -214,6 +257,38 @@ fn checked(kind: Kind, value: &Value) -> Result<Value, String> {
                 "must be a language tag such as en or fr-FR, not {value}"
             )),
         },
+        Kind::Subset { of, .. } => {
+            let given: Vec<&str> = value
+                .as_array()
+                .and_then(|values| values.iter().map(Value::as_str).collect())
+                .ok_or_else(|| format!("must be a list among {}, not {value}", of.join(", ")))?;
+            if let Some(unknown) = given.iter().find(|word| !of.contains(word)) {
+                return Err(format!("{unknown} is not one of {}", of.join(", ")));
+            }
+            // In the declaration's order, each once.
+            Ok(json!(
+                of.iter()
+                    .filter(|word| given.contains(word))
+                    .collect::<Vec<_>>()
+            ))
+        }
+        Kind::Model => {
+            let refuse = || {
+                format!(
+                    "must be a model slot such as {{provider = \"claude\", model = \"opus\", \
+                     effort = \"high\"}}, the model and the effort optional, not {value}"
+                )
+            };
+            let slot = value.as_object().ok_or_else(refuse)?;
+            if !slot["provider"].is_string()
+                || slot.iter().any(|(key, value)| {
+                    !["provider", "model", "effort"].contains(&key.as_str()) || !value.is_string()
+                })
+            {
+                return Err(refuse());
+            }
+            Ok(value.clone())
+        }
     }
 }
 
@@ -245,6 +320,16 @@ fn user_language() -> String {
 fn default_of(kind: Kind) -> Value {
     match kind {
         Kind::Language => json!(user_language()),
+        Kind::Subset { default, .. } => json!(default),
+        Kind::Model => Value::Null,
+    }
+}
+
+fn kind_word(kind: Kind) -> Value {
+    match kind {
+        Kind::Language => json!("language"),
+        Kind::Subset { of, .. } => json!({"subset": of}),
+        Kind::Model => json!("model"),
     }
 }
 
@@ -392,15 +477,105 @@ fn active_in(paths: &Paths, extension: &Extension, project: &Project) -> bool {
         && of_project(extension, project).is_ok_and(|own| own.enabled != Some(false))
 }
 
-/// The names of the tools the active extensions give an agent of the project, a root or not
+/// The names of the tools the active extensions give an agent of the project: a root, another
+/// agent, or one an extension launched (`launched`, the extension's name and its agent's kind)
 /// (`agents::tools_of`).
-pub fn tools_for(paths: &Paths, project: &Project, root: bool) -> Vec<&'static str> {
+pub fn tools_for(
+    paths: &Paths,
+    project: &Project,
+    root: bool,
+    launched: Option<(&str, &str)>,
+) -> Vec<&'static str> {
     ALL.iter()
         .filter(|extension| active_in(paths, extension, project))
-        .flat_map(|extension| extension.tools)
-        .filter(|tool| tool.given.iter().any(|(to, _)| *to == To::Roots && root))
+        .flat_map(|extension| {
+            extension.tools.iter().filter(move |tool| {
+                tool.given
+                    .iter()
+                    .any(|(to, _)| gets(*to, extension.name, root, launched))
+            })
+        })
         .map(|tool| tool.definition.name)
         .collect()
+}
+
+/// Whether a tool given `to` reaches the agent: a root that no extension launched, or an agent of
+/// that kind the extension launched.
+fn gets(to: To, extension: &str, root: bool, launched: Option<(&str, &str)>) -> bool {
+    match (to, launched) {
+        (To::Roots, None) => root,
+        (To::Launched(kind), Some((by, its))) => by == extension && kind == its,
+        _ => false,
+    }
+}
+
+/// The extension that launched the agent, and which of its agents it is: none for another agent.
+pub fn launched(daemon: &Daemon, agent: &str) -> Option<(&'static Extension, &'static str)> {
+    ALL.iter()
+        .find_map(|extension| Some((*extension, (extension.launched)(daemon, agent)?)))
+}
+
+/// Whether `child` is an agent an extension launched under `parent`, which no extension launched:
+/// the parent's `agent_*` tools do not reach it, and it is told nothing of it as of its children
+/// (`docs/extensions.md`, "Open questions", 1).
+pub fn hidden(daemon: &Daemon, parent: &str, child: &str) -> bool {
+    launched(daemon, child).is_some() && launched(daemon, parent).is_none()
+}
+
+/// Launches an agent of `extension` as a child of `parent` (`tree::launch_for_extension`), on the
+/// model slot given; `before` records it as the extension's.
+#[allow(clippy::too_many_arguments)]
+pub fn launch(
+    daemon: &Arc<Daemon>,
+    extension: &'static Extension,
+    parent: &Agent,
+    kind: &'static str,
+    title: &str,
+    brief: &str,
+    instructions: String,
+    slot: crate::providers::Asked,
+    before: impl FnOnce(&Agent) -> Result<(), String>,
+) -> Result<Agent, String> {
+    crate::tree::launch_for_extension(
+        daemon,
+        extension.name,
+        parent,
+        kind,
+        title,
+        brief,
+        instructions,
+        slot,
+        before,
+    )
+}
+
+/// The agent has reported what it was launched for: its session ends with its turn, as a child's
+/// does after `report`.
+pub fn reported(daemon: &Daemon, agent: &str) -> Result<(), Failure> {
+    daemon.write(|store| {
+        let (_, event) = store.change_agent(
+            agent,
+            flottille_core::store::AgentChange {
+                reported_at: Some(Some(flottille_core::store::now_ms())),
+                ..Default::default()
+            },
+            None,
+        )?;
+        Ok(((), event))
+    })?;
+    Ok(())
+}
+
+/// Runs `/<word>`, typed alone in a session's composer, when an extension active in the session's
+/// project declares it: never sent to the agent. `None` for any other message.
+pub async fn typed(daemon: &Arc<Daemon>, agent: &Agent, message: &str) -> Option<Answered> {
+    let word = message.trim().strip_prefix('/')?;
+    let project = projects::load_project(daemon, &agent.project).ok()?;
+    ALL.iter()
+        .filter(|extension| active_in(&daemon.paths, extension, &project))
+        .flat_map(|extension| extension.commands.iter())
+        .find(|(name, _)| *name == word)
+        .map(|(_, run)| run(daemon.clone(), agent.clone()))
 }
 
 fn tool(name: &str) -> Option<&'static Tool> {
@@ -426,12 +601,16 @@ pub fn gives(name: &str) -> bool {
 /// The gate's verdict on a call of a tool an extension gives, `None` for another tool.
 pub fn classify(daemon: &Daemon, grant: &Grant, name: &str, args: &Value) -> Option<Verdict> {
     let tool = tool(name)?;
+    let owner = ALL
+        .iter()
+        .find(|extension| extension.tools.iter().any(|its| std::ptr::eq(its, tool)))?;
     let root = daemon
         .read(|store| store.agent(&grant.agent))
         .ok()
         .flatten()
         .is_some_and(|agent| agent.parent.is_none());
-    Some(verdict(tool, root, args, || {
+    let launched = launched(daemon, &grant.agent).map(|(by, kind)| (by.name, kind));
+    Some(verdict(tool, owner.name, root, launched, args, || {
         (tool.gate)(daemon, grant, args)
     }))
 }
@@ -441,7 +620,9 @@ pub fn classify(daemon: &Daemon, grant: &Grant, name: &str, args: &Value) -> Opt
 /// harmless passes; any other is held as a call to judge.
 fn verdict(
     tool: &Tool,
+    extension: &str,
     root: bool,
+    launched: Option<(&str, &str)>,
     args: &Value,
     refusal: impl FnOnce() -> Result<(), String>,
 ) -> Verdict {
@@ -449,7 +630,7 @@ fn verdict(
     let actions: Vec<&str> = tool
         .given
         .iter()
-        .filter(|(to, _)| *to == To::Roots && root)
+        .filter(|(to, _)| gets(*to, extension, root, launched))
         .flat_map(|(_, actions)| actions.iter().copied())
         .collect();
     let action = args["action"].as_str().unwrap_or_default();
@@ -476,9 +657,9 @@ fn verdict(
 }
 
 /// Performs a call of a tool an extension gives, once the gate let it through.
-pub fn perform(daemon: &Arc<Daemon>, grant: &Grant, name: &str, args: Value) -> Outcome {
+pub async fn perform(daemon: &Arc<Daemon>, grant: &Grant, name: &str, args: Value) -> Outcome {
     match tool(name) {
-        Some(tool) => (tool.call)(daemon, grant, args),
+        Some(tool) => (tool.call)(daemon, grant, args).await,
         None => Outcome::Failed(format!("{name} is not served")),
     }
 }
@@ -515,6 +696,7 @@ pub fn start_session(
             gate_mode: None,
             launched_by: None,
             led: false,
+            launched: None,
         },
     )?;
     before(&agent)?;
@@ -653,6 +835,9 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
         "extension.set" => set(&daemon, serde_json::from_value(params)?),
         "extension.act" => act(daemon, params).await,
         method => match owner(method) {
+            Some(extension) if guidance::answers(extension, method) => {
+                guidance::call(&daemon, extension, method, params)
+            }
             Some(extension) => (extension.methods.call)(daemon, method.to_owned(), params).await,
             None => Err(Failure::new(
                 "unknown-method",
@@ -716,7 +901,7 @@ fn list(daemon: &Daemon) -> Value {
                         "key": setting.key,
                         "label": setting.label,
                         "hint": setting.hint,
-                        "kind": match setting.kind { Kind::Language => "language" },
+                        "kind": kind_word(setting.kind),
                         "per_project": setting.per_project,
                         "value": own.settings.get(setting.key).cloned()
                             .unwrap_or_else(|| default_of(setting.kind)),
@@ -754,6 +939,8 @@ fn list(daemon: &Daemon) -> Value {
                 "enabled": enabled,
                 "error": error,
                 "settings": settings,
+                "guidance": extension.guidance.is_some(),
+                "commands": extension.commands.iter().map(|(word, _)| word).collect::<Vec<_>>(),
                 "projects": projects,
             })
         })
@@ -910,7 +1097,7 @@ mod tests {
     fn an_unknown_extension_key_or_kind_in_extensions_toml_is_refused_naming_it() {
         assert_eq!(
             parse("[spexs]\nenabled = true\n").unwrap_err(),
-            "extensions.toml: spexs: unknown extension: the extensions are specs"
+            "extensions.toml: spexs: unknown extension: the extensions are specs, review"
         );
         assert_eq!(
             parse("[specs]\nenable = true\n").unwrap_err(),
@@ -977,9 +1164,32 @@ mod tests {
 
     // ── The core names no extension ─────────────────────────────────────────────────────────
 
+    /// The words of the core's own that an extension took for its name: a pull request's review is
+    /// the forge's (`forge::review`), core since before Review. For them the scan looks for the
+    /// extension's module path alone (`extensions::review`), not every identifier.
+    const CORE_WORDS: &[&str] = &["review"];
+
     /// The words an extension is named by in code: its name and its methods' prefix.
     fn words_of(extension: &Extension) -> Vec<&'static str> {
         vec![extension.name, extension.methods.prefix]
+            .into_iter()
+            .filter(|word| !CORE_WORDS.contains(word))
+            .collect()
+    }
+
+    /// The lines of code of `source` that name the extension module of one of `words`.
+    fn pathing(source: &str, words: &[&str]) -> Vec<(usize, String)> {
+        source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                let code = line.split("//").next().unwrap_or_default();
+                words
+                    .iter()
+                    .any(|word| code.contains(&format!("extensions::{word}")))
+            })
+            .map(|(at, line)| (at + 1, line.trim().to_owned()))
+            .collect()
     }
 
     /// The words of an identifier, lower case: `spec_list` and `SpecList` are `spec` and `list`.
@@ -1055,8 +1265,8 @@ mod tests {
         Ok(())
     }
 
-    fn not_called(_: &Arc<Daemon>, _: &Grant, _: Value) -> Outcome {
-        Outcome::Done(String::new())
+    fn not_called(_: &Arc<Daemon>, _: &Grant, _: Value) -> Called {
+        Box::pin(async { Outcome::Done(String::new()) })
     }
 
     /// A tool named `name`, whose actions `read` and `send` roots get, `read` declared harmless.
@@ -1084,7 +1294,7 @@ mod tests {
         let send = json!({"action": "send"});
         // Held as a call to judge: Ask holds it for the user, Auto asks the judge, Full lets it
         // through (`mcp::serve_call`), as any other call to judge.
-        match verdict(&tool, true, &send, || Ok(())) {
+        match verdict(&tool, "t", true, None, &send, || Ok(())) {
             Verdict::Ask(ask) => {
                 assert_eq!(ask.class, crate::gate::Class::Judge);
                 assert!(ask.reasons[0].contains("send"), "{:?}", ask.reasons);
@@ -1093,20 +1303,20 @@ mod tests {
         }
         let read = json!({"action": "read"});
         assert!(matches!(
-            verdict(&tool, true, &read, || Ok(())),
+            verdict(&tool, "t", true, None, &read, || Ok(())),
             Verdict::Allow
         ));
         // The extension's refusal is the gate's, before any mode is looked at: Full refuses it
         // too, and a harmless action as well.
         for args in [&send, &read] {
-            match verdict(&tool, true, args, || Err("it is locked".into())) {
+            match verdict(&tool, "t", true, None, args, || Err("it is locked".into())) {
                 Verdict::Deny(why) => assert_eq!(why, "refused: it is locked"),
                 other => panic!("not refused: {}", other.word()),
             }
         }
         // An action it is not given is refused, harmless or not.
         assert!(matches!(
-            verdict(&tool, false, &read, || Ok(())),
+            verdict(&tool, "t", false, None, &read, || Ok(())),
             Verdict::Deny(_)
         ));
     }
@@ -1145,6 +1355,13 @@ mod tests {
             .map(|(at, _)| at)
             .collect();
         assert_eq!(found, [1, 2, 3]);
+        let sample = "use crate::extensions::review;\n\
+                      let decision = forge::review::head_of(pull);";
+        let found: Vec<usize> = pathing(sample, CORE_WORDS)
+            .into_iter()
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(found, [1]);
     }
 
     /// The daemon's core modules name no extension: outside `extensions/`, nothing names one as a
@@ -1168,6 +1385,7 @@ mod tests {
                 let text = std::fs::read_to_string(file).unwrap();
                 naming(&text, &words)
                     .into_iter()
+                    .chain(pathing(&text, CORE_WORDS))
                     .map(|(at, line)| format!("{}:{at}: {line}", file.display()))
                     .collect::<Vec<_>>()
             })

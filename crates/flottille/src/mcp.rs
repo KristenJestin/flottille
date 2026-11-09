@@ -1521,6 +1521,8 @@ pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Opti
         agent.parent.is_none(),
         agent.depth,
         crate::vault::listed_to(daemon, project),
+        crate::extensions::launched(daemon, &agent.id)
+            .map(|(extension, kind)| (extension.name, kind)),
     );
     // The same tools in another order are the same list: a new order would only cost the
     // session its prompt cache.
@@ -3091,7 +3093,7 @@ async fn performed_once(
         "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
         "session_title" => crate::titles::session_title(daemon, grant, args),
         tool if crate::extensions::gives(tool) => {
-            crate::extensions::perform(daemon, grant, tool, args)
+            crate::extensions::perform(daemon, grant, tool, args).await
         }
         "vault" => crate::vault::tool(daemon, grant, args),
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,

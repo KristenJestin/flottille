@@ -203,7 +203,7 @@ $ flottille update --channel alpha --branch feat/specs
 ## Extensions and specs
 
 Parts of Flottille that can be turned off with Flottille still working (`docs/extensions.md`).
-Specs is the first: off until you turn it on.
+Specs and Review, each off until you turn it on.
 
 ### `flottille extension list [--json]`
 
@@ -369,6 +369,21 @@ part of the spec, past Draft too: a changed `C` or `D` keeps its identifier and 
 one takes the next identifier, each marked "decided during development" with its date. Refused, the
 spec is unchanged and the amendment kept. Refused for one already answered, and an accept once the
 spec is Done.
+
+### `flottille review <session> [--json]`
+
+Reviews the session's change with fresh eyes (`docs/extensions.md`, "Review"), as `/review` in its
+composer does: a pilot, a child of the session, reads the diff of its workspace from its base, runs
+the passes Review's settings enable (spec, only for a session that develops a spec; bugs;
+standards; security) and a verifier, and delivers the findings that matter to the session. Prints
+the round, the pilot and the passes; `--json` prints `review.start`'s answer. Refused, before any
+agent starts, while Review is off in the project, for a session in the project folder, while a
+review of the session runs, when its workspace has no change from its base, and after two rounds.
+
+```
+$ flottille review a1b2c3d4e5f6
+Started the review of session a1b2c3d4e5f6, round 1: its pilot is agent 0f1e2d3c4b5a, its passes bugs, standards. The findings are delivered to the session; `flottille agent show a1b2c3d4e5f6` follows it.
+```
 
 ## Projects
 
