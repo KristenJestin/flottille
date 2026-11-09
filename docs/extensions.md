@@ -656,13 +656,16 @@ the frame it uses.
 **What a connection is.** The user declares it once, in their own configuration: a name, one
 sentence on what it is for, and how to reach the server, either
 
-
 - a **command**, spawned by the daemon without a shell (a program and its arguments, as a task's
   line is), in its own process group, in a folder of its own (no project's place is its place: one
   server serves every workspace of every project), with the daemon's environment as a run has it
   (the forge tokens emptied, `tools.md`, "Tasks and runs") and the variables the declaration adds; or
 - a **local URL** (`http://127.0.0.1:…`, `localhost` or `[::1]`, Streamable HTTP, no redirect
-  followed), for a server the user runs themselves. Any other address is refused.
+  followed), for a server the user runs themselves; or
+- an **`https://` URL** (Streamable HTTP, the system's certificates, no redirect followed), for a
+  server elsewhere (decision 21). Its `headers` name vault entries, as `env` does.
+
+A plain `http://` URL to any other address is refused: what crosses a network is encrypted.
 
 ```toml
 # $XDG_CONFIG_HOME/flottille/extensions.toml
@@ -676,11 +679,15 @@ enabled = true                       # this connection's switch
 command = ["almanac", "mcp"]
 env     = { ALMANAC_TOKEN = { vault = "almanac-token" } }
 only    = { }                        # limits on arguments, below
+except  = ["client-site"]            # projects whose agents do not get it
 ```
 
-**On, it is given to every agent of every project**, and off to none: the project's file holds
-nothing of it, and no project has a switch for it. A connection for one project only is an open
-question ("Open questions").
+**On, it is given to every agent of every project**, and off to none, **except the projects its
+`except` names** (decision 22): an agent of such a project does not get the tool, and a call of it
+is refused as one of a tool it does not have. The project's file holds nothing of it, and no
+project has a switch for it: the list is the declaration's, the user's alone. Excepting a project
+does not ask for a new review: the server is the same. A connection for one project only is an
+open question ("Open questions").
 
 **The user's door only**, as `extension.set` is: the window, `flottille connection …` and the
 methods `connection.list`, `.add`, `.edit`, `.remove`, `.review` and `.accept`. No tool of an agent
@@ -691,7 +698,8 @@ so that no core tool, now or later, can take its name, and the gate's card says 
 tool is a third party's.
 
 **Secrets come from the vault** (`vault.md`). `env` (and, for a URL, `headers`) names an entry
-instead of holding a value: the daemon reads it when it starts the server and puts it where it goes.
+instead of holding a value: the daemon reads it when it starts the server and puts it where it goes
+(a variable of the server's environment, a header of every request to the URL).
 The entry must be one of every project (`vault.md`: no `project` on it), since the server is given
 to all; an entry tied to one project is refused. The agent sees neither the variable nor its
 value; the value is masked in everything the daemon stores and shows, a server's output and its
@@ -963,6 +971,16 @@ The maintainer's answers on Connections.
 20. **A server's `instructions` are pinned with its actions,** a change cuts the connection off, and
     they are given by `help`, never put in the agent's context by default.
 
+### 2026-11-09
+
+21. **A connection may reach an `https://` URL**, not only a command or a loopback URL, over
+    Streamable HTTP. Its `headers` name vault entries, as `env` does: read by the daemon, masked,
+    never shown to an agent. Only the user's own declaration holds one. A plain `http://` URL stays
+    loopback only.
+22. **A connection may leave projects out**: `except = ["<project>", …]`, by project name. An agent
+    of an excepted project does not get the tool, and its calls are refused as unknown. A
+    connection for one project only stays an open question.
+
 ## Open questions
 
 1. **Who reaches a review's agents.** Built as proposed below (#338), to confirm with the
@@ -982,7 +1000,8 @@ The maintainer's answers on Connections.
    memory server, given to every project) it may write elsewhere: a public repository, a ticket,
    another connection. The gate judges each call on its own, not where the data in it came from, so
    nothing today follows data from where it was read to where it is written. Not designed here.
-4. **A connection for one project only.** App-wide is the first version (decision 18). A server
+4. **A connection for one project only.** App-wide is the first version (decision 18), with
+   projects left out by `except` (decision 22). A server
    that should reach one project's agents, for instance a desktop-control server wanted in one
    project, would need a declaration or a switch per project, and a rule for the pin, the vault
    entries and the server's life when it is. Possible later, not decided.
