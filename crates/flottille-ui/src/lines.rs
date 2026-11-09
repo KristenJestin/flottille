@@ -18,7 +18,7 @@ use gpui_kit::{
 use crate::color::mix;
 use crate::cut::tipped_when_cut;
 use crate::icons::{Icon, icon};
-use crate::interact::{hoverable, tint};
+use crate::interact::{hoverable, selectable, tint};
 use crate::menu::Menu;
 use crate::motion::PANEL;
 use crate::theme::palette;
@@ -35,6 +35,9 @@ pub struct Chip {
     text: SharedString,
     faint: Option<SharedString>,
     on_click: Option<OnClick>,
+    /// An option the user picks (an answer to a question): whether it is chosen, its fill
+    /// moving over `PANEL` when it changes.
+    chosen: Option<bool>,
 }
 
 impl Chip {
@@ -45,6 +48,16 @@ impl Chip {
             text: text.into(),
             faint: None,
             on_click: None,
+            chosen: None,
+        }
+    }
+
+    /// An option the user picks, chosen or not: a tick when it is, by shape as well as colour.
+    pub fn choice(id: impl Into<ElementId>, text: impl Into<SharedString>, chosen: bool) -> Self {
+        let glyph = if chosen { Icon::Check } else { Icon::Plus };
+        Self {
+            chosen: Some(chosen),
+            ..Self::new(id, glyph, text)
         }
     }
 
@@ -88,6 +101,13 @@ impl RenderOnce for Chip {
             chip = chip
                 .cursor_pointer()
                 .on_click(move |event, window, cx| on_click(event, window, cx));
+        }
+        if let Some(chosen) = self.chosen {
+            return selectable(chip.aria_selected(chosen), chosen, move |d, t, on| {
+                d.bg(mix(p.hover.opacity(t), p.card2, on))
+                    .text_color(mix(mix(p.mute, p.text, t), p.text, on))
+                    .border_color(mix(mix(p.line, p.line2, t), p.focus_line, on))
+            });
         }
         hoverable(chip, move |d, t| {
             d.bg(p.hover.opacity(t))

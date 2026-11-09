@@ -70,6 +70,16 @@ pub fn of(data: &Value) -> Vec<Question> {
     }]
 }
 
+/// The id of a delivery that answers the ask of `seq` alone: what `agent.answer` sends.
+pub fn answer_id(seq: u64, unique: &str) -> String {
+    format!("answer-{seq}-{unique}")
+}
+
+/// The ask a delivery answers alone, when it is an answer from its card (`agent.answer`).
+pub fn answered_ask(id: &str) -> Option<u64> {
+    id.strip_prefix("answer-")?.split('-').next()?.parse().ok()
+}
+
 /// The answers of an `agent.answered` event's data that answered an ask.
 pub fn answers_of(data: &Value) -> Vec<Answer> {
     serde_json::from_value(data["answers"].clone()).unwrap_or_default()

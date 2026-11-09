@@ -440,13 +440,12 @@ pub enum Command {
         /// The composer's Compact before sending, while it shows: the agent's cache expired.
         compact: Option<bool>,
     },
-    /// The user's answer from the card of the question of `seq` the session's root asked: a
-    /// message to the root like any other, which answers every question open then (`seqs`).
+    /// The user's answers from the card of the ask of `seq` the session's root asked, one per
+    /// question (`agent.answer`): it answers that ask alone.
     AnswerQuestion {
         session: String,
         seq: u64,
-        seqs: Vec<u64>,
-        message: String,
+        answers: Vec<flottille_core::question::Answer>,
     },
     /// Takes back a message that waits for the session's root (`edit`: to change it and send it
     /// again). The daemon refuses one the root read first.
@@ -1060,11 +1059,10 @@ pub enum Outcome {
         ask: u64,
         refused: Option<String>,
     },
-    /// The answer from the card of `seq` to the questions `seqs` was taken, or refused with why.
+    /// The answers from the card of the ask `seq` were taken, or refused with why.
     QuestionAnswered {
         session: String,
         seq: u64,
-        seqs: Vec<u64>,
         refused: Option<String>,
     },
     /// A waiting message was taken back, with its text and pictures, or the daemon refused with
@@ -2199,13 +2197,12 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
         Command::AnswerQuestion {
             session,
             seq,
-            seqs,
-            message,
+            answers,
         } => {
             let refused = match ask_alone(
                 connect,
-                "agent.send",
-                json!({"agent": session, "message": message}),
+                "agent.answer",
+                json!({"agent": session, "question": seq, "answers": answers}),
                 bounds.quick,
             ) {
                 Ok(Ok(_)) => None,
@@ -2214,7 +2211,6 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             Outcome::QuestionAnswered {
                 session,
                 seq,
-                seqs,
                 refused,
             }
         }

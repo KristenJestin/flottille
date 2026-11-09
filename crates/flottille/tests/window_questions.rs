@@ -15,15 +15,19 @@ use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
-use flottille_window::session::{ANSWER_WAITS, ANSWERS_ALL, SessionPage};
+use flottille_window::question_card::{ANSWER_WAITS, QuestionCard};
+use flottille_window::session::SessionPage;
 use flottille_window::tree::session_id;
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
 const QUESTION: &str =
     "**POC charts**: blocked by the minimum of 3 points?\n\n- keep the minimum\n- drop it";
 const SECOND: &str = "Which colour for the axis?";
+const PUSH: &str = "Push `feat/42-export` and open the pull request?";
+const TITLE: &str = "Title of the pull request?";
+const REVIEWS: &str = "Who reviews it?";
 
 /// The agent asks, goes on with a call and a sentence, then works until the test lets it end.
 fn script() -> Value {
@@ -41,7 +45,17 @@ fn script() -> Value {
             {"say": "And one more."},
             ask(SECOND),
             {"hold": "release"}]},
-        {"when": "Drop it", "do": [{"say": "Dropped."}]}
+        {"when": "ship it", "do": [
+            {"mcp": {"tool": "ask", "arguments": {"questions": [
+                {"question": PUSH,
+                 "options": [{"label": "Yes"}, {"label": "Not yet", "description": "Keep it local"}]},
+                {"question": TITLE},
+                {"question": REVIEWS, "multiple": true,
+                 "options": [{"label": "Alice"}, {"label": "Bob"}, {"label": "Carol"}]}
+            ]}}},
+            {"say": "Asked."}]},
+        {"when": "Drop it", "do": [{"say": "Dropped."}]},
+        {"when": "Export orders", "do": [{"say": "Shipping."}]}
     ]})
 }
 
@@ -211,7 +225,7 @@ fn questions(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<(usi
 
 /// Whether the card of the question of row `at` shows, its text and its field.
 fn card_shows(at: usize, cx: &mut VisualTestContext) -> bool {
-    has(format!("row-{at}-question-text"), cx) && has(format!("row-{at}-answer-frame"), cx)
+    has(format!("row-{at}-question-text"), cx) && has(format!("row-{at}-answer-0-frame"), cx)
 }
 
 fn mark_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<AgentState> {
@@ -331,21 +345,8 @@ fn answering_the_card_delivers_the_answer_and_folds_it(cx: &mut TestAppContext) 
             .is_some_and(|(at, _)| card_shows(*at, cx))
     });
     let at = questions(&page, cx)[0].0;
-    let answer = page
-        .read_with(cx, |page, cx| {
-            page.conversation().read(cx).rows()[at]
-                .read(cx)
-                .answer()
-                .cloned()
-        })
-        .expect("the card's field");
-
     // Answered while the agent works: it waits for the end of the turn, and says so.
-    let field = answer.read_with(cx, |a, _| a.field().clone());
-    field.update_in(cx, |field, window, cx| {
-        field.set_value("Drop it.", window, cx)
-    });
-    answer.update(cx, |answer, cx| answer.send(cx));
+    let answer = answer(&page, at, "Drop it.", cx);
     until(&shell, cx, "the answer went", |cx| {
         answer.read_with(cx, |a, cx| a.is_sent(cx))
     });
@@ -356,7 +357,7 @@ fn answering_the_card_delivers_the_answer_and_folds_it(cx: &mut TestAppContext) 
     );
     assert!(has(format!("row-{at}-question-text"), cx), "still open");
 
-    // The turn ends, the agent takes the answer: the card folds away, the row and the bell
+    // The turn ends, the agent takes the answer: the card folds to it, the row and the bell
     // no longer say it.
     release(&user);
     until(&shell, cx, "the answer is taken", |cx| {
@@ -364,9 +365,10 @@ fn answering_the_card_delivers_the_answer_and_folds_it(cx: &mut TestAppContext) 
             .iter()
             .any(|b| matches!(b, Block::Text { text } if text == "Dropped."))
     });
-    until(&shell, cx, "the card folds away", |cx| {
+    until(&shell, cx, "the card folds to its answer", |cx| {
         settle(cx);
         !has(format!("row-{at}-question-text"), cx)
+            && label(format!("row-{at}-answered-0-answer"), cx).as_deref() == Some("Drop it.")
             && mark_of(&shell, &id, cx) != Some(AgentState::NeedsYou)
             && bell_of(&shell, &id, cx).is_empty()
     });
@@ -427,36 +429,59 @@ fn the_steps_line_of_ask_user_says_the_question(cx: &mut TestAppContext) {
     release(&user);
 }
 
-/// The card's field of the question of row `at`.
-fn answer_of(
+/// The card of the ask of row `at`.
+fn card_of(
     page: &Entity<SessionPage>,
     at: usize,
     cx: &mut VisualTestContext,
-) -> Entity<flottille_window::session::AnswerBox> {
+) -> Entity<QuestionCard> {
     page.read_with(cx, |page, cx| {
         page.conversation().read(cx).rows()[at]
             .read(cx)
             .answer()
             .cloned()
     })
-    .expect("the card's field")
+    .expect("the card's blocks")
 }
 
+/// Writes `text` in the field of question `n` of the card of row `at`.
+fn write(page: &Entity<SessionPage>, at: usize, n: usize, text: &str, cx: &mut VisualTestContext) {
+    let field = card_of(page, at, cx).read_with(cx, |card, _| card.field(n).clone());
+    field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
+    cx.run_until_parked();
+}
+
+/// Answers the single question of the card of row `at` with `text`.
 fn answer(
     page: &Entity<SessionPage>,
     at: usize,
     text: &str,
     cx: &mut VisualTestContext,
-) -> Entity<flottille_window::session::AnswerBox> {
-    let answer = answer_of(page, at, cx);
-    let field = answer.read_with(cx, |a, _| a.field().clone());
-    field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
-    answer.update(cx, |answer, cx| answer.send(cx));
-    answer
+) -> Entity<QuestionCard> {
+    write(page, at, 0, text, cx);
+    let card = card_of(page, at, cx);
+    card.update(cx, |card, cx| card.send(cx));
+    card
+}
+
+/// The text of every prompt the agent received.
+fn prompts(user: &User) -> Vec<String> {
+    user.received_requests("session/prompt")
+        .iter()
+        .map(|r| {
+            r["params"]["prompt"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect()
 }
 
 #[gpui_kit::test]
-fn answering_one_of_two_questions_answers_both_and_says_so(cx: &mut TestAppContext) {
+fn two_asks_waiting_are_two_cards_answered_apart(cx: &mut TestAppContext) {
     let user = user();
     let id = session(&user, "full", "ask twice");
     let (shell, page, cx) = open_session(&user, &id, cx);
@@ -466,32 +491,345 @@ fn answering_one_of_two_questions_answers_both_and_says_so(cx: &mut TestAppConte
     });
     settle(cx);
     let (first, second) = (questions(&page, cx)[0].0, questions(&page, cx)[1].0);
-    for at in [first, second] {
-        assert_eq!(
-            label(format!("row-{at}-answer-all"), cx).as_deref(),
-            Some(ANSWERS_ALL),
-            "each card says where its answer goes"
-        );
-    }
 
-    answer(&page, first, "Keep it, and blue.", cx);
+    answer(&page, first, "Drop it.", cx);
     release(&user);
-    until(&shell, cx, "both cards fold away", |cx| {
-        settle(cx);
-        !has(format!("row-{first}-question-text"), cx)
-            && !has(format!("row-{second}-question-text"), cx)
-    });
-    let prompt = user
-        .received_requests("session/prompt")
-        .iter()
-        .map(|r| r["params"]["prompt"].to_string())
-        .find(|p| p.contains("Keep it, and blue."))
+    until(
+        &shell,
+        cx,
+        "the first folds to its answer, the second still asks",
+        |cx| {
+            settle(cx);
+            !has(format!("row-{first}-question-text"), cx)
+                && has(format!("row-{first}-answered-0-answer"), cx)
+        },
+    );
+    assert!(
+        card_shows(second, cx),
+        "the second waits for its own answer"
+    );
+    assert_eq!(mark_of(&shell, &id, cx), Some(AgentState::NeedsYou));
+    let prompt = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains("Drop it."))
         .expect("the answer reached the agent");
     assert!(
-        prompt.contains("POC charts"),
-        "it quotes the first: {prompt}"
+        !prompt.contains(SECOND),
+        "it answers the first alone: {prompt}"
     );
-    assert!(prompt.contains(SECOND), "it quotes the second: {prompt}");
+
+    answer(&page, second, "Blue.", cx);
+    until(&shell, cx, "the second folds to its answer", |cx| {
+        settle(cx);
+        !has(format!("row-{second}-question-text"), cx)
+            && label(format!("row-{second}-answered-0-answer"), cx).as_deref() == Some("Blue.")
+    });
+}
+
+/// A session that asked the three questions of #637, its card shown: the row of its card.
+fn three_asked<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (
+    String,
+    Entity<Shell>,
+    Entity<SessionPage>,
+    usize,
+    &'a mut VisualTestContext,
+) {
+    let id = session(user, "full", "ship it");
+    let (shell, page, cx) = open_session(user, &id, cx);
+    until(&shell, cx, "the card", |cx| {
+        questions(&page, cx)
+            .first()
+            .is_some_and(|(at, _)| card_shows(*at, cx))
+    });
+    settle(cx);
+    let at = questions(&page, cx)[0].0;
+    (id, shell, page, at, cx)
+}
+
+fn click(id: String, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.click(id, cx));
+    cx.run_until_parked();
+}
+
+fn chosen(id: String, cx: &mut VisualTestContext) -> Option<bool> {
+    cx.update(|window, _| window.try_find(id).and_then(|found| found.selected()))
+}
+
+/// Answers the three questions: Yes with words, a title, Alice and Carol.
+fn answer_three(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
+    click(format!("row-{at}-question-0-option-0"), cx);
+    write(page, at, 0, "Squash it first.", cx);
+    write(page, at, 1, "Export orders as CSV", cx);
+    click(format!("row-{at}-question-2-option-0"), cx);
+    click(format!("row-{at}-question-2-option-2"), cx);
+    settle(cx);
+    click(format!("row-{at}-answer-send"), cx);
+}
+
+#[gpui_kit::test]
+fn the_question_card_names_the_session_that_asks(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "draw the charts");
+    user.call(
+        "agent.rename",
+        json!({"agent": id, "title": "Charts of the quarter"}),
+    )
+    .unwrap();
+    let (shell, page, cx) = open_session(&user, &id, cx);
+    until(&shell, cx, "the card, named after the session", |cx| {
+        questions(&page, cx).first().is_some_and(|(at, _)| {
+            card_shows(*at, cx)
+                && label(format!("row-{at}-question-title"), cx).as_deref()
+                    == Some("Charts of the quarter asks you")
+        })
+    });
+    let shown = cx.update(|window, _| {
+        window
+            .try_find_by_label("the conversation asks you")
+            .is_some()
+    });
+    assert!(!shown, "never the conversation");
+    release(&user);
+}
+
+#[gpui_kit::test]
+fn an_ask_with_three_questions_shows_three_blocks_each_answered_apart(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, page, at, cx) = three_asked(&user, cx);
+    assert_eq!(
+        questions(&page, cx)[0].1.lines().count(),
+        5,
+        "one ask, its text numbered"
+    );
+    for n in 0..3 {
+        assert!(has(format!("row-{at}-question-{n}"), cx), "block {n}");
+        assert!(
+            has(format!("row-{at}-answer-{n}-frame"), cx),
+            "its own field {n}"
+        );
+    }
+    assert!(has(format!("row-{at}-question-0-options"), cx));
+    assert!(
+        !has(format!("row-{at}-question-1-options"), cx),
+        "a question in words alone"
+    );
+    assert!(has(format!("row-{at}-question-2-option-2"), cx));
+
+    // One choice: the second replaces the first. Several: both stay.
+    click(format!("row-{at}-question-0-option-0"), cx);
+    click(format!("row-{at}-question-0-option-1"), cx);
+    click(format!("row-{at}-question-2-option-0"), cx);
+    click(format!("row-{at}-question-2-option-1"), cx);
+    settle(cx);
+    assert_eq!(
+        chosen(format!("row-{at}-question-0-option-0"), cx),
+        Some(false)
+    );
+    assert_eq!(
+        chosen(format!("row-{at}-question-0-option-1"), cx),
+        Some(true)
+    );
+    assert_eq!(
+        chosen(format!("row-{at}-question-2-option-0"), cx),
+        Some(true)
+    );
+    assert_eq!(
+        chosen(format!("row-{at}-question-2-option-1"), cx),
+        Some(true)
+    );
+    // Words written in one field stay in it.
+    write(&page, at, 1, "Export orders as CSV", cx);
+    let answers = card_of(&page, at, cx).read_with(cx, |card, cx| card.answers(cx));
+    assert_eq!(answers[0].text, "");
+    assert_eq!(answers[0].choices, ["Not yet"]);
+    assert_eq!(answers[1].text, "Export orders as CSV");
+    assert_eq!(answers[2].choices, ["Alice", "Bob"]);
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn an_option_chosen_and_words_written_go_back_together(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, _, at, cx) = three_asked(&user, cx);
+    let page = session_page(&shell, cx);
+    answer_three(&page, at, cx);
+    until(&shell, cx, "the agent took the answer", |_| {
+        prompts(&user)
+            .iter()
+            .any(|p| p.contains("Export orders as CSV"))
+    });
+    let prompt = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains("Export orders as CSV"))
+        .unwrap();
+    assert!(
+        prompt.contains(&format!("> {PUSH}\n\nYes\nSquash it first.")),
+        "the choice and the words together: {prompt}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_answer_message_quotes_each_question_and_its_answer(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, _, at, cx) = three_asked(&user, cx);
+    let page = session_page(&shell, cx);
+    answer_three(&page, at, cx);
+    until(&shell, cx, "the agent took the answer", |_| {
+        prompts(&user)
+            .iter()
+            .any(|p| p.contains("Export orders as CSV"))
+    });
+    let prompt = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains("Export orders as CSV"))
+        .unwrap();
+    assert!(
+        prompt.contains(&format!(
+            "> {PUSH}\n\nYes\nSquash it first.\n\n> {TITLE}\n\nExport orders as CSV\n\n\
+             > {REVIEWS}\n\nAlice, Carol"
+        )),
+        "{prompt}"
+    );
+}
+
+#[gpui_kit::test]
+fn answer_is_disabled_until_every_question_has_an_answer(cx: &mut TestAppContext) {
+    let user = user();
+    let (id, shell, page, at, cx) = three_asked(&user, cx);
+    let card = card_of(&page, at, cx);
+    click(format!("row-{at}-question-0-option-0"), cx);
+    write(&page, at, 1, "Export orders as CSV", cx);
+    assert!(
+        !card.read_with(cx, |card, cx| card.is_ready(cx)),
+        "the third has no answer"
+    );
+    click(format!("row-{at}-answer-send"), cx);
+    settle(cx);
+    assert!(
+        !card.read_with(cx, |card, cx| card.is_sent(cx)),
+        "nothing sent"
+    );
+    // Words alone answer a question of options too.
+    write(&page, at, 2, "Whoever is free", cx);
+    assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
+    click(format!("row-{at}-answer-send"), cx);
+    until(&shell, cx, "the answer went", |cx| {
+        card.read_with(cx, |card, cx| card.is_sent(cx))
+    });
+    let _ = id;
+}
+
+#[gpui_kit::test]
+fn enter_breaks_a_line_in_an_answer_and_ctrl_enter_sends(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "draw the charts");
+    let (shell, page, cx) = open_session(&user, &id, cx);
+    until(&shell, cx, "the card", |cx| {
+        questions(&page, cx)
+            .first()
+            .is_some_and(|(at, _)| card_shows(*at, cx))
+    });
+    settle(cx);
+    let at = questions(&page, cx)[0].0;
+    let card = card_of(&page, at, cx);
+    let field = card.read_with(cx, |card, _| card.field(0).clone());
+    field.update_in(cx, |field, window, cx| field.focus(window, cx));
+    cx.simulate_input("Drop it");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("and say why");
+    cx.run_until_parked();
+    assert_eq!(
+        field.read_with(cx, |field, _| field.value().to_string()),
+        "Drop it\nand say why",
+        "Enter breaks the line"
+    );
+    assert!(
+        !card.read_with(cx, |card, cx| card.is_sent(cx)),
+        "Enter sends nothing"
+    );
+    cx.simulate_keystrokes("ctrl-enter");
+    until(&shell, cx, "the answer went", |cx| {
+        card.read_with(cx, |card, cx| card.is_sent(cx))
+    });
+    release(&user);
+    until(&shell, cx, "the agent took it", |_| {
+        prompts(&user)
+            .iter()
+            .any(|p| p.contains("Drop it\nand say why"))
+    });
+}
+
+#[gpui_kit::test]
+fn a_single_question_ask_still_works_as_before(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "draw the charts");
+    let (shell, page, cx) = open_session(&user, &id, cx);
+    until(&shell, cx, "the card", |cx| {
+        questions(&page, cx)
+            .first()
+            .is_some_and(|(at, _)| card_shows(*at, cx))
+    });
+    settle(cx);
+    let at = questions(&page, cx)[0].0;
+    assert!(has(format!("row-{at}-question-0"), cx));
+    assert!(!has(format!("row-{at}-question-1"), cx), "one block");
+    assert!(
+        !has(format!("row-{at}-question-0-options"), cx),
+        "no options"
+    );
+    answer(&page, at, "Drop it.", cx);
+    release(&user);
+    until(&shell, cx, "the agent took it", |_| {
+        prompts(&user).iter().any(|p| p.contains("Drop it."))
+    });
+    let prompt = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains("Drop it."))
+        .unwrap();
+    assert!(
+        !prompt.contains("> "),
+        "the words alone, as before: {prompt}"
+    );
+}
+
+#[gpui_kit::test]
+fn an_answer_shows_the_users_words_under_its_question_not_the_quoted_text(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
+    answer_three(&page, at, cx);
+    until(&shell, cx, "the card folds to its answers", |cx| {
+        settle(cx);
+        !has(format!("row-{at}-question-text"), cx)
+            && has(format!("row-{at}-answered-2-answer"), cx)
+    });
+    assert_eq!(
+        label(format!("row-{at}-answered-0-question"), cx).as_deref(),
+        Some(PUSH)
+    );
+    assert_eq!(
+        label(format!("row-{at}-answered-0-answer"), cx).as_deref(),
+        Some("Yes\nSquash it first.")
+    );
+    assert_eq!(
+        label(format!("row-{at}-answered-1-answer"), cx).as_deref(),
+        Some("Export orders as CSV")
+    );
+    assert_eq!(
+        label(format!("row-{at}-answered-2-answer"), cx).as_deref(),
+        Some("Alice, Carol")
+    );
+    assert!(
+        label(format!("row-{at}-answered-title"), cx).is_some_and(|t| t.ends_with(" asked you"))
+    );
+    // No bubble of the user repeats the quoted text.
+    let quoted = blocks(&page, cx)
+        .into_iter()
+        .any(|b| matches!(b, Block::Message { text, .. } if text.contains("> ") || text.contains("Export orders")));
+    assert!(!quoted, "{:?}", blocks(&page, cx));
+    at_rest(cx);
 }
 
 #[gpui_kit::test]
@@ -537,7 +875,7 @@ fn an_answer_sent_stays_sent_when_the_page_is_opened_again(cx: &mut TestAppConte
         Some(ANSWER_WAITS)
     );
     assert!(
-        !has(format!("row-{at}-answer-frame"), cx),
+        !has(format!("row-{at}-answer-0-frame"), cx),
         "no field to answer again"
     );
     release(&user);

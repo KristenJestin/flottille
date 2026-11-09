@@ -2485,7 +2485,9 @@ pub fn unanswered_to(daemon: &Daemon, id: &str, to: &str) -> Result<Vec<Value>, 
                     || pilot
                         .is_some_and(|pilot| delivery.id.starts_with(&format!("session-{pilot}-")))
             })
-            .filter(|delivery| answers_ask(&delivery.id).is_none_or(|asked| asked == seq))
+            .filter(|delivery| {
+                question::answered_ask(&delivery.id).is_none_or(|asked| asked == seq)
+            })
             .map(|delivery| delivery.created_at)
             .max()
     };
@@ -2515,15 +2517,7 @@ pub fn unanswered_to(daemon: &Daemon, id: &str, to: &str) -> Result<Vec<Value>, 
 
 /// The id of a delivery that answers the ask of `seq` alone (`agent.answer`).
 pub fn answer_id(seq: u64) -> String {
-    format!(
-        "answer-{seq}-{}",
-        flottille_core::agent::new_id().unwrap_or_default()
-    )
-}
-
-/// The ask a delivery answers alone, when it is an answer from its card.
-fn answers_ask(id: &str) -> Option<u64> {
-    id.strip_prefix("answer-")?.split('-').next()?.parse().ok()
+    question::answer_id(seq, &flottille_core::agent::new_id().unwrap_or_default())
 }
 
 /// The root's questions no longer wait (`why`: its session was replaced or resumed): clients
