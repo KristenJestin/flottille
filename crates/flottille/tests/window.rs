@@ -12537,6 +12537,93 @@ fn the_branch_prefix_field_of_the_project_s_settings_accepts_an_empty_prefix(
 }
 
 #[gpui_kit::test]
+fn the_branch_prefix_and_format_are_in_one_section(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(1600.)));
+    open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+
+    // One section titled once, its two fields labelled once, no section of their own.
+    assert_eq!(
+        text_of("branches-section-atlas-title", cx),
+        Some("Branches".to_owned())
+    );
+    assert_eq!(
+        text_of("branch-prefix-field-atlas-label", cx),
+        Some("Branch prefix".to_owned())
+    );
+    assert_eq!(
+        text_of("branch-format-field-atlas-label", cx),
+        Some("Branch format".to_owned())
+    );
+    cx.update(|window, _| {
+        for gone in [
+            "branch-prefix-section-atlas-title",
+            "branch-format-section-atlas-title",
+        ] {
+            assert!(window.try_find(gone).is_none(), "{gone} is still drawn");
+        }
+        // In order: the section, the prefix, the format, and the setup only after them.
+        let y = |id| window.find(id).bounds().origin.y;
+        assert!(y("branches-section-atlas-title") < y("branch-prefix-field-atlas-label"));
+        assert!(y("branch-prefix-field-atlas-label") < y("branch-format-field-atlas-label"));
+        assert!(y("branch-format-field-atlas-label") < y("setup-title"));
+    });
+}
+
+#[gpui_kit::test]
+fn a_prefix_the_format_refuses_is_warned_under_the_prefix(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(1600.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+    let warning = "branch-prefix-field-atlas-warning";
+
+    // The prefix alone, or a prefix the format accepts, says nothing.
+    cx.update(|window, _| assert!(window.try_find(warning).is_none()));
+    let format = page.read_with(cx, |page, _| page.convention("branch_format").clone());
+    format.update_in(cx, |s, window, cx| {
+        s.type_text("^(feat|fix|chore)/[A-Z]+-[0-9]+-[a-z0-9-]+$", window, cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("branch-format-save-atlas", cx));
+    until(&shell, cx, "the daemon keeps the format", |cx| {
+        format.read_with(cx, |s, _| s.saved().is_some_and(|saved| !saved.is_empty()))
+    });
+    let field = page
+        .read_with(cx, |page, _| page.branch_prefix_field().cloned())
+        .expect("the field is made once the page is drawn");
+    field.update_in(cx, |field, window, cx| field.set_value("feat", window, cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find(warning).is_none()));
+
+    // A prefix the format refuses is warned about under the prefix, and still savable.
+    field.update_in(cx, |field, window, cx| {
+        field.set_value("feature", window, cx)
+    });
+    settle(cx);
+    assert_eq!(
+        text_of(warning, cx),
+        Some("New workspaces get feature/…, which the branch format refuses.".to_owned())
+    );
+    assert!(page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
+    cx.update(|window, _| {
+        let y = |id| window.find(id).bounds().origin.y;
+        assert!(y("branch-prefix-input-atlas") < y(warning));
+        assert!(y(warning) < y("branch-format-field-atlas-label"));
+    });
+
+    // A prefix the format accepts again takes the warning away.
+    field.update_in(cx, |field, window, cx| field.set_value("fix", window, cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find(warning).is_none()));
+}
+
+#[gpui_kit::test]
 fn the_branch_format_and_the_pull_request_template_are_saved_from_the_project_s_settings(
     cx: &mut TestAppContext,
 ) {

@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
-use flottille_core::project::cycle_sentence;
+use flottille_core::project::{branch_matches, cycle_sentence};
 use flottille_ui::{
     Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, Section,
     Select, SelectOption, Switch, Tabs, Toast, Type, changing, enter, follow_theme, hoverable,
@@ -482,6 +482,8 @@ impl ProjectSettingsPage {
             cx.observe(&commands, |_, _, cx| cx.notify()),
             cx.observe(&tasks, |_, _, cx| cx.notify()),
             cx.observe(&setup, |_, _, cx| cx.notify()),
+            // The prefix warns when the format refuses it.
+            cx.observe(&branch_format, |_, _, cx| cx.notify()),
         ];
         Self {
             shell,
@@ -1644,8 +1646,9 @@ impl ProjectSettingsPage {
         )
     }
 
-    /// The branch prefix of the project's workspaces: a field with its Save, empty allowed.
-    fn branch_prefix_section(
+    /// The branches of the project's workspaces: the prefix, a field with its Save, empty
+    /// allowed, then the format every branch must match.
+    fn branches_section(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1673,30 +1676,52 @@ impl ProjectSettingsPage {
         let save = Button::primary(id("save"), "Save")
             .disabled(!self.branch_prefix_savable(cx))
             .on_click(cx.listener(|this, _, _, cx| this.save_branch_prefix(cx)));
-        Section::new(
-            format!("branch-prefix-section-{}", self.name),
-            "Branch prefix",
-        )
-        .sentence(
-            "A new workspace is on the branch <prefix>/<name> unless one is given. Leave it \
-                 empty for the workspace's name alone, as a repository that names its branches \
-                 after tickets wants. Workspaces that exist keep their branch.",
-        )
-        .child(Field::new(
-            id("field"),
-            "Branch prefix",
-            div()
-                .flex()
-                .items_center()
-                .gap(space::SM)
-                .child(
+        let warning = self.prefix_refused(cx).map(|prefix| {
+            SharedString::from(format!(
+                "New workspaces get {prefix}/…, which the branch format refuses."
+            ))
+        });
+        Section::new(format!("branches-section-{}", self.name), "Branches")
+            .sentence(
+                "How a new workspace's branch is named: its prefix, then the format every branch \
+                 a workspace starts, renames to or pushes must match. A branch a workspace \
+                 resumed is never refused for its name.",
+            )
+            .child(
+                Field::new(
+                    id("field"),
+                    "Branch prefix",
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(field_frame(id("input"), &field, cx)),
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(field_frame(id("input"), &field, cx)),
+                        )
+                        .child(save),
                 )
-                .child(save),
-        ))
+                .hint(
+                    "A new workspace is on the branch <prefix>/<name> unless one is given. Leave \
+                     it empty for the workspace's name alone, as a repository that names its \
+                     branches after tickets wants. Workspaces that exist keep their branch.",
+                )
+                .warning(warning),
+            )
+            .child(self.branch_format.clone())
+    }
+
+    /// The prefix typed when the branch a new workspace gets by default, `<prefix>/` and a ticket's
+    /// name, is one the saved branch format refuses.
+    fn prefix_refused(&self, cx: &App) -> Option<String> {
+        let prefix = self.branch_prefix_typed(cx).trim().to_owned();
+        let format = self.branch_format.read(cx).saved().unwrap_or_default();
+        (!prefix.is_empty()
+            && !format.is_empty()
+            && !branch_matches(format, &format!("{prefix}/ABC-1-example")))
+        .then_some(prefix)
     }
 
     fn tracker_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2368,10 +2393,8 @@ impl Render for ProjectSettingsPage {
                 .flex_col()
                 .gap(space::XXL)
                 .child(self.workspaces.clone())
-                .child(self.branch_prefix_section(window, cx))
+                .child(self.branches_section(window, cx))
                 .child(self.setup.clone())
-                // Under the setup, which stays where its tab shows it first.
-                .child(self.branch_format.clone())
                 .into_any_element(),
             // What checks the agents' messages belongs with how they are told to work.
             div()

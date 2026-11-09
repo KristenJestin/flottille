@@ -663,9 +663,7 @@ impl Project {
     /// branch format. None without a format.
     pub fn branch_refusal(&self, branch: &str) -> Option<String> {
         let format = self.branch_format.as_deref()?;
-        // Checked when the file was read: a pattern that no longer compiles refuses nothing.
-        let pattern = regex::Regex::new(format).ok()?;
-        (!pattern.is_match(branch)).then(|| {
+        (!branch_matches(format, branch)).then(|| {
             format!("the branch {branch} does not match the project's branch format {format}")
         })
     }
@@ -1219,6 +1217,15 @@ pub fn check_branch_format(format: &str) -> Result<(), String> {
         let why = why.strip_prefix("error: ").unwrap_or(why);
         format!("{format} is not a regular expression ({why})")
     })
+}
+
+/// Whether `branch` matches the branch `format`. A pattern that is no regular expression (checked
+/// when the file was read) refuses nothing.
+pub fn branch_matches(format: &str, branch: &str) -> bool {
+    match regex::Regex::new(format) {
+        Ok(pattern) => pattern.is_match(branch),
+        Err(_) => true,
+    }
 }
 
 /// Why a message check cannot be run, none when it can: one line split without a shell, naming
