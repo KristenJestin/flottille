@@ -124,7 +124,7 @@ fn main() {
     let paths = Paths::from_env().expect("the XDG folders");
     let socket = paths.socket();
     gpui_kit::application().with_assets(Assets).run(move |cx| {
-        flottille_ui::init(cx);
+        flottille_window::init(cx);
         let bounds = Bounds::centered(None, size(px(dimensions.0), px(dimensions.1)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Maximized(bounds)),

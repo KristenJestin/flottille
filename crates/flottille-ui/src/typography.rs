@@ -25,7 +25,10 @@ const FONTS: [&[u8]; 6] = [
 pub(crate) fn register(cx: &mut App) {
     let fonts = FONTS.iter().map(|bytes| Cow::Borrowed(*bytes)).collect();
     if let Err(e) = cx.text_system().add_fonts(fonts) {
-        eprintln!("flottille: the bundled fonts could not be loaded: {e}");
+        crate::identity::log(
+            cx,
+            format_args!("the bundled fonts could not be loaded: {e}"),
+        );
     }
 }
 

@@ -57,6 +57,21 @@ pub mod workspaces_folder;
 use futures::StreamExt as _;
 use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 
+/// What the window tells the kit about itself: its name, and the palette of its own look.
+pub fn identity() -> flottille_ui::Identity {
+    flottille_ui::Identity::new("Flottille").palette(flottille_ui::Palette::own)
+}
+
+/// Initialises the kit for the window.
+pub fn init(cx: &mut gpui_kit::App) {
+    flottille_ui::init(identity(), cx);
+}
+
+/// [`init`] with the desktop described by `env` rather than read from the machine.
+pub fn init_with(env: flottille_ui::omarchy::Environment, cx: &mut gpui_kit::App) {
+    flottille_ui::init_with(identity(), env, cx);
+}
+
 pub use instance::Instance;
 pub use link::Connect;
 pub use shell::Shell;
@@ -68,7 +83,7 @@ pub fn run(connect: Connect, instance: Option<Instance>) {
     gpui_kit::application()
         .with_assets(glyphs::Assets)
         .run(move |cx| {
-            flottille_ui::init(cx);
+            init(cx);
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

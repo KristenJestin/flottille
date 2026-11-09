@@ -66,7 +66,7 @@ fn window_through<'a>(
     connect: Connect,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
-    cx.update(|cx| flottille_ui::init_with(env_of(user), cx));
+    cx.update(|cx| flottille_window::init_with(env_of(user), cx));
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1280.), px(1600.)));
     (shell, cx)
@@ -278,7 +278,7 @@ fn the_choice_survives_a_new_window_read_back_from_the_daemon(cx: &mut TestAppCo
     .unwrap();
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "the appearance is read", |cx| {
-        cx.update(|_, cx| omarchy::shown(cx)).source == omarchy::Source::Flottille
+        cx.update(|_, cx| omarchy::shown(cx)).source == omarchy::Source::Own
     });
     settle(cx);
     assert_eq!(cx.update(|_, cx| palette(cx)), Palette::light());

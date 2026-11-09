@@ -1525,7 +1525,7 @@ impl SettingsPage {
             [("omarchy", "Omarchy"), ("flottille", "Flottille")],
             match shown.source {
                 Source::Omarchy => 0,
-                Source::Flottille => 1,
+                Source::Own => 1,
             },
         )
         .disabled(!known)
@@ -1534,7 +1534,7 @@ impl SettingsPage {
             let source = if index == 0 {
                 Source::Omarchy
             } else {
-                Source::Flottille
+                Source::Own
             };
             this.update(cx, |this, cx| {
                 this.choose_appearance(Appearance { source, ..kept }, cx)
@@ -1561,7 +1561,7 @@ impl SettingsPage {
             this.update(cx, |this, cx| {
                 this.choose_appearance(
                     Appearance {
-                        source: Source::Flottille,
+                        source: Source::Own,
                         shade,
                     },
                     cx,
@@ -1623,7 +1623,7 @@ impl SettingsPage {
             .child(
                 presence(
                     "appearance-shade-block",
-                    shown.source == Source::Flottille,
+                    shown.source == Source::Own,
                     row(
                         "Shade",
                         "Flottille's own colours, light or dark.",

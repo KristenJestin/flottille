@@ -34,7 +34,7 @@ fn main() {
         }
     }
     gpui_kit::application().with_assets(Icons).run(move |cx| {
-        flottille_ui::init_with(env, cx);
+        flottille_ui::init_with(flottille_ui::Identity::new("Kit"), env, cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Maximized(bounds)),

@@ -73,7 +73,7 @@ pub struct Palette {
     pub shadow: Hsla,
 }
 
-/// Flottille's own palette comes light or dark.
+/// The kit's own palette comes light or dark.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Shade {
     Light,
@@ -82,15 +82,15 @@ pub enum Shade {
 }
 
 impl Palette {
-    /// Flottille's own palette in that shade.
-    pub fn flottille(shade: Shade) -> Self {
+    /// The kit's own palette in that shade: what an application shows unless it gives its own.
+    pub fn own(shade: Shade) -> Self {
         match shade {
             Shade::Light => Self::light(),
             Shade::Dark => Self::base(),
         }
     }
 
-    /// Flottille's own light palette: the dark one's roles on a near-white page. The bars and the
+    /// The own light palette: the dark one's roles on a near-white page. The bars and the
     /// cards sit a step toward the ink (never white, which would be the page itself), the states
     /// are deepened until they read as text on every surface, and the primary is a near-black.
     pub fn light() -> Self {
@@ -134,7 +134,7 @@ impl Palette {
         }
     }
 
-    /// Flottille's own dark palette: neutral greys, an off-white primary.
+    /// The own dark palette: neutral greys, an off-white primary.
     pub fn base() -> Self {
         Self {
             body: hex(0x0b0b0b),
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn the_shadows_of_light_are_lighter_and_those_of_dark_are_unchanged() {
-        let (light, dark) = (Palette::flottille(Shade::Light), Palette::base());
+        let (light, dark) = (Palette::own(Shade::Light), Palette::base());
         // Dark: a black at full strength, each overlay takes its own share, as before.
         assert_eq!((dark.shadow.l, dark.shadow.a), (0.0, 1.0));
         // A shadow that is deep on a dark page is heavy on a light one.
@@ -360,9 +360,13 @@ mod tests {
 
     #[test]
     fn the_light_palette_has_every_role_and_its_text_reads() {
-        let light = Palette::flottille(Shade::Light);
-        let dark = Palette::flottille(Shade::Dark);
-        assert_eq!(dark, Palette::base(), "Flottille Dark is today's palette");
+        let light = Palette::own(Shade::Light);
+        let dark = Palette::own(Shade::Dark);
+        assert_eq!(
+            dark,
+            Palette::base(),
+            "the own palette in Dark is the base one"
+        );
         assert!(light.bg.l > 0.9, "a light background");
         assert_eq!(light.with_readable_inks(), light, "it needs no correction");
         // The surfaces keep the dark palette's order of distance from the background: the body

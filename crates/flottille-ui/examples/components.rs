@@ -46,11 +46,11 @@ fn main() {
         };
     }
     gpui_kit::application().with_assets(Icons).run(move |cx| {
-        flottille_ui::init(cx);
+        flottille_ui::init(flottille_ui::Identity::new("Components"), cx);
         if light {
             flottille_ui::omarchy::appear(
                 flottille_ui::omarchy::Appearance {
-                    source: flottille_ui::omarchy::Source::Flottille,
+                    source: flottille_ui::omarchy::Source::Own,
                     shade: flottille_ui::theme::Shade::Light,
                 },
                 cx,

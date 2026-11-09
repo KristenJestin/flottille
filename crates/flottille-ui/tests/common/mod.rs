@@ -40,7 +40,7 @@ impl Desktop {
 }
 
 pub fn init(cx: &mut TestAppContext, env: Environment) {
-    cx.update(|cx| flottille_ui::init_with(env, cx));
+    cx.update(|cx| flottille_ui::init_with(flottille_ui::Identity::new("Kit"), env, cx));
     cx.run_until_parked();
 }
 

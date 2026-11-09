@@ -86,7 +86,7 @@ fn window<'a>(
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
-    cx.update(|cx| flottille_ui::init_with(env, cx));
+    cx.update(|cx| flottille_window::init_with(env, cx));
     let connect: Connect = Arc::new(user.connector());
     // As the real window does (`gpui_kit::open_window`): under the kit's root, which holds the
     // window's text selection.
