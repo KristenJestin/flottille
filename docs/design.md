@@ -554,9 +554,9 @@ the sidebar and in the rail of its page, in place of idle.
 
 A setting resumes the session at its reset, **off by default**: "Resume sessions when the quota
 resets", `resume_at_reset` of `sessions.toml`, set in Settings, Sessions, or by `sessions.set`.
-While a session waits for a known reset, its composer shows a switch, `Resume at 13:00`, on or off
-from that setting, which the user switches for this session alone (`agent.quota_resume`). When it
-is on, the sweep (no timer of its own) delivers the session one message at the reset plus a
+While a session waits for a known reset, its composer's toolbar shows a chip, `Resume at 13:00`,
+beside Compact, ticked or not from that setting, which the user toggles for this session alone
+(`agent.quota_resume`). When it is on, the sweep (no timer of its own) delivers the session one message at the reset plus a
 minute, `Your quota has reset: continue where you stopped.` (a `quota-reset` delivery, never the
 user's), and the session runs again. The wait for that instant is taken in one write, so the
 message goes once; a reset that could not be read resumes nothing; a reset that came while it is

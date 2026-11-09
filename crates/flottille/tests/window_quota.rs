@@ -1,6 +1,6 @@
 //! A spent quota in the window (`docs/design.md` §5.9), on GPUI's test platform in front of a real
 //! daemon whose agent is the fake ACP agent answering with Claude's words: the session's state said
-//! once, `Out of quota, resets at 13:00`, in the sidebar and the rail; the composer's switch
+//! once, `Out of quota, resets at 13:00`, in the sidebar and the rail; the composer's chip
 //! `Resume at 13:00` for this session alone; and the setting of Settings, Sessions, off by
 //! default. Each unfolds and folds away, and the page rests. No window opens on a screen.
 
@@ -24,6 +24,7 @@ fn user() -> User {
     user.fake_script(json!({"turns": [
         {"when": "hello", "do": [
             {"say": "You've hit your weekly limit · resets 1pm (Europe/Paris)"}]},
+        {"when": "unreadable", "do": [{"say": "You've hit your limit · resets whenever"}]},
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -39,6 +40,13 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 
 /// A project `app` and a root agent whose first turn spent its quota: its id and its reset.
 fn spent(user: &User) -> (String, u64) {
+    let id = start(user, "hello");
+    let reset = quota(user, &id)["reset_at"].as_u64().unwrap();
+    (id, reset)
+}
+
+/// The same, whose first message is `message`: the id, once the wait is stored.
+fn start(user: &User, message: &str) -> String {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -47,12 +55,11 @@ fn spent(user: &User) -> (String, u64) {
     user.call("project.add", json!({"folder": folder, "name": "app"}))
         .unwrap();
     let answer = user
-        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .call("agent.run", json!({"project": "app", "message": message}))
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap().to_owned();
     eventually("the wait", || quota(user, &id).is_object());
-    let reset = quota(user, &id)["reset_at"].as_u64().unwrap();
-    (id, reset)
+    id
 }
 
 fn quota(user: &User, id: &str) -> Value {
@@ -119,12 +126,8 @@ fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
     })
 }
 
-fn height(cx: &mut VisualTestContext, id: &str) -> Option<f32> {
-    cx.update(|window, cx| {
-        window.render_frame(cx);
-        let found = window.try_find(id.to_owned())?;
-        Some(f32::from(found.bounds().size.height))
-    })
+fn visible(cx: &mut VisualTestContext, id: &str) -> bool {
+    cx.update(|window, _| window.try_find(id.to_owned()).is_some_and(|f| f.visible()))
 }
 
 fn session_page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SessionPage> {
@@ -209,33 +212,126 @@ fn a_session_out_of_quota_says_it_once_in_the_sidebar_and_the_rail(cx: &mut Test
 }
 
 #[gpui_kit::test]
-fn the_composer_switches_the_resume_for_this_session_alone(cx: &mut TestAppContext) {
+fn the_composer_chip_shows_in_the_toolbar_only_while_the_reset_is_known(cx: &mut TestAppContext) {
     let user = user();
     let (id, reset) = spent(&user);
     let (shell, cx) = window(&user, cx);
     let page = open_session(&shell, &id, cx);
 
-    until(&shell, cx, "the switch is offered", |cx| {
+    until(&shell, cx, "the chip is offered", |cx| {
         offer(&page, cx).is_some()
     });
     assert_eq!(offer(&page, cx), Some(false), "off, as the setting is");
-    let first = height(cx, "reply-quota").expect("drawn from the first frame");
-    for _ in 0..4 {
-        one_frame(cx);
-    }
-    let part_way = height(cx, "reply-quota").unwrap();
+    // It fades in, in its own room.
+    one_frame(cx);
+    assert!(present(cx, "reply-quota"), "fading in");
     settle(cx);
-    let open = height(cx, "reply-quota").unwrap();
-    assert!(
-        first < part_way && part_way < open,
-        "it unfolds: {first} then {part_way} then {open}"
-    );
+    assert!(visible(cx, "reply-quota"));
     assert_eq!(
-        label(cx, "reply-quota-toggle"),
+        label(cx, "reply-quota"),
         Some(format!("Resume at {}", clock(reset)))
     );
 
-    cx.update(|window, cx| window.click("reply-quota-toggle", cx));
+    // In the toolbar, on the line of the mode and before the send button, and no block of
+    // its own under the field.
+    let (chip, mode, attach, send) = cx.update(|window, _| {
+        (
+            window.find("reply-quota").bounds(),
+            window.find("reply-mode").bounds(),
+            window.find("attach").bounds(),
+            window.find("reply-send").bounds(),
+        )
+    });
+    assert!(chip.left() >= attach.right(), "after the fixed controls");
+    assert!(
+        attach.left() >= mode.right(),
+        "Attach stays beside the mode"
+    );
+    assert!(chip.right() <= send.left(), "before the send button");
+    assert!(
+        (chip.center().y - mode.center().y).abs() <= px(1.),
+        "on the toolbar's line"
+    );
+    assert!(!present(cx, "reply-quota-line"), "no block under the field");
+}
+
+#[gpui_kit::test]
+fn the_composer_chip_fades_out_when_the_wait_ends(cx: &mut TestAppContext) {
+    let user = user();
+    let (id, reset) = spent(&user);
+    let (shell, cx) = window(&user, cx);
+    // Wide enough for the whole toolbar with the chip: in a 646 px composer the pickers, Attach,
+    // the chip and Send need 20 px more than the row has.
+    cx.simulate_resize(size(px(1600.), px(1600.)));
+    let page = open_session(&shell, &id, cx);
+    until(&shell, cx, "the chip is offered", |cx| {
+        offer(&page, cx).is_some()
+    });
+    settle(cx);
+    assert!(visible(cx, "reply-quota"));
+    let fixed = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            // Send is measured from the composer's right edge: the page may have gained a
+            // scrollbar by then, the chip is not what moves it.
+            let edge = window.find("reply").bounds().right();
+            let left =
+                ["reply-model", "reply-mode", "attach"].map(|id| window.find(id).bounds().origin.x);
+            (left, edge - window.find("reply-send").bounds().right())
+        })
+    };
+    let with_chip = fixed(cx);
+
+    // The wait ends with a message of the user's: the chip fades out and is gone.
+    user.call("agent.send", json!({"agent": id, "message": "go on"}))
+        .unwrap();
+    until(&shell, cx, "the chip leaves", |cx| {
+        offer(&page, cx).is_none()
+    });
+    one_frame(cx);
+    assert!(present(cx, "reply-quota"), "fading out");
+    assert_eq!(
+        label(cx, "reply-quota"),
+        Some(format!("Resume at {}", clock(reset))),
+        "it keeps its words while it leaves"
+    );
+    settle(cx);
+    assert!(!present(cx, "reply-quota"));
+    assert_eq!(
+        fixed(cx),
+        with_chip,
+        "its coming and going moves no other control"
+    );
+}
+
+#[gpui_kit::test]
+fn the_composer_chip_is_hidden_while_the_reset_is_unknown(cx: &mut TestAppContext) {
+    let user = user();
+    let id = start(&user, "unreadable");
+    assert!(quota(&user, &id)["reset_at"].is_null());
+    let (shell, cx) = window(&user, cx);
+    let page = open_session(&shell, &id, cx);
+    until(&shell, cx, "the rail says it", |cx| {
+        label(cx, &format!("rail-waiting-{id}")).as_deref() == Some("Out of quota")
+    });
+    settle(cx);
+    assert_eq!(offer(&page, cx), None);
+    assert!(!present(cx, "reply-quota"));
+}
+
+#[gpui_kit::test]
+fn toggling_the_composer_chip_resumes_for_this_session_alone(cx: &mut TestAppContext) {
+    let user = user();
+    let (id, _) = spent(&user);
+    let (shell, cx) = window(&user, cx);
+    let page = open_session(&shell, &id, cx);
+
+    until(&shell, cx, "the chip is offered", |cx| {
+        offer(&page, cx).is_some()
+    });
+    assert_eq!(offer(&page, cx), Some(false), "off, as the setting is");
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-quota", cx));
     assert_eq!(offer(&page, cx), Some(true), "on at once");
     until(&shell, cx, "the daemon takes it", |_| {
         quota(&user, &id)["resume"] == true
@@ -247,17 +343,6 @@ fn the_composer_switches_the_resume_for_this_session_alone(cx: &mut TestAppConte
     );
     settle(cx);
     assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
-
-    // A message of the user's ends the wait: the switch folds away.
-    user.call("agent.send", json!({"agent": id, "message": "go on"}))
-        .unwrap();
-    until(&shell, cx, "the switch leaves", |cx| {
-        offer(&page, cx).is_none()
-    });
-    one_frame(cx);
-    assert!(present(cx, "reply-quota"), "folding away");
-    settle(cx);
-    assert!(!present(cx, "reply-quota"));
 }
 
 fn open_sessions_tab(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SettingsPage> {

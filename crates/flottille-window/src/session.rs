@@ -27,7 +27,7 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Confirm, Drawer, Field, Icon, ListRow, Listing, Menu, Modal,
-    Palette, Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Switch, Toast, Type, awaiting,
+    Palette, Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting,
     changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence,
     presence_of, section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
 };
@@ -99,12 +99,14 @@ pub fn end_sentence(count: usize) -> String {
 /// The reply field's placeholder and its send button's tooltip: the field writes to the root.
 pub const REPLY_PLACEHOLDER: &str = "Reply…";
 pub const SEND: &str = "Send";
-/// What the switch that resumes the session at its quota's reset does, under its label.
+/// What the chip that resumes the session at its quota's reset does (its tooltip).
 const QUOTA_HINT: &str = "Its quota is spent: at the reset, Flottille tells it to continue where it stopped. Only this session; Settings, Sessions holds the default.";
 /// The composer's chip while the root's prompt cache expired, and what it does (its tooltip).
 pub const COMPACT_CHIP: &str = "Compact";
 /// The room the chip takes at rest (padding and its word): how wide it is while it opens and folds.
 const COMPACT_CHIP_WIDTH: f32 = 80.;
+/// The same for `Resume at 13:00`.
+const QUOTA_CHIP_WIDTH: f32 = 136.;
 const COMPACT_HINT: &str = "Its prompt cache expired: a summary makes the next turn read a short history instead of the whole conversation at full price.";
 /// The composer's button that interrupts the turn that runs.
 pub const STOP: &str = "Stop the turn";
@@ -8206,6 +8208,8 @@ pub struct Reply {
     compact: bool,
     /// The root waits for a known quota reset: the composer offers to resume at it.
     quota: Option<Quota>,
+    /// The last wait that was offered: the chip keeps its words and its fill while it fades out.
+    quota_last: Option<Quota>,
     /// The switch flipped, until the daemon answers: what it was asked to become.
     quota_pending: Option<bool>,
     /// The messages sent and not recorded yet, the oldest first: each shows from the moment it
@@ -8293,6 +8297,7 @@ impl Reply {
             compact_offered: false,
             compact: false,
             quota: None,
+            quota_last: None,
             quota_pending: None,
             left: HashMap::new(),
             activity: None,
@@ -8451,6 +8456,7 @@ impl Reply {
         let quota = quota.filter(|quota| quota.reset_at.is_some());
         if self.quota != quota {
             self.quota = quota;
+            self.quota_last = quota.or(self.quota_last);
             cx.notify();
         }
     }
@@ -8498,31 +8504,40 @@ impl Reply {
         cx.notify();
     }
 
-    /// Resume at the reset, under the field while the root waits for its quota: it unfolds and
-    /// folds away with its gap; its label follows the reset.
-    fn render_quota(&self, cx: &mut Context<Self>) -> AnyElement {
-        let on = self.quota_offer();
+    /// Resume at the reset, a quiet chip at the end of the toolbar's controls while the root waits
+    /// for its quota: its room opens and it fades in, folds and fades out; its ground follows the
+    /// choice (never the accent fill) and its label the reset. At rest it is its natural width, and the explanation is its tooltip.
+    fn render_quota(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let offered = self.quota.is_some();
+        let shown = fade("reply-quota-shown", offered, PANEL, window, cx);
+        if !offered && shown == 0.0 {
+            return None;
+        }
+        let on = self
+            .quota_offer()
+            .or(self.quota_last.map(|quota| quota.resume));
         let label = self
             .quota
+            .or(self.quota_last)
             .and_then(|quota| quota.reset_at)
             .map(resume_at)
             .unwrap_or_default();
-        presence(
-            "reply-quota",
-            on.is_some(),
+        Some(
             div()
-                .id("reply-quota-line")
-                .pt(space::SM)
-                .px(space::XS)
+                .flex_none()
+                .opacity(shown)
+                .when(shown < 1.0, |d| {
+                    d.w(px(QUOTA_CHIP_WIDTH) * shown).overflow_hidden()
+                })
                 .child(
-                    Switch::new("reply-quota-toggle", on.unwrap_or(false), label)
-                        .hint(QUOTA_HINT)
+                    Button::choice("reply-quota", label, on.unwrap_or(false))
+                        .ghost()
+                        .tooltip(QUOTA_HINT)
                         .disabled(self.quota_pending.is_some())
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_quota(cx))),
                 )
-                .test_support(),
+                .into_any_element(),
         )
-        .into_any_element()
     }
 
     fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
@@ -9181,7 +9196,6 @@ impl Render for Reply {
                     .test_support(),
             )
             .child(chips)
-            .child(self.render_quota(cx))
             .child(
                 div()
                     .flex()
@@ -9193,6 +9207,8 @@ impl Render for Reply {
                     .child(self.mode.clone())
                     .children(self.render_compact(window, cx))
                     .child(Attachments::button(cx, Self::attached_of))
+                    // An optional chip goes after the fixed controls: its arrival moves none.
+                    .children(self.render_quota(window, cx))
                     // What the root does while its turn runs, where the line above the field was.
                     .child(
                         div()
