@@ -18,6 +18,10 @@ fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// The window's own components, which were parts of `flottille-ui` and keep the exact sizes of
+/// the design as the kit's do: the scans of a screen's layout leave them out.
+const COMPONENTS: [&str; 2] = ["state.rs", "steps.rs"];
+
 /// Every source of the window, with its text.
 fn window() -> Vec<(PathBuf, String)> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -26,6 +30,7 @@ fn window() -> Vec<(PathBuf, String)> {
     assert!(files.len() > 20, "the sources were found: {}", files.len());
     files
         .into_iter()
+        .filter(|file| !COMPONENTS.iter().any(|own| file.ends_with(own)))
         .map(|file| {
             let text = fs::read_to_string(&file).unwrap();
             (file, text)
