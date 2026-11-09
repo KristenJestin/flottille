@@ -9466,6 +9466,9 @@ fn choosing_each_tab_shows_its_section_alone(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    // Tall enough that each tab's own section title is on screen: the Setup tab starts with the
+    // folder and the branches before its setup.
+    cx.simulate_resize(size(px(1280.), px(1600.)));
     let page = open_project_settings(&shell, "atlas", cx);
     until(&shell, cx, "every section is read", |cx| {
         page.read_with(cx, |page, cx| page.has_read(cx))
