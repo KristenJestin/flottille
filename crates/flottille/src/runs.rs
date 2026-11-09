@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent_folders::Snapshot;
+use crate::agent_folders::Guard;
 use crate::agents::{signal_group, start_time};
 use crate::daemon::Daemon;
 use crate::deliveries;
@@ -81,6 +81,8 @@ pub struct Live {
     /// the user), its project and its name: a second waits while the services it needs start,
     /// then joins the first.
     serving: Mutex<HashMap<Serving, Arc<tokio::sync::Mutex<()>>>>,
+    /// The agent folders of each place an agent's run goes on in (`agent_folders`).
+    guards: crate::agent_folders::Guards,
 }
 
 /// A task that keeps running, by its owner, its project and its name.
@@ -134,7 +136,7 @@ struct Going {
     /// Told when it is ready, for what waits on it (a service a task needs).
     readied: Notify,
     /// The agent folders of an agent's place as they were before it, put back once it ends.
-    guarded: Mutex<Option<Snapshot>>,
+    guarded: Mutex<Option<Guard>>,
 }
 
 /// How a run is told ready: its probe, and whether its agent asked to be told.
@@ -539,7 +541,12 @@ pub async fn run(
         url_error,
         workspace: None,
     };
-    let guarded = guard(place).await;
+    // A line the gate let through at once only reads, or writes the files it names; a task may
+    // run anything.
+    let guarded = match approved || run.name.is_some() {
+        true => Some(guard(daemon, place, &id).await),
+        false => None,
+    };
     if let Err(why) = start(
         daemon,
         run,
@@ -836,7 +843,7 @@ fn start(
     secrets: Vec<String>,
     phase: Phase,
     readying: Readying,
-    guarded: Option<Snapshot>,
+    guarded: Option<Guard>,
 ) -> Result<(), String> {
     crate::projects::refuse_removing(daemon, &run.project).map_err(|refused| refused.message)?;
     let (reader, writer) = std::io::pipe().map_err(|e| format!("cannot run it: {e}"))?;
@@ -916,11 +923,14 @@ fn start(
 
 /// The agent folders of an agent's place before one of its runs: the gate refuses every write
 /// there it sees, and a line may write there without naming one (`agent_folders`).
-async fn guard(place: &Place) -> Option<Snapshot> {
-    let (root, home) = (place.root.clone(), place.home.clone());
-    tokio::task::spawn_blocking(move || Snapshot::take(&root, home.as_deref()))
+async fn guard(daemon: &Daemon, place: &Place, id: &str) -> Guard {
+    let kept = daemon.paths.state.join("agent-folders");
+    daemon
+        .mcp
+        .runs
+        .guards
+        .enter(&place.root, place.home.as_deref(), &kept, id)
         .await
-        .ok()
 }
 
 /// Whether the run is still starting, not ready yet.
@@ -1087,8 +1097,8 @@ async fn follow(
     // What it wrote in an agent folder of its place without naming it is put back, and its
     // result says so.
     let guarded = going.guarded.lock().unwrap().take();
-    if let Some(snapshot) = guarded
-        && let Ok(restored) = tokio::task::spawn_blocking(move || snapshot.restore()).await
+    if let Some(guard) = guarded
+        && let Some(restored) = guard.leave().await
         && let Some(said) = crate::agent_folders::said(&restored)
     {
         going.output.lock().unwrap().push(said.as_bytes());
@@ -1484,7 +1494,7 @@ pub async fn restart_by_user(
             .is_some_and(|going| going.notify.load(Ordering::SeqCst)),
     };
     let guarded = match owner {
-        Some(_) => guard(&place).await,
+        Some(_) => Some(guard(daemon, &place, &id).await),
         None => None,
     };
     if let Err(why) = start(
