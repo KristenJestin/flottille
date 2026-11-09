@@ -155,9 +155,9 @@ const SENSITIVE: [&str; 15] = [
 ];
 /// The agents' own folders. The home's hold their logins and the user's own agent settings; one
 /// anywhere else is a repository's configuration, which an agent reads but never writes.
-const AGENT_FOLDERS: [&str; 3] = [".claude", ".claude.json", ".codex"];
+pub(crate) const AGENT_FOLDERS: [&str; 3] = [".claude", ".claude.json", ".codex"];
 /// A login moved into an agent's folder outside the home.
-const AGENT_LOGINS: [&str; 2] = [".credentials.json", "auth.json"];
+pub(crate) const AGENT_LOGINS: [&str; 2] = [".credentials.json", "auth.json"];
 /// Sensitive from the top of the file system only.
 const SYSTEM_SENSITIVE: [&str; 3] = ["/etc/shadow", "/etc/sudoers", "/etc/sudoers.d"];
 /// What runs at the user's next login or command, or starts a process later, from the home
@@ -3283,10 +3283,12 @@ fn named<'a>(call: &Call, layers: &'a [Vec<String>]) -> Vec<(&'a str, Resolved, 
     };
     for layer in layers {
         let text = TEXT.contains(&base(&layer[0]));
+        let revisions = shows_revisions(layer);
         for whole in &layer[1..] {
             let soft = text || whole.starts_with('-');
             for word in named_paths(whole)
                 .into_iter()
+                .chain(revisions.then(|| revision_path(whole)).flatten())
                 .filter(|word| !STREAMS.contains(word))
             {
                 let path = call.grant.place.resolve(&folder.path, word);
@@ -3298,6 +3300,39 @@ fn named<'a>(call: &Call, layers: &'a [Vec<String>]) -> Vec<(&'a str, Resolved, 
         }
     }
     named
+}
+
+/// Whether a layer is a git command that prints a file of a revision named `rev:path`.
+fn shows_revisions(layer: &[String]) -> bool {
+    if base(&layer[0]) != "git" {
+        return false;
+    }
+    let args = &layer[1..];
+    let (at, _) = git_globals(args);
+    matches!(
+        args.get(at).map(String::as_str),
+        Some("show" | "cat-file" | "diff")
+    )
+}
+
+/// The path a `rev:path` word names in its revision (`HEAD:.env`, `:path` and `:0:path` of the
+/// index): what git prints is that file, as a read of it on the disk would.
+fn revision_path(word: &str) -> Option<&str> {
+    if word.starts_with('-') {
+        return None;
+    }
+    let (_, path) = word.split_once(':')?;
+    let path = match path.split_once(':') {
+        Some((stage, rest))
+            if word.starts_with(':')
+                && stage.len() == 1
+                && stage.as_bytes()[0].is_ascii_digit() =>
+        {
+            rest
+        }
+        _ => path,
+    };
+    Some(path).filter(|path| !path.is_empty())
 }
 
 /// A path that could not be followed, taken as written: `..` on the text, as a program that
@@ -3806,6 +3841,15 @@ fn seen(path: &Resolved) -> Vec<PathBuf> {
 
 /// The refusal of a path in a login's place: an agent's, the user's, the system's secrets.
 fn credential(home: Option<&Path>, path: &Resolved) -> Option<String> {
+    if let Some(process) = open_files(path) {
+        return Some(format!(
+            "refused: {} goes through {}, a process's open files: the agent's own command line \
+             and its runs may hold a login there, or any other file they opened: an agent never \
+             reads nor writes through it, in any mode; nothing was done",
+            path.shown,
+            process.display()
+        ));
+    }
     let place = if path.inside {
         credential_names(Path::new(&path.shown))
     } else {
@@ -3824,6 +3868,22 @@ fn credential(home: Option<&Path>, path: &Resolved) -> Option<String> {
          in any mode; nothing was done",
         path.shown
     ))
+}
+
+/// The process's folder in `/proc` a path goes through when it reaches the files that process
+/// has open (`fd`, `map_files`), whatever process it is and under whatever name (`/dev/fd`).
+fn open_files(path: &Resolved) -> Option<&Path> {
+    let Some(Unfollowed::Through(process)) = &path.unfollowed else {
+        return None;
+    };
+    let opened = |path: &Path| {
+        path.strip_prefix("/proc").is_ok_and(|rest| {
+            rest.components()
+                .skip(1)
+                .any(|part| matches!(part.as_os_str().to_str(), Some("fd" | "map_files")))
+        })
+    };
+    (opened(process) || seen(path).iter().any(|path| opened(path))).then_some(process.as_path())
 }
 
 /// Where an agent's folder that a path is in lies.
@@ -3857,6 +3917,22 @@ fn agent_folder(home: Option<&Path>, path: &Resolved) -> Option<AgentFolder> {
         {
             return Some(AgentFolder::Login(format!("~/{entry}")));
         }
+    }
+    // Claude keeps copies of `~/.claude.json` beside it (`.backup`, a dated one): each holds what
+    // it does.
+    let copy = home
+        .into_iter()
+        .flat_map(|home| [Some(home.to_owned()), place::real_path(home).ok()])
+        .flatten()
+        .find_map(|home| {
+            seen.iter().find_map(|path| {
+                let name = path.strip_prefix(&home).ok()?.components().next()?;
+                let name = name.as_os_str().to_str()?;
+                name.starts_with(".claude.json").then(|| name.to_owned())
+            })
+        });
+    if let Some(name) = copy {
+        return Some(AgentFolder::Login(format!("~/{name}")));
     }
     let anywhere = matches!(path.unfollowed, Some(Unfollowed::Through(_)));
     let named = if path.inside {
@@ -5778,7 +5854,7 @@ mod tests {
     }
 
     #[test]
-    fn a_path_through_a_process_s_root_cwd_or_files_in_proc_is_base_to_read_and_refused_to_write() {
+    fn a_path_through_a_process_s_root_cwd_or_exe_in_proc_is_base_to_read_and_refused_to_write() {
         let mut fixture = Fixture::workspace();
         let own = fixture.own[0].clone();
         std::fs::create_dir_all(&own).unwrap();
@@ -5799,8 +5875,8 @@ mod tests {
         ] {
             for tool in ["fs_write", "fs_edit", "fs_read"] {
                 let verdict = fixture.file(tool, &path);
-                // Writing through any of them is refused.
-                if WRITES.contains(&tool) {
+                // Writing through any of them is refused, and reading a process's open files.
+                if WRITES.contains(&tool) || path.contains("/fd/") {
                     assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
                 } else {
                     assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
@@ -5969,7 +6045,7 @@ mod tests {
     }
 
     #[test]
-    fn a_link_into_proc_under_another_name_is_base_to_read_and_refused_to_write() {
+    fn a_link_into_proc_s_cwd_under_another_name_is_base_to_read_and_refused_to_write() {
         let fixture = Fixture::workspace();
         let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
         std::fs::create_dir_all(base.join("elsewhere")).unwrap();
@@ -5979,15 +6055,16 @@ mod tests {
         for path in ["/dev/fd/3", "/dev/stdin", &here, "src/here/judge.md"] {
             for tool in FS_TOOLS {
                 let verdict = fixture.file(tool, path);
-                // Writing through it is refused.
-                if WRITES.contains(&tool) {
+                // Writing through it is refused, and reading a process's open files.
+                if WRITES.contains(&tool) || path.starts_with("/dev/") {
                     assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
                 } else {
                     assert!(base_class(&verdict), "{tool} {path}: {verdict:?}");
                 }
             }
-            // A run's own streams are its own (`the_run_s_own_streams_are_harmless_words`).
-            if path != "/dev/stdin" {
+            // A run's own streams are its own (`the_run_s_own_streams_are_harmless_words`), and
+            // its other open files refused (`proc_fd_of_the_agent_s_tree_is_refused`).
+            if !path.starts_with("/dev/") {
                 let verdict = fixture.run(&format!("cat {path}"));
                 assert!(base_class(&verdict), "cat {path}: {verdict:?}");
             }
@@ -6128,9 +6205,9 @@ mod tests {
             assert!(!base_class(&verdict), "{line}: {verdict:?}");
             assert!(!reasons(&verdict).contains(stream), "{line}: {verdict:?}");
         }
-        // Another of its open files may be anything: read, held; written, refused.
+        // Another of its open files may be anything, a login included: refused.
         assert!(denied(&fixture.run("tee /dev/fd/3")));
-        assert!(base_class(&fixture.run("cat /dev/fd/3")));
+        assert!(denied(&fixture.run("cat /dev/fd/3")));
     }
 
     /// Makes `parts` as folders below the open folder `at`, one at a time, so that their whole
@@ -6691,9 +6768,13 @@ mod tests {
                 let verdict = fixture.file(tool, &path);
                 assert!(denied(&verdict), "{tool} {path}: {verdict:?}");
             }
-            // Reading there stays base.
+            // Reading there stays base, but for a process's open files.
             let verdict = fixture.file("fs_read", &path);
-            assert!(base_class(&verdict), "{path}: {verdict:?}");
+            if path.contains("/fd/") || path.contains("/map_files/") {
+                assert!(denied(&verdict), "{path}: {verdict:?}");
+            } else {
+                assert!(base_class(&verdict), "{path}: {verdict:?}");
+            }
         }
         let verdict = fixture.run(&format!("cp README.md {through_cwd}"));
         assert!(denied(&verdict), "{verdict:?}");
@@ -6981,5 +7062,119 @@ mod tests {
         ] {
             assert!(!denied(&fixture.run(line)), "{line}");
         }
+    }
+
+    #[test]
+    fn git_show_of_a_credentials_path_is_refused() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "git show HEAD:.claude/.credentials.json",
+            "git show :.codex/auth.json",
+            "git show :0:.claude/.credentials.json",
+            "git cat-file -p HEAD~1:.claude/.credentials.json",
+            "git cat-file blob stash@{0}^3:.codex/auth.json",
+            "git diff HEAD:README.md HEAD:.claude/.credentials.json",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+                "{line}: {verdict:?}"
+            );
+        }
+        // A secret file of the place read from a revision is held as one read on the disk.
+        for line in [
+            "git show HEAD:.env",
+            "git cat-file -p main:config/.env.local",
+        ] {
+            assert!(base_class(&fixture.run(line)), "{line}");
+        }
+        // Any other file of a revision is only read.
+        for line in [
+            "git show HEAD:src/a.rs",
+            "git show HEAD:.claude/settings.json",
+            "git diff main:README.md HEAD:README.md",
+        ] {
+            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_backup_of_claude_json_in_the_home_is_refused() {
+        let fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        for name in [
+            ".claude.json.backup",
+            ".claude.json.backup.1762700000000",
+            ".claude.json.lock",
+        ] {
+            made(&home.join(name));
+            let path = format!("../../home/{name}");
+            for verdict in [
+                fixture.file("fs_read", &path),
+                fixture.file("fs_write", &path),
+                fixture.run(&format!("cat {path}")),
+                fixture.run(&format!("cat {}", home.join(name).display())),
+            ] {
+                assert!(
+                    matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+                    "{name}: {verdict:?}"
+                );
+            }
+        }
+        // Only the home's: a file of the place that starts so is the project's.
+        made(&fixture.root.join("notes/.claude.json.backup"));
+        assert_eq!(fixture.run("cat notes/.claude.json.backup"), Verdict::Allow);
+    }
+
+    #[test]
+    fn proc_fd_of_the_agent_s_tree_is_refused() {
+        let mut fixture = Fixture::workspace();
+        let me = std::process::id();
+        // The test's own process stands for the agent's command line and its runs.
+        fixture.groups = vec![unsafe { libc::getpgid(0) } as u32];
+        for path in [
+            format!("/proc/{me}/fd/3"),
+            format!("/proc/{me}/fd"),
+            "/proc/self/fd/3".into(),
+            "/proc/thread-self/fd/3".into(),
+            format!("/proc/{me}/task/{me}/fd/3"),
+            format!("/proc/{me}/map_files"),
+            "/dev/fd/3".into(),
+            "/proc/1/fd/3".into(),
+        ] {
+            for verdict in [
+                fixture.file("fs_read", &path),
+                fixture.file("fs_list", &path),
+                fixture.run(&format!("cat {path}")),
+                fixture.run(&format!("ls -l {path}")),
+            ] {
+                assert!(
+                    matches!(&verdict, Verdict::Deny(why) if why.contains("open files")),
+                    "{path}: {verdict:?}"
+                );
+            }
+        }
+        // The agent's ordinary commands still pass as they did.
+        for line in [
+            "cat README.md /dev/null",
+            "head -n 1 README.md /dev/stdout",
+            "cat /dev/stdin",
+            "ls /dev/fd/0",
+        ] {
+            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+        for line in [
+            "cat /proc/cpuinfo".to_owned(),
+            "cat /proc/meminfo".to_owned(),
+            format!("cat /proc/{me}/status"),
+            format!("ls /proc/{me}/fdinfo"),
+            format!("ps -p {me}"),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(!denied(&verdict), "{line}: {verdict:?}");
+        }
+        assert!(to_judge(
+            &fixture.file("fs_read", &format!("/proc/{me}/status"))
+        ));
     }
 }
