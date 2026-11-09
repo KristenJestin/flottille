@@ -18,6 +18,7 @@ pub mod project;
 pub mod prompt;
 pub mod protocol;
 pub mod provider;
+pub mod question;
 pub mod registry;
 pub mod run;
 pub mod secrets;

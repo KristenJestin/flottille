@@ -12,6 +12,7 @@ use std::sync::Arc;
 use flottille_core::agent::{Agent, AgentState};
 use flottille_core::approval::{self, Decision, Request};
 use flottille_core::protocol::AgentTrees;
+use flottille_core::question;
 use flottille_core::secrets;
 use flottille_core::store::{AgentChange, Store, now_ms};
 use flottille_core::subscription::Subscription;
@@ -1486,18 +1487,50 @@ async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value
     ))
 }
 
+/// `ask`'s arguments: one question, or up to four (`docs/tools.md`, "ask").
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Question {
-    question: String,
+struct Asking {
+    question: Option<String>,
+    questions: Option<Vec<question::Question>>,
 }
 
 fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
-    let asked: Question = arguments(tool, args)?;
-    if asked.question.trim().is_empty() {
-        return Err(refused("refused: the question is empty"));
+    let asked: Asking = arguments(tool, args)?;
+    let questions = match (asked.question, asked.questions) {
+        (Some(_), Some(_)) => {
+            return Err(refused(
+                "refused: question and questions are exclusive: one question, or questions for \
+                 several",
+            ));
+        }
+        (Some(one), None) => vec![question::Question {
+            question: one,
+            ..question::Question::default()
+        }],
+        (None, Some(several)) => several,
+        (None, None) => return Err(refused("refused: the question is empty")),
+    };
+    if let Some(why) = question::refusal(&questions) {
+        return Err(refused(&why));
     }
-    let question = secrets::mask(&asked.question, &std::env::vars_os().collect());
+    let env = std::env::vars_os().collect();
+    let questions: Vec<question::Question> = questions
+        .into_iter()
+        .map(|q| question::Question {
+            question: secrets::mask(&q.question, &env),
+            options: q
+                .options
+                .into_iter()
+                .map(|o| question::Choice {
+                    label: secrets::mask(o.label.trim(), &env),
+                    description: o.description.map(|d| secrets::mask(&d, &env)),
+                })
+                .collect(),
+            multiple: q.multiple,
+        })
+        .collect();
+    let question = question::text(&questions);
     let pilot = pilot_of(daemon, caller);
     let to = match (&caller.parent, &pilot) {
         (Some(_), _) => "parent",
@@ -1514,7 +1547,8 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
                 },
                 Some((
                     "agent.asked",
-                    json!({"agent": caller.id, "question": question, "to": to, "pilot": pilot}),
+                    json!({"agent": caller.id, "question": question, "questions": questions,
+                        "to": to, "pilot": pilot}),
                 )),
             )?;
             Ok(((), event))
@@ -2441,8 +2475,9 @@ pub fn unanswered_to(daemon: &Daemon, id: &str, to: &str) -> Result<Vec<Value>, 
         .filter(|delivery| matches!(delivery.state.as_str(), "sending" | "sent"))
         .collect();
     // When the newest answer the root took was written: a message of the user's, or for a
-    // question to its pilot, a `session_send` of that pilot, whose key names it.
-    let answered = |pilot: Option<&str>| {
+    // question to its pilot, a `session_send` of that pilot, whose key names it. An answer from
+    // a question's card answers that ask alone.
+    let answered = |pilot: Option<&str>, seq: u64| {
         taken
             .iter()
             .filter(|delivery| {
@@ -2450,6 +2485,7 @@ pub fn unanswered_to(daemon: &Daemon, id: &str, to: &str) -> Result<Vec<Value>, 
                     || pilot
                         .is_some_and(|pilot| delivery.id.starts_with(&format!("session-{pilot}-")))
             })
+            .filter(|delivery| answers_ask(&delivery.id).is_none_or(|asked| asked == seq))
             .map(|delivery| delivery.created_at)
             .max()
     };
@@ -2467,10 +2503,27 @@ pub fn unanswered_to(daemon: &Daemon, id: &str, to: &str) -> Result<Vec<Value>, 
         .filter(|event| event.seq > limit && event.data["to"] == to)
         .filter(|event| to != "pilot" || event.seq > moved)
         .filter(|event| {
-            answered(event.data["pilot"].as_str()).is_none_or(|written| written <= event.at)
+            answered(event.data["pilot"].as_str(), event.seq)
+                .is_none_or(|written| written <= event.at)
         })
-        .map(|event| json!({"seq": event.seq, "at": event.at, "question": event.data["question"]}))
+        .map(|event| {
+            json!({"seq": event.seq, "at": event.at, "question": event.data["question"],
+                "questions": question::of(&event.data)})
+        })
         .collect())
+}
+
+/// The id of a delivery that answers the ask of `seq` alone (`agent.answer`).
+pub fn answer_id(seq: u64) -> String {
+    format!(
+        "answer-{seq}-{}",
+        flottille_core::agent::new_id().unwrap_or_default()
+    )
+}
+
+/// The ask a delivery answers alone, when it is an answer from its card.
+fn answers_ask(id: &str) -> Option<u64> {
+    id.strip_prefix("answer-")?.split('-').next()?.parse().ok()
 }
 
 /// The root's questions no longer wait (`why`: its session was replaced or resumed): clients

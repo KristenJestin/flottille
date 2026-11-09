@@ -111,6 +111,10 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             "seq": event.seq, "at": event.at, "kind": kind, "agent": agent.id,
             "project": agent.project, "workspace": agent.workspace, "text": text,
         }));
+        if kind == "question" {
+            entries.last_mut().unwrap()["questions"] =
+                json!(flottille_core::question::of(&event.data));
+        }
         if resolved {
             entries.last_mut().unwrap()["resolved"] = json!(true);
         }

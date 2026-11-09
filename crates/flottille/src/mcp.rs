@@ -886,14 +886,32 @@ const SERVED: [Definition; 32] = [
 
 /// What `ask` says to every caller; where its question goes is said after it, by the caller's
 /// kind (`ask_goes`).
-const ASK: &str = "Puts a question. It does not wait: the answer comes later as a message. Go on \
-    with what does not depend on it, or end your turn saying what you wait for. A question left \
-    in a report or a last message is a follow-up, not a wait: what you need answered goes here.";
+const ASK: &str = "Puts a question, or up to 4 at once: one question per point to decide \
+    ({\"question\": \"…\"}, or {\"questions\": [{\"question\": \"Push the branch?\", \
+    \"options\": [{\"label\": \"Yes\"}, {\"label\": \"Not yet\"}]}, {\"question\": \
+    \"Title of the pull request?\"}]}), with 2 to 4 short options when the answers are known \
+    (multiple: several may be chosen); each can also be answered in words. It does not wait: the \
+    answer comes later as a message. Go on with what does not depend on it, or end your turn \
+    saying what you wait for. A question left in a report or a last message is a follow-up, not \
+    a wait: what you need answered goes here.";
 
 fn question_schema() -> Value {
+    let one = json!({"type": "string"});
     json!({"type": "object", "properties": {
-        "question": {"type": "string"}
-    }, "required": ["question"], "additionalProperties": false})
+        "question": one,
+        "questions": {"type": "array", "minItems": 1, "maxItems": 4, "items": {
+            "type": "object", "properties": {
+                "question": one,
+                "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {
+                    "type": "object", "properties": {
+                        "label": {"type": "string", "description": "A short choice, one line."},
+                        "description": {"type": "string", "description": "One line that says it."}
+                    }, "required": ["label"], "additionalProperties": false
+                }},
+                "multiple": {"type": "boolean", "description": "Several options may be chosen."}
+            }, "required": ["question"], "additionalProperties": false
+        }}
+    }, "additionalProperties": false})
 }
 
 /// The description of `ask` for `agent`: where its question goes, decided by the daemon, never

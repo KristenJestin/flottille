@@ -60,6 +60,19 @@ pub enum AgentAction {
         #[arg(long)]
         json: bool,
     },
+    /// Answer a question a root agent asked you: one answer per question of its ask
+    Answer {
+        agent: String,
+        /// The ask's number, as `flottille inbox` gives it (default: its oldest open one)
+        #[arg(long, value_name = "N")]
+        question: Option<u64>,
+        /// `<n>=<text>`, the answer to its question n (from 1), once per question; a single
+        /// answer to a single question needs no number
+        #[arg(long, value_name = "N=TEXT", required = true)]
+        answer: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Take back a message you wrote to a root agent that still waits for it: it never reads it
     Unqueue {
         agent: String,
@@ -277,6 +290,52 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 );
             }
             Ok(code)
+        }
+        AgentAction::Answer {
+            agent,
+            question,
+            answer,
+            json,
+        } => {
+            let mut client = Client::connect_or_start(paths)?;
+            let tree = client.request(
+                "agent.tree",
+                serde_json::to_value(AgentName {
+                    agent: agent.clone(),
+                    after: None,
+                })?,
+            )?;
+            let open: Vec<Value> = tree["agents"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|entry| entry["agent"]["id"] == agent.as_str())
+                .flat_map(|entry| entry["questions"].as_array().cloned().unwrap_or_default())
+                .collect();
+            let asked = match question {
+                Some(n) => open.iter().find(|q| q["seq"] == n),
+                None => open.first(),
+            }
+            .ok_or_else(|| match question {
+                Some(n) => format!("question {n} of agent {agent} does not wait for an answer"),
+                None => format!("agent {agent} has no question waiting for you"),
+            })?;
+            let questions = flottille_core::question::of(asked);
+            let answers = answers_of(questions.len(), &answer)?;
+            let seq = asked["seq"].as_u64().unwrap_or_default();
+            let sent = client.request(
+                "agent.answer",
+                serde_json::json!({"agent": agent, "question": seq, "answers": answers}),
+            )?;
+            if json {
+                println!("{sent}");
+            } else {
+                println!(
+                    "Answered question {seq} of agent {agent}: it reads your answer after the \
+                     turn that runs, if one does."
+                );
+            }
+            Ok(ExitCode::SUCCESS)
         }
         AgentAction::Unqueue {
             agent,
@@ -665,6 +724,42 @@ fn doctor_text(report: &Value) -> String {
     shown
 }
 
+/// The answers `--answer` gives, one per question of an ask of `count`: `<n>=<text>` each, or
+/// the text alone for a single question.
+fn answers_of(
+    count: usize,
+    given: &[String],
+) -> std::result::Result<Vec<flottille_core::question::Answer>, String> {
+    let mut answers = vec![flottille_core::question::Answer::default(); count];
+    for one in given {
+        let numbered = one
+            .split_once('=')
+            .and_then(|(n, text)| Some((n.trim().parse::<usize>().ok()?, text)));
+        let (n, text) = match numbered {
+            Some(found) => found,
+            None if count == 1 => (1, one.as_str()),
+            None => {
+                return Err(format!(
+                    "`{one}`: say which question it answers, as `1={one}`"
+                ));
+            }
+        };
+        let slot = n
+            .checked_sub(1)
+            .and_then(|at| answers.get_mut(at))
+            .ok_or_else(|| format!("the ask has {count} questions: no question {n}"))?;
+        slot.text = text.trim().to_owned();
+    }
+    if let Some(at) = answers.iter().position(|a| a.text.is_empty()) {
+        return Err(format!(
+            "question {} has no answer: give `--answer {}=…`",
+            at + 1,
+            at + 1
+        ));
+    }
+    Ok(answers)
+}
+
 pub(crate) fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or_default()
 }
@@ -888,4 +983,41 @@ fn show_text(shown: &Value) -> String {
     }
     out.push('\n');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_answer_takes_an_answer_per_question_and_a_single_one_alone() {
+        let three = answers_of(
+            3,
+            &[
+                "2=Export orders".into(),
+                "1=Yes".into(),
+                "3=Alice, Carol".into(),
+            ],
+        )
+        .unwrap();
+        let texts: Vec<&str> = three.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(texts, ["Yes", "Export orders", "Alice, Carol"]);
+        assert_eq!(answers_of(1, &["Blue.".into()]).unwrap()[0].text, "Blue.");
+        assert_eq!(answers_of(1, &["1=Blue.".into()]).unwrap()[0].text, "Blue.");
+        assert!(
+            answers_of(3, &["Yes".into()])
+                .unwrap_err()
+                .contains("1=Yes")
+        );
+        assert!(
+            answers_of(2, &["1=Yes".into()])
+                .unwrap_err()
+                .contains("question 2")
+        );
+        assert!(
+            answers_of(2, &["5=Yes".into()])
+                .unwrap_err()
+                .contains("no question 5")
+        );
+    }
 }

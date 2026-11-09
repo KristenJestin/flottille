@@ -16,7 +16,7 @@ use flottille_core::approval;
 use flottille_core::paths::ensure_private_dir;
 use flottille_core::project::Project;
 use flottille_core::protocol::{
-    AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload,
+    AgentAnswer, AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload,
 };
 use flottille_core::secrets::{self, Secrets};
 use flottille_core::store::{AgentChange, Store, now_ms};
@@ -109,6 +109,72 @@ pub struct Live {
     reloads: Mutex<HashSet<String>>,
 }
 
+/// The user's answers to an ask of the root (`agent.answer`): one message to the root that quotes
+/// each question and gives its answer under it, which answers that ask alone; the answers are
+/// kept with the ask (`agent.answered`, `asked`), for the card that shows them.
+fn answer(daemon: &Arc<Daemon>, asked: AgentAnswer) -> Answer {
+    let agent = find(daemon, &asked.agent)?;
+    refuse_child(daemon, &agent, "answers it")?;
+    refuse_final(&agent)?;
+    let open = tree::unanswered(daemon, &agent.id)?;
+    let waits = Failure::new(
+        "refused",
+        format!("question {} does not wait for an answer", asked.question),
+    );
+    let entry = open
+        .iter()
+        .find(|q| q["seq"] == asked.question)
+        .ok_or(waits)?;
+    let sent = daemon
+        .read(|store| store.last_deliveries_of(&agent.id, "user", 64))?
+        .into_iter()
+        .any(|d| d.id.starts_with(&format!("answer-{}-", asked.question)));
+    if sent {
+        return Err(Failure::new(
+            "refused",
+            format!("question {} is answered already", asked.question),
+        ));
+    }
+    let questions = flottille_core::question::of(entry);
+    if let Some(why) = flottille_core::question::answers_refusal(&questions, &asked.answers) {
+        return Err(Failure::new("refused", why));
+    }
+    let message = flottille_core::question::message(&questions, &asked.answers);
+    let after = daemon.read(Store::last_seq)?;
+    let delivery = deliveries::deliver_message(
+        daemon,
+        &agent.id,
+        "user",
+        Some(tree::answer_id(asked.question)),
+        &crate::commands::Message::plain(&message),
+        approval::BETWEEN_TURNS,
+        Vec::new(),
+    )
+    .ok_or_else(|| Failure::new("unavailable", "the answer could not be stored"))?;
+    crate::subscriptions::user_wrote(daemon, &agent.id);
+    let env = std::env::vars_os().collect();
+    let answers: Vec<_> = asked
+        .answers
+        .into_iter()
+        .map(|a| flottille_core::question::Answer {
+            text: secrets::mask(a.text.trim(), &env),
+            ..a
+        })
+        .collect();
+    daemon.write(|store| {
+        let (_, event) = store.change_agent(
+            &agent.id,
+            AgentChange::default(),
+            Some((
+                "agent.answered",
+                json!({"agent": agent.id, "asked": asked.question, "answers": answers}),
+            )),
+        )?;
+        Ok(((), event))
+    })?;
+    Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
+}
+
 /// Answers an `agent.*` request.
 pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     let daemon = &daemon;
@@ -160,6 +226,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             crate::subscriptions::user_wrote(daemon, &agent.id);
             Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
         }
+        "agent.answer" => answer(daemon, serde_json::from_value(params)?),
         "agent.unqueue" => {
             let asked: AgentUnqueue = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
