@@ -1968,7 +1968,7 @@ pub fn ids(daemon: &Daemon, root: &str) -> Result<Vec<String>, Failure> {
 }
 
 /// Every agent below this one that has not ended.
-fn descendants(daemon: &Daemon, id: &str) -> Vec<Agent> {
+pub fn descendants(daemon: &Daemon, id: &str) -> Vec<Agent> {
     let mut found = Vec::new();
     let mut parents = vec![id.to_owned()];
     while let Some(parent) = parents.pop() {

@@ -209,3 +209,63 @@ fn a_session_that_cannot_start_at_all_still_ends() {
         "no session to resume"
     );
 }
+
+#[test]
+fn a_turn_failed_on_an_expired_login_gives_its_deliveries_back() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "hello", "error": EXPIRED}]}));
+    project(&user);
+    let (id, after) = run(&user, "hello");
+
+    let events = events_until(&user, &id, after, &["agent.released", "agent.failed"]);
+
+    let given_back = events
+        .iter()
+        .find(|e| e["name"] == "delivery.given_back")
+        .unwrap_or_else(|| panic!("given back: {events:?}"));
+    assert_eq!(
+        given_back["data"]["deliveries"].as_array().unwrap().len(),
+        1
+    );
+    let tree = user.call("agent.tree", json!({"agent": id})).unwrap();
+    let queued = &tree["agents"][0]["queued"];
+    assert_eq!(queued[0]["text"], "hello", "it waits again: {queued}");
+}
+
+#[test]
+fn messages_queued_behind_a_failed_turn_wait_for_the_next_message() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "hello", "do": [{"wait": 1500}], "error": EXPIRED, "times": 1}
+    ]}));
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, &["agent.prompted"]);
+    user.call("agent.send", json!({"agent": id, "message": "later"}))
+        .unwrap();
+    events_until(&user, &id, after, &["agent.released", "agent.failed"]);
+
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    assert_eq!(
+        user.received_requests("session/prompt").len(),
+        1,
+        "nothing started a process that would fail the same way"
+    );
+    assert_eq!(show(&user, &id)["state_reason"], LOGIN_LINE);
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "now"}))
+        .unwrap();
+    events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        &["agent.turn_ended", "agent.failed"],
+    );
+    let prompts = user.received_requests("session/prompt");
+    assert_eq!(prompts.len(), 2);
+    let text = prompts[1]["params"]["prompt"][0]["text"].as_str().unwrap();
+    for words in ["hello", "later", "now"] {
+        assert!(text.contains(words), "{words} goes with it: {text}");
+    }
+}

@@ -113,7 +113,8 @@ pub trait Events: Send + Sync + 'static {
     fn image(&self, name: &str) -> Option<(&'static str, String)>;
     /// `typed`: the prompt's `Prompt::typed`.
     fn turn_started(&self, text: &str, images: &[String], typed: &Value, deliveries: &[String]);
-    /// The end of a turn, with what it used, one entry per model.
+    /// The end of a turn, with what it used, one entry per model. A turn ended `failed` gives
+    /// its deliveries back.
     fn turn_ended(&self, stop_reason: &str, usage: Value, used: Vec<Used>);
     /// The agent's tools as they are now: its role may have gained some since the session began
     /// (`docs/tools.md`, "When the tools change").

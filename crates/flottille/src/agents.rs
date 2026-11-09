@@ -158,6 +158,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 Failure::new("unavailable", "the message could not be stored")
             })?;
             crate::subscriptions::user_wrote(daemon, &agent.id);
+            wake_the_signed_out(daemon, &agent.id);
             Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
         }
         "agent.unqueue" => {
@@ -1145,7 +1146,11 @@ async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
     loop {
         if turns.queued.is_empty() {
             crate::compaction::before_turn(&daemon, &id);
-            match deliveries::pump(&daemon, &id) {
+            let pumped = match waits_for_the_user(&daemon, &id) {
+                true => None,
+                false => deliveries::pump(&daemon, &id),
+            };
+            match pumped {
                 Some(prompt) => turns.queued.push_back(prompt),
                 None => match orders.recv().await {
                     None | Some(Order::Stop) => return,
@@ -1182,6 +1187,40 @@ async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
                 fail(&daemon, &id, &reason);
                 return;
             }
+        }
+    }
+}
+
+/// Whether the agent's login is gone (`turn_failures`): what is queued for it waits, started on
+/// nothing, until the user writes to it or to its root (`wake_the_signed_out`). A process would
+/// only fail the same way, and a parent writing back at once would loop.
+fn waits_for_the_user(daemon: &Daemon, id: &str) -> bool {
+    daemon
+        .read(|store| store.agent(id))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| {
+            agent.state == AgentState::Idle
+                && agent
+                    .state_reason
+                    .as_deref()
+                    .is_some_and(crate::turn_failures::is_login)
+        })
+}
+
+/// The user wrote to `root`: they may have signed in again. It and the agents of its tree that
+/// wait on a login gone lose that line and are rung, to take what waits for them.
+fn wake_the_signed_out(daemon: &Arc<Daemon>, root: &str) {
+    let tree = daemon
+        .read(|store| store.agent(root))
+        .ok()
+        .flatten()
+        .into_iter()
+        .chain(tree::descendants(daemon, root));
+    for agent in tree {
+        if waits_for_the_user(daemon, &agent.id) {
+            change(daemon, &agent.id, AgentState::Idle, None, None);
+            deliveries::ring(daemon, &agent.id);
         }
     }
 }
@@ -1328,12 +1367,14 @@ async fn process(
                 Some(said.to_owned()),
                 Some(("agent.released", json!({"reason": "failed"}))),
             );
+            // Told not to write: nothing it sends starts the child until the user acts.
             tree::tell_parent(
                 daemon,
                 agent,
                 "child-idle",
                 &format!(
-                    "its turn failed: {said}. Its session stays: write to it once that is fixed."
+                    "cannot work until the user signs in again ({said}). Do not write to it until \
+                     then: what you send waits, and goes once the user writes to your tree's root."
                 ),
                 approval::BETWEEN_TURNS,
             );
@@ -2045,9 +2086,16 @@ impl acp::Events for Recorder {
     fn turn_ended(&self, stop_reason: &str, usage: Value, used: Vec<Used>) {
         self.said();
         self.record_usage(stop_reason, used);
-        let _ = self
-            .daemon
-            .read(|store| store.deliveries_taken(&self.agent));
+        // A failed turn gives back what it carried: read by no one, it goes with the next one.
+        if stop_reason == "failed" {
+            let _ = self
+                .daemon
+                .write(|store| Ok(((), store.give_back(&self.agent)?)));
+        } else {
+            let _ = self
+                .daemon
+                .read(|store| store.deliveries_taken(&self.agent));
+        }
         change(
             &self.daemon,
             &self.agent,
