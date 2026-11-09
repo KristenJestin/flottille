@@ -2195,6 +2195,17 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Whether a message of the user whose id starts with `prefix` waits for the agent or was
+    /// taken by it: one withdrawn is neither.
+    pub fn user_message_taken_or_waiting(&self, agent: &str, prefix: &str) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM deliveries WHERE agent = ?1 AND kind = 'user' \
+             AND substr(id, 1, length(?2)) = ?2 AND state IN ('queued', 'sending', 'sent'))",
+            params![agent, prefix],
+            |row| row.get(0),
+        )?)
+    }
+
     /// The agent's last deliveries of `kind`, newest first.
     pub fn last_deliveries_of(
         &self,

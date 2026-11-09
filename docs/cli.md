@@ -629,6 +629,21 @@ $ flottille agent send bd7ed8152969 "Which database did we pick?" --follow
 We picked PostgreSQL.
 ```
 
+### `flottille agent answer <agent> --answer "<n>=<text>"…`
+
+Answers an ask of a root agent (`agent.answer`): one `--answer` per question, `<n>` its number from
+1 as `flottille inbox` shows it, each question once (a number given twice is refused); the answer to
+an ask of a single question is the whole text, with no number (`--answer "Blue."`, and `--answer
+"2=two"` answers `2=two`). `--question <n>` names the ask by the number `flottille inbox` gives it; left
+out, the oldest open one. The words go as written (several lines in one argument are kept); an
+option is answered by writing its label. The agent gets one message quoting each question with its
+answer under it, and its other asks still wait. `--json` prints what the daemon answered.
+
+```
+$ flottille agent answer 298a0599b45c --answer "1=Yes" --answer "2=Export orders as CSV"
+Answered question 33 of agent 298a0599b45c: it reads your answer after the turn that runs, if one does.
+```
+
 ### `flottille agent unqueue <agent> <delivery>`
 
 Takes back a message you wrote to a root agent that it has not read yet (it waits for the turn
@@ -869,7 +884,7 @@ What your **root** agents sent you, oldest first. An entry is one of:
 | Kind | What it is | The event it comes from |
 |---|---|---|
 | `report` | the root called `report`: it is done, and says what it did | `agent.reported` |
-| `question` | the root called `ask`: it asks you something and goes on without waiting; answer it with `flottille agent send`, which ends its wait for you | `agent.asked` (`to` is `user`) |
+| `question` | the root called `ask`: it asks you one thing or several (numbered, each with its options) and goes on without waiting; answer each with `flottille agent answer`, which ends its wait for you (`flottille agent send` answers every question open, in one message) | `agent.asked` (`to` is `user`) |
 | `failure` | the root cannot go on: its process could not start, its session could not open, an option it was asked is not one it offers, it was replaced too often (twice in 30 minutes), or its new workspace could not be prepared (`docs/events.md` also lists "its parent failed", which only concerns a child) | `agent.failed` |
 
 A child's report, question or failure goes to its parent, never to the inbox. The requests a gate
@@ -879,13 +894,16 @@ The inbox is a view of the stored events (`docs/events.md`), not a store of its 
 marked read. Without `--after`, it lists the last `--limit` entries (50 by default); with
 `--after <n>`, the first `--limit` entries after the event number `n`, so that a client reads on
 from the last `seq` it saw. `--json` prints `inbox.list`: `{"entries": [{"seq", "at", "kind",
-"agent", "project", "workspace", "text"}]}`, `text` being the report, the question or the reason.
+"agent", "project", "workspace", "text"}]}`, `text` being the report, the question or the reason;
+a question also has `questions`, each with its options.
 
 ```
 $ flottille inbox
 #33 question of agent 298a0599b45c (shop):
-    Which database should the app use?
-Answer a question with `flottille agent send <agent> <message>`; `flottille inbox --after <n>` lists what came since.
+    1. Push `feat/42-export` and open the pull request?
+       Options: Yes; Not yet (Keep it local)
+    2. Title of the pull request?
+Answer a question with `flottille agent answer <agent> --question <n> --answer "1=…"`, one --answer per question; `flottille inbox --after <n>` lists what came since.
 ```
 
 ### `flottille runs list [project]`

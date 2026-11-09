@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use flottille_core::protocol::Event;
+use flottille_core::question;
 use serde_json::Value;
 
 use crate::runs::CommandRow;
@@ -100,11 +101,16 @@ pub enum Block {
     Approval {
         number: u64,
     },
-    /// A question the agent asked the user with `ask_user`: `seq` is its `agent.asked` event,
-    /// which the daemon's open questions name while it waits for the answer.
+    /// A question the agent asked the user with `ask`: `seq` is its `agent.asked` event,
+    /// which the daemon's open questions name while it waits for the answer. `text` is the ask
+    /// as one text; `questions` each of its questions, with its options.
     Question {
         seq: u64,
         text: String,
+        questions: Vec<question::Question>,
+        /// The user's answers, once given from its card (`agent.answered`): the card stays,
+        /// folded to them, once the agent took them.
+        answers: Option<Vec<question::Answer>>,
     },
     /// A question a led session asked its pilot with `ask`: the pilot answers it; the card only
     /// shows the user what was asked.
@@ -792,6 +798,11 @@ impl Conversation {
                     if delivery(at).is_some_and(|id| is_replay(&id)) {
                         continue;
                     }
+                    // An answer from a question's card shows in that card, under each question:
+                    // the quotes are Flottille's, not the user's words.
+                    if delivery(at).is_some_and(|id| question::answered_ask(&id).is_some()) {
+                        continue;
+                    }
                     // A picture sent alone has no words: its thumbnails are the message.
                     if body.trim().is_empty() && !names.is_empty() {
                         alone = alone.or_else(|| delivery(at));
@@ -926,8 +937,24 @@ impl Conversation {
                 changes.extend(self.push(Block::Question {
                     seq: event.seq,
                     text: text("question"),
+                    questions: question::of(data),
+                    answers: None,
                 }));
                 changes
+            }
+            // The answers the user gave from a question's card: the card shows them.
+            "agent.answered" if data["asked"].is_u64() => {
+                let asked = data["asked"].as_u64();
+                let at = self.blocks.iter().position(
+                    |block| matches!(block, Block::Question { seq, .. } if Some(*seq) == asked),
+                );
+                match at.map(|at| (at, &mut self.blocks[at])) {
+                    Some((at, Block::Question { answers, .. })) => {
+                        *answers = Some(question::answers_of(data));
+                        vec![Change::Changed(at)]
+                    }
+                    _ => Vec::new(),
+                }
             }
             "agent.asked" if data["to"] == "pilot" => {
                 let mut changes = self.close(Some(event.at));
@@ -2348,7 +2375,12 @@ mod tests {
                 },
                 Block::Question {
                     seq: 2,
-                    text: "Cover the logout too?".into()
+                    text: "Cover the logout too?".into(),
+                    questions: vec![question::Question {
+                        question: "Cover the logout too?".into(),
+                        ..question::Question::default()
+                    }],
+                    answers: None,
                 }
             ]
         );

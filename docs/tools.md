@@ -1030,7 +1030,7 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
 | `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. `agent_id` may also name a session of the caller's project: one it started as `led` is its own to end, judged as any call in the tree's mode; any other (one it handed, or one it did not start) is held for the user every time, in every mode, Full included ("Sessions that talk to each other", "Ending another session"). |
 | `report {text}` | The caller is done. At most 10,000 characters, so that it rides whole on its parent's results; a longer one is refused, asking for fewer words and a file that holds the details. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
-| `ask {question}` | A question, answered later as a message; the daemon decides where it goes, never the agent, and the tool's description says it for the caller in one sentence chosen by its kind: a **child** asks its parent (`child-question`, answered with `agent_send`; until then the child shows as waiting on its parent); a **led** session asks its pilot (the pilot is woken at the turn's end, "Following a session", and answers with `session_send`; until then the session shows as waiting on its pilot, and the user sees the question in the session too); **any other root** asks the user (`agent.asked`, the inbox). What an agent needs goes here, never in a report or a last message; see "Where a question goes", below. |
+| `ask {question}` or `ask {questions: [{question, options?, multiple?}]}` | One question, or up to 4 at once (more is refused, asking for the rest once these are answered); `question` and `questions` are exclusive. A question's `options` are 2 to 4 short choices, each `{label, description?}` (a label of one line of 60 characters at most, distinct, a description of one line); `multiple` lets the user pick several (refused without options). Every question can also be answered in words. Its description says, in its few sentences, one question per point to decide, with options when the answers are known, and holds a call of each form. Answered later as a message; the daemon decides where it goes, never the agent, and the tool's description says it for the caller in one sentence chosen by its kind: a **child** asks its parent (`child-question`, answered with `agent_send`; until then the child shows as waiting on its parent); a **led** session asks its pilot (the pilot is woken at the turn's end, "Following a session", and answers with `session_send`; until then the session shows as waiting on its pilot, and the user sees the question in the session too); **any other root** asks the user (`agent.asked`, the inbox). A parent and a pilot read the ask as one text, each question numbered with its options under it, and answer in words; the user answers each question apart, on the ask's card in the window or with `flottille agent answer` (`agent.answer`), and the agent gets one message that quotes each question with its answer under it ("Answering an ask", below). What an agent needs goes here, never in a report or a last message; see "Where a question goes", below. |
 | `ask_user {question}`, `ask_parent {question}` | The two names `ask` replaced, kept for one release: no agent is given them, and a call of either is answered, routed as `ask` is, whoever makes it. |
 | `approval_answer {request_id, decision, why}` | Answers a request held for the caller: `deny` (the agent that asked is told, with the why) or `forward` (to the caller's parent with its why, or to the user from a root). There is no way to allow: `allow` is refused as a decision the tool does not have, and a request the caller does not hold, or no longer holds, is refused (`refused: request #n is not held by this agent: …`). |
 
@@ -1153,6 +1153,37 @@ inbox at once, the session no longer waits on its pilot, and it is told once (an
 delivery, or the `handed` or `detached` one, saying how many went). A question left in a report or in a last message is a
 follow-up, not a wait. The descriptions of `ask`, `report` and `session_send` say so, under the
 2,048 characters their limit asks.
+
+#### Answering an ask
+
+An ask to the user is answered on its own: several asks waiting are several cards, each answered
+apart (`agent.answer`, `docs/protocol.md`), and an answer from one card answers that ask alone. The
+card names who asks by the session's title (`<title> asks you`), then holds one block per question:
+the question, its options as chips (one or several to choose), and a field of several lines for
+the user's words (`Enter` breaks a line, `Ctrl+Enter` sends; the field grows with its text up to
+eight lines, then scrolls). A choice and words go together. One Answer for the card, enabled once
+every question has a choice or words. The agent gets one message:
+
+```
+> Push `feat/42-export` and open the pull request?
+
+Yes
+Squash it first.
+
+> Title of the pull request?
+
+Export orders as CSV
+
+> Who reviews it?
+
+Alice, Carol
+```
+
+A single question without options is answered by the words alone, as before. What the agent gets
+is Flottille's, not the user's words: the window shows no message of the user for it, but the
+card, folded once the agent took it to the session's title, each question on one line and what the
+user chose and wrote under it. A message the user writes in the composer still answers every ask
+open then, as it always did.
 
 #### Detach
 

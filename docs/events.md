@@ -792,7 +792,8 @@ closed by it.
 | Field | |
 |---|---|
 | `agent` | |
-| `question` | Masked. |
+| `question` | The ask as one text, masked: a single question without options is its own text; several are numbered, each option listed under its question (what a parent or a pilot reads). |
+| `questions` | Each question, masked: `{"question", "options"?: [{"label", "description"?}], "multiple"?}`. An event written before an ask could hold several has none: read it as the single question `question`, without options. |
 | `to` | `user`, `parent` or `pilot`. |
 | `pilot` | With `to` `pilot`: the pilot's id; `null` otherwise. |
 | `moved_from` | Present on a question to the pilot moved to the user: the pilot's id. |
@@ -833,14 +834,17 @@ on), and it is told so once by a `handed` delivery.
 
 A question of the agent may no longer wait: it took a message of the user (a root) or of its
 parent (a child) while a question of its waited, or its session was replaced or resumed while one
-did. It tells a client to read the root's open questions again (`agent.tree`, `questions`); it does
-not say which are open, the store does: a question is answered once the root took a message of the
-user written after it, and none asked before a replacement or a resume waits.
+did, or the user answered an ask from its card (`agent.answer`). It tells a client to read the
+root's open questions again (`agent.tree`, `questions`); it does not say which are open, the store
+does: an ask is answered once the root took a message of the user written after it (an answer from
+an ask's card answers that ask alone), and none asked before a replacement or a resume waits.
 
 | Field | |
 |---|---|
 | `agent` | |
-| `why` | `replaced` or `resumed`, when that is why; absent for a message taken. |
+| `why` | `replaced` or `resumed`, when that is why; absent otherwise. |
+| `asked` | With `agent.answer`: the number of the `agent.asked` event it answers. |
+| `answers` | With `agent.answer`: one per question, in order, `{"choices"?, "text"?}`, the words masked. The window's card shows them, folded, once the agent took them. |
 
 #### `agent.stuck`
 

@@ -293,6 +293,16 @@ pub struct AgentSend {
     pub compact: Option<bool>,
 }
 
+/// The parameters of `agent.answer`: the user's answers to an ask of the root, one per question
+/// in order (`question` is the number of its `agent.asked` event).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentAnswer {
+    pub agent: String,
+    pub question: u64,
+    pub answers: Vec<crate::question::Answer>,
+}
+
 /// An image sent with a message: its MIME type and its bytes in base64.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

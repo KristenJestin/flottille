@@ -907,12 +907,11 @@ impl Shell {
             Outcome::QuestionAnswered {
                 session,
                 seq,
-                seqs,
                 refused,
             } => {
                 // Kept by the window, not the page: a page opened again knows it was sent.
                 if refused.is_none() {
-                    crate::session::answers_sent(&session, &seqs, cx);
+                    crate::question_card::answers_sent(&session, seq, cx);
                 }
                 if let Some(page) = self
                     .session_page

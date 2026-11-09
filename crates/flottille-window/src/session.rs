@@ -26,10 +26,10 @@ use flottille_ui::card::Block as CardBlock;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Confirm, Drawer, Field, Icon, ListRow, Listing, Menu, Modal,
-    Palette, Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting,
-    changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence,
-    presence_of, section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
+    AgentState, Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette,
+    Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter,
+    fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence, presence_of,
+    section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -65,6 +65,7 @@ use crate::picture_viewer::PictureViewer;
 use crate::project::removal_refused;
 use crate::project_settings::Reveal as ProjectReveal;
 use crate::providers::Providers;
+use crate::question_card::QuestionCard;
 use crate::queued::QueuedMessages;
 use crate::runs::{self, CommandList, CommandPanel, EndedFold, ended_row, rail_label};
 use crate::session_link::{
@@ -1646,35 +1647,18 @@ impl SessionPage {
         }
     }
 
-    /// The user answers the question of `seq` from its card: a message to the root, which
-    /// names the question when several wait.
-    pub fn answer_question(&mut self, seq: u64, answer: String, cx: &mut Context<Self>) {
-        let open = self
-            .tree
-            .iter()
-            .find(|a| a.parent.is_none())
-            .map(|root| root.questions.clone())
-            .unwrap_or_default();
-        // A message of the user answers every question open: it quotes each when several wait.
-        let message = match open.len() > 1 {
-            true => {
-                let quoted: Vec<String> = open
-                    .iter()
-                    .map(|q| format!("> {}", q.text.lines().next().unwrap_or_default()))
-                    .collect();
-                format!("{}\n\n{answer}", quoted.join("\n>\n"))
-            }
-            false => answer,
-        };
-        let mut seqs: Vec<u64> = open.iter().map(|q| q.seq).collect();
-        if !seqs.contains(&seq) {
-            seqs.push(seq);
-        }
+    /// The user answers the ask of `seq` from its card, one answer per question: the daemon
+    /// sends the root one message quoting each (`agent.answer`).
+    pub fn answer_question(
+        &mut self,
+        seq: u64,
+        answers: Vec<flottille_core::question::Answer>,
+        cx: &mut Context<Self>,
+    ) {
         let command = Command::AnswerQuestion {
             session: self.opened.id.clone(),
             seq,
-            seqs,
-            message,
+            answers,
         };
         self.shell
             .update(cx, |shell, _| shell.perform(command))
@@ -1686,7 +1670,7 @@ impl SessionPage {
         &mut self,
         seq: u64,
         refused: Option<String>,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let rows = self.conversation.read(cx).rows.clone();
@@ -1697,7 +1681,7 @@ impl SessionPage {
                 .flatten()
         });
         if let Some(answer) = answer {
-            answer.update(cx, |answer, cx| answer.answered(refused, window, cx));
+            answer.update(cx, |answer, cx| answer.answered(refused, cx));
         }
     }
 
@@ -1719,14 +1703,6 @@ impl SessionPage {
         if let Some(fields) = fields {
             fields.update(cx, |fields, cx| fields.answered(refused, cx));
         }
-    }
-
-    /// How many questions of the root wait for the user's answer.
-    fn open_questions(&self) -> usize {
-        self.tree
-            .iter()
-            .find(|a| a.parent.is_none())
-            .map_or(0, |root| root.questions.len())
     }
 
     /// Whether the question of `seq` waits for the user's answer, as the daemon says it.
@@ -1777,10 +1753,6 @@ impl SessionPage {
                 let row = view.rows[at].clone();
                 view.touched += 1;
                 if let Block::Question { seq, .. } = *row.read(cx).block {
-                    if let Some(answer) = row.read(cx).answer.clone() {
-                        let open = self.open_questions();
-                        answer.update(cx, |answer, cx| answer.set_open(open, cx));
-                    }
                     let asking = self.asking(seq);
                     if row.read(cx).asking != asking {
                         row.update(cx, |row, cx| row.set_asking(asking, cx));
@@ -3364,7 +3336,8 @@ impl ConversationView {
                 .card()
                 .is_some_and(|card| card.decision.is_none()),
             Block::Command(card) => card.ending == Ending::Running,
-            Block::Question { .. } => self.rows[at].read(cx).asking,
+            // Answered from its card, it stays in sight, folded to its answers.
+            Block::Question { answers, .. } => self.rows[at].read(cx).asking || answers.is_some(),
             Block::VaultAsk(ask) => ask.open,
             _ => false,
         }
@@ -3854,8 +3827,8 @@ pub struct Row {
     pills: HashMap<String, Entity<Pill>>,
     /// Its question waits for the user's answer, as the daemon says: its card shows.
     asking: bool,
-    /// The field that answers its question, made when the card first shows.
-    answer: Option<Entity<AnswerBox>>,
+    /// The blocks that answer its ask, made when the card first shows.
+    answer: Option<Entity<QuestionCard>>,
     /// The fields of its request for a vault entry, made when the card first shows.
     vault_ask: Option<Entity<crate::vault_ask::VaultAskBox>>,
     /// It is a message the user sent from the composer: being sent, refused, or recorded since.
@@ -4109,8 +4082,8 @@ impl Row {
         &self.block
     }
 
-    /// The field that answers its question, once its card showed.
-    pub fn answer(&self) -> Option<&Entity<AnswerBox>> {
+    /// The blocks that answer its ask, once its card showed.
+    pub fn answer(&self) -> Option<&Entity<QuestionCard>> {
         self.answer.as_ref()
     }
 
@@ -5962,8 +5935,13 @@ impl Render for Row {
                     .into_any_element()
             }
             Block::Approval { number } => self.render_card(*number, window, cx).into_any_element(),
-            Block::Question { seq, .. } => self.render_question(*seq, window, cx),
-            Block::Asked { .. } => self.render_asked(),
+            Block::Question {
+                seq,
+                questions,
+                answers,
+                ..
+            } => self.render_question(*seq, questions, answers.as_deref(), window, cx),
+            Block::Asked { .. } => self.render_asked(cx),
             Block::VaultAsk(ask) => self.render_vault_ask(ask.clone(), window, cx),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
@@ -6090,12 +6068,12 @@ impl Row {
 impl Row {
     /// A question the led session asked its pilot: a card that says so, with no answer box, the
     /// pilot's to answer.
-    fn render_asked(&self) -> AnyElement {
+    fn render_asked(&self, cx: &App) -> AnyElement {
         let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
         Card::new()
             .title(SharedString::from(format!(
                 "{} asks its pilot",
-                flottille_ui::quoted_title(&self.me)
+                flottille_ui::quoted_title(&self.title(cx))
             )))
             .meta(self.when.map(clock).unwrap_or_default())
             .child(
@@ -6140,7 +6118,8 @@ impl Row {
             }
         };
         let when = SharedString::from(self.when.map(clock).unwrap_or_default());
-        crate::vault_ask::card(self.at, &self.me, when, &ask, fields, cx)
+        let title = flottille_ui::quoted_title(&self.title(cx));
+        crate::vault_ask::card(self.at, &title, when, &ask, fields, cx)
     }
 
     /// The fields of its request for a vault entry, once its card showed.
@@ -6148,54 +6127,56 @@ impl Row {
         self.vault_ask.as_ref()
     }
 
-    /// A question the agent asked the user, in full, with the field that answers it: it unfolds
-    /// where it was asked while the daemon says it waits, and folds away once the answer is
-    /// taken.
+    /// An ask of the agent to the user, each question with what answers it: it unfolds where
+    /// it was asked while the daemon says it waits, and once the agent took the answers given
+    /// from it, folds to them (an ask answered by a message of the user folds away).
     fn render_question(
         &mut self,
         seq: u64,
+        questions: &[flottille_core::question::Question],
+        answers: Option<&[flottille_core::question::Answer]>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
+        let title = self.title(cx);
+        let when = SharedString::from(self.when.map(clock).unwrap_or_default());
         let answer = match &self.answer {
             Some(answer) => answer.clone(),
             None => {
                 let page = self.page.clone();
-                let (session, open) = page
+                let session = page
                     .upgrade()
-                    .map(|page| {
-                        let page = page.read(cx);
-                        (page.id().to_owned(), page.open_questions())
-                    })
+                    .map(|page| page.read(cx).id().to_owned())
                     .unwrap_or_default();
+                let (at, asked) = (self.at, questions.to_vec());
                 let answer =
-                    cx.new(|cx| AnswerBox::new(self.at, seq, session, open, page, window, cx));
+                    cx.new(|cx| QuestionCard::new(at, seq, session, asked, page, window, cx));
                 self.answer = Some(answer.clone());
                 answer
             }
         };
-        let card = Card::new()
-            .title(SharedString::from(format!("{} asks you", self.me)))
-            .meta(self.when.map(clock).unwrap_or_default())
-            .child(
-                div()
-                    .id(id("question-text"))
-                    .px(space::LG)
-                    .pt(space::MD)
-                    .child(markdown_view(
-                        id("question-region"),
-                        &self.markdown,
-                        self.scope,
-                    ))
-                    .test_support(),
-            )
-            .child(div().px(space::LG).py(space::MD).child(answer));
+        answer.update(cx, |card, _| card.set_answered(answers.is_some()));
+        let open = crate::question_card::open_card(self.at, &title, when.clone(), answer);
+        let answered = answers.map(|answers| {
+            crate::question_card::answered_card(self.at, &title, when, questions, answers, cx)
+        });
         div()
             .id(id("question"))
-            .child(presence(id("question-open"), self.asking, card))
+            .child(presence(id("question-open"), self.asking, open))
+            .when_some(answered, |d, answered| {
+                d.child(presence(id("question-answered"), !self.asking, answered))
+            })
             .test_support()
             .into_any_element()
+    }
+
+    /// The session's title, which names who asks on a question's card.
+    fn title(&self, cx: &App) -> String {
+        self.page
+            .upgrade()
+            .map(|page| page.read(cx).opened.title.clone())
+            .unwrap_or_else(|| self.me.clone())
     }
 }
 
@@ -6242,183 +6223,6 @@ impl SessionPage {
                 cx,
             ))
             .into_any_element()
-    }
-}
-
-/// What a question's card says once its answer was sent while the agent works: a message of the
-/// user waits for the end of the agent's turn (or "Send now" under the conversation), and the
-/// card folds away once the agent took it.
-pub const ANSWER_WAITS: &str =
-    "Your answer is sent: it waits under the conversation until the agent's turn ends.";
-
-/// What each card says while several questions wait: a message of the user answers them all.
-pub const ANSWERS_ALL: &str =
-    "Several questions wait: your answer goes to all of them, and quotes each.";
-
-/// The questions whose answer the user sent, by session: the window keeps them, so that a page
-/// opened again, or a history read again, does not ask for an answer twice.
-#[derive(Default)]
-struct SentAnswers(HashSet<(String, u64)>);
-
-impl gpui_kit::Global for SentAnswers {}
-
-/// The answer to the questions `seqs` of `session` was taken by the daemon.
-pub fn answers_sent(session: &str, seqs: &[u64], cx: &mut App) {
-    let sent = &mut cx.default_global::<SentAnswers>().0;
-    sent.extend(seqs.iter().map(|&seq| (session.to_owned(), seq)));
-}
-
-/// The field that answers a question, in its own view: its caret blinks without drawing the row.
-pub struct AnswerBox {
-    at: usize,
-    seq: u64,
-    session: String,
-    /// How many questions of the session wait: its answer goes to all of them.
-    open: usize,
-    page: WeakEntity<SessionPage>,
-    field: Entity<InputState>,
-    has_text: bool,
-    sending: bool,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl AnswerBox {
-    fn new(
-        at: usize,
-        seq: u64,
-        session: String,
-        open: usize,
-        page: WeakEntity<SessionPage>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let field = cx.new(|cx| {
-            let mut field = InputState::new(window, cx).placeholder("Your answer");
-            follow_theme(&mut field, cx);
-            field
-        });
-        let mut subscriptions = vec![cx.subscribe_in(
-            &field,
-            window,
-            |this: &mut Self, field, event, _, cx| match event {
-                InputEvent::Change => {
-                    this.has_text = !field.read(cx).value().trim().is_empty();
-                    cx.notify();
-                }
-                InputEvent::PressEnter { .. } => this.send(cx),
-                _ => {}
-            },
-        )];
-        subscriptions.push(cx.observe_global::<SentAnswers>(|_, cx| cx.notify()));
-        AnswerBox {
-            at,
-            seq,
-            session,
-            open,
-            page,
-            field,
-            has_text: false,
-            sending: false,
-            _subscriptions: subscriptions,
-        }
-    }
-
-    /// How many questions of the session wait now.
-    fn set_open(&mut self, open: usize, cx: &mut Context<Self>) {
-        if self.open != open {
-            self.open = open;
-            cx.notify();
-        }
-    }
-
-    pub fn field(&self) -> &Entity<InputState> {
-        &self.field
-    }
-
-    /// Whether the answer to its question went: the field gives way to a line saying it waits.
-    pub fn is_sent(&self, cx: &App) -> bool {
-        cx.try_global::<SentAnswers>()
-            .is_some_and(|sent| sent.0.contains(&(self.session.clone(), self.seq)))
-    }
-
-    /// Sends what the field holds to the root, as a message.
-    pub fn send(&mut self, cx: &mut Context<Self>) {
-        let typed = self.field.read(cx).value().trim().to_owned();
-        if typed.is_empty() || self.sending {
-            return;
-        }
-        self.sending = true;
-        let seq = self.seq;
-        self.page
-            .update(cx, |page, cx| page.answer_question(seq, typed, cx))
-            .ok();
-        cx.notify();
-    }
-
-    fn answered(&mut self, refused: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        self.sending = false;
-        match refused {
-            None => {
-                self.has_text = false;
-                self.field
-                    .update(cx, |field, cx| field.set_value("", window, cx));
-            }
-            Some(why) => toast(Toast::failure("The answer was not sent").detail(why), cx),
-        }
-        cx.notify();
-    }
-}
-
-impl Render for AnswerBox {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
-        let frame = div()
-            .id(id("answer-frame"))
-            .h(px(34.))
-            .px(space::MD)
-            .rounded(px(8.))
-            .bg(p.field)
-            .border_1()
-            .border_color(p.line2)
-            .flex()
-            .items_center()
-            .text_size(px(13.))
-            .child(Input::new(&self.field))
-            .test_support();
-        let send = Button::primary(id("answer-send"), "Answer")
-            .disabled(!self.has_text || self.sending)
-            .on_click(cx.listener(|this, _, _, cx| this.send(cx)));
-        let field = Field::new(
-            id("answer-field"),
-            "Your answer",
-            div()
-                .flex()
-                .items_center()
-                .gap(space::SM)
-                .child(div().flex_1().min_w_0().child(frame))
-                .child(send),
-        );
-        let all = div()
-            .id(id("answer-all"))
-            .pb(space::SM)
-            .text_size(px(12.5))
-            .text_color(p.mute)
-            .aria_label(ANSWERS_ALL)
-            .child(ANSWERS_ALL)
-            .test_support();
-        let waits = div()
-            .id(id("answer-waits"))
-            .text_size(px(12.5))
-            .text_color(p.faint)
-            .aria_label(ANSWER_WAITS)
-            .child(ANSWER_WAITS)
-            .test_support();
-        let sent = self.is_sent(cx);
-        div()
-            .child(presence(id("answer-several"), self.open > 1 && !sent, all))
-            .child(presence(id("answer-open"), !sent, field))
-            .child(presence(id("answer-sent"), sent, waits))
     }
 }
 

@@ -44,8 +44,9 @@ fn inbox_text(listed: &Value) -> String {
         }
     }
     out.push_str(
-        "Answer a question with `flottille agent send <agent> <message>`; \
-         `flottille inbox --after <n>` lists what came since.\n",
+        "Answer a question with `flottille agent answer <agent> --question <n> --answer \
+         \"1=…\"`, one --answer per question; `flottille inbox --after <n>` lists what came \
+         since.\n",
     );
     out
 }
