@@ -28,6 +28,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::agent_folders::Snapshot;
 use crate::agents::{signal_group, start_time};
 use crate::daemon::Daemon;
 use crate::deliveries;
@@ -132,6 +133,8 @@ struct Going {
     notify: AtomicBool,
     /// Told when it is ready, for what waits on it (a service a task needs).
     readied: Notify,
+    /// The agent folders of an agent's place as they were before it, put back once it ends.
+    guarded: Mutex<Option<Snapshot>>,
 }
 
 /// How a run is told ready: its probe, and whether its agent asked to be told.
@@ -536,6 +539,7 @@ pub async fn run(
         url_error,
         workspace: None,
     };
+    let guarded = guard(place).await;
     if let Err(why) = start(
         daemon,
         run,
@@ -544,6 +548,7 @@ pub async fn run(
         secret_values,
         Phase::Waited,
         Readying { probe, notify },
+        guarded,
     ) {
         return Outcome::Failed(why);
     }
@@ -651,6 +656,7 @@ pub async fn run_for_user(
             probe,
             notify: false,
         },
+        None,
     )?;
     Ok(id)
 }
@@ -821,6 +827,7 @@ async fn remote_kept(
 /// Spawns the run, records it, and leaves a task of its own to follow it to its end. `phase` is
 /// what it is in from the start: a run that ends at once must find it already detached to have
 /// its end delivered.
+#[allow(clippy::too_many_arguments)]
 fn start(
     daemon: &Arc<Daemon>,
     run: Run,
@@ -829,6 +836,7 @@ fn start(
     secrets: Vec<String>,
     phase: Phase,
     readying: Readying,
+    guarded: Option<Snapshot>,
 ) -> Result<(), String> {
     crate::projects::refuse_removing(daemon, &run.project).map_err(|refused| refused.message)?;
     let (reader, writer) = std::io::pipe().map_err(|e| format!("cannot run it: {e}"))?;
@@ -890,6 +898,7 @@ fn start(
         unseen: Mutex::default(),
         notify: AtomicBool::new(readying.notify),
         readied: Notify::new(),
+        guarded: Mutex::new(guarded),
     });
     daemon
         .mcp
@@ -903,6 +912,15 @@ fn start(
     }
     tokio::spawn(follow(daemon.clone(), going, child, pid, reader));
     Ok(())
+}
+
+/// The agent folders of an agent's place before one of its runs: the gate refuses every write
+/// there it sees, and a line may write there without naming one (`agent_folders`).
+async fn guard(place: &Place) -> Option<Snapshot> {
+    let (root, home) = (place.root.clone(), place.home.clone());
+    tokio::task::spawn_blocking(move || Snapshot::take(&root, home.as_deref()))
+        .await
+        .ok()
 }
 
 /// Whether the run is still starting, not ready yet.
@@ -1065,6 +1083,15 @@ async fn follow(
             break;
         }
         going.output.lock().unwrap().push(&buffer[..read]);
+    }
+    // What it wrote in an agent folder of its place without naming it is put back, and its
+    // result says so.
+    let guarded = going.guarded.lock().unwrap().take();
+    if let Some(snapshot) = guarded
+        && let Ok(restored) = tokio::task::spawn_blocking(move || snapshot.restore()).await
+        && let Some(said) = crate::agent_folders::said(&restored)
+    {
+        going.output.lock().unwrap().push(said.as_bytes());
     }
     let end = match status {
         Some(status) => End {
@@ -1456,7 +1483,20 @@ pub async fn restart_by_user(
             .as_ref()
             .is_some_and(|going| going.notify.load(Ordering::SeqCst)),
     };
-    if let Err(why) = start(daemon, run, words, env, secret_values, phase, readying) {
+    let guarded = match owner {
+        Some(_) => guard(&place).await,
+        None => None,
+    };
+    if let Err(why) = start(
+        daemon,
+        run,
+        words,
+        env,
+        secret_values,
+        phase,
+        readying,
+        guarded,
+    ) {
         // The stop was the user's and its end was not told: the agent hears of both.
         if stopped && let Some(agent) = &owner {
             let body = format!(
@@ -2000,6 +2040,7 @@ pub(crate) fn start_service(
             probe: start.probe,
             notify: false,
         },
+        None,
     )?;
     Ok(id)
 }

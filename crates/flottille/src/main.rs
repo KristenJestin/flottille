@@ -5,6 +5,7 @@ mod acp;
 mod actions;
 mod adf;
 mod agent_command;
+mod agent_folders;
 mod agents;
 mod appearance;
 mod approval_command;
