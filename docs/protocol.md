@@ -1244,7 +1244,8 @@ answered by the words alone, as a message always answered it. It answers that as
 root's other asks still wait. The answers are kept with the ask (`agent.answered`, `asked` and
 `answers`), and the window shows them on the ask's card instead of a message of the user. It
 answers as `agent.send`: `{"agent", "after", "delivery"}`. `refused` when the ask does not wait for
-the user's answer (answered, replaced, never asked of the user), when it was answered already, when
+the user's answer (answered, replaced, never asked of the user), when an answer to it waits or was
+taken already (one withdrawn with `agent.unqueue` does not count, the ask may be answered again), when
 the answers do not fit its questions (`1 answers for 3 questions: answer each`, `question 2 has no
 answer`, `question 1 has no option Maybe`, `question 1 takes one option`), for a child, or for an
 agent in a final state.
@@ -1401,7 +1402,8 @@ the user written after it, and taken by the root, answered (an answer from an as
 after (a message written before a question does not answer it), empty once it ended; `context`, how much of its context the agent used at its last
 report (`agent.usage`), in percent, `null` before one and while the window's size is not known;
 `context_tokens`, the tokens its context holds at that report, `null` before one; `queued`, for the root, the messages the
-user wrote to it that wait for it to read them between its turns, the oldest first, each
+user wrote to it that wait for it to read them between its turns (an answer to an ask, which waits
+on the ask's card, is not one of them), the oldest first, each
 `{"delivery", "text", "images", "pictures", "at"}` (its text masked as it is stored, how many pictures go with
 it and their names, which `agent.image` reads back, when it was written), empty for a child. For a
 message that used commands (`docs/commands.md`), `text` is what the user typed, `commands` the
