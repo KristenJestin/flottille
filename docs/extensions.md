@@ -1,6 +1,6 @@
 # Extensions
 
-**Status: a proposal, S1 to S5 built.** S1 (#332) built the declaration and the registry,
+**Status: Specs (S1 to S6) and Review built, in 0.2.0; Connections and the rest are proposals.** S1 (#332) built the declaration and the registry,
 activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space and
 the scan that the core names no extension, and Specs in the store with its statuses, lock, three
 modes and tickets, from the command line. S2 (#333) built the tools an extension gives and the
@@ -8,7 +8,8 @@ Action trigger, and writing a spec: the `spec` tool, "New spec" and "Write the s
 answers, from the command line and the protocol. S3 (#334) built Specs in the window: the
 renderer of an extension's tab of Settings and of its section of a project's settings, the
 project's Specs tab, "Write the spec" on a ticket's row and a spec's page. S4 (#459) built the
-ticket side. S5 (#336) built "Launch development" and the statuses read from what Flottille sees.
+ticket side. S5 (#336) built "Launch development" and the statuses read from what Flottille sees. S6 (#337)
+built the amendments.
 Review (#338) built the agents an extension launches and the depth exception, the composer
 command, model slots and a subset of values as settings, overridable per project, an extension's
 guidance, and the folded line of the tree; the rest is a proposal. Written from a discussion with the maintainer
