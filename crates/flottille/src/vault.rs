@@ -646,6 +646,27 @@ pub async fn secret(daemon: &Daemon, project: &str, name: &str) -> Result<String
     given(&entries, &daemon.vault, project, name).await
 }
 
+/// The secret of the entry `name`, which must be every project's (no `project` on it), for what
+/// the daemon runs for all of them (a connection's server): never to be returned, logged or shown.
+pub async fn every_project_s(daemon: &Daemon, name: &str) -> Result<String, String> {
+    let entries = daemon
+        .read(|store| store.vault_entries())
+        .map_err(|error| error.to_string())?;
+    match entries.iter().find(|entry| entry.name == name) {
+        None => return Err(format!("the vault has no entry {name}")),
+        Some(entry) if entry.project.is_some() => {
+            return Err(format!(
+                "the vault entry {name} is one project's alone, not every project's"
+            ));
+        }
+        Some(_) => {}
+    }
+    tokio::time::timeout(SECRET_WAIT, daemon.vault.read(name))
+        .await
+        .map_err(|_| format!("the keyring did not answer in time: {LOCKED}"))??
+        .ok_or_else(|| format!("the keyring no longer holds the secret of {name}"))
+}
+
 /// `secret`, with the entries and the keyring at hand.
 async fn given(
     entries: &[Entry],

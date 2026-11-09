@@ -1515,7 +1515,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
 pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Option<Agent> {
     let provider = providers::of(agent).ok()?;
     let tools = crate::agents::tools_of(
-        &daemon.paths,
+        daemon,
         provider,
         project,
         agent.parent.is_none(),

@@ -2167,6 +2167,7 @@ dependencies = [
  "markdown",
  "oo7",
  "pdf_oxide",
+ "reqwest",
  "rmcp",
  "rusqlite",
  "rustix",
@@ -2248,6 +2249,13 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "flottille-fake-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

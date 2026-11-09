@@ -1,0 +1,342 @@
+//! `flottille connection`: the user's MCP servers, on the command line.
+
+use std::process::ExitCode;
+
+use clap::Subcommand;
+use flottille_core::paths::Paths;
+use serde_json::{Map, Value, json};
+
+use crate::client::Client;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+#[derive(Subcommand)]
+pub enum ConnectionAction {
+    /// Each connection, its state and its actions
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Declare a connection: a command spawned without a shell, or a URL; review it next
+    Add {
+        name: String,
+        /// One sentence on what it is for, which agents read
+        #[arg(long)]
+        about: String,
+        #[command(flatten)]
+        reach: Reach,
+        #[command(flatten)]
+        given: Given,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change a connection's declaration: what trust is given to asks for a new review
+    Edit {
+        name: String,
+        #[arg(long)]
+        about: Option<String>,
+        #[command(flatten)]
+        reach: Reach,
+        #[command(flatten)]
+        given: Given,
+        /// Turn it on
+        #[arg(long, conflicts_with = "off")]
+        on: bool,
+        /// Turn it off: its tool leaves every session
+        #[arg(long)]
+        off: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a connection; its server is stopped
+    Remove { name: String },
+    /// Start its server and show what it announces against what you accepted
+    Review {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Accept what the last review showed, or set actions: judged, passes, asked or off
+    Accept {
+        name: String,
+        /// action=setting, again for each
+        #[arg(long = "set", value_name = "ACTION=SETTING")]
+        set: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Args)]
+pub struct Reach {
+    /// The program and its arguments, after --: spawned without a shell
+    #[arg(long, num_args = 1.., allow_hyphen_values = true, conflicts_with = "url")]
+    command: Option<Vec<String>>,
+    /// An https:// URL, or http:// on this machine
+    #[arg(long)]
+    url: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct Given {
+    /// VARIABLE=entry: a vault entry put in the server's environment; again for each
+    #[arg(long = "env", value_name = "VARIABLE=ENTRY")]
+    env: Vec<String>,
+    /// Header=entry: a vault entry sent as a header to the URL; again for each
+    #[arg(long = "header", value_name = "HEADER=ENTRY")]
+    headers: Vec<String>,
+    /// argument=v1,v2: the values an argument of that name may take; again for each
+    #[arg(long = "only", value_name = "ARGUMENT=VALUES")]
+    only: Vec<String>,
+    /// A project whose agents do not get it; again for each
+    #[arg(long = "except", value_name = "PROJECT")]
+    except: Vec<String>,
+}
+
+fn pairs(given: &[String], what: &str) -> Result<Vec<(String, String)>> {
+    given
+        .iter()
+        .map(|pair| {
+            pair.split_once('=')
+                .map(|(a, b)| (a.to_owned(), b.to_owned()))
+                .ok_or_else(|| format!("{pair}: a {what} is NAME=VALUE").into())
+        })
+        .collect()
+}
+
+fn vault(given: &[String], what: &str) -> Result<Option<Value>> {
+    if given.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Value::Object(
+        pairs(given, what)?
+            .into_iter()
+            .map(|(name, entry)| (name, json!({"vault": entry})))
+            .collect(),
+    )))
+}
+
+fn declared(params: &mut Map<String, Value>, reach: Reach, given: Given) -> Result<()> {
+    if let Some(command) = reach.command {
+        params.insert("command".into(), json!(command));
+    }
+    if let Some(url) = reach.url {
+        params.insert("url".into(), json!(url));
+    }
+    if let Some(env) = vault(&given.env, "variable")? {
+        params.insert("env".into(), env);
+    }
+    if let Some(headers) = vault(&given.headers, "header")? {
+        params.insert("headers".into(), headers);
+    }
+    if !given.only.is_empty() {
+        let only: Map<String, Value> = pairs(&given.only, "limit")?
+            .into_iter()
+            .map(|(argument, values)| (argument, json!(values.split(',').collect::<Vec<_>>())))
+            .collect();
+        params.insert("only".into(), Value::Object(only));
+    }
+    if !given.except.is_empty() {
+        params.insert("except".into(), json!(given.except));
+    }
+    Ok(())
+}
+
+pub fn run(paths: &Paths, action: ConnectionAction) -> Result<ExitCode> {
+    let mut client = Client::connect_or_start(paths)?;
+    let (answer, json) = match action {
+        ConnectionAction::List { json } => {
+            let answer = client.request("connection.list", json!({}))?;
+            if !json {
+                print!("{}", list_text(&answer));
+                return Ok(ExitCode::SUCCESS);
+            }
+            (answer, true)
+        }
+        ConnectionAction::Add {
+            name,
+            about,
+            reach,
+            given,
+            json,
+        } => {
+            let mut params = Map::new();
+            params.insert("name".into(), json!(name));
+            params.insert("about".into(), json!(about));
+            declared(&mut params, reach, given)?;
+            let answer = client.request("connection.add", Value::Object(params))?;
+            if !json {
+                println!(
+                    "Declared the connection {name}: review it to give it to your agents \
+                     (`flottille connection review {name}`)."
+                );
+            }
+            (answer, json)
+        }
+        ConnectionAction::Edit {
+            name,
+            about,
+            reach,
+            given,
+            on,
+            off,
+            json,
+        } => {
+            let mut params = Map::new();
+            params.insert("name".into(), json!(name));
+            if let Some(about) = about {
+                params.insert("about".into(), json!(about));
+            }
+            if on || off {
+                params.insert("enabled".into(), json!(on));
+            }
+            declared(&mut params, reach, given)?;
+            let answer = client.request("connection.edit", Value::Object(params))?;
+            if !json {
+                println!(
+                    "The connection {name} is {}.",
+                    answer["state"].as_str().unwrap_or("?")
+                );
+            }
+            (answer, json)
+        }
+        ConnectionAction::Remove { name } => {
+            client.request("connection.remove", json!({"name": name}))?;
+            println!("Removed the connection {name}.");
+            return Ok(ExitCode::SUCCESS);
+        }
+        ConnectionAction::Review { name, json } => {
+            let answer = client.request("connection.review", json!({"name": name}))?;
+            if !json {
+                print!("{}", review_text(&answer));
+            }
+            (answer, json)
+        }
+        ConnectionAction::Accept { name, set, json } => {
+            let actions: Map<String, Value> = pairs(&set, "setting")?
+                .into_iter()
+                .map(|(action, setting)| (action, json!(setting)))
+                .collect();
+            let answer = client.request(
+                "connection.accept",
+                json!({"name": name, "actions": actions}),
+            )?;
+            if !json {
+                println!(
+                    "The connection {name} is {}: its tool is {}.",
+                    answer["state"].as_str().unwrap_or("?"),
+                    answer["tool"].as_str().unwrap_or("?")
+                );
+            }
+            (answer, json)
+        }
+    };
+    if json {
+        println!("{answer}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn list_text(answer: &Value) -> String {
+    let mut text = format!(
+        "Connections are {}.\n",
+        if answer["enabled"] == true {
+            "on"
+        } else {
+            "off"
+        }
+    );
+    if let Some(error) = answer["error"].as_str() {
+        text.push_str(&format!("  cannot be used: {error}\n"));
+    }
+    for connection in answer["connections"].as_array().into_iter().flatten() {
+        text.push_str(&format!(
+            "{} ({}): {}. {}\n",
+            connection["name"].as_str().unwrap_or_default(),
+            connection["tool"].as_str().unwrap_or_default(),
+            connection["state"].as_str().unwrap_or_default(),
+            connection["about"].as_str().unwrap_or_default(),
+        ));
+        if let Some(why) = connection["cut_off"].as_str() {
+            text.push_str(&format!("  cut off: {why}\n"));
+        }
+        if let Some(why) = connection["failing"].as_str() {
+            text.push_str(&format!("  failing: {why}\n"));
+        }
+        for action in connection["actions"].as_array().into_iter().flatten() {
+            text.push_str(&format!(
+                "  - {}: {}\n",
+                action["name"].as_str().unwrap_or_default(),
+                action["setting"].as_str().unwrap_or_default()
+            ));
+        }
+    }
+    text
+}
+
+/// The review as plain text, never Markdown: what changed, then each action.
+fn review_text(answer: &Value) -> String {
+    let mut text = format!(
+        "The server of {}: {} {}\n",
+        answer["name"].as_str().unwrap_or_default(),
+        answer["server"]["now"]["name"].as_str().unwrap_or("?"),
+        answer["server"]["now"]["version"].as_str().unwrap_or("?"),
+    );
+    for change in answer["changes"].as_array().into_iter().flatten() {
+        text.push_str(&format!(
+            "Changed: {}\n",
+            change.as_str().unwrap_or_default()
+        ));
+    }
+    let instructions = &answer["instructions"];
+    if instructions["pinned"] != instructions["now"] {
+        if let Some(old) = instructions["pinned"].as_str() {
+            text.push_str("Instructions accepted before:\n");
+            for line in old.lines() {
+                text.push_str(&format!("  - {line}\n"));
+            }
+        }
+        match instructions["now"].as_str() {
+            Some(now) => {
+                text.push_str("Instructions now:\n");
+                for line in now.lines() {
+                    text.push_str(&format!("  + {line}\n"));
+                }
+            }
+            None => text.push_str("No instructions now.\n"),
+        }
+    }
+    for action in answer["actions"].as_array().into_iter().flatten() {
+        text.push_str(&format!(
+            "{} ({}, {}):\n",
+            action["name"].as_str().unwrap_or_default(),
+            action["change"].as_str().unwrap_or_default(),
+            action["setting"].as_str().unwrap_or("gone"),
+        ));
+        if action["change"] != "unchanged" {
+            if let Some(old) = action["pinned"]["description"].as_str() {
+                for line in old.lines() {
+                    text.push_str(&format!("  - {line}\n"));
+                }
+            }
+            if let Some(now) = action["now"]["description"].as_str() {
+                for line in now.lines() {
+                    text.push_str(&format!("  + {line}\n"));
+                }
+            }
+        }
+    }
+    for limit in answer["limits"].as_array().into_iter().flatten() {
+        text.push_str(&format!(
+            "Limit on {}: covers {}; does not cover {}\n",
+            limit["argument"].as_str().unwrap_or_default(),
+            limit["covers"],
+            limit["not"]
+        ));
+    }
+    text.push_str(&format!(
+        "Accept it with `flottille connection accept {}`.\n",
+        answer["name"].as_str().unwrap_or_default()
+    ));
+    text
+}
