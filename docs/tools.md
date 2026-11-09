@@ -400,10 +400,14 @@ pending requests.
   standard output and error together, masked when shown and when stored: the values of the
   daemon's variables named like secrets, every value of the `KEY=VALUE` lines of the place's
   `.env` and `.env.*` files (at its top and each repository's), private keys, URL passwords,
-  tokens shaped like the usual providers', and the string value of the token keys of an
-  agent's login file wherever it is shown (`accessToken`, `refreshToken` of Claude's
-  `.credentials.json`; `id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY` of Codex's
-  `auth.json`; `apiKey`), as in a diff of a staged one (`flottille_core::secrets`).
+  tokens shaped like the usual providers', and the string value of a quoted key whose name ends,
+  in any case and without `_` or `-`, with `token`, `apikey` or `secret`, as an agent's login
+  file holds them (`accessToken`, `refreshToken` of Claude's `.credentials.json`; `id_token`,
+  `access_token`, `refresh_token`, `OPENAI_API_KEY` of Codex's `auth.json`; `clientSecret`,
+  `primaryApiKey`), wherever it is shown: a diff of a staged one, its value on the next line
+  after a `+` or `-`, a word diff's `[-"…"-]{+"…"+}` (`flottille_core::secrets`). It is not a
+  boundary: a line that reshapes the bytes (`xxd`, `od`) shows them; the gate's refusal of a
+  login's paths is (`docs/design.md` §7.1).
 - **The environment of a run**: the daemon's, then the place's variables filled
   (`docs/workspaces.md`: a workspace's, frozen when it was made; in the project folder the
   project's, with `{workspace}` = `main`, `{workspace.path}` the folder and `{branch}` empty), and
@@ -1559,13 +1563,20 @@ says who answers a call to judge (`docs/design.md` §7.1).
      hooks run programs …; ask the user to make the change; nothing was done`. A line that only
      reads it (`cat`, `ls`, `grep`, `git show`) is judged as any read. A line that writes there
      without naming it (`git apply`, `git checkout <branch>`, `git merge`, `git stash pop`,
-     `cp -r a/. b/`, `tar x`, `unzip`, a script) is undone after it: before each run of an agent,
-     the daemon notes the agent folders of its place (their files' content, `.git` and a login
-     file never read, the home's own left out), and once the run ends it removes what was added
-     there and writes back what was changed or removed; the run's output then ends with
-     `flottille: refused: this run wrote in a repository's agent folder (…): …; Flottille put back
-     as they were: …; ask the user to make the change`. What is outside the agent folders stays
-     as the run left it (the branch checked out, the commit made);
+     `cp -r a/. b/`, `tar x`, `unzip`, a script) is undone after it: before each run of an agent
+     of a line the gate held (to judge or base, passed by Full, the judge or the user) or of a
+     task, the daemon notes the agent folders of its place (in any case, `.CLAUDE` too; their
+     regular files' content, `.git` and a login file never read, the home's own and Flottille's
+     state folder left out), and once the run ends it removes what was added there (a pipe or a
+     device included) and writes back what was changed or removed; the run's output then ends
+     with `flottille: refused: this run wrote in a repository's agent folder (…): …; Flottille put
+     back as they were: …; what it removed or replaced there is kept in
+     <state>/agent-folders/<run>; ask the user to make the change`. Runs that overlap in a place
+     share it: the first notes, the last to end puts back and says so. Nothing is written or
+     removed below a folder that is no longer a real one (`Flottille could not put back: …, tell
+     the user`). Past 500,000 entries in the place, the rest is not looked at and the output says
+     `the agent folders of this place could not all be checked`. What is outside the agent
+     folders stays as the run left it (the branch checked out, the commit made);
    - a program that reads or prints a login: `gh`/`glab auth token`, `aws configure get` or
      `export-credentials`, `aws ecr get-login-password`, `aws sts get-session-token`,
      `kubectl config view --raw`, `kubectl create token`, `gcloud auth print-*token`,

@@ -725,7 +725,10 @@ line names, every program a wrapper or a runner runs included:
   link to them, a project that is the home folder), and a file of a revision named `rev:path`
   (`git show HEAD:.claude/.credentials.json`, `git cat-file`, `git diff`) as the path it names;
   and the open files of any process, the agent's own command line and runs included
-  (`/proc/<pid>/fd`, `map_files`, `/dev/fd/3`), which may be one;
+  (`/proc/<pid>/fd`, `map_files`, `/dev/fd/3`), which may be one. These refusals of paths are
+  what keeps a login from an agent. The masking of outputs (a token key's value in a diff of a
+  staged login file, `docs/tools.md`) is not a boundary: a line that reshapes the bytes (`xxd`,
+  `od`, `base64`) gets them past it;
 - **an agent's folder anywhere else** (`.claude`, `.claude.json`, `.codex` of a repository, a
   workspace, a copy in `~/Downloads`): it is a project's configuration, not a login, and is read
   as any file, but a `.credentials.json` or `auth.json` below it is a login's place, and **a
@@ -734,7 +737,18 @@ line names, every program a wrapper or a runner runs included:
   user to make the change. A line may write there without naming it (a patch applied, a branch
   checked out or merged, a stash popped, a folder copied, an archive unpacked): what an agent's
   run changed in the agent folders of its place is put back as it was once the run ends, and
-  its result says it was refused, naming the files;
+  its result says it was refused, naming the files. Only the runs of a line the gate held (to
+  judge or base, whoever let it through) and the runs of a task are guarded so: a line it let
+  through at once only reads, or writes the files it names. Runs that overlap in a place share
+  one guard: the first notes the agent folders, the last to end puts them back, and its result
+  says so. What the put-back removes or overwrites is moved to Flottille's state folder
+  (`agent-folders/<run>`), which the result names: a user's own edit there during the run is
+  undone, never lost. It writes nothing below a folder that is no longer a real one (a link
+  made since, to the home or anywhere): that entry is said as not put back. A place of more
+  than 500,000 entries is looked at up to that bound, and the result says its agent folders
+  could not all be checked. What this does not cover: a process that outlives its run (one that
+  left the run's session, `setsid`), a long `serve` run until it ends, and a run going on when
+  the daemon stops or crashes; the files also exist while the run goes on;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
   the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program.
   Reading them stays base: a card in Ask and Auto, allowed in Full, since what they hold has its
