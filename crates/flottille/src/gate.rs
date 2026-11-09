@@ -1921,6 +1921,11 @@ fn reads(call: &Call, layer: &[String]) -> Line {
         {
             return Line::Judge("date -s sets the system's clock".into());
         }
+        "tree" if shorts(args).any(|w| w[1..].contains('R')) => {
+            return Line::Judge(
+                "tree -R writes 00Tree.html in every folder it lists, an agent folder's too".into(),
+            );
+        }
         _ => {}
     }
     let writes = match program {
@@ -5841,6 +5846,18 @@ mod tests {
             let verdict = workspace.run(line);
             assert!(to_judge(&verdict), "{line}: {verdict:?}");
         }
+    }
+
+    #[test]
+    fn tree_r_writes_a_file_in_every_folder_and_is_judged() {
+        // `-R` runs tree again in each folder with `-o 00Tree.html`, an agent folder's too.
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in ["tree -R", "tree -aR -H . .", "tree -L 2 -R src"] {
+                let verdict = fixture.run(line);
+                assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            }
+        }
+        assert_eq!(Fixture::workspace().run("tree -a src"), Verdict::Allow);
     }
 
     #[test]
