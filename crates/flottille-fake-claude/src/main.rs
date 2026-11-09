@@ -28,7 +28,9 @@
 //!
 //! A prompt plays the first turn whose `when` is in its text; a prompt matching none is answered
 //! `ok`. A turn ends with a `result` message: `"stop_reason"` (`end_turn` by default), `"subtype"`
-//! (`success` by default) and `"error"` (a text: the result is an error) shape it. `"no_window":
+//! (`success` by default) and `"error"` (a text: the result is an error) shape it; with
+//! `"error_kind"` (`authentication_failed`…), Claude Code's last message carries that kind of
+//! error before the result, as when its sign-in is refused. `"no_window":
 //! true` leaves the model's context window out of the result, as a result that does not say it.
 //! `"used"` is what each model used in the turn (`{"claude-fake-1": {"inputTokens": 100,
 //! "outputTokens": 20, "cacheReadInputTokens": 1000, "cacheCreationInputTokens": 50, "costUSD":
@@ -450,6 +452,12 @@ impl Fake {
         }
         let interrupted = self.is_interrupted();
         let error = turn["error"].as_str().or(limited);
+        if let (Some(kind), Some(text)) = (turn["error_kind"].as_str(), error) {
+            self.send(json!({"type": "assistant", "parent_tool_use_id": null,
+                "session_id": self.session, "error": kind,
+                "message": {"model": "<synthetic>", "role": "assistant",
+                    "content": [{"type": "text", "text": text}]}}));
+        }
         let subtype = match turn["subtype"].as_str() {
             Some(subtype) => subtype,
             None if interrupted => "error_during_execution",
