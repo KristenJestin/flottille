@@ -305,6 +305,16 @@ something happens or when nothing does.
   depth: only an agent the user started (a root) has the `agent_launch` tool, a child never has
   it, whatever its role. Above the cap, `agent_launch` is refused with a sentence the agent can
   act on; it never queues silently.
+- **The one exception to the depth: an agent an extension launches** (`extensions.md`, "Agents
+  an extension launches"; Review's pilot). Only an agent launched by an extension may have
+  children; it launches them only through that extension's tool (the pilot's `review`
+  `run_pass`), never `agent_launch`: it has no `agent_*` tool, no `approval_answer`, no `ask`.
+  The tree is 2 deep at most there: the session (0), the extension's agent (1), its children
+  (2), which launch nothing. Each counts in the project's children cap, refused above it and
+  never queued, and is stopped with the tree, deepest first. A worker still has none of the
+  `agent_*` tools. The session's `agent_*` tools do not reach the extension's agents, it is told
+  nothing of them as of its children (the extension tells it what they found), and a call of
+  theirs the gate holds goes to the user, as a root's does.
 - **Stopping a parent stops its tree**, deepest first. Closing or archiving an agent closes its
   children. Deleting a workspace that an agent uses is refused while it runs.
 - **A child belongs to its parent.** The parent reads it (`agent_status`), writes to

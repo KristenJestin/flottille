@@ -831,6 +831,15 @@ ends; a handed one is the user's.
 - **Caps**: at most `max_children` children of a project run at once (`docs/projects.md`, 1 to
   12, 12 by default), and a tree is 1 deep: a child, whatever its role, has no `agent_*` tool nor
   `approval_answer`. A launch above a cap is refused with a sentence; it is never queued.
+- **The agents an extension launches** are the one exception (`docs/design.md` §5.1): Review
+  launches its pilot as a child of the reviewed session, and the pilot its passes and verifier
+  as its own children, through `review` `run_pass` alone, 2 deep at most. Each counts in the
+  cap. Each is a worker with a worker's tools less `ask` and the `agent_*` tools, plus the
+  extension's, and its instructions are the role's, then the extension's text: never the files
+  of its place nor the project's own rules, which the change it reads may have rewritten (the
+  standards pass is given the rules of the base branch). The session's `agent_*` tools do not
+  reach them, it is not told of them as of its children (`child-report`, `child-failed`,
+  `child-idle`, `children-status`), and their requests go to the user.
 - **Roles**: `lead` (by default for a root) and `worker` (by default for a child). An agent's
   instructions are Flottille's base (what Flottille enforces, then the global rules, "How to
   work": the user's, else the default, left out when the project says `rules_alone`), its role's

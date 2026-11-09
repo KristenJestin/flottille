@@ -8,8 +8,10 @@ Action trigger, and writing a spec: the `spec` tool, "New spec" and "Write the s
 answers, from the command line and the protocol. S3 (#334) built Specs in the window: the
 renderer of an extension's tab of Settings and of its section of a project's settings, the
 project's Specs tab, "Write the spec" on a ticket's row and a spec's page. S4 (#459) built the
-ticket side. S5 (#336) built "Launch development" and the statuses read from what Flottille sees;
-the rest is a proposal. Written from a discussion with the maintainer
+ticket side. S5 (#336) built "Launch development" and the statuses read from what Flottille sees.
+Review (#338) built the agents an extension launches and the depth exception, the composer
+command, model slots and a subset of values as settings, overridable per project, an extension's
+guidance, and the folded line of the tree; the rest is a proposal. Written from a discussion with the maintainer
 (November 2026), and settled with their answers of 2026-11-03 ("Decisions taken"). No question is
 left open but the one in "Open questions".
 
@@ -339,8 +341,21 @@ cap, uses the gate, is stopped with its tree, and its results come back as deliv
   queued, as `agent_launch` is), and is stopped with the tree, deepest first.
 
 No other agent gains depth: a worker still has none of the `agent_*` tools, and an extension's
-agent at depth 2 launches nothing. The Review issue writes the exception into `design.md` §5.1
-and `agents.md`, "The tree".
+agent at depth 2 launches nothing. The exception is written into `design.md` §5.1 and `agents.md`,
+"The tree".
+
+As built (#338): the declaration's `launched` says which of its agents an agent is (`pilot`,
+`pass`), and a tool given `To::Launched(kind)` reaches those of that kind. The frame's `launch`
+(`tree::launch_for_extension`) launches one as a child of a root or of an agent the same extension
+launched, 2 deep at most, in its parent's place and its tree's mode, taking the children cap's slot
+first (refused above it, never queued); the extension records the agent as its own before it is
+written. Such an agent is a `worker` with a worker's tools less `ask`, never an `agent_*` tool nor
+`approval_answer`, plus its extension's; its instructions are the role's and the extension's text,
+without the files of its place, the project's own rules or its skills. Its parent's `agent_*`
+tools do not reach it when the parent is not itself the extension's, which is told nothing of it as
+of a child (`tree::tell_parent`, `agent_status`, the sweep's `children-status`), and the gate
+holds its calls for the user. An extension's tool call is answered by a future
+(`Tool::call`), so that a call may run git without holding the daemon.
 
 ## Activation
 
@@ -592,6 +607,29 @@ or without a spec. Project-scoped.
 - **Builds**: agents an extension launches and the depth exception, slots overridable per project,
   the composer command, the folded line of the tree.
 
+As built (#338):
+
+- **Doors.** `review.start {agent}` (and `extension.act`), `/review` alone in a session's composer
+  (`agent.send` runs it and answers with no delivery: the word is never sent to the agent; with
+  more text it is a message like any other), the `review` tool's `start` for a root, the Core
+  event `item.opened` of a pull request whose head is the branch of a workspace a session runs in
+  (refused at the cap, the session is told, `[flottille:review]`; refused for another reason,
+  nothing is said), and `flottille review <session>`. A session in the project folder has no base
+  to read a diff from: refused.
+- **The diff** of each repository of the session's workspace starts at the merge base of its base
+  (`git diff <from>`, uncommitted and untracked files included); a second round starts at the
+  `HEAD` the first one recorded. Each repository's `HEAD` and `git status` are recorded at the
+  start and compared at the report.
+- **Slots.** `<pass>_model` and `verifier_model`, `null` by default: the session's provider on
+  its strongest model (Claude's `opus`; the verifier `sonnet`), once its sessions said they offer
+  it, else the provider's default. The pilot runs on the session's provider, as the strongest.
+- **Findings** are kept per session and named `F1`, `F2`… across rounds; a `rejected` one is not
+  kept. `review.finding` marks one. They show under the review's line of the session's rail and,
+  for a spec's development, on the spec's page.
+- **Guidance**: `review.md`, 4,000 characters, edited in Review's tab.
+- **Data**: `ext_review_reviews`, `ext_review_agents`, `ext_review_findings`. The core's scan
+  looks for `extensions::review` alone, `review` being the forge's word too (`forge::review`).
+
 ### Judge
 
 As it is today (`design.md` §7.1), nothing of its behaviour changed, moved into the frame last
@@ -687,7 +725,8 @@ The maintainer's answers of 2026-11-03.
 
 ## Open questions
 
-1. **Who reaches a review's agents.** They are children of the reviewed session, which today could
+1. **Who reaches a review's agents.** Built as proposed below (#338), to confirm with the
+   maintainer. They are children of the reviewed session, which today could
    read, write to and stop its children with the `agent_*` tools, and would hold their requests.
    Proposed, the simpler and reversible choice: the session's `agent_*` tools do not reach them (a
    change does not steer its own review; the session sees the review through its deliveries and
