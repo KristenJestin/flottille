@@ -71,6 +71,7 @@ mod tasks;
 mod tickets;
 mod titles;
 mod tree;
+mod turn_failures;
 mod update;
 mod vault;
 mod vault_command;

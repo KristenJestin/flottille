@@ -2219,14 +2219,12 @@ pub fn root_of(daemon: &Daemon, id: &str) -> String {
     id
 }
 
-/// Whether the agent's session is kept for `agent.resume`: a root that ended (not one that failed:
-/// its session could not go on) whose agent said it resumes or loads sessions, and that opened
-/// one. Flottille forgets it `KEPT_MS` after the root ended (`forget_kept_sessions`).
+/// Whether the agent's session is kept for `agent.resume`: a root that ended or failed (a failure
+/// rarely takes the agent's own session with it, and one that did fails again at its next start)
+/// whose agent said it resumes or loads sessions, and that opened one. Flottille forgets it
+/// `KEPT_MS` after the root ended (`forget_kept_sessions`).
 pub fn keeps_session(agent: &Agent) -> bool {
-    agent.state == AgentState::Ended
-        && agent.parent.is_none()
-        && agent.reopens
-        && agent.native_id.is_some()
+    agent.state.is_final() && agent.parent.is_none() && agent.reopens && agent.native_id.is_some()
 }
 
 /// How long an ended root's session is kept to be resumed: 7 days.
@@ -2235,9 +2233,6 @@ pub const KEPT_MS: u64 = 7 * 24 * 3_600_000;
 /// Why `agent.resume` could not start the ended agent again on its own session, `None` when it
 /// could once its last process is gone (`agents::stopping`).
 pub fn resume_refusal(daemon: &Daemon, agent: &Agent) -> Option<&'static str> {
-    if agent.state == AgentState::Failed {
-        return Some("it failed, and its session went with it");
-    }
     if !keeps_session(agent) {
         return Some("its agent can neither resume nor load its session, or it was forgotten");
     }
@@ -2289,7 +2284,7 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "ended_at": agent.ended_at,
         "waiting_on_answer": agent.waiting_on_answer,
         "gate_mode": crate::judge::mode(daemon, &agent.id),
-        "resumable": agent.state == AgentState::Ended && resume_refusal(daemon, agent).is_none(),
+        "resumable": agent.state.is_final() && resume_refusal(daemon, agent).is_none(),
         "stopping": agent.state.is_final() && agents::stopping(daemon, &agent.id),
         "images": agent.images,
         // Its session runs an older list of tools than its role has: a restart gives the new one.

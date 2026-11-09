@@ -235,6 +235,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             }
             let ended_at = agent.ended_at.unwrap_or(agent.updated_at);
             let waited = agent.waiting_on_answer;
+            let failed = (agent.state == AgentState::Failed)
+                .then(|| agent.state_reason.clone().unwrap_or_default());
             let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
                 Some((agent, event)) => Ok((Some(agent), Some(event))),
                 None => Ok((None, None)),
@@ -245,7 +247,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             if waited {
                 crate::tree::answered(daemon, &agent.id, "resumed");
             }
-            tell_resumed(daemon, &agent, ended_at);
+            tell_resumed(daemon, &agent, ended_at, failed.as_deref());
             Ok(json!({"agent": agent.to_json()}))
         }
         "agent.rename" => {
@@ -961,14 +963,19 @@ fn say_reload(daemon: &Daemon, id: &str, pending: bool) {
 }
 
 /// What a resumed root reads first in its next prompt, without being woken for it: that the user
-/// stopped it, and which of its requests were cancelled then, never to be executed.
-fn tell_resumed(daemon: &Arc<Daemon>, agent: &Agent, ended_at: u64) {
+/// stopped it, or that it failed (`failed`, why), and which of its requests were cancelled then, never to be executed.
+fn tell_resumed(daemon: &Arc<Daemon>, agent: &Agent, ended_at: u64, failed: Option<&str>) {
     let cancelled = daemon
         .read(|store| store.cancelled_requests_of(&agent.id, ended_at))
         .unwrap_or_default();
-    let mut body = "The user stopped you, then resumed you on this session: what you were doing \
-                    was cut. Check the real state of your place before you go on."
-        .to_owned();
+    let stopped = match failed {
+        Some(reason) => format!("Your session failed ({reason}), then the user resumed you on it"),
+        None => "The user stopped you, then resumed you on this session".to_owned(),
+    };
+    let mut body = format!(
+        "{stopped}: what you were doing was cut. Check the real state of your place before you go \
+         on."
+    );
     if !cancelled.is_empty() {
         let named: Vec<String> = cancelled
             .iter()
@@ -1307,6 +1314,28 @@ async fn process(
                 AgentState::Idle,
                 None,
                 Some(("agent.released", json!({"reason": "reload"}))),
+            );
+            Ok(true)
+        }
+        // Not an end: the session stays, its process goes as after an idle release, and the
+        // state line says why until the next prompt starts it again.
+        Ok(Exit::TurnFailed(said)) => {
+            stop(&mut child, pid).await;
+            change(
+                daemon,
+                &agent.id,
+                AgentState::Idle,
+                Some(said.to_owned()),
+                Some(("agent.released", json!({"reason": "failed"}))),
+            );
+            tree::tell_parent(
+                daemon,
+                agent,
+                "child-idle",
+                &format!(
+                    "its turn failed: {said}. Its session stays: write to it once that is fixed."
+                ),
+                approval::BETWEEN_TURNS,
             );
             Ok(true)
         }

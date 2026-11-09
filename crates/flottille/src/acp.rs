@@ -68,6 +68,9 @@ pub enum Exit {
     /// The user reloads its tools: let go between turns, to be started again on its session with
     /// the tools its role has now.
     Reload,
+    /// Its turn failed for a reason that leaves its session usable (`turn_failures`), which the
+    /// state line says: let go, to be started again on its session by the next prompt.
+    TurnFailed(&'static str),
 }
 
 /// What the session loop tells the agent's owner as it goes.
@@ -466,7 +469,14 @@ async fn drive(
                     Err(error) => {
                         return match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
                             Ok(Ok(status)) => Ok(Exit::Died(status)),
-                            _ => Err(acp(error)),
+                            _ => match crate::turn_failures::recognise(provider.name, &error.message) {
+                                Some(said) => {
+                                    turns.running = false;
+                                    events.turn_ended("failed", Value::Null, Vec::new());
+                                    Ok(Exit::TurnFailed(said))
+                                }
+                                None => Err(acp(error)),
+                            },
                         };
                     }
                 };

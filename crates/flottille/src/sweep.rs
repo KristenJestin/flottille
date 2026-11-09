@@ -64,7 +64,7 @@ pub fn sweep(daemon: &Arc<Daemon>) {
 }
 
 /// The runs of a session that ended for good go with it, as its other data does: a root that
-/// failed, or ended and cannot be resumed, or whose kept session was forgotten, and the tree under
+/// ended or failed and cannot be resumed, or whose kept session was forgotten, and the tree under
 /// it. A run still running is left to end.
 fn forget_runs(daemon: &Daemon) {
     let Ok(with_runs) = daemon.read(Store::agents_with_runs) else {

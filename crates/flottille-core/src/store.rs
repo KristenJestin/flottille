@@ -1229,11 +1229,12 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
-    /// The ended roots whose session is kept to be resumed: those the sweep forgets in time.
+    /// The ended or failed roots whose session is kept to be resumed: those the sweep forgets in
+    /// time.
     pub fn kept_sessions(&self) -> Result<Vec<Agent>> {
         let mut statement = self.connection.prepare_cached(&format!(
-            "SELECT {AGENT_COLUMNS} FROM agents WHERE state = 'ended' AND parent IS NULL \
-             AND reopens = 1 AND native_id IS NOT NULL ORDER BY created_at, id"
+            "SELECT {AGENT_COLUMNS} FROM agents WHERE state IN ('ended', 'failed') \
+             AND parent IS NULL AND reopens = 1 AND native_id IS NOT NULL ORDER BY created_at, id"
         ))?;
         let rows = statement.query_map([], agent_row)?;
         rows.map(|row| row?).collect()
@@ -3065,15 +3066,15 @@ impl Store {
         Ok((agent, event))
     }
 
-    /// An ended root starts again on its own session, with its `agent.resumed` event: idle, its
-    /// end and its reason forgotten, its epoch and its session kept. `None` when it is not ended
-    /// (a failed agent stays failed).
+    /// An ended or failed root starts again on its own session, with its `agent.resumed` event:
+    /// idle, its end and its reason forgotten, its epoch and its session kept. `None` when it is
+    /// neither.
     pub fn resume_agent(&mut self, id: &str) -> Result<Option<(Agent, Event)>> {
         let transaction = self.connection.transaction()?;
         let changed = transaction.execute(
             "UPDATE agents SET state = 'idle', state_reason = NULL, ended_at = NULL, \
              reported_at = NULL, quiet_turns = 0, waiting_on_answer = 0, updated_at = ?2 \
-             WHERE id = ?1 AND state = 'ended'",
+             WHERE id = ?1 AND state IN ('ended', 'failed')",
             params![id, now_ms()],
         )?;
         if changed == 0 {
@@ -4176,7 +4177,11 @@ mod tests {
         let ids = |agents: Vec<Agent>| agents.into_iter().map(|a| a.id).collect::<Vec<_>>();
 
         assert_eq!(ids(store.live_agents().unwrap()), ["running00000"]);
-        assert_eq!(ids(store.kept_sessions().unwrap()), ["kept00000000"]);
+        // A failed root keeps its session too: it can be resumed (#631).
+        assert_eq!(
+            ids(store.kept_sessions().unwrap()),
+            ["failed000000", "kept00000000"]
+        );
     }
 
     #[test]
@@ -4207,7 +4212,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ended_agent_is_resumed_on_its_session_and_a_failed_one_is_not() {
+    fn an_ended_or_failed_agent_is_resumed_on_its_session() {
         let mut store = Store::open_in_memory().unwrap();
         let mut agent = an_agent();
         agent.native_id = Some("s1".into());
@@ -4238,11 +4243,10 @@ mod tests {
         assert_eq!(resumed.native_id.as_deref(), Some("s1"));
         assert_eq!(resumed.epoch, agent.epoch);
         assert_eq!(event.name, "agent.resumed");
-        assert_eq!(store.resume_agent(&failed.id).unwrap(), None);
-        assert_eq!(
-            store.agent(&failed.id).unwrap().unwrap().state,
-            AgentState::Failed
-        );
+        // A failed root too (#631): its session is rarely what failed.
+        let (resumed, _) = store.resume_agent(&failed.id).unwrap().unwrap();
+        assert_eq!(resumed.state, AgentState::Idle);
+        assert_eq!(store.resume_agent(&failed.id).unwrap(), None, "once");
     }
 
     #[test]
