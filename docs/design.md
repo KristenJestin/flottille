@@ -539,13 +539,14 @@ agent wrote is data.
 
 When an agent's quota runs out, its provider ends the turn with words of its own, for Claude
 "You've hit your weekly limit · resets 1pm (Europe/Paris)", and the agent is idle like one that
-finished its work. Flottille tells them apart: at the end of each turn of a root, the words its
-provider said during it (its messages, and the limit it reported) go through that provider's
-recogniser (Claude's: the beginnings of Claude Code's own messages for a spent usage; another
-provider's wording is one more recogniser). Recognised, the session **waits for its reset**: the
-instant read from the words, the next occurrence of that time of day (on that date when they give
-one) in the zone they name in brackets, the machine's when they name none; unknown when the words
-cannot be read. The wait is stored (`quota_waits`), so a restart keeps it, and it is said by
+finished its work. Flottille tells them apart by what the provider reports, never by what the agent
+says: at the end of each turn of a root, the limits its provider reported during it
+(`agent.provider_limit`) go through that provider's recogniser (Claude's reads the reset after
+`resets`; another provider's wording is one more recogniser). A reported limit makes the session
+**wait for its reset**: the instant read from the words, the next occurrence of that time of day
+(on that date when they give one) in the zone they name in brackets, the machine's when they name
+none, or the one passed up to ten minutes ago when the provider's clock is late; unknown when the
+words cannot be read. The wait is stored (`quota_waits`), so a restart keeps it, and it is said by
 `agent.quota` and in `agent.list`, `agent.tree` and `agent.show` (`quota`: `reset_at`, `resume`).
 
 The window says it as the session's state, once: waiting, its words `Out of quota, resets at

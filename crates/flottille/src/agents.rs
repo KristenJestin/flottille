@@ -2035,6 +2035,9 @@ impl acp::Events for Recorder {
         let _ = self
             .daemon
             .read(|store| store.deliveries_taken(&self.agent));
+        // Before the agent is idle: the sweep takes the waits of idle sessions only, and this turn
+        // may have ended an old wait or made a new one.
+        crate::quota::turn_ended(&self.daemon, &self.agent);
         change(
             &self.daemon,
             &self.agent,
@@ -2045,7 +2048,6 @@ impl acp::Events for Recorder {
                 json!({"stop_reason": stop_reason, "usage": usage}),
             )),
         );
-        crate::quota::turn_ended(&self.daemon, &self.agent);
         tree::after_turn(&self.daemon, &self.agent, stop_reason);
         // Past its threshold, or asked during the turn: summarised before its next prompt.
         crate::compaction::turn_ended(&self.daemon, &self.agent);

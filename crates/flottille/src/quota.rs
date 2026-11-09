@@ -1,5 +1,6 @@
-//! A spent quota (`docs/design.md` §5.9): when a turn of a session ends on its provider saying
-//! the quota is spent ("You've hit your weekly limit · resets 1pm (Europe/Paris)"), the session
+//! A spent quota (`docs/design.md` §5.9): when a turn of a session ends on its provider reporting
+//! the quota is spent (`agent.provider_limit`, whose message reads "You've hit your weekly limit ·
+//! resets 1pm (Europe/Paris)"; the agent's own words are never read), the session
 //! waits for the reset, stored with the instant read from those words (none when they cannot be
 //! read). When the user's setting allows it (`resume_at_reset` of `sessions.toml`, or their
 //! choice for this session alone), the sweep delivers the session one message at the reset, plus
@@ -29,31 +30,28 @@ pub const KIND: &str = "quota-reset";
 /// What the session is told at the reset.
 pub const RESUME: &str = "Your quota has reset: continue where you stopped.";
 
-/// What one provider's words for a spent quota say: `Some(reset)` when they are such words,
-/// `reset` the instant when it can be read from them, `said` being when they were said.
+/// What one provider's message of a reported limit says: `Some(reset)`, `reset` the instant when
+/// it can be read from it, `said` being when it was said.
 type Recogniser = fn(text: &str, said: u64) -> Option<Option<u64>>;
+
+/// How far in the past a reset time is still that reset and not the next occurrence.
+const JUST_PASSED_MS: i64 = 10 * 60_000;
 
 /// The recognisers, by provider: another provider's wording is one more entry.
 const RECOGNISERS: &[(&str, Recogniser)] = &[("claude", claude)];
 
-/// How Claude Code's own messages for a spent usage start (`bridge::USAGE_LIMIT`), the reset
-/// after `resets`: `You've hit your weekly limit · resets 1pm (Europe/Paris)`.
+/// Claude's bridge reports a limit whatever Claude Code's sentence is (its own for a spent usage,
+/// or none known when a rate limit was rejected): the reset is after `resets`, when it is there:
+/// `You've hit your weekly limit · resets 1pm (Europe/Paris)`.
 fn claude(text: &str, said: u64) -> Option<Option<u64>> {
-    let text = text.trim();
-    if !crate::bridge::USAGE_LIMIT
-        .iter()
-        .any(|prefix| text.starts_with(prefix))
-    {
-        return None;
-    }
     let reset = text
         .split_once("resets ")
         .and_then(|(_, when)| reset_at(when, said));
     Some(reset)
 }
 
-/// The words of `provider` in `texts` (the last first) say its quota is spent: the reset, when
-/// it can be read.
+/// The messages `texts` of the limits `provider` reported (the last first) say its quota is
+/// spent: the reset, when it can be read. None when it reported none.
 pub fn recognise(provider: &str, texts: &[String], said: u64) -> Option<Option<u64>> {
     let (_, recogniser) = RECOGNISERS.iter().find(|(name, _)| *name == provider)?;
     texts.iter().rev().find_map(|text| recogniser(text, said))
@@ -61,8 +59,10 @@ pub fn recognise(provider: &str, texts: &[String], said: u64) -> Option<Option<u
 
 /// The next instant after `now` that `when` names, in the zone it names in brackets (the
 /// machine's when it names none): `1pm (Europe/Paris)`, `1:30pm`, `13:00 (UTC)`, `Nov 10, 1pm
-/// (Europe/Paris)`, `Nov 10 at 1pm`, `10 Nov, 1pm`. `None` for anything else, a zone it does not
-/// know included.
+/// (Europe/Paris)`, `Nov 10 at 1pm`, `10 Nov, 1pm`. An instant passed up to `JUST_PASSED_MS` ago
+/// is that one, not the next: a provider whose clock is late says a reset that came already, and
+/// the next occurrence would be a day (a year) away; it is due at once, and its resume key being
+/// the same, it resumes once. `None` for anything else, a zone it does not know included.
 pub fn reset_at(when: &str, now: u64) -> Option<u64> {
     let when = when.trim().trim_end_matches(['.', '!']);
     let (when, zone) = match when.split_once('(') {
@@ -102,10 +102,13 @@ pub fn reset_at(when: &str, now: u64) -> Option<u64> {
         .ok()?
         .to_zoned(zone.clone());
     let at = |date: Date| -> Option<Zoned> { date.to_datetime(time).to_zoned(zone.clone()).ok() };
+    let still = |at: &Zoned| {
+        at.timestamp().as_millisecond() + JUST_PASSED_MS > now.timestamp().as_millisecond()
+    };
     let next = match day {
         None => {
             let today = at(now.date())?;
-            if today > now {
+            if still(&today) {
                 today
             } else {
                 at(now.date().tomorrow().ok()?)?
@@ -113,7 +116,7 @@ pub fn reset_at(when: &str, now: u64) -> Option<u64> {
         }
         Some((month, day)) => {
             let this_year = at(Date::new(now.year(), month, day).ok()?)?;
-            if this_year > now {
+            if still(&this_year) {
                 this_year
             } else {
                 at(Date::new(now.year() + 1, month, day).ok()?)?
@@ -197,8 +200,9 @@ pub fn shown(daemon: &Daemon, agent: &Agent) -> Value {
     }
 }
 
-/// A turn of the root `id` ended: what its provider said during it decides whether the session
-/// waits for its quota's reset; a turn that ran without the limit ends a wait.
+/// A turn of the root `id` ended: the limit its provider reported during it decides whether the
+/// session waits for its quota's reset; a turn that ran without the limit ends a wait. Called
+/// before the agent goes idle, so that the sweep never sees an old wait of a turn that went well.
 pub fn turn_ended(daemon: &Arc<Daemon>, id: &str) {
     let Ok(Some(agent)) = daemon.read(|store| store.agent(id)) else {
         return;
@@ -211,15 +215,19 @@ pub fn turn_ended(daemon: &Arc<Daemon>, id: &str) {
         .ok()
         .and_then(|events| events.first().map(|event| event.seq))
         .unwrap_or(0);
-    let mut texts: Vec<String> = daemon
+    let texts: Vec<String> = daemon
         .read(|store| store.last_agent_events(id, "agent.provider_limit", 5))
         .unwrap_or_default()
         .into_iter()
         .rev()
         .filter(|event| event.seq > prompted)
-        .filter_map(|event| event.data["message"].as_str().map(str::to_owned))
+        .map(|event| {
+            event.data["message"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
         .collect();
-    texts.extend(crate::tree::last_messages_after(daemon, id, prompted));
     match recognise(&agent.provider, &texts, now_ms()) {
         Some(reset) => {
             let _ = daemon.write(|store| store.limit_quota(id, reset));
@@ -321,6 +329,28 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_time_a_few_minutes_past_is_not_read_as_tomorrow() {
+        // 9:55, the provider's clock being late: the reset just passed, due at once.
+        assert_eq!(
+            paris(reset_at("9:55am (Europe/Paris)", NOW).unwrap()),
+            "2026-11-08 09:55"
+        );
+        assert_eq!(
+            paris(reset_at("Nov 8, 9:55am (Europe/Paris)", NOW).unwrap()),
+            "2026-11-08 09:55"
+        );
+        // Longer past, it is the next one.
+        assert_eq!(
+            paris(reset_at("9:49am (Europe/Paris)", NOW).unwrap()),
+            "2026-11-09 09:49"
+        );
+        assert_eq!(
+            paris(reset_at("Nov 8, 9:49am (Europe/Paris)", NOW).unwrap()),
+            "2027-11-08 09:49"
+        );
+    }
+
+    #[test]
     fn a_reset_with_a_date_is_that_day() {
         assert_eq!(
             paris(reset_at("Nov 10, 1pm (Europe/Paris)", NOW).unwrap()),
@@ -363,7 +393,9 @@ mod tests {
         assert_eq!(paris(weekly.unwrap()), "2026-11-08 13:00");
         assert_eq!(said("You've hit your limit · resets soon"), Some(None));
         assert_eq!(said("You're out of extra usage"), Some(None));
-        assert_eq!(said("I have hit a limit of what I can do"), None);
+        // A reported limit, whatever its sentence: it waits, its reset unknown.
+        assert_eq!(said("Request rejected"), Some(None));
+        assert_eq!(recognise("claude", &[], NOW), None);
         // Another provider's words are its recogniser's: none yet.
         assert_eq!(
             recognise(

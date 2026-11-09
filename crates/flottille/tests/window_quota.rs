@@ -19,12 +19,18 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
+/// The step in which the provider reports a spent limit, as the bridge does at the end of a turn.
+fn limit(message: &str) -> Value {
+    json!({"update": {"sessionUpdate": "session_info_update", "_meta": {"jetbrains": {"air":
+        {"sessionFailure": {"severity": "error", "category": "limit", "message": message}}}}}})
+}
+
 fn user() -> User {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "hello", "do": [
-            {"say": "You've hit your weekly limit · resets 1pm (Europe/Paris)"}]},
-        {"when": "unreadable", "do": [{"say": "You've hit your limit · resets whenever"}]},
+            limit("You've hit your weekly limit · resets 1pm (Europe/Paris)")]},
+        {"when": "unreadable", "do": [limit("You've hit your limit · resets whenever")]},
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user

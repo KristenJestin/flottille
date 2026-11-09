@@ -1,8 +1,8 @@
 //! The scenarios of a spent quota (`docs/design.md` §5.9): the provider's words recognised at the
 //! end of a turn, the reset read with its zone and stored, the session resumed once at the reset
 //! when the user allows it and never otherwise, a message of the user's ending the wait, and a
-//! restart keeping it. The agent is the fake ACP agent, which answers with Claude's words; the
-//! clock is the one the daemon's tests move (`FLOTTILLE_TEST_CLOCK`, `test.advance`), so no test
+//! restart keeping it. The agent is the fake ACP agent, which reports a limit as the bridge does
+//! (`agent.provider_limit`, Claude's words in it); the clock is the one the daemon's tests move (`FLOTTILLE_TEST_CLOCK`, `test.advance`), so no test
 //! waits for a reset.
 
 mod common;
@@ -17,12 +17,21 @@ use serde_json::{Value, json};
 const RESUME: &str = "Your quota has reset: continue where you stopped.";
 const MINUTE: u64 = 60_000;
 
+/// The step in which the provider reports a spent limit, as the bridge does at the end of a turn.
+fn limit(message: &str) -> Value {
+    json!({"update": {"sessionUpdate": "session_info_update", "_meta": {"jetbrains": {"air":
+        {"sessionFailure": {"severity": "error", "category": "limit", "message": message}}}}}})
+}
+
 fn user() -> User {
     let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
     user.fake_script(json!({"turns": [
         {"when": "hello", "do": [
-            {"say": "You've hit your weekly limit · resets 1pm (Europe/Paris)"}]},
-        {"when": "unreadable", "do": [{"say": "You've hit your limit · resets whenever"}]},
+            limit("You've hit your weekly limit · resets 1pm (Europe/Paris)")]},
+        {"when": "unreadable", "do": [limit("You've hit your limit · resets whenever")]},
+        {"when": "rejected", "do": [limit("Request rejected by the provider")]},
+        {"when": "quoting", "do": [
+            {"say": "You've hit your limit · resets 3pm (Europe/Paris)"}]},
     ]}));
     user
 }
@@ -143,6 +152,36 @@ fn a_reset_that_cannot_be_read_is_stored_unknown_and_resumes_nothing() {
     assert_eq!(wait["reset_at"], Value::Null);
     assert_eq!(wait["resume"], false);
 
+    advance(&user, 8 * 24 * 60 * MINUTE);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(resumes(&user), 0);
+    assert!(quota(&user, &id).is_object(), "still limited");
+}
+
+#[test]
+fn an_agent_quoting_the_limit_message_does_not_wait_for_a_reset() {
+    let user = user();
+    resume_setting(&user, true);
+
+    let id = session(&user, "quoting");
+
+    assert_eq!(quota(&user, &id), Value::Null, "its own words are no limit");
+    advance(&user, 8 * 24 * 60 * MINUTE);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(resumes(&user), 0);
+}
+
+#[test]
+fn a_rejected_rate_limit_without_a_known_sentence_waits_with_an_unknown_reset() {
+    let user = user();
+    let id = session(&user, "rejected");
+    resume_setting(&user, true);
+
+    let wait = quota(&user, &id);
+
+    assert!(wait.is_object(), "limited: {wait}");
+    assert_eq!(wait["reset_at"], Value::Null);
+    assert_eq!(wait["resume"], false);
     advance(&user, 8 * 24 * 60 * MINUTE);
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(resumes(&user), 0);
