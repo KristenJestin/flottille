@@ -117,7 +117,7 @@ impl Secrets {
         for value in &self.all() {
             masked = masked.replace(value.as_str(), MASK);
         }
-        mask_tokens(&mask_private_keys(&masked))
+        mask_tokens(&mask_login_fields(&mask_private_keys(&masked)))
     }
 
     /// How much of `text`, a message still streaming, is settled: masked alone, it reads as it will
@@ -253,7 +253,109 @@ fn tokens(text: &str) -> Vec<(usize, usize)> {
         }
         previous = Some(c);
     }
+    // A login file's field, from its key to the quote that ends its value: past the text's end
+    // while that quote is still coming, even after a whitespace.
+    found.extend(login_fields(text).into_iter().map(|field| {
+        let end = field.value.map_or(text.len() + 1, |(_, end)| end + 1);
+        (field.at, end)
+    }));
     found
+}
+
+/// The keys, lowercase and without `_`, whose string value is a token in an agent's login file:
+/// Claude's `.credentials.json` (`accessToken`, `refreshToken`), Codex's `auth.json`
+/// (`id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY`), wherever such a file is
+/// shown (a diff, a stash, a revision of it).
+const LOGIN_KEYS: [&str; 5] = [
+    "accesstoken",
+    "refreshtoken",
+    "idtoken",
+    "openaiapikey",
+    "apikey",
+];
+
+/// A key of `LOGIN_KEYS` in a text, quoted, from its opening quote.
+struct LoginField {
+    at: usize,
+    /// Where its string value is, without its quotes: to its end when it is cut short. `None`
+    /// while the text ends before it starts.
+    value: Option<(usize, usize)>,
+}
+
+/// Each `"<key>": "<value>"` of `text` whose key is in `LOGIN_KEYS`, and one still coming at its
+/// end.
+fn login_fields(text: &str) -> Vec<LoginField> {
+    let bytes = text.as_bytes();
+    let blank = |at: usize| {
+        (at..text.len())
+            .find(|&at| !bytes[at].is_ascii_whitespace())
+            .unwrap_or(text.len())
+    };
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find('"').map(|i| from + i) {
+        from = at + 1;
+        let after = text[from..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(text.len(), |end| from + end);
+        let key: String = text[from..after]
+            .chars()
+            .filter(|c| *c != '_')
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        if after == text.len() {
+            if !key.is_empty() && LOGIN_KEYS.iter().any(|known| known.starts_with(&key)) {
+                found.push(LoginField { at, value: None });
+            }
+            break;
+        }
+        if bytes[after] != b'"' || !LOGIN_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        let colon = blank(after + 1);
+        if colon == text.len() {
+            found.push(LoginField { at, value: None });
+            break;
+        }
+        if bytes[colon] != b':' {
+            continue;
+        }
+        let quote = blank(colon + 1);
+        if quote == text.len() {
+            found.push(LoginField { at, value: None });
+            break;
+        }
+        if bytes[quote] != b'"' {
+            continue;
+        }
+        let start = quote + 1;
+        let mut end = start;
+        while end < text.len() && !matches!(bytes[end], b'"' | b'\n') {
+            end += if bytes[end] == b'\\' { 2 } else { 1 };
+        }
+        let end = end.min(text.len());
+        found.push(LoginField {
+            at,
+            value: Some((start, end)),
+        });
+        from = end;
+    }
+    found
+}
+
+/// The string value of each key of `LOGIN_KEYS`, masked.
+fn mask_login_fields(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    for field in login_fields(text) {
+        if let Some((start, end)) = field.value.filter(|(start, end)| end > start) {
+            out.push_str(&text[from..start]);
+            out.push_str(MASK);
+            from = end;
+        }
+    }
+    out.push_str(&text[from..]);
+    out
 }
 
 /// Whether `text` starts like a known kind of token or a JWT, at the start of a word.
@@ -641,5 +743,34 @@ mod tests {
             "token=[masked] ok"
         );
         assert_eq!(mask("risk-taking sk-short", &env), "risk-taking sk-short");
+    }
+
+    /// A Claude login file and a Codex one, their tokens invented and of no known prefix.
+    const LOGINS: &str = "{\"claudeAiOauth\":{\"accessToken\":\"fake-access-0123456789abcdef\",\
+        \"refreshToken\":\"fake-refresh-0123456789abcdef\",\"expiresAt\":1762700000000}}\n\
+        +{\n+  \"OPENAI_API_KEY\": \"fake-key-0123456789abcdef\",\n+  \"tokens\": {\n\
+        +    \"id_token\": \"fake-id-0123456789abcdef\",\n\
+        +    \"access_token\" : \"fake-codex-access-0123456789\",\n\
+        +    \"refresh_token\":\"fake-codex-refresh-0123456789\",\n\
+        +    \"account_id\": \"account-1\"\n+  }\n+}\n";
+
+    #[test]
+    fn the_tokens_of_an_agent_s_login_file_are_masked_wherever_they_appear() {
+        let masked = mask(LOGINS, &BTreeMap::new());
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(masked.contains("\"accessToken\":\"[masked]\""), "{masked}");
+        assert!(
+            masked.contains("\"refresh_token\":\"[masked]\""),
+            "{masked}"
+        );
+        assert!(masked.contains("\"expiresAt\":1762700000000"), "{masked}");
+        assert!(masked.contains("\"account_id\": \"account-1\""), "{masked}");
+        // Streamed in any pieces, it reads the same.
+        for cut in 1..LOGINS.len() {
+            if LOGINS.is_char_boundary(cut) {
+                assert_eq!(streamed(LOGINS, &[cut], &BTreeMap::new()), masked, "{cut}");
+            }
+        }
     }
 }
