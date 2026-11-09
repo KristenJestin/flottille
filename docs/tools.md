@@ -1157,7 +1157,7 @@ follow-up, not a wait. The descriptions of `ask`, `report` and `session_send` sa
 #### Detach
 
 A led or handed session can be **detached** from the agent that started it, by the user, at any
-time: `Detach from <pilot>` in the window's session menu, `flottille agent detach <agent>`, or
+time: `Detach from its lead` in the window's session menus (the sidebar row's and the rail's), `flottille agent detach <agent>`, or
 `agent.detach`. Asked of a session no agent started, or already detached, it is refused, saying
 why. What it does, at once:
 

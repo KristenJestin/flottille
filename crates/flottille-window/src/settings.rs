@@ -834,7 +834,7 @@ impl SettingsPage {
             return Vec::new();
         };
         let mut lines = vec![
-            provider.state(),
+            provider.status(),
             provider.sign_in(),
             provider.program_line(),
         ];
@@ -1660,7 +1660,7 @@ impl SettingsPage {
         let switch = Switch::new(
             ElementId::Name(format!("provider-switch-{name}").into()),
             on,
-            "Enabled",
+            "Use",
         )
         .disabled(self.pending.contains_key(&name))
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1706,12 +1706,18 @@ impl SettingsPage {
                     .text_color(state_color)
                     .child(mark)
                     // The daemon's sentence wraps rather than run past the row.
-                    .child(
+                    .child({
+                        let status = SharedString::from(provider.status());
                         div()
+                            .id(ElementId::Name(
+                                format!("provider-state-{}", provider.name).into(),
+                            ))
+                            .aria_label(status.clone())
                             .flex_1()
                             .min_w_0()
-                            .child(SharedString::from(provider.state())),
-                    ),
+                            .child(status)
+                            .test_support()
+                    }),
             )
             .child(line(provider.sign_in(), p.faint))
             .children(
@@ -1747,7 +1753,9 @@ impl Render for SettingsPage {
             .iter()
             .map(|provider| self.provider_row(provider, cx))
             .collect();
-        let count = rows.len();
+        let listed = rows.len();
+        // What is in use, not how many rows there are: three rows with one switched on count one.
+        let count = self.providers.offered().count();
         let providers = Section::new("providers", "Providers")
             .count(count.to_string())
             .sentence(
@@ -1777,7 +1785,7 @@ impl Render for SettingsPage {
             ))
             .child(presence(
                 "provider-list-block",
-                count > 0,
+                listed > 0,
                 ListCard::new("provider-list").rows(rows),
             ))
             .into_any_element();

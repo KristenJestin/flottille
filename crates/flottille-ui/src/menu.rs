@@ -4,6 +4,10 @@
 //! The list is the dropdowns' (drawn after everything else, inside the window). Escape closes it,
 //! so does a click anywhere outside it, and so does picking an entry, which runs after the menu
 //! has started to close.
+//!
+//! It is as wide as its longest label: no entry wraps, and one too long for the window is cut.
+//! Every entry has its own icon (a menu refuses two entries with the same one), the destructive
+//! entry's is the bin, and an entry without one keeps the icon's room, so that the labels line up.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,7 +18,7 @@ use gpui_kit::{
 };
 
 use crate::button::Button;
-use crate::dropdown::{Align, Handler, MenuItem, TRIGGER, list_overlay};
+use crate::dropdown::{Align, Handler, MenuItem, TRIGGER, Width, list_overlay};
 use crate::icons::Icon;
 use crate::motion::{ENTER, HOVER, Motion};
 
@@ -22,6 +26,7 @@ struct Entry {
     id: ElementId,
     label: SharedString,
     leading: Option<Icon>,
+    detail: Option<SharedString>,
     danger: bool,
     pick: Handler,
 }
@@ -58,7 +63,9 @@ impl Menu {
         }
     }
 
-    /// An entry `id`, picked by a click.
+    /// An entry `id`, picked by a click. Another entry of the menu with the same icon fails the
+    /// debug builds and the tests, never the user's window:
+    /// two actions that look alike are told apart by their icons, or not at all.
     pub fn entry(
         mut self,
         id: impl Into<ElementId>,
@@ -66,13 +73,29 @@ impl Menu {
         leading: Option<Icon>,
         pick: impl Fn(&mut Window, &mut gpui_kit::App) + 'static,
     ) -> Self {
+        if let Some(glyph) = leading {
+            debug_assert!(
+                self.entries.iter().all(|e| e.leading != Some(glyph)),
+                "two entries of the menu `{:?}` have the same icon ({glyph:?})",
+                self.id
+            );
+        }
         self.entries.push(Entry {
             id: id.into(),
             label: label.into(),
             leading,
+            detail: None,
             danger: false,
             pick: Rc::new(pick),
         });
+        self
+    }
+
+    /// A second, fainter line under the last entry's label, cut to one line.
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        if let Some(entry) = self.entries.last_mut() {
+            entry.detail = Some(detail.into());
+        }
         self
     }
 
@@ -87,11 +110,20 @@ impl Menu {
         self.entries.push(Entry {
             id: id.into(),
             label: label.into(),
-            leading: None,
+            leading: Some(Icon::Trash),
+            detail: None,
             danger: true,
             pick: Rc::new(pick),
         });
         self
+    }
+
+    /// Each entry's id, label and icon, in the order given: what a test reads of a menu.
+    pub fn entries(&self) -> Vec<(ElementId, SharedString, Option<Icon>)> {
+        self.entries
+            .iter()
+            .map(|e| (e.id.clone(), e.label.clone(), e.leading))
+            .collect()
     }
 
     pub fn align(mut self, align: Align) -> Self {
@@ -182,6 +214,7 @@ impl Render for Menu {
         }
         let menu = cx.entity().downgrade();
         let p = crate::theme::palette(cx);
+        let slot = self.entries.iter().any(|e| e.leading.is_some());
         let item = |entry: &Entry| {
             let (menu, pick) = (menu.clone(), entry.pick.clone());
             let item =
@@ -191,6 +224,11 @@ impl Render for Menu {
                 });
             let item = match entry.leading {
                 Some(glyph) => item.leading(glyph),
+                None if slot => item.slot(),
+                None => item,
+            };
+            let item = match &entry.detail {
+                Some(detail) => item.detail(detail.clone()),
                 None => item,
             };
             if entry.danger { item.danger() } else { item }.into_any_element()
@@ -221,7 +259,15 @@ impl Render for Menu {
             }) as Handler
         });
         root.child(list_overlay(
-            &self.id, TRIGGER, self.align, self.width, items, dismiss, t, window, cx,
+            &self.id,
+            TRIGGER,
+            self.align,
+            Width::Fit(self.width),
+            items,
+            dismiss,
+            t,
+            window,
+            cx,
         ))
         .test_support()
     }

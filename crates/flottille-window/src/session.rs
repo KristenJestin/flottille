@@ -330,6 +330,9 @@ pub const RELOADS_AFTER_TURN: &str = "Reloads after this turn";
 /// starts the next process.
 pub const RELOADED: &str = "Tools reload at its next message";
 
+/// The entry of the rail's menu that detaches the session from the agent that started it.
+pub const DETACH: &str = "Detach from its lead";
+
 /// The entry of the session's menu that compacts its conversation now, or once its turn ends.
 pub const COMPACT: &str = "Compact conversation";
 
@@ -873,8 +876,20 @@ impl SessionPage {
         if !self.says_by(&started_by, &led_by) {
             self.opened.started_by = started_by;
             self.opened.led_by = led_by;
+            let by = self.opened.started_by.clone();
+            self.rail
+                .update(cx, |rail, cx| rail.set_detach(by.as_deref(), cx));
             cx.notify();
         }
+    }
+
+    /// "Detach from its lead" in the rail's menu: the same command as the sidebar row's.
+    pub fn detach(&mut self, cx: &mut Context<Self>) {
+        let Some(from) = self.opened.started_by.clone() else {
+            return;
+        };
+        let session = self.opened.id.clone();
+        self.perform(Command::Detach { session, from }, cx);
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -6527,8 +6542,14 @@ pub struct SessionRail {
     place_known: bool,
     /// The "⋯" menu of the WORKSPACE section.
     menu: Entity<Menu>,
-    /// The "⋯" menu of the root's row: it ends the session.
+    /// A ticket is linked to the place (or its tracker is being read), as the menu says.
+    linked: bool,
+    /// The place is a workspace, which the menu can remove.
+    removable: bool,
+    /// The "⋯" menu of the root's row: it reloads, compacts, detaches and ends the session.
     agent_menu: Entity<Menu>,
+    /// The agent that started the session, which the menu detaches it from.
+    detach: Option<String>,
     /// The commands of the session's tree.
     commands: Entity<CommandList>,
     /// What the agents of the session's tree wait for outside Flottille.
@@ -6558,72 +6579,27 @@ pub struct SessionRail {
 }
 
 impl SessionRail {
+    /// The "⋯" menu of the root's row.
+    pub fn agent_menu(&self) -> &Entity<Menu> {
+        &self.agent_menu
+    }
+
+    /// The "⋯" menu of the Workspace section.
+    pub fn workspace_menu(&self) -> &Entity<Menu> {
+        &self.menu
+    }
+
     fn new(
         page: WeakEntity<SessionPage>,
         root: String,
         opened: &Opened,
         cx: &mut Context<Self>,
     ) -> Self {
-        let editor = page.clone();
-        let ender = page.clone();
-        let reloader = page.clone();
-        let compactor = page.clone();
-        let agent_menu = cx.new(|cx| {
-            Menu::new("rail-agent-menu", "Session actions", cx)
-                .entry(
-                    "rail-agent-reload-tools",
-                    RELOAD_TOOLS,
-                    Some(Icon::Restart),
-                    move |_, cx| {
-                        reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
-                    },
-                )
-                .entry(
-                    "rail-agent-compact",
-                    COMPACT,
-                    Some(Icon::Restart),
-                    move |_, cx| {
-                        compactor.update(cx, |page, cx| page.compact(cx)).ok();
-                    },
-                )
-                .entry(
-                    "rail-agent-end",
-                    "End session…",
-                    Some(Icon::Stop),
-                    move |_, cx| {
-                        ender.update(cx, |page, cx| page.ask_end(cx)).ok();
-                    },
-                )
-        });
         let rail = cx.entity().downgrade();
-        let unlinks = rail.clone();
-        let removes = rail.clone();
         let removable = opened.place.is_some();
-        let menu = cx.new(|cx| {
-            workspace_menu(
-                "workspace-menu",
-                WorkspaceActions {
-                    open_in_editor: Box::new(move |cx| {
-                        editor.update(cx, |page, _| page.open_in_editor()).ok();
-                    }),
-                    link_ticket: Some(Box::new(move |cx| {
-                        rail.update(cx, |rail, cx| rail.start_linking(cx)).ok();
-                    })),
-                    unlink_ticket: Some(Box::new(move |cx| {
-                        unlinks
-                            .update(cx, |rail, cx| rail.link_ticket(None, cx))
-                            .ok();
-                    })),
-                    // A session in the project's folder has no workspace to remove.
-                    remove: removable.then(|| -> WorkspaceAction {
-                        Box::new(move |cx| {
-                            removes.update(cx, |rail, cx| rail.ask_removal(cx)).ok();
-                        })
-                    }),
-                },
-                cx,
-            )
-        });
+        let detach = opened.started_by.clone();
+        let agent_menu = cx.new(|cx| agent_menu(&page, detach.as_deref(), cx));
+        let menu = cx.new(|cx| workspace_menu_of(&page, &rail, removable, false, cx));
         let commands = cx.new(|_| CommandList::new(page.clone()).of_agent(root.clone()));
         let subscriptions = cx.new(|_| SubscriptionList::new(page.clone()));
         let leaves = cx.new(|_| LeaveList::new(page.clone(), root.clone()));
@@ -6642,7 +6618,10 @@ impl SessionRail {
             gauges: HashMap::new(),
             last_runs: HashMap::new(),
             menu,
+            linked: false,
+            removable,
             agent_menu,
+            detach,
             selected: root,
             workspace: opened.place.clone(),
             project: opened.project.clone(),
@@ -6658,6 +6637,33 @@ impl SessionRail {
             removed: false,
             renders: 0,
         }
+    }
+
+    /// Who started the session, as the daemon says now: the agent's menu offers Detach from it
+    /// while there is one.
+    pub fn set_detach(&mut self, by: Option<&str>, cx: &mut Context<Self>) {
+        if self.detach.as_deref() == by {
+            return;
+        }
+        self.detach = by.map(str::to_owned);
+        let (page, detach) = (self.page.clone(), self.detach.clone());
+        self.agent_menu = cx.new(|cx| agent_menu(&page, detach.as_deref(), cx));
+        cx.notify();
+    }
+
+    /// The Workspace menu says what applies to the ticket: it is made again when a ticket is
+    /// linked or unlinked.
+    fn sync_menu(&mut self, cx: &mut Context<Self>) {
+        let linked = self
+            .place
+            .as_ref()
+            .is_some_and(|place| place.ticket.is_some() || place.ticket_pending);
+        if self.linked == linked {
+            return;
+        }
+        self.linked = linked;
+        let (page, rail, removable) = (self.page.clone(), cx.entity().downgrade(), self.removable);
+        self.menu = cx.new(|cx| workspace_menu_of(&page, &rail, removable, linked, cx));
     }
 
     /// "Remove workspace…": the confirmation opens, unless the workspace is already going.
@@ -6863,6 +6869,7 @@ impl SessionRail {
         let first = !std::mem::replace(&mut self.place_known, true);
         if self.place != place || first {
             self.place = place;
+            self.sync_menu(cx);
             cx.notify();
         }
     }
@@ -6898,6 +6905,7 @@ impl SessionRail {
         if place.ticket_pending || place.ticket != ticket {
             place.ticket = ticket;
             place.ticket_pending = false;
+            self.sync_menu(cx);
             cx.notify();
         }
     }
@@ -7970,10 +7978,97 @@ fn fact_line(
         .test_support()
 }
 
+/// The "⋯" menu of the root's row in the rail: each action has its own icon, and Detach is
+/// there while an agent that started the session (`detach`) still has it, as in the sidebar.
+fn agent_menu(
+    page: &WeakEntity<SessionPage>,
+    detach: Option<&str>,
+    cx: &mut Context<Menu>,
+) -> Menu {
+    let (reloader, compactor, detacher, ender) =
+        (page.clone(), page.clone(), page.clone(), page.clone());
+    let mut menu = Menu::new("rail-agent-menu", "Session actions", cx)
+        .entry(
+            "rail-agent-reload-tools",
+            RELOAD_TOOLS,
+            Some(Icon::Restart),
+            move |_, cx| {
+                reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
+            },
+        )
+        .entry(
+            "rail-agent-compact",
+            COMPACT,
+            Some(Icon::Fold),
+            move |_, cx| {
+                compactor.update(cx, |page, cx| page.compact(cx)).ok();
+            },
+        );
+    if let Some(by) = detach {
+        menu = menu
+            .entry(
+                "rail-agent-detach",
+                DETACH,
+                Some(Icon::Detach),
+                move |_, cx| {
+                    detacher.update(cx, |page, cx| page.detach(cx)).ok();
+                },
+            )
+            .detail(by.to_owned());
+    }
+    menu.entry(
+        "rail-agent-end",
+        "End session…",
+        Some(Icon::Stop),
+        move |_, cx| {
+            ender.update(cx, |page, cx| page.ask_end(cx)).ok();
+        },
+    )
+}
+
+/// The rail's Workspace "⋯" menu, for a ticket linked or not.
+fn workspace_menu_of(
+    page: &WeakEntity<SessionPage>,
+    rail: &WeakEntity<SessionRail>,
+    removable: bool,
+    linked: bool,
+    cx: &mut Context<Menu>,
+) -> Menu {
+    let editor = page.clone();
+    let (linking, unlinks, removes) = (rail.clone(), rail.clone(), rail.clone());
+    workspace_menu(
+        "workspace-menu",
+        WorkspaceActions {
+            open_in_editor: Box::new(move |cx| {
+                editor.update(cx, |page, _| page.open_in_editor()).ok();
+            }),
+            ticket_linked: linked,
+            link_ticket: Some(Box::new(move |cx| {
+                linking.update(cx, |rail, cx| rail.start_linking(cx)).ok();
+            })),
+            unlink_ticket: Some(Box::new(move |cx| {
+                unlinks
+                    .update(cx, |rail, cx| rail.link_ticket(None, cx))
+                    .ok();
+            })),
+            // A session in the project's folder has no workspace to remove.
+            remove: removable.then(|| -> WorkspaceAction {
+                Box::new(move |cx| {
+                    removes.update(cx, |rail, cx| rail.ask_removal(cx)).ok();
+                })
+            }),
+        },
+        cx,
+    )
+}
+
 /// What a workspace's "⋯" offers, wherever it is drawn: the rail's Workspace and the workspace's
 /// card on the project page build it with this, so that both say the same.
 pub struct WorkspaceActions {
     pub open_in_editor: WorkspaceAction,
+    /// A ticket is linked to the workspace: its menu offers to change and to unlink it, not to
+    /// link one.
+    pub ticket_linked: bool,
     /// Shows where a ticket is typed; `None` where the workspace links none.
     pub link_ticket: Option<WorkspaceAction>,
     pub unlink_ticket: Option<WorkspaceAction>,
@@ -7999,6 +8094,7 @@ pub(crate) fn removal_toast(name: &str, refused: Option<&str>) -> Toast {
 pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu>) -> Menu {
     let WorkspaceActions {
         open_in_editor,
+        ticket_linked,
         link_ticket,
         unlink_ticket,
         remove,
@@ -8015,18 +8111,19 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
         move |_, cx| open_in_editor(cx),
     );
     if let Some(link) = link_ticket {
-        menu = menu.entry(
-            "workspace-link-ticket",
-            "Link a ticket…",
-            Some(Icon::Ticket),
-            move |_, cx| link(cx),
-        );
+        let (label, glyph) = match ticket_linked {
+            true => ("Change the ticket…", Icon::Change),
+            false => ("Link a ticket…", Icon::Ticket),
+        };
+        menu = menu.entry("workspace-link-ticket", label, Some(glyph), move |_, cx| {
+            link(cx)
+        });
     }
-    if let Some(unlink) = unlink_ticket {
+    if let Some(unlink) = unlink_ticket.filter(|_| ticket_linked) {
         menu = menu.entry(
             "workspace-unlink-ticket",
             "Unlink the ticket",
-            None,
+            Some(Icon::Unlink),
             move |_, cx| unlink(cx),
         );
     }
