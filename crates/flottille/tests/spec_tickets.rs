@@ -768,3 +768,114 @@ fn a_created_ticket_whose_key_cannot_be_read_says_to_link_it() {
     );
     assert!(!problem.contains("no ticket was created"), "{problem}");
 }
+
+const DEPARTURES: &str = "The ticket asks for a passkey too: left out, decided in D1.";
+
+/// An internal spec of ABC-7, Done, with its departures written: the spec's number.
+fn done_with_departures(user: &User) -> u64 {
+    ticket_says(user, "Users want to sign in without a password.");
+    let (spec, writer) = from_ticket(user, "internal");
+    complete(user, spec);
+    let answer = writer.call(
+        "spec",
+        json!({"action": "write", "spec": spec, "section": "departures", "content": DEPARTURES}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    user.call("spec.ready", json!({"spec": spec})).unwrap();
+    make_done(user, spec);
+    spec
+}
+
+/// ABC-7 as the fake `acli` holds it with a person's comment, `id` 20000, of `text`.
+fn with_a_person_s_comment(text: &str) -> Value {
+    let mut item = work_item("ABC-7", "Users want to sign in without a password.");
+    item["fields"]["comment"] = json!({"total": 1, "comments": [{
+        "id": "20000", "author": {"displayName": "Alice"},
+        "created": "2026-10-01T10:00:00.000+0000", "body": document(text)
+    }]});
+    item
+}
+
+/// What an agent of the project reads of ABC-7's comments, in full.
+fn comments_read(user: &User) -> String {
+    let opened = user.received_requests("session/new").len();
+    user.call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let (url, authorization) = server_of(user, opened);
+    let agent = Mcp::initialize(&url, &authorization);
+    let full = agent.call(
+        "tickets",
+        json!({"action": "show", "ticket": "ABC-7", "detail": "full", "fresh": true}),
+    );
+    assert!(!full.error, "{}", full.text);
+    full.text
+}
+
+#[test]
+fn a_departures_comment_on_jira_is_recorded_by_its_id() {
+    let user = jira_user();
+    let spec = done_with_departures(&user);
+
+    user.call("spec.departures", json!({"spec": spec, "post": true}))
+        .unwrap();
+
+    // The id is the one the read right after the post found, the first Jira gave.
+    assert_eq!(
+        posts(&user),
+        [(
+            "ABC-7".to_owned(),
+            "comment".to_owned(),
+            Some("10100".to_owned())
+        )]
+    );
+    let read = comments_read(&user);
+    assert!(
+        read.contains("(posted by an agent)") && read.contains("[comment 10100]"),
+        "{read}"
+    );
+}
+
+#[test]
+fn a_person_s_comment_with_the_departures_words_is_not_flottille_s() {
+    let user = jira_user();
+    let spec = done_with_departures(&user);
+    // The person wrote the same words before Flottille posted them.
+    user.acli_script(json!({"items": {"ABC-7": with_a_person_s_comment(DEPARTURES)}}));
+    user.call("spec.departures", json!({"spec": spec, "post": true}))
+        .unwrap();
+
+    let read = comments_read(&user);
+
+    assert!(
+        read.contains("- Alice, 2026-10-01T10:00:00.000+0000: The ticket asks"),
+        "{read}"
+    );
+    assert!(
+        read.contains("(posted by an agent) [comment 10100]"),
+        "{read}"
+    );
+    assert_eq!(read.matches("posted by an agent").count(), 1, "{read}");
+}
+
+#[test]
+fn a_departures_comment_whose_id_was_not_read_is_recorded_by_nothing() {
+    let user = jira_user();
+    let spec = done_with_departures(&user);
+    // The read right after the post fails: no id is bound.
+    user.acli_script(json!({
+        "items": {"ABC-7": work_item("ABC-7", "x")},
+        "fail": {"ABC-7": "Error: the work item could not be fetched"}
+    }));
+
+    let posted = user
+        .call("spec.departures", json!({"spec": spec, "post": true}))
+        .unwrap();
+
+    assert!(posted["posted_at"].is_u64(), "{posted}");
+    assert_eq!(comments_on(&user, "ABC-7"), 1);
+    assert!(posts(&user).is_empty(), "no record of words alone");
+    // A person's same words later are not Flottille's, nor are Flottille's own.
+    user.acli_script(json!({"items": {"ABC-7": with_a_person_s_comment(DEPARTURES)}}));
+    let read = comments_read(&user);
+    assert!(!read.contains("posted by an agent"), "{read}");
+}

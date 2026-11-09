@@ -296,8 +296,10 @@ gate is not asked; nothing else writes a ticket for a spec.
   Ready.
 - **Internal.** The ticket is read, never written. The comment of where the spec departs from it
   is posted at Done only by the user (`spec.departures {post}`), on each ticket, and recorded by
-  the id GitHub gives it, or by its text on Jira, as an agent's comment is. The post is kept per
-  ticket: one that failed on a ticket is made again only on those it did not reach.
+  the id of the comment, as an agent's comment is: GitHub gives it, and on Jira it is bound by the
+  read of the work item right after the post. A comment whose id is not found is recorded by
+  nothing, never by its words: it is not marked as Flottille's, and a person's comment with the
+  same words never is. The post is kept per ticket: one that failed on a ticket is made again only on those it did not reach.
 
 The rounds keep no description, so a description a spec wrote emits no event. A comment the user
 posts for a spec is recorded as an agent's is: it shows `posted by an agent`, and `from: people`
