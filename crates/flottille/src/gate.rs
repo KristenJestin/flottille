@@ -3912,9 +3912,22 @@ fn agent_folder(home: Option<&Path>, path: &Resolved) -> Option<AgentFolder> {
             })
             .flatten()
             .collect();
+        // A file system may not tell cases apart: `~/.Claude` is `~/.claude` there.
+        let in_case = |path: &PathBuf| {
+            home.into_iter()
+                .flat_map(|home| [Some(home.to_owned()), place::real_path(home).ok()])
+                .flatten()
+                .any(|home| {
+                    path.strip_prefix(&home)
+                        .ok()
+                        .and_then(|rest| rest.components().next())
+                        .and_then(|name| name.as_os_str().to_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case(entry))
+                })
+        };
         if seen
             .iter()
-            .any(|path| homes.iter().any(|folder| path.starts_with(folder)))
+            .any(|path| homes.iter().any(|folder| path.starts_with(folder)) || in_case(path))
         {
             return Some(AgentFolder::Login(format!("~/{entry}")));
         }
@@ -3929,7 +3942,9 @@ fn agent_folder(home: Option<&Path>, path: &Resolved) -> Option<AgentFolder> {
             seen.iter().find_map(|path| {
                 let name = path.strip_prefix(&home).ok()?.components().next()?;
                 let name = name.as_os_str().to_str()?;
-                name.starts_with(".claude.json").then(|| name.to_owned())
+                name.to_ascii_lowercase()
+                    .starts_with(".claude.json")
+                    .then(|| name.to_owned())
             })
         });
     if let Some(name) = copy {
@@ -3945,7 +3960,7 @@ fn agent_folder(home: Option<&Path>, path: &Resolved) -> Option<AgentFolder> {
         let parts = parts_of(path);
         let at = parts
             .iter()
-            .position(|part| AGENT_FOLDERS.contains(&part.as_str()))?;
+            .position(|part| AGENT_FOLDERS.iter().any(|f| part.eq_ignore_ascii_case(f)))?;
         let entry = &parts[at];
         if home.is_none() || anywhere {
             return Some(AgentFolder::Login(format!("~/{entry}")));
@@ -3953,7 +3968,7 @@ fn agent_folder(home: Option<&Path>, path: &Resolved) -> Option<AgentFolder> {
         Some(
             match parts[at + 1..]
                 .iter()
-                .find(|part| AGENT_LOGINS.contains(&part.as_str()))
+                .find(|part| AGENT_LOGINS.iter().any(|l| part.eq_ignore_ascii_case(l)))
             {
                 Some(login) => AgentFolder::Login(format!("{login} in {entry}")),
                 None => AgentFolder::Repository(entry.clone()),
@@ -5297,6 +5312,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_agent_folder_named_in_another_case_is_refused_as_one() {
+        // A file system that does not tell cases apart (macOS, a FAT key) holds `.Claude` as
+        // `.claude`: the agent's command line reads its settings there.
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join("settings.json"));
+        for verdict in [
+            fixture.file("fs_write", ".Claude/settings.json"),
+            fixture.file("fs_write", "src/.CODEX/config.toml"),
+            fixture.file("fs_write", ".Claude.JSON"),
+            fixture.run("git mv settings.json .Claude"),
+            fixture.run("cp settings.json .CLAUDE/settings.json"),
+        ] {
+            assert!(
+                matches!(&verdict, Verdict::Deny(why)
+                    if why.contains("hooks") && why.contains("ask the user")),
+                "{verdict:?}"
+            );
+        }
+        made(&fixture.root.join(".Claude/.Credentials.json"));
+        let verdict = fixture.file("fs_read", ".Claude/.Credentials.json");
+        assert!(
+            matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+            "{verdict:?}"
+        );
+        let home = fixture.grant.place.home.clone().unwrap();
+        made(&home.join(".Claude/settings.json"));
+        let verdict = fixture.file("fs_read", "../../home/.Claude/settings.json");
+        assert!(
+            matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+            "{verdict:?}"
+        );
     }
 
     #[test]
