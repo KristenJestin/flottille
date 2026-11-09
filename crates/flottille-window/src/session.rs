@@ -6057,6 +6057,7 @@ impl Row {
                 answer
             }
         };
+        answer.update(cx, |card, _| card.set_answered(answers.is_some()));
         let open = crate::question_card::open_card(self.at, &title, when.clone(), answer);
         let answered = answers.map(|answers| {
             crate::question_card::answered_card(self.at, &title, when, questions, answers, cx)

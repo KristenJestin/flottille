@@ -880,3 +880,53 @@ fn an_answer_sent_stays_sent_when_the_page_is_opened_again(cx: &mut TestAppConte
     );
     release(&user);
 }
+
+#[gpui_kit::test]
+fn a_card_answered_before_a_restart_stays_answered(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "draw the charts");
+    let other = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, page, cx) = open_session(&user, &id, cx);
+    until(&shell, cx, "the card", |cx| {
+        questions(&page, cx)
+            .first()
+            .is_some_and(|(at, _)| card_shows(*at, cx))
+    });
+    let at = questions(&page, cx)[0].0;
+    let sent = answer(&page, at, "Drop it.", cx);
+    until(&shell, cx, "the answer went", |cx| {
+        sent.read_with(cx, |a, cx| a.is_sent(cx))
+    });
+
+    // The window starts again while the answer waits: only the daemon's history is left.
+    cx.update(|_, cx| flottille_window::question_card::forget_sent_answers(cx));
+    cx.update(|window, cx| window.click(session_id(&other), cx));
+    until(&shell, cx, "the other page", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.id() == other)
+    });
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "this page again, its card", |cx| {
+        let page = session_page(&shell, cx);
+        page.read_with(cx, |p, _| p.id() == id)
+            && questions(&page, cx)
+                .first()
+                .is_some_and(|(at, _)| has(format!("row-{at}-question-text"), cx))
+    });
+    settle(cx);
+    let page = session_page(&shell, cx);
+    let at = questions(&page, cx)[0].0;
+    assert_eq!(
+        label(format!("row-{at}-answer-waits"), cx).as_deref(),
+        Some(ANSWER_WAITS)
+    );
+    assert!(
+        !has(format!("row-{at}-answer-0-frame"), cx),
+        "no field to answer again"
+    );
+    release(&user);
+}

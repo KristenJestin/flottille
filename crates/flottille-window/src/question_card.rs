@@ -44,6 +44,11 @@ pub fn answers_sent(session: &str, seq: u64, cx: &mut App) {
     sent.insert((session.to_owned(), seq));
 }
 
+/// What a window that was started again knows: nothing but what the daemon's history says.
+pub fn forget_sent_answers(cx: &mut App) {
+    cx.default_global::<SentAnswers>().0.clear();
+}
+
 /// The blocks of an ask's card, in their own view: a caret blinks without drawing the row.
 pub struct QuestionCard {
     at: usize,
@@ -56,6 +61,8 @@ pub struct QuestionCard {
     /// The options chosen, by question.
     chosen: Vec<Vec<String>>,
     sending: bool,
+    /// The history says the ask was answered (`agent.answered`): true after a restart too.
+    answered: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -109,6 +116,7 @@ impl QuestionCard {
             texts,
             fields,
             sending: false,
+            answered: false,
             _subscriptions: subscriptions,
         }
     }
@@ -157,10 +165,18 @@ impl QuestionCard {
         self.answers(cx).iter().all(|answer| !answer.is_empty())
     }
 
-    /// Whether the answer went: the fields give way to a line saying it waits.
+    /// Whether the answer went: the fields give way to a line saying it waits. The window's
+    /// memory says it, and so does the ask's history once the answers were kept with it.
     pub fn is_sent(&self, cx: &App) -> bool {
-        cx.try_global::<SentAnswers>()
-            .is_some_and(|sent| sent.0.contains(&(self.session.clone(), self.seq)))
+        self.answered
+            || cx
+                .try_global::<SentAnswers>()
+                .is_some_and(|sent| sent.0.contains(&(self.session.clone(), self.seq)))
+    }
+
+    /// Whether the ask's history holds the answers given from this card.
+    pub fn set_answered(&mut self, answered: bool) {
+        self.answered = answered;
     }
 
     /// Sends the answers to the root, once every question has one.
