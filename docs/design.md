@@ -516,7 +516,8 @@ agent wrote is data.
    composer is a control of its toolbar, never a block above it. A
    message from Flottille itself (a child's news, a delivery) follows the setting.
 7. **The agent's own handoff**: **Summary written by** (`summary` in `compaction.toml`) is the
-   compactor (the default, all of the above) or **the agent itself**. Then, at the same moments
+   compactor (the default, all of the above, shown in the window as **A model you choose**) or
+   **the session's own agent**. Then, at the same moments
    (the threshold at the end of a turn, or asked by hand) and with no compactor needed, Flottille
    sends the agent a message of its own, shown as Flottille's and never as the user's, that asks
    for its handoff in a fixed shape: its task, the decisions and why, the files touched, what is

@@ -128,10 +128,10 @@ fn provider_title(provider: &str) -> &str {
 }
 
 /// What the Compaction tab says under its title.
-const COMPACTION_SENTENCE: &str = "When an agent's context fills up, the compactor or the \
-     agent itself writes a summary of its conversation, and the agent goes on in a new session \
-     from its brief and the summary. With the compactor set to None, each agent's program \
-     compacts on its own.";
+const COMPACTION_SENTENCE: &str = "When an agent's context fills up, a separate model or the \
+     session's own agent writes a summary of its conversation, and the agent goes on in a new \
+     session from its brief and the summary. With None chosen for the model, each agent's \
+     program compacts on its own.";
 
 /// What the compactor's picker calls no compactor.
 pub const NO_COMPACTOR: &str = "None (each program compacts on its own)";
@@ -597,10 +597,10 @@ impl SettingsPage {
         let summary = Select::new(
             "compaction-summary",
             [
-                SelectOption::new("compactor", "The compactor")
-                    .line("A model of your choice summarises the conversation."),
-                SelectOption::new("agent", "The agent itself")
-                    .line("Flottille asks the agent for its handoff, and turns its program's own compaction off where it can."),
+                SelectOption::new("compactor", "A model you choose")
+                    .line("A separate model summarises the conversation."),
+                SelectOption::new("agent", "The session's own agent")
+                    .line("The agent summarises its own conversation, in its session."),
             ],
             usize::from(shown.by_agent),
         )
@@ -793,8 +793,9 @@ impl SettingsPage {
             .border_1()
             .border_color(p.line)
             .child(
-                Field::new("compaction-summary-field", "Summary written by", summary)
-                    .hint("The compactor, or the agent itself in a handoff of a fixed shape."),
+                Field::new("compaction-summary-field", "Summary written by", summary).hint(
+                    "A model you choose, or the session's own agent in a handoff of a fixed shape.",
+                ),
             )
             .child(
                 div()
@@ -1906,13 +1907,29 @@ pub(crate) fn grouped(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOL_RESULTS_SENTENCE, grouped};
+    use super::{COMPACTION_SENTENCE, TOOL_RESULTS_SENTENCE, grouped};
 
     #[test]
     fn the_sentence_of_the_tool_results_section_has_no_run_of_spaces() {
         assert!(
             !TOOL_RESULTS_SENTENCE.contains("  "),
             "{TOOL_RESULTS_SENTENCE}"
+        );
+    }
+
+    #[test]
+    fn the_compaction_sentence_names_the_choices_in_the_words_of_the_select() {
+        assert!(
+            COMPACTION_SENTENCE.contains("a separate model"),
+            "{COMPACTION_SENTENCE}"
+        );
+        assert!(
+            COMPACTION_SENTENCE.contains("the session's own agent"),
+            "{COMPACTION_SENTENCE}"
+        );
+        assert!(
+            !COMPACTION_SENTENCE.contains("compactor"),
+            "{COMPACTION_SENTENCE}"
         );
     }
 
