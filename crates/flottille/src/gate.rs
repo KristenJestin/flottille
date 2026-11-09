@@ -3318,7 +3318,8 @@ fn shows_revisions(layer: &[String]) -> bool {
 /// The path a `rev:path` word names in its revision (`HEAD:.env`, `:path` and `:0:path` of the
 /// index): what git prints is that file, as a read of it on the disk would.
 fn revision_path(word: &str) -> Option<&str> {
-    if word.starts_with('-') {
+    // `:/text` is the newest commit whose message holds `text`, no file.
+    if word.starts_with('-') || word.starts_with(":/") {
         return None;
     }
     let (_, path) = word.split_once(':')?;
@@ -7176,5 +7177,39 @@ mod tests {
         assert!(to_judge(
             &fixture.file("fs_read", &format!("/proc/{me}/status"))
         ));
+    }
+
+    #[test]
+    fn git_s_output_option_is_a_write_of_the_file_it_names() {
+        for fixture in [Fixture::workspace(), Fixture::main()] {
+            made(&fixture.root.join(".claude/settings.json"));
+            for line in [
+                "git diff --output .claude/settings.json",
+                "git log -p --outp=.claude/settings.json",
+                "git show --output=.codex/config.toml HEAD",
+                "git format-patch -o .claude/hooks HEAD~1",
+                "git format-patch -o.claude HEAD~1",
+                "git archive -o .claude/settings.json HEAD",
+                "git archive --output=.claude.json HEAD",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(
+                    matches!(&verdict, Verdict::Deny(why) if why.contains("agent folder")),
+                    "{line}: {verdict:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn git_show_of_a_commit_message_search_is_not_a_path() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "git show :/fix",
+            "git show :/fix the login",
+            "git log -1 :/release",
+        ] {
+            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
     }
 }
