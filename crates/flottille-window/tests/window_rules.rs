@@ -360,3 +360,39 @@ fn every_one_line_text_of_the_window_can_shrink() {
         found.join("\n")
     );
 }
+
+// ── The composer's toolbar: Send is its only primary ───────────────────────────────────────────
+
+/// The lines of a `reply-` toggle of the composer's toolbar (`Button::choice`) with no `.ghost()`
+/// in its builder chain: a choice fills with the accent when it is the chosen one, and in the
+/// composer only Send is filled. "In the chain" is the five lines after it.
+fn filled_toolbar_choices(source: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = source.lines().collect();
+    code(source)
+        .filter(|(_, line)| line.contains("Button::choice(\"reply-"))
+        .filter(|(at, _)| {
+            let chain = &lines[at - 1..(*at + 5).min(lines.len())];
+            !chain.iter().any(|line| line.contains(".ghost()"))
+        })
+        .map(|(at, line)| (at, line.to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_toolbar_toggle_filled_with_the_accent_is_found() {
+    let wrong = "Button::choice(\"reply-compact\", COMPACT_CHIP, self.compact)\n    .tooltip(HINT)";
+    assert_eq!(filled_toolbar_choices(wrong).len(), 1);
+    let right =
+        "Button::choice(\"reply-compact\", COMPACT_CHIP, on)\n    .ghost()\n    .tooltip(HINT)";
+    assert!(filled_toolbar_choices(right).is_empty());
+}
+
+#[test]
+fn the_composer_s_toggles_are_never_filled_with_the_accent() {
+    let found = offenders(filled_toolbar_choices);
+    assert!(
+        found.is_empty(),
+        "Send is the only primary of the composer: a toggle of its toolbar is `.ghost()`:\n{}",
+        found.join("\n")
+    );
+}

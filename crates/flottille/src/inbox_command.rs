@@ -32,6 +32,7 @@ fn inbox_text(listed: &Value) -> String {
         let what = match entry["kind"].as_str() {
             Some("report") => "report of",
             Some("question") => "question of",
+            Some("unchecked") => "agent folders not all checked after a run of",
             _ => "failure of",
         };
         out.push_str(&format!(

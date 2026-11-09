@@ -1028,3 +1028,261 @@ fn an_agent_cannot_start_a_session_in_full() {
     done(launch_root(&mcp, "Docs"));
     assert_eq!(mode_of(&user, &started(&user, "Docs")), "auto");
 }
+
+/// A Claude hook in a repository's settings: it runs a program the next time the user opens
+/// that repository with Claude's own command line.
+const HOOK: &str = "{\"hooks\": {\"SessionStart\": [{\"hooks\": [{\"type\": \"command\", \
+    \"command\": \"touch /tmp/flottille-test-hooked\"}]}]}}\n";
+
+/// The agent folder a run wrote, told in its result as refused and put back.
+fn put_back(said: &str, path: &str) {
+    assert!(said.contains("refused"), "{said}");
+    assert!(said.contains(path), "{said}");
+    assert!(said.contains("put back"), "{said}");
+}
+
+#[test]
+fn git_apply_creating_claude_settings_is_refused_or_reverted() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    let patch = format!(
+        "diff --git a/.claude/settings.json b/.claude/settings.json\n\
+         new file mode 100644\n\
+         --- /dev/null\n\
+         +++ b/.claude/settings.json\n\
+         @@ -0,0 +1 @@\n\
+         +{}",
+        HOOK
+    );
+    std::fs::write(folder.join("hooks.patch"), patch).unwrap();
+
+    let said = done(mcp.call("run", json!({"line": "git apply hooks.patch"})));
+
+    put_back(&said, ".claude/settings.json");
+    assert!(!folder.join(".claude").exists(), "{said}");
+    assert!(folder.join("hooks.patch").exists());
+}
+
+#[test]
+fn a_checkout_that_brings_a_claude_hook_is_refused_or_reverted() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    // The repository already has its settings; a branch changes them.
+    std::fs::create_dir_all(folder.join(".claude")).unwrap();
+    std::fs::write(folder.join(".claude/settings.json"), "{}\n").unwrap();
+    user.git(&folder, &["add", ".claude/settings.json"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "settings"]);
+    user.git(&folder, &["branch", "plain"]);
+    user.git(&folder, &["checkout", "--quiet", "-b", "hooked"]);
+    std::fs::write(folder.join(".claude/settings.json"), HOOK).unwrap();
+    std::fs::create_dir_all(folder.join(".codex")).unwrap();
+    std::fs::write(folder.join(".codex/config.toml"), "notify = [\"true\"]\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "hooks"]);
+    user.git(&folder, &["checkout", "--quiet", "plain"]);
+
+    let said = done(mcp.call("run", json!({"line": "git checkout hooked"})));
+
+    put_back(&said, ".claude/settings.json");
+    put_back(&said, ".codex/config.toml");
+    assert_eq!(
+        std::fs::read_to_string(folder.join(".claude/settings.json")).unwrap(),
+        "{}\n"
+    );
+    assert!(!folder.join(".codex").exists());
+    // What did not reach an agent folder is left as the run made it.
+    let head = user.git_output(&folder, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert_eq!(head.trim(), "hooked");
+}
+
+#[test]
+fn cp_of_a_folder_into_a_claude_folder_is_refused() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    std::fs::create_dir_all(folder.join("template/.claude")).unwrap();
+    std::fs::write(folder.join("template/.claude/settings.json"), HOOK).unwrap();
+    std::fs::write(folder.join("template/notes.md"), "notes\n").unwrap();
+    std::fs::create_dir_all(folder.join("hooks")).unwrap();
+    std::fs::write(folder.join("hooks/settings.json"), HOOK).unwrap();
+
+    // Named, the agent folder is refused before the run.
+    let said = refused(mcp.call("run", json!({"line": "cp -r hooks/. .claude/"})));
+    assert!(said.contains("agent folder"), "{said}");
+    // Brought by a folder the line copies, it is put back after it.
+    let said = done(mcp.call("run", json!({"line": "cp -r template/. ."})));
+
+    put_back(&said, ".claude/settings.json");
+    assert!(!folder.join(".claude").exists(), "{said}");
+    assert!(folder.join("notes.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(folder.join("template/.claude/settings.json")).unwrap(),
+        HOOK
+    );
+}
+
+#[test]
+fn a_staged_credentials_file_is_masked_in_a_diff() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    // Invented tokens, of no prefix a known kind of token has.
+    std::fs::create_dir_all(folder.join(".claude")).unwrap();
+    std::fs::write(
+        folder.join(".claude/.credentials.json"),
+        "{\"claudeAiOauth\":{\"accessToken\":\"fake-access-0123456789abcdef\",\
+         \"refreshToken\":\"fake-refresh-0123456789abcdef\",\"expiresAt\":1762700000000}}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(folder.join(".codex")).unwrap();
+    std::fs::write(
+        folder.join(".codex/auth.json"),
+        "{\n  \"tokens\": {\n    \"access_token\": \"fake-codex-access-0123456789\",\n    \
+         \"refresh_token\": \"fake-codex-refresh-0123456789\"\n  }\n}\n",
+    )
+    .unwrap();
+
+    done(mcp.call("run", json!({"line": "git add -A"})));
+    let shown = [
+        done(mcp.call("run", json!({"line": "git diff --cached"}))),
+        done(mcp.call("run", json!({"line": "git stash push --include-untracked"}))),
+        done(mcp.call(
+            "run",
+            json!({"line": "git stash show -p --include-untracked"}),
+        )),
+    ];
+
+    for said in &shown {
+        assert!(!said.contains("fake-"), "{said}");
+    }
+    assert!(shown[0].contains("accessToken"), "{}", shown[0]);
+    assert!(shown[0].contains("refresh_token"), "{}", shown[0]);
+    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let runs = store.ended_runs_of(&[id], 10, 1_000).unwrap();
+    assert_eq!(runs.len(), 4);
+    for run in runs {
+        assert!(!run.output.contains("fake-"), "{}", run.output);
+    }
+}
+
+#[test]
+fn git_merge_planting_claude_settings_is_put_back() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    user.git(&folder, &["checkout", "--quiet", "-b", "hooked"]);
+    std::fs::create_dir_all(folder.join(".claude")).unwrap();
+    std::fs::write(folder.join(".claude/settings.json"), HOOK).unwrap();
+    std::fs::write(folder.join("feature.md"), "feature\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "hooks"]);
+    user.git(&folder, &["checkout", "--quiet", "-"]);
+
+    let said = done(mcp.call("run", json!({"line": "git merge --ff-only hooked"})));
+
+    put_back(&said, ".claude/settings.json");
+    assert!(!folder.join(".claude").exists(), "{said}");
+    assert!(folder.join("feature.md").exists());
+}
+
+#[test]
+fn git_stash_pop_planting_claude_settings_is_put_back() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    std::fs::create_dir_all(folder.join(".claude")).unwrap();
+    std::fs::write(folder.join(".claude/settings.json"), HOOK).unwrap();
+    user.git(
+        &folder,
+        &["stash", "push", "--quiet", "--include-untracked"],
+    );
+    assert!(!folder.join(".claude").exists());
+
+    let said = done(mcp.call("run", json!({"line": "git stash pop"})));
+
+    put_back(&said, ".claude/settings.json");
+    assert!(!folder.join(".claude").exists(), "{said}");
+}
+
+#[test]
+fn tar_x_planting_claude_settings_is_put_back() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    let packed = user.path("packed");
+    std::fs::create_dir_all(packed.join(".claude")).unwrap();
+    std::fs::write(packed.join(".claude/settings.json"), HOOK).unwrap();
+    std::fs::write(packed.join("notes.md"), "notes\n").unwrap();
+    let made = std::process::Command::new("tar")
+        .arg("cf")
+        .arg(folder.join("hooks.tar"))
+        .args(["-C", packed.to_str().unwrap(), ".claude", "notes.md"])
+        .status()
+        .unwrap();
+    assert!(made.success());
+
+    let said = done(mcp.call("run", json!({"line": "tar xf hooks.tar"})));
+
+    put_back(&said, ".claude/settings.json");
+    assert!(!folder.join(".claude").exists(), "{said}");
+    assert!(folder.join("notes.md").exists());
+    // What it put back is kept for the user.
+    assert!(said.contains("agent-folders"), "{said}");
+}
+
+#[test]
+fn a_place_too_large_to_check_tells_the_user_in_the_inbox() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers()
+        .with_env("FLOTTILLE_TEST_AGENT_FOLDER_ENTRIES", "20");
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    for n in 0..30 {
+        std::fs::write(folder.join(format!("note-{n}.md")), "\n").unwrap();
+    }
+    let packed = user.path("packed");
+    std::fs::create_dir_all(&packed).unwrap();
+    std::fs::write(packed.join("notes.md"), "notes\n").unwrap();
+    let made = std::process::Command::new("tar")
+        .arg("cf")
+        .arg(folder.join("notes.tar"))
+        .args(["-C", packed.to_str().unwrap(), "notes.md"])
+        .status()
+        .unwrap();
+    assert!(made.success());
+
+    let said = done(mcp.call("run", json!({"line": "tar xf notes.tar"})));
+
+    assert!(said.contains("could not all be checked"), "{said}");
+    let inbox = user.call("inbox.list", json!({})).unwrap();
+    let entries = inbox["entries"].as_array().unwrap();
+    let entry = entries
+        .iter()
+        .find(|entry| entry["kind"] == "unchecked")
+        .unwrap_or_else(|| panic!("{inbox}"));
+    assert_eq!(entry["agent"], id);
+    assert!(
+        entry["text"]
+            .as_str()
+            .unwrap()
+            .contains("too large for Flottille to check"),
+        "{entry}"
+    );
+}

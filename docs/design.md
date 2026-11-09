@@ -524,8 +524,9 @@ agent wrote is data.
    not seen, for a context that did not grow since the session started or its last compaction
    failed, nor for a provider whose cache lifetime is not established (`docs/agents.md`, "The
    prompt cache's lifetime"); the Compaction tab says each provider's. Once an agent's cache
-   expired, the composer's toolbar shows a **Compact** chip beside the mode, ticked from the setting
-   (its tooltip says why): unticked, the message goes to the session as it is; ticked, it
+   expired, the composer's toolbar's **Compact** control, always in its place beside the mode (disabled,
+   its tooltip saying why, while there is nothing to compact), is enabled and ticked from the
+   setting (its tooltip says why): unticked, the message goes to the session as it is; ticked, it
    compacts first even with the setting off. The composer keeps its height: an option of the
    composer is a control of its toolbar, never a block above it. A
    message from Flottille itself (a child's news, a delivery) follows the setting.
@@ -571,7 +572,7 @@ the sidebar and in the rail of its page, in place of idle.
 A setting resumes the session at its reset, **off by default**: "Resume sessions when the quota
 resets", `resume_at_reset` of `sessions.toml`, set in Settings, Sessions, or by `sessions.set`.
 While a session waits for a known reset, its composer's toolbar shows a chip, `Resume at 13:00`,
-beside Compact, ticked or not from that setting, which the user toggles for this session alone
+at the end of its controls, ticked or not from that setting, which the user toggles for this session alone
 (`agent.quota_resume`). When it is on, the sweep (no timer of its own) delivers the session one message at the reset plus a
 minute, `Your quota has reset: continue where you stopped.` (a `quota-reset` delivery, never the
 user's), and the session runs again. The wait for that instant is taken in one write, so the
@@ -730,22 +731,46 @@ line names, every program a wrapper or a runner runs included:
   `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.netrc`, `~/.npmrc`,
   `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`,
   `~/.local/share/opencode`, wherever they are along a path, and `/etc/shadow`, `/etc/sudoers`,
-  `/etc/sudoers.d`; the agents' own folders of the home (`~/.claude`, `~/.claude.json`,
-  `~/.codex`), whole, where the path leads included (a link to them, a project that is the home
-  folder);
+  `/etc/sudoers.d`; the agents' own folders of the home (`~/.claude`, `~/.claude.json` and its
+  copies beside it, `~/.claude.json.backup`…, `~/.codex`), whole, where the path leads included (a
+  link to them, a project that is the home folder), and a file of a revision named `rev:path`
+  (`git show HEAD:.claude/.credentials.json`, `git cat-file`, `git diff`) as the path it names;
+  and the open files of any process, the agent's own command line and runs included
+  (`/proc/<pid>/fd`, `map_files`, `/dev/fd/3`), which may be one. These refusals of paths are
+  what keeps a login from an agent. The masking of outputs (a token key's value in a diff of a
+  staged login file, `docs/tools.md`) is not a boundary: a line that reshapes the bytes (`xxd`,
+  `od`, `base64`) gets them past it;
 - **an agent's folder anywhere else** (`.claude`, `.claude.json`, `.codex` of a repository, a
   workspace, a copy in `~/Downloads`): it is a project's configuration, not a login, and is read
   as any file, but a `.credentials.json` or `auth.json` below it is a login's place, and **a
   write there** is refused: its settings and hooks run programs the next time the user opens
   that repository with the agent's own command line, outside the gate, so the agent asks the
-  user to make the change;
+  user to make the change. A line may write there without naming it (a patch applied, a branch
+  checked out or merged, a stash popped, a folder copied, an archive unpacked): what an agent's
+  run changed in the agent folders of its place is put back as it was once the run ends, and
+  its result says it was refused, naming the files. Only the runs of a line the gate held (to
+  judge or base, whoever let it through) and the runs of a task are guarded so: a line it let
+  through at once only reads, or writes the files it names. Runs that overlap in a place, or in
+  places one inside the other (a repository's folder in its project's), share one guard: the
+  first notes the agent folders, a run in an outer place takes in what the inner ones noted,
+  the last to end puts them back, and its result says so. What the put-back removes or overwrites is moved to Flottille's state folder
+  (`agent-folders/<run>`), which the result names: a user's own edit there during the run is
+  undone, never lost. It writes nothing below a folder that is no longer a real one (a link
+  made since, to the home or anywhere): that entry is said as not put back; each folder is
+  opened by its handle, never through a link, so one made a link while the put-back goes on
+  leads it nowhere. The agent folders right in the place and in each of its repositories are
+  always looked at whole; the rest of a place of more than 500,000 entries is looked at up to
+  that bound, and the result says its agent folders could not all be checked, as does an entry
+  of the user's inbox (`run.agent_folders_unchecked`). What this does not cover: a process that outlives its run (one that
+  left the run's session, `setsid`), a long `serve` run until it ends, and a run going on when
+  the daemon stops or crashes; the files also exist while the run goes on;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
   the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program.
   Reading them stays base: a card in Ask and Auto, allowed in Full, since what they hold has its
   secrets masked and the user may want an agent to read a log;
 - **any write through a process's folder in `/proc`** that leads elsewhere (`/proc/<pid>/cwd`,
   `root`, `fd`, `exe`, `map_files`, `/dev/fd/3`): the daemon runs in `/`, so through it any path
-  of the disk. Reading there stays base;
+  of the disk. Reading through `cwd`, `root` or `exe` stays base;
 - **a write of a startup file**, or of a folder above one: `~/.bashrc`, `~/.bash_profile`,
   `~/.bash_login`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin`,
   `~/.config/fish`, `~/.gitconfig`, `~/.config/git`, `~/.config/autostart`,

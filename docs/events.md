@@ -530,8 +530,8 @@ compactor summarised it before the agent went on in a new session.
 #### `agent.cache_expired`
 
 The prompt cache of the agent, at rest, expired, and its context is past the minimum size of the
-compaction around the expiry (`docs/design.md` §5.8, 6): the composer's toolbar shows its **Compact**
-chip until the agent's next turn or compaction. Said once per expiry.
+compaction around the expiry (`docs/design.md` §5.8, 6): the composer's toolbar's **Compact**
+control is enabled until the agent's next turn or compaction. Said once per expiry.
 
 | Field | |
 |---|---|
@@ -996,6 +996,18 @@ ended.
 
 A restart (`run.restart`) is a `run.ended` with state `stopped` for the first run, if it ran, then a
 `run.started` for the new one, of the same `agent`, `project` and `name`.
+
+#### `run.agent_folders_unchecked`
+
+An agent's run ended in a place too large for the daemon to check all its agent folders after it
+(`docs/design.md` §7.1): those right in the place and in its repositories were, one further down
+past 500,000 entries was not. `flottille inbox` lists it as an entry of kind `unchecked`
+(`docs/protocol.md`, `inbox.list`), for a child's run too.
+
+| Field | |
+|---|---|
+| `agent`, `project`, `run` | |
+| `folder` | Where it ran. |
 
 #### `run.dismissed`
 

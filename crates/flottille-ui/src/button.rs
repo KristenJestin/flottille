@@ -58,6 +58,7 @@ pub struct Button {
     disabled: bool,
     chosen: Option<bool>,
     ghost: bool,
+    icon_only: bool,
     on_click: Option<OnClick>,
 }
 
@@ -75,6 +76,7 @@ impl Button {
             disabled: false,
             chosen: None,
             ghost: false,
+            icon_only: false,
             on_click: None,
         }
     }
@@ -135,6 +137,13 @@ impl Button {
     /// filled in the composer).
     pub fn ghost(mut self) -> Self {
         self.ghost = true;
+        self
+    }
+
+    /// Draws only the icon (`.leading(..)`): a row that is short gives its optional chips up
+    /// their words. The label stays the button's accessible name.
+    pub fn icon_only(mut self, icon_only: bool) -> Self {
+        self.icon_only = icon_only;
         self
     }
 
@@ -283,7 +292,7 @@ impl RenderOnce for Button {
                     .test_support(),
             );
         }
-        if let Some(label) = label {
+        if let Some(label) = label.filter(|_| !self.icon_only) {
             button = button.child(div().relative().child(label));
         }
         if let Some(badge) = self.badge {
