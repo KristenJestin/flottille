@@ -514,8 +514,9 @@ agent wrote is data.
    not seen, for a context that did not grow since the session started or its last compaction
    failed, nor for a provider whose cache lifetime is not established (`docs/agents.md`, "The
    prompt cache's lifetime"); the Compaction tab says each provider's. Once an agent's cache
-   expired, the composer's toolbar shows a **Compact** chip beside the mode, ticked from the setting
-   (its tooltip says why): unticked, the message goes to the session as it is; ticked, it
+   expired, the composer's toolbar's **Compact** control, always in its place beside the mode (disabled,
+   its tooltip saying why, while there is nothing to compact), is enabled and ticked from the
+   setting (its tooltip says why): unticked, the message goes to the session as it is; ticked, it
    compacts first even with the setting off. The composer keeps its height: an option of the
    composer is a control of its toolbar, never a block above it. A
    message from Flottille itself (a child's news, a delivery) follows the setting.
@@ -561,7 +562,7 @@ the sidebar and in the rail of its page, in place of idle.
 A setting resumes the session at its reset, **off by default**: "Resume sessions when the quota
 resets", `resume_at_reset` of `sessions.toml`, set in Settings, Sessions, or by `sessions.set`.
 While a session waits for a known reset, its composer's toolbar shows a chip, `Resume at 13:00`,
-beside Compact, ticked or not from that setting, which the user toggles for this session alone
+at the end of its controls, ticked or not from that setting, which the user toggles for this session alone
 (`agent.quota_resume`). When it is on, the sweep (no timer of its own) delivers the session one message at the reset plus a
 minute, `Your quota has reset: continue where you stopped.` (a `quota-reset` delivery, never the
 user's), and the session runs again. The wait for that instant is taken in one write, so the

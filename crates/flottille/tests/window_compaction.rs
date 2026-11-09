@@ -423,46 +423,82 @@ fn compactions(user: &User, id: &str) -> usize {
         .count()
 }
 
+/// The toolbar's controls that stay: where each starts, and how far Send ends from the
+/// composer's right edge.
+fn fixed(cx: &mut VisualTestContext) -> ([gpui_kit::Pixels; 4], gpui_kit::Pixels) {
+    cx.update(|window, _| {
+        let left = ["reply-model", "reply-mode", "reply-compact", "attach"]
+            .map(|id| window.find(id).bounds().origin.x);
+        let edge = window.find("reply").bounds().right();
+        (left, edge - window.find("reply-send").bounds().right())
+    })
+}
+
 #[gpui_kit::test]
-fn the_composer_chip_shows_in_the_toolbar_only_when_the_cache_expired(cx: &mut TestAppContext) {
+fn compact_is_always_in_its_place_and_its_coming_available_moves_nothing(cx: &mut TestAppContext) {
     let (user, _id, shell, page, cx) = expiring("after_expiry = false", cx);
     assert_eq!(offer(&page, cx), None);
-    assert!(!present(cx, "reply-compact"));
+    // Nothing to compact: it is there, in its words, disabled, and says why.
+    assert!(visible(cx, "reply-compact"));
+    assert_eq!(label(cx, "reply-compact").as_deref(), Some("Compact"));
+    let hint = page
+        .read_with(cx, |page, cx| {
+            page.reply().map(|r| r.read(cx).compact_hint())
+        })
+        .unwrap();
+    assert!(hint.starts_with("Nothing to compact"), "{hint}");
     let rest = height(cx, "reply");
+    let before = fixed(cx);
+    // A click on it while it is disabled ticks nothing.
+    cx.update(|window, cx| window.click("reply-compact", cx));
+    settle(cx);
+    assert_eq!(offer(&page, cx), None);
 
     // Claude's cache lives an hour here: not yet expired at 59 minutes.
     user.call("test.advance", json!({"ms": 59 * 60_000}))
         .unwrap();
     settle(cx);
-    assert!(!present(cx, "reply-compact"));
+    assert_eq!(offer(&page, cx), None);
+    assert_eq!(fixed(cx), before);
 
     user.call("test.advance", json!({"ms": 2 * 60_000}))
         .unwrap();
     until(&shell, cx, "the chip is offered", |cx| {
         offer(&page, cx).is_some()
     });
-    // Unticked, as the setting is off; it fades in.
+    // Unticked, as the setting is off.
     assert_eq!(offer(&page, cx), Some(false));
     one_frame(cx);
-    assert!(present(cx, "reply-compact"), "fading in");
+    assert_eq!(
+        fixed(cx),
+        before,
+        "the control moves none of the others while it becomes available"
+    );
     settle(cx);
-    assert!(visible(cx, "reply-compact"));
+    assert_eq!(fixed(cx), before, "nor once it is");
     assert_eq!(label(cx, "reply-compact").as_deref(), Some("Compact"));
+    let hint = page
+        .read_with(cx, |page, cx| {
+            page.reply().map(|r| r.read(cx).compact_hint())
+        })
+        .unwrap();
+    assert!(hint.starts_with("Its prompt cache expired"), "{hint}");
 
-    // In the toolbar, on the line of the mode and before the send button, and no block of
+    // In the toolbar, on the line of the mode, after it and before Attach, and no block of
     // its own above it: the composer keeps its height.
-    let (chip, mode, send) = cx.update(|window, _| {
+    let (chip, mode, attach, send) = cx.update(|window, _| {
         (
             window.find("reply-compact").bounds(),
             window.find("reply-mode").bounds(),
+            window.find("attach").bounds(),
             window.find("reply-send").bounds(),
         )
     });
     assert!(chip.left() >= mode.right(), "beside the mode");
-    assert!(chip.right() <= send.left(), "before the send button");
-    let (chip_middle, mode_middle) = (chip.center().y, mode.center().y);
+    assert!(chip.right() <= attach.left(), "before Attach");
+    assert!(attach.right() <= send.left(), "before the send button");
     assert!(
-        (chip_middle - mode_middle).abs() <= px(1.),
+        (chip.center().y - mode.center().y).abs() <= px(1.),
         "on the toolbar's line"
     );
     assert!(
@@ -470,6 +506,37 @@ fn the_composer_chip_shows_in_the_toolbar_only_when_the_cache_expired(cx: &mut T
         "no block above the toolbar"
     );
     assert_eq!(height(cx, "reply"), rest, "the composer keeps its height");
+}
+
+#[gpui_kit::test]
+fn the_toolbar_never_overflows_the_composer_at_1280_px_with_compact_available(
+    cx: &mut TestAppContext,
+) {
+    let (user, _id, shell, page, cx) = expiring("", cx);
+    user.call("test.advance", json!({"ms": 61 * 60_000}))
+        .unwrap();
+    until(&shell, cx, "the chip is offered", |cx| {
+        offer(&page, cx).is_some()
+    });
+    settle(cx);
+    let (composer, send, chip) = cx.update(|window, _| {
+        (
+            window.find("reply").bounds(),
+            window.find("reply-send").bounds(),
+            window.find("reply-compact").bounds(),
+        )
+    });
+    assert_eq!(
+        composer.size.width,
+        px(646.),
+        "the composer of a 1280 px window"
+    );
+    assert!(
+        send.right() <= composer.right(),
+        "Send ends {:?} past the composer's edge",
+        send.right() - composer.right()
+    );
+    assert!(chip.right() <= send.left(), "Compact stays before Send");
 }
 
 #[gpui_kit::test]
@@ -482,6 +549,7 @@ fn unticking_the_chip_sends_without_compacting(cx: &mut TestAppContext) {
     });
     assert_eq!(offer(&page, cx), Some(true), "ticked from the setting");
     settle(cx);
+    let before = fixed(cx);
 
     cx.update(|window, cx| window.click("reply-compact", cx));
     settle(cx);
@@ -492,14 +560,13 @@ fn unticking_the_chip_sends_without_compacting(cx: &mut TestAppContext) {
     let reply = page.read_with(cx, |page, _| page.reply().cloned()).unwrap();
     reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
 
-    // The turn starts in the same session, and the chip fades out.
+    // The turn starts in the same session, and the control goes quiet where it is.
     until(&shell, cx, "the chip leaves", |cx| {
         offer(&page, cx).is_none()
     });
-    one_frame(cx);
-    assert!(present(cx, "reply-compact"), "fading out");
     settle(cx);
-    assert!(!present(cx, "reply-compact"));
+    assert!(visible(cx, "reply-compact"), "it stays, disabled");
+    assert_eq!(fixed(cx), before, "and moves none of the others");
     eventually("the turn's end", || {
         user.call("agent.show", json!({"agent": id})).unwrap()["events"]
             .as_array()

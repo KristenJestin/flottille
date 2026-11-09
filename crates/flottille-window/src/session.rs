@@ -105,10 +105,19 @@ pub const SEND: &str = "Send";
 const QUOTA_HINT: &str = "Its quota is spent: at the reset, Flottille tells it to continue where it stopped. Only this session; Settings, Sessions holds the default.";
 /// The composer's chip while the root's prompt cache expired, and what it does (its tooltip).
 pub const COMPACT_CHIP: &str = "Compact";
-/// The room the chip takes at rest (padding and its word): how wide it is while it opens and folds.
-const COMPACT_CHIP_WIDTH: f32 = 80.;
 /// The same for `Resume at 13:00`.
 const QUOTA_CHIP_WIDTH: f32 = 136.;
+/// What a chip takes once it gave its words up for its icon (12 px each side and the icon).
+const ICON_CHIP_WIDTH: f32 = 38.;
+/// The toolbar's width under which the optional chips give their words up for their icons. The
+/// pickers, the mode, Compact, Attach, the `Resume at …` chip and Send need about 720 px: the
+/// limit holds for the chips whether or not the `Resume at …` chip shows, so that its coming moves
+/// no control (a 1280 px window's toolbar is 628 px).
+const TOOLBAR_TIGHT: f32 = 740.;
+/// The room the control takes at rest (padding and its word): how wide it is while its word
+/// gives way.
+const COMPACT_CHIP_WIDTH: f32 = 80.;
+const COMPACT_NONE_HINT: &str = "Nothing to compact: the prompt cache is warm, so the next turn reads the conversation at the cached price.";
 const COMPACT_HINT: &str = "Its prompt cache expired: a summary makes the next turn read a short history instead of the whole conversation at full price.";
 /// The composer's button that interrupts the turn that runs.
 pub const STOP: &str = "Stop the turn";
@@ -8165,6 +8174,9 @@ pub struct Reply {
     compact_offered: bool,
     /// Whether that toggle is ticked: from the setting, then as the user leaves it.
     compact: bool,
+    /// The width the toolbar had when it was last drawn: the optional chips give their words up
+    /// for their icons while it is short.
+    toolbar_width: Rc<Cell<Pixels>>,
     /// The root waits for a known quota reset: the composer offers to resume at it.
     quota: Option<Quota>,
     /// The last wait that was offered: the chip keeps its words and its fill while it fades out.
@@ -8256,6 +8268,7 @@ impl Reply {
             next_pending: 0,
             compact_offered: false,
             compact: false,
+            toolbar_width: Rc::new(Cell::new(px(0.))),
             quota: None,
             quota_last: None,
             quota_pending: None,
@@ -8385,38 +8398,74 @@ impl Reply {
     }
 
     pub fn toggle_compact(&mut self, cx: &mut Context<Self>) {
+        if !self.compact_offered {
+            return;
+        }
         self.compact = !self.compact;
         cx.notify();
     }
 
-    /// Compact before sending, a chip in the toolbar while the root's cache expired: its room
-    /// opens and it fades in, folds and fades out; its fill follows the toggle. At rest it is
-    /// its natural width, and the explanation is its tooltip.
-    fn render_compact(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let shown = fade(
-            "reply-compact-shown",
-            self.compact_offered,
-            PANEL,
-            window,
-            cx,
-        );
-        if !self.compact_offered && shown == 0.0 {
-            return None;
+    /// What the control's tooltip says: what it does, or why there is nothing to compact.
+    pub fn compact_hint(&self) -> &'static str {
+        if self.compact_offered {
+            COMPACT_HINT
+        } else {
+            COMPACT_NONE_HINT
         }
-        Some(
-            div()
-                .flex_none()
-                .opacity(shown)
-                .when(shown < 1.0, |d| {
-                    d.w(px(COMPACT_CHIP_WIDTH) * shown).overflow_hidden()
-                })
-                .child(
-                    Button::choice("reply-compact", COMPACT_CHIP, self.compact)
-                        .tooltip(COMPACT_HINT)
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_compact(cx))),
-                )
-                .into_any_element(),
+    }
+
+    /// Measures the toolbar as it is drawn, and draws the composer again when its width changed.
+    fn toolbar_measure(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (width, id) = (self.toolbar_width.clone(), cx.entity_id());
+        canvas(
+            move |bounds: Bounds<Pixels>, _, cx: &mut App| {
+                if width.get() != bounds.size.width {
+                    width.set(bounds.size.width);
+                    cx.notify(id);
+                }
+            },
+            |_, _, _, _| {},
         )
+        .absolute()
+        .size_full()
+    }
+
+    /// Whether the toolbar is too short for its optional chips' words: they show their icons.
+    fn toolbar_tight(&self) -> bool {
+        let width = self.toolbar_width.get();
+        width > px(0.) && width < px(TOOLBAR_TIGHT)
+    }
+
+    /// A chip's room while `squeeze` (0 to 1) takes its words from it: `full` wide with them,
+    /// the icon's width without; at rest it is its natural width.
+    fn squeezed(chip: AnyElement, full: f32, squeeze: f32) -> Div {
+        div()
+            .flex_none()
+            .when(squeeze > 0.0 && squeeze < 1.0, |d| {
+                d.w(px(full + (ICON_CHIP_WIDTH - full) * squeeze))
+                    .overflow_hidden()
+            })
+            .child(chip)
+    }
+
+    /// Compact before sending, a ghost control of the toolbar that is always in its place: while
+    /// the root's cache is warm it is disabled and its tooltip says why, so its becoming available
+    /// moves none of the others. Its ground follows the toggle, never the accent fill; in a short
+    /// toolbar its word gives way to its icon (the room closes over `PANEL`).
+    fn render_compact(&self, squeeze: f32, cx: &mut Context<Self>) -> Div {
+        let icon_only = squeeze > 0.5;
+        let chip = Button::choice(
+            "reply-compact",
+            COMPACT_CHIP,
+            self.compact_offered && self.compact,
+        )
+        .ghost()
+        .when(icon_only, |b| b.leading(Icon::Fold))
+        .icon_only(icon_only)
+        .tooltip(self.compact_hint())
+        .disabled(!self.compact_offered)
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_compact(cx)));
+        Self::squeezed(chip.into_any_element(), COMPACT_CHIP_WIDTH, squeeze)
     }
 
     /// The root's wait for its quota's reset, as the tree says it: the switch shows while the
@@ -8475,8 +8524,14 @@ impl Reply {
 
     /// Resume at the reset, a quiet chip at the end of the toolbar's controls while the root waits
     /// for its quota: its room opens and it fades in, folds and fades out; its ground follows the
-    /// choice (never the accent fill) and its label the reset. At rest it is its natural width, and the explanation is its tooltip.
-    fn render_quota(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// choice (never the accent fill) and its label the reset. At rest it is its natural width,
+    /// and the explanation is its tooltip. In a short toolbar its words give way to its icon.
+    fn render_quota(
+        &self,
+        squeeze: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let offered = self.quota.is_some();
         let shown = fade("reply-quota-shown", offered, PANEL, window, cx);
         if !offered && shown == 0.0 {
@@ -8491,20 +8546,25 @@ impl Reply {
             .and_then(|quota| quota.reset_at)
             .map(resume_at)
             .unwrap_or_default();
+        let icon_only = squeeze > 0.5;
+        // Without its words the chip keeps the reset in its tooltip.
+        let tooltip = if icon_only {
+            format!("{label}. {QUOTA_HINT}")
+        } else {
+            QUOTA_HINT.to_owned()
+        };
+        let chip = Button::choice("reply-quota", label, on.unwrap_or(false))
+            .ghost()
+            .when(icon_only, |b| b.leading(Icon::Clock))
+            .icon_only(icon_only)
+            .tooltip(tooltip)
+            .disabled(self.quota_pending.is_some())
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_quota(cx)));
+        let room = QUOTA_CHIP_WIDTH + (ICON_CHIP_WIDTH - QUOTA_CHIP_WIDTH) * squeeze;
         Some(
-            div()
-                .flex_none()
+            Self::squeezed(chip.into_any_element(), QUOTA_CHIP_WIDTH, squeeze)
                 .opacity(shown)
-                .when(shown < 1.0, |d| {
-                    d.w(px(QUOTA_CHIP_WIDTH) * shown).overflow_hidden()
-                })
-                .child(
-                    Button::choice("reply-quota", label, on.unwrap_or(false))
-                        .ghost()
-                        .tooltip(QUOTA_HINT)
-                        .disabled(self.quota_pending.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_quota(cx))),
-                )
+                .when(shown < 1.0, |d| d.w(px(room) * shown).overflow_hidden())
                 .into_any_element(),
         )
     }
@@ -9093,6 +9153,13 @@ impl Render for Reply {
         self.renders += 1;
         let p = palette(cx);
         let can_send = (self.has_text || !self.attached.is_empty()) && !self.sending;
+        let squeeze = fade(
+            "reply-toolbar-tight",
+            self.toolbar_tight(),
+            PANEL,
+            window,
+            cx,
+        );
         let swap = fade(
             "reply-stop-swap",
             self.running && !can_send,
@@ -9170,14 +9237,16 @@ impl Render for Reply {
                     .flex()
                     .items_center()
                     .gap(space::XS)
+                    .relative()
                     .pt(space::SM)
                     .px(space::XS)
+                    .child(self.toolbar_measure(cx))
                     .child(self.options.clone())
                     .child(self.mode.clone())
-                    .children(self.render_compact(window, cx))
+                    .child(self.render_compact(squeeze, cx))
                     .child(Attachments::button(cx, Self::attached_of))
                     // An optional chip goes after the fixed controls: its arrival moves none.
-                    .children(self.render_quota(window, cx))
+                    .children(self.render_quota(squeeze, window, cx))
                     // What the root does while its turn runs, where the line above the field was.
                     .child(
                         div()
