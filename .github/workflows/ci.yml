@@ -44,9 +44,36 @@ jobs:
           printf '%s\n' "$TITLE" > "$RUNNER_TEMP/title"
           tools/commit-message.sh "$RUNNER_TEMP/title"
 
+  # A release moves main to a commit of dev (docs/releases.md): when that commit's push run on dev
+  # succeeded, its `verify` passed there and main does not run it again. Anything else (no such
+  # run, a failed one, an error of the API) says nothing, and main runs `verify` itself.
+  verified-on-dev:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      verified: ${{ steps.dev.outputs.verified }}
+    steps:
+      - name: Did this commit's push run on dev succeed
+        id: dev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if n=$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=dev&status=success" --jq .total_count) && [ "$n" -gt 0 ]; then
+            echo "::notice::$GITHUB_SHA passed on dev: verify is not run again."
+            echo "verified=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No successful push run of $GITHUB_SHA on dev: verify runs here."
+          fi
+
   # No real agent, no real configuration: the suites run against a fake ACP agent and throwaway
   # repositories (see AGENTS.md, Testing). Skipped until the Cargo workspace exists.
   verify:
+    needs: verified-on-dev
+    # `verified-on-dev` is skipped off main: `!cancelled()` keeps that from skipping this job.
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' }}
     runs-on: ubuntu-latest
     env:
       # An incremental cache is only written here, never reused by the next run.
@@ -183,8 +210,15 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [verify, build]
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.build.outputs.skip != 'true'
+    needs: [verified-on-dev, verify, build]
+    # `verify` passed here, or was skipped because this commit passed it on dev: never on a commit
+    # no `verify` passed on. A failed or skipped `build` publishes nothing.
+    if: >-
+      !cancelled()
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && needs.build.result == 'success' && needs.build.outputs.skip != 'true'
+      && (needs.verify.result == 'success'
+        || (needs.verify.result == 'skipped' && needs.verified-on-dev.outputs.verified == 'true'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
