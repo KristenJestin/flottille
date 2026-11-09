@@ -5,7 +5,7 @@
 //! sees, cannot see those, so what the run changed there is undone once it ends and the run's
 //! result says so (`docs/design.md` §7.1).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -98,7 +98,19 @@ pub struct Restored {
 
 impl Snapshot {
     /// The agent folders of `root`, the home's and `kept` left out.
+    #[cfg(test)]
     pub fn take(root: &Path, home: Option<&Path>, kept: &Path) -> Snapshot {
+        Snapshot::take_around(root, home, kept, &[])
+    }
+
+    /// `take`, but for each folder of `inside` (relative to `root`), its snapshot as it was
+    /// taken, not the disk: a run there may have changed it since.
+    fn take_around(
+        root: &Path,
+        home: Option<&Path>,
+        kept: &Path,
+        inside: &[(PathBuf, Arc<Snapshot>)],
+    ) -> Snapshot {
         let root = real(root);
         let home = home.map(real);
         let kept = match (kept.parent(), kept.file_name()) {
@@ -106,7 +118,24 @@ impl Snapshot {
             _ => kept.to_owned(),
         };
         let mut contents = BTreeMap::new();
-        let (entries, complete) = walk(&root, home.as_deref(), &kept, Some(&mut contents));
+        let skipped: Vec<&Path> = inside.iter().map(|(at, _)| at.as_path()).collect();
+        let (mut entries, mut complete) =
+            walk(&root, home.as_deref(), &kept, &skipped, Some(&mut contents));
+        for (at, snapshot) in inside {
+            entries.extend(
+                snapshot
+                    .entries
+                    .iter()
+                    .map(|(path, kind)| (at.join(path), kind.clone())),
+            );
+            contents.extend(
+                snapshot
+                    .contents
+                    .iter()
+                    .map(|(path, content)| (at.join(path), content.clone())),
+            );
+            complete &= snapshot.complete;
+        }
         Snapshot {
             root,
             home,
@@ -122,7 +151,7 @@ impl Snapshot {
     /// moved first to the folder `run` of the snapshot's `kept`, never lost.
     pub fn restore(&self, run: &str) -> Restored {
         let kept = &self.kept.join(run);
-        let (after, complete) = walk(&self.root, self.home.as_deref(), &self.kept, None);
+        let (after, complete) = walk(&self.root, self.home.as_deref(), &self.kept, &[], None);
         let mut restored = Restored {
             unchecked: !self.complete || !complete,
             ..Restored::default()
@@ -366,15 +395,16 @@ fn write_new(folder: BorrowedFd, name: &OsStr, content: &[u8], mode: u32) -> std
     file.set_permissions(std::fs::Permissions::from_mode(mode))
 }
 
-/// Every entry of an agent folder below `root`, relative to it: `.git`, the home's and `kept`
-/// left out, links not followed, and no login file of an agent folder, which is never read; with
-/// `contents`, those of the files not too large to keep. Each folder is opened below the place
-/// without going through a link, and what is in it looked at by its handle. Whether every entry
-/// of the place was looked at.
+/// Every entry of an agent folder below `root`, relative to it: `.git`, the home's, `kept` and
+/// the folders `skipped` left out, links not followed, and no login file of an agent folder,
+/// which is never read; with `contents`, those of the files not too large to keep. Each folder is
+/// opened below the place without going through a link, and what is in it looked at by its
+/// handle. Whether every entry of the place was looked at.
 fn walk(
     root: &Path,
     home: Option<&Path>,
     kept: &Path,
+    skipped: &[&Path],
     mut contents: Option<&mut BTreeMap<PathBuf, Vec<u8>>>,
 ) -> (BTreeMap<PathBuf, Kind>, bool) {
     let mut entries = BTreeMap::new();
@@ -408,6 +438,7 @@ fn walk(
             if (!agent && name.as_encoded_bytes().eq_ignore_ascii_case(b".git"))
                 || home_s
                 || root.join(&path) == kept
+                || skipped.contains(&path.as_path())
             {
                 continue;
             }
@@ -493,21 +524,27 @@ pub fn said(restored: &Restored) -> Option<String> {
 
 /// The agent folders of each place an agent's run goes on in. Runs that overlap in a place share
 /// one snapshot: the first to start takes it, the last to end puts it back. One taken while
-/// another run goes on would hold what that run wrote, and put it back.
+/// another run goes on would hold what that run wrote, and put it back. A place inside another
+/// (a repository's folder in the project's, a project that is the home) is the same place: its
+/// runs join the outer one's group, and a run in an outer place takes in the groups inside it,
+/// their snapshots kept for their folders.
 #[derive(Default)]
 pub struct Guards {
-    places: std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<Guarded>>>>,
+    /// One lock for all of them: a group may take in others. Held while a snapshot is taken or
+    /// put back, so that a run that starts meanwhile waits for it.
+    groups: Arc<tokio::sync::Mutex<Vec<Group>>>,
 }
 
-#[derive(Default)]
-struct Guarded {
-    runs: usize,
+/// The runs that go on in a place, or in places inside it.
+struct Group {
+    root: PathBuf,
+    runs: Vec<String>,
     snapshot: Option<Arc<Snapshot>>,
 }
 
 /// One run's share of its place's guard: `leave` once it ends.
 pub struct Guard {
-    place: Arc<tokio::sync::Mutex<Guarded>>,
+    groups: Arc<tokio::sync::Mutex<Vec<Group>>>,
     /// The run's id: where its put-back keeps what it removes, if it is the last.
     run: String,
     left: bool,
@@ -518,29 +555,49 @@ impl Guards {
     /// put-back keeps what it removes, a folder per run.
     pub async fn enter(&self, root: &Path, home: Option<&Path>, kept: &Path, run: &str) -> Guard {
         let root = real(root);
-        let place = self
-            .places
-            .lock()
-            .unwrap()
-            .entry(root.clone())
-            .or_default()
-            .clone();
-        let mut guarded = place.lock().await;
-        if guarded.runs == 0 {
-            let (home, kept) = (home.map(Path::to_owned), kept.to_owned());
-            guarded.snapshot = tokio::task::spawn_blocking(move || {
-                Arc::new(Snapshot::take(&root, home.as_deref(), &kept))
-            })
-            .await
-            .ok();
-        }
-        guarded.runs += 1;
-        drop(guarded);
-        Guard {
-            place,
+        let mut groups = self.groups.lock().await;
+        let guard = Guard {
+            groups: self.groups.clone(),
             run: run.to_owned(),
             left: false,
+        };
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| root.starts_with(&group.root))
+        {
+            group.runs.push(run.to_owned());
+            return guard;
         }
+        let (inside, others): (Vec<Group>, Vec<Group>) = std::mem::take(&mut *groups)
+            .into_iter()
+            .partition(|group| group.root.starts_with(&root));
+        *groups = others;
+        let mut runs: Vec<String> = inside.iter().flat_map(|group| group.runs.clone()).collect();
+        runs.push(run.to_owned());
+        let taken_in: Vec<(PathBuf, Arc<Snapshot>)> = inside
+            .into_iter()
+            .filter_map(|group| {
+                let relative = group.root.strip_prefix(&root).ok()?.to_owned();
+                Some((relative, group.snapshot?))
+            })
+            .collect();
+        let (home, kept, at) = (home.map(Path::to_owned), kept.to_owned(), root.clone());
+        let snapshot = tokio::task::spawn_blocking(move || {
+            Arc::new(Snapshot::take_around(
+                &at,
+                home.as_deref(),
+                &kept,
+                &taken_in,
+            ))
+        })
+        .await
+        .ok();
+        groups.push(Group {
+            root,
+            runs,
+            snapshot,
+        });
+        guard
     }
 }
 
@@ -548,27 +605,38 @@ impl Guard {
     /// The run ended: the last one of its place puts the agent folders back.
     pub async fn leave(mut self) -> Option<Restored> {
         self.left = true;
-        leave(self.place.clone(), self.run.clone()).await
+        leave(self.groups.clone(), self.run.clone()).await
     }
 }
 
 impl Drop for Guard {
     /// A run that never started still leaves its place.
     fn drop(&mut self) {
-        if !self.left {
-            tokio::spawn(leave(self.place.clone(), self.run.clone()));
+        if self.left {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(leave(self.groups.clone(), self.run.clone()));
+            }
+            // Only when the daemon stops: nothing is left to put back for.
+            Err(_) => eprintln!(
+                "flottille: the run {} left its agent folders' guard without a runtime: they \
+                 are not put back",
+                self.run
+            ),
         }
     }
 }
 
-async fn leave(place: Arc<tokio::sync::Mutex<Guarded>>, run: String) -> Option<Restored> {
-    // Held while it puts back: a run that starts meanwhile takes its snapshot after.
-    let mut guarded = place.lock().await;
-    guarded.runs -= 1;
-    if guarded.runs > 0 {
+async fn leave(groups: Arc<tokio::sync::Mutex<Vec<Group>>>, run: String) -> Option<Restored> {
+    let mut groups = groups.lock().await;
+    let at = groups.iter().position(|group| group.runs.contains(&run))?;
+    groups[at].runs.retain(|other| *other != run);
+    if !groups[at].runs.is_empty() {
         return None;
     }
-    let snapshot = guarded.snapshot.take()?;
+    let snapshot = groups.remove(at).snapshot?;
     tokio::task::spawn_blocking(move || snapshot.restore(&run))
         .await
         .ok()
@@ -900,6 +968,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_places_share_one_guard_and_do_not_put_back_a_planted_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("p");
+        let inner = outer.join("svc");
+        made(&inner.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let planted = inner.join(".claude/settings.json");
+
+        // The outer run starts first and plants; the inner one starts while it goes on.
+        let guards = Guards::default();
+        let a = guards.enter(&outer, None, &kept, "a").await;
+        made(&planted, "{\"hooks\": {}}\n");
+        let b = guards.enter(&inner, None, &kept, "b").await;
+        assert_eq!(a.leave().await, None);
+        assert!(planted.exists());
+        let restored = b.leave().await.unwrap();
+        assert!(!planted.exists(), "{restored:?}");
+        assert_eq!(restored.put_back, ["svc/.claude/settings.json"]);
+
+        // The inner run starts first and plants; the outer one starts while it goes on.
+        let guards = Guards::default();
+        let b = guards.enter(&inner, None, &kept, "b2").await;
+        made(&planted, "{\"hooks\": {}}\n");
+        let a = guards.enter(&outer, None, &kept, "a2").await;
+        assert_eq!(b.leave().await, None);
+        assert!(planted.exists());
+        a.leave().await.unwrap();
+        assert!(!planted.exists());
+        assert!(guards.groups.lock().await.is_empty());
+    }
+
+    #[test]
+    fn a_guard_dropped_outside_a_runtime_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let guards = Guards::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let guard = runtime.block_on(guards.enter(dir.path(), None, &dir.path().join("kept"), "r"));
+        drop(runtime);
+        drop(guard);
+    }
+
+    #[tokio::test]
     async fn overlapping_runs_do_not_put_back_a_planted_hook() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("place");
@@ -929,5 +1041,7 @@ mod tests {
         made(&root.join(".codex/config.toml"), "\n");
         next.leave().await.unwrap();
         assert!(!root.join(".codex/config.toml").exists());
+        // The last run of a place to leave takes its entry with it.
+        assert!(guards.groups.lock().await.is_empty());
     }
 }
