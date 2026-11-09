@@ -59,11 +59,10 @@ const READER_ANSWER_BYTES: u64 = 4 * 1024 * 1024;
 /// The hidden subcommand the reader runs as.
 pub const READER: &str = "read-page";
 
-const USER_AGENT: &str = concat!(
-    "Flottille/",
-    env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/KristenJestin/flottille)"
-);
+/// The same for every user and every version: a link or a version would tell a site who browses
+/// while Flottille has few users, and follow them from one request to the next. It still says an
+/// agent reads, never a browser.
+const USER_AGENT: &str = "Mozilla/5.0 (compatible; agent)";
 const ACCEPT: &str = "text/html,application/xhtml+xml,application/pdf,text/plain,\
     application/json;q=0.9,*/*;q=0.5";
 
@@ -1533,6 +1532,22 @@ pub(crate) fn tls() -> Result<Arc<ClientConfig>, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_web_user_agent_names_no_one_and_no_version() {
+        assert!(!USER_AGENT.contains("http"), "{USER_AGENT}");
+        assert!(!USER_AGENT.contains("github"), "{USER_AGENT}");
+        assert!(
+            !USER_AGENT.contains(env!("CARGO_PKG_VERSION")),
+            "{USER_AGENT}"
+        );
+        assert!(
+            !USER_AGENT.to_lowercase().contains("flottille"),
+            "{USER_AGENT}"
+        );
+        assert!(USER_AGENT.contains("agent"), "{USER_AGENT}");
+    }
+
     use super::*;
     use serde_json::json;
     use std::io::{BufRead, BufReader, Write};
