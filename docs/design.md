@@ -211,6 +211,11 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   steps, numbered) and `project` (its settings, its forges and tracker, its rules), and the writes
   of `tasks`, what the window does, each change a call to judge, a change of the tracker or of the
   rules base, a line it sets judged as a run of it (`tools.md`, "The project", `projects.md`);
+- the user's connections (every agent of every project but those a connection excepts, while
+  Connections is on and the connection reviewed): `conn_<name> {action, arguments?, for?}`, one
+  tool per MCP server the user declared, the daemon being its client; its description written by
+  Flottille, `help` answered from what the user accepted, each call judged unless the user marked
+  its action (`tools.md`, "Connections", `extensions.md`, "Connections");
 
 Flottille's own tools:
 
@@ -702,7 +707,15 @@ with says so. Reading another session says the mode of that session's tree too.
   with the user's rights, and the gate does not see what that code touches; only a sandbox would
   close that. The refusals below protect the user from an agent's direct or accidental use of
   what must never be touched; they are **not a sandbox**: a program the agent runs may still do
-  any of it on its own.
+  any of it on its own. The same holds for a connection's server (`extensions.md`,
+  "Connections"): the gate sees the action called and its arguments, never what the server then
+  does with the user's rights, whatever the mode.
+
+A call of a connection is **to judge** by default; the user may mark one action **passes**
+(harmless) or **asked** (base: a card in Ask and Auto, never the judge's). The judge reads the
+action's description as the user accepted it, in a block of its own, escaped, and never the
+server's instructions. An action turned off, arguments that do not fit the accepted schema or a
+limit, and a connection not ready are refused in every mode.
 
 What becomes of a call, by what the gate says of it and the tree's mode:
 

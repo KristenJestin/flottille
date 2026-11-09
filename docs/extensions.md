@@ -11,7 +11,9 @@ project's Specs tab, "Write the spec" on a ticket's row and a spec's page. S4 (#
 ticket side. S5 (#336) built "Launch development" and the statuses read from what Flottille sees.
 Review (#338) built the agents an extension launches and the depth exception, the composer
 command, model slots and a subset of values as settings, overridable per project, an extension's
-guidance, and the folded line of the tree; the rest is a proposal. Written from a discussion with the maintainer
+guidance, and the folded line of the tree. Connections (#560) built its daemon part: an app-wide
+scope, the tables an extension's table declares, tools named at run time, its events in the
+inbox and a block of the judge's prompt; its window is #672. The rest is a proposal. Written from a discussion with the maintainer
 (November 2026), and settled with their answers of 2026-11-03 and 2026-11-07 ("Decisions taken"). No
 question is left open but those in "Open questions".
 
@@ -823,6 +825,16 @@ action and the arguments of a call, never what the server then does with the mac
 not read the arguments for paths or addresses. A server that is wrong, compromised or just
 powerful can act as the user, and no mode changes that; this is Full mode's limit
 (`design.md` §7.1), and the reason the user installs only what they would run as a CLI.
+
+**As built (#560, the daemon).** The frame gained `Scope::Global` (no switch nor setting of a
+project: a project's `[extensions.connections]` is refused), `declared` (the extension's own
+list of tables, `[[connections.server]]`, checked by it, written through the frame's `rewrite`),
+`dynamic` (tools named at run time, given to every agent of a project but those an extension
+launched, gated, performed and described to the judge by the extension), and `needs_you` (its
+events the inbox lists, kind `connections`). The pin and the settings are in
+`ext_connections_connections`. A `help` action of a server's is not offered, as `help` is
+Flottille's. The server's environment is a run's (forge tokens emptied, no `XDG_RUNTIME_DIR`),
+its folder `$XDG_STATE_HOME/flottille/connections/<name>`.
 
 **Examples.** The first two are invented; the others are public programs, the first cases of
 0.3.
