@@ -465,7 +465,8 @@ and `departures_posted_at` when the user posted it, `null` before; `amendments` 
 development sessions proposed, as `spec.amendments` gives them. A `C` or a `D` an accepted
 amendment changed or added holds `amended`, a list of `{"at", "was"}`: when it was decided during
 development, and what it read before (the `C`'s text, the `D`'s `{"question", "decision",
-"set_aside"}`), `null` for one it added; an item no amendment touched has no `amended`.
+"set_aside"}`), `null` for one it added; an item no amendment touched has no `amended`, and one
+the user rewrites while the spec is a Draft loses it (written again as it was, it keeps it).
 
 - `spec.new {project, title?, idea?, mode?, tickets?}`: a Draft in the project's `language` (its
   own, else the one of `extensions.toml`, else the user's locale), kept with it. `alone` takes no

@@ -597,3 +597,41 @@ fn a_changed_decision_keeps_its_question_and_set_aside_options() {
         "{d}"
     );
 }
+
+#[test]
+fn an_amended_item_rewritten_in_draft_is_no_longer_marked() {
+    let user = user();
+    let (spec, _, mcp) = developed(&user);
+    let n = change_c1(
+        &user,
+        &mcp,
+        spec,
+        "The orders list filters by status with chips.",
+    );
+    done(amend(&mcp, spec, chips()));
+    answer(&user, spec, n, "accept");
+    let added = amendments(&user, spec)[1]["amendment"].as_u64().unwrap();
+    answer(&user, spec, added, "accept");
+    user.call("spec.draft", json!({"spec": spec})).unwrap();
+
+    // C1 rewritten, C2 sent again as it is.
+    user.call(
+        "spec.write",
+        json!({"spec": spec, "section": "behaviour", "content": [
+            {"id": "C1", "text": "The orders list filters by date."},
+            {"id": "C2", "text": "The filters are chips, one per status."}]}),
+    )
+    .unwrap();
+
+    let shown = show(&user, spec);
+    assert_eq!(shown["behaviour"][0]["amended"], Value::Null, "{shown}");
+    assert_eq!(
+        shown["behaviour"][1]["amended"][0]["was"],
+        Value::Null,
+        "{shown}"
+    );
+    assert!(
+        shown["behaviour"][1]["amended"][0]["at"].is_u64(),
+        "{shown}"
+    );
+}

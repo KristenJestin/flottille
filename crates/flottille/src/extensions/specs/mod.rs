@@ -998,19 +998,21 @@ fn write_section(project: &Project, spec: &mut Spec, section: &str, content: Val
                 &now,
                 &mut spec.last_c,
             )?;
-            // An item rewritten keeps what was decided of it during a development.
+            // An item written again as it was keeps what was decided of it during a development;
+            // rewritten, it is the writer's, no longer decided during development.
             let behaviour = asked
                 .into_iter()
                 .zip(ids)
                 .map(|(asked, id)| {
+                    let text = said(&asked.text, &id)?;
                     Ok(Behaviour {
-                        text: said(&asked.text, &id)?,
                         amended: content_of
                             .behaviour
                             .iter()
-                            .find(|c| c.id == id)
+                            .find(|c| c.id == id && c.text == text)
                             .map(|c| c.amended.clone())
                             .unwrap_or_default(),
+                        text,
                         id,
                     })
                 })
@@ -1033,13 +1035,17 @@ fn write_section(project: &Project, spec: &mut Spec, section: &str, content: Val
                 .into_iter()
                 .zip(ids)
                 .map(|(asked, id)| {
-                    let amended = content_of
+                    let mut d = decision_of(asked, id, Vec::new())?;
+                    d.amended = content_of
                         .decisions
                         .iter()
-                        .find(|d| d.id == id)
-                        .map(|d| d.amended.clone())
+                        .find(|was| {
+                            (&was.id, &was.question, &was.decision, &was.set_aside)
+                                == (&d.id, &d.question, &d.decision, &d.set_aside)
+                        })
+                        .map(|was| was.amended.clone())
                         .unwrap_or_default();
-                    decision_of(asked, id, amended)
+                    Ok(d)
                 })
                 .collect::<Result<_>>()?;
         }
