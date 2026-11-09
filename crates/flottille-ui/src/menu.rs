@@ -61,7 +61,8 @@ impl Menu {
         }
     }
 
-    /// An entry `id`, picked by a click. Panics when another entry of the menu has the same icon:
+    /// An entry `id`, picked by a click. Another entry of the menu with the same icon fails the
+    /// debug builds and the tests, never the user's window:
     /// two actions that look alike are told apart by their icons, or not at all.
     pub fn entry(
         mut self,
@@ -71,7 +72,7 @@ impl Menu {
         pick: impl Fn(&mut Window, &mut gpui_kit::App) + 'static,
     ) -> Self {
         if let Some(glyph) = leading {
-            assert!(
+            debug_assert!(
                 self.entries.iter().all(|e| e.leading != Some(glyph)),
                 "two entries of the menu `{:?}` have the same icon ({glyph:?})",
                 self.id
