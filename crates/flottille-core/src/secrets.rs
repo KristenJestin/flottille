@@ -267,15 +267,18 @@ fn tokens(text: &str) -> Vec<(usize, usize)> {
 /// How the keys whose string value is a token end, lowercase and without `_` or `-`: an agent's
 /// login file (Claude's `.credentials.json`: `accessToken`, `refreshToken`; Codex's `auth.json`:
 /// `id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY`) and others like it
-/// (`clientSecret`, `primaryApiKey`, `password`, `passwd`, `secret_key`, an HTTP header's
-/// `Authorization`), wherever such a file is shown (a diff, a stash, a revision of it).
-const LOGIN_KEY_ENDS: [&str; 7] = [
+/// (`clientSecret`, `primaryApiKey`, `password`, `passwd`, `secret_key`,
+/// `aws_secret_access_key`, `private_key`, an HTTP header's `Authorization`), wherever such a
+/// file is shown (a diff, a stash, a revision of it).
+const LOGIN_KEY_ENDS: [&str; 9] = [
     "token",
     "apikey",
     "secret",
     "password",
     "passwd",
     "secretkey",
+    "accesskey",
+    "privatekey",
     "authorization",
 ];
 
@@ -449,11 +452,22 @@ fn login_fields(text: &str) -> Vec<LoginField> {
 /// The schemes of an `Authorization` header said before its credentials, which are kept.
 const SCHEMES: [&str; 5] = ["bearer", "basic", "digest", "token", "negotiate"];
 
-/// Each `Authorization` header whose key is not quoted (an HTTP header, YAML, `curl -v`'s
-/// `> Authorization: Bearer …`, `Proxy-Authorization`), and one that may still be coming at the
-/// text's end. Its value, its scheme left out, runs to the end of its line or a quote.
+/// The keys of `headers`: an HTTP header's that carry credentials, and YAML's `password`.
+const HEADERS: [&str; 4] = ["authorization", "x-api-key", "cookie", "password"];
+
+/// Each header of `HEADERS` whose key is not quoted (an HTTP header, YAML, `curl -v`'s
+/// `> Authorization: Bearer …`, `Proxy-Authorization`, `Set-Cookie`), and one that may still be
+/// coming at the text's end. Its value, an `Authorization`'s scheme left out, runs to the end of
+/// its line or a quote. A `password` is one only at the start of its line (YAML's
+/// `  password: …`, a diff's `+password: …`): in prose, its colon starts a sentence.
 fn headers(text: &str) -> Vec<LoginField> {
-    const KEY: &str = "authorization";
+    let mut found: Vec<LoginField> = HEADERS.iter().flat_map(|key| header(text, key)).collect();
+    found.sort_by_key(|field| field.at);
+    found
+}
+
+/// `headers`, of the key `key`.
+fn header(text: &str, key: &str) -> Vec<LoginField> {
     let (bytes, len) = (text.as_bytes(), text.len());
     let coming = len + 1;
     let lower = text.to_ascii_lowercase();
@@ -464,8 +478,16 @@ fn headers(text: &str) -> Vec<LoginField> {
         at
     };
     let mut found = Vec::new();
-    for (at, _) in lower.match_indices(KEY) {
+    for (at, _) in lower.match_indices(key) {
         if at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_') {
+            continue;
+        }
+        if key == "password"
+            && !text[..at]
+                .rsplit('\n')
+                .next()
+                .is_some_and(|line| line.chars().all(|c| matches!(c, ' ' | '\t' | '+' | '-')))
+        {
             continue;
         }
         let mut field = LoginField {
@@ -473,7 +495,7 @@ fn headers(text: &str) -> Vec<LoginField> {
             values: Vec::new(),
             end: coming,
         };
-        let colon = spaces(at + KEY.len());
+        let colon = spaces(at + key.len());
         if colon == len {
             found.push(field);
             break;
@@ -494,7 +516,7 @@ fn headers(text: &str) -> Vec<LoginField> {
             found.push(field);
             break;
         }
-        if bytes[word] == b' ' && SCHEMES.contains(&&lower[start..word]) {
+        if key == "authorization" && bytes[word] == b' ' && SCHEMES.contains(&&lower[start..word]) {
             start = spaces(word);
         }
         let Some(stop) = bytes[start..]
@@ -521,18 +543,24 @@ fn headers(text: &str) -> Vec<LoginField> {
 /// The string value of each key that names a token, and the credentials of each header that
 /// carries them, masked.
 fn mask_login_fields(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut from = 0;
-    let mut values: Vec<(usize, usize)> = login_fields(text)
+    let values: Vec<(usize, usize)> = login_fields(text)
         .into_iter()
         .chain(headers(text))
         .flat_map(|field| field.values)
         .filter(|(start, end)| end > start)
         .collect();
+    mask_ranges(text, values)
+}
+
+/// `text` with each of `values` (where a secret starts and ends) masked.
+fn mask_ranges(text: &str, mut values: Vec<(usize, usize)>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
     values.sort();
     for (start, end) in values {
-        // Inside a value already masked.
+        // Inside a value already masked, or past its end: the mask goes on to its end.
         if start < from {
+            from = from.max(end);
             continue;
         }
         out.push_str(&text[from..start]);
@@ -1055,5 +1083,53 @@ mod tests {
             \"description\": \"the access token\", \"tokens\": {}}\n\
             +    \"note\": [-\"old text\"-]{+\"new text\"+}\n";
         assert_eq!(mask(text, &BTreeMap::new()), text);
+    }
+
+    #[test]
+    fn an_access_key_or_a_private_key_key_is_masked() {
+        let text = "{\"aws_secret_access_key\": \"fake-secret-access-0123\", \
+            \"AccessKey\": \"fake-access-0123\", \"private_key\": \"fake-private-0123\", \
+            \"privateKey\": \"fake-private-key-0123\"}\n";
+        let masked = mask(text, &BTreeMap::new());
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(masked.contains("\"private_key\": \"[masked]\""), "{masked}");
+    }
+
+    #[test]
+    fn an_unquoted_password_api_key_or_cookie_is_masked() {
+        let text = "database:\n  password: fake-yaml-pass-0123\n\
+            > X-Api-Key: fake-api-key-0123\r\n\
+            > Cookie: session=fake-session-0123; theme=fake-theme\r\n\
+            < Set-Cookie: id=fake-cookie-0123; Path=/\r\n\
+            curl -H 'x-api-key: fake-curl-0123' https://example.test\n";
+        let masked = mask(text, &BTreeMap::new());
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(masked.contains("  password: [masked]\n"), "{masked}");
+        assert!(masked.contains("> X-Api-Key: [masked]\r\n"), "{masked}");
+        assert!(
+            masked.contains("[masked]' https://example.test"),
+            "{masked}"
+        );
+        for cut in 1..text.len() {
+            assert_eq!(streamed(text, &[cut], &BTreeMap::new()), masked, "{cut}");
+        }
+        // Prose that names them keeps its words.
+        let prose = "Forgot your password? Reset the password: open the settings. \
+            Send the X-Api-Key header and accept cookies.\n";
+        assert_eq!(mask(prose, &BTreeMap::new()), prose);
+    }
+
+    #[test]
+    fn a_value_overlapping_an_earlier_one_extends_the_mask() {
+        assert_eq!(
+            mask_ranges("abcdefghij", vec![(1, 4), (3, 8)]),
+            "a[masked]ij"
+        );
+        assert_eq!(
+            mask_ranges("abcdefghij", vec![(1, 8), (3, 5)]),
+            "a[masked]ij"
+        );
     }
 }
