@@ -1,23 +1,27 @@
 //! The card of an ask of the root to the user (`docs/tools.md`, "ask"): who asks, by the
-//! session's title, then one block per question, each with its options as chips (one or several
-//! to choose) and a field of several lines for the user's own words (`Enter` breaks a line,
-//! `Ctrl+Enter` sends). One Answer for the whole card, once every question has a choice or
-//! words: the daemon sends the agent one message quoting each question with its answer under it
-//! (`agent.answer`). Once the agent took it, the card folds to its answers: each question on one
-//! line, what the user chose and wrote under it.
+//! session's title, an `asks you` tag and how many questions are answered, then one block per
+//! question, each with its options as rows (a round mark for one choice, a square one for
+//! several) and, as the last row, "Something else…", whose field of several lines unfolds when it
+//! is picked. Once an option is chosen, "+ Add a note" unfolds a field for a note with the choice
+//! (`Enter` breaks a line, `Ctrl+Enter` sends). One Answer for the whole card, once every question
+//! has a choice or words: the daemon sends the agent one message quoting each question with its
+//! answer under it (`agent.answer`). Once the agent took it, the card folds to its answers: each
+//! question on one line, what the user chose and wrote under it.
 
 use std::collections::HashSet;
 
 use flottille_core::question::{Answer, Question};
 use flottille_ui::{
-    Button, Card, Chip, Field, Toast, palette, presence, quoted_title, space, toast,
+    Block, Button, Card, ChoiceRow, Field, Icon, Toast, Type as _, changing, icon, palette,
+    presence, quoted_title, space, toast,
 };
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, FontWeight, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, TestSupportExt as _, WeakEntity, Window,
+    div, px,
 };
 
 use crate::session::{MarkdownText, SessionPage};
@@ -49,17 +53,27 @@ pub fn forget_sent_answers(cx: &mut App) {
     cx.default_global::<SentAnswers>().0.clear();
 }
 
-/// The blocks of an ask's card, in their own view: a caret blinks without drawing the row.
+/// The ask's card, in its own view: a caret blinks without drawing the row.
 pub struct QuestionCard {
     at: usize,
     seq: u64,
     session: String,
     page: WeakEntity<SessionPage>,
+    /// The session's title and the time of the ask, which the row says.
+    title: String,
+    when: SharedString,
     questions: Vec<Question>,
     texts: Vec<MarkdownText>,
+    /// The words of "Something else…", or of a question with no options.
     fields: Vec<Entity<TextareaState>>,
+    /// The note that goes with a choice.
+    notes: Vec<Entity<TextareaState>>,
     /// The options chosen, by question.
     chosen: Vec<Vec<String>>,
+    /// "Something else…" is picked.
+    other: Vec<bool>,
+    /// "+ Add a note" was clicked.
+    noting: Vec<bool>,
     sending: bool,
     /// The history says the ask was answered (`agent.answered`): true after a restart too.
     answered: bool,
@@ -77,12 +91,13 @@ impl QuestionCard {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut subscriptions = Vec::new();
-        let fields = (0..questions.len())
-            .map(|_| {
+        let mut make =
+            |placeholder: Option<&'static str>, window: &mut Window, cx: &mut Context<Self>| {
                 let field = cx.new(|cx| {
-                    let mut field = TextareaState::new(window, cx)
-                        .auto_grow(1, MOST_LINES)
-                        .placeholder("Your answer");
+                    let mut field = TextareaState::new(window, cx).auto_grow(1, MOST_LINES);
+                    if let Some(placeholder) = placeholder {
+                        field = field.placeholder(placeholder);
+                    }
                     flottille_ui::follow_theme(&mut field, cx);
                     field
                 });
@@ -99,7 +114,17 @@ impl QuestionCard {
                     },
                 ));
                 field
+            };
+        let fields: Vec<_> = questions
+            .iter()
+            .map(|q| {
+                let placeholder = (!q.options.is_empty()).then_some("Say what you want instead");
+                make(placeholder, window, cx)
             })
+            .collect();
+        let notes: Vec<_> = questions
+            .iter()
+            .map(|_| make(Some("Optional"), window, cx))
             .collect();
         subscriptions.push(cx.observe_global::<SentAnswers>(|_, cx| cx.notify()));
         let texts = questions
@@ -111,23 +136,43 @@ impl QuestionCard {
             seq,
             session,
             page,
+            title: String::new(),
+            when: SharedString::default(),
+            other: vec![false; questions.len()],
+            noting: vec![false; questions.len()],
             chosen: vec![Vec::new(); questions.len()],
             questions,
             texts,
             fields,
+            notes,
             sending: false,
             answered: false,
             _subscriptions: subscriptions,
         }
     }
 
-    /// The field of the words of question `n` (from 0).
+    /// The session's title and the time of the ask, as the row says them.
+    pub fn set_header(&mut self, title: &str, when: SharedString, cx: &mut Context<Self>) {
+        if self.title != title || self.when != when {
+            self.title = title.to_owned();
+            self.when = when;
+            cx.notify();
+        }
+    }
+
+    /// The field of the words of question `n` (from 0): "Something else…", or the whole answer
+    /// of a question with no options.
     pub fn field(&self, n: usize) -> &Entity<TextareaState> {
         &self.fields[n]
     }
 
+    /// The field of the note that goes with the choice of question `n`.
+    pub fn note(&self, n: usize) -> &Entity<TextareaState> {
+        &self.notes[n]
+    }
+
     /// Picks the option `label` of question `n`, or lets it go: a question of one choice keeps
-    /// the last one picked.
+    /// the last one picked, "Something else…" included.
     pub fn choose(&mut self, n: usize, label: &str, cx: &mut Context<Self>) {
         let multiple = self.questions[n].multiple;
         let chosen = &mut self.chosen[n];
@@ -136,7 +181,10 @@ impl QuestionCard {
                 chosen.remove(at);
             }
             None if multiple => chosen.push(label.to_owned()),
-            None => *chosen = vec![label.to_owned()],
+            None => {
+                *chosen = vec![label.to_owned()];
+                self.other[n] = false;
+            }
         }
         // In the order the agent gave them.
         let order: Vec<&str> = self.questions[n]
@@ -148,21 +196,66 @@ impl QuestionCard {
         cx.notify();
     }
 
-    /// The answers as the card holds them, one per question.
+    /// Picks "Something else…" of question `n`, or lets it go: in a question of one choice it
+    /// takes the place of the option chosen.
+    pub fn choose_other(&mut self, n: usize, cx: &mut Context<Self>) {
+        self.other[n] = !self.other[n];
+        if self.other[n] && !self.questions[n].multiple {
+            self.chosen[n].clear();
+        }
+        cx.notify();
+    }
+
+    /// Whether the words of question `n` are asked: "Something else…" is picked, or there is
+    /// nothing else to pick.
+    fn words_open(&self, n: usize) -> bool {
+        self.questions[n].options.is_empty() || self.other[n]
+    }
+
+    /// Whether the note of question `n` is open: an option is chosen, and the button was clicked.
+    fn note_open(&self, n: usize) -> bool {
+        self.can_note(n) && self.noting[n]
+    }
+
+    /// Whether question `n` may have a note: an option is chosen and the words of "Something
+    /// else…" are not.
+    fn can_note(&self, n: usize) -> bool {
+        !self.chosen[n].is_empty() && !self.other[n]
+    }
+
+    /// The answers as the card holds them, one per question: the choices, and the words that
+    /// were asked ("Something else…") or the note that was opened.
     pub fn answers(&self, cx: &App) -> Vec<Answer> {
-        self.fields
-            .iter()
-            .zip(&self.chosen)
-            .map(|(field, chosen)| Answer {
-                choices: chosen.clone(),
-                text: field.read(cx).value().trim().to_owned(),
+        (0..self.questions.len())
+            .map(|n| {
+                let words =
+                    |field: &Entity<TextareaState>| field.read(cx).value().trim().to_owned();
+                let text = if self.words_open(n) {
+                    words(&self.fields[n])
+                } else if self.note_open(n) {
+                    words(&self.notes[n])
+                } else {
+                    String::new()
+                };
+                Answer {
+                    choices: self.chosen[n].clone(),
+                    text,
+                }
             })
             .collect()
     }
 
+    /// How many questions have a choice or words.
+    pub fn answered_count(&self, cx: &App) -> usize {
+        self.answers(cx)
+            .iter()
+            .filter(|answer| !answer.is_empty())
+            .count()
+    }
+
     /// Every question has a choice or words.
     pub fn is_ready(&self, cx: &App) -> bool {
-        self.answers(cx).iter().all(|answer| !answer.is_empty())
+        self.answered_count(cx) == self.questions.len()
     }
 
     /// Whether the answer went: the fields give way to a line saying it waits. The window's
@@ -206,73 +299,175 @@ impl QuestionCard {
         let at = self.at;
         let id = |part: String| ElementId::Name(format!("row-{at}-{part}").into());
         let question = &self.questions[n];
-        let chips = question.options.iter().enumerate().map(|(j, option)| {
+        let card = cx.entity().downgrade();
+        let rows = question.options.iter().enumerate().map(|(j, option)| {
             let label = option.label.clone();
-            let chosen = self.chosen[n].contains(&label);
-            let chip = Chip::choice(
-                id(format!("question-{n}-option-{j}")),
-                label.clone(),
-                chosen,
-            )
-            .on_click({
-                let card = cx.entity().downgrade();
-                move |_, _, cx| {
-                    card.update(cx, |card, cx| card.choose(n, &label, cx)).ok();
-                }
-            });
+            let mut row = ChoiceRow::new(id(format!("question-{n}-option-{j}")), label.clone())
+                .chosen(self.chosen[n].contains(&label))
+                .on_click({
+                    let card = card.clone();
+                    move |_, cx| {
+                        card.update(cx, |card, cx| card.choose(n, &label, cx)).ok();
+                    }
+                });
+            if question.multiple {
+                row = row.square();
+            }
             match &option.description {
-                Some(description) => chip.faint(format!("· {description}")),
-                None => chip,
+                Some(description) => row.description(description.clone()),
+                None => row,
             }
         });
-        let frame = div()
-            .id(id(format!("answer-{n}-frame")))
-            .px(space::MD)
-            .py(space::XS)
-            .rounded(px(8.))
-            .bg(p.field)
-            .border_1()
-            .border_color(p.line2)
-            .text_size(px(13.))
-            .line_height(px(20.))
-            .child(self.fields[n].clone())
-            .test_support();
-        let label = match question.options.is_empty() {
-            true => "Your answer",
-            false => "Your words, with the choice or instead",
+        let other = (!question.options.is_empty()).then(|| {
+            let mut row = ChoiceRow::new(id(format!("question-{n}-other")), "Something else…")
+                .faint()
+                .chosen(self.other[n])
+                .on_click({
+                    let card = card.clone();
+                    move |_, cx| {
+                        card.update(cx, |card, cx| card.choose_other(n, cx)).ok();
+                    }
+                });
+            if question.multiple {
+                row = row.square();
+            }
+            row
+        });
+        let field = |part: &str, label: &'static str, field: &Entity<TextareaState>| {
+            let frame = div()
+                .id(id(format!("{part}-{n}-frame")))
+                .px(space::MD)
+                .py(space::XS)
+                .rounded(px(8.))
+                .bg(p.field)
+                .border_1()
+                .border_color(p.line2)
+                .text_size(px(13.))
+                .line_height(px(20.))
+                .child(field.clone())
+                .test_support();
+            div().ml(space::XXL).child(Field::new(
+                id(format!("{part}-{n}-field")),
+                label,
+                flottille_ui::growing(id(format!("{part}-{n}-height")), frame),
+            ))
         };
+        let several = question.multiple.then(|| {
+            div()
+                .id(id(format!("question-{n}-several")))
+                .aria_label("several")
+                .flex_none()
+                .ml_auto()
+                .whitespace_nowrap()
+                .text_size(px(12.))
+                .text_color(p.faint)
+                .child("several")
+                .test_support()
+        });
+        let top = div()
+            .flex()
+            .items_start()
+            .gap(space::SM)
+            .child(
+                div()
+                    .flex_none()
+                    .w(space::XL)
+                    .mono(12.)
+                    .text_color(p.faint)
+                    .child(format!("{}", n + 1)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(self.texts[n].view(id(format!("question-{n}-text")))),
+            )
+            .children(several);
+        let options = div()
+            .id(id(format!("question-{n}-options")))
+            .ml(space::XXL)
+            .flex()
+            .flex_col()
+            .gap(space::XS)
+            .children(rows)
+            .children(other)
+            .test_support();
         let inputs = div()
             .flex()
             .flex_col()
             .gap(space::SM)
-            .when(!question.options.is_empty(), |d| {
-                d.child(
-                    div()
-                        .id(id(format!("question-{n}-options")))
-                        .flex()
-                        .flex_wrap()
-                        .gap(space::SM)
-                        .children(chips)
-                        .test_support(),
+            .when(!question.options.is_empty(), |d| d.child(options))
+            .child(
+                presence(
+                    id(format!("question-{n}-words")),
+                    open && self.words_open(n),
+                    field("answer", "Your answer", &self.fields[n]),
                 )
-            })
-            .child(Field::new(
-                id(format!("answer-{n}-field")),
-                label,
-                flottille_ui::growing(id(format!("answer-{n}-height")), frame),
-            ));
+                .gap(space::SM),
+            )
+            .child(
+                presence(
+                    id(format!("note-{n}-open")),
+                    open && self.note_open(n),
+                    field("note", "Note with your choice", &self.notes[n]),
+                )
+                .gap(space::SM),
+            )
+            .child(
+                presence(
+                    id(format!("note-{n}-ask")),
+                    open && self.can_note(n) && !self.noting[n],
+                    div().ml(space::XXL).flex().child(
+                        Button::quiet(id(format!("note-{n}-add")), "+ Add a note").on_click({
+                            let card = card.clone();
+                            move |_, _, cx| {
+                                card.update(cx, |card, cx| {
+                                    card.noting[n] = true;
+                                    cx.notify();
+                                })
+                                .ok();
+                            }
+                        }),
+                    ),
+                )
+                .gap(space::SM),
+            );
         div()
             .id(id(format!("question-{n}")))
+            .px(space::LG)
+            .py(space::MD)
             .flex()
             .flex_col()
             .gap(space::SM)
-            .child(
-                div()
-                    .text_size(px(13.5))
-                    .child(self.texts[n].view(id(format!("question-{n}-text")))),
-            )
+            .child(top)
             .child(presence(id(format!("question-{n}-inputs")), open, inputs))
             .test_support()
+    }
+
+    /// "n of m answered", faint: it fades back in when the count changes.
+    fn count(&self, cx: &App) -> impl IntoElement {
+        let p = palette(cx);
+        let id = ElementId::Name(format!("row-{}-question-count", self.at).into());
+        let said = format!(
+            "{} of {} answered",
+            self.answered_count(cx),
+            self.questions.len()
+        );
+        let fade = ElementId::Name(format!("row-{}-question-count-fade", self.at).into());
+        changing(fade, said, move |text| {
+            div()
+                .id(id)
+                .aria_label(text.clone())
+                .flex_none()
+                .whitespace_nowrap()
+                .text_size(px(12.))
+                .text_color(p.faint)
+                .child(text)
+                .test_support()
+                .into_any_element()
+        })
     }
 }
 
@@ -282,14 +477,58 @@ impl Render for QuestionCard {
         let at = self.at;
         let id = |part: &str| ElementId::Name(format!("row-{at}-{part}").into());
         let sent = self.is_sent(cx);
-        let blocks: Vec<AnyElement> = (0..self.questions.len())
-            .map(|n| self.block(n, !sent, cx).into_any_element())
-            .collect();
-        let send = div().flex().justify_end().child(
-            Button::primary(id("answer-send"), "Answer")
-                .disabled(!self.is_ready(cx) || self.sending)
-                .on_click(cx.listener(|this, _, _, cx| this.send(cx))),
-        );
+        let ready = self.is_ready(cx);
+        let mut card = Card::new()
+            .title(head(
+                at,
+                "question",
+                &self.title,
+                "asks you",
+                (p.wait, p.wait_bg),
+                Some(self.count(cx).into_any_element()),
+            ))
+            .meta(self.when.clone());
+        for n in 0..self.questions.len() {
+            card = card.block(Block::new().child(self.block(n, !sent, cx)));
+        }
+        let why = if ready {
+            "Sent to the agent as one message."
+        } else {
+            "Answer each question to send."
+        };
+        let why = changing(id("answer-why-fade"), why, {
+            let id = id("answer-why");
+            move |text| {
+                div()
+                    .id(id)
+                    .aria_label(text.clone())
+                    .text_size(px(12.5))
+                    .text_color(p.faint)
+                    .child(text)
+                    .test_support()
+                    .into_any_element()
+            }
+        });
+        let send = div()
+            .flex()
+            .items_center()
+            .gap(space::MD)
+            .child(div().flex_1().min_w_0().child(why))
+            .child(
+                div()
+                    .id(id("answer-keys"))
+                    .aria_label("Ctrl+Enter")
+                    .flex_none()
+                    .mono(11.5)
+                    .text_color(p.faint)
+                    .child("Ctrl+Enter")
+                    .test_support(),
+            )
+            .child(
+                Button::primary(id("answer-send"), "Answer")
+                    .disabled(!ready || self.sending)
+                    .on_click(cx.listener(|this, _, _, cx| this.send(cx))),
+            );
         let waits = div()
             .id(id("answer-waits"))
             .text_size(px(12.5))
@@ -297,28 +536,51 @@ impl Render for QuestionCard {
             .aria_label(ANSWER_WAITS)
             .child(ANSWER_WAITS)
             .test_support();
-        div()
-            .id(id("question-text"))
-            .flex()
-            .flex_col()
-            .gap(space::LG)
-            .children(blocks)
+        let footer = div()
+            .px(space::LG)
+            .py(space::MD)
             .child(presence(id("answer-open"), !sent, send))
-            .child(presence(id("answer-sent"), sent, waits))
-            .test_support()
+            .child(presence(id("answer-sent"), sent, waits));
+        card = card.block(Block::new().child(footer));
+        div().id(id("question-text")).child(card).test_support()
     }
 }
 
-/// The card of an ask while it waits: who asks, by the session's title, and its blocks.
-pub fn open_card(at: usize, title: &str, when: SharedString, card: Entity<QuestionCard>) -> Card {
-    Card::new()
-        .title(heading(
+/// The header of a card of an ask: the session's title, a tag saying what the card is, what it
+/// counts, if anything. `part` names its title (`<part>-title`) and its tag (`<part>-tag`).
+fn head(
+    at: usize,
+    part: &str,
+    title: &str,
+    tag: &'static str,
+    (ink, fill): (Hsla, Hsla),
+    count: Option<AnyElement>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(space::SM)
+        .w_full()
+        .child(div().flex_1().min_w_0().child(heading(
             at,
-            "question-title",
-            format!("{} asks you", quoted_title(title)),
-        ))
-        .meta(when)
-        .child(div().px(space::LG).py(space::MD).child(card))
+            &format!("{part}-title"),
+            quoted_title(title),
+        )))
+        .child(
+            div()
+                .id(ElementId::Name(format!("row-{at}-{part}-tag").into()))
+                .aria_label(tag)
+                .flex_none()
+                .px(space::SM)
+                .rounded_full()
+                .bg(fill)
+                .text_color(ink)
+                .text_size(px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .child(tag)
+                .test_support(),
+        )
+        .children(count)
 }
 
 /// What a card of a led session's question says under its title: who answers it, and that the
@@ -339,7 +601,7 @@ pub(crate) fn heading(at: usize, part: &str, said: String) -> impl IntoElement {
 }
 
 /// The card of an ask once the agent took its answers, folded to them: each question on one
-/// line, what the user chose and wrote under it.
+/// line, a check and what the user chose under it, the note under that.
 pub fn answered_card(
     at: usize,
     title: &str,
@@ -350,67 +612,96 @@ pub fn answered_card(
 ) -> Card {
     let p = palette(cx);
     let id = |part: String| ElementId::Name(format!("row-{at}-{part}").into());
-    let lines = questions
-        .iter()
-        .zip(answers)
-        .enumerate()
-        .map(|(n, (q, a))| {
-            let asked = q.question.lines().next().unwrap_or_default().to_owned();
-            let mut said: Vec<String> = Vec::new();
-            if !a.choices.is_empty() {
-                said.push(a.choices.join(", "));
-            }
-            if !a.text.is_empty() {
-                said.push(a.text.clone());
-            }
-            let said = said.join("\n");
+    let mut card = Card::new()
+        .title(head(
+            at,
+            "answered",
+            title,
+            "answered",
+            (p.ok, p.ok_bg),
+            None,
+        ))
+        .meta(when);
+    for (n, (q, a)) in questions.iter().zip(answers).enumerate() {
+        let asked = q.question.lines().next().unwrap_or_default().to_owned();
+        let mut said: Vec<String> = Vec::new();
+        if !a.choices.is_empty() {
+            said.push(a.choices.join(", "));
+        }
+        if !a.text.is_empty() {
+            said.push(a.text.clone());
+        }
+        let said = said.join("\n");
+        // What was chosen is the answer; the words under a choice are its note, and words
+        // alone are the answer.
+        let (headline, note) = match a.choices.is_empty() {
+            true => (a.text.clone(), String::new()),
+            false => (a.choices.join(", "), a.text.clone()),
+        };
+        let lines = |text: &str, ink, weight| {
             div()
-                .id(id(format!("answered-{n}")))
                 .flex()
                 .flex_col()
-                .gap(space::XS)
-                .child(
-                    div()
-                        .id(id(format!("answered-{n}-question")))
-                        .aria_label(SharedString::from(asked.clone()))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_size(px(12.5))
-                        .text_color(p.mute)
-                        .child(SharedString::from(asked))
-                        .test_support(),
+                .text_size(px(13.))
+                .font_weight(weight)
+                .text_color(ink)
+                .children(
+                    text.lines()
+                        .map(|line| div().child(line.to_owned()))
+                        .collect::<Vec<_>>(),
                 )
-                .child(
+        };
+        card =
+            card.block(
+                Block::new().child(
                     div()
-                        .id(id(format!("answered-{n}-answer")))
-                        .aria_label(SharedString::from(said.clone()))
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(p.text)
-                        .children(
-                            said.lines()
-                                .map(|line| div().child(line.to_owned()))
-                                .collect::<Vec<_>>(),
+                        .id(id(format!("answered-{n}")))
+                        .px(space::LG)
+                        .py(space::MD)
+                        .flex()
+                        .flex_col()
+                        .gap(space::XS)
+                        .child(
+                            div()
+                                .id(id(format!("answered-{n}-question")))
+                                .aria_label(SharedString::from(asked.clone()))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(13.))
+                                .text_color(p.mute)
+                                .child(SharedString::from(format!("{} · {asked}", n + 1)))
+                                .test_support(),
+                        )
+                        .child(
+                            div()
+                                .id(id(format!("answered-{n}-answer")))
+                                .aria_label(SharedString::from(said.clone()))
+                                .flex()
+                                .flex_col()
+                                .gap(space::XS)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_start()
+                                        .gap(space::SM)
+                                        .child(div().flex_none().pt(space::XS).child(
+                                            icon(Icon::Check).size(px(13.)).text_color(p.ok),
+                                        ))
+                                        .child(lines(&headline, p.text, FontWeight::MEDIUM)),
+                                )
+                                .when(!note.is_empty(), |d| {
+                                    d.child(div().ml(space::XL).child(lines(
+                                        &note,
+                                        p.mute,
+                                        FontWeight::NORMAL,
+                                    )))
+                                })
+                                .test_support(),
                         )
                         .test_support(),
-                )
-                .test_support()
-        });
-    Card::new()
-        .title(heading(
-            at,
-            "answered-title",
-            format!("{} asked you", quoted_title(title)),
-        ))
-        .meta(when)
-        .child(
-            div()
-                .px(space::LG)
-                .py(space::MD)
-                .flex()
-                .flex_col()
-                .gap(space::MD)
-                .children(lines),
-        )
+                ),
+            );
+    }
+    card
 }

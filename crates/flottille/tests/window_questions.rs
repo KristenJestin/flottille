@@ -28,6 +28,9 @@ const SECOND: &str = "Which colour for the axis?";
 const PUSH: &str = "Push `feat/42-export` and open the pull request?";
 const TITLE: &str = "Title of the pull request?";
 const REVIEWS: &str = "Who reviews it?";
+const LONG_OPTION: &str = "You drop me a bundle or a clone of the real repository, and I replay \
+    its commits one by one so that the history stays whole in the new place, with every author \
+    and every date as they were.";
 
 /// The agent asks, goes on with a call and a sentence, then works until the test lets it end.
 fn script() -> Value {
@@ -52,6 +55,13 @@ fn script() -> Value {
                 {"question": TITLE},
                 {"question": REVIEWS, "multiple": true,
                  "options": [{"label": "Alice"}, {"label": "Bob"}, {"label": "Carol"}]}
+            ]}}},
+            {"say": "Asked."}]},
+        {"when": "long options", "do": [
+            {"mcp": {"tool": "ask", "arguments": {"questions": [
+                {"question": PUSH, "options": [
+                    {"label": "I send you the history", "description": LONG_OPTION},
+                    {"label": "One initial commit"}]}
             ]}}},
             {"say": "Asked."}]},
         {"when": "Drop it", "do": [{"say": "Dropped."}]},
@@ -223,9 +233,9 @@ fn questions(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<(usi
         .collect()
 }
 
-/// Whether the card of the question of row `at` shows, its text and its field.
+/// Whether the card of the question of row `at` shows, with its first question.
 fn card_shows(at: usize, cx: &mut VisualTestContext) -> bool {
-    has(format!("row-{at}-question-text"), cx) && has(format!("row-{at}-answer-0-frame"), cx)
+    has(format!("row-{at}-question-text"), cx) && has(format!("row-{at}-question-0-text"), cx)
 }
 
 fn mark_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<AgentState> {
@@ -451,6 +461,13 @@ fn write(page: &Entity<SessionPage>, at: usize, n: usize, text: &str, cx: &mut V
     cx.run_until_parked();
 }
 
+/// Writes `text` in the note of question `n` of the card of row `at`.
+fn note(page: &Entity<SessionPage>, at: usize, n: usize, text: &str, cx: &mut VisualTestContext) {
+    let field = card_of(page, at, cx).read_with(cx, |card, _| card.note(n).clone());
+    field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
+    cx.run_until_parked();
+}
+
 /// Answers the single question of the card of row `at` with `text`.
 fn answer(
     page: &Entity<SessionPage>,
@@ -539,6 +556,8 @@ fn three_asked<'a>(
 ) {
     let id = session(user, "full", "ship it");
     let (shell, page, cx) = open_session(user, &id, cx);
+    // Tall enough for the three questions' rows: a click needs its target in sight.
+    cx.simulate_resize(size(px(1440.), px(1800.)));
     until(&shell, cx, "the card", |cx| {
         questions(&page, cx)
             .first()
@@ -558,10 +577,13 @@ fn chosen(id: String, cx: &mut VisualTestContext) -> Option<bool> {
     cx.update(|window, _| window.try_find(id).and_then(|found| found.selected()))
 }
 
-/// Answers the three questions: Yes with words, a title, Alice and Carol.
+/// Answers the three questions: Yes with a note, a title, Alice and Carol.
 fn answer_three(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
     click(format!("row-{at}-question-0-option-0"), cx);
-    write(page, at, 0, "Squash it first.", cx);
+    settle(cx);
+    click(format!("row-{at}-note-0-add"), cx);
+    settle(cx);
+    note(page, at, 0, "Squash it first.", cx);
     write(page, at, 1, "Export orders as CSV", cx);
     click(format!("row-{at}-question-2-option-0"), cx);
     click(format!("row-{at}-question-2-option-2"), cx);
@@ -583,14 +605,15 @@ fn the_question_card_names_the_session_that_asks(cx: &mut TestAppContext) {
         questions(&page, cx).first().is_some_and(|(at, _)| {
             card_shows(*at, cx)
                 && label(format!("row-{at}-question-title"), cx).as_deref()
-                    == Some("Charts of the quarter asks you")
+                    == Some("Charts of the quarter")
         })
     });
-    let shown = cx.update(|window, _| {
-        window
-            .try_find_by_label("the conversation asks you")
-            .is_some()
-    });
+    let at = questions(&page, cx)[0].0;
+    assert_eq!(
+        label(format!("row-{at}-question-tag"), cx).as_deref(),
+        Some("asks you")
+    );
+    let shown = cx.update(|window, _| window.try_find_by_label("the conversation").is_some());
     assert!(!shown, "never the conversation");
     release(&user);
 }
@@ -606,15 +629,19 @@ fn an_ask_with_three_questions_shows_three_blocks_each_answered_apart(cx: &mut T
     );
     for n in 0..3 {
         assert!(has(format!("row-{at}-question-{n}"), cx), "block {n}");
-        assert!(
-            has(format!("row-{at}-answer-{n}-frame"), cx),
-            "its own field {n}"
-        );
     }
     assert!(has(format!("row-{at}-question-0-options"), cx));
     assert!(
         !has(format!("row-{at}-question-1-options"), cx),
         "a question in words alone"
+    );
+    assert!(
+        has(format!("row-{at}-answer-1-frame"), cx),
+        "its field is there at once"
+    );
+    assert!(
+        !has(format!("row-{at}-answer-0-frame"), cx),
+        "the words of a question of options come with Something else"
     );
     assert!(has(format!("row-{at}-question-2-option-2"), cx));
 
@@ -647,6 +674,213 @@ fn an_ask_with_three_questions_shows_three_blocks_each_answered_apart(cx: &mut T
     assert_eq!(answers[0].choices, ["Not yet"]);
     assert_eq!(answers[1].text, "Export orders as CSV");
     assert_eq!(answers[2].choices, ["Alice", "Bob"]);
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn an_option_is_a_row_with_its_description_under_it(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, _, at, cx) = three_asked(&user, cx);
+    let row = format!("row-{at}-question-0-option-1");
+    assert_eq!(label(row.clone(), cx).as_deref(), Some("Not yet"));
+    assert_eq!(
+        label(format!("{row}-line"), cx).as_deref(),
+        Some("Keep it local")
+    );
+    let (row, words, line) = cx.update(|window, _| {
+        (
+            window.find(row.clone()).bounds(),
+            window.find(format!("{row}-label")).bounds(),
+            window.find(format!("{row}-line")).bounds(),
+        )
+    });
+    assert!(words.bottom() <= line.top(), "under its label");
+    assert!(line.bottom() <= row.bottom());
+    // The last row of each question is the way out, in its own words.
+    assert_eq!(
+        label(format!("row-{at}-question-0-other"), cx).as_deref(),
+        Some("Something else…")
+    );
+    assert_eq!(
+        label(format!("row-{at}-question-2-other"), cx).as_deref(),
+        Some("Something else…")
+    );
+}
+
+#[gpui_kit::test]
+fn a_long_option_wraps_and_stays_in_the_card(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "long options");
+    let (shell, page, cx) = open_session(&user, &id, cx);
+    cx.simulate_resize(size(px(760.), px(800.)));
+    until(&shell, cx, "the card", |cx| {
+        questions(&page, cx)
+            .first()
+            .is_some_and(|(at, _)| has(format!("row-{at}-question-0-option-0-line"), cx))
+    });
+    settle(cx);
+    let at = questions(&page, cx)[0].0;
+    let (card, line) = cx.update(|window, _| {
+        (
+            window.find(format!("row-{at}-question-text")).bounds(),
+            window
+                .find(format!("row-{at}-question-0-option-0-line"))
+                .bounds(),
+        )
+    });
+    assert!(line.right() <= card.right(), "{line:?} in {card:?}");
+    assert!(line.size.height > px(36.), "on several lines: {line:?}");
+}
+
+#[gpui_kit::test]
+fn several_choices_have_square_marks_and_say_several_once(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, _, at, cx) = three_asked(&user, cx);
+    assert!(has(format!("row-{at}-question-2-option-0-tick"), cx));
+    assert!(!has(format!("row-{at}-question-2-option-0-dot"), cx));
+    assert!(has(format!("row-{at}-question-0-option-0-dot"), cx));
+    assert!(!has(format!("row-{at}-question-0-option-0-tick"), cx));
+    assert_eq!(
+        label(format!("row-{at}-question-2-several"), cx).as_deref(),
+        Some("several")
+    );
+    assert!(!has(format!("row-{at}-question-0-several"), cx));
+    let said = cx.update(|window, _| window.find_all_by_label("several").len());
+    assert_eq!(said, 1, "said once");
+}
+
+#[gpui_kit::test]
+fn something_else_unfolds_a_labelled_field_and_needs_words(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let card = card_of(&page, at, cx);
+    click(format!("row-{at}-question-0-option-0"), cx);
+    write(&page, at, 1, "Export orders as CSV", cx);
+    click(format!("row-{at}-question-2-option-0"), cx);
+    settle(cx);
+    assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
+    assert!(!has(format!("row-{at}-answer-0-frame"), cx), "folded");
+
+    // Picked, it takes the place of the choice and unfolds its field, labelled.
+    click(format!("row-{at}-question-0-other"), cx);
+    settle(cx);
+    assert_eq!(
+        chosen(format!("row-{at}-question-0-option-0"), cx),
+        Some(false)
+    );
+    assert_eq!(chosen(format!("row-{at}-question-0-other"), cx), Some(true));
+    assert!(has(format!("row-{at}-answer-0-frame"), cx));
+    assert_eq!(
+        label(format!("row-{at}-answer-0-field-label"), cx).as_deref(),
+        Some("Your answer")
+    );
+    assert!(
+        !card.read_with(cx, |card, cx| card.is_ready(cx)),
+        "it needs its words"
+    );
+    write(&page, at, 0, "Both, in that order", cx);
+    assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
+    let answers = card.read_with(cx, |card, cx| card.answers(cx));
+    assert_eq!(answers[0].choices, Vec::<String>::new());
+    assert_eq!(answers[0].text, "Both, in that order");
+
+    // Let go of, it folds away.
+    click(format!("row-{at}-question-0-other"), cx);
+    settle(cx);
+    assert!(!has(format!("row-{at}-answer-0-frame"), cx), "folded again");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn add_a_note_appears_after_a_choice_and_sends_the_note(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
+    assert!(!has(format!("row-{at}-note-0-add"), cx), "no choice yet");
+    click(format!("row-{at}-question-0-option-0"), cx);
+    settle(cx);
+    assert_eq!(
+        label(format!("row-{at}-note-0-add"), cx).as_deref(),
+        Some("+ Add a note")
+    );
+    assert!(!has(format!("row-{at}-note-0-frame"), cx));
+    click(format!("row-{at}-note-0-add"), cx);
+    settle(cx);
+    assert!(has(format!("row-{at}-note-0-frame"), cx), "its field");
+    assert_eq!(
+        label(format!("row-{at}-note-0-field-label"), cx).as_deref(),
+        Some("Note with your choice")
+    );
+    assert!(!has(format!("row-{at}-note-0-add"), cx), "the button left");
+    note(&page, at, 0, "Squash it first.", cx);
+    let answers = card_of(&page, at, cx).read_with(cx, |card, cx| card.answers(cx));
+    assert_eq!(answers[0].choices, ["Yes"]);
+    assert_eq!(answers[0].text, "Squash it first.");
+
+    // The note goes with the choice.
+    write(&page, at, 1, "Export orders as CSV", cx);
+    click(format!("row-{at}-question-2-option-1"), cx);
+    settle(cx);
+    click(format!("row-{at}-answer-send"), cx);
+    until(&shell, cx, "the agent took it", |_| {
+        prompts(&user)
+            .iter()
+            .any(|p| p.contains("Yes\nSquash it first."))
+    });
+}
+
+#[gpui_kit::test]
+fn answer_waits_until_every_question_is_answered_and_says_why(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
+    let card = card_of(&page, at, cx);
+    let why = format!("row-{at}-answer-why");
+    assert_eq!(
+        label(why.clone(), cx).as_deref(),
+        Some("Answer each question to send.")
+    );
+    click(format!("row-{at}-answer-send"), cx);
+    settle(cx);
+    assert!(
+        !card.read_with(cx, |card, cx| card.is_sent(cx)),
+        "Answer waits"
+    );
+    click(format!("row-{at}-question-0-option-0"), cx);
+    write(&page, at, 1, "Export orders as CSV", cx);
+    click(format!("row-{at}-question-2-option-1"), cx);
+    settle(cx);
+    assert_eq!(
+        label(why, cx).as_deref(),
+        Some("Sent to the agent as one message.")
+    );
+    assert_eq!(
+        label(format!("row-{at}-answer-keys"), cx).as_deref(),
+        Some("Ctrl+Enter")
+    );
+    click(format!("row-{at}-answer-send"), cx);
+    until(&shell, cx, "the answer went", |cx| {
+        card.read_with(cx, |card, cx| card.is_sent(cx))
+    });
+}
+
+#[gpui_kit::test]
+fn the_count_says_how_many_are_answered(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let count = format!("row-{at}-question-count");
+    assert_eq!(label(count.clone(), cx).as_deref(), Some("0 of 3 answered"));
+    click(format!("row-{at}-question-0-option-0"), cx);
+    settle(cx);
+    assert_eq!(label(count.clone(), cx).as_deref(), Some("1 of 3 answered"));
+    write(&page, at, 1, "Export orders as CSV", cx);
+    settle(cx);
+    assert_eq!(label(count.clone(), cx).as_deref(), Some("2 of 3 answered"));
+    // Something else, with no words yet, is not an answer.
+    click(format!("row-{at}-question-2-other"), cx);
+    settle(cx);
+    assert_eq!(label(count.clone(), cx).as_deref(), Some("2 of 3 answered"));
+    write(&page, at, 2, "Whoever is free", cx);
+    settle(cx);
+    assert_eq!(label(count, cx).as_deref(), Some("3 of 3 answered"));
     at_rest(cx);
 }
 
@@ -712,7 +946,8 @@ fn answer_is_disabled_until_every_question_has_an_answer(cx: &mut TestAppContext
         !card.read_with(cx, |card, cx| card.is_sent(cx)),
         "nothing sent"
     );
-    // Words alone answer a question of options too.
+    // Words alone answer a question of options too, through Something else.
+    click(format!("row-{at}-question-2-other"), cx);
     write(&page, at, 2, "Whoever is free", cx);
     assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
     click(format!("row-{at}-answer-send"), cx);
@@ -796,7 +1031,7 @@ fn a_single_question_ask_still_works_as_before(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn an_answer_shows_the_users_words_under_its_question_not_the_quoted_text(cx: &mut TestAppContext) {
+fn the_card_folds_to_its_answers_with_the_notes(cx: &mut TestAppContext) {
     let user = user();
     let (_, shell, page, at, cx) = three_asked(&user, cx);
     answer_three(&page, at, cx);
@@ -821,8 +1056,10 @@ fn an_answer_shows_the_users_words_under_its_question_not_the_quoted_text(cx: &m
         label(format!("row-{at}-answered-2-answer"), cx).as_deref(),
         Some("Alice, Carol")
     );
-    assert!(
-        label(format!("row-{at}-answered-title"), cx).is_some_and(|t| t.ends_with(" asked you"))
+    assert!(label(format!("row-{at}-answered-title"), cx).is_some());
+    assert_eq!(
+        label(format!("row-{at}-answered-tag"), cx).as_deref(),
+        Some("answered")
     );
     // No bubble of the user repeats the quoted text.
     let quoted = blocks(&page, cx)

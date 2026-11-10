@@ -666,7 +666,7 @@ fn a_choice_row_s_mark_is_round_or_square_and_fills_when_chosen(cx: &mut TestApp
         "several: a square mark with a tick"
     );
     assert!(!shown("square-dot", cx));
-    assert_eq!(chosen.get(), false);
+    assert!(!chosen.get());
     assert_eq!(bounds("square-tick", cx).size.width, px(0.), "nothing yet");
     assert_eq!(cx.update(|w, _| w.find("square").selected()), Some(false));
 

@@ -6213,8 +6213,11 @@ impl Row {
                 answer
             }
         };
-        answer.update(cx, |card, _| card.set_answered(answers.is_some()));
-        let open = crate::question_card::open_card(self.at, &title, when.clone(), answer);
+        answer.update(cx, |card, cx| {
+            card.set_answered(answers.is_some());
+            card.set_header(&title, when.clone(), cx);
+        });
+        let open = answer;
         let answered = answers.map(|answers| {
             crate::question_card::answered_card(self.at, &title, when, questions, answers, cx)
         });
