@@ -289,7 +289,7 @@ impl Render for Convention {
             presence(
                 id("save-block"),
                 self.savable(cx),
-                Button::primary(id("save"), "Save")
+                Button::secondary(id("save"), "Save")
                     .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
             )
             .gap(space::SM),

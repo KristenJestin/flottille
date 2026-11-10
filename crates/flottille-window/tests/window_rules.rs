@@ -423,6 +423,49 @@ fn the_composer_s_toggles_are_never_filled_with_the_accent() {
     );
 }
 
+// ── A Save beside a field is a secondary button ────────────────────────────────────────────────
+
+/// The `Save` of a section's own field (`id("save")`) that is a primary button: a primary is the
+/// one action of a view, and a tab of the project's settings holds several sections that each
+/// save apart, so they are secondary (rule 1).
+fn primary_saves(source: &str) -> Vec<(usize, String)> {
+    code(source)
+        .filter(|(_, line)| line.contains("Button::primary(id(\"save\")"))
+        .map(|(at, line)| (at, line.to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_primary_save_beside_a_field_is_found() {
+    assert_eq!(
+        primary_saves("let save = Button::primary(id(\"save\"), \"Save\")").len(),
+        1
+    );
+    assert!(primary_saves("Button::secondary(id(\"save\"), \"Save\")").is_empty());
+}
+
+#[test]
+fn the_saves_of_a_project_s_settings_are_secondary() {
+    let sections = [
+        "conventions.rs",
+        "message_checks.rs",
+        "project_settings.rs",
+        "workspaces_folder.rs",
+    ];
+    let found = offenders_in(
+        window()
+            .into_iter()
+            .filter(|(file, _)| sections.iter().any(|name| file.ends_with(name)))
+            .collect(),
+        primary_saves,
+    );
+    assert!(
+        found.is_empty(),
+        "a Save beside a field is `Button::secondary`:\n{}",
+        found.join("\n")
+    );
+}
+
 // ── The kit's rules, held on the window's sources ──────────────────────────────────────────────
 
 /// The lines that draw a black of their own: a shadow is a role of the palette

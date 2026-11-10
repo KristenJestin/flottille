@@ -397,7 +397,7 @@ impl Render for WorkspacesFolder {
             .mono(12.5)
             .child(Input::new(&field))
             .test_support();
-        let save = Button::primary(id("save"), "Save")
+        let save = Button::secondary(id("save"), "Save")
             .disabled(!self.savable(cx))
             .on_click(cx.listener(|this, _, _, cx| this.save(cx)));
         // Save shows once what is typed differs from what is kept (rule 4). A presence is as

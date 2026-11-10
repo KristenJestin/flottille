@@ -1688,7 +1688,7 @@ impl ProjectSettingsPage {
             presence(
                 id("save-block"),
                 self.branch_prefix_savable(cx),
-                Button::primary(id("save"), "Save")
+                Button::secondary(id("save"), "Save")
                     .on_click(cx.listener(|this, _, _, cx| this.save_branch_prefix(cx))),
             )
             .gap(space::SM),
