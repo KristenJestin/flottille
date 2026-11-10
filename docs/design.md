@@ -1107,7 +1107,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   nothing under the bar), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
-  Link a ticket… (Change the ticket… once one is linked), Unlink the ticket (only while one is linked) and, for a session in a workspace, Remove workspace…, which
+  Open in editor and, for a session in a workspace (one in the project's folder is offered Open in editor only), Link a ticket… (Change the ticket… once one is linked), Unlink the ticket (only while one is linked) and Remove workspace…, which
   asks as the card does, the dialog refusing it, with the sessions named, while sessions not ended work there; while it runs the section says it is
   being removed, and once removed it folds away, the page staying) and facts, its runs, then, pinned at the very bottom and
   folding away when nothing waits, "Waiting for you", the one place of the page that says the user
