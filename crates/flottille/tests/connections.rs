@@ -1548,3 +1548,107 @@ fn a_connection_never_goes_through_a_proxy() {
         "{requests:?}"
     );
 }
+
+#[test]
+fn a_secret_read_after_the_start_is_masked_in_a_connection_s_output() {
+    let user = user();
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET}),
+    )
+    .unwrap();
+    let mut script = almanac();
+    script["answers"]["search"] = json!({"env": "ALMANAC_TOKEN"});
+    script["answers"]["write"] = json!({"error": format!("refused: {SECRET} is wrong")});
+    turn_on(&user);
+    declare(
+        &user,
+        "almanac",
+        &script,
+        json!({"env": {"ALMANAC_TOKEN": {"vault": "almanac-token"}}}),
+    );
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes", "write": "passes"}}),
+    )
+    .unwrap();
+    // The daemon starts again on a locked keyring that holds the secret: nothing of it is masked
+    // at the start, and the keyring is unlocked once it runs.
+    user.run(&["daemon", "stop"]);
+    let keyring = user.path("config/flottille/keyring.toml");
+    let kept = format!("[kept]\nalmanac-token = \"{SECRET}\"\n");
+    std::fs::write(
+        &keyring,
+        format!("backend = \"memory\"\nlocked = true\n{kept}"),
+    )
+    .unwrap();
+    user.call("connection.list", json!({})).unwrap();
+    std::fs::write(&keyring, format!("backend = \"memory\"\n{kept}")).unwrap();
+    let watch = user.watch(&[]);
+    let (id, mcp) = session(&user, "app");
+
+    let found = done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    assert_eq!(logged(&user, "almanac", "call")[0]["answered"], SECRET);
+    assert!(
+        !found.contains(SECRET) && found.contains("[masked]"),
+        "{found}"
+    );
+    let error = refused(mcp.call(
+        "conn_almanac",
+        json!({"action": "write", "arguments": {"text": "a"}}),
+    ));
+    assert!(
+        !error.contains(SECRET) && error.contains("[masked]"),
+        "{error}"
+    );
+    restart(&user, "almanac");
+    script["stderr"] = json!(format!("no login for {SECRET}"));
+    script["exit"] = json!(3);
+    write_script(&user, "almanac", &script);
+    let stderr = refused(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    assert!(
+        !stderr.contains(SECRET) && stderr.contains("no login for [masked]"),
+        "{stderr}"
+    );
+
+    let events = watch.until(|e| e["name"] == "connection.changed" && e["data"]["why"].is_string());
+    assert!(!json!(events).to_string().contains(SECRET));
+    let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+    assert!(!shown.to_string().contains(SECRET));
+    let listed = user.call("connection.list", json!({})).unwrap();
+    assert!(!listed.to_string().contains(SECRET), "{listed}");
+    for folder in ["state", "data"] {
+        assert!(
+            files_holding(&user.path(folder), SECRET).is_empty(),
+            "{folder}: {:?}",
+            files_holding(&user.path(folder), SECRET)
+        );
+    }
+}
+
+/// The files under `dir` that hold `needle`.
+fn files_holding(dir: &Path, needle: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_holding(&path, needle));
+        } else if std::fs::read(&path).is_ok_and(|bytes| {
+            bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+        }) {
+            found.push(path.display().to_string());
+        }
+    }
+    found
+}
