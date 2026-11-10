@@ -104,6 +104,8 @@ const ACTION_CHARS: usize = 48;
 const DESCRIPTION_CHARS: usize = 1_200;
 /// What `help` gives of a description or of the instructions, at most.
 const HELP_CHARS: usize = 4_000;
+/// The longest server name or version a cut-off says.
+const SERVER_CHARS: usize = 100;
 /// What `help` with `for` names for the server's instructions: no action is named so.
 const INSTRUCTIONS: &str = "@instructions";
 /// The action answered by Flottille from the pin, never by the server.
@@ -492,12 +494,16 @@ impl Listing {
         self.actions.iter().find(|action| action.name == name)
     }
 
+    /// Its name and version, each cut at `SERVER_CHARS`: the review shows them whole.
     fn version(&self) -> String {
-        format!(
-            "{} {}",
-            self.server["name"].as_str().unwrap_or("?"),
-            self.server["version"].as_str().unwrap_or("?")
-        )
+        let said = |key: &str| {
+            let text = self.server[key].as_str().unwrap_or("?");
+            match text.chars().count() > SERVER_CHARS {
+                true => format!("{}…", text.chars().take(SERVER_CHARS).collect::<String>()),
+                false => text.to_owned(),
+            }
+        };
+        format!("{} {}", said("name"), said("version"))
     }
 }
 
