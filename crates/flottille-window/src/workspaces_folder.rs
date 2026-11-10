@@ -529,11 +529,49 @@ impl Render for WorkspacesFolder {
 
 /// A folder as the window says it: relative to the user's home, with `~`.
 fn relative_to_home(folder: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() => match folder.strip_prefix(&home) {
+    relative_to(folder, std::env::var("HOME").ok().as_deref())
+}
+
+/// [`relative_to_home`] with the home given.
+fn relative_to(folder: &str, home: Option<&str>) -> String {
+    match home {
+        Some(home) if !home.is_empty() => match folder.strip_prefix(home) {
             Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
             _ => folder.to_owned(),
         },
         _ => folder.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relative_to;
+
+    #[test]
+    fn a_folder_under_the_home_is_said_from_the_tilde() {
+        assert_eq!(
+            relative_to(
+                "/home/user/.local/share/app/workspaces/api",
+                Some("/home/user")
+            ),
+            "~/.local/share/app/workspaces/api"
+        );
+        assert_eq!(relative_to("/home/user", Some("/home/user")), "~");
+    }
+
+    #[test]
+    fn a_folder_outside_the_home_is_said_whole() {
+        // A sibling whose name starts with the home's is not under it.
+        assert_eq!(
+            relative_to("/home/username/work", Some("/home/user")),
+            "/home/username/work"
+        );
+        assert_eq!(relative_to("/srv/work", Some("/home/user")), "/srv/work");
+    }
+
+    #[test]
+    fn with_no_home_a_folder_is_said_whole() {
+        assert_eq!(relative_to("/home/user/work", None), "/home/user/work");
+        assert_eq!(relative_to("/home/user/work", Some("")), "/home/user/work");
     }
 }
