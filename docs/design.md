@@ -1003,30 +1003,60 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   they were, only its chevron folds and unfolds them; a session's row offers a "⋯" menu with End
   session (the confirmation of the session page, counting the agents that end) and, on an ended
   session whose agent can resume, Resume, with no need to open the session first. A session is
-  started in a place from the project page (each place's "New session in …");
-- a project page: its repositories (each with its branch, its remote or "local only" and its
-  forge; added, removed, which only forgets one, and detected again), its places with their
-  sessions, each workspace's card saying where each of its repositories stands (branch, commits
-  ahead, files not committed, setup steps played), creating and removing a
-  workspace (with the preparation's progress and failure output), the composer that starts
-  a session (place, agent, model, first message, and pictures taken as a session's composer does,
-  which go with the first message), its pull requests and tickets (`items.md`: two
-  tabs, Pull requests and Tickets, each counting what it lists, filtered open, closed or all, the
-  user's own, and a repository for the pull requests, and searched by key or title (the quick
-  switcher's matching, what matched in the accent; a line says how many are listed, `128 open`,
-  or `3 of 128 open` under a search); the list is about ten rows tall and scrolls inside its
-  section, the tabs and the filters staying above it, keeps its place when it is read again and
-  goes back to the top when a tab, a filter or the search changes; each row its number, title, state, CI mark,
-  author, assignee and when it changed, coming, going and changing live with the `item.*` events
-  and going with `items.forgotten`; a project with no forge or no tracker says so with a link to
-  its Settings, a source that fails says why; a click opens the item's detail in a dialog: its
-  description in Markdown, its branches, its checks with their links, its reviews and comments,
-  an agent's marked "posted by an agent", and Open in browser; while Specs is on in the project, a
-  third tab, Specs, lists each spec with its status, its tickets and its open questions, with "New
-  spec", and a ticket's row offers "Write the spec", or "Open the spec" once it has one; a spec's
-  page shows the spec, its questions each answered in one click, Ready and Back to draft, and the
-  sessions that worked on it, `docs/extensions.md`, "Specs"), and its tasks, each with Run, which runs it in
-  the project folder, listed below with the rail's rows and output panel; its Settings, in five tabs (`reference/gpui.md`, rule 13), opening on the first.
+  started in a place from the project page (each place's "New session here");
+- a project page: a header with its name, its folder (relative to `~`), Settings and New workspace
+  (its two buttons), and a chip per repository with the branch its checkout is on (none for a
+  project of one repository); under it the composer that starts a session (place, agent, model,
+  first message, and pictures taken as a session's composer does, which go with the first
+  message; its place's menu ends with New workspace…; with no provider ready it says "No provider
+  is ready. **Open Settings**", which opens Agents, Providers); then its tabs, **Work**, **Pull
+  requests** and **Tickets**, and **Specs** while Specs is on in the project (four at most, room
+  kept for a fifth), the chosen one alone below them (`reference/gpui.md`, rule 13). Creating a
+  workspace shows the preparation's progress and failure output, removing one asks first.
+  **Work** is one column of the project's places: `main` first, then the workspaces from the
+  newest to the oldest, in an order nothing changes (activity orders the sidebar, never this
+  page). Each place is a block. Its row: a folder icon and `main`, or a branch icon and the
+  workspace's name, whole, never cut for what follows; on its right, quiet chips for what
+  describes it, its pull request (`#118` and its checks' mark), its ticket (`SHOP-42`), the lines
+  it changed (`+120 −14`), or `no session` for a workspace where none works. On hover, three icon
+  buttons fade in: ▶ "Run a task here", which lists the project's tasks (each with its tag,
+  `server` or `check`) and runs the one picked in that place (`task.run` with its `workspace`);
+  + "New session here", which sets the composer's place; and "⋯", with Open in editor, Link a
+  ticket… (Change the ticket… once one is linked), Prepare again and Remove workspace…, which asks
+  first and refuses, naming them, while sessions not ended work there. A workspace's second line,
+  faint, says in labelled values where it starts from and where each repository stands (`from
+  develop · api: 1 commit ahead, 5 files changed · web: clean`; a project of one repository does
+  not name it), and the setup steps played. Under it, the sessions that work in this place and
+  only they, each listed once, where it works: its title, then one mark only when it says
+  something (running, needs you, waiting), else how long since it was active; a session that
+  leads others says `leads 2: export-csv, checkout-retry`, each place a link that scrolls to its
+  block; a led session says `↳ led by <pilot>`, a link to its pilot's session; a session that
+  waits for the user has a second, faint line, the question or the request (the colour stays on
+  the mark alone). A click on a session opens it. Then the task runs going on in this place, the
+  user's and its agents': one row each, its task, its address as a link when it serves one, how
+  long, and a Stop icon button whose tooltip names the task. At the bottom of Work, folded, `3
+  ended runs`: the last runs that ended, each with its place (`in main`, `in checkout-retry`) and
+  how it ended. A click on a run opens its drawer. A workspace with no session is its row alone,
+  with its facts.
+  **Pull requests** and **Tickets** (`items.md`) each count what they list, filtered on one row:
+  `Open | Closed | All`, **Mine**, a repository for the pull requests, and a search by key or
+  title (the quick switcher's matching, what matched in the accent); a line under the row says
+  how many are listed, `128 open`, or `3 of 128 open` under a search. No sentence says how they
+  are read. The list is about ten rows tall and scrolls inside its tab, the filters staying above
+  it, keeps its place when it is read again and goes back to the top when a tab, a filter or the
+  search changes; each row its number, title, state, CI mark, author, assignee and when it
+  changed, and for a pull request of a workspace, `in checkout-retry`, coming, going and changing
+  live with the `item.*` events and going with `items.forgotten`; a project with no forge says
+  "No forge set for this project. **Choose one in Settings**", which opens Repositories, one with
+  no tracker the same for its tickets, and a source that fails says why; a click opens the item's
+  detail in a dialog: its description in Markdown, its branches, its checks with their links, its
+  reviews and comments, an agent's marked "posted by an agent", and Open in browser. A ticket's
+  row offers "Write the spec", which starts it at once in the default mode, and "Write the spec
+  as…" in its "⋯", or "Open the spec" once it has one. **Specs** lists each spec with its status,
+  its tickets and its open questions, with "New spec"; a spec's page shows the spec, its
+  questions each answered in one click, Ready and Back to draft, and the sessions that worked on
+  it (`docs/extensions.md`, "Specs");
+  the project's Settings, in five tabs (`reference/gpui.md`, rule 13), opening on the first.
   **Repositories** holds its **Repositories** (a count; "The git repositories of the project. Each
   workspace gets its own copy of each.", or for a project of one, "The project folder is the
   repository."): each a row with **Starts from** (`develop, then main`), **Remote** (`origin ·
@@ -1169,9 +1199,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   and a dot on its picker says it until the agent took it, its menu saying when it applies,
   nothing under the bar), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
-  repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
+  repositories with no forge; its actions in a "⋯" menu, the same as its place's on the project page, with
   Open in editor and, for a session in a workspace (one in the project's folder is offered Open in editor only), Link a ticket… (Change the ticket… once one is linked), Unlink the ticket (only while one is linked) and Remove workspace…, which
-  asks as the card does, the dialog refusing it, with the sessions named, while sessions not ended work there; while it runs the section says it is
+  asks as the project page does, the dialog refusing it, with the sessions named, while sessions not ended work there; while it runs the section says it is
   being removed, and once removed it folds away, the page staying) and facts, its runs, then, pinned at the very bottom and
   folding away when nothing waits, "Waiting for you", the one place of the page that says the user
   is needed (each request that reached the user is a compact card: the whole call, wrapping over
@@ -1210,7 +1240,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   gate (`task.run`), and its row unfolds into the section. A child
   with task runs still going says so on its row in the Agents list (`2 runs`), and a click opens
   that child with its Runs section; a click on a run opens its drawer (the same on the project
-  page, which lists only the tasks the user ran there): its command, its
+  page, where each place lists the task runs going on in it): its command, its
   task, where it runs, who started it (a link to the agent in its session), since when or how it
   ended, its output, live and following its end, Copy, Restart (the daemon's `run.restart`: it
   stops the command if it runs and starts the same line again in the same place; the drawer, and
