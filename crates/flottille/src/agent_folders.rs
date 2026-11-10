@@ -143,6 +143,9 @@ pub struct Snapshot {
     whole: BTreeSet<PathBuf>,
     /// The content of each file, when it is not too large to keep.
     contents: BTreeMap<PathBuf, Vec<u8>>,
+    /// The files written between the walk that noted them and the read of their content: none
+    /// is kept.
+    changed: BTreeSet<PathBuf>,
     /// The repositories whose folder is outside the place, reached through a link or not: their
     /// agent folders are not looked at, and the result says so.
     unreached: Vec<PathBuf>,
@@ -157,6 +160,9 @@ pub struct Restored {
     /// Changed, but too large to have been kept, below a folder that is no longer a real one, or
     /// the disk refused to put it back.
     pub left: Vec<String>,
+    /// Of `left`, those written while the agent folders were noted, before the run: how they
+    /// were before it is not known, and they are moved to `kept`.
+    pub changed: Vec<String>,
     /// Where what was removed or overwritten was moved, when there was any.
     pub kept: Option<PathBuf>,
     /// The place has more entries than are looked at: what is past them was not checked.
@@ -216,8 +222,12 @@ impl Snapshot {
             &skipped,
             Some(&mut contents),
         );
-        let (mut entries, mut complete, mut whole) =
-            (walked.entries, walked.complete, walked.whole);
+        let (mut entries, mut complete, mut whole, mut changed) = (
+            walked.entries,
+            walked.complete,
+            walked.whole,
+            walked.changed,
+        );
         let mut tops = own_tops;
         for (at, snapshot) in inside {
             tops.extend(snapshot.tops.iter().map(|top| at.join(top)));
@@ -234,6 +244,7 @@ impl Snapshot {
                     .iter()
                     .map(|(path, content)| (at.join(path), content.clone())),
             );
+            changed.extend(snapshot.changed.iter().map(|path| at.join(path)));
             complete &= snapshot.complete;
             unreached.extend(snapshot.unreached.iter().cloned());
         }
@@ -246,6 +257,7 @@ impl Snapshot {
             tops,
             whole,
             contents,
+            changed,
             unreached,
             missing: false,
         }
@@ -337,15 +349,20 @@ impl Snapshot {
                 }
                 _ => {}
             }
-            let put = match now {
+            let moved = match now {
                 Some(Kind::Folder) => remove_folder(top, path),
                 Some(_) => keep(top, path, kept, &mut restored.kept),
                 None => Ok(()),
-            }
-            .and_then(|()| self.write(top, path, kind));
-            match put {
+            };
+            let kept_aside = moved.is_ok() && now.is_some_and(|now| *now != Kind::Folder);
+            match moved.and_then(|()| self.write(top, path, kind)) {
                 Ok(()) => restored.put_back.push(shown(path)),
-                Err(_) => restored.left.push(shown(path)),
+                Err(_) => {
+                    if kept_aside && self.changed.contains(path) {
+                        restored.changed.push(shown(path));
+                    }
+                    restored.left.push(shown(path));
+                }
             }
         }
         restored
@@ -520,7 +537,7 @@ fn read_open(file: &std::fs::File) -> std::io::Result<Vec<u8>> {
 
 /// `read_file`, when the file read is still the one `noted`: the same inode, size and times,
 /// looked at once it is read, so that a write before or while it was read is seen.
-fn read_noted(folder: BorrowedFd, name: &OsStr, noted: &Kind) -> std::io::Result<Vec<u8>> {
+fn read_noted(folder: BorrowedFd, name: &OsStr, noted: &Kind) -> std::io::Result<Option<Vec<u8>>> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | crate::nofollow::READ;
     let file = std::fs::File::from(rustix::fs::openat(folder, name, flags, Mode::empty())?);
     let content = read_open(&file)?;
@@ -539,9 +556,9 @@ fn read_noted(folder: BorrowedFd, name: &OsStr, noted: &Kind) -> std::io::Result
         || (stat.st_mtime as i64, stat.st_mtime_nsec as i64) != *modified
         || (stat.st_ctime as i64, stat.st_ctime_nsec as i64) != *changed
     {
-        return Err(std::io::Error::other("written since it was noted"));
+        return Ok(None);
     }
-    Ok(content)
+    Ok(Some(content))
 }
 
 /// Copies the file `name` of `folder` to `to`, where it is not yet, a piece at a time: never
@@ -584,6 +601,8 @@ struct Walked {
     complete: bool,
     /// The tops whose agent folders were all looked at, whatever the rest of the place.
     whole: BTreeSet<PathBuf>,
+    /// The files written between the walk and the read of their content.
+    changed: BTreeSet<PathBuf>,
 }
 
 /// A walk of the place, its folders opened below it without going through a link, and what is
@@ -600,6 +619,8 @@ struct Walk<'a> {
     held: u64,
     /// The files not too large to keep and their size, read once all are found.
     wanted: Vec<(PathBuf, u64)>,
+    /// The files of `wanted` written since they were noted.
+    changed: BTreeSet<PathBuf>,
     entries: BTreeMap<PathBuf, Kind>,
 }
 
@@ -621,6 +642,7 @@ fn walk(
         entries: BTreeMap::new(),
         complete: true,
         whole: BTreeSet::new(),
+        changed: BTreeSet::new(),
     };
     let Ok(top) = open_root(root) else {
         return walked;
@@ -635,6 +657,7 @@ fn walk(
         contents,
         held: 0,
         wanted: Vec::new(),
+        changed: BTreeSet::new(),
         entries: BTreeMap::new(),
     };
     let mut seen = 0;
@@ -648,6 +671,7 @@ fn walk(
         && walked.whole.len() == tops.len();
     walk.read_wanted();
     walked.entries = walk.entries;
+    walked.changed = walk.changed;
     walked
 }
 
@@ -734,11 +758,15 @@ impl Walk<'_> {
             };
             // Written since it was noted, its content is not the one before the run: none is
             // kept, and a change is said, not put back.
-            if let Ok(content) = read_noted(folder.as_fd(), name, &self.entries[&path])
-                && self.held + content.len() as u64 <= KEPT_TOTAL
-            {
-                self.held += content.len() as u64;
-                contents.insert(path, content);
+            match read_noted(folder.as_fd(), name, &self.entries[&path]) {
+                Ok(Some(content)) if self.held + content.len() as u64 <= KEPT_TOTAL => {
+                    self.held += content.len() as u64;
+                    contents.insert(path, content);
+                }
+                Ok(None) => {
+                    self.changed.insert(path);
+                }
+                _ => {}
             }
         }
     }
@@ -790,7 +818,14 @@ fn top_of(path: &Path) -> Option<PathBuf> {
 /// What the run's result says of the agent folders it changed, once put back.
 pub fn said(restored: &Restored) -> Option<String> {
     let mut text = String::new();
-    if !restored.put_back.is_empty() || !restored.left.is_empty() {
+    // Those written while the agent folders were noted are not the run's writes: said apart.
+    let left: Vec<&String> = restored
+        .left
+        .iter()
+        .filter(|path| !restored.changed.contains(path))
+        .collect();
+    let wrote = !restored.put_back.is_empty() || !left.is_empty();
+    if wrote {
         text = format!(
             "\nflottille: refused: this run wrote in a repository's agent folder ({}): its \
              settings and hooks run programs the next time the user opens that repository with \
@@ -799,7 +834,7 @@ pub fn said(restored: &Restored) -> Option<String> {
             restored
                 .put_back
                 .iter()
-                .chain(&restored.left)
+                .chain(left.iter().copied())
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -810,10 +845,13 @@ pub fn said(restored: &Restored) -> Option<String> {
                 restored.put_back.join(", ")
             ));
         }
-        if !restored.left.is_empty() {
+        if !left.is_empty() {
             text.push_str(&format!(
                 "; Flottille could not put back: {}, tell the user",
-                restored.left.join(", ")
+                left.iter()
+                    .map(|path| path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if let Some(kept) = &restored.kept {
@@ -822,6 +860,26 @@ pub fn said(restored: &Restored) -> Option<String> {
                 kept.display()
             ));
         }
+    }
+    if !restored.changed.is_empty() {
+        let kept = restored
+            .kept
+            .as_deref()
+            .map_or("Flottille's state folder".into(), |kept| {
+                kept.display().to_string()
+            });
+        text.push_str(&format!(
+            "{}{} changed while Flottille noted the agent folders of this place at the run's \
+             start, so how they were before it is not known: they are not put back but moved to \
+             {}, tell the user",
+            if text.is_empty() {
+                "\nflottille: "
+            } else {
+                "; "
+            },
+            restored.changed.join(", "),
+            kept
+        ));
     }
     if restored.unchecked {
         text.push_str(&format!(
@@ -863,7 +921,7 @@ pub fn said(restored: &Restored) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    if !restored.put_back.is_empty() || !restored.left.is_empty() {
+    if wrote {
         text.push_str("; ask the user to make the change");
     }
     text.push('\n');
@@ -1115,10 +1173,13 @@ impl Guards {
                             .map(|group| {
                                 let (closed, closing) = watch::channel(false);
                                 group.closing = Some(closing);
-                                (group.snapshot.clone(), closed, group.marker.clone())
+                                let (snapshot, marker) =
+                                    (group.snapshot.clone(), group.marker.clone());
+                                (snapshot, closed, marker, group.root.clone())
                             });
-                        if let Some((snapshot, closed, marker)) = dead {
-                            put_back_again(self.groups.clone(), snapshot, closed, marker).await;
+                        if let Some((snapshot, closed, marker, root)) = dead {
+                            put_back_again(self.groups.clone(), snapshot, closed, marker, root)
+                                .await;
                         }
                     }
                 }
@@ -1246,12 +1307,17 @@ async fn split(
             }
             let (closed, closing) = watch::channel(false);
             group.closing = Some(closing);
-            ended.push((group.snapshot.clone(), closed, group.marker.clone()));
+            ended.push((
+                group.snapshot.clone(),
+                closed,
+                group.marker.clone(),
+                group.root.clone(),
+            ));
             groups.push(group);
         }
     }
-    for (snapshot, closed, marker) in ended {
-        put_back_again(groups.clone(), snapshot, closed, marker).await;
+    for (snapshot, closed, marker, root) in ended {
+        put_back_again(groups.clone(), snapshot, closed, marker, root).await;
     }
 }
 
@@ -1360,6 +1426,7 @@ async fn put_back_again(
     snapshot: watch::Receiver<Option<Taken>>,
     closed: watch::Sender<bool>,
     marker: PathBuf,
+    root: PathBuf,
 ) {
     let run = marker
         .file_stem()
@@ -1368,9 +1435,45 @@ async fn put_back_again(
     let restored = tokio::spawn(put_back(groups, snapshot, closed, marker, run.clone()))
         .await
         .ok();
-    if let Some(text) = restored.as_ref().and_then(said) {
-        eprintln!("flottille: the agent folders guarded by the run {run}:{text}");
+    if let Some(line) = restored.and_then(|restored| logged(&run, &root, &restored)) {
+        eprintln!("{line}");
     }
+}
+
+/// The daemon's log line of a put-back of `root` done again, the run `run` having started
+/// guarding it: no agent reads it.
+fn logged(run: &str, root: &Path, restored: &Restored) -> Option<String> {
+    let mut said = Vec::new();
+    if !restored.put_back.is_empty() {
+        said.push(format!("put back {}", restored.put_back.join(", ")));
+    }
+    if !restored.left.is_empty() {
+        said.push(format!("could not put back {}", restored.left.join(", ")));
+    }
+    if let Some(kept) = &restored.kept {
+        said.push(format!(
+            "kept what it removed or replaced in {}",
+            kept.display()
+        ));
+    }
+    if restored.missing {
+        said.push("had no snapshot to put back from".into());
+    }
+    if restored.unchecked {
+        said.push("could not check all its agent folders".into());
+    }
+    if !restored.unreached.is_empty() {
+        said.push(format!("did not check {}", restored.unreached.join(", ")));
+    }
+    if said.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "flottille daemon: the put-back of the agent folders of {}, guarded since the run {run} \
+         and left undone, was done again: it {}",
+        root.display(),
+        said.join("; ")
+    ))
 }
 
 #[cfg(test)]
@@ -2220,6 +2323,61 @@ mod tests {
         let restored = snapshot.restore("run");
         assert_eq!(restored.left, [".claude/settings.json"]);
         assert!(!settings.exists());
+    }
+
+    #[test]
+    fn a_file_changed_while_it_was_noted_is_said_changed_and_where_it_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let settings = root.join(".claude/settings.json");
+        made(&settings, "{}\n");
+        let planted = settings.clone();
+        racing(".claude/settings.json", move || {
+            made(&planted, "{\"model\": \"m\"}\n")
+        });
+        let kept = dir.path().join("kept");
+        let snapshot = Snapshot::take(&root, None, &kept);
+
+        let restored = snapshot.restore("run");
+
+        assert_eq!(restored.changed, [".claude/settings.json"]);
+        assert!(kept.join("run/.claude/settings.json").exists());
+        let text = said(&restored).unwrap();
+        // Not a write of the run's: what it is, and where the user finds it.
+        assert!(!text.contains("this run wrote"), "{text}");
+        assert!(!text.contains("make the change"), "{text}");
+        assert!(
+            text.contains(".claude/settings.json changed while"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&kept.join("run").display().to_string()),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_redone_put_back_is_logged_in_the_daemon_s_own_words() {
+        let restored = Restored {
+            put_back: vec![".claude/settings.json".into()],
+            kept: Some(PathBuf::from("/kept/dead")),
+            ..Restored::default()
+        };
+
+        let line = logged("dead", Path::new("/place"), &restored).unwrap();
+
+        // Told to no agent: it never speaks to one.
+        assert!(!line.contains("this run"), "{line}");
+        assert!(!line.contains("tell the user"), "{line}");
+        assert!(line.starts_with("flottille daemon: "), "{line}");
+        assert!(line.contains("/place"), "{line}");
+        assert!(line.contains("dead"), "{line}");
+        assert!(line.contains(".claude/settings.json"), "{line}");
+        assert!(line.contains("/kept/dead"), "{line}");
+        assert_eq!(
+            logged("dead", Path::new("/place"), &Restored::default()),
+            None
+        );
     }
 
     #[test]
