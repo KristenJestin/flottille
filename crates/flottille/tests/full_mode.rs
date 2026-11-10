@@ -1355,3 +1355,45 @@ fn a_place_guarded_when_the_daemon_stopped_tells_the_user_at_its_next_start() {
     assert!(text.contains("stopped"), "{text}");
     assert!(std::fs::read_dir(&markers).unwrap().next().is_none());
 }
+
+#[test]
+fn a_workspace_setup_line_that_writes_an_agent_folder_is_put_back_and_told() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (_, _, _) = session(&user);
+    // A setup line runs what the repository holds, which an agent may have written.
+    let main = user.path("work/app");
+    let packed = user.path("packed");
+    std::fs::create_dir_all(packed.join(".claude")).unwrap();
+    std::fs::write(packed.join(".claude/settings.json"), HOOK).unwrap();
+    let made = std::process::Command::new("tar")
+        .arg("cf")
+        .arg(main.join("hooks.tar"))
+        .args(["-C", packed.to_str().unwrap(), ".claude"])
+        .status()
+        .unwrap();
+    assert!(made.success());
+    user.git(&main, &["add", "hooks.tar"]);
+    user.git(&main, &["commit", "--quiet", "-m", "hooks"]);
+    user.git(&main, &["push", "--quiet", "origin", "main"]);
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\n[[setup]]\nrun = \"tar xf hooks.tar\"\n");
+    std::fs::write(&file, text).unwrap();
+
+    let folder = workspace(&user, "set");
+
+    assert!(folder.join("hooks.tar").exists());
+    assert!(!folder.join(".claude").exists());
+    let inbox = user.call("inbox.list", json!({})).unwrap();
+    let entry = inbox["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "put_back")
+        .unwrap_or_else(|| panic!("{inbox}"));
+    assert_eq!(entry["workspace"], "set");
+    let text = entry["text"].as_str().unwrap();
+    assert!(text.contains(".claude/settings.json"), "{text}");
+}

@@ -81,8 +81,9 @@ pub struct Live {
     /// the user), its project and its name: a second waits while the services it needs start,
     /// then joins the first.
     serving: Mutex<HashMap<Serving, Arc<tokio::sync::Mutex<()>>>>,
-    /// The agent folders of each place an agent's run goes on in (`agent_folders`).
-    guards: crate::agent_folders::Guards,
+    /// The agent folders of each place an agent's run, or a workspace's setup line, goes on in
+    /// (`agent_folders`).
+    pub(crate) guards: crate::agent_folders::Guards,
 }
 
 /// A task that keeps running, by its owner, its project and its name.
@@ -951,7 +952,11 @@ fn guarded_run(run: &Run) -> Value {
 /// Tells the user what a put-back did, or could not check: the result it is said in may be
 /// another agent's run, which ended last in the place, or none when the run did not start
 /// (`run.agent_folders_put_back`, `run.agent_folders_unchecked`).
-fn tell_put_back(daemon: &Daemon, about: &Value, restored: &crate::agent_folders::Restored) {
+pub(crate) fn tell_put_back(
+    daemon: &Daemon,
+    about: &Value,
+    restored: &crate::agent_folders::Restored,
+) {
     let with = |more: Value| {
         let mut data = about.clone();
         data.as_object_mut()

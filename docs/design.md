@@ -750,7 +750,10 @@ line names, every program a wrapper or a runner runs included:
   checked out or merged, a stash popped, a folder copied, an archive unpacked): what an agent's
   run changed in the agent folders of its place is put back as it was once the run ends, and
   its result says it was refused, naming the files. Only the runs of a line the gate held (to
-  judge or base, whoever let it through) and the runs of a task are guarded so: a line it let
+  judge or base, whoever let it through), the runs of a task and a workspace's setup lines,
+  which run what its repositories hold, are guarded so (a setup line's put-back is told in the
+  inbox, of no agent, and in its failure); a service, which runs in its own folder until it
+  stops, is not. A line the gate let
   through at once only reads, or writes the files it names. Runs that overlap in a place, or in
   places one inside the other (a repository's folder in its project's), share one guard: the
   first notes the agent folders, a run in an outer place takes in what the inner ones noted,
