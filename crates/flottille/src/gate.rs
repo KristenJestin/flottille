@@ -3325,13 +3325,17 @@ fn moves_agent_folder(call: &Call, layer: &[String]) -> Option<String> {
     let folder = call.paths.first()?;
     let at = layer.iter().position(|word| word == "rm" || word == "mv")?;
     let shown = || shown_words(layer);
-    // Another folder or work tree: what the words name is not where the gate looks.
-    if layer[1..at]
+    // Another folder, repository or work tree, or pathspecs read another way (`--icase-pathspecs`
+    // makes `DOCS` reach `docs`): what the words name is not where the gate looks. `-c` was
+    // judged on its own.
+    if git_globals(&layer[1..at])
+        .1
         .iter()
-        .any(|word| word.starts_with("-C") || word.starts_with("--work-tree"))
+        .any(|(option, _)| *option != "-c")
     {
         return Some(format!(
-            "{} moves or removes files of another folder, which may hold an agent folder",
+            "{} moves or removes files after a global option of git, which may reach an agent \
+             folder",
             shown()
         ));
     }
@@ -4507,6 +4511,29 @@ mod tests {
                 fixture.run(line)
             );
         }
+    }
+
+    #[test]
+    fn git_rm_after_a_global_option_is_judged() {
+        // `--icase-pathspecs` makes `DOCS` reach `docs`, which the gate does not look for: a global
+        // option may change what the words name.
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join("docs/.claude/settings.json"));
+        made(&fixture.root.join("src/a.rs"));
+        for line in [
+            "git --icase-pathspecs rm -r DOCS",
+            "git --literal-pathspecs rm -r docs",
+            "git --no-pager mv src lib",
+            "git --git-dir=.git rm -r src",
+            "git --git-dir .git rm -r src",
+        ] {
+            assert!(
+                matches!(fixture.run(line), Verdict::Ask(_)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+        assert_eq!(fixture.run("git rm -r src"), Verdict::Allow);
     }
 
     #[test]
