@@ -481,10 +481,11 @@ As built (S3), before the redesign: the window reads `extension.list` at its sta
 `extension.changed`, `spec.*` and a project's change. Its module
 `crates/flottille-window/src/extensions/` draws an extension's page of Settings' Features and its
 page of the project's Features (`project_page`, while it is on globally; a feature off there is a
-faded row whose "Off in Settings" opens its global page) from the declaration, the global page
-also naming the projects that turn it off (`projects_line`). A setting is drawn by its kind (a language is a select, its first option the value it
-has when none is set there). Specs' project tab is a tab of the project page beside Pull requests
-and Tickets, its action on a row is the ticket row's button, its page opens from a spec's row.
+faded row in its place whose "Off in Settings" opens its global page) from the declaration, the
+global page also naming the projects that turn it off (`projects_line`). A setting is drawn by its
+kind (a language is a select, its first option the value it has when none is set there). Specs'
+project tab is a tab of the project page beside Pull requests and Tickets, its action on a row is
+the ticket row's button, its page opens from a spec's row.
 Back to draft is one click from Ready, and asks in a confirmation from In progress or Review,
 which only the development (S5) reaches.
 
