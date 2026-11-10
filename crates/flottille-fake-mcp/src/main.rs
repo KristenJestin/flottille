@@ -23,13 +23,14 @@
 //!  "exit": 3,
 //!  "notify": {"when": "<file>", "times": 50},
 //!  "list_sleep_ms": 100,
-//!  "endless_listing": true}
+//!  "endless_listing": true,
+//!  "list_error": "the text of a JSON-RPC error answered to every listing"}
 //! ```
 //!
 //! On stdio, `tools/list` reads the script again: a test changes the tools of a running server
 //! by writing it. `notify` says its tools changed `times` times, at once, when the file `when`
 //! appears; `list_sleep_ms` slows each listing; `endless_listing` answers every page with a next
-//! one.
+//! one; `list_error` fails each listing with that text.
 //!
 //! An answer is, in this order of precedence, any of: `sleep_ms` (waits first), `ask`
 //! (`"sampling"`, `"elicitation"` or `"roots"`: sends that request to the client and answers with
@@ -134,6 +135,11 @@ fn main() {
                 write_log(&log, json!({"event": "list", "cursor": params["cursor"]}));
                 if let Some(ms) = script["list_sleep_ms"].as_u64() {
                     std::thread::sleep(Duration::from_millis(ms));
+                }
+                if let Some(message) = script["list_error"].as_str() {
+                    send(&json!({"jsonrpc": "2.0", "id": id,
+                        "error": {"code": -32000, "message": message}}));
+                    continue;
                 }
                 let mut result = json!({"tools": script["tools"]});
                 if script["endless_listing"] == true {

@@ -2440,6 +2440,24 @@ fn settings_says(project: &Project, call: &ProjectCall) -> Result<Vec<String>, O
                 .check()
                 .map_err(|error| Outcome::Refused(format!("refused: the tracker{error}")))?;
             says.push(format!("Set the tracker to {}", checked.said()));
+            // The binding of a worklog entry is to the project's worklog, not to a host: the user
+            // approves where its secret goes.
+            if let ProjectTracker::Jira {
+                site,
+                worklog_token: Some(entry),
+                ..
+            } = &checked
+            {
+                let sent_already = matches!(&project.tracker, Some(ProjectTracker::Jira {
+                    site: was, worklog_token: Some(had), ..
+                }) if was == site && had == entry);
+                if !sent_already {
+                    says.push(format!(
+                        "Log time with it: the secret of the vault entry `{entry}` will be sent \
+                         to {site}"
+                    ));
+                }
+            }
         }
         Some(None) => says.push("Remove the tracker".into()),
         None => {}
@@ -2694,6 +2712,45 @@ mod tests {
                 repository: "acme/other".into()
             })
         );
+    }
+
+    #[test]
+    fn changing_the_tracker_host_says_the_token_goes_there() {
+        let mut project = project_with(None);
+        project.tracker = Some(ProjectTracker::Jira {
+            site: "acme.atlassian.net".into(),
+            projects: vec!["ABC".into()],
+            worklog_token: Some("jira-time".into()),
+        });
+        let says = |tracker: Value| {
+            let call = serde_json::from_value::<ProjectCall>(
+                json!({"action": "set_settings", "tracker": tracker}),
+            )
+            .unwrap();
+            settings_says(&project, &call).ok().unwrap().join("\n")
+        };
+        let goes = "the secret of the vault entry `jira-time` will be sent to";
+
+        // Another host, the same entry: the user approves where the token goes.
+        let moved = says(json!({"kind": "jira", "site": "elsewhere.atlassian.net",
+            "projects": ["ABC"], "worklog_token": "jira-time"}));
+        assert!(
+            moved.contains(&format!("{goes} elsewhere.atlassian.net")),
+            "{moved}"
+        );
+        // Another entry, the same host.
+        let swapped = says(json!({"kind": "jira", "site": "acme.atlassian.net",
+            "projects": ["ABC"], "worklog_token": "other-time"}));
+        assert!(
+            swapped.contains(
+                "the secret of the vault entry `other-time` will be sent to acme.atlassian.net"
+            ),
+            "{swapped}"
+        );
+        // The same host and entry, other projects: nothing new is sent anywhere.
+        let same = says(json!({"kind": "jira", "site": "acme.atlassian.net",
+            "projects": ["ABC", "DEF"], "worklog_token": "jira-time"}));
+        assert!(!same.contains("will be sent to"), "{same}");
     }
 
     #[test]

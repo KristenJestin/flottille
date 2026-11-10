@@ -63,15 +63,54 @@ struct Server {
     leader: Mutex<Option<u32>>,
     /// Why it failed to start, until it starts.
     failing: Mutex<Option<String>>,
-    /// Its tools listed again after it said they changed: one listing at a time.
+    /// Its tools listed again after it said they changed: one listing at a time, of the server
+    /// that runs.
     noticed: Mutex<Noticed>,
 }
 
 #[derive(Default)]
 struct Noticed {
+    /// The start of the server it is of: a new one starts afresh, whatever the stopped one left.
+    start: u64,
     listing: bool,
     /// It said so again while a listing ran: one more listing once it ends.
     again: bool,
+}
+
+impl Server {
+    /// A notice of the server of start `start`: whether to list its tools now, or once the
+    /// listing that runs ends.
+    fn noticed(&self, start: u64) -> bool {
+        let mut noticed = self.noticed.lock().unwrap();
+        if noticed.start != start {
+            *noticed = Noticed {
+                start,
+                listing: true,
+                again: false,
+            };
+            return true;
+        }
+        if noticed.listing {
+            noticed.again = true;
+            return false;
+        }
+        noticed.listing = true;
+        true
+    }
+
+    /// A listing of the server of start `start` ended: whether to list again.
+    fn again(&self, start: u64) -> bool {
+        let mut noticed = self.noticed.lock().unwrap();
+        if noticed.start != start {
+            return false;
+        }
+        if !noticed.again {
+            noticed.listing = false;
+            return false;
+        }
+        noticed.again = false;
+        true
+    }
 }
 
 /// Why a server's tools could not be listed.
@@ -170,6 +209,8 @@ pub fn failing(daemon: &Daemon, name: &str) -> Option<String> {
 struct Handler {
     daemon: Weak<Daemon>,
     name: String,
+    /// The start of the server it handles.
+    start: u64,
 }
 
 fn refused(what: &str) -> ErrorData {
@@ -223,24 +264,17 @@ impl ClientHandler for Handler {
         else {
             return;
         };
-        {
-            let mut noticed = server.noticed.lock().unwrap();
-            if noticed.listing {
-                noticed.again = true;
-                return;
-            }
-            noticed.listing = true;
+        if !server.noticed(self.start) {
+            return;
         }
         let (daemon, name, peer) = (self.daemon.clone(), self.name.clone(), context.peer.clone());
+        let start = self.start;
         tokio::spawn(async move {
             loop {
                 compare(&daemon, &name, &peer).await;
-                let mut noticed = server.noticed.lock().unwrap();
-                if !noticed.again {
-                    noticed.listing = false;
+                if !server.again(start) {
                     return;
                 }
-                noticed.again = false;
             }
         });
     }
@@ -263,7 +297,11 @@ async fn compare(daemon: &Weak<Daemon>, name: &str, peer: &Peer<RoleClient>) {
         }
         Err(Unlisted::Endless(why)) => vec![why],
         Err(Unlisted::Failed(why)) => {
-            eprintln!("flottille daemon: connection {name}: {why}");
+            let why = flottille_core::secrets::mask(&why, &std::env::vars_os().collect());
+            eprintln!(
+                "flottille daemon: connection {name}: {}",
+                super::short(&why)
+            );
             return;
         }
     };
@@ -290,18 +328,19 @@ async fn secrets(
     Ok(read)
 }
 
-/// Starts the server as declared, and reads what it announces.
+/// Starts the server as declared, and reads what it announces; why it could not, in its own words
+/// when it said them, neither masked nor cut.
 async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Running, String> {
-    let handler = Handler {
-        daemon: Arc::downgrade(daemon),
-        name: declaration.name.clone(),
-    };
     let start = daemon
         .extensions
         .connections
         .started
         .fetch_add(1, Ordering::Relaxed);
-    let could_not = |why: String| format!("the connection could not start: {why}");
+    let handler = Handler {
+        daemon: Arc::downgrade(daemon),
+        name: declaration.name.clone(),
+        start,
+    };
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
             let folder = daemon
@@ -310,12 +349,9 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                 .join("connections")
                 .join(&declaration.name);
             flottille_core::paths::ensure_private_dir(&folder)
-                .map_err(|error| could_not(error.to_string()))?;
-            let mut env = crate::runs::beside(daemon).map_err(could_not)?;
-            for (name, secret) in secrets(daemon, &declaration.name, &declaration.env)
-                .await
-                .map_err(could_not)?
-            {
+                .map_err(|error| error.to_string())?;
+            let mut env = crate::runs::beside(daemon)?;
+            for (name, secret) in secrets(daemon, &declaration.name, &declaration.env).await? {
                 env.insert(OsString::from(name), OsString::from(secret));
             }
             let mut command = tokio::process::Command::new(&words[0]);
@@ -329,12 +365,12 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
             let mut child = crate::children::spawn(crate::children::in_own_session(&mut command))
-                .map_err(|error| could_not(format!("{}: {error}", words[0])))?;
+                .map_err(|error| format!("{}: {error}", words[0]))?;
             let leader = child.id();
             let (Some(stdout), Some(stdin), Some(stderr)) =
                 (child.stdout.take(), child.stdin.take(), child.stderr.take())
             else {
-                return Err(could_not("its streams could not be opened".into()));
+                return Err("its streams could not be opened".into());
             };
             // The first line of its error output says why it failed, when it does.
             let first = Arc::new(Mutex::new(None::<String>));
@@ -370,25 +406,21 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                         (None, Ok(Err(error))) => error.to_string(),
                         (None, Ok(Ok(_))) => unreachable!("matched above"),
                     };
-                    return Err(could_not(why));
+                    return Err(why);
                 }
             }
         }
         Reach::Url(url) => {
             let mut headers = HashMap::new();
-            for (name, secret) in secrets(daemon, &declaration.name, &declaration.headers)
-                .await
-                .map_err(could_not)?
-            {
+            for (name, secret) in secrets(daemon, &declaration.name, &declaration.headers).await? {
                 let name = http::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|error| could_not(error.to_string()))?;
-                let mut value = http::HeaderValue::from_str(&secret).map_err(|_| {
-                    could_not(format!("the vault entry for {name} is no header's value"))
-                })?;
+                    .map_err(|error| error.to_string())?;
+                let mut value = http::HeaderValue::from_str(&secret)
+                    .map_err(|_| format!("the vault entry for {name} is no header's value"))?;
                 value.set_sensitive(true);
                 headers.insert(name, value);
             }
-            let client = http_client(url).map_err(could_not)?;
+            let client = http_client(url)?;
             let config =
                 StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(headers);
             let transport = StreamableHttpClientTransport::with_client(client, config);
@@ -397,8 +429,8 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                 handler.serve_with_lifecycle(transport, ClientLifecycleMode::Initialize),
             )
             .await
-            .map_err(|_| could_not("it did not answer within 30 seconds".into()))?
-            .map_err(|error| could_not(error.to_string()))?;
+            .map_err(|_| "it did not answer within 30 seconds".to_owned())?
+            .map_err(|error| error.to_string())?;
             (served, None)
         }
     };
@@ -418,7 +450,7 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                 start,
             })
             .await;
-            return Err(could_not(why));
+            return Err(why);
         }
     };
     // Its own words, shown in a cut-off, an event and the inbox: masked from the start.
@@ -550,6 +582,31 @@ pub async fn stop(daemon: &Arc<Daemon>, name: &str) {
     }
 }
 
+/// Stops the connection's server, after its running call, and does `then` before another call or
+/// review may start one: what `then` writes is what the next server is compared with.
+pub async fn stopped<T>(daemon: &Arc<Daemon>, name: &str, then: impl FnOnce() -> T) -> T {
+    let server = server_of(daemon, name);
+    let (stopped, done) = holding(&server, then).await;
+    if stopped {
+        super::changed_event(daemon, name, None);
+    }
+    done
+}
+
+/// `stopped` on the server itself: whether one ran, and what `then` gave.
+async fn holding<T>(server: &Server, then: impl FnOnce() -> T) -> (bool, T) {
+    let mut turn = server.turn.lock().await;
+    let stopped = match turn.take() {
+        Some(running) => {
+            *server.leader.lock().unwrap() = None;
+            stop_running(running).await;
+            true
+        }
+        None => false,
+    };
+    (stopped, then())
+}
+
 /// Every server stops with the daemon, a call running or not.
 pub async fn stop_all(daemon: &Arc<Daemon>) {
     let servers: Vec<Arc<Server>> = daemon
@@ -574,7 +631,18 @@ pub async fn stop_all(daemon: &Arc<Daemon>) {
     }
 }
 
-/// Starts the server afresh for a review: what it announces now.
+/// Why the server could not start, masked by `mask` before it is cut: a secret is never cut in
+/// two, half of it left unmasked.
+fn not_started(why: &str, mask: impl FnOnce(&str) -> String) -> String {
+    format!(
+        "the connection could not start: {}",
+        super::short(&mask(why))
+    )
+}
+
+/// Starts the server afresh for a review: what it announces now. One that is not what the
+/// connection was accepted as is not kept: the next call starts it again and meets it against
+/// the pin, which a call does not do with a server already running.
 pub async fn review(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Listing, String> {
     let server = server_of(daemon, &declaration.name);
     let mut turn = server.turn.lock().await;
@@ -585,13 +653,19 @@ pub async fn review(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<L
     let running = match start(daemon, declaration).await {
         Ok(running) => running,
         Err(why) => {
-            let why = flottille_core::secrets::mask_also(&why, &std::env::vars_os().collect(), &[]);
+            let why = not_started(&why, |why| {
+                flottille_core::secrets::mask(why, &std::env::vars_os().collect())
+            });
             *server.failing.lock().unwrap() = Some(why.clone());
             return Err(why);
         }
     };
     let listing = running.listing.clone();
-    keep(daemon, &declaration.name, &server, &mut turn, running);
+    let pin = super::row(daemon, &declaration.name).pin;
+    match pin.is_some_and(|pin| !super::changes(&pin, &listing).is_empty()) {
+        true => stop_running(running).await,
+        false => keep(daemon, &declaration.name, &server, &mut turn, running),
+    }
     Ok(listing)
 }
 
@@ -626,7 +700,7 @@ pub async fn call(
         let running = match start(daemon, &declaration).await {
             Ok(running) => running,
             Err(why) => {
-                let why = crate::mcp::masked(&why, &grant.place);
+                let why = not_started(&why, |why| crate::mcp::masked(why, &grant.place));
                 *server.failing.lock().unwrap() = Some(why.clone());
                 drop(turn);
                 super::changed_event(daemon, name, Some(&why));
@@ -743,4 +817,39 @@ fn failed_framed(what: &str, masked: &str) -> Outcome {
          </connection_answer>",
         super::framed(masked)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accept_holds_the_server_until_the_pin_is_written() {
+        let server = Server::default();
+        let (_, held) = holding(&server, || server.turn.try_lock().is_err()).await;
+        assert!(
+            held,
+            "a review could start a server before the pin is written"
+        );
+    }
+
+    #[test]
+    fn a_notice_after_a_restart_lists_the_new_server() {
+        let server = Server::default();
+        assert!(server.noticed(1), "the first server's notice lists it");
+        assert!(!server.noticed(1), "another waits for that listing");
+        // Stopped while it listed, the first server is followed by a second, which says its
+        // tools changed: they are listed at once, not left to the stopped server's loop.
+        assert!(
+            server.noticed(2),
+            "the new server's notice waited for a stopped one"
+        );
+        assert!(
+            !server.again(1),
+            "the stopped server's loop listed it again"
+        );
+        assert!(!server.noticed(2), "the new server's listing runs");
+        assert!(server.again(2), "the notice during it lists once more");
+        assert!(!server.again(2));
+    }
 }
