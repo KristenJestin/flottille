@@ -1101,9 +1101,11 @@ impl SettingsPage {
         .hint(DEVELOPER_HINT)
         .disabled(self.developer.is_none() || self.developer_pending.is_some())
         .on_click(cx.listener(|this, _, _, cx| this.flip_developer(cx)));
+        // The path is the log's: it comes with the switch, folds away with it.
         let file = self
             .developer
             .as_ref()
+            .filter(|_| self.developer_on())
             .map(|d| SharedString::from(d.file.clone()));
         let card = div()
             .id("developer")

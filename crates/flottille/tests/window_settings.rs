@@ -519,3 +519,35 @@ fn check_again_reads_the_providers_anew_from_the_section_s_header(cx: &mut TestA
         Some("Off: sessions that run keep running")
     );
 }
+
+#[gpui_kit::test]
+fn the_log_path_unfolds_only_with_developer_mode(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = window(&user, cx);
+    let page = open_settings(&shell, cx);
+    tab(&shell, cx, "general");
+    until(&shell, cx, "the developer mode is read", |cx| {
+        page.read_with(cx, |p, _| p.developer().is_some())
+    });
+    settle(cx);
+    assert!(visible(cx, "developer-switch"));
+    assert!(!present(cx, "developer-file"), "off: no path");
+
+    click(cx, "developer-switch");
+    until(&shell, cx, "the daemon says it is on", |cx| {
+        page.read_with(cx, |p, _| p.developer_on())
+    });
+    settle(cx);
+    assert!(visible(cx, "developer-file"), "on: the path unfolds");
+    assert_eq!(
+        label(cx, "developer-file").as_deref(),
+        Some(user.path("state/flottille/developer.log").to_str().unwrap())
+    );
+
+    click(cx, "developer-switch");
+    until(&shell, cx, "the daemon says it is off", |cx| {
+        page.read_with(cx, |p, _| !p.developer_on())
+    });
+    settle(cx);
+    assert!(!present(cx, "developer-file"), "off again: it folds away");
+}

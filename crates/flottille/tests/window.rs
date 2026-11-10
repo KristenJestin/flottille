@@ -12217,7 +12217,7 @@ fn the_developer_mode_is_switched_in_settings_with_its_log_s_path_beside_the_swi
     assert!(!page.read_with(cx, |page, _| page.developer_on()));
     cx.update(|window, _| {
         assert!(window.find("developer-switch-label").visible());
-        assert!(window.find("developer-file").visible());
+        assert!(window.try_find("developer-file").is_none(), "off: no path");
     });
     assert_eq!(
         page.read_with(cx, |page, _| page.developer().unwrap().file.clone()),
