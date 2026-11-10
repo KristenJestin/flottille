@@ -422,3 +422,52 @@ fn the_composer_s_toggles_are_never_filled_with_the_accent() {
         found.join("\n")
     );
 }
+
+// ── The kit's rules, held on the window's sources ──────────────────────────────────────────────
+
+/// The lines that draw a black of their own: a shadow is a role of the palette
+/// (`Palette::shadow`), lighter in Light.
+fn own_blacks(source: &str) -> Vec<(usize, String)> {
+    code(source)
+        .filter(|(_, line)| line.contains("hsla(0., 0., 0."))
+        .map(|(at, line)| (at, line.to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_black_of_its_own_is_found() {
+    let found = own_blacks("color: hsla(0., 0., 0., 0.5),\n// hsla(0., 0., 0., 1.)\n");
+    assert_eq!(found, vec![(1, "color: hsla(0., 0., 0., 0.5),".to_owned())]);
+}
+
+#[test]
+fn no_overlay_of_the_window_draws_a_shadow_in_a_black_of_its_own() {
+    let found = offenders(own_blacks);
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+/// The lines that open GPUI's own tooltip, which follows the pointer: a tooltip is anchored to its
+/// element (`Button::tooltip`, `flottille_ui::tipped`).
+fn pointer_tooltips(source: &str) -> Vec<(usize, String)> {
+    code(source)
+        .filter(|(_, line)| line.contains(".tooltip(|") || line.contains(".tooltip(move |"))
+        .map(|(at, line)| (at, line.to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_tooltip_that_follows_the_pointer_is_found() {
+    let found =
+        pointer_tooltips(".tooltip(|w, cx| view)\n.tooltip(move |w, cx| view)\n.tooltip(\"x\")");
+    assert_eq!(found.len(), 2);
+}
+
+#[test]
+fn no_source_of_the_window_uses_the_tooltip_that_follows_the_pointer() {
+    let found = offenders(pointer_tooltips);
+    assert!(
+        found.is_empty(),
+        "GPUI's tooltip opens under the pointer:\n{}",
+        found.join("\n")
+    );
+}

@@ -162,20 +162,17 @@ fn the_tooltip_of_a_button_whose_menu_is_open_stays_hidden(cx: &mut TestAppConte
 /// GPUI's own `.tooltip(|..| ..)` opens under the pointer: a tooltip is `Button::tooltip`.
 #[test]
 fn no_source_uses_the_tooltip_that_follows_the_pointer() {
-    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut folders = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
     let mut seen = Vec::new();
-    for krate in ["flottille-ui", "flottille-window"] {
-        let mut folders = vec![crates.join(krate).join("src")];
-        while let Some(folder) = folders.pop() {
-            for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    folders.push(path);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    let text = std::fs::read_to_string(&path).unwrap();
-                    if text.contains(".tooltip(|") || text.contains(".tooltip(move |") {
-                        seen.push(path);
-                    }
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                if text.contains(".tooltip(|") || text.contains(".tooltip(move |") {
+                    seen.push(path);
                 }
             }
         }
