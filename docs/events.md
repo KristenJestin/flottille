@@ -1031,7 +1031,7 @@ An agent's run ended and the daemon could not check all the agent folders of its
 | `folder` | Where it ran. |
 | `too_large` | The place is too large: the agent folders right in it and in its repositories were checked, one further down past 500,000 entries was not. Absent from an event of before it, which was one. |
 | `interrupted` | The daemon stopped or crashed while the place was guarded: found at its next start, nothing there was checked nor put back. `agent` and `project` are the run's, `null` when it is not known. |
-| `missing` | The daemon could not note the agent folders before the run: nothing it changed there is known, nor put back. |
+| `missing` | The daemon could not note all the agent folders before the run: nothing it changed there is known, nor put back. A run whose own snapshot failed is refused instead; this is said of runs already going on inside a place whose snapshot failed. |
 | `unreached` | The folders of the place's repositories that are outside it (reached through a link), whose agent folders were not checked. |
 
 #### `run.agent_folders_put_back`
