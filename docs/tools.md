@@ -407,10 +407,12 @@ pending requests.
   daemon's variables named like secrets, every value of the `KEY=VALUE` lines of the place's
   `.env` and `.env.*` files (at its top and each repository's), private keys, URL passwords,
   tokens shaped like the usual providers', and the string value of a quoted key whose name ends,
-  in any case and without `_` or `-`, with `token`, `apikey` or `secret`, as an agent's login
-  file holds them (`accessToken`, `refreshToken` of Claude's `.credentials.json`; `id_token`,
-  `access_token`, `refresh_token`, `OPENAI_API_KEY` of Codex's `auth.json`; `clientSecret`,
-  `primaryApiKey`), wherever it is shown: a diff of a staged one, its value on the next line
+  in any case and without `_` or `-`, with `token`, `apikey`, `secret`, `password` or
+  `authorization`, as an agent's login file holds them (`accessToken`, `refreshToken` of Claude's
+  `.credentials.json`; `id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY` of Codex's
+  `auth.json`; `clientSecret`, `primaryApiKey`; an HTTP header's `Authorization`), but a
+  tokenizer's special tokens (`pad_token`, `bos_token`, `eos_token`, `unk_token`, `sep_token`,
+  `cls_token`, `mask_token`), wherever it is shown: a diff of a staged one, its value on the next line
   after a `+` or `-`, a word diff's `[-"…"-]{+"…"+}` (`flottille_core::secrets`). It is not a
   boundary: a line that reshapes the bytes (`xxd`, `od`) shows them; the gate's refusal of a
   login's paths is (`docs/design.md` §7.1).
