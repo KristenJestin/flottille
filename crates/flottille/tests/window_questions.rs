@@ -1240,3 +1240,38 @@ fn something_else_needs_words_even_with_another_choice(cx: &mut TestAppContext) 
     assert_eq!(answers[2].choices, ["Alice"]);
     assert_eq!(answers[2].text, "Whoever is free");
 }
+
+#[gpui_kit::test]
+fn letting_the_choice_go_folds_and_clears_the_note(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, page, at, cx) = three_asked(&user, cx);
+    click(format!("row-{at}-question-0-option-0"), cx);
+    settle(cx);
+    click(format!("row-{at}-note-0-add"), cx);
+    settle(cx);
+    note(&page, at, 0, "Squash it first.", cx);
+    assert!(has(format!("row-{at}-note-0-frame"), cx));
+
+    // The choice goes, and the note with it.
+    click(format!("row-{at}-question-0-option-0"), cx);
+    settle(cx);
+    assert!(!has(format!("row-{at}-note-0-frame"), cx), "folded");
+    assert!(
+        !has(format!("row-{at}-note-0-add"), cx),
+        "no choice to note"
+    );
+    let card = card_of(&page, at, cx);
+    let kept = card.read_with(cx, |card, cx| card.note(0).read(cx).value().to_string());
+    assert_eq!(kept, "", "emptied");
+
+    // Choosing again offers "+ Add a note" afresh, with nothing written.
+    click(format!("row-{at}-question-0-option-1"), cx);
+    settle(cx);
+    assert_eq!(
+        label(format!("row-{at}-note-0-add"), cx).as_deref(),
+        Some("+ Add a note")
+    );
+    assert!(!has(format!("row-{at}-note-0-frame"), cx));
+    let answers = card.read_with(cx, |card, cx| card.answers(cx));
+    assert_eq!(answers[0].text, "");
+}

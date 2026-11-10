@@ -177,7 +177,7 @@ impl QuestionCard {
 
     /// Picks the option `label` of question `n`, or lets it go: a question of one choice keeps
     /// the last one picked, "Something else…" included.
-    pub fn choose(&mut self, n: usize, label: &str, cx: &mut Context<Self>) {
+    pub fn choose(&mut self, n: usize, label: &str, window: &mut Window, cx: &mut Context<Self>) {
         let multiple = self.questions[n].multiple;
         let chosen = &mut self.chosen[n];
         match chosen.iter().position(|c| c == label) {
@@ -197,15 +197,27 @@ impl QuestionCard {
             .map(|o| o.label.as_str())
             .collect();
         chosen.sort_by_key(|c| order.iter().position(|o| o == c));
+        self.drop_note_without_choice(n, window, cx);
         cx.notify();
+    }
+
+    /// A note goes with a choice: with none left on question `n` it folds away, empty, and
+    /// "+ Add a note" comes back with the next choice.
+    fn drop_note_without_choice(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.chosen[n].is_empty() {
+            return;
+        }
+        self.noting[n] = false;
+        self.notes[n].update(cx, |note, cx| note.set_value("", window, cx));
     }
 
     /// Picks "Something else…" of question `n`, or lets it go: in a question of one choice it
     /// takes the place of the option chosen.
-    pub fn choose_other(&mut self, n: usize, cx: &mut Context<Self>) {
+    pub fn choose_other(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.other[n] = !self.other[n];
         if self.other[n] && !self.questions[n].multiple {
             self.chosen[n].clear();
+            self.drop_note_without_choice(n, window, cx);
         }
         cx.notify();
     }
@@ -320,7 +332,7 @@ impl QuestionCard {
                     let card = card.clone();
                     move |window, cx| {
                         card.update(cx, |card, cx| {
-                            card.choose(n, &label, cx);
+                            card.choose(n, &label, window, cx);
                             window.focus(&card.focus, cx);
                         })
                         .ok();
@@ -342,7 +354,7 @@ impl QuestionCard {
                     let card = card.clone();
                     move |window, cx| {
                         card.update(cx, |card, cx| {
-                            card.choose_other(n, cx);
+                            card.choose_other(n, window, cx);
                             window.focus(&card.focus, cx);
                         })
                         .ok();
