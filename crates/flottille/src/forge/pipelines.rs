@@ -86,6 +86,7 @@ pub(super) async fn call(daemon: &Daemon, agent: &str, place: &Place, asked: For
     match acted(daemon, agent, place, asked).await {
         Outcome::Done(text) => Outcome::Done(hide(text)),
         Outcome::Refused(text) => Outcome::Refused(hide(text)),
+        Outcome::Invalid(text) => Outcome::Invalid(hide(text)),
         Outcome::Failed(text) => Outcome::Failed(hide(text)),
         Outcome::Held(text) => Outcome::Held(hide(text)),
     }

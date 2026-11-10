@@ -117,6 +117,53 @@ fn a_title_too_long_or_on_several_lines_is_refused_with_the_reason() {
     assert!(titled(&user, &id).is_empty());
 }
 
+/// The `agent.tool_served` events of the agent's `session_title` calls, their data.
+fn served(user: &User, agent: &str) -> Vec<Value> {
+    shown(user, agent)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            event["name"] == "agent.tool_served" && event["data"]["tool"] == "session_title"
+        })
+        .map(|event| event["data"].clone())
+        .collect()
+}
+
+#[test]
+fn a_call_refused_for_its_input_says_so_at_its_end_and_another_refusal_does_not() {
+    let user = user();
+    project(&user);
+    let (id, mcp) = root(&user, "look around");
+
+    refused(mcp.call("session_title", json!({"title": "Site"})));
+    refused(mcp.call("session_title", json!({"title": "Rework the\nsite"})));
+    refused(mcp.call("session_title", json!({"title": 7})));
+    let answer = mcp.call(
+        "session_title",
+        json!({"title": "Rework the Flottille site"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    user.call("agent.rename", json!({"agent": id, "title": "The site"}))
+        .unwrap();
+    refused(mcp.call("session_title", json!({"title": "Move the site to Astro"})));
+
+    let ends: Vec<(Value, Value)> = served(&user, &id)
+        .iter()
+        .map(|end| (end["outcome"].clone(), end["input_refused"].clone()))
+        .collect();
+    assert_eq!(
+        ends,
+        [
+            (json!("refused"), json!(true)),
+            (json!("refused"), json!(true)),
+            (json!("refused"), json!(true)),
+            (json!("ok"), Value::Null),
+            (json!("refused"), Value::Null),
+        ]
+    );
+}
+
 #[test]
 fn an_agent_retitles_its_session_while_the_user_has_not_named_it() {
     let user = user();

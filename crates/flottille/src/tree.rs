@@ -514,7 +514,7 @@ pub fn launch_for_extension(
         Failure::new(
             "unavailable",
             match refusal {
-                Outcome::Refused(_) => format!(
+                Outcome::Refused(_) | Outcome::Invalid(_) => format!(
                     "the project {} runs its cap of {} children: wait for one of them to end",
                     project.name, project.max_children
                 ),
@@ -847,7 +847,11 @@ pub fn needs_leave(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<bool,
     match session_of(daemon, &caller, &asked) {
         Ok((_, relation)) => Ok(relation == Relation::NoLeave),
         Err(
-            Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why) | Outcome::Done(why),
+            Outcome::Refused(why)
+            | Outcome::Invalid(why)
+            | Outcome::Failed(why)
+            | Outcome::Held(why)
+            | Outcome::Done(why),
         ) => Err(why),
     }
 }

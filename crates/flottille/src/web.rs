@@ -111,7 +111,7 @@ enum Asked {
 fn asked(args: &Value) -> Result<Asked, String> {
     let args: Arguments = match arguments("web", args.clone()) {
         Ok(args) => args,
-        Err(Outcome::Refused(why)) => return Err(why),
+        Err(Outcome::Invalid(why)) => return Err(why),
         Err(_) => unreachable!("arguments only refuse"),
     };
     match (args.action.as_str(), args.url, args.query) {
@@ -1916,7 +1916,10 @@ mod tests {
     fn done(outcome: Outcome) -> String {
         match outcome {
             Outcome::Done(text) => text,
-            Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why) => {
+            Outcome::Refused(why)
+            | Outcome::Invalid(why)
+            | Outcome::Failed(why)
+            | Outcome::Held(why) => {
                 panic!("not done: {why}")
             }
         }
@@ -1924,7 +1927,7 @@ mod tests {
 
     fn refusal(outcome: Outcome) -> String {
         match outcome {
-            Outcome::Refused(why) => why,
+            Outcome::Refused(why) | Outcome::Invalid(why) => why,
             Outcome::Done(text) | Outcome::Failed(text) | Outcome::Held(text) => {
                 panic!("not refused: {text}")
             }

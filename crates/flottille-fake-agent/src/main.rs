@@ -89,7 +89,7 @@
 //! | `{"compaction": true}` | a completed tool call carrying `_meta.jetbrains.air.contextCompaction`, as the Claude adapter reports a compaction |
 //! | `{"permission": {"tool": "Bash", "title": "ls"}}` | a `session/request_permission` for that tool, answer recorded |
 //! | `{"permission": {"title": "x", "untyped": true}}` | the same with no `_meta.claudeCode.toolName`: a request that has only a title |
-//! | `{"mcp": {"tool": "fs_list", "arguments": {}}}` | calls the tool on the session's first HTTP MCP server (initialize, then `tools/call`), as a tool call; the answer recorded |
+//! | `{"mcp": {"tool": "fs_list", "arguments": {}}}` | calls the tool on the session's first HTTP MCP server (initialize, then `tools/call`), as a tool call; the answer recorded; a refusal ends the call `failed`, its text as the content |
 //! | `{"mcp": {"tool": "agent_launch", "arguments": {…}, "keep": "w1"}}` | the same, and keeps the first agent id (12 hexadecimal digits) of the answer's text under that name |
 //! | `{"mcp": {"tool": "fs_list", "arguments": {}, "quiet": true}}` | the same without its tool call's session updates: an MCP call that lands before the updates around it |
 //! | `{"mcp": {"tool": "fs_list", "arguments": {}, "keyed": true}}` | the same, the call carrying its tool call's id as its call key (`_meta`, `claudecode/toolUseId`), as Claude Code's do |
@@ -652,11 +652,16 @@ impl Agent {
             }
         }
         if !quiet {
-            self.notify(
-                session,
-                json!({"sessionUpdate": "tool_call_update", "toolCallId": call_id,
-                    "status": if status == 200 { "completed" } else { "failed" }, "rawOutput": body}),
-            );
+            // A tool's refusal is an error result: the call is failed, with its text as content.
+            let refused = body["result"]["isError"] == true;
+            let mut update = json!({"sessionUpdate": "tool_call_update", "toolCallId": call_id,
+                "status": if status == 200 && !refused { "completed" } else { "failed" },
+                "rawOutput": body});
+            if refused {
+                update["content"] = json!([{"type": "content", "content": {"type": "text",
+                    "text": body["result"]["content"][0]["text"]}}]);
+            }
+            self.notify(session, update);
         }
     }
 

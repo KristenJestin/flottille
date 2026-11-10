@@ -355,7 +355,7 @@ fn weight(text: &str) -> usize {
 fn shown(outcome: Outcome) -> (String, bool) {
     let (text, limit, error) = match outcome {
         Outcome::Done(text) | Outcome::Held(text) => (text, RESULT_LIMIT, false),
-        Outcome::Refused(text) => (text, ERROR_LIMIT, true),
+        Outcome::Refused(text) | Outcome::Invalid(text) => (text, ERROR_LIMIT, true),
         Outcome::Failed(text) => (format!("the call failed: {text}"), ERROR_LIMIT, true),
     };
     (cut(&deliveries::escape(&text), limit), error)

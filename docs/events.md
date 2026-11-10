@@ -631,6 +631,7 @@ activity.
 | `gate` | The gate's verdict on the call: `allow` (harmless, or allowed by the user), `judged` (to judge, allowed by the judge in Auto), `full` (to judge or base, allowed by Full mode), `deny` or `ask`; `null` for a call refused before it, because the agent has no such tool. |
 | `judgement` | The judge's verdict when one was asked, `{"by", "verdict", "reason"}` (`docs/protocol.md`, `approval.list`); else `null`. |
 | `outcome` | `ok`, `refused`, `failed`, or `held` for a call the gate held (`docs/tools.md`, "The gate"). |
+| `input_refused` | Only on a `refused` call whose input broke the tool's own rule before anything ran (arguments that do not fit its schema, a detail it has none of, a session title of two words): `true`. Said by the daemon, never guessed from the text; a refusal of the gate, of the user or of the state of things (a workspace that is gone, a title the user named) carries none. The window counts such a call as retried, not failed, when a call of the same tool passes later in the same turn. |
 | `duration_ms` | How long it took. |
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
 | `link` | Only for a `forge` `run` that was done and whose answer gave the run's link: that link. |

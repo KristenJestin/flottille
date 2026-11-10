@@ -75,7 +75,7 @@ pub fn session_title(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcom
     }
     let title = match checked(&asked.title) {
         Ok(title) => crate::mcp::masked(&title, &grant.place),
-        Err(why) => return Outcome::Refused(format!("refused: {why}")),
+        Err(why) => return Outcome::Invalid(format!("refused: {why}")),
     };
     let titled = daemon.write(|store| {
         let event = store.retitle_agent(&agent.id, &title, BY_AGENT)?;

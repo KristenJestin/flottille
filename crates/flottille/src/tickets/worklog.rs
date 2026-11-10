@@ -163,9 +163,11 @@ pub fn says(
     let asked: TicketsCall = serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
     entry_of(daemon, project)?;
     let key = super::key_of(daemon, place, project, &asked).map_err(|outcome| match outcome {
-        Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why) | Outcome::Done(why) => {
-            why
-        }
+        Outcome::Refused(why)
+        | Outcome::Invalid(why)
+        | Outcome::Failed(why)
+        | Outcome::Held(why)
+        | Outcome::Done(why) => why,
     })?;
     let duration = given(args, "duration")
         .and_then(|d| duration_of(d).ok())
