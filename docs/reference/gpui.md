@@ -309,6 +309,10 @@ The components that hold them:
 - A text view sets the I-beam over its own lines only, so a pointer crossing the gap between two
   paragraphs (or two views) flickers between I-beam and arrow. A selectable text sits in a
   `text_region(id)`, one region that keeps the I-beam from its first line to its last.
+- A reply's fenced code block gets its Copy button from the text view's `code_block_actions`
+  (`session.rs`, `code_actions`), which puts the block's text as shown on the clipboard. Giving a
+  view actions makes it stop drawing the block's language, so the window draws it beside the
+  button; the block's right padding keeps its lines clear of the button.
 - Keys: GPUI tries key bindings first, then `on_key_down` from the root down, then gives the
   character to the input. A global shortcut on Space or `/` on the root swallows typing: check
   first whether the input has focus.

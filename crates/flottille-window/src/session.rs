@@ -4711,7 +4711,8 @@ impl Render for MarkdownPiece {
             .child(
                 TextView::new(&self.state)
                     .style(style)
-                    .image_source(no_image),
+                    .image_source(no_image)
+                    .code_block_actions(move |block, _, _| code_actions(block, &p)),
             )
             .text_selection_scope(scope)
     }
@@ -4728,7 +4729,12 @@ pub fn markdown_style(p: &Palette, muted: bool) -> TextViewStyle {
         .with_link(p.acc)
         .with_selection(p.sel)
         .with_code_background(p.card2)
-        .with_code_block(gpui_kit::StyleRefinement::default().mono(12.))
+        // The right edge is the room of the Copy button, which sits in the corner over the text.
+        .with_code_block(
+            gpui_kit::StyleRefinement::default()
+                .mono(12.)
+                .pr(CODE_ACTIONS_ROOM),
+        )
         .with_inline_code(gpui_kit::HighlightStyle {
             color: Some(p.text),
             background_color: Some(p.card2),
@@ -4738,6 +4744,41 @@ pub fn markdown_style(p: &Palette, muted: bool) -> TextViewStyle {
         .with_table_cell(gpui_kit::StyleRefinement::default().text_color(ink))
         .with_border(p.line)
         .with_dark(p.bg.l < 0.5)
+}
+
+/// What the corner of a code block keeps free on the right: the Copy button, 28 px, and its margin.
+const CODE_ACTIONS_ROOM: Pixels = px(44.);
+
+/// The corner of a fenced code block: its language, which the view stops drawing once it is given
+/// actions, and Copy, which puts the block's text, as it is shown (masked already), on the
+/// clipboard and says it in a toast. The ids carry where the block starts in its piece.
+fn code_actions(block: &gpui_kit::base::text::CodeBlock, p: &Palette) -> impl IntoElement + use<> {
+    let at = block.span.map_or(0, |span| span.start);
+    let code = block.code().to_string();
+    div()
+        .flex()
+        .items_center()
+        .gap(space::SM)
+        .children(block.lang().filter(|lang| !lang.is_empty()).map(|lang| {
+            div()
+                .id(ElementId::Name(format!("code-language-{at}").into()))
+                .text_size(px(11.))
+                .text_color(p.faint)
+                .aria_label(lang.clone())
+                .child(lang)
+                .test_support()
+        }))
+        .child(
+            Button::icon(
+                ElementId::Name(format!("copy-code-{at}").into()),
+                Icon::Copy,
+                "Copy",
+            )
+            .on_click(move |_, _, cx| {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(code.clone()));
+                toast(Toast::success(COPIED), cx);
+            }),
+        )
 }
 
 /// Past this many bytes, a reply is cut into another Markdown piece where a block starts.
