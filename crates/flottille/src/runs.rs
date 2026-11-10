@@ -2178,6 +2178,16 @@ pub async fn settle_at_start(daemon: &Daemon) {
     for pid in left {
         crate::children::end_session(pid).await;
     }
+    // A place guarded when the daemon stopped was not put back: the user hears of it.
+    for place in crate::agent_folders::interrupted(&daemon.paths.state.join("agent-folders")) {
+        let run = daemon.read(|store| store.run(&place.run)).ok().flatten();
+        let data = json!({"agent": run.as_ref().and_then(|run| run.agent.clone()),
+            "project": run.as_ref().map(|run| run.project.clone()), "run": place.run,
+            "folder": place.root, "too_large": false, "interrupted": true});
+        if let Err(error) = daemon.emit("run.agent_folders_unchecked", data) {
+            eprintln!("flottille daemon: run {}: {error}", place.run);
+        }
+    }
     let runs = daemon.read(Store::running_runs).unwrap_or_default();
     for run in runs {
         let _ = daemon.write(|store| {

@@ -767,7 +767,9 @@ line names, every program a wrapper or a runner runs included:
   folder is outside it (reached through a link), whose agent folders are not looked at, and a snapshot that could not be taken. A run waits for
   the snapshot of its place, and for a put-back going on there, never for another place's. What this does not cover: a process that outlives its run (one that
   left the run's session, `setsid`), a long `serve` run until it ends, and a run going on when
-  the daemon stops or crashes; the files also exist while the run goes on;
+  the daemon stops or crashes, whose place is not put back: a marker of each place guarded
+  (`agent-folders/.guarded`) tells the user's inbox at the daemon's next start; the files also
+  exist while the run goes on;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
   the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program.
   Reading them stays base: a card in Ask and Auto, allowed in Full, since what they hold has its

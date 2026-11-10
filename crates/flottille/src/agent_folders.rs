@@ -804,10 +804,77 @@ struct Group {
     /// While it is put back: a run that starts in, around or inside the place waits for its end,
     /// so that its snapshot holds none of what is still to be put back.
     closing: Option<watch::Receiver<bool>>,
+    /// The file that says the place is guarded until it is put back: one left at the daemon's
+    /// start was not (`interrupted`).
+    marker: PathBuf,
 }
 
 /// A group's snapshot, once taken.
 type Taken = Option<Arc<Snapshot>>;
+
+/// The folder of `kept` that holds a marker per place guarded.
+const MARKERS: &str = ".guarded";
+
+/// Marks `root` guarded, in `marker`, until it is put back.
+fn mark(marker: &Path, root: &Path) {
+    let written = marker
+        .parent()
+        .ok_or_else(|| std::io::Error::other("no folder"))
+        .and_then(|folder| {
+            flottille_core::paths::ensure_private_dir(folder)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        })
+        .and_then(|()| {
+            std::fs::write(
+                marker,
+                serde_json::json!({"root": root.to_string_lossy()}).to_string(),
+            )
+        });
+    if let Err(error) = written {
+        eprintln!(
+            "flottille: cannot mark {} guarded: {error}; a daemon that stops during its run will \
+             not say it was not put back",
+            root.display()
+        );
+    }
+}
+
+/// A place a daemon that stopped was guarding: what its runs wrote in its agent folders was not
+/// put back.
+#[derive(Debug, PartialEq)]
+pub struct Interrupted {
+    pub root: PathBuf,
+    /// The run that started guarding it.
+    pub run: String,
+}
+
+/// The places guarded when the daemon stopped, their markers removed: told once.
+pub fn interrupted(kept: &Path) -> Vec<Interrupted> {
+    let folder = kept.join(MARKERS);
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let Some(run) = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .and_then(|name| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let root = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|marker| marker["root"].as_str().map(PathBuf::from))
+            .unwrap_or_default();
+        found.push(Interrupted {
+            root,
+            run: run.to_owned(),
+        });
+        let _ = std::fs::remove_file(&path);
+    }
+    found.sort_by(|a, b| a.run.cmp(&b.run));
+    found
+}
 
 /// What a run that enters waits for.
 enum Wait {
@@ -904,15 +971,19 @@ impl Guards {
         let mut runs: Vec<String> = inside.iter().flat_map(|group| group.runs.clone()).collect();
         runs.push(run.to_owned());
         let (taken, snapshot) = watch::channel(None);
+        let marker = kept.join(MARKERS).join(format!("{run}.json"));
         groups.push(Group {
             root: root.to_owned(),
             runs,
             snapshot: snapshot.clone(),
             closing: None,
+            marker: marker.clone(),
         });
         let (home, kept, at) = (home.map(Path::to_owned), kept.to_owned(), root.to_owned());
         let tops = tops.to_vec();
         tokio::spawn(async move {
+            // Before the run starts, and before the markers of the places it takes in go.
+            mark(&marker, &at);
             let mut taken_in = Vec::new();
             let mut lost = false;
             for mut group in inside {
@@ -920,6 +991,7 @@ impl Guards {
                     Ok(snapshot) => snapshot.clone().flatten(),
                     Err(_) => None,
                 };
+                let _ = std::fs::remove_file(&group.marker);
                 match (group.root.strip_prefix(&at), snapshot) {
                     (Ok(relative), Some(snapshot)) => {
                         taken_in.push((relative.to_owned(), snapshot))
@@ -987,7 +1059,7 @@ impl Drop for Guard {
 /// The run `run` leaves its group: the last one puts the place back, in a task of its own that
 /// goes on if the one waiting for it is given up, a run that starts there meanwhile waiting.
 async fn leave(groups: Arc<std::sync::Mutex<Vec<Group>>>, run: String) -> Option<Restored> {
-    let (mut snapshot, closed) = {
+    let (mut snapshot, closed, marker) = {
         let mut groups = groups.lock().unwrap();
         let group = groups.iter_mut().find(|group| group.runs.contains(&run))?;
         group.runs.retain(|other| *other != run);
@@ -996,7 +1068,7 @@ async fn leave(groups: Arc<std::sync::Mutex<Vec<Group>>>, run: String) -> Option
         }
         let (closed, closing) = watch::channel(false);
         group.closing = Some(closing);
-        (group.snapshot.clone(), closed)
+        (group.snapshot.clone(), closed, group.marker.clone())
     };
     tokio::spawn(async move {
         let taken = match snapshot.wait_for(Option::is_some).await {
@@ -1014,6 +1086,7 @@ async fn leave(groups: Arc<std::sync::Mutex<Vec<Group>>>, run: String) -> Option
                 .unwrap_or(missing),
             None => missing,
         };
+        let _ = std::fs::remove_file(&marker);
         let this = closed.subscribe();
         groups.lock().unwrap().retain(|group| {
             !group
@@ -1654,6 +1727,29 @@ mod tests {
 
         assert_eq!(restored.put_back, [".claude/settings.json"]);
         assert!(!root.join(".claude").exists());
+    }
+
+    #[tokio::test]
+    async fn a_guarded_place_left_by_a_daemon_that_stopped_is_found_at_its_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, kept) = (dir.path().join("place"), dir.path().join("kept"));
+        made(&root.join("README.md"), "\n");
+        let guards = Guards::default();
+
+        // Put back, a place leaves no marker.
+        let guard = guards.enter(&root, &[], None, &kept, "done").await;
+        assert_eq!(std::fs::read_dir(kept.join(".guarded")).unwrap().count(), 1);
+        guard.leave().await;
+        assert!(interrupted(&kept).is_empty());
+
+        // The daemon stops during a run: its marker stays, found once, and is gone.
+        let guard = guards.enter(&root, &[], None, &kept, "going").await;
+        std::mem::forget(guard);
+        let found = interrupted(&kept);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].run, "going");
+        assert_eq!(found[0].root, real(&root));
+        assert!(interrupted(&kept).is_empty());
     }
 
     #[tokio::test]

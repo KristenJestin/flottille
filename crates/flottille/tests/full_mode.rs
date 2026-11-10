@@ -1320,3 +1320,38 @@ fn what_a_run_s_put_back_did_tells_the_user_in_the_inbox() {
     assert!(text.contains(".claude/settings.json"), "{text}");
     assert!(text.contains("agent-folders"), "{text}");
 }
+
+#[test]
+fn a_place_guarded_when_the_daemon_stopped_tells_the_user_at_its_next_start() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    // What a daemon that stopped during a guarded run left: its marker.
+    let markers = user.path("state/flottille/agent-folders/.guarded");
+    std::fs::create_dir_all(&markers).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        user.path("state/flottille"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::write(
+        markers.join("0123456789ab.json"),
+        json!({"root": user.path("work/app")}).to_string(),
+    )
+    .unwrap();
+
+    session(&user);
+
+    let inbox = user.call("inbox.list", json!({})).unwrap();
+    let entry = inbox["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "unchecked")
+        .unwrap_or_else(|| panic!("{inbox}"));
+    let text = entry["text"].as_str().unwrap();
+    assert!(text.contains("0123456789ab"), "{text}");
+    assert!(text.contains("stopped"), "{text}");
+    assert!(std::fs::read_dir(&markers).unwrap().next().is_none());
+}
