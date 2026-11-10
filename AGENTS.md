@@ -24,7 +24,7 @@ is English only.
 
 ```
 cargo build
-cargo nextest run       # the tests, every binary at once (`cargo install cargo-nextest --locked`)
+cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 tools/commit-message.sh --range origin/dev..HEAD
@@ -204,6 +204,6 @@ the components of `flottille-ui` that hold them, never its own.
 
 ## When done
 
-Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo nextest run`
-(as CI does; `cargo test` runs the same tests, one binary after another), plus the manual checks
-the issue asks for, and report the real output. If something fails, say so; don't claim green.
+Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, plus the
+manual checks the issue asks for, and report the real output. If something fails, say so;
+don't claim green.
