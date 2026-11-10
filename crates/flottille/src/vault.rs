@@ -428,10 +428,18 @@ fn bound_checked(
              letters, digits and _"
         )));
     }
+    if let Some(("worklog", of)) = bound.split_once(':')
+        && let Err(failure) = crate::projects::load_project(daemon, of)
+    {
+        return Err(Failure::refused(match failure.code {
+            "not-found" => format!("no project is named {of}"),
+            _ => format!(
+                "the file of the project {of} cannot be read: {}",
+                failure.message
+            ),
+        }));
+    }
     match (bound.split_once(':'), project) {
-        (Some(("worklog", of)), _) if crate::projects::load_project(daemon, of).is_err() => {
-            Err(Failure::refused(format!("no project is named {of}")))
-        }
         (Some(("worklog", of)), Some(own)) if of != own => Err(Failure::refused(format!(
             "an entry the project {own} alone sees cannot be bound to {said}"
         ))),
@@ -448,13 +456,14 @@ fn bound_checked(
 /// told when the files that declare it cannot be read.
 fn named_by(daemon: &Daemon, bound: &str, name: &str) -> Result<bool, String> {
     match bound.split_once(':') {
-        Some(("worklog", project)) => Ok(crate::projects::load_project(daemon, project).is_ok_and(
-            |project| {
-                matches!(&project.tracker, Some(ProjectTracker::Jira {
-                    worklog_token: Some(token), ..
-                }) if token == name)
-            },
-        )),
+        // A project that is gone names nothing; one whose file cannot be read cannot say.
+        Some(("worklog", project)) => match crate::projects::load_project(daemon, project) {
+            Ok(project) => Ok(matches!(&project.tracker, Some(ProjectTracker::Jira {
+                worklog_token: Some(token), ..
+            }) if token == name)),
+            Err(failure) if failure.code == "not-found" => Ok(false),
+            Err(failure) => Err(failure.message),
+        },
         _ => crate::extensions::bound_names(daemon, bound, name),
     }
 }
