@@ -1507,12 +1507,7 @@ async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
         write_row(
             daemon,
             &name,
-            |row| {
-                row.pin = Some(listing);
-                row.pinned_for = Some(digest);
-                row.settings = settings;
-                row.cut_off = None;
-            },
+            |row| pinned(row, listing, digest, settings, due),
             None,
         )
     };
@@ -1532,9 +1527,53 @@ async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
     shown(daemon, &name)
 }
 
+/// The row as `accept` leaves it, read again where it is written: the cut-off is cleared with
+/// what was due, never one written since the row was read.
+fn pinned(
+    row: &mut Row,
+    listing: Listing,
+    digest: String,
+    settings: BTreeMap<String, String>,
+    due: bool,
+) {
+    row.pin = Some(listing);
+    row.pinned_for = Some(digest);
+    row.settings = settings;
+    if due {
+        row.cut_off = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepting_a_connection_not_due_keeps_a_fresh_cut_off() {
+        let listing = Listing::default();
+        let fresh = || Row {
+            pin: Some(listing.clone()),
+            pinned_for: Some("digest".into()),
+            cut_off: Some("the server is now another".into()),
+            ..Row::default()
+        };
+        // Ready when it was read, cut off since: the settings are written, the cut-off kept.
+        let mut row = fresh();
+        let settings = BTreeMap::from([("search".to_owned(), "passes".to_owned())]);
+        pinned(
+            &mut row,
+            listing.clone(),
+            "digest".into(),
+            settings.clone(),
+            false,
+        );
+        assert_eq!(row.settings, settings);
+        assert_eq!(row.cut_off.as_deref(), Some("the server is now another"));
+        // Due, the reviewed server is what is pinned: its cut-off goes.
+        let mut row = fresh();
+        pinned(&mut row, listing, "digest".into(), settings, true);
+        assert_eq!(row.cut_off, None);
+    }
 
     fn parse(table: Value) -> std::result::Result<Declaration, String> {
         Declaration::of(table.as_object().unwrap(), "connections.server[0]")
