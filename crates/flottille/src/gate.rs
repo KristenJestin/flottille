@@ -3335,6 +3335,16 @@ fn moves_agent_folder(call: &Call, layer: &[String]) -> Option<String> {
             shown()
         ));
     }
+    // The paths are in a file the gate does not read. "--pathspec-f" is still ambiguous.
+    if layer[at + 1..]
+        .iter()
+        .any(|word| abbreviates(word, "pathspec-from-file", 10))
+    {
+        return Some(format!(
+            "{} names its files in a file, which may name an agent folder",
+            shown()
+        ));
+    }
     for word in layer[at + 1..].iter().filter(|word| !word.starts_with('-')) {
         if word.starts_with(':') || word.contains(['*', '?', '[']) {
             return Some(format!(
@@ -4476,6 +4486,26 @@ mod tests {
         }
         for line in ["git rm -r src", "git mv src lib", "git rm src/a.rs"] {
             assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+    }
+
+    #[test]
+    fn git_rm_with_a_pathspec_file_is_judged() {
+        // The paths are in a file the gate does not read: one may hold an agent folder.
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join("docs/.claude/settings.json"));
+        made(&fixture.root.join("list.txt"));
+        for line in [
+            "git rm -r --pathspec-from-file=list.txt",
+            "git rm -r --pathspec-from-file list.txt",
+            "git rm -r --pathspec-from=list.txt",
+            "git mv --pathspec-from-file=list.txt notes",
+        ] {
+            assert!(
+                matches!(fixture.run(line), Verdict::Ask(_)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
         }
     }
 
