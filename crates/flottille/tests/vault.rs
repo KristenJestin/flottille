@@ -558,3 +558,49 @@ fn an_unbound_entry_works_as_before() {
     assert!(refused.contains("everything"), "{refused}");
     assert!(listed_names(&user).is_empty());
 }
+
+#[test]
+fn an_entry_bound_to_a_worklog_is_never_shown_to_another_project_s_agents() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "start", "do": [{"say": "ready"}]}]}));
+    project(&user, "alpha");
+    project(&user, "beta");
+    // Bound to alpha's worklog without a project: the entry is alpha's, not every project's.
+    let entry = user
+        .call(
+            "vault.set",
+            json!({"name": "jira-time", "secret": SECRET, "description": "Logs time",
+                "for": "worklog:alpha"}),
+        )
+        .unwrap();
+    assert_eq!(entry["project"], "alpha", "{entry}");
+    user.call(
+        "vault.set",
+        json!({"name": "shared", "secret": "an0ther-s3cret", "description": "For all"}),
+    )
+    .unwrap();
+    // An entry of another project cannot be bound to alpha's worklog.
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "other-time", "secret": SECRET, "project": "beta",
+                "for": "worklog:alpha"}),
+        )
+        .unwrap_err();
+    assert!(refused.contains("beta"), "{refused}");
+
+    // The agent of beta learns neither the entry nor the name of the project alpha.
+    agent(&user, "beta", "start");
+    let (url, authorization) = server_of(&user, 0);
+    let answer = Mcp::initialize(&url, &authorization).call("vault", json!({"action": "list"}));
+    assert!(answer.text.contains("shared"), "{}", answer.text);
+    assert!(!answer.text.contains("jira-time"), "{}", answer.text);
+    assert!(!answer.text.contains("alpha"), "{}", answer.text);
+
+    // The agent of alpha sees its entry, as the docs say: name, description, URL, username.
+    agent(&user, "alpha", "start");
+    let (url, authorization) = server_of(&user, 1);
+    let answer = Mcp::initialize(&url, &authorization).call("vault", json!({"action": "list"}));
+    assert!(answer.text.contains("jira-time"), "{}", answer.text);
+    assert!(!answer.text.contains("for:"), "{}", answer.text);
+}

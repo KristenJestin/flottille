@@ -54,6 +54,9 @@ An entry made for one precise feature is that feature's alone. `for` names it:
   without `for` is unbound; set again without `for`, an entry keeps its use, and another use for
   a bound entry is refused, naming the one it has: it is removed first. Settings, Vault shows the
   use of each entry on its row (`For the worklog of the project app alone`).
+- **A worklog's entry is its project's.** Bound to `worklog:<project>`, an entry is that project's
+  (its `project` is set to it when it names none; an entry of another project is refused), so no
+  other project's agent lists it, and the `vault` tool never tells an agent the use of an entry.
 - **Not removed as simply as another.** Removing a bound entry while its feature names it is
   refused, naming the feature and what stops working: its feature's own screen names another
   entry first (the entry then goes as any), or the removal is confirmed

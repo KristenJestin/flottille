@@ -762,8 +762,8 @@ run follows its run and forge subscribe a pull request's checks.`
 ## The vault
 
 **`vault {action: "list"}`** lists the entries of the user's vault the agent's project sees
-(`docs/vault.md`): each name with what it is for, its URL, its username and the one use it is
-bound to (`for: the worklog of the project app alone`), one field a line. It is
+(`docs/vault.md`): each name with what it is for, its URL and its username, one field a line (the
+use an entry is bound to is not told: it could name another project). It is
 listed to an agent whose project sees at least one entry (a tool that could only say the vault is
 empty is not listed), and the agents of every project get or lose it when an entry is set or
 removed. No action returns a secret: any other action is refused, saying that a secret is never

@@ -332,7 +332,7 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         .into_iter()
         .find(|entry| entry.name == asked.name)
         .and_then(|entry| entry.bound);
-    let bound = match (given(asked.bound), had) {
+    let (bound, project) = match (given(asked.bound), had) {
         (Some(new), Some(own)) if new != own => {
             return Err(Failure::refused(format!(
                 "the vault entry {} is bound to {}: remove it first, or choose another name",
@@ -340,8 +340,12 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
                 use_said(&own).unwrap_or(own.clone())
             )));
         }
-        (Some(new), _) => Some(bound_checked(daemon, &new, project.as_deref())?),
-        (None, had) => had,
+        // A worklog's entry is its project's alone: no other project's agent learns it exists.
+        (Some(new), _) => {
+            let project = bound_checked(daemon, &new, project.as_deref())?;
+            (Some(new), project)
+        }
+        (None, had) => (had, project),
     };
     let entry = Entry {
         name: asked.name,
@@ -372,9 +376,14 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     Ok(entry.to_json())
 }
 
-/// `bound`, a use a new entry is bound to, if Flottille knows it and it fits the entry's project:
-/// a project's worklog reads only an entry it sees, a connection only an entry of every project.
-fn bound_checked(daemon: &Daemon, bound: &str, project: Option<&str>) -> Result<String, Failure> {
+/// The project an entry bound to `bound` has, if Flottille knows the use and it fits the entry's
+/// `project`: a project's worklog reads only an entry that project sees, so the entry is the
+/// project's; a connection reads only an entry of every project.
+fn bound_checked(
+    daemon: &Daemon,
+    bound: &str,
+    project: Option<&str>,
+) -> Result<Option<String>, Failure> {
     let Some(said) = use_said(bound) else {
         return Err(Failure::refused(format!(
             "an entry is bound to worklog:<project> or connection:<name>: {bound} is neither"
@@ -387,11 +396,12 @@ fn bound_checked(daemon: &Daemon, bound: &str, project: Option<&str>) -> Result<
         (Some(("worklog", of)), Some(own)) if of != own => Err(Failure::refused(format!(
             "an entry the project {own} alone sees cannot be bound to {said}"
         ))),
+        (Some(("worklog", of)), _) => Ok(Some(of.to_owned())),
         (Some(("connection", _)), Some(own)) => Err(Failure::refused(format!(
             "an entry bound to {said} is every project's: a connection is given to all, and \
              the project {own} cannot be its only one"
         ))),
-        _ => Ok(bound.to_owned()),
+        _ => Ok(project.map(str::to_owned)),
     }
 }
 
@@ -839,9 +849,6 @@ pub fn tool(daemon: &Daemon, grant: &Grant, args: Value) -> Outcome {
             if let Some(value) = value {
                 text.push_str(&format!("\n  {label}: {value}"));
             }
-        }
-        if let Some(said) = entry.bound.as_deref().and_then(use_said) {
-            text.push_str(&format!("\n  for: {said} alone"));
         }
         text.push('\n');
     }
