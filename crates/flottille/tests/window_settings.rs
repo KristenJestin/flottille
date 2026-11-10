@@ -622,3 +622,61 @@ fn the_auto_judge_waits_as_a_skeleton_until_the_providers_are_known(cx: &mut Tes
     assert!(visible(cx, "judge-switch"), "the judge replaces its skeleton");
     assert!(!present(cx, "judge-skeleton"));
 }
+
+fn copied(cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+}
+
+#[gpui_kit::test]
+fn not_signed_in_shows_the_command_to_copy(cx: &mut TestAppContext) {
+    let user = User::with_fake_claude();
+    std::fs::remove_file(user.path("home/.claude/.credentials.json")).unwrap();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, cx);
+
+    assert_eq!(
+        label(cx, "provider-state-claude").as_deref(),
+        Some("Not signed in: run")
+    );
+    assert_eq!(
+        label(cx, "provider-sign-in-claude").as_deref(),
+        Some("claude login"),
+        "the command, in a block"
+    );
+    assert_eq!(
+        label(cx, "provider-sign-in-claude-copy").as_deref(),
+        Some("Copy"),
+        "with a labelled button"
+    );
+    click(cx, "provider-sign-in-claude-copy");
+    assert_eq!(copied(cx).as_deref(), Some("claude login"));
+    assert!(!present(cx, "provider-install-claude"), "it was found");
+}
+
+#[gpui_kit::test]
+fn not_found_links_to_how_to_install(cx: &mut TestAppContext) {
+    // A `PATH` that holds no program: no agent is found on it.
+    let user = User::new().with_env("PATH", "/nonexistent-flottille-test-path");
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let (shell, cx) = window(&user, cx);
+    let opened = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = opened.clone();
+    shell.update(cx, |shell, _| {
+        shell.set_opener(Arc::new(move |path: &std::path::Path| {
+            seen.lock().unwrap().push(path.display().to_string());
+        }))
+    });
+    open_settings(&shell, cx);
+
+    assert_eq!(
+        label(cx, "provider-state-claude").as_deref(),
+        Some("Not found on this machine")
+    );
+    assert!(visible(cx, "provider-install-claude"));
+    assert!(!present(cx, "provider-sign-in-claude"), "nothing to sign in");
+    click(cx, "provider-install-claude");
+    let page = label(cx, "provider-install-claude").unwrap();
+    assert!(page.starts_with("https://"), "{page}");
+    assert_eq!(*opened.lock().unwrap(), [page], "the system opens it");
+}

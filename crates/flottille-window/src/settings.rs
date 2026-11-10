@@ -1715,6 +1715,50 @@ impl SettingsPage {
                 None => tag.into_any_element(),
             }
         });
+        // What to do about it unfolds under the line: the command that signs it in, in a block to
+        // copy, or the page that says how to install it.
+        let sign_in = presence_of(
+            format!("provider-sign-in-{}-block", provider.name),
+            provider
+                .needs_sign_in()
+                .then(|| SharedString::from(provider.sign_in_command())),
+            {
+                let id = format!("provider-sign-in-{}", provider.name);
+                move |command| crate::programs::command_row(id, command, p)
+            },
+        )
+        .gap(space::SM);
+        let install = presence_of(
+            format!("provider-install-{}-block", provider.name),
+            provider
+                .needs_install()
+                .then(|| provider.install_page().map(SharedString::from))
+                .flatten(),
+            {
+                let id = format!("provider-install-{}", provider.name);
+                let shell = self.shell.clone();
+                let title = provider.title.clone();
+                move |page| {
+                    let opened = page.clone();
+                    hoverable(
+                        div()
+                            .id(ElementId::Name(id.into()))
+                            .aria_label(page)
+                            .text_size(px(12.5))
+                            .text_color(p.run)
+                            .cursor_pointer()
+                            .child(SharedString::from(format!("How to install {title}")))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                shell.update(cx, |shell, _| shell.open_link(&opened)).ok();
+                            }),
+                        move |link, t| link.bg(p.hover.opacity(t)),
+                    )
+                    .into_any_element()
+                }
+            },
+        )
+        .gap(space::SM);
         div()
             .id(ElementId::Name(
                 format!("provider-row-{}", provider.name).into(),
@@ -1733,6 +1777,8 @@ impl SettingsPage {
                     .children(version),
             )
             .child(state)
+            .child(sign_in)
+            .child(install)
             .into_any_element()
     }
 

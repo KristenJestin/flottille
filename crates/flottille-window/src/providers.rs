@@ -191,9 +191,10 @@ impl Provider {
     }
 
     /// What the settings page says of it, once, on its row (`docs/design.md` §10): `Ready ·
-    /// signed in`, `Not signed in: run claude login`, `Not found on this machine`, or `Off:
-    /// sessions that run keep running` when its switch is off. Never the path of a login file,
-    /// the name of a variable nor a file of the configuration.
+    /// signed in`, `Not signed in: run` (the command follows in a block to copy), `Not found on
+    /// this machine` (a link to how to install it follows), or `Off: sessions that run keep
+    /// running` when its switch is off. Never the path of a login file, the name of a variable
+    /// nor a file of the configuration.
     pub fn said(&self) -> String {
         if !self.enabled {
             return "Off: sessions that run keep running".into();
@@ -213,7 +214,33 @@ impl Provider {
         match (self.login_present, &self.api_key) {
             (true, _) => "Ready · signed in".into(),
             (false, Some(_)) => "Ready · signed in with an API key".into(),
-            (false, None) => format!("Not signed in: run {}", self.sign_in_command()),
+            (false, None) => "Not signed in: run".into(),
+        }
+    }
+
+    /// Whether the row shows the command that signs it in, under its line: its program was found,
+    /// and no login nor key was.
+    pub fn needs_sign_in(&self) -> bool {
+        self.enabled
+            && !self.overridden
+            && self.program_path.is_some()
+            && self.why.is_none()
+            && !self.login_present
+            && self.api_key.is_none()
+    }
+
+    /// Whether the row links to how to install its program: it was not found.
+    pub fn needs_install(&self) -> bool {
+        self.enabled && !self.overridden && self.program_path.is_none()
+    }
+
+    /// The page that says how to install its program.
+    pub fn install_page(&self) -> Option<&'static str> {
+        match self.program.as_str() {
+            "claude" => Some("https://docs.claude.com/en/docs/claude-code/setup"),
+            "codex" => Some("https://github.com/openai/codex"),
+            "opencode" => Some("https://opencode.ai/docs/"),
+            _ => None,
         }
     }
 
@@ -435,8 +462,15 @@ mod tests {
         let unsigned = Providers::of(Ok(&unsigned));
         assert_eq!(
             unsigned.get("claude").unwrap().said(),
-            "Not signed in: run claude login"
+            "Not signed in: run"
         );
+        assert!(unsigned.get("claude").unwrap().needs_sign_in());
+        assert_eq!(
+            unsigned.get("claude").unwrap().sign_in_command(),
+            "claude login"
+        );
+        assert!(opencode.needs_install());
+        assert!(opencode.install_page().is_some());
         let mut off = listed();
         off["providers"][0]["enabled"] = json!(false);
         let off = Providers::of(Ok(&off));
