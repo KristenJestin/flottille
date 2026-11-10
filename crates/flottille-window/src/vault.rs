@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use flottille_ui::{
+use gpui_design_system::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, Section,
     Select, SelectOption, Toast, icon, palette, presence, space, toast,
 };
@@ -188,7 +188,7 @@ impl VaultSection {
             let name = line_field("jira", window, cx);
             let secret = cx.new(|cx| {
                 let mut field = InputState::new(window, cx).masked(true);
-                flottille_ui::follow_theme(&mut field, cx);
+                gpui_design_system::follow_theme(&mut field, cx);
                 field
             });
             let description = line_field("Logs time on Jira", window, cx);

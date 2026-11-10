@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use flottille_core::question::{Answer, Question};
-use flottille_ui::{
+use gpui_design_system::{
     Button, Card, Chip, Field, Toast, palette, presence, quoted_title, space, toast,
 };
 use gpui_kit::base::input::{InputEvent, TextareaState};
@@ -83,7 +83,7 @@ impl QuestionCard {
                     let mut field = TextareaState::new(window, cx)
                         .auto_grow(1, MOST_LINES)
                         .placeholder("Your answer");
-                    flottille_ui::follow_theme(&mut field, cx);
+                    gpui_design_system::follow_theme(&mut field, cx);
                     field
                 });
                 subscriptions.push(cx.subscribe_in(
@@ -259,7 +259,7 @@ impl QuestionCard {
             .child(Field::new(
                 id(format!("answer-{n}-field")),
                 label,
-                flottille_ui::growing(id(format!("answer-{n}-height")), frame),
+                gpui_design_system::growing(id(format!("answer-{n}-height")), frame),
             ));
         div()
             .id(id(format!("question-{n}")))

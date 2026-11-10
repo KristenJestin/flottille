@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use std::collections::HashMap;
 
-use flottille_ui::drawer::Closed;
-use flottille_ui::motion::PANEL;
-use flottille_ui::{
+use gpui_design_system::drawer::Closed;
+use gpui_design_system::motion::PANEL;
+use gpui_design_system::{
     Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow, Listing,
     Menu, Modal, RadioChoices, Section, Select, SelectOption, Switch, Toast, Type, fade, palette,
     presence, space, toast,

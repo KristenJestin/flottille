@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::project::{PlaceBlock, ProjectPage, session_end_id, session_menu_id};
 use flottille_window::shell::Selection;
 use flottille_window::tree::ended_id;
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;

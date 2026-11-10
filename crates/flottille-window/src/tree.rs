@@ -7,10 +7,10 @@ use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
 use std::collections::HashSet;
 
-use flottille_ui::color::mix;
-use flottille_ui::motion::{ENTER, PANEL};
-use flottille_ui::rows::TWO_LINES;
-use flottille_ui::{
+use gpui_design_system::color::mix;
+use gpui_design_system::motion::{ENTER, PANEL};
+use gpui_design_system::rows::TWO_LINES;
+use gpui_design_system::{
     Button, Fold, Icon, Item, Listing, Menu, Modal, Tie, TreeRow, fade, hoverable, meta, palette,
     presence, presence_of, section_label, space, tipped, tree_children, tree_tie,
 };
@@ -164,7 +164,7 @@ fn trailing(id: ElementId, commands: usize, last: impl IntoElement, cx: &App) ->
                     .flex_none()
                     .aria_label(SharedString::from(said))
                     .child(
-                        flottille_ui::icon(Icon::Terminal)
+                        gpui_design_system::icon(Icon::Terminal)
                             .size(px(12.))
                             .text_color(p.run),
                     )
@@ -1286,7 +1286,7 @@ impl Render for SessionRow {
         );
         // One mark: the state, the dot or the time take each other's place, one folding away as
         // the other comes. The state and the dot share the tooltip that says what they mean.
-        let mark = flottille_ui::tipped(
+        let mark = gpui_design_system::tipped(
             div()
                 .id(session_mark_id(&self.id))
                 .flex()
@@ -1359,13 +1359,13 @@ impl SessionRow {
                 .h(px(MARK)),
             move |element, t| {
                 element.child(
-                    flottille_ui::icon(Icon::Edit)
+                    gpui_design_system::icon(Icon::Edit)
                         .size(px(12.))
                         .text_color(mix(p.mute, p.text, t)),
                 )
             },
         );
-        flottille_ui::tipped(
+        gpui_design_system::tipped(
             div()
                 .id(session_draft_id(&self.id))
                 .flex_none()
@@ -1425,7 +1425,11 @@ impl SessionRow {
                     .id(session_place_icon_id(&self.id))
                     .aria_label(said)
                     .flex_none()
-                    .child(flottille_ui::icon(icon).size(px(11.)).text_color(p.faint))
+                    .child(
+                        gpui_design_system::icon(icon)
+                            .size(px(11.))
+                            .text_color(p.faint),
+                    )
                     .test_support(),
             )
             .child(
@@ -1460,9 +1464,11 @@ impl SessionRow {
                     .h(px(LINE))
                     .opacity(shown)
                     .child(SharedString::from(format!("#{}", pull.number)))
-                    .children(
-                        mark.map(|mark| flottille_ui::icon(mark).size(px(11.)).text_color(color)),
-                    )
+                    .children(mark.map(|mark| {
+                        gpui_design_system::icon(mark)
+                            .size(px(11.))
+                            .text_color(color)
+                    }))
                     .test_support()
             }));
         tipped(line, SharedString::from(tip), LINE, window, cx)
@@ -1482,7 +1488,10 @@ fn pull_said(pull: &PullRequest) -> String {
 
 /// The mark of a pull request's checks, drawn by shape as well as by colour: a check, a cross, a
 /// dot; none without checks.
-fn pull_mark(pull: &PullRequest, p: &flottille_ui::Palette) -> (Option<Icon>, gpui_kit::Hsla) {
+fn pull_mark(
+    pull: &PullRequest,
+    p: &gpui_design_system::Palette,
+) -> (Option<Icon>, gpui_kit::Hsla) {
     match pull.mark.as_deref() {
         Some("passing") => (Some(Icon::Check), p.ok),
         Some("failing") => (Some(Icon::Close), p.fail),

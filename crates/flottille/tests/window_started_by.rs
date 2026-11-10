@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::tree::session_id;
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -284,7 +284,7 @@ fn a_session_title_quoted_in_the_conversation_never_wraps_in_a_narrow_window(
     cx.update(|window, cx| window.click(session_id(&lead), cx));
     // A narrow window: its tree is a drawer, and the conversation has what is left.
     cx.simulate_resize(size(px(300.), px(800.)));
-    let cut = flottille_ui::quoted_title(LONG);
+    let cut = gpui_design_system::quoted_title(LONG);
     assert!(cut.ends_with('…'), "the title is cut: {cut}");
     // The notice sits among the steps of the turn that launched it, folded: a click opens them.
     until(&shell, cx, "the steps of the turn", |cx| {

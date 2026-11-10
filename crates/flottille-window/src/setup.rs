@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use flottille_core::project::SetupStep;
-use flottille_ui::{
+use gpui_design_system::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, Section,
     Select, SelectOption, Toast, Type, icon, palette, presence, space, toast,
 };

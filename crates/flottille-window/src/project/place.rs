@@ -14,9 +14,9 @@ use crate::state::{AgentState, StateIcon, Status};
 use crate::steps::{StepRow, StepTone};
 
 use flottille_core::workspace::StepState;
-use flottille_ui::color::mix;
-use flottille_ui::motion::PANEL;
-use flottille_ui::{
+use gpui_design_system::color::mix;
+use gpui_design_system::motion::PANEL;
+use gpui_design_system::{
     Button, Chip, Confirm, Field, FlatRow, Icon, Item, Listing, Menu, Modal, Placement, Skeleton,
     Toast, Type, awaiting, caption, enter, fade, hoverable, icon, palette, presence, presence_of,
     space, toast,

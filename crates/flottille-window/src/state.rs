@@ -14,9 +14,9 @@ use gpui_kit::{
     Task, TestSupportExt, Window, canvas, div, point, px, relative,
 };
 
-use flottille_ui::Type;
-use flottille_ui::motion::{Motion, PANEL, SWAP_FROM};
-use flottille_ui::theme::{Palette, palette, radius};
+use gpui_design_system::Type;
+use gpui_design_system::motion::{Motion, PANEL, SWAP_FROM};
+use gpui_design_system::theme::{Palette, palette, radius};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AgentState {

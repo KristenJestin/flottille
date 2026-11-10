@@ -2,7 +2,7 @@
 //! ([`SessionPage`]).
 
 use crate::state::Status;
-use flottille_ui::{Type, palette, space};
+use gpui_design_system::{Type, palette, space};
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
     Styled, WeakEntity, Window, div,
@@ -224,8 +224,8 @@ impl Render for MainArea {
                     .child("No project yet.")
                     .child({
                         let shell = self.shell.clone();
-                        flottille_ui::Button::primary("add-first-project", "Add a project")
-                            .leading(flottille_ui::Icon::Plus)
+                        gpui_design_system::Button::primary("add-first-project", "Add a project")
+                            .leading(gpui_design_system::Icon::Plus)
                             .on_click(move |_, window, cx| {
                                 shell
                                     .update(cx, |shell, cx| shell.add_project(window, cx))

@@ -12,13 +12,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::Palette;
-use flottille_ui::color::hex;
-use flottille_ui::omarchy::{self, Environment};
-use flottille_ui::theme::palette;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::settings::SettingsPage;
+use gpui_design_system::Palette;
+use gpui_design_system::appearance::{self, Source};
+use gpui_design_system::color::hex;
+use gpui_design_system::omarchy::Environment;
+use gpui_design_system::theme::palette;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -244,7 +245,7 @@ fn choosing_omarchy_with_a_test_theme_folder_follows_it(cx: &mut TestAppContext)
     // The desktop switches theme: the window follows it.
     write_theme(&user, &THEME.replace("#f0883e", "#7aa2f7"));
     cx.executor()
-        .advance_clock(omarchy::POLL + Duration::from_millis(10));
+        .advance_clock(appearance::POLL + Duration::from_millis(10));
     cx.run_until_parked();
     settle(cx);
     assert_eq!(cx.update(|_, cx| palette(cx)).acc, hex(0x7aa2f7));
@@ -320,7 +321,7 @@ fn the_choice_survives_a_new_window_read_back_from_the_daemon(cx: &mut TestAppCo
     .unwrap();
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "the appearance is read", |cx| {
-        cx.update(|_, cx| omarchy::shown(cx)).source == omarchy::Source::Own
+        cx.update(|_, cx| appearance::shown(cx)).source == Source::Theme("flottille".into())
     });
     settle(cx);
     assert_eq!(cx.update(|_, cx| palette(cx)), Palette::light());
@@ -332,7 +333,7 @@ fn the_choice_survives_a_new_window_read_back_from_the_daemon(cx: &mut TestAppCo
     )
     .unwrap();
     until(&shell, cx, "the change is followed", |cx| {
-        cx.update(|_, cx| omarchy::shown(cx)).source == omarchy::Source::Omarchy
+        cx.update(|_, cx| appearance::shown(cx)).source == Source::Desktop("omarchy".into())
     });
     settle(cx);
     assert_eq!(cx.update(|_, cx| palette(cx)).acc, hex(0xf0883e));
@@ -431,7 +432,7 @@ fn a_choice_the_daemon_refuses_says_so_in_a_toast_and_shows_the_kept_appearance_
         toasts(&shell, cx) == ["The appearance was not kept"]
     });
     until(&shell, cx, "the kept appearance is shown again", |cx| {
-        cx.update(|_, cx| omarchy::shown(cx)).shade == flottille_ui::theme::Shade::Dark
+        cx.update(|_, cx| appearance::shown(cx)).shade == gpui_design_system::theme::Shade::Dark
     });
     settle(cx);
     assert_eq!(selected("appearance-shade-dark", cx), Some(true));
@@ -458,13 +459,13 @@ fn two_quick_choices_end_on_the_last_one_in_the_window_and_in_the_daemon(cx: &mu
     slow.store(true, Ordering::SeqCst);
     click("appearance-shade-light", cx);
     click("appearance-shade-dark", cx);
-    let dark = flottille_ui::theme::Shade::Dark;
+    let dark = gpui_design_system::theme::Shade::Dark;
     let until_late = Instant::now() + Duration::from_millis(1500);
     while Instant::now() < until_late {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
         cx.run_until_parked();
         assert_eq!(
-            cx.update(|_, cx| omarchy::shown(cx)).shade,
+            cx.update(|_, cx| appearance::shown(cx)).shade,
             dark,
             "a late answer to the first choice does not take the window back to it"
         );

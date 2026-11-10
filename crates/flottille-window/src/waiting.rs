@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use std::f32::consts::PI;
 
-use flottille_ui::color::mix;
-use flottille_ui::motion::PANEL;
-use flottille_ui::{
+use gpui_design_system::color::mix;
+use gpui_design_system::motion::PANEL;
+use gpui_design_system::{
     Button, Icon, Item, Listing, Palette, Placement, Type, fade, hoverable, icon, palette,
     presence, space, turning,
 };

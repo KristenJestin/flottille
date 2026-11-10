@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_core::project::{branch_matches, cycle_sentence};
-use flottille_ui::{
+use gpui_design_system::{
     Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, Section,
     Select, SelectOption, Switch, Tabs, Toast, Type, changing, enter, follow_theme, hoverable,
     icon, palette, presence, presence_of, space, toast,
@@ -2356,7 +2356,7 @@ impl Render for ProjectSettingsPage {
                             .update(cx, |shell, cx| shell.open(selection, window, cx))
                             .ok();
                     }),
-                move |d, t| d.text_color(flottille_ui::color::mix(p.faint, p.text, t)),
+                move |d, t| d.text_color(gpui_design_system::color::mix(p.faint, p.text, t)),
             )
         };
         let header = div()

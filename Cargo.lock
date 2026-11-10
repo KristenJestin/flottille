@@ -2153,9 +2153,9 @@ dependencies = [
  "dom_smoothie",
  "flate2",
  "flottille-core",
- "flottille-ui",
  "flottille-window",
  "futures",
+ "gpui-design-system",
  "gpui-kit",
  "http",
  "http-body-util",
@@ -2268,23 +2268,13 @@ name = "flottille-fake-server"
 version = "0.1.0"
 
 [[package]]
-name = "flottille-ui"
-version = "0.1.0"
-dependencies = [
- "gpui-kit",
- "tempfile",
- "toml 1.1.8+spec-1.1.0",
- "unicode-normalization",
-]
-
-[[package]]
 name = "flottille-window"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "flottille-core",
- "flottille-ui",
  "futures",
+ "gpui-design-system",
  "gpui-kit",
  "image",
  "libc",
@@ -2831,6 +2821,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "gpui-design-system"
+version = "0.1.0"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-alpha.feat-4-from-flottille.3#80ed2abbb5f107e62fe6c2487e8c3e776e5efe66"
+dependencies = [
+ "gpui-kit",
+ "toml 1.1.8+spec-1.1.0",
+ "unicode-normalization",
 ]
 
 [[package]]

@@ -5,8 +5,8 @@
 //! that starts a session has the same control, local: it sends nothing, and the mode it holds is
 //! what the session starts in.
 
-use flottille_ui::motion::PANEL;
-use flottille_ui::{Button, Icon, Segmented, enter, fade, palette, space};
+use gpui_design_system::motion::PANEL;
+use gpui_design_system::{Button, Icon, Segmented, enter, fade, palette, space};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,

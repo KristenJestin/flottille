@@ -1,8 +1,9 @@
-//! The icons the window adds to the base set of `flottille-ui`, and the assets that serve them.
+//! The icons the window adds to the kit's base set (`gpui-design-system`), and the assets that
+//! serve them.
 
 use std::borrow::Cow;
 
-use flottille_ui::{Icon, Icons};
+use gpui_design_system::{Icon, Icons};
 use gpui_kit::{AssetSource, Result, SharedString};
 
 /// The agents: a network of nodes.

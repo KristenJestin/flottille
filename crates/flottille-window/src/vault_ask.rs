@@ -7,7 +7,7 @@
 //! says so on its name line and Set waits for another name: a request never takes an entry from
 //! another project.
 
-use flottille_ui::{Button, Card, Field, Toast, palette, presence, space, toast};
+use gpui_design_system::{Button, Card, Field, Toast, palette, presence, space, toast};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -50,7 +50,7 @@ impl VaultAskBox {
     ) -> Self {
         let secret = cx.new(|cx| {
             let mut field = InputState::new(window, cx).masked(true);
-            flottille_ui::follow_theme(&mut field, cx);
+            gpui_design_system::follow_theme(&mut field, cx);
             field
         });
         let username = line_field("me@example.com", window, cx);

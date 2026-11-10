@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use flottille_core::ansi;
-use flottille_ui::color::mix;
-use flottille_ui::motion::{MODAL, Motion, PANEL};
-use flottille_ui::{
+use gpui_design_system::color::mix;
+use gpui_design_system::motion::{MODAL, Motion, PANEL};
+use gpui_design_system::{
     Button, Icon, Item, Listing, Menu, Modal, Palette, Skeleton, Toast, Type, awaiting, changing,
     fade, fold_frame, hoverable, icon, palette, presence, section_label, space, tipped,
     tipped_when_cut, toast, turning,
@@ -1122,7 +1122,7 @@ impl Render for CommandList {
         let present = !self.running.is_empty() || ended_count > 0 || !self.tasks.is_empty();
         let draw =
             |this: &Self, listing: &Listing<CommandRow>, window: &mut Window, cx: &mut App| {
-                let listed: Vec<(String, CommandRow, flottille_ui::Placement)> = listing
+                let listed: Vec<(String, CommandRow, gpui_design_system::Placement)> = listing
                     .rows()
                     .map(|listed| {
                         (
@@ -1911,7 +1911,7 @@ impl Render for CommandPanel {
         };
         let by_sentence = |id: &'static str, window: &mut Window, cx: &mut App| match &by_session {
             Some(session) => {
-                flottille_ui::quoted(id, &format!("{by}, in "), session, "", window, cx)
+                gpui_design_system::quoted(id, &format!("{by}, in "), session, "", window, cx)
             }
             None => SharedString::from(by.clone()).into_any_element(),
         };

@@ -14,9 +14,9 @@ pub use place::{PlaceBlock, block_id, session_end_id, session_menu_id, session_r
 
 use std::collections::HashMap;
 
-use flottille_ui::color::mix;
-use flottille_ui::motion::{Motion, PANEL};
-use flottille_ui::{
+use gpui_design_system::color::mix;
+use gpui_design_system::motion::{Motion, PANEL};
+use gpui_design_system::{
     Button, Chip, Field, Icon, Modal, PageHeader, Tabs, Toast, Type, changing, enter, fade,
     follow_theme, icon, palette, presence, selectable, space, toast,
 };
@@ -132,7 +132,7 @@ pub struct ProjectPage {
     /// page again each time the block changes.
     places: Vec<Place>,
     /// The blocks as drawn: one that comes unfolds, one that goes folds away.
-    place_rows: flottille_ui::Listing<Place>,
+    place_rows: gpui_design_system::Listing<Place>,
     composer: Entity<Composer>,
     new_workspace: Entity<NewWorkspace>,
     /// Its tasks and runs, and the run drawer.
@@ -200,7 +200,7 @@ impl ProjectPage {
             branches: Vec::new(),
             blocks: Vec::new(),
             places: Vec::new(),
-            place_rows: flottille_ui::Listing::default(),
+            place_rows: gpui_design_system::Listing::default(),
             composer,
             new_workspace,
             tasks,
@@ -572,7 +572,7 @@ impl Render for ProjectPage {
                     .flex_col()
                     .gap(space::SM)
                     .children(blocks.into_iter().map(|(key, block, placement)| {
-                        flottille_ui::Item::new(
+                        gpui_design_system::Item::new(
                             ElementId::Name(format!("place-item-{key}").into()),
                             placement,
                             block,

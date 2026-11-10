@@ -6,7 +6,7 @@
 
 use crate::glyphs;
 use flottille_core::protocol::ShownWorkspace;
-use flottille_ui::{
+use gpui_design_system::{
     Confirm, Icon, LabelledLine, Skeleton, Switch, Toast, awaiting, caption, changing, enter,
     presence, space, toast,
 };

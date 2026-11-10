@@ -10,10 +10,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::project::ProjectPage;
 use flottille_window::shell::Selection;
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Bounds, ElementId, Entity, Pixels, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};

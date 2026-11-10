@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use flottille_core::subscription::NO_DEADLINE;
-use flottille_ui::{
+use gpui_design_system::{
     Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, presence_of, space,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -309,7 +309,7 @@ impl Render for SubscriptionList {
         let p = palette(cx);
         let now = now_ms();
         let present = !self.list.is_empty();
-        let listed: Vec<(String, SubscriptionRow, flottille_ui::Placement)> = self
+        let listed: Vec<(String, SubscriptionRow, gpui_design_system::Placement)> = self
             .list
             .rows()
             .map(|listed| {

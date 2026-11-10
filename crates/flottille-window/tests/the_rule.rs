@@ -4,7 +4,8 @@
 //! element for its hover transition. What can be held is the way in: the window's sources never
 //! use the instant style; a hover is `hoverable`, `selectable` or a component's own (`Button`,
 //! `ListRow`, `TreeRow`, `MenuItem`), which fade over `HOVER`. The rest of the rule is the
-//! checklist of `docs/reference/gpui.md`, which each window pull request ticks.
+//! checklist of `docs/reference/gpui.md`, which each window pull request ticks. The kit's own
+//! components are held by the same scan in the kit (`tests/instant_hovers.rs`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,7 +54,6 @@ fn no_view_of_the_window_switches_a_hover_at_once() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     sources(&root.join("src"), &mut files);
-    sources(&root.join("../flottille-ui/src"), &mut files);
     assert!(files.len() > 20, "the sources were found: {}", files.len());
     let mut offenders = Vec::new();
     for file in files {

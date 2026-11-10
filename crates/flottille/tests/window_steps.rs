@@ -3,8 +3,8 @@
 
 mod kit_common;
 
-use flottille_ui::motion::PANEL;
 use flottille_window::steps::{StepRow, StepTone};
+use gpui_design_system::motion::PANEL;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     Context, IntoElement, ParentElement, Render, Styled, TestAppContext, VisualTestContext, Window,

@@ -5,8 +5,8 @@
 //! (`project.programs`, `docs/protocol.md`); the window reads when the page opens, after a change of
 //! forge or tracker and when the user asks (Check again), never in a loop.
 
-use flottille_ui::motion::PANEL;
-use flottille_ui::{
+use gpui_design_system::motion::PANEL;
+use gpui_design_system::{
     Button, Icon, Palette, Toast, Type, hoverable, icon, palette, presence_of, space, tint, toast,
 };
 use gpui_kit::{

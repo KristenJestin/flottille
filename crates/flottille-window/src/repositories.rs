@@ -9,7 +9,7 @@
 //! rows are the settings page's.
 
 use flottille_core::declared::RepositoryForge;
-use flottille_ui::{Confirm, Toast, toast};
+use gpui_design_system::{Confirm, Toast, toast};
 use gpui_kit::{App, Context, IntoElement, Render, SharedString, WeakEntity, Window};
 use serde_json::{Value, json};
 

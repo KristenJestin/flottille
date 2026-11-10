@@ -13,8 +13,6 @@ use std::time::{Duration, Instant};
 use common::User;
 use common::mcp::Mcp;
 use flottille_core::workspace::StepState;
-use flottille_ui::Icon;
-use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::actions::Changes;
 use flottille_window::composer::{Choice, Composer, Menu, PlaceChoice};
@@ -30,6 +28,8 @@ use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
 use flottille_window::state::icon_id;
 use flottille_window::tree::{project_id, session_id};
+use gpui_design_system::Icon;
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     Bounds, Entity, Focusable as _, Pixels, TestAppContext, VisualTestContext, px, size,
@@ -304,7 +304,7 @@ fn a_session_that_starts_waiting_marks_its_row_and_its_folded_project_and_the_be
     assert_eq!(shell.read_with(cx, |s, cx| s.top().read(cx).count()), 0);
 
     // Fold the project (its chevron: its name opens its page and folds nothing).
-    cx.update(|window, cx| window.click(flottille_ui::toggle_id(project_id("atlas")), cx));
+    cx.update(|window, cx| window.click(gpui_design_system::toggle_id(project_id("atlas")), cx));
     let project = shell.read_with(cx, |shell, _| shell.project("atlas").unwrap().clone());
     assert!(!project.read_with(cx, |p, _| p.is_open()));
 
@@ -554,7 +554,7 @@ fn below_860_the_tree_is_a_drawer_opened_by_the_menu_button(cx: &mut TestAppCont
         "the tree is not drawn beside the page"
     );
     cx.update(|window, cx| window.click("open-tree", cx));
-    flottille_ui_advance(cx);
+    gpui_design_system_advance(cx);
     cx.update(|window, cx| window.click(session_id(&id), cx));
     assert_eq!(
         shell.read_with(cx, |s, _| s.selected().cloned()),
@@ -632,7 +632,7 @@ fn the_narrow_session_opens_its_rail_with_a_panel_icon_labelled_session_details(
 }
 
 /// Lets a drawer's slide end.
-fn flottille_ui_advance(cx: &mut VisualTestContext) {
+fn gpui_design_system_advance(cx: &mut VisualTestContext) {
     for _ in 0..30 {
         cx.executor().advance_clock(Duration::from_millis(16));
         cx.update(|window, cx| window.simulate_next_frame(cx));
@@ -5541,7 +5541,7 @@ const TABLE: &str = "A table:\n\n| Tool | Result |\n| --- | --- |\n| `cargo test
 fn drawn_table(
     colors: Option<&str>,
     cx: &mut TestAppContext,
-) -> (flottille_ui::Palette, Vec<gpui_kit::Hsla>) {
+) -> (gpui_design_system::Palette, Vec<gpui_kit::Hsla>) {
     let user = team_user();
     if let Some(colors) = colors {
         std::fs::write(user.path("os-release"), "NAME=Test\nID=omarchy\n").unwrap();
@@ -5567,7 +5567,7 @@ fn drawn_table(
     );
     frame(cx);
     settle(cx);
-    let palette = cx.update(|_, cx| flottille_ui::palette(cx));
+    let palette = cx.update(|_, cx| gpui_design_system::palette(cx));
     let quads = cx.update(|window, _| {
         window
             .painted_quads()
@@ -5580,7 +5580,7 @@ fn drawn_table(
 
 /// The table's frame is on the palette's card and its header on the quiet surface: no quad of the
 /// kit's own (white) surface is left.
-fn assert_table_in_palette(p: &flottille_ui::Palette, quads: &[gpui_kit::Hsla]) {
+fn assert_table_in_palette(p: &gpui_design_system::Palette, quads: &[gpui_kit::Hsla]) {
     assert!(
         quads.contains(&p.card),
         "the table's frame is the card colour"
@@ -5694,7 +5694,7 @@ const REPORT: &str = "[flottille:child-report]\nBoth `forge show` and `forge lis
 fn drawn_report(
     colors: Option<&str>,
     cx: &mut TestAppContext,
-) -> (flottille_ui::Palette, Vec<gpui_kit::Hsla>) {
+) -> (gpui_design_system::Palette, Vec<gpui_kit::Hsla>) {
     let user = team_user();
     if let Some(colors) = colors {
         std::fs::write(user.path("os-release"), "NAME=Test\nID=omarchy\n").unwrap();
@@ -5717,7 +5717,7 @@ fn drawn_report(
     frame(cx);
     settle(cx);
     assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
-    let palette = cx.update(|_, cx| flottille_ui::palette(cx));
+    let palette = cx.update(|_, cx| gpui_design_system::palette(cx));
     let quads = cx.update(|window, _| {
         let body = window.find("row-0-report-text").bounds();
         let (left, top) = (f32::from(body.origin.x), f32::from(body.origin.y));
@@ -5745,7 +5745,7 @@ fn drawn_report(
 
 /// The inline code's chips in the report are on the quiet surface of the palette: none of the
 /// kit's own (white) surface is left.
-fn assert_report_in_palette(p: &flottille_ui::Palette, quads: &[gpui_kit::Hsla]) {
+fn assert_report_in_palette(p: &gpui_design_system::Palette, quads: &[gpui_kit::Hsla]) {
     assert!(
         quads.contains(&p.card2),
         "the code chips are the quiet surface: {quads:?}"
@@ -5934,7 +5934,7 @@ fn the_whole_path_is_in_the_tooltip(cx: &mut TestAppContext) {
     let line = format!("row-{at}-diff-path");
     cx.update(|window, cx| window.hover(line.clone(), cx));
     cx.executor()
-        .advance_clock(flottille_ui::motion::TOOLTIP + flottille_ui::motion::HOVER * 2);
+        .advance_clock(gpui_design_system::motion::TOOLTIP + gpui_design_system::motion::HOVER * 2);
     cx.run_until_parked();
     frame(cx);
     cx.update(|window, _| {
@@ -5953,8 +5953,9 @@ fn a_cut_diff_line_shows_its_whole_text_in_a_tooltip(cx: &mut TestAppContext) {
     settle(cx);
     let rest_on = |line: usize, cx: &mut VisualTestContext| {
         cx.update(|window, cx| window.hover(format!("row-{at}-diff-line-{line}"), cx));
-        cx.executor()
-            .advance_clock(flottille_ui::motion::TOOLTIP + flottille_ui::motion::HOVER * 2);
+        cx.executor().advance_clock(
+            gpui_design_system::motion::TOOLTIP + gpui_design_system::motion::HOVER * 2,
+        );
         cx.run_until_parked();
         frame(cx);
     };

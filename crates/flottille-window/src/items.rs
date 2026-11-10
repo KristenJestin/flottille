@@ -10,9 +10,9 @@ use crate::state::{AgentState, StateIcon, Status};
 use std::collections::HashMap;
 use std::time::Duration;
 
-use flottille_ui::fuzzy;
-use flottille_ui::motion::PANEL;
-use flottille_ui::{
+use gpui_design_system::fuzzy;
+use gpui_design_system::motion::PANEL;
+use gpui_design_system::{
     Block, Button, Card, EmptyLine, Field, FlatRow, Icon, LINE_GAP, LabelledLine, ListCard,
     ListRow, Listing, Modal, Segmented, Select, SelectOption, Switch, Type, changing, fade, icon,
     palette, presence, presence_of, space, tipped,
@@ -1523,7 +1523,7 @@ impl Render for ProjectItems {
         let problem = failed
             .or_else(|| (!problems.is_empty()).then(|| problems.join("\n")))
             .map(SharedString::from);
-        let listed: Vec<(String, ItemRow, flottille_ui::Placement)> = self.lists[tab.index()]
+        let listed: Vec<(String, ItemRow, gpui_design_system::Placement)> = self.lists[tab.index()]
             .rows()
             .map(|listed| {
                 (

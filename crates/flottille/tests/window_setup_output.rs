@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use flottille_core::workspace::StepState;
-use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::project::{PlaceBlock, ProjectPage};
 use flottille_window::shell::Selection;
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;

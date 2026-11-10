@@ -11,7 +11,7 @@ pub mod specs;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use flottille_ui::{
+use gpui_design_system::{
     Chosen, Field, Icon, ModelChoice, Section, Select, SelectOption, Switch, Toast, enter, palette,
     presence, presence_of, space, toast,
 };

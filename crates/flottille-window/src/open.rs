@@ -38,8 +38,8 @@ pub fn system() -> Opener {
 pub fn shown(opener: &Opener, target: &str, cx: &mut gpui_kit::App) {
     match flottille_core::shown::openable(target) {
         Ok(()) => opener(Path::new(target)),
-        Err(why) => flottille_ui::toast(
-            flottille_ui::Toast::failure(format!("Not opened: {why}")),
+        Err(why) => gpui_design_system::toast(
+            gpui_design_system::Toast::failure(format!("Not opened: {why}")),
             cx,
         ),
     }

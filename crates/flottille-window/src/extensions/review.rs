@@ -2,7 +2,7 @@
 //! Flottille runs and never sends to the agent. A review's agents and findings are one folded line
 //! of the session's rail (`session.rs`, `RailRow::Review`).
 
-use flottille_ui::{Toast, toast};
+use gpui_design_system::{Toast, toast};
 use gpui_kit::{App, WeakEntity};
 use serde_json::{Value, json};
 

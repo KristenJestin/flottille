@@ -4,15 +4,15 @@
 //! not.
 //!
 //! This is the data and the logic: what matches, in which order, which result is marked and what
-//! choosing it does. The look is `flottille_ui::Modal::search` over `ListRow`s.
+//! choosing it does. The look is `gpui_design_system::Modal::search` over `ListRow`s.
 
 use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
 use std::collections::HashMap;
 
-use flottille_ui::fuzzy::{self, Match};
-use flottille_ui::motion::MODAL;
-use flottille_ui::{
+use gpui_design_system::fuzzy::{self, Match};
+use gpui_design_system::motion::MODAL;
+use gpui_design_system::{
     EmptyLine, Field, Icon, Item, ListRow, Listing, Modal, Type, icon, meta, palette, presence,
     section_label, space,
 };

@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
-use flottille_ui::color::mix;
-use flottille_ui::motion::{HOVER, PANEL};
-use flottille_ui::{
+use gpui_design_system::color::mix;
+use gpui_design_system::motion::{HOVER, PANEL};
+use gpui_design_system::{
     Align, Button, Dropdown, Icon, MenuItem, Skeleton, Toast, Type, enter, fade, follow_theme,
     hoverable, palette, presence_of, space, toast,
 };

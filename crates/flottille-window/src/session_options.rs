@@ -5,8 +5,8 @@
 //! a dot until the agent took it, and its menu says when it applies (`agent.options`,
 //! `docs/agents.md`, "The options"). Nothing under the bar, so the composer keeps its height.
 
-use flottille_ui::motion::{HOVER, PANEL};
-use flottille_ui::{Align, Dropdown, MenuItem, fade, palette, section_label, space};
+use gpui_design_system::motion::{HOVER, PANEL};
+use gpui_design_system::{Align, Dropdown, MenuItem, fade, palette, section_label, space};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
@@ -265,8 +265,9 @@ impl SessionOptions {
         self.held = refused.is_none() && !self.asked.is_empty();
         if let Some(why) = refused {
             self.asked = Pending::default();
-            flottille_ui::toast(
-                flottille_ui::Toast::failure("The model or effort was not changed").detail(why),
+            gpui_design_system::toast(
+                gpui_design_system::Toast::failure("The model or effort was not changed")
+                    .detail(why),
                 cx,
             );
         }
@@ -277,8 +278,9 @@ impl SessionOptions {
     /// pickers say again, and a toast says why, naming what it offers.
     pub fn refused(&mut self, reason: String, cx: &mut Context<Self>) {
         self.asked = Pending::default();
-        flottille_ui::toast(
-            flottille_ui::Toast::failure("The model or effort was not changed").detail(reason),
+        gpui_design_system::toast(
+            gpui_design_system::Toast::failure("The model or effort was not changed")
+                .detail(reason),
             cx,
         );
         cx.notify();

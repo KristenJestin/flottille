@@ -177,7 +177,7 @@ pub enum Command {
     },
     /// Keeps the window's appearance (`appearance.set`).
     AppearanceSet {
-        appearance: flottille_ui::omarchy::Appearance,
+        appearance: gpui_design_system::Appearance,
         seq: u64,
     },
     /// The user saw the notice of the Auto judge Flottille picked (`provider.judge_noticed`);
@@ -970,7 +970,7 @@ pub enum Outcome {
         /// The number of the request this answers.
         seq: u64,
         written: bool,
-        shown: Result<flottille_ui::omarchy::Appearance, String>,
+        shown: Result<gpui_design_system::Appearance, String>,
     },
     /// The compaction as the daemon says it (`compaction.show`), after a read, a change of its
     /// settings (`written`) or of its guidance (`guidance`).
@@ -2684,12 +2684,11 @@ pub(crate) fn read_providers(
 }
 
 /// The appearance in the words of `appearance.show`.
-fn appearance_json(appearance: flottille_ui::omarchy::Appearance) -> Value {
-    use flottille_ui::omarchy::Source;
-    use flottille_ui::theme::Shade;
+fn appearance_json(appearance: gpui_design_system::Appearance) -> Value {
+    use gpui_design_system::Source;
+    use gpui_design_system::theme::Shade;
     let theme = match appearance.source {
-        Source::Omarchy => "omarchy",
-        Source::Own => "flottille",
+        Source::Desktop(id) | Source::Theme(id) => id.to_string(),
     };
     let shade = match appearance.shade {
         Shade::Light => "light",
@@ -2699,12 +2698,12 @@ fn appearance_json(appearance: flottille_ui::omarchy::Appearance) -> Value {
 }
 
 /// What `appearance.show` says, or why it says nothing the window knows.
-pub fn appearance_of(shown: &Value) -> Result<flottille_ui::omarchy::Appearance, String> {
-    use flottille_ui::omarchy::{Appearance, Source};
-    use flottille_ui::theme::Shade;
+pub fn appearance_of(shown: &Value) -> Result<gpui_design_system::Appearance, String> {
+    use gpui_design_system::theme::Shade;
+    use gpui_design_system::{Appearance, Source};
     let source = match shown["theme"].as_str() {
-        Some("omarchy") => Source::Omarchy,
-        Some("flottille") => Source::Own,
+        Some(crate::OMARCHY) => Source::Desktop(crate::OMARCHY.into()),
+        Some(crate::OWN_THEME) => Source::Theme(crate::OWN_THEME.into()),
         other => return Err(format!("an unknown theme: {other:?}")),
     };
     let shade = match shown["shade"].as_str() {

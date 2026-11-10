@@ -5,7 +5,9 @@
 //! (`leave.withdraw`). Nothing is drawn while there is none; a row unfolds when a leave is given
 //! and folds away when it ends, withdrawn or with either session.
 
-use flottille_ui::{Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, space};
+use gpui_design_system::{
+    Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, space,
+};
 use gpui_kit::{
     AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div,
@@ -55,11 +57,11 @@ impl LeaveRow {
         match self.writer == root {
             true => format!(
                 "May write to {}",
-                flottille_ui::quoted_title(&self.session_name)
+                gpui_design_system::quoted_title(&self.session_name)
             ),
             false => format!(
                 "{} may write here",
-                flottille_ui::quoted_title(&self.writer_name)
+                gpui_design_system::quoted_title(&self.writer_name)
             ),
         }
     }
@@ -174,7 +176,7 @@ impl Render for LeaveList {
         self.list.sync(entries, at, cx.reduce_motion());
         let p = palette(cx);
         let present = !self.list.is_empty();
-        let listed: Vec<(String, LeaveRow, flottille_ui::Placement)> = self
+        let listed: Vec<(String, LeaveRow, gpui_design_system::Placement)> = self
             .list
             .rows()
             .map(|listed| {

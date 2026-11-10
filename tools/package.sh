@@ -18,7 +18,7 @@ trap 'rm -rf "$work"' EXIT
 mkdir "$work/$name"
 install -m 0755 "$binary" "$work/$name/flottille"
 install -m 0644 "$root/LICENSE" "$work/$name/LICENSE"
-install -m 0644 "$root/crates/flottille-ui/assets/fonts/OFL.txt" "$work/$name/LICENSE-fonts.txt"
+install -m 0644 "$root/assets/brand/fonts/OFL.txt" "$work/$name/LICENSE-fonts.txt"
 (cd "$root/packaging/linux" && find flottille.desktop icons -type f | sort) | while read -r file; do
   case "$file" in
     flottille.desktop) target="share/applications/$file" ;;

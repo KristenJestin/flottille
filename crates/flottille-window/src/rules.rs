@@ -9,7 +9,7 @@
 //! The same editor holds the Auto judge's guidance in Settings (`judge.show`, `judge.set`,
 //! `judge.reset`), read at each judgement: a change reaches the next one.
 
-use flottille_ui::{
+use gpui_design_system::{
     Button, Icon, Section, Switch, Toast, follow_theme, hoverable, icon, palette, presence,
     presence_of, space, toast, turning,
 };
@@ -642,7 +642,7 @@ impl Render for RulesEditor {
                         None => SharedString::from("Global rules"),
                     })
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_global(cx))),
-                move |d, t| d.text_color(flottille_ui::color::mix(p.faint, p.text, t)),
+                move |d, t| d.text_color(gpui_design_system::color::mix(p.faint, p.text, t)),
             );
             let shell = self.shell.clone();
             let body = div()

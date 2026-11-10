@@ -9,11 +9,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::composer::Composer;
 use flottille_window::link::Connect;
 use flottille_window::shell::Selection;
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     ClipboardItem, Entity, Image, ImageFormat, TestAppContext, VisualTestContext, px, size,
