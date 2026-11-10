@@ -763,7 +763,8 @@ line names, every program a wrapper or a runner runs included:
   always looked at whole; the rest of a place of more than 500,000 entries is looked at up to
   that bound, and the result says its agent folders could not all be checked, as does an entry
   of the user's inbox (`run.agent_folders_unchecked`); so does a repository of the place whose
-  folder is outside it (reached through a link), whose agent folders are not looked at. What this does not cover: a process that outlives its run (one that
+  folder is outside it (reached through a link), whose agent folders are not looked at, and a snapshot that could not be taken. A run waits for
+  the snapshot of its place, and for a put-back going on there, never for another place's. What this does not cover: a process that outlives its run (one that
   left the run's session, `setsid`), a long `serve` run until it ends, and a run going on when
   the daemon stops or crashes; the files also exist while the run goes on;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:

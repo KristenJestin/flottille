@@ -53,6 +53,13 @@ fn unchecked(data: &Value) -> String {
                 .to_owned(),
         );
     }
+    if data["missing"] == true {
+        said.push(
+            "Flottille could not note its agent folders before it: what it changed there was \
+             neither known nor put back"
+                .to_owned(),
+        );
+    }
     let unreached: Vec<&str> = data["unreached"]
         .as_array()
         .into_iter()
@@ -177,11 +184,18 @@ mod tests {
 
     #[test]
     fn an_unchecked_entry_names_a_repository_outside_the_place() {
-        let text = unchecked(&json!({"run": "r1", "folder": "/work/app", "too_large": false,
-            "unreached": ["/work/app/linked"]}));
+        let text = unchecked(
+            &json!({"run": "r1", "folder": "/work/app", "too_large": false,
+            "unreached": ["/work/app/linked"]}),
+        );
         assert!(text.contains("/work/app/linked"), "{text}");
         assert!(text.contains("outside it"), "{text}");
         assert!(!text.contains("too large"), "{text}");
+        let text = unchecked(
+            &json!({"run": "r1", "folder": "/work/app", "too_large": false,
+            "missing": true}),
+        );
+        assert!(text.contains("could not note its agent folders"), "{text}");
         // One stored before it said why was a place too large.
         let text = unchecked(&json!({"run": "r1", "folder": "/work/app"}));
         assert!(text.contains("too large for Flottille to check"), "{text}");

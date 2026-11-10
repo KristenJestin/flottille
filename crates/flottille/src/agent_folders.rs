@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
+use tokio::sync::watch;
 
 use crate::gate::{AGENT_FOLDERS, AGENT_LOGINS};
 
@@ -61,6 +62,23 @@ type Race = Option<Box<dyn FnMut(&Path)>>;
 #[cfg(test)]
 thread_local! {
     static RACE: std::cell::RefCell<Race> = std::cell::RefCell::new(None);
+}
+
+// The snapshots and put-backs a test holds, by the place's path (`.put-back` below it for a
+// put-back): each waits for its sender, and fails when it is dropped.
+#[cfg(test)]
+static HELD: std::sync::Mutex<BTreeMap<PathBuf, std::sync::mpsc::Receiver<()>>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+fn held(at: &Path) {
+    #[cfg(test)]
+    {
+        let release = HELD.lock().unwrap().remove(at);
+        if release.is_some_and(|release| release.recv().is_err()) {
+            panic!("held, then failed");
+        }
+    }
+    let _ = at;
 }
 
 // Whether `keep` acts as if what it keeps were on another disk than the place.
@@ -128,6 +146,8 @@ pub struct Snapshot {
     /// The repositories whose folder is outside the place, reached through a link or not: their
     /// agent folders are not looked at, and the result says so.
     unreached: Vec<PathBuf>,
+    /// A snapshot of a place inside it, taken in, could not be taken.
+    missing: bool,
 }
 
 /// What `Snapshot::restore` found the run changed, relative to the place.
@@ -144,6 +164,9 @@ pub struct Restored {
     /// The repositories of the place whose folder is outside it (reached through a link): their
     /// agent folders were not checked.
     pub unreached: Vec<String>,
+    /// The agent folders could not be noted before the run (the snapshot failed): nothing it
+    /// changed there is known, nor put back.
+    pub missing: bool,
 }
 
 impl Snapshot {
@@ -164,6 +187,7 @@ impl Snapshot {
         inside: &[(PathBuf, Arc<Snapshot>)],
     ) -> Snapshot {
         let root = real(root);
+        held(&root);
         let home = home.map(real);
         let kept = match (kept.parent(), kept.file_name()) {
             (Some(parent), Some(name)) => real(parent).join(name),
@@ -223,6 +247,7 @@ impl Snapshot {
             whole,
             contents,
             unreached,
+            missing: false,
         }
     }
 
@@ -230,6 +255,7 @@ impl Snapshot {
     /// removed, what was changed or removed is written again. What is removed or overwritten is
     /// moved first to the folder `run` of the snapshot's `kept`, never lost.
     pub fn restore(&self, run: &str) -> Restored {
+        held(&self.root.join(".put-back"));
         let kept = &self.kept.join(run);
         let walked = walk(
             &self.root,
@@ -247,6 +273,7 @@ impl Snapshot {
                 .iter()
                 .map(|top| top.display().to_string())
                 .collect(),
+            missing: self.missing,
             ..Restored::default()
         };
         let Ok(top) = open_root(&self.root) else {
@@ -720,6 +747,17 @@ pub fn said(restored: &Restored) -> Option<String> {
             entries_max()
         ));
     }
+    if restored.missing {
+        text.push_str(&format!(
+            "{}the agent folders of this place could not be noted before the run: what it \
+             changed there is neither known nor put back, tell the user",
+            if text.is_empty() {
+                "\nflottille: refused: "
+            } else {
+                "; "
+            }
+        ));
+    }
     if !restored.unreached.is_empty() {
         text.push_str(&format!(
             "{}the agent folders of {} were not checked: a repository of this place whose folder \
@@ -751,21 +789,37 @@ pub fn said(restored: &Restored) -> Option<String> {
 /// their snapshots kept for their folders.
 #[derive(Default)]
 pub struct Guards {
-    /// One lock for all of them: a group may take in others. Held while a snapshot is taken or
-    /// put back, so that a run that starts meanwhile waits for it.
-    groups: Arc<tokio::sync::Mutex<Vec<Group>>>,
+    /// One lock for all of them: a group may take in others. Held only to change them, never
+    /// while a snapshot is taken or put back: a run elsewhere does not wait behind a large place.
+    groups: Arc<std::sync::Mutex<Vec<Group>>>,
 }
 
 /// The runs that go on in a place, or in places inside it.
 struct Group {
     root: PathBuf,
     runs: Vec<String>,
-    snapshot: Option<Arc<Snapshot>>,
+    /// `None` while it is taken, then the snapshot, `None` when it could not be: a run that
+    /// joins waits for it, so that nothing it writes is in it.
+    snapshot: watch::Receiver<Option<Taken>>,
+    /// While it is put back: a run that starts in, around or inside the place waits for its end,
+    /// so that its snapshot holds none of what is still to be put back.
+    closing: Option<watch::Receiver<bool>>,
+}
+
+/// A group's snapshot, once taken.
+type Taken = Option<Arc<Snapshot>>;
+
+/// What a run that enters waits for.
+enum Wait {
+    /// A put-back of its place, before it looks at the groups again.
+    Closing(watch::Receiver<bool>),
+    /// The snapshot of the group it is in.
+    Taken(watch::Receiver<Option<Taken>>),
 }
 
 /// One run's share of its place's guard: `leave` once it ends.
 pub struct Guard {
-    groups: Arc<tokio::sync::Mutex<Vec<Group>>>,
+    groups: Arc<std::sync::Mutex<Vec<Group>>>,
     /// The run's id: where its put-back keeps what it removes, if it is the last.
     run: String,
     left: bool,
@@ -773,7 +827,8 @@ pub struct Guard {
 
 impl Guards {
     /// Guards the agent folders of `root` while the run `run` goes on there. `kept`, where a
-    /// put-back keeps what it removes, a folder per run.
+    /// put-back keeps what it removes, a folder per run. It returns once the snapshot the run
+    /// shares is taken.
     pub async fn enter(
         &self,
         root: &Path,
@@ -783,51 +838,100 @@ impl Guards {
         run: &str,
     ) -> Guard {
         let root = real(root);
-        let mut groups = self.groups.lock().await;
         let guard = Guard {
             groups: self.groups.clone(),
             run: run.to_owned(),
             left: false,
         };
-        if let Some(group) = groups
-            .iter_mut()
-            .find(|group| root.starts_with(&group.root))
-        {
-            group.runs.push(run.to_owned());
-            return guard;
+        loop {
+            let wait = {
+                let mut groups = self.groups.lock().unwrap();
+                let overlaps =
+                    |group: &Group| root.starts_with(&group.root) || group.root.starts_with(&root);
+                match groups
+                    .iter()
+                    .filter(|group| overlaps(group))
+                    .find_map(|group| group.closing.clone())
+                {
+                    Some(closing) => Wait::Closing(closing),
+                    None => Wait::Taken(
+                        match groups
+                            .iter_mut()
+                            .find(|group| root.starts_with(&group.root))
+                        {
+                            Some(group) => {
+                                group.runs.push(run.to_owned());
+                                group.snapshot.clone()
+                            }
+                            None => self.prepare(&mut groups, &root, tops, home, kept, run),
+                        },
+                    ),
+                }
+            };
+            match wait {
+                Wait::Closing(mut closing) => {
+                    let _ = closing.wait_for(|closed| *closed).await;
+                }
+                Wait::Taken(mut taken) => {
+                    let _ = taken.wait_for(Option::is_some).await;
+                    return guard;
+                }
+            }
         }
-        let (inside, others): (Vec<Group>, Vec<Group>) = std::mem::take(&mut *groups)
+    }
+
+    /// A group for the run `run` in `root`, which takes in the groups inside it: its snapshot is
+    /// taken by a task of its own, which goes on if the run's start is given up.
+    fn prepare(
+        &self,
+        groups: &mut Vec<Group>,
+        root: &Path,
+        tops: &[PathBuf],
+        home: Option<&Path>,
+        kept: &Path,
+        run: &str,
+    ) -> watch::Receiver<Option<Taken>> {
+        let (inside, others): (Vec<Group>, Vec<Group>) = std::mem::take(groups)
             .into_iter()
-            .partition(|group| group.root.starts_with(&root));
+            .partition(|group| group.root.starts_with(root));
         *groups = others;
         let mut runs: Vec<String> = inside.iter().flat_map(|group| group.runs.clone()).collect();
         runs.push(run.to_owned());
-        let taken_in: Vec<(PathBuf, Arc<Snapshot>)> = inside
-            .into_iter()
-            .filter_map(|group| {
-                let relative = group.root.strip_prefix(&root).ok()?.to_owned();
-                Some((relative, group.snapshot?))
-            })
-            .collect();
-        let (home, kept, at) = (home.map(Path::to_owned), kept.to_owned(), root.clone());
-        let tops = tops.to_vec();
-        let snapshot = tokio::task::spawn_blocking(move || {
-            Arc::new(Snapshot::take_around(
-                &at,
-                home.as_deref(),
-                &kept,
-                &tops,
-                &taken_in,
-            ))
-        })
-        .await
-        .ok();
+        let (taken, snapshot) = watch::channel(None);
         groups.push(Group {
-            root,
+            root: root.to_owned(),
             runs,
-            snapshot,
+            snapshot: snapshot.clone(),
+            closing: None,
         });
-        guard
+        let (home, kept, at) = (home.map(Path::to_owned), kept.to_owned(), root.to_owned());
+        let tops = tops.to_vec();
+        tokio::spawn(async move {
+            let mut taken_in = Vec::new();
+            let mut lost = false;
+            for mut group in inside {
+                let snapshot = match group.snapshot.wait_for(Option::is_some).await {
+                    Ok(snapshot) => snapshot.clone().flatten(),
+                    Err(_) => None,
+                };
+                match (group.root.strip_prefix(&at), snapshot) {
+                    (Ok(relative), Some(snapshot)) => {
+                        taken_in.push((relative.to_owned(), snapshot))
+                    }
+                    _ => lost = true,
+                }
+            }
+            let snapshot = tokio::task::spawn_blocking(move || {
+                let mut snapshot =
+                    Snapshot::take_around(&at, home.as_deref(), &kept, &tops, &taken_in);
+                snapshot.missing |= lost;
+                Arc::new(snapshot)
+            })
+            .await
+            .ok();
+            let _ = taken.send(Some(snapshot));
+        });
+        snapshot
     }
 }
 
@@ -859,22 +963,54 @@ impl Drop for Guard {
     }
 }
 
-async fn leave(groups: Arc<tokio::sync::Mutex<Vec<Group>>>, run: String) -> Option<Restored> {
-    let mut groups = groups.lock().await;
-    let at = groups.iter().position(|group| group.runs.contains(&run))?;
-    groups[at].runs.retain(|other| *other != run);
-    if !groups[at].runs.is_empty() {
-        return None;
-    }
-    let snapshot = groups.remove(at).snapshot?;
-    tokio::task::spawn_blocking(move || snapshot.restore(&run))
-        .await
-        .ok()
+/// The run `run` leaves its group: the last one puts the place back, in a task of its own that
+/// goes on if the one waiting for it is given up, a run that starts there meanwhile waiting.
+async fn leave(groups: Arc<std::sync::Mutex<Vec<Group>>>, run: String) -> Option<Restored> {
+    let (mut snapshot, closed) = {
+        let mut groups = groups.lock().unwrap();
+        let group = groups.iter_mut().find(|group| group.runs.contains(&run))?;
+        group.runs.retain(|other| *other != run);
+        if !group.runs.is_empty() {
+            return None;
+        }
+        let (closed, closing) = watch::channel(false);
+        group.closing = Some(closing);
+        (group.snapshot.clone(), closed)
+    };
+    tokio::spawn(async move {
+        let taken = match snapshot.wait_for(Option::is_some).await {
+            Ok(taken) => taken.clone().flatten(),
+            Err(_) => None,
+        };
+        // Not taken, nothing is known of what the runs changed: said, never passed over.
+        let missing = Restored {
+            missing: true,
+            ..Restored::default()
+        };
+        let restored = match taken {
+            Some(taken) => tokio::task::spawn_blocking(move || taken.restore(&run))
+                .await
+                .unwrap_or(missing),
+            None => missing,
+        };
+        let this = closed.subscribe();
+        groups.lock().unwrap().retain(|group| {
+            !group
+                .closing
+                .as_ref()
+                .is_some_and(|closing| closing.same_channel(&this))
+        });
+        let _ = closed.send(true);
+        restored
+    })
+    .await
+    .ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn made(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1374,7 +1510,7 @@ mod tests {
         assert!(planted.exists());
         a.leave().await.unwrap();
         assert!(!planted.exists());
-        assert!(guards.groups.lock().await.is_empty());
+        assert!(guards.groups.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1388,6 +1524,109 @@ mod tests {
             runtime.block_on(guards.enter(dir.path(), &[], None, &dir.path().join("kept"), "r"));
         drop(runtime);
         drop(guard);
+    }
+
+    /// Holds what is done at `at` until the sender is used; dropped, it fails.
+    fn hold(at: PathBuf) -> std::sync::mpsc::Sender<()> {
+        let (release, held) = std::sync::mpsc::channel();
+        HELD.lock().unwrap().insert(at, held);
+        release
+    }
+
+    /// The run `run` entering `root`, in a task of its own.
+    fn entering(
+        guards: &Arc<Guards>,
+        root: &Path,
+        kept: &Path,
+        run: &str,
+    ) -> tokio::task::JoinHandle<Guard> {
+        let (guards, root, kept, run) = (
+            guards.clone(),
+            root.to_owned(),
+            kept.to_owned(),
+            run.to_owned(),
+        );
+        tokio::spawn(async move { guards.enter(&root, &[], None, &kept, &run).await })
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_being_taken_does_not_hold_up_a_run_in_another_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let (large, small) = (dir.path().join("large"), dir.path().join("small"));
+        made(&large.join("README.md"), "\n");
+        made(&small.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let guards = Arc::new(Guards::default());
+        let release = hold(real(&large));
+        let first = entering(&guards, &large, &kept, "first");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // A run elsewhere starts and ends while the large place is looked at.
+        let other = tokio::time::timeout(Duration::from_secs(10), async {
+            let guard = guards.enter(&small, &[], None, &kept, "small").await;
+            made(&small.join(".claude/settings.json"), "{\"hooks\": {}}\n");
+            guard.leave().await
+        })
+        .await
+        .expect("held up behind another place's snapshot");
+        assert_eq!(other.unwrap().put_back, [".claude/settings.json"]);
+
+        // A run in the place being looked at waits for its snapshot: what it writes is not in it.
+        let second = entering(&guards, &large, &kept, "second");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!first.is_finished() && !second.is_finished());
+        release.send(()).unwrap();
+        let (first, second) = (first.await.unwrap(), second.await.unwrap());
+        made(&large.join(".claude/settings.json"), "{\"hooks\": {}}\n");
+        assert_eq!(first.leave().await, None);
+        let restored = second.leave().await.unwrap();
+        assert_eq!(restored.put_back, [".claude/settings.json"]);
+        assert!(!large.join(".claude").exists());
+    }
+
+    #[tokio::test]
+    async fn a_run_that_starts_while_its_place_is_put_back_waits_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        made(&root.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let guards = Arc::new(Guards::default());
+        let first = guards.enter(&root, &[], None, &kept, "first").await;
+        made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
+        let release = hold(real(&root).join(".put-back"));
+        let leaving = tokio::spawn(first.leave());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let next = entering(&guards, &root, &kept, "next");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!next.is_finished());
+        release.send(()).unwrap();
+        let restored = leaving.await.unwrap().unwrap();
+        assert_eq!(restored.put_back, [".claude/settings.json"]);
+        // Its snapshot was taken once the hook was gone: it is not put back again.
+        let next = next.await.unwrap();
+        assert_eq!(next.leave().await, Some(Restored::default()));
+        assert!(!root.join(".claude").exists());
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_that_fails_is_said_unchecked_not_passed_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        made(&root.join("README.md"), "\n");
+        drop(hold(real(&root)));
+        let guards = Guards::default();
+
+        let guard = guards
+            .enter(&root, &[], None, &dir.path().join("kept"), "run")
+            .await;
+        made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
+        let restored = guard.leave().await.unwrap();
+
+        assert!(restored.missing, "{restored:?}");
+        let text = said(&restored).unwrap();
+        assert!(text.contains("could not be noted before the run"), "{text}");
+        assert!(guards.groups.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1421,6 +1660,6 @@ mod tests {
         next.leave().await.unwrap();
         assert!(!root.join(".codex/config.toml").exists());
         // The last run of a place to leave takes its entry with it.
-        assert!(guards.groups.lock().await.is_empty());
+        assert!(guards.groups.lock().unwrap().is_empty());
     }
 }
