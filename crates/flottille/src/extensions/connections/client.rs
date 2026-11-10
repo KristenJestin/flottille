@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 use rmcp::model::{
     CallToolRequestParams, ClientConfig, CreateMessageRequestParams, CreateMessageResult,
     ElicitRequestParams, ElicitResult, ErrorCode, Implementation, ListRootsResult,
+    PaginatedRequestParams,
 };
-use rmcp::service::{NotificationContext, RequestContext, RunningService};
+use rmcp::service::{NotificationContext, Peer, RequestContext, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{ClientHandler, ClientLifecycleMode, ClientServiceExt, ErrorData, RoleClient};
@@ -31,6 +32,10 @@ use crate::mcp::{Grant, Outcome};
 const CALL_LIMIT: Duration = Duration::from_secs(120);
 /// How long a server has to answer `initialize` and list its tools.
 const START_LIMIT: Duration = Duration::from_secs(30);
+/// How many pages of tools a server may list, and how many tools in all: a listing past either
+/// would grow without end.
+const LIST_PAGES: usize = 100;
+const LIST_TOOLS: usize = 1_000;
 /// How often a running server is looked at: off, cut off, idle.
 const TICK: Duration = Duration::from_millis(500);
 
@@ -58,6 +63,62 @@ struct Server {
     leader: Mutex<Option<u32>>,
     /// Why it failed to start, until it starts.
     failing: Mutex<Option<String>>,
+    /// Its tools listed again after it said they changed: one listing at a time.
+    noticed: Mutex<Noticed>,
+}
+
+#[derive(Default)]
+struct Noticed {
+    listing: bool,
+    /// It said so again while a listing ran: one more listing once it ends.
+    again: bool,
+}
+
+/// Why a server's tools could not be listed.
+enum Unlisted {
+    /// Its answer failed.
+    Failed(String),
+    /// It took too long or listed too much: it cannot be compared with what was accepted.
+    Endless(String),
+}
+
+/// Its tools, page after page, within the start's time limit and `LIST_PAGES` and `LIST_TOOLS`.
+async fn listed(peer: &Peer<RoleClient>) -> Result<Vec<Value>, Unlisted> {
+    let pages = async {
+        let mut tools = Vec::new();
+        let mut cursor = None;
+        for _ in 0..LIST_PAGES {
+            let page = peer
+                .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
+                .await
+                .map_err(|error| Unlisted::Failed(format!("listing its tools: {error}")))?;
+            tools.extend(
+                page.tools
+                    .iter()
+                    .filter_map(|tool| serde_json::to_value(tool).ok()),
+            );
+            if tools.len() > LIST_TOOLS {
+                return Err(Unlisted::Endless(format!(
+                    "it lists more than {LIST_TOOLS} tools"
+                )));
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                return Ok(tools);
+            }
+        }
+        Err(Unlisted::Endless(format!(
+            "its listing does not end: more than {LIST_PAGES} pages of tools"
+        )))
+    };
+    tokio::time::timeout(START_LIMIT, pages)
+        .await
+        .unwrap_or_else(|_| {
+            Err(Unlisted::Endless(format!(
+                "it did not list its tools within {} seconds",
+                START_LIMIT.as_secs()
+            )))
+        })
 }
 
 struct Running {
@@ -152,35 +213,63 @@ impl ClientHandler for Handler {
         Err(refused("roots"))
     }
 
-    /// Listed again and compared with the pin: any change cuts the connection off.
+    /// Listed again and compared with the pin: any change cuts the connection off. Notices that
+    /// come while it is listed make one more listing, not one each.
     async fn on_tool_list_changed(&self, context: NotificationContext<RoleClient>) {
+        let Some(server) = self
+            .daemon
+            .upgrade()
+            .and_then(|daemon| existing(&daemon, &self.name))
+        else {
+            return;
+        };
+        {
+            let mut noticed = server.noticed.lock().unwrap();
+            if noticed.listing {
+                noticed.again = true;
+                return;
+            }
+            noticed.listing = true;
+        }
         let (daemon, name, peer) = (self.daemon.clone(), self.name.clone(), context.peer.clone());
         tokio::spawn(async move {
-            let tools = match peer.list_all_tools().await {
-                Ok(tools) => tools,
-                Err(error) => {
-                    eprintln!("flottille daemon: connection {name}: listing its tools: {error}");
+            loop {
+                compare(&daemon, &name, &peer).await;
+                let mut noticed = server.noticed.lock().unwrap();
+                if !noticed.again {
+                    noticed.listing = false;
                     return;
                 }
-            };
-            let Some(daemon) = daemon.upgrade() else {
-                return;
-            };
-            let tools: Vec<Value> = tools
-                .iter()
-                .filter_map(|tool| serde_json::to_value(tool).ok())
-                .collect();
-            let row = super::row(&daemon, &name);
-            let Some(pin) = row.pin.filter(|_| row.cut_off.is_none()) else {
-                return;
-            };
-            let now = Listing::of(pin.server.clone(), pin.instructions.clone(), &tools);
-            let changed = super::action_changes(&pin, &now);
-            if !changed.is_empty() {
-                super::cut_off(&daemon, &name, &changed);
-                stop_soon(&daemon, &name);
+                noticed.again = false;
             }
         });
+    }
+}
+
+/// The server's tools listed again, against the pin.
+async fn compare(daemon: &Weak<Daemon>, name: &str, peer: &Peer<RoleClient>) {
+    let listing = listed(peer).await;
+    let Some(daemon) = daemon.upgrade() else {
+        return;
+    };
+    let row = super::row(&daemon, name);
+    let Some(pin) = row.pin.filter(|_| row.cut_off.is_none()) else {
+        return;
+    };
+    let changed = match listing {
+        Ok(tools) => {
+            let now = Listing::of(pin.server.clone(), pin.instructions.clone(), &tools);
+            super::action_changes(&pin, &now)
+        }
+        Err(Unlisted::Endless(why)) => vec![why],
+        Err(Unlisted::Failed(why)) => {
+            eprintln!("flottille daemon: connection {name}: {why}");
+            return;
+        }
+    };
+    if !changed.is_empty() {
+        super::cut_off(&daemon, name, &changed);
+        stop_soon(&daemon, name);
     }
 }
 
@@ -313,14 +402,9 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
         .peer_info()
         .and_then(|info| serde_json::to_value(&*info).ok())
         .unwrap_or_default();
-    let tools = match tokio::time::timeout(START_LIMIT, service.peer().list_all_tools()).await {
-        Ok(Ok(tools)) => tools,
-        failed => {
-            let why = match failed {
-                Err(_) => "it did not list its tools within 30 seconds".to_owned(),
-                Ok(Err(error)) => format!("listing its tools: {error}"),
-                Ok(Ok(_)) => unreachable!("matched above"),
-            };
+    let tools = match listed(service.peer()).await {
+        Ok(tools) => tools,
+        Err(Unlisted::Failed(why) | Unlisted::Endless(why)) => {
             stop_running(Running {
                 service,
                 leader,
@@ -332,10 +416,6 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
             return Err(could_not(why));
         }
     };
-    let tools: Vec<Value> = tools
-        .iter()
-        .filter_map(|tool| serde_json::to_value(tool).ok())
-        .collect();
     let server =
         json!({"name": info["serverInfo"]["name"], "version": info["serverInfo"]["version"]});
     let instructions = info["instructions"].as_str().map(str::to_owned);

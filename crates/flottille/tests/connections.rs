@@ -1704,3 +1704,59 @@ fn a_change_announced_between_review_and_accept_is_not_pinned_unseen() {
     );
 }
 
+#[test]
+fn a_flood_of_change_notices_runs_one_listing_at_a_time() {
+    let user = user();
+    project(&user, "app");
+    let trigger = user.path("almanac-notify");
+    let mut script = almanac();
+    script["notify"] = json!({"when": trigger, "times": 50});
+    script["list_sleep_ms"] = json!(100);
+    connect(&user, "almanac", &script, json!({"search": "passes"}));
+    let (_, mcp) = session(&user, "app");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    let before = logged(&user, "almanac", "list").len();
+    std::fs::write(&trigger, "").unwrap();
+    eventually("listed again", || {
+        logged(&user, "almanac", "list").len() > before
+    });
+    std::thread::sleep(Duration::from_millis(1_500));
+    let listings = logged(&user, "almanac", "list").len() - before;
+    assert!(
+        listings <= 2,
+        "{listings} listings for one flood: one, and one more for the notices that came during it"
+    );
+    assert_eq!(connection(&user, "almanac")["state"], "ready");
+}
+
+#[test]
+fn a_server_that_never_ends_its_listing_is_cut_off() {
+    let user = user();
+    project(&user, "app");
+    let trigger = user.path("almanac-notify");
+    let mut script = almanac();
+    script["notify"] = json!({"when": trigger, "times": 1});
+    connect(&user, "almanac", &script, json!({"search": "passes"}));
+    let (_, mcp) = session(&user, "app");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    let mut endless = script.clone();
+    endless["endless_listing"] = json!(true);
+    write_script(&user, "almanac", &endless);
+    std::fs::write(&trigger, "").unwrap();
+    eventually("cut off", || {
+        connection(&user, "almanac")["state"] == "cut off"
+    });
+    let why = connection(&user, "almanac")["cut_off"].clone();
+    assert!(
+        why.as_str().unwrap().contains("pages of tools"),
+        "{why}"
+    );
+    assert!(!has(&mcp, "conn_almanac"));
+}
+
