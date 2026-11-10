@@ -1,0 +1,16 @@
+# Counts what the tool lists of Flottille's agents cost, from the JSON the `tool_list_cost` test
+# writes (`docs/research/tool-list-cost.md`). Its own workspace: nothing of Flottille's build
+# depends on it, and the tokenizer is a dependency of weight the daemon never needs.
+[package]
+name = "tool-list-cost"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[dependencies]
+serde_json = "1.0.154"
+# The BPE tables of OpenAI's `o200k_base` are compiled in: it counts offline, and calls no API.
+tiktoken-rs = "0.12.1"
+
+[workspace]
