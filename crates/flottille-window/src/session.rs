@@ -1716,6 +1716,14 @@ impl SessionPage {
         }
     }
 
+    /// Whether the session waits for the answer of its pilot, as the daemon says it.
+    fn waits_on_pilot(&self) -> bool {
+        self.tree
+            .iter()
+            .find(|a| a.parent.is_none())
+            .is_some_and(|root| root.waiting_on.as_deref() == Some("pilot"))
+    }
+
     /// Whether the question of `seq` waits for the user's answer, as the daemon says it.
     fn asking(&self, seq: u64) -> bool {
         self.tree
@@ -1765,6 +1773,20 @@ impl SessionPage {
                 view.touched += 1;
                 if let Block::Question { seq, .. } = *row.read(cx).block {
                     let asking = self.asking(seq);
+                    if row.read(cx).asking != asking {
+                        row.update(cx, |row, cx| row.set_asking(asking, cx));
+                        view.card_changed(at, cx);
+                    }
+                    continue;
+                }
+                if let Block::Asked { moved, .. } = *row.read(cx).block {
+                    // The last question still waiting for the pilot is the one in sight.
+                    let last = view
+                        .model
+                        .blocks()
+                        .iter()
+                        .rposition(|block| matches!(block, Block::Asked { .. }));
+                    let asking = !moved && last == Some(at) && self.waits_on_pilot();
                     if row.read(cx).asking != asking {
                         row.update(cx, |row, cx| row.set_asking(asking, cx));
                         view.card_changed(at, cx);
@@ -3201,7 +3223,10 @@ impl ConversationView {
         let block = self.model.blocks()[at].clone();
         if matches!(
             block,
-            Block::SubAgents | Block::Approval { .. } | Block::Question { .. }
+            Block::SubAgents
+                | Block::Approval { .. }
+                | Block::Question { .. }
+                | Block::Asked { .. }
         ) {
             self.specials.push(at);
         }
@@ -3349,6 +3374,8 @@ impl ConversationView {
             Block::Command(card) => card.ending == Ending::Running,
             // Answered from its card, it stays in sight, folded to its answers.
             Block::Question { answers, .. } => self.rows[at].read(cx).asking || answers.is_some(),
+            // Waiting for the pilot, which the user may answer first.
+            Block::Asked { moved, .. } => !moved && self.rows[at].read(cx).asking,
             Block::VaultAsk(ask) => ask.open,
             _ => false,
         }
@@ -4273,7 +4300,7 @@ impl Row {
         | Block::Thought { text, .. }
         | Block::Report { text, .. }
         | Block::Question { text, .. }
-        | Block::Asked { text } = &block
+        | Block::Asked { text, .. } = &block
         {
             let muted = matches!(block, Block::Thought { .. });
             self.set_markdown(text, muted, false, cx);
@@ -5952,7 +5979,7 @@ impl Render for Row {
                 answers,
                 ..
             } => self.render_question(*seq, questions, answers.as_deref(), window, cx),
-            Block::Asked { .. } => self.render_asked(cx),
+            Block::Asked { moved, .. } => self.render_asked(*moved, cx),
             Block::VaultAsk(ask) => self.render_vault_ask(ask.clone(), window, cx),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
@@ -6077,29 +6104,48 @@ impl Row {
 }
 
 impl Row {
-    /// A question the led session asked its pilot: a card that says so, with no answer box, the
-    /// pilot's to answer.
-    fn render_asked(&self, cx: &App) -> AnyElement {
+    /// A question the led session asked its pilot: a card that says who it was asked of and that
+    /// the user may answer too, the pilot's to answer; it folds away once the question went to
+    /// the user.
+    fn render_asked(&self, moved: bool, cx: &App) -> AnyElement {
+        let p = palette(cx);
         let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
-        Card::new()
-            .title(SharedString::from(format!(
-                "{} asks its pilot",
-                flottille_ui::quoted_title(&self.title(cx))
-            )))
+        let title = flottille_ui::quoted_title(&self.title(cx));
+        let said = match self.pilot(cx) {
+            Some(pilot) => format!(
+                "{title} asks its pilot {}",
+                flottille_ui::quoted_title(&pilot)
+            ),
+            None => format!("{title} asks its pilot"),
+        };
+        let card = Card::new()
+            .title(crate::question_card::heading(self.at, "asked-title", said))
             .meta(self.when.map(clock).unwrap_or_default())
             .child(
                 div()
                     .id(id("asked-text"))
                     .px(space::LG)
                     .py(space::MD)
+                    .flex()
+                    .flex_col()
+                    .gap(space::SM)
                     .child(markdown_view(
                         id("asked-region"),
                         &self.markdown,
                         self.scope,
                     ))
+                    .child(
+                        div()
+                            .id(id("asked-note"))
+                            .text_size(px(12.5))
+                            .text_color(p.faint)
+                            .aria_label(crate::question_card::ASKED_NOTE)
+                            .child(crate::question_card::ASKED_NOTE)
+                            .test_support(),
+                    )
                     .test_support(),
-            )
-            .into_any_element()
+            );
+        presence(id("asked"), !moved, card).into_any_element()
     }
 
     /// The agent's request for a vault entry: what Flottille prefilled, the agent's reason, and
@@ -6180,6 +6226,13 @@ impl Row {
             })
             .test_support()
             .into_any_element()
+    }
+
+    /// Who leads the session, by the name it goes by, while somebody does.
+    fn pilot(&self, cx: &App) -> Option<String> {
+        self.page
+            .upgrade()
+            .and_then(|page| page.read(cx).opened.led_by.clone())
     }
 
     /// The session's title, which names who asks on a question's card.

@@ -993,7 +993,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   result; the lead's title is a second, fainter line of the entry, cut to one line, never wrapped; the
   agent's "⋯" menu in the session's rail offers the same action while the session is led): the row slides back among the project's sessions, its indent and mark fade, and the
   header's line and the note fold away. A question a led session asks its pilot shows in its
-  conversation as a card, "<session> asks its pilot", with no answer box. Each session takes
+  conversation as a card, "<session> asks its pilot <pilot>", with no answer box and, under it in
+  small text, "Its pilot answers at the end of its turn; you can answer here too." (the user's
+  messages reach the session, as the note above its composer says). The last one still waiting
+  stays in sight under the steps while the session waits on its pilot; once the pilot no longer
+  follows the session, the card folds away and the question comes again as the user's own, "<session>
+  asks you", with its answer box. Each session takes
   **two lines**:
   the first is its title and, at the right, **one mark**, chosen in this order: its state
   (running, needs the user, waiting) when it has one, else a small dot when something new was
