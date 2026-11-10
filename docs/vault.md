@@ -26,11 +26,43 @@ Never a file of Flottille's and never its store: the store keeps only the entrie
 | `url` | Where it is used. Optional. |
 | `username` | The login that goes with it. Optional. |
 | `project` | The only project whose agents see it. Left out, every project's. Optional. |
+| `for` | The one use that reads it (below). Left out, any feature that names it. Optional. |
 
 An entry is tied to its project **by name**, not by its folder: a project that is renamed leaves
 its entries under the old name, seen by no agent, until they are set again with the new one; a
 project removed and added again under the same name sees them again. The window keeps naming an
 entry's project when no project of that name exists.
+
+## Bound to one use
+
+An entry made for one precise feature is that feature's alone. `for` names it:
+
+| `for` | The use |
+|---|---|
+| `worklog:<project>` | The token the project's tracker logs time with (`docs/tickets.md`, "Logging time"). |
+| `connection:<name>` | What the server of a connection is given (`docs/extensions.md`, "Connections"). |
+
+- **Only its use reads it.** A feature reads an entry bound to it or an unbound one it names. An
+  entry bound elsewhere is refused by every other feature and every tool, in the daemon where the
+  secret is read, with a sentence naming its use (`the vault entry jira-time is bound to the
+  worklog of the project app and serves no other use`), never its value. A connection naming
+  another use's entry is refused when it is declared, and its server does not start; the
+  worklog's `Log time with` does not offer it, and `tickets log_time` refuses it before any card.
+- **Made from a feature, bound to it from the start**: the entry set from a request's card (the
+  worklog's need), from a project's Settings, Tracker, "Add one in the vault", or from a feature's
+  own screen, which says `for`. An entry set from Settings, Vault (or `flottille vault set`)
+  without `for` is unbound; set again without `for`, an entry keeps its use, and another use for
+  a bound entry is refused, naming the one it has: it is removed first. Settings, Vault shows the
+  use of each entry on its row (`For the worklog of the project app alone`).
+- **Not removed as simply as another.** Removing a bound entry while its feature names it is
+  refused, naming the feature and what stops working: its feature's own screen names another
+  entry first (the entry then goes as any), or the removal is confirmed
+  (`vault.remove {name, confirmed: true}`, `flottille vault remove <name> --confirmed`, the Vault
+  page's confirmation, which says what stops working).
+- **Unbound entries behave as they always did**, and every entry that existed before uses were
+  added is unbound: no worklog token or connection of the user's stops working.
+
+The OAuth tokens a connection signs in for (#674) are entries bound to it the same way.
 
 ## The secret is write-only
 
@@ -54,8 +86,9 @@ hold the same value.
 ## Choosing the entry for time logging
 
 A Jira project's Settings, Tracker, names the entry (`docs/projects.md`, "Forges and tracker"): the
-select `Log time with` lists the entries the project sees by name and username, and its link opens
-the vault's new-entry dialog from there.
+select `Log time with` lists the entries the project sees by name and username, but those bound to
+another use, and its link opens the vault's new-entry dialog from there, the entry it makes bound
+to the project's worklog.
 
 ## What agents see
 
@@ -86,7 +119,7 @@ no free-form ask**.
   entry is open, another ask for it joins it. A dismissed entry is not offered again, nor asked
   for, until the project's settings change or the entry is set from Settings, Vault.
 - **Set** stores the entry as Settings, Vault does, with the same checks, for the project that
-  asked. It never changes an existing entry's project: when another project uses the name (or it
+  asked, bound to its worklog ("Bound to one use"). It never changes an existing entry's project: when another project uses the name (or it
   is global), the card says so on its name line, `<name> is used by the project <other>: choose
   another name`, and Set waits for another name. The card does not change the setting that names
   the entry: it says that setting must name the new one, and so does the delivery. Each agent
@@ -106,7 +139,9 @@ is locked and the user must unlock it, and a keyring that does not answer within
 answered the same. The first users: `tickets log_time` (`docs/tickets.md`, "Logging time") and
 Connections (`docs/extensions.md`, "Connections"): a connection's `env` and `headers` name entries
 of every project, read when its server starts and put in its environment or on its requests,
-never shown to an agent; an entry tied to one project is refused for it.
+never shown to an agent; an entry tied to one project, or bound to another use, is refused for
+it. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
+another.
 
 ## The tests' keyring
 

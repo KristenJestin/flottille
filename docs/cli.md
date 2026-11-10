@@ -573,7 +573,7 @@ The user's secrets, kept by the keyring, that agents use through Flottille's too
 
 ### `flottille vault list [--project <project>]`
 
-The entries: name, description, URL, username and project; never a secret. `--project` keeps the
+The entries: name, description, URL, username, project and use (`for`); never a secret. `--project` keeps the
 entries that project's agents see. `--json` prints `vault.list`.
 
 ```
@@ -585,7 +585,9 @@ The vault's entries (their secrets are never shown):
 ### `flottille vault set <name>`
 
 Adds the entry, or replaces it whole, with `--description <line>`, `--url <url>`, `--username
-<login>` and `--project <project>` (left out, every project's agents see it). The secret is read
+<login>`, `--project <project>` (left out, every project's agents see it) and `--for <use>`
+(`worklog:<project>` or `connection:<name>`: the one use that reads it, `docs/vault.md`, "Bound
+to one use"; left out, an entry set again keeps its use). The secret is read
 from the standard input, less its last line end, or typed at a prompt that does not echo it when
 the standard input is a terminal: never an argument, which the shell's history and the process
 list would keep (`printf %s "$TOKEN" | flottille vault set jira`). Refused for an empty or short
@@ -594,7 +596,9 @@ unknown project. `--json` prints `vault.set`.
 
 ### `flottille vault remove <name>`
 
-Removes the entry and its secret from the keyring. `--json` prints `vault.remove`.
+Removes the entry and its secret from the keyring. An entry bound to a feature that names it is
+refused, naming the feature and what stops working, unless `--confirmed`. `--json` prints
+`vault.remove`.
 
 ## Workspaces
 
