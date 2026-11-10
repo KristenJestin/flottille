@@ -975,26 +975,54 @@ pub fn drop_old(kept: &Path) {
     else {
         return;
     };
-    // A link in its place leads to folders that are not the put-backs': none is dropped.
-    if !std::fs::symlink_metadata(kept).is_ok_and(|meta| meta.is_dir()) {
+    let before = before
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    // A link in its place leads to folders that are not the put-backs': none is dropped. What
+    // is dropped is by its handle: one made a link since leads nowhere.
+    let Ok(folder) = rustix::fs::open(kept, FOLDER, Mode::empty()) else {
         return;
-    }
-    for entry in std::fs::read_dir(kept).into_iter().flatten().flatten() {
-        if entry.file_name() == MARKERS
-            || !std::fs::symlink_metadata(entry.path())
-                .and_then(|meta| meta.modified())
-                .is_ok_and(|modified| modified < before)
+    };
+    for name in names(folder.as_fd()) {
+        if name == MARKERS
+            || !rustix::fs::statat(&folder, &name, AtFlags::SYMLINK_NOFOLLOW)
+                .is_ok_and(|stat| stat.st_mtime < before)
         {
             continue;
         }
-        // Never through a link: one is removed, not what it leads to.
-        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+        race(Path::new(&name));
+        if let Err(error) = remove_all(folder.as_fd(), &name) {
             eprintln!(
                 "flottille daemon: cannot drop {}: {error}",
-                entry.path().display()
+                kept.join(&name).display()
             );
         }
     }
+}
+
+/// The names in the open `folder`, `.` and `..` left out.
+fn names(folder: BorrowedFd) -> Vec<OsString> {
+    rustix::fs::Dir::read_from(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| OsString::from_vec(entry.file_name().to_bytes().to_vec()))
+        .filter(|name| name != "." && name != "..")
+        .collect()
+}
+
+/// Removes the entry `name` of `folder` and what is below it, each folder opened by its handle,
+/// never through a link: one is removed, not what it leads to.
+fn remove_all(folder: BorrowedFd, name: &OsStr) -> std::io::Result<()> {
+    let stat = rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+        return Ok(rustix::fs::unlinkat(folder, name, AtFlags::empty())?);
+    }
+    let below = rustix::fs::openat(folder, name, FOLDER, Mode::empty())?;
+    for inside in names(below.as_fd()) {
+        remove_all(below.as_fd(), &inside)?;
+    }
+    Ok(rustix::fs::unlinkat(folder, name, AtFlags::REMOVEDIR)?)
 }
 
 /// What a run that enters waits for.
@@ -2115,5 +2143,25 @@ mod tests {
         }
         let held: usize = snapshot.contents.values().map(Vec::len).sum();
         assert!(held as u64 <= KEPT_TOTAL, "{held}");
+    }
+
+    #[test]
+    fn the_kept_folder_made_a_link_while_old_ones_are_dropped_is_not_gone_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().join("kept");
+        let elsewhere = dir.path().join("elsewhere");
+        made(&kept.join("old-run/.claude/settings.json"), "{}\n");
+        made(&elsewhere.join("old-run/notes.md"), "mine\n");
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(40 * 24 * 3600);
+        std::fs::File::open(kept.join("old-run"))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        racing("old-run", swapped(kept.clone(), elsewhere.clone()));
+
+        drop_old(&kept);
+
+        assert!(elsewhere.join("old-run/notes.md").exists());
+        assert!(!kept.with_extension("aside").join("old-run").exists());
     }
 }
