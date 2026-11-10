@@ -63,15 +63,54 @@ struct Server {
     leader: Mutex<Option<u32>>,
     /// Why it failed to start, until it starts.
     failing: Mutex<Option<String>>,
-    /// Its tools listed again after it said they changed: one listing at a time.
+    /// Its tools listed again after it said they changed: one listing at a time, of the server
+    /// that runs.
     noticed: Mutex<Noticed>,
 }
 
 #[derive(Default)]
 struct Noticed {
+    /// The start of the server it is of: a new one starts afresh, whatever the stopped one left.
+    start: u64,
     listing: bool,
     /// It said so again while a listing ran: one more listing once it ends.
     again: bool,
+}
+
+impl Server {
+    /// A notice of the server of start `start`: whether to list its tools now, or once the
+    /// listing that runs ends.
+    fn noticed(&self, start: u64) -> bool {
+        let mut noticed = self.noticed.lock().unwrap();
+        if noticed.start != start {
+            *noticed = Noticed {
+                start,
+                listing: true,
+                again: false,
+            };
+            return true;
+        }
+        if noticed.listing {
+            noticed.again = true;
+            return false;
+        }
+        noticed.listing = true;
+        true
+    }
+
+    /// A listing of the server of start `start` ended: whether to list again.
+    fn again(&self, start: u64) -> bool {
+        let mut noticed = self.noticed.lock().unwrap();
+        if noticed.start != start {
+            return false;
+        }
+        if !noticed.again {
+            noticed.listing = false;
+            return false;
+        }
+        noticed.again = false;
+        true
+    }
 }
 
 /// Why a server's tools could not be listed.
@@ -170,6 +209,8 @@ pub fn failing(daemon: &Daemon, name: &str) -> Option<String> {
 struct Handler {
     daemon: Weak<Daemon>,
     name: String,
+    /// The start of the server it handles.
+    start: u64,
 }
 
 fn refused(what: &str) -> ErrorData {
@@ -223,24 +264,17 @@ impl ClientHandler for Handler {
         else {
             return;
         };
-        {
-            let mut noticed = server.noticed.lock().unwrap();
-            if noticed.listing {
-                noticed.again = true;
-                return;
-            }
-            noticed.listing = true;
+        if !server.noticed(self.start) {
+            return;
         }
         let (daemon, name, peer) = (self.daemon.clone(), self.name.clone(), context.peer.clone());
+        let start = self.start;
         tokio::spawn(async move {
             loop {
                 compare(&daemon, &name, &peer).await;
-                let mut noticed = server.noticed.lock().unwrap();
-                if !noticed.again {
-                    noticed.listing = false;
+                if !server.again(start) {
                     return;
                 }
-                noticed.again = false;
             }
         });
     }
@@ -292,15 +326,16 @@ async fn secrets(
 
 /// Starts the server as declared, and reads what it announces.
 async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Running, String> {
-    let handler = Handler {
-        daemon: Arc::downgrade(daemon),
-        name: declaration.name.clone(),
-    };
     let start = daemon
         .extensions
         .connections
         .started
         .fetch_add(1, Ordering::Relaxed);
+    let handler = Handler {
+        daemon: Arc::downgrade(daemon),
+        name: declaration.name.clone(),
+        start,
+    };
     let could_not = |why: String| format!("the connection could not start: {why}");
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
@@ -743,4 +778,29 @@ fn failed_framed(what: &str, masked: &str) -> Outcome {
          </connection_answer>",
         super::framed(masked)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_notice_after_a_restart_lists_the_new_server() {
+        let server = Server::default();
+        assert!(server.noticed(1), "the first server's notice lists it");
+        assert!(!server.noticed(1), "another waits for that listing");
+        // Stopped while it listed, the first server is followed by a second, which says its
+        // tools changed: they are listed at once, not left to the stopped server's loop.
+        assert!(
+            server.noticed(2),
+            "the new server's notice waited for a stopped one"
+        );
+        assert!(
+            !server.again(1),
+            "the stopped server's loop listed it again"
+        );
+        assert!(!server.noticed(2), "the new server's listing runs");
+        assert!(server.again(2), "the notice during it lists once more");
+        assert!(!server.again(2));
+    }
 }
