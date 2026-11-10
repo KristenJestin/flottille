@@ -170,6 +170,49 @@ fn the_window_draws_no_frame_at_rest_on_the_project_page(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_each_tab_of_the_project_page(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    user.call(
+        "workspace.create",
+        json!({"project": "app", "name": "login"}),
+    )
+    .unwrap();
+    eventually("the workspace is ready", || {
+        user.call("workspace.show", json!({"project": "app", "name": "login"}))
+            .unwrap()["state"]
+            == "ready"
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("app".into()), window, cx)
+    });
+    until(&shell, cx, "Work shows the workspace", |cx| {
+        cx.update(|window, _| window.try_find("place-login").is_some())
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "Work: (frames drawn, frames asked)"
+    );
+
+    for tab in ["pulls", "tickets", "work"] {
+        let id = format!("project-tabs-{tab}");
+        cx.update(|window, cx| window.click(id, cx));
+        settle(&shell, cx);
+        assert_eq!(
+            frames_at_rest(&shell, cx),
+            (0, 0),
+            "{tab}: (frames drawn, frames asked)"
+        );
+    }
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_add_a_project_with_its_folder_detected(
     cx: &mut TestAppContext,
 ) {
