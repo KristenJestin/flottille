@@ -20,21 +20,22 @@ Unknown keys are refused too, so a typo is never silently ignored.
 | `flottille project remove <name> [--discard [--yes]]` | Stops the project's agents and command runs, removes its workspaces and forgets it, never its folder ("Removing a project"). A workspace holding unsaved work is kept unless `--discard`, which shows what would be lost and asks first. |
 | `flottille project check <name>` | Detects the repositories again; fails when they differ from the configuration. |
 
-The project page lists the project's repositories (`project.repositories`): each with the branch
-its checkout is on, where its remote leads or "local only", and its forge; the repositories the
-folder holds that the file does not name, detected again, each with Add; a field that adds one by
-its path; Detect again; and Remove, which asks first and only forgets the repository: its folder,
+The project's Settings, Repositories tab, lists the project's repositories (`project.repositories`):
+each with where it starts from, where its remote leads or "local only", and its forge; the
+repositories the folder holds that the file does not name, each a row with Add; a field that adds
+one by its path; and Remove, which asks first and only forgets the repository: its folder,
 its branches and the worktrees of its workspaces stay, and the window says so. Adding and removing
 write the file where it stands, its comments kept (`project.add_repository`,
 `project.remove_repository`), and are refused, nothing written, when the file would no longer be
-one the daemon can use.
+one the daemon can use. The tab reads the repositories again when it opens and each time the
+window takes the focus back while it is shown; it has no button for it (`design.md` §10).
 
 **The branch prefix** starts the branch of a workspace that is given none: `<branch prefix>/<name>`.
 It defaults to a slug of the project's name, and a file that does not hold the key keeps that. It
 may be empty (`branch_prefix = ""`): the branch is then the workspace's name alone, never
 `/<name>`, for a team whose branches follow the tickets (`fix/ABC-12-…`), which an agent gives
 with `branch` (`docs/workspaces.md`). Only a space is refused (`branch_prefix: must not hold
-spaces`). The project's Settings, Setup tab, Branches section, "Branch prefix", edits it, an empty field
+spaces`). The project's Settings, Workspaces tab, Branches section, "Prefix", edits it, an empty field
 included (`project.set_settings`, `branch_prefix`); the workspaces that exist keep their branch.
 A prefix whose default branch (`<prefix>/ABC-1-example`) the branch format refuses is warned about
 under the field, as a warning and not a refusal.
@@ -57,7 +58,7 @@ or as last fetched): the creation then decides, once it knows which repositories
 creation refuses a branch named outside the format that no repository has, nor its remote (listed,
 not fetched), before it fetches any base. A
 pattern that is not a regular expression is refused when the file is read and when it is saved,
-with the reason. The project's Settings, Setup tab, Branches section, "Branch format", under the prefix,
+with the reason. The project's Settings, Workspaces tab, Branches section, "Allowed names", under the prefix,
 edits it (`project.set_conventions`, `docs/protocol.md`); empty turns it off. Agents read it with
 `project settings`.
 
@@ -65,8 +66,8 @@ edits it (`project.set_conventions`, `docs/protocol.md`); empty turns it off. Ag
 description of a pull request an agent opens without one: `forge` `create` without `body` gives the
 forge the template, its card saying it whole; with `body`, the body is used as it is. The
 description of `forge` says so, and `project settings` shows the template, so that an agent fills
-it in `body` rather than replace it. The project's Settings, Rules tab, "Pull request template",
-under the message checks, edits it (`project.set_conventions`); empty turns it off.
+it in `body` rather than replace it. The project's Settings, Instructions tab, "Pull request template",
+under the commit and pull request checks, edits it (`project.set_conventions`); empty turns it off.
 
 A click on a repository's row in the project's Settings opens its dialog: its base branches (a list
 in order of preference, moved, removed and added there), the other repositories it depends on (one
@@ -170,9 +171,9 @@ of any other name is kept, and the existing workspaces keep their folder from th
 existing ones stay where they are and nothing is moved, whichever way the default or the root
 changes.
 
-The window sets both: **Settings**, Workspaces tab, "Workspaces folder" (the default for every
-project, `workspaces_folder.set`), and a project's Settings, Setup tab, "Workspaces folder" ("Use
-the default" or a folder of its own), which shows the folder that results. `flottille project show` prints that folder as
+The window sets both: **Settings**, General tab, "Workspaces folder" (the default for every
+project, `workspaces_folder.set`), and a project's Settings, Workspaces tab, "Folder" ("As in
+Settings" or "A folder for this project"), which shows the folder that results. `flottille project show` prints that folder as
 `workspaces root`.
 `workspaces.toml` is edited through the window or by hand; the command line has no command for it.
 
@@ -190,7 +191,7 @@ rest.
 # The name is the file's name: this is projects/app.toml. A `name` key is allowed if it says the same.
 folder = "/work/app"                  # absolute
 branch_prefix = "app"                 # default: a slug of the name; "" for none: the branch is the workspace's name
-branch_format = '^(feat|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$'   # a branch must match it ("Branch format"); none by default
+branch_format = '^(feat|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$'   # a branch must match it ("Allowed names"); none by default
 workspaces_root = "/work/app-work"    # absolute (`~` and `<project>` allowed); default: the user's, see "Where the workspaces go"
 default_repositories = "all"          # "all", or a list of the repositories a workspace takes
 max_children = 12                     # children running at once, 1 to 12
@@ -481,11 +482,11 @@ run.
 ## Tasks
 
 `[tasks.<name>]` lists the project's command lines its agents run by name with `run`
-(tests, lint, servers), and the user with the Run button of the project page. Each holds `line` (one line, never run by a shell) and, when they apply,
+(tests, lint, servers), and the user with a place's ▶ on the project page, "Run a task here". Each holds `line` (one line, never run by a shell) and, when they apply,
 `repository` (where it runs; the workspace folder when left out), `serve` (it keeps running),
 `check` (tests, lint), `read_only` (it changes nothing), `ask_before_running` (held for
 approval each time an agent runs it) and `needs` (the services of the machine it needs, below). A setup step runs one with `task = "<name>"`; a task a step
-runs cannot be removed. The Tasks section of the project's Settings adds, edits and removes them
+runs cannot be removed. The project's Settings, Tasks tab, adds, edits and removes them
 (`task.*`, `docs/protocol.md`), and so does a root agent with `tasks`, each write judged
 (`docs/tools.md`). A task's menu there has "Copy to…", which adds the task to another project
 (`task.copy`): the same name, line and flags, and where it runs when that project has a
@@ -588,7 +589,7 @@ has no workspace, so its templates fill only `{url}`, in `ready`'s `url` and `li
   `stopped`, `starting`, `ready`, `running` (it says no ready), `outside`, or `failed` with the
   line that says why (the last line of its output, or why it could not start).
 - **Tasks need them.** A task's `needs` names services; running it (an agent's `run`, the user's
-  Run button and Run again, a setup step) first starts each it needs that does not run, those they need first,
+  "Run a task here" and Run again, a setup step) first starts each it needs that does not run, those they need first,
   and waits until each with a `ready` is ready, 120 seconds at most: a service that is not ready by
   then, or fails, refuses the task, naming the service and the line that says why. An unknown name
   is refused when the project's file is read; a cycle or an unknown name in a service's `needs`
@@ -610,7 +611,7 @@ has no workspace, so its templates fill only `{url}`, in `ready`'s `url` and `li
   held call says the services it starts first, their lines and folders. The call then starts
   only the services it was judged on: one that Flottille ran when it was judged and that has
   stopped since refuses it (`the service S stopped since the call was judged: call again`).
-  What the user starts (the Run button, Run again, `service start`, a setup step of a
+  What the user starts ("Run a task here", Run again, `service start`, a setup step of a
   workspace the user creates) is never judged.
 - **Its folder** is the home when left out: as for any place, the run's output is masked with the
   `.env` files of its folder, those of the home then.

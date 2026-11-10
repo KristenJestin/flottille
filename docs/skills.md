@@ -85,7 +85,7 @@ review).
 
 ## Editing them
 
-- **The window**: the project's Settings, section Skills: add (a path picked in the project
+- **The window**: the project's Settings, Instructions tab, section Skills: New skill (a path picked in the project
   folder, or a text written in the form), edit, remove (a second click confirms).
 - **The command line**: `flottille skill list|show|add|edit|remove` (`docs/cli.md`).
 - **An agent**: a root's `skills` tool (`docs/tools.md`, "The project"): `list` and `show` run at

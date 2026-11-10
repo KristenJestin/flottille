@@ -148,7 +148,7 @@ documentation, changelogs and published source, never by running one):
 ## Long results
 
 A tool result longer than the limit, **8,000 characters** until the user chooses another
-(Settings → Providers → Tool results, `docs/protocol.md`, "The tool results methods"), is cut at
+(Settings → Agents → Long tool results, `docs/protocol.md`, "The tool results methods"), is cut at
 the source, by Flottille and without any model, whichever agent runs and whichever tool answered.
 It is the core's own, not an extension's: every agent gets it, and it needs nothing of the agent's
 program.
@@ -490,10 +490,11 @@ pending requests.
   and stop it (its whole process group, as above); the rail keeps the last five that ended, and
   the protocol and the command line can dismiss one
   (`docs/protocol.md`, "The run methods"; `flottille runs`, `docs/cli.md`).
-- **The user runs a task too**: the Run button of a task on the project page (`task.run`) runs it
-  in the project folder, with the project's variables, as a run of no agent: no gate (the user
-  asked), no delivery, the same records. It is listed on the project page with the same rows and
-  output panel as the session's rail, and in the left sidebar with the project's runs.
+- **The user runs a task too**: a place's "Run a task here" on the project page (`task.run`) runs
+  it in that place (the project folder, or a workspace with its own variables), with the project's
+  variables, as a run of no agent: no gate (the user asked), no delivery, the same records. It is
+  listed on the project page in its place while it runs, then under the page's ended runs, with the
+  same rows and drawer as the session's rail, and in the left sidebar with the project's runs.
 - **Runs are records**: the store's `runs` (with the end of their output once ended), and the
   `run.started` and `run.ended` events. Each run's process group is recorded while it runs: a
   daemon started after a crash kills the groups a previous one left (only while their leader is
