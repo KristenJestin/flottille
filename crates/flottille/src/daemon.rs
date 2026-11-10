@@ -416,6 +416,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     let loading = daemon.clone();
     let loading = tokio::spawn(async move { crate::vault::load(&loading).await });
     let _ = tokio::time::timeout(VAULT_LOAD, loading).await;
+    runs::tell_guarded_at_start(&daemon);
     workspaces::resume_at_start(&daemon);
     agents::settle_at_start(&daemon);
     tree::brief_at_start(&daemon);

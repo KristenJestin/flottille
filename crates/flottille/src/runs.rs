@@ -2161,6 +2161,22 @@ pub(crate) async fn wait_ready(daemon: &Daemon, id: &str) -> bool {
 
 // The daemon's start and stop.
 
+/// At daemon start, before any workspace preparation resumes (its setup line's guard writes a
+/// live marker): a place guarded when the daemon stopped was not put back, the user hears of it.
+pub fn tell_guarded_at_start(daemon: &Daemon) {
+    let kept = daemon.paths.state.join("agent-folders");
+    crate::agent_folders::drop_old(&kept);
+    for place in crate::agent_folders::interrupted(&kept) {
+        let run = daemon.read(|store| store.run(&place.run)).ok().flatten();
+        let data = json!({"agent": run.as_ref().and_then(|run| run.agent.clone()),
+            "project": run.as_ref().map(|run| run.project.clone()), "run": place.run,
+            "folder": place.root, "too_large": false, "interrupted": true});
+        if let Err(error) = daemon.emit("run.agent_folders_unchecked", data) {
+            eprintln!("flottille daemon: run {}: {error}", place.run);
+        }
+    }
+}
+
 /// At daemon start: kills the run process groups a previous daemon left running, each only when
 /// its leader is still the process it started, and marks their runs interrupted.
 pub async fn settle_at_start(daemon: &Daemon) {
@@ -2182,18 +2198,6 @@ pub async fn settle_at_start(daemon: &Daemon) {
     // Outside the store: ending a session reads all of `/proc`, more than once.
     for pid in left {
         crate::children::end_session(pid).await;
-    }
-    // A place guarded when the daemon stopped was not put back: the user hears of it.
-    let kept = daemon.paths.state.join("agent-folders");
-    crate::agent_folders::drop_old(&kept);
-    for place in crate::agent_folders::interrupted(&kept) {
-        let run = daemon.read(|store| store.run(&place.run)).ok().flatten();
-        let data = json!({"agent": run.as_ref().and_then(|run| run.agent.clone()),
-            "project": run.as_ref().map(|run| run.project.clone()), "run": place.run,
-            "folder": place.root, "too_large": false, "interrupted": true});
-        if let Err(error) = daemon.emit("run.agent_folders_unchecked", data) {
-            eprintln!("flottille daemon: run {}: {error}", place.run);
-        }
     }
     let runs = daemon.read(Store::running_runs).unwrap_or_default();
     for run in runs {

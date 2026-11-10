@@ -1357,6 +1357,78 @@ fn a_place_guarded_when_the_daemon_stopped_tells_the_user_at_its_next_start() {
 }
 
 #[test]
+fn a_resumed_setup_s_marker_is_not_taken_for_an_interrupted_one() {
+    // The markers left by the daemon that stopped are told before any preparation resumes: a
+    // resumed setup line's guard writes a live one, which is not to be told nor removed.
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    session(&user);
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\n[[setup]]\nrun = \"sleep 2\"\n");
+    std::fs::write(&file, text).unwrap();
+    user.call(
+        "workspace.create",
+        json!({"project": "app", "name": "slow"}),
+    )
+    .unwrap();
+    eventually("the setup line", || {
+        user.call("workspace.show", json!({"project": "app", "name": "slow"}))
+            .unwrap()["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["state"] == "running")
+    });
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    let markers = user.path("state/flottille/agent-folders/.guarded");
+    std::fs::create_dir_all(&markers).unwrap();
+    std::fs::write(
+        markers.join("0123456789ab.json"),
+        json!({"root": user.path("work/app")}).to_string(),
+    )
+    .unwrap();
+
+    let watch = user.watch(&["--after", "0"]);
+    let events = watch
+        .until(|event| event["name"] == "workspace.ready" && event["data"]["workspace"] == "slow");
+
+    let restart = events
+        .iter()
+        .rposition(|event| event["name"] == "daemon.started")
+        .unwrap();
+    let after = &events[restart..];
+    let names: Vec<&str> = after
+        .iter()
+        .map(|event| event["name"].as_str().unwrap())
+        .collect();
+    let resumed = names.iter().position(|name| *name == "workspace.resumed");
+    let resumed = resumed.unwrap_or_else(|| panic!("{names:?}"));
+    let told: Vec<&Value> = after
+        .iter()
+        .filter(|event| event["name"] == "run.agent_folders_unchecked")
+        .collect();
+    assert!(
+        told.iter()
+            .any(|event| event["data"]["run"] == "0123456789ab"),
+        "{names:?}"
+    );
+    assert!(
+        names[..resumed].contains(&"run.agent_folders_unchecked")
+            && !names[resumed..].contains(&"run.agent_folders_unchecked"),
+        "{names:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["name"] == "daemon.started")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn a_workspace_setup_line_that_writes_an_agent_folder_is_put_back_and_told() {
     let user = User::with_fake_agent()
         .with_allowing_judge()
