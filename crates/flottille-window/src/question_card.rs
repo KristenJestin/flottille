@@ -249,11 +249,19 @@ impl QuestionCard {
             .collect()
     }
 
-    /// How many questions have a choice or words.
+    /// How many questions have a choice or words: "Something else…" always needs its words, with
+    /// another choice beside it or not.
     pub fn answered_count(&self, cx: &App) -> usize {
         self.answers(cx)
             .iter()
-            .filter(|answer| !answer.is_empty())
+            .enumerate()
+            .filter(|(n, answer)| {
+                if self.words_open(*n) {
+                    !answer.text.is_empty()
+                } else {
+                    !answer.is_empty()
+                }
+            })
             .count()
     }
 

@@ -1198,3 +1198,45 @@ fn ctrl_enter_answers_a_card_of_options_alone(cx: &mut TestAppContext) {
         card.read_with(cx, |card, cx| card.is_sent(cx))
     });
 }
+
+#[gpui_kit::test]
+fn something_else_needs_words_even_with_another_choice(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let card = card_of(&page, at, cx);
+    click(format!("row-{at}-question-0-option-0"), cx);
+    write(&page, at, 1, "Export orders as CSV", cx);
+    click(format!("row-{at}-question-2-option-0"), cx);
+    settle(cx);
+    assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
+
+    // A question of several choices keeps Alice, and "Something else…" is picked beside her.
+    click(format!("row-{at}-question-2-other"), cx);
+    settle(cx);
+    assert_eq!(
+        chosen(format!("row-{at}-question-2-option-0"), cx),
+        Some(true)
+    );
+    assert_eq!(chosen(format!("row-{at}-question-2-other"), cx), Some(true));
+    assert!(
+        !card.read_with(cx, |card, cx| card.is_ready(cx)),
+        "it needs its words"
+    );
+    assert_eq!(card.read_with(cx, |card, cx| card.answered_count(cx)), 2);
+    assert_eq!(
+        label(format!("row-{at}-question-count"), cx).as_deref(),
+        Some("2 of 3 answered")
+    );
+    click(format!("row-{at}-answer-send"), cx);
+    settle(cx);
+    assert!(
+        !card.read_with(cx, |card, cx| card.is_sent(cx)),
+        "nothing sent"
+    );
+
+    write(&page, at, 2, "Whoever is free", cx);
+    assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
+    let answers = card.read_with(cx, |card, cx| card.answers(cx));
+    assert_eq!(answers[2].choices, ["Alice"]);
+    assert_eq!(answers[2].text, "Whoever is free");
+}
