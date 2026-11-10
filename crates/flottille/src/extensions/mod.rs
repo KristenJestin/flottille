@@ -4,6 +4,7 @@
 //! tables.
 
 mod command;
+mod connections;
 mod guidance;
 mod review;
 mod specs;
@@ -29,7 +30,11 @@ use crate::projects::{self, Failure};
 pub use command::run;
 
 /// Every extension, in the order of their settings' tabs.
-pub const ALL: &[&Extension] = &[&specs::EXTENSION, &review::EXTENSION];
+pub const ALL: &[&Extension] = &[
+    &specs::EXTENSION,
+    &review::EXTENSION,
+    &connections::EXTENSION,
+];
 
 /// The command lines of the extensions, beside the frame's own `extension`.
 #[derive(Subcommand)]
@@ -50,6 +55,11 @@ pub enum Command {
         session: String,
         #[arg(long)]
         json: bool,
+    },
+    /// Your MCP servers, each given to every agent as one tool once you reviewed it
+    Connection {
+        #[command(subcommand)]
+        action: connections::command::ConnectionAction,
     },
 }
 
@@ -94,7 +104,51 @@ pub struct Extension {
     pub commands: &'static [(&'static str, Typed)],
     /// Its editable guidance, `<name>.md` beside the settings (`<name>.show`, `.set`, `.reset`).
     pub guidance: Option<Guidance>,
+    /// What the user declares under its table beyond its settings: a list of tables of its own
+    /// (`[[connections.server]]`), checked by the extension.
+    pub declared: Option<Declared>,
+    /// The tools it gives every agent of every project while it is active, named at run time
+    /// from what the user declared (`conn_<name>`).
+    pub dynamic: Option<Dynamic>,
+    /// Its events the user's inbox lists, each with the text it shows: what needs the user.
+    pub needs_you: &'static [(&'static str, Says)],
 }
+
+/// A list of tables an extension's table holds (`[[<name>.<key>]]`), each checked by `check`;
+/// `Err` names the key at fault, under `at`.
+#[derive(Clone, Copy)]
+pub struct Declared {
+    pub key: &'static str,
+    pub check: fn(&[Value], &str) -> Result<(), String>,
+}
+
+/// Tools an extension names at run time. Each is served and gated as a declared tool is.
+#[derive(Clone, Copy)]
+pub struct Dynamic {
+    /// The tools it gives every agent of the project now; called only while it is on.
+    pub given: fn(&Daemon, &Project) -> Vec<&'static Definition>,
+    /// One of its tools by name, given now or not: what a grant serves.
+    pub definition: fn(&str) -> Option<&'static Definition>,
+    /// The gate's verdict on a call of one of its tools.
+    pub classify: fn(&Daemon, &Grant, &str, &Value) -> Verdict,
+    pub call: fn(&Arc<Daemon>, &Grant, &str, Value) -> Called,
+    /// What the judge reads of a call besides its arguments, in a block of its own, or nothing.
+    pub described: fn(&Daemon, &str, &Value) -> Option<String>,
+}
+
+/// What the extensions keep while the daemon runs (a connection's server), each its own part.
+#[derive(Default)]
+pub struct Live {
+    connections: connections::Live,
+}
+
+/// Stops what the extensions keep running, as the daemon stops.
+pub async fn stop_all(daemon: &Arc<Daemon>) {
+    connections::stop_all(daemon).await;
+}
+
+/// What the inbox shows of an event of an extension's.
+pub type Says = fn(&Value) -> String;
 
 /// What runs a composer command, given the session it was typed in.
 pub type Typed = fn(Arc<Daemon>, Agent) -> Answered;
@@ -141,11 +195,13 @@ pub enum To {
     Launched(&'static str),
 }
 
-/// What an extension touches: Global comes with the compaction.
+/// What an extension touches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     /// It is on in every project once on globally, unless a project turns it off.
     Project,
+    /// App-wide: its switch is the global one alone, and a project's file holds nothing of it.
+    Global,
 }
 
 /// Where an extension's settings appear: a section of a screen that exists comes with the first
@@ -192,6 +248,8 @@ pub struct Methods {
 struct Values {
     enabled: Option<bool>,
     settings: BTreeMap<String, Value>,
+    /// Its declared tables (`Extension::declared`), as written.
+    declared: Vec<Value>,
 }
 
 /// Held while `extensions.toml` is read and written again.
@@ -346,12 +404,24 @@ fn values(extension: &Extension, table: &Map<String, Value>, at: &str) -> Result
             );
             continue;
         }
+        if let Some(declared) = extension.declared.filter(|declared| declared.key == key) {
+            let tables = value
+                .as_array()
+                .filter(|all| all.iter().all(Value::is_object))
+                .ok_or_else(|| {
+                    format!("{at}.{key}: must be tables, [[{at}.{key}]], not {value}")
+                })?;
+            (declared.check)(tables, &format!("{at}.{key}"))?;
+            values.declared = tables.clone();
+            continue;
+        }
         let setting = extension
             .settings
             .iter()
             .find(|setting| setting.key == key)
             .ok_or_else(|| {
                 let keys: Vec<&str> = std::iter::once("enabled")
+                    .chain(extension.declared.map(|declared| declared.key))
                     .chain(extension.settings.iter().map(|setting| setting.key))
                     .collect();
                 format!("{at}.{key}: unknown key: the keys are {}", keys.join(", "))
@@ -372,9 +442,12 @@ fn json_of(item: &toml_edit::Item, at: &str) -> Result<Value, String> {
             .map(|(key, item)| Ok((key.to_owned(), json_of(item, &format!("{at}.{key}"))?)))
             .collect::<Result<Map<_, _>, String>>()
             .map(Value::Object),
-        toml_edit::Item::ArrayOfTables(_) | toml_edit::Item::None => {
-            Err(format!("{at}: an array of tables is not taken"))
-        }
+        toml_edit::Item::ArrayOfTables(tables) => tables
+            .iter()
+            .map(|table| json_of(&toml_edit::Item::Table(table.clone()), at))
+            .collect::<Result<Vec<_>, String>>()
+            .map(Value::Array),
+        toml_edit::Item::None => Err(format!("{at}: an array of tables is not taken")),
     }
 }
 
@@ -455,6 +528,10 @@ fn of_project(extension: &Extension, project: &Project) -> Result<Values, String
     let at = format!("extensions.{}", extension.name);
     match project.extensions.get(extension.name) {
         None => Ok(Values::default()),
+        Some(_) if extension.scope == Scope::Global => Err(format!(
+            "projects/{}.toml: {at}: {} is app-wide: a project's file holds nothing of it",
+            project.name, extension.title
+        )),
         Some(table) => values(extension, table, &at)
             .map_err(|why| format!("projects/{}.toml: {why}", project.name)),
     }
@@ -474,20 +551,88 @@ fn active_in(paths: &Paths, extension: &Extension, project: &Project) -> bool {
         return false;
     };
     globally_on(extension, &global)
-        && of_project(extension, project).is_ok_and(|own| own.enabled != Some(false))
+        && (extension.scope == Scope::Global
+            || of_project(extension, project).is_ok_and(|own| own.enabled != Some(false)))
+}
+
+/// What the user declared under the extension's table of `extensions.toml`
+/// (`Extension::declared`), checked; nothing when the file holds none.
+pub fn declared(paths: &Paths, extension: &Extension) -> Result<Vec<Value>, String> {
+    Ok(global(paths)?
+        .remove(extension.name)
+        .map(|values| values.declared)
+        .unwrap_or_default())
+}
+
+/// Whether the extension is on, as `extensions.toml` says now; a file that cannot be read leaves
+/// it off.
+pub fn is_on(paths: &Paths, extension: &Extension) -> bool {
+    global(paths).is_ok_and(|global| globally_on(extension, &global))
+}
+
+/// Rewrites the extension's table of `extensions.toml` with `edit`, checked as a whole before
+/// it is written, then gives every running session the tools it has now.
+pub fn rewrite(
+    daemon: &Daemon,
+    extension: &Extension,
+    edit: impl FnOnce(&mut toml_edit::Table) -> Result<(), Failure>,
+) -> Result<(), Failure> {
+    {
+        let _writing = WRITING.lock().unwrap();
+        let paths = &daemon.paths;
+        let unavailable = |error: std::io::Error| {
+            Failure::new("unavailable", format!("extensions.toml: {error}"))
+        };
+        let text = match std::fs::read_to_string(file(paths)) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(unavailable(error)),
+        };
+        parse(&text).map_err(|why| Failure::new("invalid-config", why))?;
+        let mut document: toml_edit::DocumentMut =
+            text.parse().map_err(|error: toml_edit::TomlError| {
+                Failure::new(
+                    "invalid-config",
+                    format!("extensions.toml: {}", error.message()),
+                )
+            })?;
+        let table = document
+            .entry(extension.name)
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| {
+                Failure::new(
+                    "invalid-config",
+                    format!("extensions.toml: {}: must be a table", extension.name),
+                )
+            })?;
+        edit(table)?;
+        let text = document.to_string();
+        parse(&text).map_err(Failure::refused)?;
+        std::fs::create_dir_all(&paths.config).map_err(unavailable)?;
+        crate::providers::write_in_place(&file(paths), &text).map_err(unavailable)?;
+    }
+    // Before the answer: the next call of a session is served the tools it has now.
+    projects::tools_changed(daemon);
+    Ok(())
 }
 
 /// The names of the tools the active extensions give an agent of the project: a root, another
 /// agent, or one an extension launched (`launched`, the extension's name and its agent's kind)
 /// (`agents::tools_of`).
 pub fn tools_for(
-    paths: &Paths,
+    daemon: &Daemon,
     project: &Project,
     root: bool,
     launched: Option<(&str, &str)>,
 ) -> Vec<&'static str> {
-    ALL.iter()
-        .filter(|extension| active_in(paths, extension, project))
+    let active: Vec<&Extension> = ALL
+        .iter()
+        .copied()
+        .filter(|extension| active_in(&daemon.paths, extension, project))
+        .collect();
+    let mut tools: Vec<&'static str> = active
+        .iter()
         .flat_map(|extension| {
             extension.tools.iter().filter(move |tool| {
                 tool.given
@@ -496,6 +641,45 @@ pub fn tools_for(
             })
         })
         .map(|tool| tool.definition.name)
+        .collect();
+    // An agent an extension launched has only the tools that extension gives it.
+    if launched.is_none() {
+        for dynamic in active.iter().filter_map(|extension| extension.dynamic) {
+            tools.extend(
+                (dynamic.given)(daemon, project)
+                    .iter()
+                    .map(|tool| tool.name),
+            );
+        }
+    }
+    tools
+}
+
+/// The extension whose run-time tools hold `name`.
+fn dynamic_of(name: &str) -> Option<Dynamic> {
+    if crate::mcp::serves(name) {
+        return None;
+    }
+    ALL.iter()
+        .filter_map(|extension| extension.dynamic)
+        .find(|dynamic| (dynamic.definition)(name).is_some())
+}
+
+/// What the judge reads of a call of an extension's tool besides its arguments, or nothing.
+pub fn described(daemon: &Daemon, name: &str, args: &Value) -> Option<String> {
+    (dynamic_of(name)?.described)(daemon, name, args)
+}
+
+/// The events of the extensions the user's inbox lists, each with the kind it is listed as and
+/// the text it shows.
+pub fn needs_you() -> Vec<(&'static str, &'static str, Says)> {
+    ALL.iter()
+        .flat_map(|extension| {
+            extension
+                .needs_you
+                .iter()
+                .map(|(event, text)| (*event, extension.name, *text))
+        })
         .collect()
 }
 
@@ -591,16 +775,21 @@ fn tool(name: &str) -> Option<&'static Tool> {
 /// The definition of a tool an extension gives, active or not: a grant holds only those its
 /// agent was given.
 pub fn definition(name: &str) -> Option<&'static Definition> {
-    tool(name).map(|tool| &tool.definition)
+    tool(name)
+        .map(|tool| &tool.definition)
+        .or_else(|| (dynamic_of(name)?.definition)(name))
 }
 
 /// Whether the tool is one an extension gives.
 pub fn gives(name: &str) -> bool {
-    tool(name).is_some()
+    tool(name).is_some() || dynamic_of(name).is_some()
 }
 
 /// The gate's verdict on a call of a tool an extension gives, `None` for another tool.
 pub fn classify(daemon: &Daemon, grant: &Grant, name: &str, args: &Value) -> Option<Verdict> {
+    if let Some(dynamic) = dynamic_of(name) {
+        return Some((dynamic.classify)(daemon, grant, name, args));
+    }
     let tool = tool(name)?;
     let owner = ALL
         .iter()
@@ -659,9 +848,10 @@ fn verdict(
 
 /// Performs a call of a tool an extension gives, once the gate let it through.
 pub async fn perform(daemon: &Arc<Daemon>, grant: &Grant, name: &str, args: Value) -> Outcome {
-    match tool(name) {
-        Some(tool) => (tool.call)(daemon, grant, args).await,
-        None => Outcome::Failed(format!("{name} is not served")),
+    match (tool(name), dynamic_of(name)) {
+        (Some(tool), _) => (tool.call)(daemon, grant, args).await,
+        (None, Some(dynamic)) => (dynamic.call)(daemon, grant, name, args).await,
+        (None, None) => Outcome::Failed(format!("{name} is not served")),
     }
 }
 
@@ -912,6 +1102,7 @@ fn list(daemon: &Daemon) -> Value {
                 .collect();
             let projects: Vec<Value> = all
                 .iter()
+                .filter(|_| extension.scope == Scope::Project)
                 .map(|project| match of_project(extension, project) {
                     Ok(values) => json!({
                         "project": project.name,
@@ -934,7 +1125,10 @@ fn list(daemon: &Daemon) -> Value {
                 "name": extension.name,
                 "title": extension.title,
                 "sentence": extension.sentence,
-                "scope": match extension.scope { Scope::Project => "project" },
+                "scope": match extension.scope {
+                    Scope::Project => "project",
+                    Scope::Global => "global",
+                },
                 "on_by_default": extension.on_by_default,
                 "place": {"tab": title, "order": order},
                 "enabled": enabled,
@@ -964,6 +1158,12 @@ struct Set {
 /// file, checked against the declaration before anything is written.
 fn set(daemon: &Daemon, asked: Set) -> Result<Value, Failure> {
     let extension = find(&asked.name).map_err(|why| Failure::new("not-found", why))?;
+    if asked.project.is_some() && extension.scope == Scope::Global {
+        return Err(Failure::refused(format!(
+            "{} is app-wide: it has no switch nor setting of a project",
+            extension.title
+        )));
+    }
     let at = match &asked.project {
         Some(_) => format!("extensions.{}", extension.name),
         None => extension.name.to_owned(),
@@ -1037,44 +1237,11 @@ fn set(daemon: &Daemon, asked: Set) -> Result<Value, Failure> {
                 Ok(())
             })?;
         }
-        None => {
-            let _writing = WRITING.lock().unwrap();
-            let paths = &daemon.paths;
-            let unavailable = |error: std::io::Error| {
-                Failure::new("unavailable", format!("extensions.toml: {error}"))
-            };
-            let text = match std::fs::read_to_string(file(paths)) {
-                Ok(text) => text,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(error) => return Err(unavailable(error)),
-            };
-            parse(&text).map_err(|why| Failure::new("invalid-config", why))?;
-            let mut document: toml_edit::DocumentMut =
-                text.parse().map_err(|error: toml_edit::TomlError| {
-                    Failure::new(
-                        "invalid-config",
-                        format!("extensions.toml: {}", error.message()),
-                    )
-                })?;
-            let table = document
-                .entry(extension.name)
-                .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
-                .as_table_mut()
-                .ok_or_else(|| {
-                    Failure::new(
-                        "invalid-config",
-                        format!("extensions.toml: {}: must be a table", extension.name),
-                    )
-                })?;
+        // A project's own switch is its file's, announced when it is rewritten.
+        None => rewrite(daemon, extension, |table| {
             edit(table);
-            let text = document.to_string();
-            parse(&text).map_err(|why| Failure::new("invalid-config", why))?;
-            std::fs::create_dir_all(&paths.config).map_err(unavailable)?;
-            crate::providers::write_in_place(&file(paths), &text).map_err(unavailable)?;
-            // Before the answer: the next call of a session is served the tools it has now. A
-            // project's own switch is its file's, announced when it is rewritten.
-            projects::tools_changed(daemon);
-        }
+            Ok(())
+        })?,
     }
     daemon
         .emit(
@@ -1098,7 +1265,8 @@ mod tests {
     fn an_unknown_extension_key_or_kind_in_extensions_toml_is_refused_naming_it() {
         assert_eq!(
             parse("[spexs]\nenabled = true\n").unwrap_err(),
-            "extensions.toml: spexs: unknown extension: the extensions are specs, review"
+            "extensions.toml: spexs: unknown extension: the extensions are specs, review, \
+             connections"
         );
         assert_eq!(
             parse("[specs]\nenable = true\n").unwrap_err(),
@@ -1168,7 +1336,8 @@ mod tests {
     /// The words of the core's own that an extension took for its name: a pull request's review is
     /// the forge's (`forge::review`), core since before Review. For them the scan looks for the
     /// extension's module path alone (`extensions::review`), not every identifier.
-    const CORE_WORDS: &[&str] = &["review"];
+    /// A connection is the core's word too: the daemon's socket takes its clients' connections.
+    const CORE_WORDS: &[&str] = &["review", "connection", "connections"];
 
     /// The words an extension is named by in code: its name and its methods' prefix.
     fn words_of(extension: &Extension) -> Vec<&'static str> {
@@ -1363,6 +1532,30 @@ mod tests {
             .map(|(at, _)| at)
             .collect();
         assert_eq!(found, [1]);
+    }
+
+    /// Connections is named in `extensions/` alone: the core reaches it through the registry.
+    /// `connection` stays the core's own word for its clients and hyper's, so the scan looks for
+    /// the module's path, as for Review.
+    #[test]
+    fn the_core_names_no_connection() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        sources(&root, &mut files);
+        let found: Vec<String> = files
+            .iter()
+            .filter(|file| !file.starts_with(root.join("extensions")))
+            .flat_map(|file| {
+                let text = std::fs::read_to_string(file).unwrap();
+                pathing(&text, &["connections"])
+                    .into_iter()
+                    .map(|(at, line)| format!("{}:{at}: {line}", file.display()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(found.is_empty(), "{}", found.join("\n"));
+        let sample = "use crate::extensions::connections;\nlet connection = 2;";
+        assert_eq!(pathing(sample, &["connections"]).len(), 1);
     }
 
     /// The daemon's core modules name no extension: outside `extensions/`, nothing names one as a

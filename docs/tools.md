@@ -107,6 +107,11 @@ agent. They change in two ways, and a session never keeps a list its role no lon
   given their new list before the change is answered; in one project, its switch is in the
   project's file, announced as above. An `extensions.toml` that cannot be read leaves every
   extension off, and its tools with it.
+- **A connection changes** (`docs/extensions.md`, "Connections"): accepted, turned on or off,
+  declared again, excepting a project, or cut off because its server is no longer what the user
+  accepted. Its tool `conn_<name>` is added to or removed from every running session of every
+  project the same way and at once; the `tools` delivery of a new process names it
+  (`- conn_almanac: new`, `- conn_almanac: gone`).
 
 Bare mode is kept: only Flottille's tools, only the role's. A session that lists its tools again
 has the new list. One that calls a tool after it was told without listing them again, while the
@@ -775,6 +780,40 @@ project …`), as is an entry the user dismissed until its setting changes; a se
 is open joins it. The schema has no field for a secret, and an argument it does not know is
 refused. The tool is listed to an agent whose project sees an entry or misses one a feature
 names.
+
+## Connections
+
+`conn_<name> {action, arguments?, for?}`: one tool per MCP server the user declared and reviewed
+(`docs/extensions.md`, "Connections"), given to every agent of every project but those its
+`except` names, while Connections and the connection are on. The daemon is the MCP client; an
+agent never talks to the server.
+
+- **Its description** is Flottille's: a fixed text, the user's sentence and the names of the
+  enabled actions, 1,200 characters at most (`and 12 more: help lists them`). Never a word the
+  server wrote. Its schema is the same for every connection.
+- **`help`** lists the enabled actions, a line each; with `for: "<action>"` it gives that
+  action's description (cut at 4,000 characters, a line saying so) and its argument schema; with
+  `for: "@instructions"` the server's own instructions, cut the same. Answered from what the user
+  accepted, never by a call to the server, and harmless. Each text is framed as the server's, in
+  a `<connection_text>` block with every `<` and `&` escaped.
+- **`arguments`** is the action's own object, checked against the accepted schema (types,
+  properties, the required ones, the values taken, items, bounds) and the user's limits before the
+  server sees anything: an unknown action, one turned off, arguments that do not fit or a value
+  outside a limit are refused, naming what is wrong.
+- **A result** is the server's text blocks, masked, framed in a `<connection_answer>` block as a
+  third party's data, escaped as every result is and cut as "Long results" says. An image, a
+  sound or a resource is left out with one line saying what it was and how big. `isError` is a
+  failure.
+- **One call at a time** per connection, whatever the project, 120 seconds each, then cancelled
+  (the server stopped). The server starts at the first call, stays while a session of any project
+  runs and ten minutes after, and is stopped with its whole session of processes then, when the
+  connection is turned off, removed or declared again, and with the daemon. A server that does not
+  start answers `the call failed: the connection could not start: <the first line of its error
+  output, masked>`, tried again at the next call. A call running when the connection is turned off
+  answers `the call failed: the connection was turned off while it ran; it may have been
+  performed`.
+- **The gate**: judged by default, passes or asked as the user set the action (`docs/design.md`
+  §7.1); recorded as every call is.
 
 ## The workspace
 

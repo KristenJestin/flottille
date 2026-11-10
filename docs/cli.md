@@ -235,6 +235,36 @@ Turns it off for all projects, or with `--project P` in that project alone. What
 settings, its data) stays, and the projects' switches stay as they are: turned on again, it comes
 back as it was.
 
+### `flottille connection list [--json]`
+
+Your connections (`docs/extensions.md`, "Connections"): whether Connections is on, and each
+connection with its tool, its state, why it is cut off or failing, and the setting of each action.
+
+### `flottille connection add <name> --about S (--command W... | --url U) [--env V=E]... [--header H=E]... [--only A=v1,v2]... [--except P]...`
+
+Declares a connection under `[[connections.server]]` of `extensions.toml`: a command spawned
+without a shell (its words given after `--command`), or an `https://` URL (`http://` on this
+machine alone). `--env` and `--header` name vault entries of every project, `--only` limits the
+values of an argument, `--except` leaves a project out. It is given to no agent until reviewed.
+
+### `flottille connection edit <name> [--about S] [--command W... | --url U] [--env…] [--header…] [--only…] [--except…] [--on | --off]`
+
+Replaces what is given. A change of the command, the URL, the variables, the headers or the
+limits asks for a new review.
+
+### `flottille connection remove <name>`
+
+### `flottille connection review <name> [--json]`
+
+Starts its server and prints, as plain text, what it announces against what you accepted: the
+version, the instructions and each action, old lines `-`, new lines `+`, and what each limit
+covers.
+
+### `flottille connection accept <name> [--set ACTION=SETTING]...`
+
+Accepts what the last review showed: the actions that did not change keep their settings, new
+ones are judged. `--set` sets one to `judged`, `passes`, `asked` or `off`.
+
 ### `flottille spec new <project> (--title T | --idea I) [--mode alone|internal|ticket] [--ticket K]...`
 
 Starts a spec, a Draft, in the project's language (`docs/extensions.md`, "Specs"). The mode is
