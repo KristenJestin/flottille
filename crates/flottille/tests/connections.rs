@@ -1915,3 +1915,40 @@ fn a_server_s_name_and_version_are_masked_and_cut_in_a_cut_off() {
         assert!(!said.contains(&"x".repeat(200)), "{what}: {said}");
     }
 }
+
+#[test]
+fn an_unreadable_extensions_file_refuses_removing_a_bound_entry() {
+    let user = user();
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET, "for": "connection:almanac"}),
+    )
+    .unwrap();
+    turn_on(&user);
+    declare(
+        &user,
+        "almanac",
+        &almanac(),
+        json!({"env": {"TOKEN": {"vault": "almanac-token"}}}),
+    );
+    std::fs::write(
+        user.path("config/flottille/extensions.toml"),
+        "[[connections.server]\nname = \n",
+    )
+    .unwrap();
+    // Whether the connection still names it cannot be told: the removal is asked, not done.
+    let refused = user
+        .call("vault.remove", json!({"name": "almanac-token"}))
+        .unwrap_err()
+        .1;
+    assert!(refused.contains("confirm"), "{refused}");
+    assert!(!refused.contains(SECRET), "{refused}");
+    let entries = user.call("vault.list", json!({})).unwrap().to_string();
+    assert!(entries.contains("almanac-token"), "{entries}");
+    user.call(
+        "vault.remove",
+        json!({"name": "almanac-token", "confirmed": true}),
+    )
+    .unwrap();
+}

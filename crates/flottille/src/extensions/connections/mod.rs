@@ -1230,13 +1230,12 @@ fn entries_checked(daemon: &Daemon, declaration: &Declaration) -> std::result::R
     Ok(())
 }
 
-/// Whether the connection `name`, as declared, names the vault entry `entry`.
-pub fn names(daemon: &Daemon, name: &str, entry: &str) -> bool {
-    declarations(&daemon.paths).is_ok_and(|all| {
-        all.iter().any(|declaration| {
-            declaration.name == name && declaration.entries().any(|e| e == entry)
-        })
-    })
+/// Whether the connection `name`, as declared, names the vault entry `entry`; why it cannot be
+/// told when the declarations cannot be read.
+pub fn names(daemon: &Daemon, name: &str, entry: &str) -> std::result::Result<bool, String> {
+    Ok(declarations(&daemon.paths)?
+        .iter()
+        .any(|declaration| declaration.name == name && declaration.entries().any(|e| e == entry)))
 }
 
 fn table_of(declaration: &Declaration) -> std::result::Result<toml_edit::Table, Failure> {

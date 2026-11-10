@@ -292,14 +292,27 @@ pub async fn call(
             };
             if let Some(bound) = &entry.bound
                 && !confirmed
-                && named_by(&daemon, bound, &name)
             {
-                return Err(Failure::refused(format!(
-                    "the vault entry {name} is bound to {}, which names it: removing it means {}; \
-                     have it name another entry first, or confirm the removal",
-                    use_said(bound).unwrap_or_else(|| bound.clone()),
-                    use_stops(bound).unwrap_or_else(|| "that it stops working".into()),
-                )));
+                let said = use_said(bound).unwrap_or_else(|| bound.clone());
+                let stops = use_stops(bound).unwrap_or_else(|| "that it stops working".into());
+                match named_by(&daemon, bound, &name) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        return Err(Failure::refused(format!(
+                            "the vault entry {name} is bound to {said}, which names it: removing \
+                             it means {stops}; have it name another entry first, or confirm the \
+                             removal"
+                        )));
+                    }
+                    // An unreadable file cannot say the entry is not named: the guard holds.
+                    Err(why) => {
+                        return Err(Failure::refused(format!(
+                            "the vault entry {name} is bound to {said}, and whether it names it \
+                             cannot be told ({why}): removing it may mean {stops}; mend the file, \
+                             or confirm the removal"
+                        )));
+                    }
+                }
             }
             // The secret first: a keyring that refuses (locked) leaves the entry whole, to be
             // removed again once it is unlocked.
@@ -431,16 +444,17 @@ fn bound_checked(
     }
 }
 
-/// Whether the feature the use `bound` stands for names the entry `name` now.
-fn named_by(daemon: &Daemon, bound: &str, name: &str) -> bool {
+/// Whether the feature the use `bound` stands for names the entry `name` now; why it cannot be
+/// told when the files that declare it cannot be read.
+fn named_by(daemon: &Daemon, bound: &str, name: &str) -> Result<bool, String> {
     match bound.split_once(':') {
-        Some(("worklog", project)) => {
-            crate::projects::load_project(daemon, project).is_ok_and(|project| {
+        Some(("worklog", project)) => Ok(crate::projects::load_project(daemon, project).is_ok_and(
+            |project| {
                 matches!(&project.tracker, Some(ProjectTracker::Jira {
                     worklog_token: Some(token), ..
                 }) if token == name)
-            })
-        }
+            },
+        )),
         _ => crate::extensions::bound_names(daemon, bound, name),
     }
 }

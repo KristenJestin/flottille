@@ -556,11 +556,11 @@ fn active_in(paths: &Paths, extension: &Extension, project: &Project) -> bool {
 }
 
 /// Whether the feature of an extension a vault entry is bound to (`bound`, `connection:<name>`)
-/// names the entry `entry` now.
-pub fn bound_names(daemon: &Daemon, bound: &str, entry: &str) -> bool {
+/// names the entry `entry` now; why it cannot be told when its files cannot be read.
+pub fn bound_names(daemon: &Daemon, bound: &str, entry: &str) -> Result<bool, String> {
     match bound.split_once(':') {
         Some(("connection", name)) => connections::names(daemon, name, entry),
-        _ => false,
+        _ => Ok(false),
     }
 }
 
