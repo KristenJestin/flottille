@@ -6,7 +6,8 @@ the scan that the core names no extension, and Specs in the store with its statu
 modes and tickets, from the command line. S2 (#333) built the tools an extension gives and the
 Action trigger, and writing a spec: the `spec` tool, "New spec" and "Write the spec", questions and
 answers, from the command line and the protocol. S3 (#334) built Specs in the window: the
-renderer of an extension's tab of Settings and of its section of a project's settings, the
+renderer of an extension's tab of Settings and of its section of a project's settings (now a
+page of Features, "In the window"), the
 project's Specs tab, "Write the spec" on a ticket's row and a spec's page. S4 (#459) built the
 ticket side. S5 (#336) built "Launch development" and the statuses read from what Flottille sees. S6 (#337)
 built the amendments.
@@ -39,7 +40,7 @@ today, moves into the frame last ("The order of the work").
 | Core | What Flottille is without any extension: the daemon, the store, projects, workspaces, agents and their tree, deliveries, the gate and bare mode, the generic tools, the providers, the window's shell. |
 | Extension | A part of Flottille, compiled in, that adds a capability of its own and can be turned off with Flottille still working. |
 | Declaration | What an extension says it brings: settings and where they appear, model slots, guidance, calls, triggers, tools, the agents it launches, data, screens. The core reads it and runs it. |
-| Place | Where an extension's settings appear in the window: its own tab of Settings (with a title and an order among the tabs), or a section of a screen that exists. |
+| Place | Where an extension's settings appear in the window: a row of Settings' Features tab (with a title and an order among the rows) and its page, or a section of a screen that exists (the judge: Approvals). |
 | Model slot | A setting that names a model: provider, model and effort, picked like the Auto judge. |
 | Guidance | An editable text an extension's model follows, set inside a fixed text it cannot move, with Reset to default. |
 | Call | One question to a model with no tool at all: input given by Flottille, output checked by the extension. |
@@ -106,7 +107,7 @@ pub struct Extension {
     pub sentence: &'static str,
     pub scope: Scope,              // Global, or Project
     pub on_by_default: bool,
-    /// Where its settings appear: a tab of its own, or a section of a screen that exists.
+    /// Where its settings appear: a row of Features, or a section of a screen that exists.
     pub place: Place,
     pub settings: &'static [Setting],
     pub tools: &'static [Tool],
@@ -245,8 +246,8 @@ the judge as its one known exception until the judge moves ("The last step").
 The window's shell offers places; an extension's window module fills them, built from
 `flottille-ui`'s components and under the rules of the window.
 
-- **Its settings, in the place it declares**, rendered from the declaration, and a section of a
-  project's settings for its per-project switch and values (Specs).
+- **Its settings, in the place it declares**, rendered from the declaration, and its page in a
+  project's Features for its per-project switch and values (Specs).
 - **A project tab** (Specs), **a page** (a spec), **an action on a row** ("Write the spec" on a
   ticket) (Specs).
 - **An element of the composer** ("Compact before sending"), **an action of a session** (Compact,
@@ -268,10 +269,14 @@ slot, the judge's own code left as it is until it moves:
 - **Picking for a user who never chose:** the smallest model of the first provider that is enabled,
   installed and signed in, among those whose smallest model Flottille lists (`SMALLEST`, Claude's
   Haiku); or, for a slot that says so, the strongest model of a provider (Review). Written once,
-  said once in a notice that opens the extension's tab, marked `picked` until the notice is seen.
+  said once in a notice that opens the extension's page, marked `picked` until the notice is seen.
   A slot the user set to none is never picked again.
-- **Per project** (Review): a slot a project may override, in its section of the project's
-  settings.
+- **Per project** (Review): a slot a project may override, on its page in the project's
+  Features.
+- **In the window**, every slot is the one model choice of `reference/gpui.md` (rule 15,
+  `ModelChoice`): one select of `<provider> · <model>`, the effort beside it, the default first and
+  said with what it gives today. A slot is never set to none from it: an extension is turned off by
+  its switch.
 - **Using it:** a provider no longer enabled or ready makes each use of the slot fail, and a use
   that fails falls back as its extension says (the compaction changes nothing; a review pass is
   reported as not run).
@@ -363,8 +368,8 @@ holds its calls for the user. An extension's tool call is answered by a future
 
 ## Activation
 
-- **Global**, for every extension: on or off, by the switch at the top of its settings (its own
-  tab), `extension.set`, or `flottille extension on|off <name>`. The command and the methods are
+- **Global**, for every extension: on or off, by the switch at the top of its page,
+  `extension.set`, or `flottille extension on|off <name>`. The command and the methods are
   the scripts' and the clients' door; the window never says "extension".
 - **Per project**, for an extension that touches a project (Specs, Review, Handbook): once turned
   on globally, it is **on in every project**. The user turns it off in a project where they do not
@@ -375,7 +380,7 @@ holds its calls for the user. An extension's tool call is answered by a future
 judge" is the judge turned off (`judge = "none"`, kept as it is written now). Every other extension
 is off until the user turns it on.
 
-**What off removes.** Its tab's content but for the switch and its sentence, its screens (its
+**What off removes.** Its page's content but for the switch, its sentence and its usage line, its screens (its
 project tab, its pages, its actions, the composer's element), its tools from every agent's list,
 its triggers, its notices. For the judge: Auto has no one to decide, is shown unavailable, and
 every call to judge comes to the user. Its settings, its guidance and its data stay where they
@@ -398,48 +403,78 @@ trigger.
 
 ## In the window
 
-Each feature is part of the app, and its settings sit where they belong: each extension has its
-own tab of Settings (its `place`), and a project-scoped one also a section of the project's
-settings. The declaration says *where*, with a title and an order; the core draws what is in it,
-with the components every other tab is built from. There is no "Extensions" tab.
+Each feature is part of the app, and its settings sit where they belong. An extension the user
+turns on or off is **a row of Settings' Features tab, never a tab of its own** (the maintainer's
+redesign of 2026-11-10: a tab per feature made too many); a project-scoped one is also a
+row of the project's Features tab. The declaration says *where*, with a title, an icon, its line
+and an order; the core draws what is in it, with the components every other page is built from.
+There is no "Extensions" tab, and the word never shows.
 
-- **A tab of an extension** is a page like the others (rule 8 of `reference/gpui.md`: a title, and
-  sections each with its title and one sentence). At its top, its **switch** (On), with its
-  sentence as hint. **Off, the tab shows the switch and that one line, nothing else.** On, under
-  the switch and in that order: its model slots, its settings (each a labelled control chosen by
-  rule 4), its guidance (the editor the Judge guidance has now, with Reset to default, Save and the
-  line on when a change applies), and the one line saying what it costs when it runs a model on
-  the user's own quota. The sections fold away and unfold with the switch.
-- **A project's settings** get, for each project-scoped extension on globally, a section with its
-  switch (on, unless the user turned it off there) and the values a project may set (Specs' language,
-  Review's models).
-- **A link to a tab** (the mode's "Auto unavailable" line, a notice that a model was picked) opens
-  that tab, with the setting in view.
-- **The judge's tab** keeps its place, the first, the one Settings opens on. When it moves into the
-  frame its two lines on Auto become the sentence and the hint of its switch; off writes
-  `judge = "none"`, on picks a judge as for a user who never chose; the "No judge" entry of its
-  select goes, the switch says it.
-- **Tool results** (#308, core): a section at the end of the Providers tab, since it is about what
-  every agent is given, whatever runs it.
+- **Features** is a list (`Subpage`, `reference/gpui.md` rule 13): one row per extension, its
+  icon, its title, its state as a tag said once (`On`, `Off`; Connections `2 on`), and one line
+  saying what it is for, never its state:
 
-Settings, in order: Judge, Specs, Compaction, Review, Providers, Rules, Appearance, Developer mode.
-The order is a number each declaration gives; a core tab has its own place, and none is moved by
-another's declaration.
+  | Row | Its line |
+  |---|---|
+  | Specs | A spec of each task, written with you before an agent builds it. |
+  | Review | Fresh eyes on a session's change before you merge it. |
+  | Compaction | Long conversations summarised so agents keep going. |
+  | Connections | Your MCP servers, given to every agent behind the gate. |
+  | Handbook (later) | One row more. |
 
-As built (S3): the window reads `extension.list` at its start and again on `extension.changed`,
-`spec.*` and a project's change. Its module `crates/flottille-window/src/extensions/` draws an
-extension's tab (after the Judge's, by its order) and its project section (a tab of the project's
-settings after Rules, while it is on globally) from the declaration; a setting is drawn by its
-kind (a language is a select, its first option the value it has when none is set there). Specs'
-project tab is a third tab beside Pull requests and Tickets, its action on a row is the ticket
-row's button, its page opens from a spec's row. Back to draft is one click from Ready, and asks
-in a confirmation from In progress or Review, which only the development (S5) reaches.
+  A click opens its page in place of the list, under the path `Features / Review`, whose first
+  word goes back, as Escape does. The declaration gives what the row and the page need beside its
+  title and its sentence: its icon, its row's line, its switch's label and its usage line.
+- **An extension's page** follows rule 14: at its top, its **switch**, labelled with what it does
+  (Specs "Write specs before building", Review "Review changes", the compaction "Compact long
+  conversations", Connections "Use connections"), never "On"; its sentence as hint; its **usage
+  line**, where and how it acts, shown even while it is off. **Off, the page shows that block,
+  nothing else.** On, under it and in that order: its model slots (`ModelChoice`, rule 15; several
+  in a row are one card), its settings (each a labelled control chosen by rule 4, a setting that
+  depends on another unfolding under it), its guidance (an editor with Reset to default and Save
+  once it changed; its title says who reads it: "What reviewers are told", "What a summary
+  keeps"), and the one line saying what it costs when it runs a model on the user's own quota.
+  The sections fold away and unfold with the switch.
+- **A project's page of an extension** (in the project's Features, for each project-scoped
+  extension) has the switch with the global one's label (the path says the project:
+  `acme-shop / Settings / Features / Review`; its hint, "On in every project unless you turn it
+  off here."), the same usage line, and the values a project may set (Specs' language and mode,
+  Review's checks and models), each offering **As in Settings** first, its second line the value
+  it gives; a value set there carries a dot, "set here", and **Use Settings' value** under it. An
+  extension off in Settings is a faded row there, its line "Off in Settings" a link. The global
+  page says in one line which projects do otherwise (`notes-app turns it off`), only when one does.
+- **A link to a page** (the mode's "Auto unavailable" line, a notice that a model was picked, the
+  quick switcher, which has an action per page) opens it, `Settings › Features › Review`, with the
+  setting in view.
+- **The judge** is not a row of Features: it is found through Auto, and its place is Settings'
+  **Approvals** tab, the first section, drawn as a page of rule 14 (its switch "Let a model decide
+  in Auto", its usage line, its model, then "What the judge is told"; `design.md` §10). Off writes
+  `judge = "none"`, on picks a judge as for a user who never chose; its select has no "No judge"
+  entry, the switch says it. This needs nothing of its move into the frame.
+- **Long tool results** (#308, core): a section of Settings' Agents tab, since it is about what
+  every agent is given, whatever runs it; it moves to the savings of Usage when Usage comes (#547).
 
-Everything in it follows the rules of the window and its motion: the sections of a tab enter one
-after the other, the switch moves over `HOVER`, the settings fold and unfold with the switch, an
-error appears and leaves animated. Each window issue lists what it animates and ticks the
-checklist of `reference/gpui.md`. This note designs no pixels: the components of `flottille-ui`
-hold them.
+Features, in order: Specs, Review, Compaction, then Connections. The order is a number each
+declaration gives; the core's tabs and sections have their own places, and none is moved by a
+declaration.
+
+As built (S3), before the redesign: the window reads `extension.list` at its start and again on
+`extension.changed`, `spec.*` and a project's change. Its module
+`crates/flottille-window/src/extensions/` draws an extension's tab (after the Judge's, by its
+order) and its project section (a tab of the project's settings after Rules, while it is on
+globally) from the declaration; the redesign moves both into the rows and pages above, drawn the
+same way. A setting is drawn by its kind (a language is a select, its first option the value it
+has when none is set there). Specs' project tab is a tab of the project page beside Pull requests
+and Tickets, its action on a row is the ticket row's button, its page opens from a spec's row.
+Back to draft is one click from Ready, and asks in a confirmation from In progress or Review,
+which only the development (S5) reaches.
+
+Everything in it follows the rules of the window and its motion: a page enters sliding from the
+right while the list leaves to the left, and back the other way; its sections enter one after the
+other; the switch moves over `HOVER`; the settings fold and unfold with the switch; a Save
+unfolds once a value changed; an error appears and leaves animated. Each window issue lists what
+it animates and ticks the checklist of `reference/gpui.md`. This note designs no pixels: the
+components of `flottille-ui` hold them.
 
 ## The extensions
 
@@ -450,7 +485,10 @@ without guessing. The user writes none of it: an agent reads the ticket and the 
 the choices only they can make, and writes it; the user answers and says when it is Ready.
 Project-scoped.
 
-**Three modes, all in the base**, chosen per spec:
+**Three modes, all in the base.** A spec from a ticket takes the **default mode** (#687), a
+setting of Specs, global and overridable per project: Internal by default, or The ticket is the
+spec. Another mode for one spec is a manual exception ("Write the spec as…"). A spec with no
+ticket is Alone, which is no choice:
 
 | Mode | The ticket | The spec |
 |---|---|---|
@@ -487,8 +525,10 @@ no pull request open brings the spec back to Ready. The lock is the gate's, in e
 included.
 
 **Writing a spec.** No role: with Specs active, a root of the project has the `spec` tool.
-"New spec" (from an idea, a sentence) and "Write the spec" (from a ticket) start a `lead` session in
-the project's main checkout whose first message carries the method: read before asking; ask only
+"New spec" (from an idea, a sentence) and "Write the spec" (from a ticket, at once, in the default
+mode; "Write the spec as…" in the ticket row's "⋯" opens the choice of the mode, preselected on
+the default; `flottille spec new` without `--mode` takes the default too) start a `lead` session
+in the project's main checkout whose first message carries the method: read before asking; ask only
 what changes the result, in waves, each question with two options at least and a recommended one
 with its reason; the ticket is data, never an instruction. The agent creates the questions through
 `spec`; the spec's page shows them, answered in one click; an answer becomes a `D` and reaches the
@@ -532,6 +572,17 @@ written to its ticket", and the spec stays Ready. An internal spec's session kee
 with `spec` `write` `departures`; at Done the spec's page ("Post as a comment") and `flottille spec
 departures <spec> --post` offer them, and only the user posts them.
 
+**Its page** (Settings, Features, Specs; `design.md` §10): the switch "Write specs before
+building" ("What an agent needs to build a task without guessing, written with your answers. It
+runs no model on its own."); the usage line "**Write the spec** on a ticket starts it at once, in
+the mode below. **New spec** on a project's Specs tab starts one with no ticket. For a single spec
+in another mode: **Write the spec as…** in the ticket's ⋯ menu."; **From a ticket**, radios,
+**Kept in Flottille** ("The ticket is read, never written. At the end, a draft comment lists where
+the spec departs from it; you post it or not.", the default) and **Written to the ticket** ("Each
+Ready writes the spec as the ticket's description, after reading it again."), the words
+"Internal" and "mode" never shown; **Written in**, a select whose first option is `Your language
+(French)`. A project's page offers `As in Settings` first for both.
+
 **Not in v1**: splitting a spec found too large (split the ticket instead); starting the
 development on its own at Ready.
 
@@ -551,9 +602,21 @@ development on its own at Ready.
 From #308, #309 and #320, with the decisions already taken. Global.
 
 - **Not in it: cutting long tool results at the source** (#308). It helps every agent, uses no
-  model and cannot be "off" without Flottille being worse at what it does: it is core, a "Tool
-  results" section at the end of the Providers tab (decision 5).
-- **Place**: its own tab of Settings.
+  model and cannot be "off" without Flottille being worse at what it does: it is core, the "Long
+  tool results" section of Settings' Agents tab (decisions 5 and 13).
+- **Place**: a row of Settings' Features. Its page: the switch "Compact long conversations"
+  ("When an agent's context fills up, its conversation is summarised and it goes on from the
+  summary. Off, each program compacts on its own."), the usage line ("Automatic past the threshold
+  below, or **Compact** in a session's ⋯ menu, or **Compact before sending** in its composer."),
+  **Summary written by**, one `ModelChoice` whose first option is `The session's own agent` and
+  the others the models, the effort beside a model; "Compact automatically" ("At the end of a
+  turn, past the threshold. Off, only when you ask.") and **When the context reaches** unfolding
+  under it; the rest folded under **More settings**: **Or above** (the maximum size), **Recent
+  messages kept as they are**, "Compact an idle agent before its cache expires" and **How long
+  before** under it, "Compact when a session comes back after its cache expired", **Not below**
+  (the minimum size), and the cache lifetime of each provider as labelled values; the cost line
+  "Each summary is a turn of this model, on your own quota."; **What a summary keeps**, its
+  guidance. The word "compactor" is never shown.
 - **Slot**: the compactor, picked like the judge once the user turns the compaction on. Off is
   #309's "None": each CLI compacts on its own, as today.
 - **Settings**: Automatic (on), Threshold (70 % of the model's context window), Maximum size
@@ -570,7 +633,7 @@ From #308, #309 and #320, with the decisions already taken. Global.
   messages word for word. The handoff is the core's, which a change of provider will use too.
 - **Data**: each agent's last summary (`ext_compaction_summary`).
 - **Screens**: the composer's "Compact before sending", the rail's Compact, the conversation's
-  line, its tab (with the cache lifetime it uses for each provider, or that it knows none).
+  line, its page (with the cache lifetime it uses for each provider, or that it knows none).
 - **Builds**: model slots, guidance, calls, the Turn ended, Agent timer and Before a prompt
   triggers, `takes_over_compaction`.
 
@@ -600,14 +663,15 @@ or without a spec. Project-scoped.
 - **Commands**: the reviewer and its passes may run commands, free lines too, through the gate
   (no shell); their instructions say they modify nothing; Flottille compares the workspace before
   and after (each repository's `HEAD` and `git status`) and says so in the review when it changed.
-- **Models**: a slot per pass and one for the verifier, in Review's tab, overridable per project.
+- **Models**: a slot per pass and one for the verifier, on Review's page, overridable per project.
   By default the strongest model of the session's provider; the verifier may be one size smaller.
 - **Rounds**: after the fixes, one re-review of what changed since and of the open findings,
   matched by identifier; two rounds at most, then what is left stays open.
 - **In the window**: the review's agents are grouped under one folded "Review" line of the tree,
-  with its state (`Review · 3/4 passes · 2 findings`).
+  with its state (`Review · 3/4 checks · 2 findings`).
 - **Instructions**: its fixed text, the project's rules from the base branch (the standards pass
-  only), and an editable guidance in its tab, with Reset to default.
+  only), an editable guidance shared by every agent of a review, and, for each pass, an optional
+  guidance of its own, empty by default ("Each check's guidance").
 - **Builds**: agents an extension launches and the depth exception, slots overridable per project,
   the composer command, the folded line of the tree.
 
@@ -630,9 +694,55 @@ As built (#338):
 - **Findings** are kept per session and named `F1`, `F2`… across rounds; a `rejected` one is not
   kept. `review.finding` marks one. They show under the review's line of the session's rail and,
   for a spec's development, on the spec's page.
-- **Guidance**: `review.md`, 4,000 characters, edited in Review's tab.
+- **Guidance**: `review.md`, 4,000 characters, edited on Review's page.
 - **Data**: `ext_review_reviews`, `ext_review_agents`, `ext_review_findings`. The core's scan
   looks for `extensions::review` alone, `review` being the forge's word too (`forge::review`).
+
+**Its page** (Settings, Features, Review; `design.md` §10), in the window's words: none of
+*pilot*, *pass* or *verifier* is shown, and the keys (`spec`, `bugs`, `standards`, `security`,
+`<pass>_model`, `verifier_model`) stay as they are.
+
+- The switch **Review changes** ("Agents read a session's change with fresh eyes and send it what
+  is wrong. Nothing is blocked."), and its usage line, shown even while it is off: "A review starts
+  when a session's pull request opens, when you type **/review** in its composer, or when its
+  agent asks for one. From a terminal: `flottille review <session>`."
+- **What it checks**: one card, a line per pass, each with its switch, its name, one line of what
+  it looks for and its model on the right (a compact `ModelChoice`): **The spec** ("Each expected
+  behaviour met, nothing out of scope. Only for a session that builds a spec."), **Bugs** ("Wrong
+  results, lost data, crashes the change brings."), **Project rules**, the standards pass ("The
+  project's AGENTS.md, read from the base branch."), **Security** ("Secrets, injections, access.
+  Off by default."). The last line, **Checking the findings**, is the verifier, with no switch
+  since it always runs ("Each finding confirmed before it reaches the session."), its first option
+  `One size smaller` (`Sonnet for Claude`). The default is said once under the card: "Models: the
+  strongest of the session's provider unless you choose one. Each check is a turn on your own
+  quota.", then "After fixes, one more review of what changed; two at most."
+- Under each check's line, a quiet fold, **Instructions for this check** (below), its folded line
+  `none` or the start of its text.
+- **What every reviewer is told**, the shared guidance ("Added to Flottille's own instructions,
+  which say they change nothing. A check's own instructions come after it."): its editor, Reset to
+  default and Save once it changed.
+- One line names the projects that do otherwise (`acme-shop runs Security too`), when one does.
+
+The tree's folded line says `Review · 3/4 checks · 2 findings`.
+
+**Each check's guidance** (the maintainer's decision of 2026-11-10, not built). Beside the shared
+guidance, each pass may have instructions of its own, **empty by default**:
+
+- A guidance of the frame may have **parts**: the extension names them (Review: its four passes);
+  each is the file `$XDG_CONFIG_HOME/flottille/<name>-<part>.md` (`review-bugs.md`), absent while
+  it is empty, with no default text, the guidance's limit (4,000 characters) and its reading rules:
+  read at each use, a file that cannot be read whole fails that use, saying which file and why
+  (a pass that fails so is reported as not run).
+- The methods are the guidance's own, given a part: `review.show {part?}`, `review.set {part?,
+  text}`, `review.reset {part?}` and the event `review.changed {part?}`; without `part`, the shared
+  guidance, as today. Saving an empty text removes the file.
+- **What each agent reads, in order**: the pass's agent, Flottille's fixed text, then the shared
+  guidance, then its own instructions, each in a block of its own; the pilot and the verifier, the
+  fixed text and the shared guidance only. A part can add to what the fixed text asks, never lift
+  it, as any guidance.
+- **Global only**: a project does not override a check's instructions (its rules already reach
+  the Project rules check). Asked for later, it would be a value of the project's page like the
+  models.
 
 ### Judge
 
@@ -640,7 +750,7 @@ As it is today (`design.md` §7.1), nothing of its behaviour changed, moved into
 ("The last step").
 
 - **Slot**: the judge, `[judge]` of `providers.toml`, `judge = "none"` for off (decision 3).
-- **Place**: its own tab of Settings, the first, as today.
+- **Place**: the first section of Settings' Approvals tab ("In the window").
 - **Guidance**: `judge.md`, the fixed text `judge-base.md`, 4,000 characters.
 - **Call**: the judgement, `{"verdict": "allow" | "ask", "reason"}`, 30 seconds; any failure asks.
 - **Trigger**: Decide, at the gate, for a call to judge in Auto. The mode's control is the core's;
@@ -704,7 +814,7 @@ judge's code written a second time for the compaction until the last step remove
 The maintainer's answers of 2026-11-03.
 
 1. **Auto with the judge off: shown unavailable** (`Segmented`'s `.unavailable`, faded, with one
-   line saying the judge is off and a link to the Judge's tab). A session already in Auto when
+   line saying the judge is off and a link to the judge's settings, Approvals). A session already in Auto when
    the judge is turned off goes on asking as Ask until the user picks another mode, its mode kept.
 2. **The extensions other than the judge are off by default.** Once the user turns one on, its
    slots are picked. #309 had the compactor picked with no gesture of the user: this asks for one
@@ -712,8 +822,10 @@ The maintainer's answers of 2026-11-03.
 3. **The judge keeps its files:** `[judge]` in `providers.toml` and `judge.md`. The new extensions
    use `extensions.toml`.
 4. **No "Extensions" tab, no dialog, no list to open.** Each extension's settings are natively in
-   its own tab; its switch is at the top; off, the tab shows the switch and one line.
+   its own tab; its switch is at the top; off, the tab shows the switch and one line. *Replaced on
+   2026-11-10 by decision 13: no tab of its own, a row of Features.*
 5. **#308's limit on tool results** is a "Tool results" section at the end of the Providers tab.
+   *Since 2026-11-10: "Long tool results", a section of the Agents tab (decision 13).*
 6. **Per project: on everywhere, off where the user says so**, once on globally.
 7. **The order**: Specs first, building the frame; the compaction; Review and the cold read; the
    judge last, as a pure refactor; the handbook. ("The order of the work".)
@@ -726,6 +838,23 @@ The maintainer's answers of 2026-11-03.
 12. **Review is a pilot with passes and a verifier**, under the narrow depth exception; launched by
     `/review`, the `review` tool, a pull request opened and the command line, never a button; it
     blocks nothing; two rounds at most.
+
+The maintainer's validation of the window's redesign, 2026-11-10 (`design.md` §10):
+
+13. **Settings in tabs by subject, an extension a row of Features.** Agents, Approvals, Features,
+    Vault, General, and Usage the sixth and last; a project's settings in Repositories,
+    Workspaces, Tasks, Instructions, Features. An extension the user turns on or off is a row of
+    Features opening its page, never a tab; the judge is the Approvals tab's first section.
+14. **One pattern per thing**: one model choice everywhere (`ModelChoice`); a feature's page
+    starts with its switch labelled with what it does, its sentence and its usage line; a project
+    overrides a value with `As in Settings` first. "Providers" keeps its name.
+15. **Review's words**: Review changes, What it checks, The spec, Bugs, Project rules, Security,
+    Checking the findings, What every reviewer is told; no pilot, pass or verifier on screen.
+16. **A guidance per check of Review**, optional and empty by default, folded under each check
+    ("Instructions for this check"), read after the shared guidance by that check's agent only.
+17. **Specs' default mode for a spec from a ticket** (#687): Kept in Flottille (Internal) by
+    default, or Written to the ticket; "Write the spec" starts at once, "Write the spec as…" is
+    the manual exception.
 
 ## Open questions
 
