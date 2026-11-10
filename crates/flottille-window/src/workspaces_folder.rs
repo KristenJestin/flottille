@@ -6,8 +6,8 @@
 //! Only the workspaces made after a change follow it: the section says so.
 
 use flottille_ui::{
-    Button, Field, RadioChoices, Section, Toast, Type as _, changing, follow_theme, palette,
-    presence, presence_of, space, toast,
+    Button, Field, RadioChoices, Section, Skeleton, Toast, Type as _, awaiting, changing,
+    follow_theme, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
@@ -346,19 +346,16 @@ impl Render for WorkspacesFolder {
                 ),
                 (Place::Data, false) => kinds.choice(
                     "data",
-                    "Flottille's data folder",
-                    // The real folder, which XDG_DATA_HOME may have moved.
+                    "In Flottille's data folder",
+                    // The real folder, which XDG_DATA_HOME may have moved, relative to `~`.
                     match self.shown.as_ref().and_then(|shown| shown.data.as_deref()) {
-                        Some(data) => {
-                            format!("{data}/workspaces/<project>, where they are made today.")
-                        }
-                        None => "<data folder>/workspaces/<project>, where they are made today."
-                            .to_owned(),
+                        Some(data) => format!("{}/workspaces/<project>", relative_to_home(data)),
+                        None => "<data folder>/workspaces/<project>".to_owned(),
                     },
                 ),
                 (Place::Beside, _) => kinds.choice(
                     "beside",
-                    "Beside the project",
+                    "Beside each project",
                     "<parent of the project folder>/<project>-work.",
                 ),
                 (Place::Own, true) => kinds.choice(
@@ -368,7 +365,7 @@ impl Render for WorkspacesFolder {
                 ),
                 (Place::Own, false) => kinds.choice(
                     "own",
-                    "A folder of my own",
+                    "A folder you choose",
                     "A path where <project> is replaced by the project's name and ~ is your home.",
                 ),
             };
@@ -395,6 +392,17 @@ impl Render for WorkspacesFolder {
         let save = Button::primary(id("save"), "Save")
             .disabled(!self.savable(cx))
             .on_click(cx.listener(|this, _, _, cx| this.save(cx)));
+        // The global field shows Save once what is typed differs from what is kept (rule 4); a
+        // project's keeps its button until the project's settings are redone.
+        let save = if project {
+            save.into_any_element()
+        } else {
+            // A presence is as wide as its parent: the button keeps its own width.
+            div()
+                .flex_none()
+                .child(presence(id("save-block"), self.savable(cx), save).gap(space::SM))
+                .into_any_element()
+        };
         // The field unfolds and fades in when "a folder of my own" is chosen, and folds away when
         // another is.
         let path = presence(
@@ -477,17 +485,18 @@ impl Render for WorkspacesFolder {
         })
         .gap(space::MD);
 
-        let (title, sentence) = if project {
+        let (title, sentence): (&str, String) = if project {
             (
                 "Workspaces folder",
-                "Where this project's new workspaces are made. It follows the default for every \
-                 project unless it has a folder of its own.",
+                format!(
+                    "Where this project's new workspaces are made. It follows the default for \
+                     every project unless it has a folder of its own. {REACH}"
+                ),
             )
         } else {
             (
                 "Workspaces folder",
-                "Where the new workspaces of every project are made, unless a project has a \
-                 folder of its own.",
+                "Where new workspaces are made. A project can choose its own.".to_owned(),
             )
         };
         let section = Section::new(
@@ -499,16 +508,22 @@ impl Render for WorkspacesFolder {
             },
             title,
         )
-        .sentence(format!("{sentence} {REACH}"))
-        .child(presence(
-            id("asking"),
+        .sentence(sentence)
+        // A skeleton stands for the choice until the daemon says it.
+        .child(awaiting(
+            id("waiting"),
             !known && self.problem.is_none(),
-            div()
-                .text_size(px(12.5))
-                .text_color(p.faint)
-                .child("Asking the daemon…"),
+            Skeleton::new(id("skeleton")).h(px(96.)),
+            Field::new(
+                id("choice-field"),
+                if project {
+                    "Workspaces folder"
+                } else {
+                    "Where"
+                },
+                kinds,
+            ),
         ))
-        .child(Field::new(id("choice-field"), "Workspaces folder", kinds))
         .child(path)
         .child(problem)
         .child(unread);
@@ -517,5 +532,16 @@ impl Render for WorkspacesFolder {
         } else {
             section
         }
+    }
+}
+
+/// A folder as the window says it: relative to the user's home, with `~`.
+fn relative_to_home(folder: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() => match folder.strip_prefix(&home) {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+            _ => folder.to_owned(),
+        },
+        _ => folder.to_owned(),
     }
 }

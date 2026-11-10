@@ -687,14 +687,17 @@ impl RenderOnce for ListRow {
         };
         // A tag is a word or a path someone wrote: it is cut with an ellipsis at 160 px (its
         // whole text in a tooltip) so that the title keeps its room, rather than push the row
-        // out of its place.
+        // out of its place. A tag whose text changes (On, Off) fades back in rather than jump.
         let tags: Vec<AnyElement> = self
             .tags
             .into_iter()
             .enumerate()
             .map(|(index, tag)| {
+                let id = ElementId::Name(format!("{}-tag-{index}", self.id).into());
+                let fading = changed(&id, &tag, window, cx);
                 let element = div()
-                    .id(ElementId::Name(format!("{}-tag-{index}", self.id).into()))
+                    .id(id)
+                    .opacity(fading)
                     .aria_label(tag.clone())
                     .min_w_0()
                     .max_w(px(160.))

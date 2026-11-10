@@ -104,7 +104,7 @@ pub fn end_sentence(count: usize) -> String {
 pub const REPLY_PLACEHOLDER: &str = "Reply…";
 pub const SEND: &str = "Send";
 /// What the chip that resumes the session at its quota's reset does (its tooltip).
-const QUOTA_HINT: &str = "Its quota is spent: at the reset, Flottille tells it to continue where it stopped. Only this session; Settings, Sessions holds the default.";
+const QUOTA_HINT: &str = "Its quota is spent: at the reset, Flottille tells it to continue where it stopped. Only this session; Settings, Agents holds the default.";
 /// The composer's chip while the root's prompt cache expired, and what it does (its tooltip).
 pub const COMPACT_CHIP: &str = "Compact";
 /// The same for `Resume at 13:00`.

@@ -28,7 +28,7 @@ use gpui_kit::{
 use super::{Selection, Shell, now_ms};
 use crate::model::{Snapshot, ago};
 use crate::project_settings::{field_frame, styled_input};
-use crate::settings::{Reveal, SECTIONS};
+use crate::settings::{COMPACTION, Reveal, SECTIONS};
 use crate::tree::place_name;
 
 /// The most results of each group while something is typed, and the recent sessions shown while
@@ -67,7 +67,7 @@ pub struct Action {
 }
 
 /// Every action the switcher offers, in the order it lists them, for the projects there are.
-pub fn actions(projects: &[String]) -> Vec<Action> {
+pub fn actions(projects: &[String], features: &[(String, String)]) -> Vec<Action> {
     let mut found = vec![
         Action {
             title: "New session".into(),
@@ -106,13 +106,24 @@ pub fn actions(projects: &[String]) -> Vec<Action> {
         icon: Icon::Settings,
         then: Do::SettingsTab(at),
     }));
-    // The judge's guidance is no tab: it is the second block of the Judge tab.
+    // The judge's guidance is no tab: it is the second block of Approvals.
     found.push(Action {
         title: "Settings: Judge guidance".into(),
-        words: "preferences options auto judge",
+        words: "preferences options auto judge told",
         icon: Icon::Settings,
         then: Do::SettingsAt(Reveal::Guidance),
     });
+    // A feature's page is an action too: it opens in Features with its switch in view.
+    found.extend(features.iter().map(|(key, title)| Action {
+        title: format!("Settings: {title}"),
+        words: "preferences options feature",
+        icon: Icon::Settings,
+        then: Do::SettingsAt(if key == COMPACTION {
+            Reveal::Compaction
+        } else {
+            Reveal::Feature(key.clone())
+        }),
+    }));
     found.extend(projects.iter().map(|project| Action {
         title: format!("Settings of {project}"),
         words: "project preferences options",
@@ -130,7 +141,7 @@ impl Do {
             Do::Settings => shell.open(Selection::Settings, window, cx),
             Do::Services => shell.open(Selection::Services, window, cx),
             Do::SettingsTab(tab) => shell.open_settings_tab(*tab, window, cx),
-            Do::SettingsAt(at) => shell.open_settings_at(*at, window, cx),
+            Do::SettingsAt(at) => shell.open_settings_at(at.clone(), window, cx),
             Do::ProjectSettings(project) => {
                 shell.open(Selection::ProjectSettings(project.clone()), window, cx)
             }
@@ -302,6 +313,9 @@ pub struct Switcher {
     query: String,
     corpus: Vec<Target>,
     actions: Vec<Action>,
+    /// The projects and the features the actions are made for.
+    projects: Vec<String>,
+    features: Vec<(String, String)>,
     entries: Vec<Entry>,
     list: Listing<Entry>,
     /// The result Enter chooses.
@@ -346,7 +360,9 @@ impl Switcher {
             field,
             query: String::new(),
             corpus: Vec::new(),
-            actions: actions(&[]),
+            projects: Vec::new(),
+            features: Vec::new(),
+            actions: actions(&[], &[]),
             entries: Vec::new(),
             list: Listing::default(),
             marked: None,
@@ -412,11 +428,23 @@ impl Switcher {
         })
     }
 
+    /// The features whose page an action opens (their key and title), as Settings lists them.
+    pub fn set_features(&mut self, features: Vec<(String, String)>, cx: &mut Context<Self>) {
+        if self.features != features {
+            self.features = features;
+            self.actions = actions(&self.projects, &self.features);
+            if self.open {
+                self.refresh(cx);
+            }
+        }
+    }
+
     /// The daemon's last read, when it changed what can be found. While it is open the results
     /// keep their places, under the pointer and the mark: only what they say is read again.
     pub fn set_snapshot(&mut self, snapshot: &Snapshot, cx: &mut Context<Self>) {
         let projects: Vec<String> = snapshot.projects.iter().map(|p| p.name.clone()).collect();
-        self.actions = actions(&projects);
+        self.projects = projects;
+        self.actions = actions(&self.projects, &self.features);
         let corpus = corpus(snapshot);
         if self.corpus != corpus {
             self.corpus = corpus;

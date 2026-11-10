@@ -18,7 +18,19 @@ pub const STOP: Icon = Icon::Filled(STOP_PATH);
 const STOP_PATH: &str = "icons/flottille-stop.svg";
 const STOP_SVG: &[u8] = include_bytes!("../assets/icons/stop.svg");
 
-gpui_kit::assets::icon_assets!(Lucide, [GitPullRequest, Network, Ticket]);
+gpui_kit::assets::icon_assets!(
+    Lucide,
+    [
+        GitPullRequest,
+        Network,
+        Ticket,
+        FileText,
+        ScanSearch,
+        Shrink,
+        Plug,
+        Blocks
+    ]
+);
 
 /// The assets of the window: the icons of the kit, the Lucide icons the window adds and its own
 /// glyphs.
@@ -69,6 +81,23 @@ mod tests {
             Assets.load(&Icon::Plus.path()).unwrap().is_some(),
             "the base set is served too"
         );
+    }
+
+    #[test]
+    fn every_icon_a_declaration_can_name_is_embedded() {
+        for name in [
+            "file-text",
+            "scan-search",
+            "shrink",
+            "plug",
+            "something-else",
+        ] {
+            let icon = crate::extensions::icon_named(name);
+            assert!(
+                Assets.load(&icon.path()).unwrap().is_some(),
+                "{name}: {icon:?} is not embedded"
+            );
+        }
     }
 
     #[test]

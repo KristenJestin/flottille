@@ -330,13 +330,21 @@ fn review_s_tab_has_its_switch_its_passes_its_slots_and_its_guidance(cx: &mut Te
     let (shell, cx) = window(&user, cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     shell.update_in(cx, |s, window, cx| s.open(Selection::Settings, window, cx));
-    until(&shell, cx, "the Review tab is offered", |cx| {
-        present(cx, "settings-tabs-review")
+    until(&shell, cx, "Review is listed", |cx| {
+        present(cx, "settings-tabs-features")
     });
-    cx.update(|window, cx| window.click("settings-tabs-review", cx));
+    cx.update(|window, cx| window.click("settings-tabs-features", cx));
+    until(&shell, cx, "the Review row is offered", |cx| {
+        present(cx, "features-review")
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("features-review", cx));
     settle(cx);
     // Off: the switch and its one line.
-    assert_eq!(label(cx, "review-switch-label").as_deref(), Some("On"));
+    assert_eq!(
+        label(cx, "review-switch-label").as_deref(),
+        Some("Review changes")
+    );
     assert!(!present(cx, "review-setting-passes-label"));
     assert!(!present(cx, "review-guidance-text"));
 
@@ -357,10 +365,10 @@ fn review_s_tab_has_its_switch_its_passes_its_slots_and_its_guidance(cx: &mut Te
         "review-setting-bugs_model-model",
         "review-setting-verifier_model-model",
         "review-guidance-text",
-        "review-guidance-save",
     ] {
         assert!(present(cx, id), "{id}");
     }
+    assert!(!present(cx, "review-guidance-save"), "no Save at rest");
 
     // A pass switched on is the daemon's, in the declaration's order.
     cx.update(|window, cx| window.click("review-setting-passes-security", cx));
@@ -408,10 +416,15 @@ fn review_s_checks_are_one_card_with_a_model_per_line(cx: &mut TestAppContext) {
     let (shell, cx) = window(&user, cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     shell.update_in(cx, |s, window, cx| s.open(Selection::Settings, window, cx));
-    until(&shell, cx, "the Review tab is offered", |cx| {
-        present(cx, "settings-tabs-review")
+    until(&shell, cx, "Review is listed", |cx| {
+        present(cx, "settings-tabs-features")
     });
-    cx.update(|window, cx| window.click("settings-tabs-review", cx));
+    cx.update(|window, cx| window.click("settings-tabs-features", cx));
+    until(&shell, cx, "the Review row is offered", |cx| {
+        present(cx, "features-review")
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("features-review", cx));
     until(&shell, cx, "the checks are shown", |cx| {
         present(cx, "review-models")
     });

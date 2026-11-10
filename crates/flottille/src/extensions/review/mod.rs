@@ -64,8 +64,11 @@ pub const EXTENSION: Extension = Extension {
                its passes and a verifier, each a model run on your own quota.",
     scope: Scope::Project,
     on_by_default: false,
-    place: Place::Tab {
-        title: "Review",
+    switch: "Review changes",
+    usage: "Used by **/review** in a session's composer.",
+    place: Place::Row {
+        icon: "scan-search",
+        line: "Fresh eyes on a session's change before you merge it.",
         order: 4,
     },
     settings: &[

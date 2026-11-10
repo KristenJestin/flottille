@@ -154,7 +154,8 @@ The tests never reach the user's keyring: their daemon's configuration folder ho
 with `backend = "memory"`, which keeps the secrets in the daemon's memory, lost when it stops. The
 daemon says so in its log at start. `locked = true` in the same file, read again at each use, plays
 a locked keyring. It is chosen by the daemon's configuration, never by an environment variable an
-agent could set for what it runs. Only a test build has it (`cargo test` builds without
-optimisation): a release build that finds `backend = "memory"` says in its log that it refuses it
-and uses the system's keyring, and never reads a secret from that file, so that no user's file
-holds secrets in plain text.
+agent could set for what it runs. Only a debug build accepts it (`cargo test`, and as much
+`cargo build` and `cargo run`, which build without optimisation), never a packaged build: a
+release build (`cargo build --release`, what a release ships) that finds `backend = "memory"` says
+in its log that it refuses it and uses the system's keyring, and never reads a secret from that
+file, so that no user's file holds secrets in plain text.

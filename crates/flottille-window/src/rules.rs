@@ -255,6 +255,16 @@ impl RulesEditor {
                 || shown.error.is_some())
     }
 
+    /// Whether Save is drawn: the text differs from what is saved, or what is stored must be
+    /// written anew (cut to the limit, or a file edited by hand that cannot be used). The user's
+    /// rules left as the default show no Save: nothing changed (rule 4).
+    pub fn save_shown(&self, cx: &gpui_kit::App) -> bool {
+        self.savable(cx)
+            && self.shown.as_ref().is_some_and(|shown| {
+                self.is_edited(cx) || shown.cut.is_some() || shown.error.is_some()
+            })
+    }
+
     /// Whether Reset to default has something to remove: rules of its own at this level, or a
     /// project's `rules_alone`.
     pub fn is_own(&self) -> bool {
@@ -496,7 +506,6 @@ impl Render for RulesEditor {
                 .into(),
             )
         };
-        let savable = self.savable(cx);
         let footer = div()
             .mt(space::XS)
             .flex()
@@ -517,11 +526,30 @@ impl Render for RulesEditor {
                     .disabled(!self.is_own() || self.waiting)
                     .on_click(cx.listener(|this, _, _, cx| this.reset(cx))),
             )
-            .child(
-                Button::primary(id("save"), "Save")
-                    .disabled(!savable || self.waiting)
-                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-            );
+            // Save is not drawn at rest: it unfolds beside the field once it differs from what is
+            // saved, and folds away after it is saved or set back (rule 4). A project's editor
+            // keeps its disabled button until the project's settings are redone.
+            .child(match self.project {
+                // A presence is as wide as its parent: the button keeps its own width beside the
+                // line.
+                None => div()
+                    .flex_none()
+                    .child(
+                        presence(
+                            id("save-block"),
+                            self.save_shown(cx),
+                            Button::primary(id("save"), "Save")
+                                .disabled(self.waiting)
+                                .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                        )
+                        .gap(space::SM),
+                    )
+                    .into_any_element(),
+                Some(_) => Button::primary(id("save"), "Save")
+                    .disabled(!self.savable(cx) || self.waiting)
+                    .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+                    .into_any_element(),
+            });
         let text = div()
             .id(id("text"))
             .min_h(px(150.))
@@ -558,15 +586,15 @@ impl Render for RulesEditor {
                 )
             }
             _ if compaction => (
-                "Compaction guidance".into(),
+                "What a summary keeps".into(),
                 "What a summary must keep. It sits inside Flottille's fixed text, which says the \
                  summary is data and smaller than what it replaces.",
                 "compaction-guidance".into(),
             ),
             (true, _) => (
-                "Judge guidance".into(),
-                "What the judge is told to allow. It can add to the floor (ask for anything \
-                 destructive), never lift it.",
+                "What the judge is told".into(),
+                "Added to Flottille's own instructions, which always ask before anything \
+                 destructive.",
                 "guidance".into(),
             ),
             (false, Some(_)) => (
@@ -576,8 +604,9 @@ impl Render for RulesEditor {
                 "rules".into(),
             ),
             (false, None) => (
-                "Rules".into(),
-                "How every project's agents work, unless a project has rules of its own.",
+                "Rules for every project".into(),
+                "What every agent is told, in every project. A project adds its own, or uses only \
+                 its own.",
                 "rules".into(),
             ),
         };
