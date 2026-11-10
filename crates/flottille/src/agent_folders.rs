@@ -56,6 +56,20 @@ thread_local! {
     static RACE: std::cell::RefCell<Race> = std::cell::RefCell::new(None);
 }
 
+// Whether `keep` acts as if what it keeps were on another disk than the place.
+#[cfg(test)]
+thread_local! {
+    static CROSS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn crossed() -> bool {
+    #[cfg(test)]
+    if CROSS.with(std::cell::Cell::get) {
+        return true;
+    }
+    false
+}
+
 fn race(path: &Path) {
     #[cfg(test)]
     RACE.with(|race| {
@@ -368,16 +382,19 @@ fn keep(
     let to = crate::nofollow::folder_made(&kept.join(path.parent().unwrap_or(Path::new(""))))?;
     *said = Some(kept.to_owned());
     race(path);
-    match rustix::fs::renameat(&folder, name, &to, name) {
+    let moved = match crossed() {
+        true => Err(Errno::XDEV),
+        false => rustix::fs::renameat(&folder, name, &to, name),
+    };
+    match moved {
         Err(Errno::XDEV) => {}
         moved => return Ok(moved?),
     }
-    // On another disk, its copy is made first.
+    // On another disk, its copy is made first, a piece at a time: an added file may be of any
+    // size.
     let stat = rustix::fs::statat(&folder, name, AtFlags::SYMLINK_NOFOLLOW)?;
     match FileType::from_raw_mode(stat.st_mode) {
-        FileType::RegularFile => {
-            write_new(to.as_fd(), name, &read_file(folder.as_fd(), name)?, 0o600)?
-        }
+        FileType::RegularFile => copy_new(folder.as_fd(), name, to.as_fd())?,
         FileType::Symlink => {
             let target = rustix::fs::readlinkat(&folder, name, Vec::new())?;
             rustix::fs::symlinkat(target.as_c_str(), &to, name)?;
@@ -439,6 +456,25 @@ fn read_file(folder: BorrowedFd, name: &OsStr) -> std::io::Result<Vec<u8>> {
     let mut content = Vec::new();
     file.read_to_end(&mut content)?;
     Ok(content)
+}
+
+/// Copies the file `name` of `folder` to `to`, where it is not yet, a piece at a time: never
+/// through a link, never waiting on a pipe put there since it was looked at.
+fn copy_new(folder: BorrowedFd, name: &OsStr, to: BorrowedFd) -> std::io::Result<()> {
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | crate::nofollow::READ;
+    let mut from = std::fs::File::from(rustix::fs::openat(folder, name, flags, Mode::empty())?);
+    if !from.metadata()?.is_file() {
+        return Err(std::io::Error::other("not a file"));
+    }
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut copy = std::fs::File::from(rustix::fs::openat(
+        to,
+        name,
+        flags,
+        Mode::from_raw_mode(0o600),
+    )?);
+    std::io::copy(&mut from, &mut copy)?;
+    Ok(())
 }
 
 /// Writes the file `name` of `folder`, which is not there yet, never through a link.
@@ -1079,6 +1115,29 @@ mod tests {
         made(&small.join("README.md"), "\n");
         let snapshot = Snapshot::take(&small, None, &dir.path().join("kept"));
         assert_eq!(said(&snapshot.restore("run")), None);
+    }
+
+    #[test]
+    fn a_large_file_added_is_kept_whole_on_another_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let kept = dir.path().join("kept");
+        made(&root.join("README.md"), "\n");
+        let snapshot = Snapshot::take(&root, None, &kept);
+
+        // Larger than what is kept in memory, of no repeating shape.
+        let large: Vec<u8> = (0..3 * KEPT_MAX as usize + 17)
+            .map(|n| (n * 31 % 251) as u8)
+            .collect();
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        std::fs::write(root.join(".claude/model.bin"), &large).unwrap();
+        CROSS.with(|cross| cross.set(true));
+        let restored = snapshot.restore("run");
+        CROSS.with(|cross| cross.set(false));
+
+        assert!(!root.join(".claude").exists(), "{restored:?}");
+        assert_eq!(restored.put_back, [".claude/model.bin"]);
+        assert!(std::fs::read(kept.join("run/.claude/model.bin")).unwrap() == large);
     }
 
     /// Runs `swap` once, the first time the walk or the put-back reaches `at`.
