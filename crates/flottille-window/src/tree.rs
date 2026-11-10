@@ -29,31 +29,19 @@ use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell};
 
 /// The levels of Flottille's left tree: what a row stands for, drawn with the parts of the tree
-/// the kit has: a project is a first-level row, the main folder and a workspace a row with a
-/// folder or a branch before it, a session a plain row.
+/// the kit has: a project is a first-level row, a session a plain row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeLevel {
     Project,
-    /// The project's own folder, `main`.
-    Main,
-    Workspace,
     Session,
 }
 
 impl TreeLevel {
     /// The row of this level.
-    pub fn row(
-        self,
-        id: impl Into<ElementId>,
-        title: impl Into<SharedString>,
-        cx: &App,
-    ) -> TreeRow {
+    pub fn row(self, id: impl Into<ElementId>, title: impl Into<SharedString>) -> TreeRow {
         let row = TreeRow::new(id, title);
-        let p = palette(cx);
         match self {
             Self::Project => row.top(),
-            Self::Main => row.leading(flottille_ui::icon(Icon::Folder).text_color(p.faint)),
-            Self::Workspace => row.leading(flottille_ui::icon(Icon::Branch).text_color(p.faint)),
             Self::Session => row,
         }
     }
@@ -637,7 +625,7 @@ impl Render for ProjectNode {
         let shell = self.shell.clone();
         let name = self.name.clone();
         let row = TreeLevel::Project
-            .row(project_id(&self.name), self.name.clone(), cx)
+            .row(project_id(&self.name), self.name.clone())
             .expanded(self.open)
             .trailing(trailing(
                 project_commands_id(&self.name),
@@ -787,7 +775,7 @@ impl Render for EndedNode {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let count = self.sessions.read(cx).rows.len();
         let row = TreeLevel::Session
-            .row(ended_id(), "Ended", cx)
+            .row(ended_id(), "Ended")
             .unfolds_upward()
             .trailing(meta(count.to_string(), cx))
             .expanded(self.open)
@@ -1257,7 +1245,7 @@ impl Render for SessionRow {
         let shell = self.shell.clone();
         let id = self.id.clone();
         let mut row = TreeLevel::Session
-            .row(session_id(&self.id), self.title.clone(), cx)
+            .row(session_id(&self.id), self.title.clone())
             .selected(self.selected)
             .on_click(move |_, window, cx| {
                 let session = id.clone();

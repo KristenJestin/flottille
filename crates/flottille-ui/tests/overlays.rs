@@ -261,7 +261,7 @@ impl Render for Dialog {
                     .test_support(),
             )
             .child(
-                Modal::new("dialog", "New workspace")
+                Modal::new("dialog", "New folder")
                     .open(self.open)
                     .child(
                         div()
@@ -437,7 +437,7 @@ struct Tall {
 impl Render for Tall {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         Modal::new("tall", "Repository api")
-            .sentence("In the project folder.")
+            .sentence("In the folder.")
             .open(self.open)
             .children((0..40).map(|row| {
                 div()

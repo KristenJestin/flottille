@@ -152,7 +152,7 @@ fn the_whole_path_is_in_the_tooltip(cx: &mut TestAppContext) {
     assert_eq!(pending_frames(cx), 0);
 }
 
-const LONG_TITLE: &str = "Fix the recipients sheet so that a very long title of a session never pushes its actions out of the page";
+const LONG_TITLE: &str = "Fix the recipients sheet so that a very long title of an item never pushes its actions out of the page";
 
 /// A page header 300 px wide.
 struct Header;
@@ -216,7 +216,7 @@ fn a_long_card_title_stays_inside_the_card(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_menu_entry_that_quotes_a_session_title_stays_on_one_line(cx: &mut TestAppContext) {
+fn a_menu_entry_that_quotes_an_item_title_stays_on_one_line(cx: &mut TestAppContext) {
     init(cx, Desktop::new(false).env());
     let (_, cx) = cx.add_window_view(|_, _| Menu);
     cx.simulate_resize(size(px(800.), px(400.)));

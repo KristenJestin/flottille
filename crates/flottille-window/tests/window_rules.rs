@@ -19,7 +19,7 @@ fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
 }
 
 /// The window's own components, which were parts of `flottille-ui` and keep the exact sizes of
-/// the design as the kit's do: the scans of a screen's layout leave them out.
+/// the design as the kit's do: only the spacing scan leaves them out, every other scan reads them.
 const COMPONENTS: [&str; 2] = ["state.rs", "steps.rs"];
 
 /// Every source of the window, with its text.
@@ -30,7 +30,6 @@ fn window() -> Vec<(PathBuf, String)> {
     assert!(files.len() > 20, "the sources were found: {}", files.len());
     files
         .into_iter()
-        .filter(|file| !COMPONENTS.iter().any(|own| file.ends_with(own)))
         .map(|file| {
             let text = fs::read_to_string(&file).unwrap();
             (file, text)
@@ -48,7 +47,14 @@ fn code(source: &str) -> impl Iterator<Item = (usize, &str)> {
 }
 
 fn offenders(find: impl Fn(&str) -> Vec<(usize, String)>) -> Vec<String> {
-    window()
+    offenders_in(window(), find)
+}
+
+fn offenders_in(
+    files: Vec<(PathBuf, String)>,
+    find: impl Fn(&str) -> Vec<(usize, String)>,
+) -> Vec<String> {
+    files
         .into_iter()
         .flat_map(|(file, text)| {
             find(&text)
@@ -56,6 +62,17 @@ fn offenders(find: impl Fn(&str) -> Vec<(usize, String)>) -> Vec<String> {
                 .map(move |(at, line)| format!("{}:{at}: {line}", file.display()))
         })
         .collect()
+}
+
+#[test]
+fn the_scans_read_the_components_the_spacing_scan_leaves_out() {
+    let files = window();
+    for own in COMPONENTS {
+        assert!(
+            files.iter().any(|(file, _)| file.ends_with(own)),
+            "{own} is read by the scans"
+        );
+    }
 }
 
 // ── 2. One confirmation: a modal dialog ────────────────────────────────────────────────────────
@@ -206,7 +223,11 @@ fn a_gap_or_a_padding_off_the_scale_is_found() {
 
 #[test]
 fn every_gap_and_padding_of_the_window_is_a_step_of_the_scale() {
-    let found = offenders(spacing_literals);
+    let screens = window()
+        .into_iter()
+        .filter(|(file, _)| !COMPONENTS.iter().any(|own| file.ends_with(own)))
+        .collect();
+    let found = offenders_in(screens, spacing_literals);
     assert!(
         found.is_empty(),
         "a gap or a padding is a step of `flottille_ui::space` (4, 8, 12, 16, 24, 32, 48):\n{}",
@@ -398,6 +419,55 @@ fn the_composer_s_toggles_are_never_filled_with_the_accent() {
     assert!(
         found.is_empty(),
         "Send is the only primary of the composer: a toggle of its toolbar is `.ghost()`:\n{}",
+        found.join("\n")
+    );
+}
+
+// ── The kit's rules, held on the window's sources ──────────────────────────────────────────────
+
+/// The lines that draw a black of their own: a shadow is a role of the palette
+/// (`Palette::shadow`), lighter in Light.
+fn own_blacks(source: &str) -> Vec<(usize, String)> {
+    code(source)
+        .filter(|(_, line)| line.contains("hsla(0., 0., 0."))
+        .map(|(at, line)| (at, line.to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_black_of_its_own_is_found() {
+    let found = own_blacks("color: hsla(0., 0., 0., 0.5),\n// hsla(0., 0., 0., 1.)\n");
+    assert_eq!(found, vec![(1, "color: hsla(0., 0., 0., 0.5),".to_owned())]);
+}
+
+#[test]
+fn no_overlay_of_the_window_draws_a_shadow_in_a_black_of_its_own() {
+    let found = offenders(own_blacks);
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+/// The lines that open GPUI's own tooltip, which follows the pointer: a tooltip is anchored to its
+/// element (`Button::tooltip`, `flottille_ui::tipped`).
+fn pointer_tooltips(source: &str) -> Vec<(usize, String)> {
+    code(source)
+        .filter(|(_, line)| line.contains(".tooltip(|") || line.contains(".tooltip(move |"))
+        .map(|(at, line)| (at, line.to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_tooltip_that_follows_the_pointer_is_found() {
+    let found =
+        pointer_tooltips(".tooltip(|w, cx| view)\n.tooltip(move |w, cx| view)\n.tooltip(\"x\")");
+    assert_eq!(found.len(), 2);
+}
+
+#[test]
+fn no_source_of_the_window_uses_the_tooltip_that_follows_the_pointer() {
+    let found = offenders(pointer_tooltips);
+    assert!(
+        found.is_empty(),
+        "GPUI's tooltip opens under the pointer:\n{}",
         found.join("\n")
     );
 }

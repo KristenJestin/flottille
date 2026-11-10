@@ -15,7 +15,7 @@ use gpui_kit::{
 const LONG: &str = "Fix the recipients sheet so that a very long title never leaves its row";
 const SHORT: &str = "Fix it";
 const SENTENCE: &str =
-    "Runs the whole test suite of the workspace, then the linter, then the formatter check";
+    "Runs the whole test suite of the package, then the linter, then the formatter check";
 
 /// A list row and a rail row, 260 px wide each.
 struct Rows(&'static str);
