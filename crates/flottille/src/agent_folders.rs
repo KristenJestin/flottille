@@ -567,6 +567,8 @@ struct Walk<'a> {
     contents: Option<&'a mut BTreeMap<PathBuf, Vec<u8>>>,
     /// The bytes of `contents`, bound by `KEPT_TOTAL`.
     held: u64,
+    /// The files not too large to keep and their size, read once all are found.
+    wanted: Vec<(PathBuf, u64)>,
     entries: BTreeMap<PathBuf, Kind>,
 }
 
@@ -601,6 +603,7 @@ fn walk(
         skipped,
         contents,
         held: 0,
+        wanted: Vec::new(),
         entries: BTreeMap::new(),
     };
     let mut seen = 0;
@@ -612,6 +615,7 @@ fn walk(
     let mut seen = 0;
     walked.complete = walk.visit(vec![(PathBuf::new(), false)], &mut seen, false)
         && walked.whole.len() == tops.len();
+    walk.read_wanted();
     walked.entries = walk.entries;
     walked
 }
@@ -669,20 +673,62 @@ impl Walk<'_> {
                 if !agent {
                     continue;
                 }
-                if let (Some(contents), Kind::File { len, .. }) =
-                    (self.contents.as_deref_mut(), &kind)
+                if let (Some(_), Kind::File { len, .. }) = (&self.contents, &kind)
                     && *len <= KEPT_MAX
-                    && self.held + len <= KEPT_TOTAL
-                    && let Ok(content) = read_file(opened.as_fd(), name)
                 {
-                    self.held += content.len() as u64;
-                    contents.insert(path.clone(), content);
+                    self.wanted.push((path.clone(), *len));
                 }
                 self.entries.insert(path, kind);
             }
         }
         true
     }
+
+    /// The contents of the files `wanted`, up to `KEPT_TOTAL`: the settings files first, then
+    /// the smallest, so that in agent folders already past it a large file never leaves out the
+    /// one that runs hooks.
+    fn read_wanted(&mut self) {
+        let Some(contents) = self.contents.as_deref_mut() else {
+            return;
+        };
+        let mut wanted = std::mem::take(&mut self.wanted);
+        wanted.sort_by_key(|(path, len)| (!settings(path), *len));
+        for (path, len) in wanted {
+            if self.held + len > KEPT_TOTAL {
+                continue;
+            }
+            let Ok((folder, name)) = parent(self.top.as_fd(), &path) else {
+                continue;
+            };
+            // It may have grown since it was looked at.
+            if let Ok(content) = read_file(folder.as_fd(), name)
+                && self.held + content.len() as u64 <= KEPT_TOTAL
+            {
+                self.held += content.len() as u64;
+                contents.insert(path, content);
+            }
+        }
+    }
+}
+
+/// The files of an agent folder that say what the agent runs (its hooks, its MCP servers), by
+/// name in any case.
+const SETTINGS: [&str; 5] = [
+    "settings.json",
+    "settings.local.json",
+    "config.toml",
+    ".mcp.json",
+    ".claude.json",
+];
+
+/// Whether `path` is one of `SETTINGS`.
+fn settings(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        SETTINGS.iter().any(|file| {
+            name.as_encoded_bytes()
+                .eq_ignore_ascii_case(file.as_bytes())
+        })
+    })
 }
 
 /// The top an entry's agent folder is right in, when it is right in one: where the agent folder
@@ -1489,6 +1535,42 @@ mod tests {
         assert_eq!(restored.put_back.len(), 1, "{restored:?}");
         assert_eq!(restored.left.len(), 1, "{restored:?}");
         assert!(said(&restored).unwrap().contains("could not put back"));
+    }
+
+    #[test]
+    fn settings_files_are_kept_first_past_the_total_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let settings = [
+            ".claude/settings.json",
+            "app/.claude/settings.local.json",
+            "app/.codex/config.toml",
+            ".mcp.json",
+        ];
+        let setting = format!("{{\"model\": \"{}\"}}\n", "m".repeat(24));
+        for path in settings {
+            made(&root.join(path), &setting);
+        }
+        made(&root.join(".claude/notes.md"), "small\n");
+        // A large file leaves no room for a second one nor for the settings files: whichever is
+        // read first, they are left out unless they are kept first.
+        let large = "x".repeat(KEPT_TOTAL as usize - 100);
+        for folder in [".claude", "app/.claude", "app/.codex"] {
+            for name in ["a.bin", "b.bin", "c.bin", "d.bin"] {
+                made(&root.join(folder).join(name), &large);
+            }
+        }
+
+        let snapshot = Snapshot::take(&root, None, &dir.path().join("kept"));
+
+        let kept: Vec<&Path> = snapshot.contents.keys().map(PathBuf::as_path).collect();
+        for path in settings {
+            assert!(kept.contains(&Path::new(path)), "{path}: {kept:?}");
+        }
+        // Then the small files.
+        assert!(kept.contains(&Path::new(".claude/notes.md")), "{kept:?}");
+        let held: usize = snapshot.contents.values().map(Vec::len).sum();
+        assert!(held as u64 <= KEPT_TOTAL, "{held}");
     }
 
     #[test]
