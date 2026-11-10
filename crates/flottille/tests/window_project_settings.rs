@@ -121,6 +121,15 @@ fn left(cx: &mut VisualTestContext, id: &str) -> f32 {
     cx.update(|window, _| f32::from(window.find(id).bounds().origin.x))
 }
 
+/// How far an element that carries its fade says it is (0 to 1).
+fn faded_by(cx: &mut VisualTestContext, id: &str) -> Option<f32> {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .and_then(|found| found.value().and_then(|value| value.parse().ok()))
+    })
+}
+
 /// The window's clock and frames going on for `by`, with no wait for the daemon.
 fn run_for(by: Duration, cx: &mut VisualTestContext) {
     let mut gone = Duration::ZERO;
@@ -548,9 +557,35 @@ fn a_feature_off_globally_is_a_faded_row_with_a_link(cx: &mut TestAppContext) {
         label(cx, "project-features-specs-off").as_deref(),
         Some("Off in Settings")
     );
+    assert_eq!(
+        faded_by(cx, "project-features-specs-off"),
+        Some(1.0),
+        "the row is faded"
+    );
     assert!(
         !present(cx, "project-features-review-off"),
         "a feature on in Settings is no faded row"
+    );
+    // In the order the daemon lists them, not under the others.
+    let order: Vec<String> = user.call("extension.list", json!({})).unwrap()["extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .filter(|name| ["review", "specs"].contains(name))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(order.len(), 2);
+    assert!(
+        top(cx, &format!("project-features-{}", order[0]))
+            < top(cx, &format!("project-features-{}", order[1])),
+        "in their declared order: {order:?}"
+    );
+    // It opens nothing of the project.
+    click(cx, "project-features-specs");
+    assert!(
+        !present(cx, "project-features-path"),
+        "no page of the project"
     );
     // The faded row opens nothing of the project: its link opens the feature's page in Settings.
     click(cx, "project-features-specs-off");
@@ -606,10 +641,53 @@ fn the_global_page_names_a_project_that_turns_it_off(cx: &mut TestAppContext) {
             })
             .is_some_and(|page| {
                 page.read_with(cx, |page, _| {
-                    page.name() == "notes-app" && TABS[page.tab()] == "features"
+                    page.name() == "notes-app"
+                        && TABS[page.tab()] == "features"
+                        && page.open_feature() == Some("specs")
                 })
             })
     });
+}
+
+#[gpui_kit::test]
+fn a_feature_that_turns_off_in_settings_fades_in_its_place_and_back(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    turn(&user, "review", true, None);
+    turn(&user, "specs", true, None);
+    let (shell, cx) = window(&user, cx);
+    open_features(&user, &shell, cx);
+    until(&shell, cx, "both rows are drawn", |cx| {
+        visible(cx, "project-features-specs") && visible(cx, "project-features-review")
+    });
+    settle(cx);
+    let (review, specs) = (
+        top(cx, "project-features-review"),
+        top(cx, "project-features-specs"),
+    );
+    assert!(!present(cx, "project-features-specs-off"));
+
+    turn(&user, "specs", false, None);
+    until(&shell, cx, "Specs begins to fade", |cx| {
+        faded_by(cx, "project-features-specs-off").is_some()
+    });
+    run_for(Duration::from_millis(100), cx);
+    let part = faded_by(cx, "project-features-specs-off");
+    assert!(
+        part.is_some_and(|part| 0.0 < part && part < 1.0),
+        "the fade is on its way: {part:?}"
+    );
+    settle(cx);
+    assert_eq!(faded_by(cx, "project-features-specs-off"), Some(1.0));
+    assert_eq!(top(cx, "project-features-review"), review);
+    assert_eq!(top(cx, "project-features-specs"), specs, "no card moved");
+
+    turn(&user, "specs", true, None);
+    until(&shell, cx, "Specs is on again", |cx| {
+        settle(cx);
+        !present(cx, "project-features-specs-off")
+    });
+    assert_eq!(top(cx, "project-features-specs"), specs);
 }
 
 #[gpui_kit::test]

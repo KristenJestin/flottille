@@ -2362,10 +2362,9 @@ impl ProjectSettingsPage {
     }
 
     /// The Features tab: the parts that touch a project, each a row that opens its page in place
-    /// of the list (`Subpage`); one that is off in Settings is a faded row under them, its line a
-    /// link to where it is turned on.
+    /// of the list (`Subpage`); one that is off in Settings is a faded row in its place, its line
+    /// a link to where it is turned on.
     fn features_tab(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let p = palette(cx);
         let registry = self
             .shell
             .upgrade()
@@ -2374,11 +2373,11 @@ impl ProjectSettingsPage {
             .as_ref()
             .is_none_or(|registry| registry.read(cx).is_known());
         let project = self.name.clone();
-        let (mut on, mut off) = (Vec::new(), Vec::new());
+        let mut rows = Vec::new();
         if let Some(registry) = &registry {
             let registry = registry.read(cx);
             for listed in registry.project_rows() {
-                let row = (
+                rows.push((
                     listed.name.clone(),
                     crate::extensions::icon_named(&listed.icon),
                     listed.title.clone(),
@@ -2388,15 +2387,16 @@ impl ProjectSettingsPage {
                         "Off"
                     },
                     listed.line.clone(),
-                );
-                if listed.enabled { &mut on } else { &mut off }.push(row);
+                    listed.enabled,
+                ));
             }
         }
         let open = self
             .feature
             .clone()
-            .filter(|key| on.iter().any(|row| &row.0 == key));
+            .filter(|key| rows.iter().any(|row| &row.0 == key && row.5));
         let this = cx.entity().downgrade();
+        let shell = self.shell.clone();
         let mut subpage = Subpage::new("project-features", "Features")
             .open(open.as_deref())
             .on_open(move |key, _, cx| {
@@ -2404,52 +2404,28 @@ impl ProjectSettingsPage {
                     this.set_feature(key.map(|key| key.to_string()), cx)
                 })
                 .ok();
+            })
+            // A feature that is off in Settings is turned on there.
+            .on_link(move |key, window, cx| {
+                let at = crate::settings::Reveal::Feature(key.to_string());
+                shell
+                    .update(cx, |shell, cx| shell.open_settings_at(at, window, cx))
+                    .ok();
             });
-        for (key, icon, title, tag, line) in on {
-            subpage = subpage.entry(key, icon, title, tag, line);
+        for (key, icon, title, tag, line, enabled) in rows {
+            subpage = subpage.entry(key.clone(), icon, title, tag, line);
+            if !enabled {
+                subpage = subpage.faded(key, "Off in Settings");
+            }
         }
         if let Some(key) = open.clone() {
             subpage = subpage.page(self.feature_page(key, cx));
         }
-        let shell = self.shell.clone();
-        let faded = ListCard::new("project-features-off").rows(off.into_iter().map(
-            |(key, icon, title, _, _)| {
-                let (shell, feature) = (shell.clone(), key.clone());
-                let link = hoverable(
-                    div()
-                        .id(SharedString::from(format!("project-features-{key}-off")))
-                        .aria_label("Off in Settings")
-                        .cursor_pointer()
-                        .text_size(px(12.5))
-                        .child("Off in Settings")
-                        .on_click(move |_, window, cx| {
-                            let at = crate::settings::Reveal::Feature(feature.clone());
-                            shell
-                                .update(cx, |shell, cx| shell.open_settings_at(at, window, cx))
-                                .ok();
-                        }),
-                    move |d, t| d.text_color(gpui_design_system::color::mix(p.faint, p.text, t)),
-                );
-                ListRow::new(SharedString::from(format!("project-features-{key}")), title)
-                    .leading(
-                        gpui_design_system::icon(icon)
-                            .size(px(15.))
-                            .text_color(p.faint),
-                    )
-                    .trailing(link)
-                    .decorate(|row| row.opacity(0.6))
-            },
-        ));
-        let faded_shown = open.is_none() && !faded_is_empty(&registry, cx);
         awaiting(
             "project-features-waiting",
             !known,
             Skeleton::new("project-features-skeleton").h(px(120.)),
-            div()
-                .flex()
-                .flex_col()
-                .child(subpage)
-                .child(presence("project-features-off-block", faded_shown, faded).gap(space::LG)),
+            subpage,
         )
         .into_any_element()
     }
@@ -2477,17 +2453,6 @@ impl ProjectSettingsPage {
         self.feature_pages.insert(name, view.clone());
         view
     }
-}
-
-/// Whether no feature is off in Settings: the faded rows have nothing to show.
-fn faded_is_empty(registry: &Option<Entity<crate::extensions::Registry>>, cx: &App) -> bool {
-    registry.as_ref().is_none_or(|registry| {
-        !registry
-            .read(cx)
-            .project_rows()
-            .iter()
-            .any(|listed| !listed.enabled)
-    })
 }
 
 /// A view that draws the page of a feature in this project, for the `Subpage` that holds it.
@@ -2563,14 +2528,6 @@ impl Render for ProjectSettingsPage {
             .child(
                 PageHeader::new("project-settings-header", "Settings")
                     .crumb(crumb)
-        if let Some((at, until)) = self.scroll_to {
-            self.scroll.scroll_to_top_of_item(at);
-            if cx.background_executor().now() < until {
-                window.request_animation_frame();
-            } else {
-                self.scroll_to = None;
-            }
-        }
                     .path(SharedString::from(shown_folder(&self.folder)))
                     .more(self.more.clone()),
             )
@@ -2606,6 +2563,14 @@ impl Render for ProjectSettingsPage {
                         .into_any_element()
                 },
             ));
+        if let Some((at, until)) = self.scroll_to {
+            self.scroll.scroll_to_top_of_item(at);
+            if cx.background_executor().now() < until {
+                window.request_animation_frame();
+            } else {
+                self.scroll_to = None;
+            }
+        }
         let counts = self.counts(cx);
         // Only the tab shown is built: what it holds enters again as it is shown, and what a
         // section keeps (its rows' places) is kept by its own view.
@@ -2643,7 +2608,6 @@ impl Render for ProjectSettingsPage {
         let tabs = SECTIONS.iter().zip(counts).fold(
             Tabs::new("project-settings-tabs", "Sections", core),
             |tabs, ((key, label), count)| match count {
-            .track_scroll(&self.scroll)
                 Some(count) => tabs.counted(*key, *label, count.to_string()),
                 None => tabs.tab(*key, *label),
             },
@@ -2679,6 +2643,7 @@ impl Render for ProjectSettingsPage {
         // drawn, so it plays again), one after the other, after the tabs.
         let page = div()
             .id("project-settings-page")
+            .track_scroll(&self.scroll)
             .w_full()
             .flex_1()
             .min_h_0()

@@ -464,6 +464,55 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_features(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_project_feature_s_page_with_a_value_set_here(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    user.call("extension.set", json!({"name": "specs", "enabled": true}))
+        .unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "specs", "project": "app", "settings": {"language": "fr"}}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("app".into()), window, cx)
+    });
+    until(&shell, cx, "the project's settings are read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_settings_page()
+                .is_some_and(|page| page.read(cx).is_loaded())
+        })
+    });
+    cx.update(|window, cx| window.click("project-settings-tabs-features", cx));
+    until(&shell, cx, "Specs is listed", |cx| {
+        cx.update(|window, _| window.try_find("project-features-specs").is_some())
+    });
+    cx.update(|window, cx| window.click("project-features-specs", cx));
+    until(&shell, cx, "the value says it is set here", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find("project-specs-setting-language-set")
+                .is_some()
+        })
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_settings(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     idle_session(&user);

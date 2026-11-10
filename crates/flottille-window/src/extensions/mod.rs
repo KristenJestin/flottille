@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use gpui_design_system::color::mix;
 use gpui_design_system::{
-    Chosen, Field, Icon, ModelChoice, Palette, Select, SelectOption, Switch, Toast, enter,
+    Chosen, Field, Icon, ModelChoice, Select, SelectOption, SetHere, Switch, Toast, enter,
     hoverable, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::{
@@ -537,7 +537,6 @@ fn control(
     default: Value,
     id: &str,
     providers: &crate::providers::Providers,
-    p: Palette,
 ) -> Option<AnyElement> {
     let is_set = own.is_some();
     let bare = bare_control(
@@ -546,8 +545,7 @@ fn control(
     let Some(project) = project else {
         return Some(bare);
     };
-    // A value set in the project carries a dot, "set here", and a link under it that goes back to
-    // Settings' value; both fade in and out with the value.
+    // A value set in the project carries a mark, `set here`, and a way back to Settings' value.
     let reset = {
         let (registry, name, project, setting) = (
             registry.downgrade(),
@@ -555,7 +553,7 @@ fn control(
             project.to_owned(),
             setting.clone(),
         );
-        move |_: &gpui_kit::ClickEvent, _: &mut gpui_kit::Window, cx: &mut App| {
+        move |_: &mut gpui_kit::Window, cx: &mut App| {
             registry
                 .update(cx, |registry, cx| {
                     registry.set(&name, Some(&project), &setting, None, cx)
@@ -563,44 +561,16 @@ fn control(
                 .ok();
         }
     };
-    let (dot_id, link_id) = (format!("{id}-set"), format!("{id}-reset"));
-    let line = div()
-        .flex()
-        .items_center()
-        .gap(space::SM)
-        .child(
-            div()
-                .id(SharedString::from(dot_id))
-                .aria_label("set here")
-                .flex()
-                .items_center()
-                .gap(space::XS)
-                .text_size(px(12.))
-                .text_color(p.acc)
-                .child(div().size(px(6.)).rounded_full().bg(p.acc))
-                .child("set here")
-                .test_support(),
-        )
-        .child(hoverable(
-            div()
-                .id(SharedString::from(link_id))
-                .aria_label("Use Settings' value")
-                .cursor_pointer()
-                .text_size(px(12.))
-                .child("Use Settings' value")
-                .on_click(reset),
-            move |link, t| link.text_color(mix(p.faint, p.text, t)),
-        ));
     Some(
-        div()
-            .flex()
-            .flex_col()
-            .child(bare)
-            .child(
-                presence(SharedString::from(format!("{id}-set-block")), is_set, line)
-                    .gap(space::SM),
-            )
-            .into_any_element(),
+        SetHere::new(
+            SharedString::from(id.to_owned()),
+            bare,
+            "set here",
+            "Use Settings' value",
+        )
+        .set(is_set)
+        .on_reset(reset)
+        .into_any_element(),
     )
 }
 
@@ -813,7 +783,6 @@ fn fields<'a>(
                 global,
                 &format!("{prefix}-setting-{}", setting.key),
                 &providers,
-                palette(cx),
             )
         });
         let id = format!("{prefix}-models");
@@ -868,7 +837,6 @@ fn fields<'a>(
                         default,
                         &id,
                         &providers,
-                        palette(cx),
                     )?;
                     let field = Field::new(
                         SharedString::from(id.clone()),
