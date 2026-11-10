@@ -46,6 +46,20 @@ fn script() -> Value {
         {"when": "open a ticket", "do": [{"mcp": {"tool": "tickets", "keyed": true,
             "arguments": {"action": "create", "title": "Add a logout",
                 "body": "Users stay signed in"}}}]},
+        {"when": "title it twice", "do": [
+            {"mcp": {"tool": "session_title", "keyed": true, "arguments": {"title": "Site"}}},
+            {"hold": "release"},
+            {"mcp": {"tool": "session_title", "keyed": true,
+                "arguments": {"title": "Rework the Flottille site"}}},
+            {"say": "Titled."}]},
+        {"when": "title it badly", "do": [
+            {"mcp": {"tool": "session_title", "keyed": true, "arguments": {"title": "Site"}}},
+            {"say": "Titled."}]},
+        {"when": "fail a command", "do": [
+            call("f1", "run", "failed", json!({"line": "cargo nope"})),
+            {"mcp": {"tool": "session_title", "keyed": true,
+                "arguments": {"title": "Rework the Flottille site"}}},
+            {"say": "Titled."}]},
         {"when": "work a lot", "do": [
             {"say": "Looking into it."},
             {"think": "Where to start."},
@@ -3577,4 +3591,144 @@ fn the_loading_line_unfolds_and_folds_away(cx: &mut TestAppContext) {
     at_rest(cx);
     assert!(!has("earlier-loading", cx));
     assert!(!has("show-earlier", cx));
+}
+
+/// The conversation of the lead whose first message is `message`, while it works.
+fn titling<'a>(
+    user: &User,
+    message: &str,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    Entity<SessionPage>,
+    &'a mut VisualTestContext,
+) {
+    let lead = lead(user);
+    worked(user, &lead, message);
+    open_session(user, &lead, cx)
+}
+
+/// Waits for the one step of the group, a refused title, to be failed, and its line to say it.
+fn until_refused(
+    shell: &Entity<Shell>,
+    page: &Entity<SessionPage>,
+    cx: &mut VisualTestContext,
+) -> String {
+    until(shell, cx, "the refused title", |cx| {
+        blocks(page, cx).iter().any(|b| {
+            matches!(b, Block::Steps { calls } if calls.len() == 1
+                && calls[0].state == flottille_window::conversation::CallState::Failed)
+        })
+    });
+    settle(cx);
+    let group = group_of(page, cx, |b| matches!(b, Block::Steps { .. }));
+    line_of(page, &group, cx)
+}
+
+#[gpui_kit::test]
+fn an_input_refusal_retried_right_counts_as_retried_not_failed(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, page, cx) = titling(&user, "title it twice", cx);
+    let id = until_refused(&shell, &page, cx);
+    assert_eq!(
+        label(format!("{id}-failed"), cx).as_deref(),
+        Some("1 failed"),
+        "refused and not yet retried"
+    );
+
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    until(&shell, cx, "the retry", |cx| {
+        row_of(&page, cx, |b| is_text(b, "Titled.")).is_some()
+    });
+    settle(cx);
+    let line = label(id.clone(), cx).expect("the group's line");
+    assert!(
+        line.starts_with("2 steps · session_title · 1 retried · "),
+        "{line}"
+    );
+    assert_eq!(
+        label(format!("{id}-retried"), cx).as_deref(),
+        Some("1 retried")
+    );
+    assert!(!has(format!("{id}-failed"), cx), "{line}");
+}
+
+#[gpui_kit::test]
+fn the_summary_s_words_fade_when_a_retry_turns_a_failure_into_retried(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, page, cx) = titling(&user, "title it twice", cx);
+    let id = until_refused(&shell, &page, cx);
+    at_rest(cx);
+
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    until(&shell, cx, "the retried count", |cx| {
+        has(format!("{id}-retried"), cx)
+    });
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the words and their ink move over HOVER"
+    );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn an_input_refusal_not_retried_stays_failed(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, page, cx) = titling(&user, "title it badly", cx);
+    let id = until_refused(&shell, &page, cx);
+    until(&shell, cx, "the turn's end", |cx| {
+        row_of(&page, cx, |b| is_text(b, "Titled.")).is_some()
+    });
+    settle(cx);
+    assert_eq!(
+        label(format!("{id}-failed"), cx).as_deref(),
+        Some("1 failed")
+    );
+    assert!(!has(format!("{id}-retried"), cx));
+}
+
+#[gpui_kit::test]
+fn a_command_that_failed_stays_failed(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, page, cx) = titling(&user, "fail a command", cx);
+    until(&shell, cx, "the turn's end", |cx| {
+        row_of(&page, cx, |b| is_text(b, "Titled.")).is_some()
+    });
+    settle(cx);
+    let group = group_of(&page, cx, |b| matches!(b, Block::Steps { .. }));
+    let id = line_of(&page, &group, cx);
+    assert_eq!(
+        label(format!("{id}-failed"), cx).as_deref(),
+        Some("1 failed"),
+        "a command that failed, and a title that passed after it"
+    );
+    assert!(!has(format!("{id}-retried"), cx));
+}
+
+#[gpui_kit::test]
+fn a_retried_step_unfolded_shows_its_refusal_faint(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, page, cx) = titling(&user, "title it twice", cx);
+    until_refused(&shell, &page, cx);
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    until(&shell, cx, "the retry", |cx| {
+        row_of(&page, cx, |b| is_text(b, "Titled.")).is_some()
+    });
+    settle(cx);
+    let at = row_of(
+        &page,
+        cx,
+        |b| matches!(b, Block::Steps { calls } if calls.len() == 2),
+    )
+    .expect("the steps");
+    unfold(&page, at, cx);
+    cx.update(|window, cx| window.click(format!("row-{at}-steps-toggle"), cx));
+    at_rest(cx);
+
+    let why = label(format!("step-{at}-0-refusal"), cx).expect("the refusal and its reason");
+    assert!(why.starts_with("refused: a title is 3 to 8 words"), "{why}");
+    assert!(
+        !has(format!("step-{at}-1-refusal"), cx),
+        "the call that passed has none to say"
+    );
 }
