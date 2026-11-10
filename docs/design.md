@@ -260,7 +260,8 @@ Flottille's own tools:
   `session_send` (the session shows as waiting on its pilot); any other root's to the user. A
   question to the user is open at once, whatever the agent does next: in the inbox, as "needs you"
   on its session's row, as a card at its place in the conversation named after the session, with
-  a block per question (its options as chips, a field of several lines) and one Answer (the call's
+  a block per question (its options as rows, "Something else…" last, whose field of several lines
+  unfolds when picked) and one Answer (the call's
   own line says `asked you: <its first line>`), and in what `session_read` gives, until the agent
   takes the answer from that card (`agent.answer`: one message quoting each question with its
   answer, which answers that ask alone, the card then folded to the answers) or a message of the
