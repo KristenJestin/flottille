@@ -966,7 +966,7 @@ own words in a failure (an error result, a JSON-RPC error, its first error line)
 result is, and a cut-off says its name and version masked and cut at 100 characters.
 
 **Examples.** The first two are invented; the others are public programs, the first cases of
-0.3.
+0.4.
 
 - **A personal memory server**, `almanac`, and **a notes server**, `jotter`: `search` and `read` are
   set to **passes**, `write` and `link` stay **judged**. A token is a vault entry, put in the
@@ -981,7 +981,7 @@ result is, and a cut-off says its name and version masked and cut at 100 charact
   names the applications it may act on.
 
 **Builds**: nothing of the frame that Specs (0.2) does not build (settings, tools given by an
-extension, data, screens). It lands in 0.3 (milestone "Connections"). The MCP client is `rmcp`'s, which the tests already use (the daemon's
+extension, data, screens). It lands in 0.4 (milestone "v0.4 - Connections"). The MCP client is `rmcp`'s, which the tests already use (the daemon's
 dependency gains the client features it needs, said in the pull request), the server process is the
 daemon's own spawn, and the tests run a small fake MCP server
 on stdio with scripted behaviour, never a real one.
@@ -1039,7 +1039,7 @@ New: `the_judge_is_declared_with_its_slot_guidance_call_and_decider`,
 3. **The compaction as an extension**: #308 stays core; #309 and #320 are rewritten into the frame
    (slots, guidance, calls, its triggers, the handoff in the core).
 4. **Review and the cold read**: agents an extension launches, the depth exception.
-5. **Connections** (0.3): it asks nothing of the frame that Specs did not build (settings, tools
+5. **Connections** (0.4): it asks nothing of the frame that Specs did not build (settings, tools
    given by an extension, data, screens), and lands after Specs (0.2) has built it.
 6. **The judge moved into the frame**, a pure refactor.
 7. **Handbook.**
@@ -1110,7 +1110,7 @@ The maintainer's answers on Connections.
     declaration and no per-project switch for now ("a connection for one project only" is an open
     question). The declaration is the user's alone, never an agent's.
 19. **Any MCP server.** Connections is generic: nothing in it is shaped around one server, and the
-    examples are only examples. It lands in 0.3, after Specs (0.2) has built the frame.
+    examples are only examples. It lands in 0.4, after Specs (0.2) has built the frame and the redesign (0.3).
 20. **A server's `instructions` are pinned with its actions,** a change cuts the connection off, and
     they are given by `help`, never put in the agent's context by default.
 
