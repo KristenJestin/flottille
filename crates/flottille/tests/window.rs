@@ -12789,3 +12789,91 @@ fn the_project_page_says_when_the_default_cannot_be_followed(cx: &mut TestAppCon
     );
     assert!(line.contains("path: must be absolute"), "{line}");
 }
+
+/// The bounds of the element `id` of the open window.
+fn bounds_of(cx: &mut VisualTestContext, id: String) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    cx.update(|window, _| window.find(id).bounds())
+}
+
+/// A lead with two workers in a turn, the rail settled.
+fn lead_and_two_workers<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (String, String, String, &'a mut VisualTestContext) {
+    let (lead, mcp, _) = lead_in_w(user);
+    let (first, _a) = worker(user, &mcp, "build the form");
+    let (second, _b) = worker(user, &mcp, "write the tests");
+    let (shell, cx) = open_session(user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail shows the three agents", |cx| {
+        rail_ids(&page, cx).len() == 3
+    });
+    settle(cx);
+    (lead, first, second, cx)
+}
+
+#[gpui_kit::test]
+fn a_child_s_elbow_turns_at_the_middle_of_its_mark(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (_lead, first, second, cx) = lead_and_two_workers(&user, cx);
+
+    for child in [&first, &second] {
+        let row = bounds_of(cx, format!("rail-row-{child}"));
+        let turn = bounds_of(cx, format!("elbow-turn-{child}"));
+        let mark = bounds_of(cx, format!("rail-mark-{child}"));
+        let name = bounds_of(cx, format!("rail-name-{child}"));
+        let wrapper = bounds_of(cx, format!("rail-agent-{child}"));
+        // The line of the turn is the last pixel of its box.
+        let at = turn.bottom() - gpui_kit::px(0.5);
+        assert!(
+            f32::from(at - mark.center().y).abs() <= 1.,
+            "at the middle of the mark: {turn:?} {mark:?} {row:?}"
+        );
+        assert!(
+            at > name.top() && at < row.bottom() - gpui_kit::px(4.),
+            "in the row, not at its bottom: {turn:?} {name:?} {row:?}"
+        );
+        assert!(
+            turn.right() <= row.left() && turn.left() > wrapper.left(),
+            "it runs into the row from the left: {turn:?} {row:?} {wrapper:?}"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn the_rail_s_line_runs_on_between_two_children_of_one_parent(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, first, second, cx) = lead_and_two_workers(&user, cx);
+
+    let first_turn = bounds_of(cx, format!("elbow-turn-{first}"));
+    let below = bounds_of(cx, format!("elbow-below-{first}"));
+    let second_turn = bounds_of(cx, format!("elbow-turn-{second}"));
+    let first_row = bounds_of(cx, format!("rail-agent-{first}"));
+    assert_eq!(below.left(), first_turn.left(), "one line");
+    assert_eq!(below.left(), second_turn.left(), "one line");
+    assert_eq!(
+        below.top(),
+        first_turn.bottom(),
+        "it goes on from the turn: {below:?} {first_turn:?}"
+    );
+    assert_eq!(
+        below.bottom(),
+        first_row.bottom(),
+        "to the end of the row: {below:?} {first_row:?}"
+    );
+    assert_eq!(
+        second_turn.top(),
+        first_row.bottom(),
+        "no gap before the next turn"
+    );
+    cx.update(|window, _| {
+        assert!(
+            window.try_find(format!("elbow-below-{second}")).is_none(),
+            "nothing goes on past the last child"
+        );
+        assert!(
+            window.try_find(format!("elbow-{lead}")).is_none(),
+            "the root has no line"
+        );
+    });
+}
