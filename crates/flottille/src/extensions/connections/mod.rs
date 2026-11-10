@@ -1504,6 +1504,12 @@ async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
         settings.insert(action.clone(), setting.to_owned());
     }
     let pin = || {
+        // A review that started a server before the pin is written would be met against the old
+        // one: the server is held while it is written.
+        debug_assert!(
+            !due || client::held(daemon, &name),
+            "the pin of {name} is written while its server is free"
+        );
         write_row(
             daemon,
             &name,
