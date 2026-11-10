@@ -862,8 +862,10 @@ fn the_window_draws_no_frame_at_rest_on_a_question_card_open_with_three_question
     });
     settle(&shell, cx);
     let (pulse, _) = frames_at_rest(&shell, cx);
+    // Two windows of the same length count the pulse a frame or two apart (where its first and
+    // last frames fall); a card that moved at rest would add a frame per tick, hundreds.
     assert!(
-        with_card <= pulse,
+        with_card <= pulse + 5,
         "the open card adds no frame to the pulse of the row: {with_card} against {pulse}"
     );
 }
