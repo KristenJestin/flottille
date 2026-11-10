@@ -8191,15 +8191,20 @@ fn workspace_menu_of(
                 editor.update(cx, |page, _| page.open_in_editor()).ok();
             }),
             ticket_linked: linked,
-            link_ticket: Some(Box::new(move |cx| {
-                linking.update(cx, |rail, cx| rail.start_linking(cx)).ok();
-            })),
-            unlink_ticket: Some(Box::new(move |cx| {
-                unlinks
-                    .update(cx, |rail, cx| rail.link_ticket(None, cx))
-                    .ok();
-            })),
-            // A session in the project's folder has no workspace to remove.
+            // A ticket is linked to a workspace: a session in the project's folder has none to
+            // link, as it has none to remove.
+            link_ticket: removable.then(|| -> WorkspaceAction {
+                Box::new(move |cx| {
+                    linking.update(cx, |rail, cx| rail.start_linking(cx)).ok();
+                })
+            }),
+            unlink_ticket: removable.then(|| -> WorkspaceAction {
+                Box::new(move |cx| {
+                    unlinks
+                        .update(cx, |rail, cx| rail.link_ticket(None, cx))
+                        .ok();
+                })
+            }),
             remove: removable.then(|| -> WorkspaceAction {
                 Box::new(move |cx| {
                     removes.update(cx, |rail, cx| rail.ask_removal(cx)).ok();
