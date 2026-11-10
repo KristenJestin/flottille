@@ -419,7 +419,10 @@ holds. The guidance sits inside a fixed text (`crates/flottille/roles/compactor-
   agent), `before_expiry` and `after_expiry` (booleans), `margin` (1 to 30 minutes) and `minimum`
   (0 to 1000000 tokens); what is left out stays. It answers as `compaction.show`;
   `invalid-params` for anything else, `not-found` for an unknown provider. `compactor = "none"`
-  is a choice: no compactor is ever picked again.
+  is a choice: no compactor is ever picked again. `compactor = "pick"` (the window's switch
+  turned on) writes the one Flottille picks for a user who never chose, not marked `picked`, or
+  else the first provider enabled, installed and signed in on its default model; `unavailable`
+  when none is.
 - `compaction.set_guidance {text}` writes the guidance (`refused` above 4,000 characters; an
   empty text resets it); `compaction.reset_guidance` removes it. Both answer as
   `compaction.show`.
@@ -1928,12 +1931,15 @@ the file is then left as it is.
 
 ### `provider.set_judge`
 
-`{"provider", "model"?}`. Chooses the Auto judge (`docs/design.md` §7.1): the provider whose agent
+`{"provider", "model"?}`, or `{"pick": true}`. Chooses the Auto judge (`docs/design.md` §7.1): the provider whose agent
 judges the calls to judge of sessions in Auto, and its model (the provider's default when left
 out or empty; once the provider's models are known, one given without its date suffix is written as the
 listed id, `docs/agents.md`, "Providers"); `provider` `null` chooses none, and Auto then asks the user as Ask does. The daemon
 writes `[judge]` in `providers.toml` (`provider`, `model`), or `judge = "none"` for none, so that
-no judge is ever picked for a user who chose none; the rest of the file is
+no judge is ever picked for a user who chose none. `{"pick": true}` (the window's switch turned
+on) chooses the judge Flottille picks for a user who never chose, not marked `picked`, or else the
+first provider enabled, installed and signed in on its default model; `unavailable` when none is.
+The rest of the file is
 kept as `provider.enable` keeps it, and answers `{"judge"}`, as `provider.list` gives it. When this
 changes the file it emits `provider.judge_changed`. `not-found` when there is no provider of that
 name; `invalid-config` when `providers.toml` cannot be read. The provider is checked when it

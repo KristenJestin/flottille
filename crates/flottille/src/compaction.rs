@@ -497,6 +497,19 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             false
         }
         "compaction.set" => {
+            let mut params = params;
+            // The window's switch turned on: a compactor picked as for a user who never chose.
+            if params["compactor"] == "pick" {
+                let providers = flottille_core::provider::Settings::load(&daemon.paths)
+                    .map_err(|error| Failure::new("invalid-config", error))?;
+                let (provider, model) = providers::ready_pick(&providers).ok_or_else(|| {
+                    Failure::new(
+                        "unavailable",
+                        "no provider is enabled, installed and signed in to pick a model from",
+                    )
+                })?;
+                params["compactor"] = json!({"provider": provider, "model": model});
+            }
             let asked = Asked::of(&params)?;
             edit(paths, |before, document| {
                 let mut changed = false;

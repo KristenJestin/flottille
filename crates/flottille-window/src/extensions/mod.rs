@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use flottille_ui::{
-    Field, Section, Select, SelectOption, Switch, Toast, enter, palette, presence, presence_of,
-    space, toast,
+    Chosen, Field, ModelChoice, Section, Select, SelectOption, Switch, Toast, enter, palette,
+    presence, presence_of, space, toast,
 };
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement, IntoElement,
@@ -470,6 +470,7 @@ fn control(
     id: &str,
     providers: &crate::providers::Providers,
 ) -> Option<AnyElement> {
+    let (rule, gives) = model_default(name, &setting.key);
     let (registry, name, project_name, setting_of) = (
         registry.downgrade(),
         name.to_owned(),
@@ -552,46 +553,78 @@ fn control(
             )
         }
         "model" => {
-            let mut slots: Vec<(Value, String)> = Vec::new();
-            for provider in providers.offered() {
-                for model in provider.models.iter().flatten() {
-                    slots.push((
-                        json!({"provider": provider.name, "model": model.id}),
-                        format!("{} · {}", provider.title, model.label()),
-                    ));
-                }
-            }
-            if let Some(own) = &own
-                && !slots.iter().any(|(slot, _)| slot == own)
-            {
-                let said = match own["model"].as_str() {
-                    Some(model) => format!("{} · {model}", own["provider"].as_str().unwrap_or("")),
-                    None => format!("{} · its default", own["provider"].as_str().unwrap_or("")),
-                };
-                slots.push((own.clone(), said));
-            }
-            let first = match (project, default.is_null()) {
-                (Some(_), false) => "As in Settings".to_owned(),
-                _ => "The strongest of the session's provider".to_owned(),
+            let text = |value: &Value, key: &str| value[key].as_str().map(str::to_owned);
+            let chosen = match &own {
+                Some(own) => match text(own, "provider") {
+                    Some(provider) => providers.chosen(&provider, text(own, "model").as_deref()),
+                    None => Chosen::First,
+                },
+                None => Chosen::First,
             };
-            let options = std::iter::once(SelectOption::new("default", first)).chain(
-                slots
-                    .iter()
-                    .enumerate()
-                    .map(|(at, (_, said))| SelectOption::new(format!("slot-{at}"), said.clone())),
+            let choice = ModelChoice::new(
+                SharedString::from(id.to_owned()),
+                setting.label.clone(),
+                chosen,
+            )
+            .compact()
+            .hint(setting.hint.clone())
+            .models(providers.model_entries())
+            .effort(
+                own.as_ref()
+                    .and_then(|own| text(own, "effort"))
+                    .map(Into::into),
             );
-            let chosen = own
-                .as_ref()
-                .and_then(|own| slots.iter().position(|(slot, _)| slot == own))
-                .map_or(0, |at| at + 1);
-            let select = Select::new(SharedString::from(format!("{id}-select")), options, chosen)
-                .on_choose(move |at, _, cx| {
-                    set(at.checked_sub(1).map(|at| slots[at].0.clone()), cx);
-                });
-            Some(select.into_any_element())
+            let choice = match project {
+                None => choice.default(rule, gives),
+                // In a project, the first option is Settings' value: the model set there, else
+                // the default's rule.
+                Some(_) => choice.inherited(match text(&default, "provider") {
+                    Some(provider) => {
+                        let title = providers
+                            .get(&provider)
+                            .map_or(provider.clone(), |p| p.title.clone());
+                        format!(
+                            "{title} · {}",
+                            text(&default, "model").unwrap_or_else(|| "its default".into())
+                        )
+                    }
+                    None => rule.to_owned(),
+                }),
+            };
+            let choice = choice.on_choose(move |chosen, effort, _, cx| {
+                let slot = match chosen {
+                    Chosen::Model(provider, model) => {
+                        let mut slot = Map::new();
+                        slot.insert("provider".into(), json!(provider));
+                        if let Some(model) = model {
+                            slot.insert("model".into(), json!(model));
+                        }
+                        if let Some(effort) = effort {
+                            slot.insert("effort".into(), json!(effort));
+                        }
+                        Some(Value::Object(slot))
+                    }
+                    _ => None,
+                };
+                set(slot, cx);
+            });
+            Some(choice.into_any_element())
         }
         _ => None,
     }
+}
+
+/// The default of a model slot, as its first option says it: its rule and what it gives today.
+fn model_default(name: &str, key: &str) -> (&'static str, &'static str) {
+    match name {
+        review::NAME => review::model_default(key),
+        _ => ("Its feature's choice", "Chosen when it runs"),
+    }
+}
+
+/// The line said once under the card of a feature's models.
+fn models_line(name: &str) -> Option<&'static str> {
+    (name == review::NAME).then_some(review::MODELS_LINE)
 }
 
 /// A value as a switch's label says it: `bugs` is "Bugs".
@@ -619,34 +652,95 @@ fn fields<'a>(
         .upgrade()
         .map(|shell| shell.read(cx).providers().clone())
         .unwrap_or_default();
-    div()
-        .flex()
-        .flex_col()
-        .gap(space::LG)
-        .children(settings.enumerate().filter_map(|(at, setting)| {
+    let (models, settings): (Vec<&Setting>, Vec<&Setting>) =
+        settings.partition(|setting| setting.kind == "model");
+    let models_card = (!models.is_empty()).then(|| {
+        let p = palette(cx);
+        let lines = models.iter().filter_map(|setting| {
             let global = setting.value.clone();
-            let (own, default) = match side {
-                None => (setting.set.then(|| global.clone()), global),
-                Some(side) => (side.settings.get(&setting.key).cloned(), global),
+            let own = match side {
+                None => setting.set.then(|| global.clone()),
+                Some(side) => side.settings.get(&setting.key).cloned(),
             };
-            let id = format!("{prefix}-setting-{}", setting.key);
-            let control = control(
+            control(
                 registry,
                 &listed.name,
                 project,
                 setting,
                 own,
-                default,
-                &id,
+                global,
+                &format!("{prefix}-setting-{}", setting.key),
                 &providers,
-            )?;
-            let field = Field::new(
-                SharedString::from(id.clone()),
-                setting.label.clone(),
-                control,
             )
-            .hint(setting.hint.clone());
-            Some(enter(SharedString::from(format!("{id}-enter")), at, field))
+        });
+        let id = format!("{prefix}-models");
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .child(
+                div()
+                    .id(SharedString::from(id.clone()))
+                    .p(space::LG)
+                    .flex()
+                    .flex_col()
+                    .gap(space::MD)
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(p.line)
+                    .children(lines)
+                    .test_support(),
+            )
+            .children(models_line(&listed.name).map(|line| {
+                div()
+                    .id(SharedString::from(format!("{id}-cost")))
+                    .aria_label(line)
+                    .text_size(px(12.))
+                    .text_color(p.faint)
+                    .child(line)
+                    .test_support()
+            }))
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap(space::LG)
+        .children(
+            settings
+                .into_iter()
+                .enumerate()
+                .filter_map(|(at, setting)| {
+                    let global = setting.value.clone();
+                    let (own, default) = match side {
+                        None => (setting.set.then(|| global.clone()), global),
+                        Some(side) => (side.settings.get(&setting.key).cloned(), global),
+                    };
+                    let id = format!("{prefix}-setting-{}", setting.key);
+                    let control = control(
+                        registry,
+                        &listed.name,
+                        project,
+                        setting,
+                        own,
+                        default,
+                        &id,
+                        &providers,
+                    )?;
+                    let field = Field::new(
+                        SharedString::from(id.clone()),
+                        setting.label.clone(),
+                        control,
+                    )
+                    .hint(setting.hint.clone());
+                    Some(enter(SharedString::from(format!("{id}-enter")), at, field))
+                }),
+        )
+        .children(models_card.map(|card| {
+            enter(
+                SharedString::from(format!("{prefix}-models-enter")),
+                1,
+                card,
+            )
         }))
         .into_any_element()
 }

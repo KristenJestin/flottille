@@ -136,6 +136,9 @@ pub enum Command {
         provider: Option<String>,
         model: Option<String>,
     },
+    /// Turns the Auto judge on: the daemon picks one as for a user who never chose
+    /// (`provider.set_judge {pick}`).
+    PickJudge,
     /// Reads the providers again: `providers.toml` is the user's to edit by hand too.
     ReadProviders,
     /// The developer mode (`developer.show`).
@@ -1459,13 +1462,14 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::ProviderSet { name, refused }
         }
-        Command::SetJudge { provider, model } => {
-            let refused = match ask_alone(
-                connect,
-                "provider.set_judge",
-                json!({"provider": provider, "model": model}),
-                bounds.quick,
-            ) {
+        Command::SetJudge { .. } | Command::PickJudge => {
+            let params = match command {
+                Command::SetJudge { provider, model } => {
+                    json!({"provider": provider, "model": model})
+                }
+                _ => json!({"pick": true}),
+            };
+            let refused = match ask_alone(connect, "provider.set_judge", params, bounds.quick) {
                 Ok(Ok(_)) => None,
                 Ok(Err(why)) | Err(why) => Some(why),
             };

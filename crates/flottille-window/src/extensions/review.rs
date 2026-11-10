@@ -20,6 +20,19 @@ pub const COMMAND: &str = "review";
 pub const COMMAND_LINE: &str =
     "Review this session's change with fresh eyes: the findings come back to the session";
 
+/// The default of a check's model, as its first option says it: the rule, and what it gives
+/// today (the daemon's `STRONGEST` and `SMALLER` of Review).
+pub fn model_default(key: &str) -> (&'static str, &'static str) {
+    match key {
+        "verifier_model" => ("One size smaller", "Sonnet for Claude"),
+        _ => ("Strongest of the session's provider", "Opus for Claude"),
+    }
+}
+
+/// What the card of the checks' models says once under it.
+pub const MODELS_LINE: &str = "Models: the strongest of the session's provider unless you choose \
+     one. Each check is a turn on your own quota.";
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Then {
     /// `review.start` of a session.

@@ -1306,3 +1306,20 @@ fn a_session_read_by_another_agent_has_the_brief_once_after_a_compaction() {
     );
     assert_eq!(page.text.matches("go on").count(), 1, "{}", page.text);
 }
+
+#[test]
+fn a_compaction_turned_on_again_picks_a_compactor_as_for_a_new_user() {
+    let user = User::with_fake_claude();
+    user.call("compaction.set", json!({"compactor": "none"}))
+        .unwrap();
+
+    let shown = user
+        .call("compaction.set", json!({"compactor": "pick"}))
+        .unwrap();
+
+    assert_eq!(
+        shown["compactor"],
+        json!({"provider": "claude", "model": "haiku"}),
+        "{shown}"
+    );
+}
