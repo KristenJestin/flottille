@@ -35,6 +35,13 @@ Branches reach `dev` by squash. A release does not: **`main` moves forward to a 
   token may start), which builds and publishes as on any push. Run again when `main` is already
   the commit, it moves nothing and starts the build again, which publishes nothing already
   published.
+- **`main` is not verified twice.** The commit released is a commit of `dev`, whose own push run
+  verified it already: on `main`, the job `verified-on-dev` asks GitHub's API, with a token that
+  can only read, for a run of `ci.yml` on that very commit, pushed to `dev`, that succeeded; a
+  run succeeds only when its `verify` passed. Found, `verify` is skipped on `main`. Not found (no
+  such run, a failed one, an error of the API), `verify` runs on `main` itself. `publish` runs
+  only when `verify` passed in the run, or was skipped because that run on `dev` was found: never
+  on a commit no `verify` passed on.
 - **The tag `vX.Y.Z` is put on the released commit**, the same commit on `main` and on `dev`. No
   tag is pushed by hand.
 - **The stable version is the one dev already had**: the version of the beta of that commit,
@@ -120,7 +127,8 @@ On a push to `dev`, `feat/**` or `fix/**`, and on `main` when the `Release` work
     changelog (`tools/changelog.sh`): the Angular commits counted, oldest first, grouped under
     breaking changes, features, fixes, performance and other changes, each
     `- **<scope>**: <subject>` with the pull request number its squash kept.
-- **`publish`**, once `verify` passed on the pushed commit, runs none of the branch's code: it
+- **`publish`**, once `verify` passed on the pushed commit (on `main`, here or on `dev`, see
+  "Releasing"), runs none of the branch's code: it
   takes what `build` made and alone holds the right to write releases and tags. It runs no git
   and never works inside the artifact's folder, whose files the branch's code made (a
   repository's layout left there would hand git its configuration): only `gh`, naming the files
