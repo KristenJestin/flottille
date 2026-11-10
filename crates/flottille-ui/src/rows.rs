@@ -350,8 +350,6 @@ const TIE_ROOT: f32 = 14.;
 const TIE_TURN: f32 = 6.;
 /// How far past the indent the connector runs into its row.
 const TIE_INTO: f32 = 4.;
-/// The size of the arrowhead that ends the connector.
-const TIE_HEAD: f32 = 12.;
 
 /// The element id of a row's connector, whose label says whether the row is the last one.
 pub fn tie_id(row: impl Into<ElementId>) -> ElementId {
@@ -380,14 +378,12 @@ pub fn tie_through_id(row: impl Into<ElementId>, level: usize) -> ElementId {
 /// above and turns right into the row, at the middle of its first line (`first_line`, from the
 /// row's top), going on below it while the row has a sibling after it, and the lines of the
 /// ancestors that go on past it. Draw it over the row, in a block that starts where the row's
-/// indent starts; `shown` fades it with the row. The line ends in an arrowhead, `head` (`↳`): the
-/// mark that says the row is led, which has the row's tooltip.
+/// indent starts; `shown` fades it with the row. The line ends where it turns into the row.
 pub fn tree_tie(
     row: impl Into<ElementId>,
     tie: &Tie,
     first_line: f32,
     shown: f32,
-    head: impl IntoElement,
     cx: &App,
 ) -> impl IntoElement {
     let p = palette(cx);
@@ -435,13 +431,6 @@ pub fn tree_tie(
                 .border_color(p.line)
                 .rounded_bl(px(TIE_TURN))
                 .test_support(),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(TIE_INDENT * tie.depth() as f32 + TIE_INTO - TIE_HEAD))
-                .top(px(first_line - TIE_HEAD / 2.))
-                .child(head),
         )
         .when(!tie.last, |d| {
             d.child(

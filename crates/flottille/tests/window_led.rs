@@ -13,7 +13,7 @@ use flottille_ui::omarchy::Environment;
 use flottille_ui::{tie_below_id, tie_id, tie_through_id, tie_turn_id, toggle_id};
 use flottille_window::Shell;
 use flottille_window::link::Connect;
-use flottille_window::tree::{session_detach_id, session_id, session_led_id, session_menu_id};
+use flottille_window::tree::{session_detach_id, session_id, session_menu_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -189,10 +189,6 @@ fn the_sidebar_nests_a_led_session_under_its_pilot(cx: &mut TestAppContext) {
     assert_eq!(
         led_by(&shell, &led, cx).as_deref(),
         Some("begin the docs session")
-    );
-    assert_eq!(
-        label(cx, session_led_id(&led)).as_deref(),
-        Some("led by begin the docs session")
     );
     assert_eq!(led_by(&shell, &lead, cx), None);
 
@@ -435,6 +431,27 @@ fn a_child_session_row_is_tied_to_its_parent_by_a_connector(cx: &mut TestAppCont
         4,
         "no row was added for the connector"
     );
+}
+
+#[gpui_kit::test]
+fn a_led_session_s_connector_ends_without_an_arrowhead(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, led) = lead_and_led(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the led session's connector", |cx| {
+        label(cx, tie_id(session_id(&led))).is_some()
+    });
+    settle(cx);
+
+    // The row draws its connector and its turn, and nothing after the turn: the mark that ended
+    // it (`↳`, with the tooltip "led by …") is gone, whoever leads the session being said by the
+    // session's own header.
+    cx.update(|window, _| {
+        assert!(window.try_find(tie_turn_id(session_id(&led))).is_some());
+        let arrowhead = gpui_kit::ElementId::Name(format!("session-led-{led}").into());
+        assert!(window.try_find(arrowhead).is_none(), "no arrowhead");
+    });
+    assert_eq!(label(cx, tie_id(session_id(&lead))), None);
 }
 
 #[gpui_kit::test]
