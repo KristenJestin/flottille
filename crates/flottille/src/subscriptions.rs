@@ -47,9 +47,7 @@ pub const SESSION: &str = "session";
 pub const RUN: &str = "run";
 /// The kind of the delivery that wakes the agent that follows a session.
 pub const TURN_ENDED: &str = "session-turn-ended";
-/// How many `session_send` the two sessions of a following write to each other, with no message
-/// of the user's in either, before the following pauses.
-pub const EXCHANGES: u64 = 5;
+pub use flottille_core::subscription::EXCHANGES;
 /// The longest part of the session's last message a wake carries, in characters.
 const LAST_CHARS: usize = 2_000;
 /// The longest `why` of a wake, in characters: a reason, not a brief.
@@ -224,7 +222,7 @@ fn store_seen(daemon: &Daemon, subscription: &Subscription, seen: Value) {
 
 /// What a `session_send` between the two sessions of a paused following is told: nothing reaches
 /// the other until the user writes to one of them.
-pub const PAUSED: &str = "refused: paused: you two wrote to each other five times without the \
+pub const PAUSED: &str = "refused: paused: you two wrote to each other fifty times without the \
     user; wait for their message";
 
 /// Whether the following of `session` by `starter` is paused: their `session_send` are refused.
@@ -235,8 +233,8 @@ pub fn paused(daemon: &Daemon, starter: &str, session: &str) -> bool {
 }
 
 /// The two sessions of a following wrote to each other once more (`session_send`, from either;
-/// `answered` when the session wrote to its starter, said by when): at the fifth with no message of the user's
-/// in either, the following pauses and the user's inbox says so.
+/// `answered` when the session wrote to its starter, said by when): at the fiftieth with no message
+/// of the user's in either, the following pauses and the user's inbox says so.
 pub fn exchanged(daemon: &Daemon, starter: &str, session: &Agent, answered: bool) {
     let _counting = COUNTING.lock().unwrap();
     let Some(subscription) = following(daemon, starter, Some(&session.id)).pop() else {
@@ -939,6 +937,12 @@ mod tests {
             }),
             text: String::new(),
         }
+    }
+
+    #[test]
+    fn the_refusal_says_the_number_of_exchanges_in_words() {
+        assert_eq!(EXCHANGES, 50);
+        assert!(PAUSED.contains("fifty times"), "{PAUSED}");
     }
 
     #[test]

@@ -1121,7 +1121,7 @@ ends first, `cancelled`.
 #### `session.following_paused`, `session.following_resumed`
 
 The two sessions of a following (`docs/tools.md`, "Sessions that talk to each other") wrote to each
-other five times with no message of the user's in either: the following pauses, and wakes nobody
+other fifty times with no message of the user's in either: the following pauses, and wakes nobody
 until it resumes, and the `session_send` between the two are refused. A message of the user's to
 either session, or the window's Resume (`subscription.resume`), resumes it.
 
@@ -1129,7 +1129,7 @@ either session, or the window's Resume (`subscription.resume`), resumes it.
 |---|---|
 | `agent` | The session that is followed, a root: the user's. |
 | `follower` | The agent that started it and follows it. |
-| `exchanges` | (`paused` only) How many were written: 5. |
+| `exchanges` | (`paused` only) How many were written: 50. |
 
 `flottille inbox` lists a pause as an entry of kind `paused` (`docs/protocol.md`, `inbox.list`).
 
