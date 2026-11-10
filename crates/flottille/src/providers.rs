@@ -615,6 +615,18 @@ pub fn takes_images(daemon: &Daemon, provider: &str) -> Option<bool> {
         .find_map(|agent| agent.images)
 }
 
+/// The providers enabled and ready now: the ones a session can start on.
+pub fn ready(daemon: &Daemon) -> Vec<&'static Provider> {
+    let Ok(settings) = Settings::load(&daemon.paths) else {
+        return Vec::new();
+    };
+    checks(&settings, Version::Known)
+        .iter()
+        .filter(|check| check.ready())
+        .map(|check| check.provider)
+        .collect()
+}
+
 /// The models a provider's agents offered, when they were read from the version of the provider
 /// there is now: only these refuse a model or an effort.
 /// The model of the provider's list that `asked` names (`listed_model`), once one of its sessions

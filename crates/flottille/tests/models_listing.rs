@@ -380,3 +380,67 @@ fn the_efforts_of_every_model_are_learned_once_per_provider_version_without_a_pr
         "no prompt: {received:?}"
     );
 }
+
+/// What `extension.list` says a Review slot left on its default gives, for each ready provider.
+fn review_default(user: &User, key: &str) -> Value {
+    let listed = user.call("extension.list", json!({})).unwrap();
+    let review = listed["extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "review")
+        .unwrap();
+    let slot = review["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == key)
+        .unwrap();
+    slot["default"].clone()
+}
+
+#[test]
+fn a_default_slot_says_the_model_the_daemon_picks() {
+    let user = User::with_fake_providers().with_env(ASKS.0, ASKS.1);
+    user.write_providers("[opencode]\nenabled = false\n");
+    user.provider_script("claude", json!({"models": ["opus", "sonnet"]}));
+    eventually("the models of Claude", || {
+        !ids(&listed(&user, "claude")).is_empty()
+    });
+
+    let strongest = review_default(&user, "bugs_model");
+    assert_eq!(strongest["rule"], "Strongest of the session's provider");
+    assert_eq!(strongest["gives"], json!({"claude": "opus"}));
+    let smaller = review_default(&user, "verifier_model");
+    assert_eq!(smaller["rule"], "One size smaller");
+    assert_eq!(smaller["gives"], json!({"claude": "sonnet"}));
+}
+
+#[test]
+fn a_default_slot_gives_nothing_where_the_provider_offers_no_such_model() {
+    let user = User::with_fake_providers().with_env(ASKS.0, ASKS.1);
+    user.write_providers("[opencode]\nenabled = false\n");
+    user.provider_script("claude", json!({"models": ["fake-small", "fake-large"]}));
+    eventually("the models of Claude", || {
+        !ids(&listed(&user, "claude")).is_empty()
+    });
+
+    // The provider runs on its own default: the answer names the provider, with no model.
+    assert_eq!(
+        review_default(&user, "bugs_model")["gives"],
+        json!({"claude": null})
+    );
+}
+
+#[test]
+fn a_default_slot_names_only_the_ready_providers() {
+    let user = User::with_fake_providers().with_env(ASKS.0, ASKS.1);
+    user.write_providers("[opencode]\nenabled = false\n[codex]\nenabled = false\n");
+    user.provider_script("claude", json!({"models": ["opus"]}));
+    eventually("the models of Claude", || {
+        !ids(&listed(&user, "claude")).is_empty()
+    });
+
+    let gives = review_default(&user, "bugs_model")["gives"].clone();
+    assert_eq!(gives.as_object().unwrap().len(), 1, "{gives}");
+}
