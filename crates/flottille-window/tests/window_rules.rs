@@ -19,7 +19,7 @@ fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
 }
 
 /// The window's own components, which were parts of `flottille-ui` and keep the exact sizes of
-/// the design as the kit's do: the scans of a screen's layout leave them out.
+/// the design as the kit's do: only the spacing scan leaves them out, every other scan reads them.
 const COMPONENTS: [&str; 2] = ["state.rs", "steps.rs"];
 
 /// Every source of the window, with its text.
@@ -30,7 +30,6 @@ fn window() -> Vec<(PathBuf, String)> {
     assert!(files.len() > 20, "the sources were found: {}", files.len());
     files
         .into_iter()
-        .filter(|file| !COMPONENTS.iter().any(|own| file.ends_with(own)))
         .map(|file| {
             let text = fs::read_to_string(&file).unwrap();
             (file, text)
@@ -48,7 +47,14 @@ fn code(source: &str) -> impl Iterator<Item = (usize, &str)> {
 }
 
 fn offenders(find: impl Fn(&str) -> Vec<(usize, String)>) -> Vec<String> {
-    window()
+    offenders_in(window(), find)
+}
+
+fn offenders_in(
+    files: Vec<(PathBuf, String)>,
+    find: impl Fn(&str) -> Vec<(usize, String)>,
+) -> Vec<String> {
+    files
         .into_iter()
         .flat_map(|(file, text)| {
             find(&text)
@@ -56,6 +62,17 @@ fn offenders(find: impl Fn(&str) -> Vec<(usize, String)>) -> Vec<String> {
                 .map(move |(at, line)| format!("{}:{at}: {line}", file.display()))
         })
         .collect()
+}
+
+#[test]
+fn the_scans_read_the_components_the_spacing_scan_leaves_out() {
+    let files = window();
+    for own in COMPONENTS {
+        assert!(
+            files.iter().any(|(file, _)| file.ends_with(own)),
+            "{own} is read by the scans"
+        );
+    }
 }
 
 // ── 2. One confirmation: a modal dialog ────────────────────────────────────────────────────────
@@ -206,7 +223,11 @@ fn a_gap_or_a_padding_off_the_scale_is_found() {
 
 #[test]
 fn every_gap_and_padding_of_the_window_is_a_step_of_the_scale() {
-    let found = offenders(spacing_literals);
+    let screens = window()
+        .into_iter()
+        .filter(|(file, _)| !COMPONENTS.iter().any(|own| file.ends_with(own)))
+        .collect();
+    let found = offenders_in(screens, spacing_literals);
     assert!(
         found.is_empty(),
         "a gap or a padding is a step of `flottille_ui::space` (4, 8, 12, 16, 24, 32, 48):\n{}",
