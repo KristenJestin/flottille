@@ -82,8 +82,8 @@ git config core.hooksPath .githooks     # once per clone: the commit-msg and pre
 
 **Everything that moves in the window is animated.** The maintainer said it once, and a window
 pull request is not asked to be told again. The same durations and easing as everywhere
-(`crates/flottille-ui/src/motion.rs`, `docs/design.md` §10), through the helpers of
-`flottille-ui`, never a second system:
+(the kit's `src/motion.rs`, `docs/design.md` §10), through the helpers of the kit, never a
+second system:
 
 - hover and press of every interactive element (a button, a row, a link, a chip, a toggle): its
   colours fade over `HOVER`. GPUI's own `.hover(..)` switches at once and is never used (a test
@@ -103,7 +103,14 @@ sends it back. The pull request lists each element it animated; the checklist in
 Motion is the tenth of the **rules of the window** (`docs/reference/gpui.md`, "Rules of the
 window"): four kinds of button, one confirmation dialog, results as toasts, a visible label on
 every control, a state said once, one list pattern, the spacing scale. A screen builds them from
-the components of `flottille-ui` that hold them, never its own.
+the components of the kit that hold them, never its own.
+
+**The components live in the kit**, [`gpui-design-system`](https://github.com/KristenJestin/gpui-design-system),
+shared with other GPUI applications: `flottille-window` depends on it by git, pinned to one of its
+tags. A component that is missing or must change is added there first: a pull request in the kit
+(its scenarios in the kit's tests, under the kit's own `AGENTS.md`), whose push publishes a tag;
+then the bump of that tag here, in the pull request that needs it (`docs/reference/gpui.md`, "The
+stack"). Nothing of Flottille goes into the kit, and no component is drawn here instead.
 
 ## Agents and safety (non-negotiable)
 

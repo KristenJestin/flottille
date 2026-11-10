@@ -1295,13 +1295,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the button first and closes; a page that no longer exists is skipped.
 
 Motion: **everything that moves is animated**, with the grammar of `reference/gpui.md` (ease-out
-cubic, the durations of `crates/flottille-ui/src/motion.rs`: hover 140 ms, press 90 ms, an entrance
-240 ms, a fold or a state 280 ms; reduced motion honoured). Hover and press on every interactive
-element; a state that changes (selected, chosen, focused, open); an element or a block that
-appears or leaves, with the gap around it; a row inserted into, removed from or moved in a list; a
-fold; a panel or a menu that opens or closes; a page and its sections, one after the other (at most
-eight waits, whatever the length). At rest nothing moves and nothing is redrawn. An issue about
-the window without its animations is incomplete.
+cubic, the durations of the kit's `src/motion.rs`, `gpui-design-system`: hover 140 ms, press 90 ms,
+an entrance 240 ms, a fold or a state 280 ms; reduced motion honoured). Hover and press on every
+interactive element; a state that changes (selected, chosen, focused, open); an element or a block
+that appears or leaves, with the gap around it; a row inserted into, removed from or moved in a
+list; a fold; a panel or a menu that opens or closes; a page and its sections, one after the other
+(at most eight waits, whatever the length). At rest nothing moves and nothing is redrawn. An issue
+about the window without its animations is incomplete.
 
 Colours: the user chooses them in Settings, General, Appearance, and the daemon keeps the choice
 (`appearance.toml`, `docs/protocol.md`) for every window and a restart: **Omarchy**, the current

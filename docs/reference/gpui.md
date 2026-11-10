@@ -8,25 +8,38 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
 - **gpui-kit** (crates.io, 0.7.x, by Longbridge): components (lists, tables, inputs, icons
   Lucide, dialogs) on top of GPUI, Zed's GPU UI engine. It pins a GPUI snapshot (`gpui-pre`).
 - **GPUI Fast** (`gpui-fast`, 0.1.x, by Longbridge): a fork of GPUI in retained mode, which
-  redraws only the views that changed. Enable it with gpui-kit's `gpui-fast` feature (no
-  `[patch]` needed): `fast = ["gpui-kit/gpui-fast"]` in the default features;
-  `--no-default-features` builds plain GPUI. `GPUI_VIEW_RETENTION=0` turns retention off to
-  compare or to rule out a stale display.
+  redraws only the views that changed. The kit (below) always builds gpui-kit's `gpui-fast`
+  feature (no `[patch]` needed): the window has no plain-GPUI build. Keep `gpui-fast` at 0.1.10
+  in `Cargo.lock` (0.1.11 breaks `gpui-base` 0.8). `GPUI_VIEW_RETENTION=0` turns retention off
+  to compare or to rule out a stale display.
+- **The kit** ([`gpui-design-system`](https://github.com/KristenJestin/gpui-design-system)): the
+  components, tokens and motion of the window, shared with other GPUI applications. It is a git
+  dependency of `flottille-window` (and of `flottille`'s window tests) pinned to one of its tags,
+  never a path: Flottille holds no component of its own beside the window's few (`state.rs`,
+  `steps.rs`, `tree.rs`). **Adding or changing a component** is a pull request in the kit, with
+  its scenarios in the kit's `tests/` and its rules (its `AGENTS.md`); each push of its branch
+  publishes an alpha tag (`vX.Y.Z-alpha.<branch>.N`), its merge into the kit's `main` a beta
+  (`vX.Y.Z-beta.N`). Flottille then bumps the `tag` of `gpui-design-system` in both
+  `Cargo.toml` files to that tag, in the pull request of the issue that needs it: one line each,
+  and `Cargo.lock`. A screen that needs a component the kit lacks waits for it, never draws its
+  own.
 - Results: at rest about 4 draws per second and under 1% of a core; lists of 7,200 rows and grids
   of 720 covers scroll with no frame over the 6 ms budget; animations at full refresh rate.
 - Build cost: a release build from scratch takes 8 to 14 minutes at `nice -n 19` with 6 jobs and
   up to 1 GB of memory for GPUI alone; incremental builds take about 5 s. Binary about 55 MB
   (embed only the icons used: `gpui_kit::assets::icon_assets!(Icons, [Play, …])`).
-  `flottille-ui` knows no app: its `Icons` serves the base set of `Icon`, and an app adds its
+  The kit knows no app: its `Icons` serves the base set of `Icon`, and an app adds its
   own. Another Lucide icon is `Icon::Lucide("name")`, a glyph of the app's own `Icon::Asset(path)`
   (stroked) or `Icon::Filled(path)` (solid, drawn larger); the app's assets serve their files
   beside `Icons`. Flottille's are in `crates/flottille-window/src/glyphs.rs` (`Assets`; the stop
   glyph, a small filled square Lucide does not draw, is an SVG of
   `crates/flottille-window/assets/icons/`, embedded with `include_bytes!`).
-  An app tells the kit its name and its look at `init` (`Identity`); the window's is
-  `flottille_window::identity()`. The parts that know agents (the state marks, the setup step
-  row, the tree's levels) are the window's own: `state.rs`, `steps.rs`, `tree.rs`. A scan
-  (`crates/flottille-ui/tests/no_app_word.rs`) keeps the kit from naming any of them.
+  An app tells the kit its name, its themes and the desktops whose theme it follows at `init`
+  (`Identity`); the window's is `flottille_window::identity(env)`: Flottille, its own theme
+  (`flottille`) and Omarchy (the kit's default `omarchy` feature). The parts that know agents
+  (the state marks, the setup step row, the tree's levels) are the window's own: `state.rs`,
+  `steps.rs`, `tree.rs`. A scan in the kit (`tests/no_app_word.rs`) keeps it from naming any of
+  them.
 - CI (Ubuntu): `pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev
   libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev`; only fontconfig
   and freetype are linked at build time. Cache the build (`Swatinem/rust-cache`).
@@ -56,9 +69,10 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
 - A **text input** (`gpui_kit::component::input`) notifies its state on every caret blink: render
   it in its own view, keep its text in a separate entity updated on `Change`.
   A field's colours (ink, placeholder, selection, caret) are not drawn from the palette by the
-  input: they are set on it. `flottille_ui::follow_theme` sets them from `field_style` and again at
-  each frame of a theme change; a field made with an `InputEditorStyle` of its own keeps the
-  colours of the theme it was made in (a scan refuses it).
+  input: they are set on it. `gpui_design_system::follow_theme` sets them from `field_style` and
+  again at each frame of a theme change; a field made with an `InputEditorStyle` of its own keeps
+  the colours of the theme it was made in (a scan refuses it, in the window's sources and in the
+  kit's).
 - `uniform_list` calls its row closure for row 0 alone to measure, and only for missing rows
   later: side effects in the closure must ignore `0..1` and not count on being called again.
 - A list that grows while it is looked at (a streaming conversation): keep the rows in an
@@ -68,9 +82,9 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
 ## Motion in the window: the rule and its checklist
 
 The rule (`AGENTS.md`, `docs/design.md` §10): **everything that moves is animated**, with the
-durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms, `PRESS` 90 ms,
+durations and the easing of the kit's `src/motion.rs` (`HOVER` 140 ms, `PRESS` 90 ms,
 `ENTER` 240 ms, `PANEL` 280 ms, a stagger of 70 ms for at most eight siblings, a rise of 6 px).
-`flottille-ui` has one helper for each thing that moves; a screen uses them and invents none.
+The kit has one helper for each thing that moves; a screen uses them and invents none.
 
 | What moves | The helper |
 |---|---|
@@ -101,11 +115,11 @@ when a helper above does it.
 **The guard.** gpui-kit's test support (`test_support()`, `window.find(..)`) says an element's
 role, label, bounds and focus, not which listeners it has: no test can walk a view and ask each
 interactive element for its hover transition. What a test can hold is held: the instant hover
-style is refused in every source of the window (`crates/flottille-window/tests/the_rule.rs`), each
-helper has its own scenarios (`crates/flottille-ui/tests/everything_moves.rs`: a hover fades and
-stops, a row arrives, goes and slides, a block folds, reduced motion jumps, nothing is drawn once
-it arrived), and the rest is this checklist, which each window pull request ticks in its
-description:
+style is refused in every source of the window (`crates/flottille-window/tests/the_rule.rs`) and
+of the kit (its `tests/instant_hovers.rs`), each helper has its own scenarios (the kit's
+`tests/everything_moves.rs`: a hover fades and stops, a row arrives, goes and slides, a block
+folds, reduced motion jumps, nothing is drawn once it arrived), and the rest is this checklist,
+which each window pull request ticks in its description:
 
 - [ ] every element that is clicked fades its hover (a component, `hoverable` or `selectable`);
 - [ ] every state that changes (selected, chosen, focused, open, enabled) moves, not jumps;
@@ -123,8 +137,8 @@ description:
 ## Rules of the window
 
 The window holds together because every screen follows the same rules and builds them from the
-same components of `flottille-ui`, which make the wrong thing hard to write. **[test]** marks a
-rule a test holds: the components' scenarios are in `crates/flottille-ui/tests/rules.rs`, the scans
+same components of the kit, which make the wrong thing hard to write. **[test]** marks a
+rule a test holds: the components' scenarios are in the kit's `tests/rules.rs`, the scans
 of the window's sources in `crates/flottille-window/tests/window_rules.rs` (each shown a sample of
 the wrong code first).
 
@@ -134,7 +148,7 @@ the wrong code first).
    confirmation of something destructive). Every text button is 30 px high, 13 px medium; an icon
    button is a 28 px square with a tooltip, anchored to it (below, centred, above when there is no
    room below, inside the window; never GPUI's `.tooltip(..)`, which opens under the pointer).
-   **[test]** `Button` takes no size, and `crates/flottille-ui/tests/tooltips.rs` holds the
+   **[test]** `Button` takes no size, and the kit's `tests/tooltips.rs` holds the
    tooltip. A page header holds at most two secondary buttons, on the title's line, and a "⋯" menu for the rest
    (**[test]** `PageHeader` refuses a third). A destructive action is never a visible button in a
    page or a row: it is a "Remove…" item of a "⋯" menu, last. A label never repeats a name the
@@ -143,7 +157,7 @@ the wrong code first).
    could not fit the window; every entry has an icon of its own (the menu refuses two entries
    with the same one; the destructive entry's is the bin), the labels start at one x, and an entry
    offers only what applies (a second, fainter line may say what it acts on, never wrapped).
-   **[test]** `crates/flottille-ui/tests/menus.rs`.
+   **[test]** the kit's `tests/menus.rs`.
 2. **One confirmation: a modal dialog.** Its title is the question with the object's name, then
    one sentence of consequence, Cancel and the danger button; Escape and the scrim cancel; when
    the action cannot be done, the dialog says why and its button is disabled. Never a button that
@@ -189,7 +203,7 @@ the wrong code first).
    step, skill, command, task, entry; **Check again** for any read made anew) and the same thing
    the same name everywhere ("Rules for every project" in Settings and in a project). Durations,
    not seconds ("stops after 10 min").
-9. **Spacing**: the scale 4, 8, 12, 16, 24, 32, 48 px (`flottille_ui::space`). **[test]** the
+9. **Spacing**: the scale 4, 8, 12, 16, 24, 32, 48 px (`gpui_design_system::space`). **[test]** the
    constants, and a scan refusing any other gap or padding literal in the window crate. A page's
    column is 880 px at most with 32 px between its sections; a dialog is 520 px (640 wide) with
    24 px of padding.
@@ -201,7 +215,7 @@ the wrong code first).
     wait, each by its own skeleton, of the size of the line it stands for, replaced in place
     when its read ends or by its reason when it failed. A skeleton is `Skeleton`, wrapped in
     `awaiting`: it pulses slowly (no shimmer), and the content crossfades into it. **[test]**
-    `crates/flottille-ui/tests/skeletons.rs`.
+    the kit's `tests/skeletons.rs`.
 12. **The composer's toolbar**: Send is its only primary; a control that applies only in some
     states (Compact) stays in its place, disabled with its reason as tooltip, and a chip that
     exists only in some states (`Resume at …`) goes at the end of the row, after the fixed
@@ -269,7 +283,7 @@ The components that hold them:
 | `fuzzy::find(query, title, context)` | a search's matching (the window's quick switcher): each word typed in the title, else as a whole in the context, ignoring case, accents and ligatures; a score and the marks, `Match::pieces(title)` for a `ListRow` |
 | `space::{XS, SM, MD, LG, XL, XXL, XXXL}`, `COLUMN`, `DIALOG`, `DIALOG_WIDE` | rule 9 |
 
-`cargo run -p flottille-ui --example components` shows them on one page (`--dialog`, `--confirm`,
+`cargo run --example components`, in the kit, shows them on one page (`--dialog`, `--confirm`,
 `--drawer`, `--menu` open one of them), for a capture in a headless compositor.
 
 ## Pitfalls
@@ -284,8 +298,8 @@ The components that hold them:
 - An `absolute` layer with buttons lets clicks through to what is below: `.occlude()`.
 - GPUI Fast draws every `deferred` layer in one list sorted by priority, a layer opened from inside
   another included: a list nested in a dialog with a lower priority is drawn under the dialog. The
-  window's priorities live in `flottille_ui::layer` (dialog, list, toast); a new floating layer
-  takes one there, never a number of its own.
+  window's priorities live in `gpui_design_system::layer` (dialog, list, toast); a new floating
+  layer takes one there (a pull request in the kit), never a number of its own.
 - A path cut by its frame is copied whole by a "Copy the path" icon button beside it (the edit
   card and the file steps), with a `Toast::success`: the click is the button's own
   (`cx.stop_propagation()`), it neither opens the card nor folds the steps. GPUI wraps a long
