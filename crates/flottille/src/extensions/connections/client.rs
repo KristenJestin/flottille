@@ -593,6 +593,11 @@ pub async fn stopped<T>(daemon: &Arc<Daemon>, name: &str, then: impl FnOnce() ->
     done
 }
 
+/// Whether the connection's server is held: a call, a review or `stopped` has its turn.
+pub fn held(daemon: &Daemon, name: &str) -> bool {
+    server_of(daemon, name).turn.try_lock().is_err()
+}
+
 /// `stopped` on the server itself: whether one ran, and what `then` gave.
 async fn holding<T>(server: &Server, then: impl FnOnce() -> T) -> (bool, T) {
     let mut turn = server.turn.lock().await;
@@ -824,7 +829,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn accept_holds_the_server_until_the_pin_is_written() {
+    async fn stopped_holds_the_server_while_then_runs() {
         let server = Server::default();
         let (_, held) = holding(&server, || server.turn.try_lock().is_err()).await;
         assert!(

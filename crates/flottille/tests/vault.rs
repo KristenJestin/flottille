@@ -536,6 +536,43 @@ fn removing_an_entry_in_use_names_its_feature_and_is_refused() {
 }
 
 #[test]
+fn an_unreadable_project_file_refuses_removing_its_worklog_entry() {
+    let user = User::with_fake_agent();
+    project(&user, "app");
+    worklog_names(&user, "jira-time");
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": SECRET, "for": "worklog:app"}),
+    )
+    .unwrap();
+    std::fs::write(user.project_file("app"), "[tracker\nkind = \n").unwrap();
+
+    // Whether the project still names it cannot be told: the removal is asked, not done.
+    let (_, refused) = user
+        .call("vault.remove", json!({"name": "jira-time"}))
+        .unwrap_err();
+    assert!(refused.contains("cannot be told"), "{refused}");
+    assert!(refused.contains("confirm"), "{refused}");
+    assert!(!refused.contains(SECRET), "{refused}");
+    assert_eq!(listed_names(&user), ["jira-time"], "kept whole");
+    // Nor is the project said to be missing when an entry is bound to its worklog.
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "other-time", "secret": SECRET, "for": "worklog:app"}),
+        )
+        .unwrap_err();
+    assert!(!refused.contains("no project"), "{refused}");
+    assert!(refused.contains("cannot be read"), "{refused}");
+    user.call(
+        "vault.remove",
+        json!({"name": "jira-time", "confirmed": true}),
+    )
+    .unwrap();
+    assert!(listed_names(&user).is_empty());
+}
+
+#[test]
 fn an_unbound_entry_works_as_before() {
     let user = User::with_fake_agent();
     project(&user, "app");

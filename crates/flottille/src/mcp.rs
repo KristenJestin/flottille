@@ -2271,13 +2271,17 @@ async fn played_in(
                             // refuses was refused above.
                             // Its own workspace is removed only with the user's word, and so is
                             // a session written to for the first time; so are a service stopped
-                            // and a pull request approved or blocked, by `forge` or by a line.
+                            // and a pull request approved or blocked, by `forge` or by a line,
+                            // and the worklog's token sent to another site or entry.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
                                 && !gate::asks_end(&ask)
                                 && !crate::services::stops(tool, &args)
-                                && !gate::asks_review(&ask) =>
+                                && !gate::asks_review(&ask)
+                                && !crate::actions::sends_a_worklog_token(
+                                    daemon, grant, tool, &args,
+                                ) =>
                             {
                                 verdict = Some("full");
                                 if let Some(refused) = stale(daemon, grant, tool) {

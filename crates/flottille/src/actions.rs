@@ -2440,23 +2440,11 @@ fn settings_says(project: &Project, call: &ProjectCall) -> Result<Vec<String>, O
                 .check()
                 .map_err(|error| Outcome::Refused(format!("refused: the tracker{error}")))?;
             says.push(format!("Set the tracker to {}", checked.said()));
-            // The binding of a worklog entry is to the project's worklog, not to a host: the user
-            // approves where its secret goes.
-            if let ProjectTracker::Jira {
-                site,
-                worklog_token: Some(entry),
-                ..
-            } = &checked
-            {
-                let sent_already = matches!(&project.tracker, Some(ProjectTracker::Jira {
-                    site: was, worklog_token: Some(had), ..
-                }) if was == site && had == entry);
-                if !sent_already {
-                    says.push(format!(
-                        "Log time with it: the secret of the vault entry `{entry}` will be sent \
-                         to {site}"
-                    ));
-                }
+            if let Some((entry, site)) = newly_sent(project, &checked) {
+                says.push(format!(
+                    "Log time with it: the secret of the vault entry `{entry}` will be sent to \
+                     {site}"
+                ));
             }
         }
         Some(None) => says.push("Remove the tracker".into()),
@@ -2472,6 +2460,45 @@ fn settings_says(project: &Project, call: &ProjectCall) -> Result<Vec<String>, O
         ));
     }
     Ok(says)
+}
+
+/// The worklog entry a tracker sends and where, when the project's tracker does not already
+/// send that entry there. The binding of a worklog entry is to the project's worklog, not to a
+/// host: the user approves where its secret goes.
+fn newly_sent<'a>(project: &Project, tracker: &'a ProjectTracker) -> Option<(&'a str, &'a str)> {
+    let ProjectTracker::Jira {
+        site,
+        worklog_token: Some(entry),
+        ..
+    } = tracker
+    else {
+        return None;
+    };
+    let sent_already = matches!(&project.tracker, Some(ProjectTracker::Jira {
+        site: was, worklog_token: Some(had), ..
+    }) if was == site && had == entry);
+    (!sent_already).then_some((entry.as_str(), site.as_str()))
+}
+
+/// Whether a change of the settings would send the worklog's token to another site, or name
+/// another entry for it: only the user allows it, in every mode, Full included, so that an agent
+/// never sends the user's token to a host it chose. A call that cannot be read is refused before.
+pub fn sends_a_worklog_token(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> bool {
+    if family(tool, args) != Some("settings") {
+        return false;
+    }
+    let Ok(ProjectCall {
+        tracker: Some(Some(mut tracker)),
+        ..
+    }) = arguments::<ProjectCall>(tool, args.clone())
+    else {
+        return false;
+    };
+    if tracker.check().is_err() {
+        return false;
+    }
+    // A project that cannot be read cannot say where the token goes already.
+    own(daemon, grant).map_or(true, |project| newly_sent(&project, &tracker).is_some())
 }
 
 /// Where a skill is: its path, or Flottille's data folder for a text.
