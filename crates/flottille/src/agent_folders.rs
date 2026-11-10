@@ -125,6 +125,9 @@ pub struct Snapshot {
     whole: BTreeSet<PathBuf>,
     /// The content of each file, when it is not too large to keep.
     contents: BTreeMap<PathBuf, Vec<u8>>,
+    /// The repositories whose folder is outside the place, reached through a link or not: their
+    /// agent folders are not looked at, and the result says so.
+    unreached: Vec<PathBuf>,
 }
 
 /// What `Snapshot::restore` found the run changed, relative to the place.
@@ -138,6 +141,9 @@ pub struct Restored {
     pub kept: Option<PathBuf>,
     /// The place has more entries than are looked at: what is past them was not checked.
     pub unchecked: bool,
+    /// The repositories of the place whose folder is outside it (reached through a link): their
+    /// agent folders were not checked.
+    pub unreached: Vec<String>,
 }
 
 impl Snapshot {
@@ -166,12 +172,16 @@ impl Snapshot {
         let mut contents = BTreeMap::new();
         let skipped: Vec<&Path> = inside.iter().map(|(at, _)| at.as_path()).collect();
         let mut own_tops = vec![PathBuf::new()];
+        let mut unreached = Vec::new();
         for top in tops {
-            if let Ok(top) = real(top).strip_prefix(&root)
-                && !own_tops.iter().any(|known| known == top)
-                && !skipped.iter().any(|inner| top.starts_with(inner))
+            let Ok(relative) = real(top).strip_prefix(&root).map(Path::to_owned) else {
+                unreached.push(top.to_owned());
+                continue;
+            };
+            if !own_tops.contains(&relative)
+                && !skipped.iter().any(|inner| relative.starts_with(inner))
             {
-                own_tops.push(top.to_owned());
+                own_tops.push(relative);
             }
         }
         let walked = walk(
@@ -201,6 +211,7 @@ impl Snapshot {
                     .map(|(path, content)| (at.join(path), content.clone())),
             );
             complete &= snapshot.complete;
+            unreached.extend(snapshot.unreached.iter().cloned());
         }
         Snapshot {
             root,
@@ -211,6 +222,7 @@ impl Snapshot {
             tops,
             whole,
             contents,
+            unreached,
         }
     }
 
@@ -230,6 +242,11 @@ impl Snapshot {
         let (after, complete) = (walked.entries, walked.complete);
         let mut restored = Restored {
             unchecked: !self.complete || !complete,
+            unreached: self
+                .unreached
+                .iter()
+                .map(|top| top.display().to_string())
+                .collect(),
             ..Restored::default()
         };
         let Ok(top) = open_root(&self.root) else {
@@ -703,6 +720,19 @@ pub fn said(restored: &Restored) -> Option<String> {
             entries_max()
         ));
     }
+    if !restored.unreached.is_empty() {
+        text.push_str(&format!(
+            "{}the agent folders of {} were not checked: a repository of this place whose folder \
+             is outside the place (reached through a link) is not looked at, a change there is \
+             neither seen nor put back, tell the user",
+            if text.is_empty() {
+                "\nflottille: refused: "
+            } else {
+                "; "
+            },
+            restored.unreached.join(", ")
+        ));
+    }
     if text.is_empty() {
         return None;
     }
@@ -1174,6 +1204,38 @@ mod tests {
         assert_eq!(restored.put_back.len(), 1, "{restored:?}");
         assert_eq!(restored.left.len(), 1, "{restored:?}");
         assert!(said(&restored).unwrap().contains("could not put back"));
+    }
+
+    #[test]
+    fn a_repository_reached_through_a_link_or_outside_the_place_is_said_unchecked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let elsewhere = dir.path().join("elsewhere");
+        let outside = dir.path().join("outside");
+        made(&root.join("README.md"), "\n");
+        made(&elsewhere.join("README.md"), "\n");
+        made(&outside.join("README.md"), "\n");
+        std::os::unix::fs::symlink(&elsewhere, root.join("linked")).unwrap();
+        let snapshot = Snapshot::take_around(
+            &root,
+            None,
+            &dir.path().join("kept"),
+            &[root.join("linked"), outside.clone()],
+            &[],
+        );
+
+        let restored = snapshot.restore("run");
+
+        assert_eq!(
+            restored.unreached,
+            [
+                root.join("linked").display().to_string(),
+                outside.display().to_string()
+            ]
+        );
+        let text = said(&restored).unwrap();
+        assert!(text.contains("outside the place"), "{text}");
+        assert!(text.contains(&outside.display().to_string()), "{text}");
     }
 
     /// Runs `swap` once, the first time the walk or the put-back reaches `at`.

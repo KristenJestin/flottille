@@ -36,6 +36,44 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
     }
 }
 
+/// What a `run.agent_folders_unchecked` tells the user: why the agent folders of a run's place
+/// were not all checked after it.
+fn unchecked(data: &Value) -> String {
+    let (run, folder) = (
+        data["run"].as_str().unwrap_or_default(),
+        data["folder"].as_str().unwrap_or_default(),
+    );
+    let mut said = Vec::new();
+    // An event of before `too_large` was one.
+    if data["too_large"].as_bool().unwrap_or(true) {
+        said.push(
+            "it is too large for Flottille to check all its agent folders (.claude, .claude.json, \
+             .codex, .mcp.json) after it: those right in the place and in its repositories were \
+             checked and put back, a change in one further down was neither seen nor put back"
+                .to_owned(),
+        );
+    }
+    let unreached: Vec<&str> = data["unreached"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !unreached.is_empty() {
+        said.push(format!(
+            "the agent folders of {}, a repository of the place whose folder is outside it \
+             (reached through a link), were not checked: a change there was neither seen nor put \
+             back",
+            unreached.join(", ")
+        ));
+    }
+    format!(
+        "Its run {run} in {folder} ended: {}. Look there before you open it with an agent's own \
+         command line.",
+        said.join("; ")
+    )
+}
+
 /// A root's report, its question to the user, or its failure, oldest first. With `after`, the
 /// first `limit` after that number; without, the last `limit` of all.
 fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
@@ -103,15 +141,7 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             "paused" => json!(paused),
             "report" => event.data["text"].clone(),
             "question" => event.data["question"].clone(),
-            "unchecked" => json!(format!(
-                "Its run {} in {} ended in a place too large for Flottille to check all its agent \
-                 folders (.claude, .claude.json, .codex, .mcp.json) after it: those right in the place and in \
-                 its repositories were checked and put back, a change in one further down was \
-                 neither seen nor put back. Look there before you open it with an agent's own \
-                 command line.",
-                event.data["run"].as_str().unwrap_or_default(),
-                event.data["folder"].as_str().unwrap_or_default()
-            )),
+            "unchecked" => json!(unchecked(&event.data)),
             "vault" => json!(format!(
                 "It asks you to set the vault entry {} of {}: {}",
                 event.data["name"].as_str().unwrap_or_default(),
@@ -139,4 +169,21 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
         entries = entries.split_off(entries.len().saturating_sub(limit));
     }
     Ok(json!({"entries": entries}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unchecked_entry_names_a_repository_outside_the_place() {
+        let text = unchecked(&json!({"run": "r1", "folder": "/work/app", "too_large": false,
+            "unreached": ["/work/app/linked"]}));
+        assert!(text.contains("/work/app/linked"), "{text}");
+        assert!(text.contains("outside it"), "{text}");
+        assert!(!text.contains("too large"), "{text}");
+        // One stored before it said why was a place too large.
+        let text = unchecked(&json!({"run": "r1", "folder": "/work/app"}));
+        assert!(text.contains("too large for Flottille to check"), "{text}");
+    }
 }

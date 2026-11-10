@@ -1116,10 +1116,11 @@ async fn follow(
     if let Some(guard) = guarded
         && let Some(restored) = guard.leave().await
     {
-        if restored.unchecked {
+        if restored.unchecked || !restored.unreached.is_empty() {
             let run = &going.run;
             let data = json!({"agent": run.agent, "project": run.project, "run": run.id,
-                "folder": run.folder});
+                "folder": run.folder, "too_large": restored.unchecked,
+                "unreached": restored.unreached});
             if let Err(error) = daemon.emit("run.agent_folders_unchecked", data) {
                 eprintln!("flottille daemon: run {}: {error}", run.id);
             }
