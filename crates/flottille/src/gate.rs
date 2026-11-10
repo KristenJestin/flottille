@@ -3352,7 +3352,7 @@ fn moves_agent_folder(call: &Call, layer: &[String]) -> Option<String> {
     // After `--`, every word is a path, `-weird` too.
     let paths = layer[at + 1..].iter().scan(false, |ended, word| {
         let option = !*ended && word.starts_with('-');
-        *ended |= word == "--";
+        *ended |= word == "--" || word == "--end-of-options";
         Some((word, option))
     });
     for word in paths.filter(|(_, option)| !option).map(|(word, _)| word) {
@@ -4501,11 +4501,17 @@ mod tests {
 
     #[test]
     fn a_path_after_double_dash_that_starts_with_a_dash_is_checked() {
-        // After `--`, every word is a path: `-weird` is a folder, not an option.
+        // After `--` (or `--end-of-options`, which git reads the same), every word is a path:
+        // `-weird` is a folder, not an option.
         let fixture = Fixture::workspace();
         made(&fixture.root.join("-weird/.claude/settings.json"));
         made(&fixture.root.join("-plain/a.rs"));
-        for line in ["git rm -r -- -weird", "git mv -- -weird notes"] {
+        for line in [
+            "git rm -r -- -weird",
+            "git mv -- -weird notes",
+            "git rm -r --end-of-options -weird",
+            "git mv --end-of-options -weird notes",
+        ] {
             assert!(
                 matches!(fixture.run(line), Verdict::Ask(_)),
                 "{line}: {:?}",
