@@ -161,7 +161,10 @@ pub(crate) async fn head_of(
     asked: &ForgeCall,
 ) -> Result<String, String> {
     let said = |outcome: Outcome| match outcome {
-        Outcome::Done(text) | Outcome::Refused(text) | Outcome::Failed(text) => text,
+        Outcome::Done(text)
+        | Outcome::Refused(text)
+        | Outcome::Invalid(text)
+        | Outcome::Failed(text) => text,
         Outcome::Held(text) => text,
     };
     let (_, forge) = resolved(daemon, place, asked).await.map_err(said)?;

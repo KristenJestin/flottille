@@ -2233,7 +2233,10 @@ async fn written_for_user(
     };
     match outcome {
         Outcome::Done(said) => Ok(said),
-        Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why) => Err(why),
+        Outcome::Refused(why)
+        | Outcome::Invalid(why)
+        | Outcome::Failed(why)
+        | Outcome::Held(why) => Err(why),
     }
 }
 

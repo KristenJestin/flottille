@@ -386,7 +386,12 @@ async fn performed(
     let review = gate::decides_a_review(tool, &request.arguments);
     if request.kind == Kind::Action || review {
         match actions::prepared(daemon, &grant, tool, &request.arguments).await {
-            Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
+            Err(
+                Outcome::Refused(why)
+                | Outcome::Invalid(why)
+                | Outcome::Failed(why)
+                | Outcome::Held(why),
+            ) => {
                 return not_executed(mcp::masked(&why, &grant.place));
             }
             Err(Outcome::Done(_)) => {}
@@ -423,7 +428,12 @@ async fn performed(
                     );
                 }
             },
-            Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
+            Err(
+                Outcome::Refused(why)
+                | Outcome::Invalid(why)
+                | Outcome::Failed(why)
+                | Outcome::Held(why),
+            ) => {
                 return not_executed(mcp::masked(&why, &grant.place));
             }
             Err(Outcome::Done(_)) => None,
@@ -469,7 +479,7 @@ async fn performed(
                 "Request #{number} ({tool}) was approved by the user, but nothing was done: {why}"
             ),
         ),
-        Outcome::Refused(why) | Outcome::Held(why) => not_executed(why),
+        Outcome::Refused(why) | Outcome::Invalid(why) | Outcome::Held(why) => not_executed(why),
     };
     (word, mcp::masked(&body, &grant.place))
 }

@@ -989,6 +989,9 @@ pub enum Outcome {
     Done(String),
     /// Refused, with the sentence that says why and what to do.
     Refused(String),
+    /// Refused for its input, as a refusal: the tool's own rule broke before anything ran, and
+    /// the agent may call again right. The event of the call says so (`input_refused`).
+    Invalid(String),
     /// It could not be done.
     Failed(String),
     /// The gate held it for an answer: the waiting text.
@@ -999,7 +1002,7 @@ impl Outcome {
     fn word(&self) -> &'static str {
         match self {
             Outcome::Done(_) => "ok",
-            Outcome::Refused(_) => "refused",
+            Outcome::Refused(_) | Outcome::Invalid(_) => "refused",
             Outcome::Failed(_) => "failed",
             Outcome::Held(_) => "held",
         }
@@ -1010,7 +1013,7 @@ impl Outcome {
 pub fn arguments<T: DeserializeOwned>(tool: &str, args: Value) -> Result<T, Outcome> {
     let args = if args.is_null() { json!({}) } else { args };
     serde_json::from_value(args).map_err(|error| {
-        Outcome::Refused(format!(
+        Outcome::Invalid(format!(
             "refused: the arguments do not fit {tool}: {error}; see its input schema"
         ))
     })
@@ -1065,7 +1068,7 @@ pub fn full_detail(tool: &str, detail: Option<&str>) -> Result<bool, Outcome> {
     match detail {
         None | Some("short") => Ok(false),
         Some("full") => Ok(true),
-        Some(other) => Err(Outcome::Refused(format!(
+        Some(other) => Err(Outcome::Invalid(format!(
             "refused: {tool} has no detail {other:?}: its details are short (the default) and full"
         ))),
     }
@@ -2363,7 +2366,10 @@ async fn played_in(
         None,
         cut.as_ref(),
     );
-    let error = matches!(outcome, Outcome::Refused(_) | Outcome::Failed(_));
+    let error = matches!(
+        outcome,
+        Outcome::Refused(_) | Outcome::Invalid(_) | Outcome::Failed(_)
+    );
     let (text, limit) = shown(outcome, &grant.place);
     // Notes left for the session that replaced this one are its own, not this late call's.
     let notes = if is_replaced(daemon, grant) {
@@ -2432,7 +2438,9 @@ fn log_call(
     });
     let (text, error) = match outcome {
         Outcome::Done(text) | Outcome::Held(text) => (text, None),
-        Outcome::Refused(text) | Outcome::Failed(text) => (text, Some(text)),
+        Outcome::Refused(text) | Outcome::Invalid(text) | Outcome::Failed(text) => {
+            (text, Some(text))
+        }
     };
     daemon.developer.write(
         "call",
@@ -2961,6 +2969,11 @@ fn record(
     if let Some(cut) = cut {
         data["cut"] = cut.to_json();
     }
+    // A call that broke the tool's own rule on its input: the window does not count it as a
+    // failure when the agent then calls again right.
+    if matches!(outcome, Outcome::Invalid(_)) {
+        data["input_refused"] = true.into();
+    }
     // A time that cannot be logged for want of the project's vault entry: the window offers its
     // Settings, where the user chooses one.
     if tool == "tickets"
@@ -2997,7 +3010,7 @@ fn shown(outcome: Outcome, place: &Place) -> (String, usize) {
     let (text, limit) = match outcome {
         Outcome::Done(text) => (masked(&text, place), RESULT_LIMIT),
         Outcome::Held(text) => (text, RESULT_LIMIT),
-        Outcome::Refused(text) => (text, ERROR_LIMIT),
+        Outcome::Refused(text) | Outcome::Invalid(text) => (text, ERROR_LIMIT),
         Outcome::Failed(text) => (
             masked(&format!("the call failed: {text}"), place),
             ERROR_LIMIT,
