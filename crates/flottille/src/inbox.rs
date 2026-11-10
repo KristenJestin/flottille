@@ -105,7 +105,7 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             "question" => event.data["question"].clone(),
             "unchecked" => json!(format!(
                 "Its run {} in {} ended in a place too large for Flottille to check all its agent \
-                 folders (.claude, .claude.json, .codex) after it: those right in the place and in \
+                 folders (.claude, .claude.json, .codex, .mcp.json) after it: those right in the place and in \
                  its repositories were checked and put back, a change in one further down was \
                  neither seen nor put back. Look there before you open it with an agent's own \
                  command line.",

@@ -740,7 +740,8 @@ line names, every program a wrapper or a runner runs included:
   what keeps a login from an agent. The masking of outputs (a token key's value in a diff of a
   staged login file, `docs/tools.md`) is not a boundary: a line that reshapes the bytes (`xxd`,
   `od`, `base64`) gets them past it;
-- **an agent's folder anywhere else** (`.claude`, `.claude.json`, `.codex` of a repository, a
+- **an agent's folder anywhere else** (`.claude`, `.claude.json`, `.codex`, and `.mcp.json`,
+  whose servers Claude's command line starts once the user agrees, of a repository, a
   workspace, a copy in `~/Downloads`): it is a project's configuration, not a login, and is read
   as any file, but a `.credentials.json` or `auth.json` below it is a login's place, and **a
   write there** is refused: its settings and hooks run programs the next time the user opens

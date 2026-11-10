@@ -1,5 +1,5 @@
-//! The agent folders of a place (`.claude`, `.claude.json`, `.codex`, wherever they are in it) as
-//! they were before an agent's run, put back as they were after it. A line may write there
+//! The agent folders of a place (`.claude`, `.claude.json`, `.codex`, `.mcp.json`, wherever they
+//! are in it) as they were before an agent's run, put back as they were after it. A line may write there
 //! without naming a path in one (a patch applied, a branch checked out or merged, a stash popped,
 //! a folder copied, an archive unpacked): the gate, which refuses every write of such a folder it
 //! sees, cannot see those, so what the run changed there is undone once it ends and the run's
@@ -844,6 +844,30 @@ mod tests {
         );
         assert!(restored.left.is_empty());
         assert_eq!(snapshot.restore("again"), Restored::default());
+    }
+
+    #[test]
+    fn a_repository_s_mcp_json_is_put_back_as_an_agent_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        made(&root.join(".mcp.json"), "{\"mcpServers\": {}}\n");
+        let snapshot = Snapshot::take(&root, None, &dir.path().join("kept"));
+
+        made(
+            &root.join(".mcp.json"),
+            "{\"mcpServers\": {\"x\": {\"command\": \"true\"}}}\n",
+        );
+        made(&root.join("app/.mcp.json"), "{\"mcpServers\": {}}\n");
+        let restored = snapshot.restore("run");
+
+        assert_eq!(
+            std::fs::read_to_string(root.join(".mcp.json")).unwrap(),
+            "{\"mcpServers\": {}}\n"
+        );
+        assert!(!root.join("app/.mcp.json").exists());
+        let mut put_back = restored.put_back.clone();
+        put_back.sort();
+        assert_eq!(put_back, [".mcp.json", "app/.mcp.json"]);
     }
 
     #[test]

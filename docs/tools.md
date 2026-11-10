@@ -1611,8 +1611,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
      included: a path through `/proc/<pid>/fd` or `map_files` (`/proc/self/fd/7`,
      `/proc/<pid>/task/<tid>/fd`, `/dev/fd/3`), since one of them may be a login: `refused: X goes
      through /proc/<pid>/fd, a process's open files: …`;
-   - a write in an agent's folder that is not the home's (`.claude`, `.claude.json`, `.codex` of
-     a repository or anywhere else): by `fs_write` or `fs_edit`, as a path a line that does not
+   - a write in an agent's folder that is not the home's (`.claude`, `.claude.json`, `.codex`,
+     `.mcp.json` of a repository or anywhere else): by `fs_write` or `fs_edit`, as a path a line that does not
      only read names (a line that writes only the place's files, `git add`, `git rm`,
      `git diff --output`, included), or as the folder such a line runs in. Its settings and hooks
      run programs the next time the user opens the repository with the agent's own command line,

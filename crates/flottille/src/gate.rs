@@ -154,8 +154,9 @@ const SENSITIVE: [&str; 15] = [
     ".local/share/opencode",
 ];
 /// The agents' own folders. The home's hold their logins and the user's own agent settings; one
-/// anywhere else is a repository's configuration, which an agent reads but never writes.
-pub(crate) const AGENT_FOLDERS: [&str; 3] = [".claude", ".claude.json", ".codex"];
+/// anywhere else is a repository's configuration, which an agent reads but never writes:
+/// `.mcp.json` names the programs Claude's command line starts there, once the user agrees.
+pub(crate) const AGENT_FOLDERS: [&str; 4] = [".claude", ".claude.json", ".codex", ".mcp.json"];
 /// A login moved into an agent's folder outside the home.
 pub(crate) const AGENT_LOGINS: [&str; 2] = [".credentials.json", "auth.json"];
 /// Sensitive from the top of the file system only.
@@ -5317,6 +5318,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn writing_a_repository_s_mcp_json_is_refused_as_an_agent_folder() {
+        // Claude's command line starts the servers a repository's `.mcp.json` names, once the
+        // user agrees, outside the gate.
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join("servers.json"));
+        for verdict in [
+            fixture.file("fs_write", ".mcp.json"),
+            fixture.file("fs_write", "app/.MCP.json"),
+            fixture.run("cp servers.json .mcp.json"),
+        ] {
+            assert!(
+                matches!(&verdict, Verdict::Deny(why)
+                    if why.contains("hooks") && why.contains("ask the user")),
+                "{verdict:?}"
+            );
+        }
+        made(&fixture.root.join(".mcp.json"));
+        assert!(
+            !matches!(fixture.file("fs_read", ".mcp.json"), Verdict::Deny(_)),
+            "a repository's .mcp.json is read as any file"
+        );
     }
 
     #[test]
