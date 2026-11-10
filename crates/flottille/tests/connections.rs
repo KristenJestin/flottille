@@ -1474,3 +1474,77 @@ fn the_tools_delivery_names_a_connection_added_or_gone() {
     .unwrap();
     prompt_after("- conn_almanac: gone");
 }
+
+// ── What a server cannot do to the daemon ─────────────────────────────────────────────────────
+
+/// The fake server of `name` on Streamable HTTP over loopback: the process and its port.
+fn http_server(user: &User, name: &str) -> (std::process::Child, String) {
+    let port_file = user.path(&format!("{name}-port"));
+    let server = std::process::Command::new(fake_mcp())
+        .args([
+            "--script",
+            script_file(user, name).to_str().unwrap(),
+            "--log",
+            log_file(user, name).to_str().unwrap(),
+            "--http",
+            port_file.to_str().unwrap(),
+        ])
+        .spawn()
+        .unwrap();
+    eventually("the server listens", || {
+        port_file.exists() && !std::fs::read_to_string(&port_file).unwrap().is_empty()
+    });
+    (server, std::fs::read_to_string(&port_file).unwrap())
+}
+
+#[test]
+fn a_connection_never_goes_through_a_proxy() {
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    proxy.set_nonblocking(true).unwrap();
+    let at = format!("http://{}", proxy.local_addr().unwrap());
+    let mut user = user();
+    for variable in [
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+    ] {
+        user = user.with_env(variable, &at);
+    }
+    project(&user, "app");
+    write_script(&user, "jotter", &almanac());
+    let (mut server, port) = http_server(&user, "jotter");
+    user.call("vault.set", json!({"name": "jotter-key", "secret": SECRET}))
+        .unwrap();
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "jotter", "about": "A notes server.",
+        "url": format!("http://127.0.0.1:{port}/mcp"),
+        "headers": {"X-Jotter-Key": {"vault": "jotter-key"}}}),
+    )
+    .unwrap();
+    let review = user.call_within(
+        "connection.review",
+        json!({"name": "jotter"}),
+        Duration::from_secs(40),
+    );
+    let reached = proxy.accept();
+    let _ = server.kill();
+    let _ = server.wait();
+    assert!(
+        matches!(&reached, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the proxy was reached: {reached:?}"
+    );
+    let review = review.unwrap();
+    assert_eq!(review["actions"].as_array().unwrap().len(), 3, "{review}");
+    let requests = logged(&user, "jotter", "http");
+    assert!(
+        requests
+            .iter()
+            .any(|r| r["headers"]["x-jotter-key"] == SECRET),
+        "{requests:?}"
+    );
+}

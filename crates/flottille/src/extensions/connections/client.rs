@@ -348,8 +348,9 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
     })
 }
 
-/// The HTTP client of a URL connection: no redirect followed, the system's certificates for
-/// `https://`. A plain `http://` URL, on this machine alone, is given a TLS client that trusts
+/// The HTTP client of a URL connection: no proxy (a proxy variable of the daemon's environment
+/// would carry the vault's headers to another host), no redirect followed, the system's
+/// certificates for `https://`. A plain `http://` URL, on this machine alone, is given a TLS client that trusts
 /// nothing, which it never uses: reqwest builds none of its own.
 fn http_client(url: &str) -> Result<reqwest::Client, String> {
     use tokio_rustls::rustls;
@@ -364,6 +365,7 @@ fn http_client(url: &str) -> Result<reqwest::Client, String> {
         .with_no_client_auth(),
     };
     reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .tls_backend_preconfigured(tls)
         .build()
