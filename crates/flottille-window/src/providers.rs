@@ -315,8 +315,7 @@ impl Providers {
                     provider.name.clone(),
                     provider.title.clone(),
                     None,
-                    self.model_said(&provider.name, None)
-                        .unwrap_or_else(|| "its default model".to_owned()),
+                    self.model_line(&provider.name, None),
                 ));
             }
             for model in listed {
