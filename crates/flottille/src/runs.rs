@@ -545,7 +545,10 @@ pub async fn run(
     // A line the gate let through at once only reads, or writes the files it names; a task, or
     // a line of the same words, may run anything.
     let guarded = match approved || run.name.is_some() || a_task(daemon, place, &words) {
-        true => Some(guard(daemon, place, &run).await),
+        true => match guard(daemon, place, &run).await {
+            Ok(guard) => Some(guard),
+            Err(why) => return Outcome::Refused(format!("refused: {why}")),
+        },
         false => None,
     };
     if let Err(why) = start(
@@ -934,8 +937,9 @@ fn start(
 }
 
 /// The agent folders of an agent's place before one of its runs: the gate refuses every write
-/// there it sees, and a line may write there without naming one (`agent_folders`).
-async fn guard(daemon: &Arc<Daemon>, place: &Place, run: &Run) -> Guard {
+/// there it sees, and a line may write there without naming one (`agent_folders`). Why the run
+/// is refused when they could not be noted.
+async fn guard(daemon: &Arc<Daemon>, place: &Place, run: &Run) -> Result<Guard, String> {
     let kept = daemon.paths.state.join("agent-folders");
     let tops: Vec<std::path::PathBuf> = place
         .repositories
@@ -947,12 +951,12 @@ async fn guard(daemon: &Arc<Daemon>, place: &Place, run: &Run) -> Guard {
         .runs
         .guards
         .enter(&place.root, &tops, place.home.as_deref(), &kept, &run.id)
-        .await;
+        .await?;
     let (daemon, about) = (daemon.clone(), guarded_run(run));
     guard.tell(Box::new(move |restored| {
         tell_put_back(&daemon, &about, &restored)
     }));
-    guard
+    Ok(guard)
 }
 
 /// What the events of a guarded run's put-back say of it.
@@ -1572,19 +1576,21 @@ pub async fn restart_by_user(
             .is_some_and(|going| going.notify.load(Ordering::SeqCst)),
     };
     let guarded = match owner {
-        Some(_) => Some(guard(daemon, &place, &run).await),
-        None => None,
+        Some(_) => guard(daemon, &place, &run).await.map(Some),
+        None => Ok(None),
     };
-    if let Err(why) = start(
-        daemon,
-        run,
-        words,
-        env,
-        secret_values,
-        phase,
-        readying,
-        guarded,
-    ) {
+    if let Err(why) = guarded.and_then(|guarded| {
+        start(
+            daemon,
+            run,
+            words,
+            env,
+            secret_values,
+            phase,
+            readying,
+            guarded,
+        )
+    }) {
         // The stop was the user's and its end was not told: the agent hears of both.
         if stopped && let Some(agent) = &owner {
             let body = format!(

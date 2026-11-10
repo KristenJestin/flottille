@@ -783,7 +783,11 @@ line names, every program a wrapper or a runner runs included:
   always looked at whole; the rest of a place of more than 500,000 entries is looked at up to
   that bound, and the result says its agent folders could not all be checked, as does an entry
   of the user's inbox (`run.agent_folders_unchecked`); so does a repository of the place whose
-  folder is outside it (reached through a link), whose agent folders are not looked at, and a snapshot that could not be taken. A run waits for
+  folder is outside it (reached through a link), whose agent folders are not looked at. A run
+  whose place's agent folders could not be noted is refused, with a sentence: nothing it wrote
+  there would be put back. Past the bound on the contents kept (64 MiB), the settings files
+  (`settings.json`, `settings.local.json`, `config.toml`, `.mcp.json`, `.claude.json`) are kept
+  first, then the smallest. A run waits for
   the snapshot of its place, and for a put-back going on there, never for another place's. What this does not cover: a process that outlives its run (one that
   left the run's session, `setsid`), a long `serve` run until it ends, and a run going on when
   the daemon stops or crashes, whose place is not put back: a marker of each place guarded
