@@ -1,6 +1,6 @@
 [package]
 name = "flottille-ui"
-description = "Flottille's shared window components: tokens, states, rows, cards, motion"
+description = "Shared window components: tokens, rows, cards, menus, motion"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

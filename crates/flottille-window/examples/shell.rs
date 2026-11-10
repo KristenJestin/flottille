@@ -27,9 +27,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use flottille_core::paths::Paths;
-use flottille_ui::Icons;
 use flottille_window::Shell;
 use flottille_window::composer::Menu;
+use flottille_window::glyphs::Assets;
 use flottille_window::shell::Selection;
 use gpui_kit::{AppContext as _, Bounds, Focusable as _, WindowBounds, WindowOptions, px, size};
 
@@ -123,8 +123,8 @@ fn main() {
     }
     let paths = Paths::from_env().expect("the XDG folders");
     let socket = paths.socket();
-    gpui_kit::application().with_assets(Icons).run(move |cx| {
-        flottille_ui::init(cx);
+    gpui_kit::application().with_assets(Assets).run(move |cx| {
+        flottille_window::init(cx);
         let bounds = Bounds::centered(None, size(px(dimensions.0), px(dimensions.1)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Maximized(bounds)),

@@ -2,17 +2,17 @@
 //! state change on a shared model updates every component reading it", "with nothing running or
 //! waiting, no frame is requested after the animations end".
 
-mod common;
+mod kit_common;
 
 use std::time::Duration;
 
-use common::{Desktop, advance, count_redraws, init, pending_frames};
-use flottille_ui::state::{icon_id, pill_id};
-use flottille_ui::{AgentState, Pill, StateIcon, Status};
+use kit_common::{Desktop, advance, count_redraws, init, pending_frames};
+
+use flottille_window::state::{AgentState, Pill, StateIcon, Status, icon_id, pill_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled, TestAppContext,
-    VisualTestContext, Window, div,
+    VisualTestContext, Window, div, px,
 };
 
 /// A board of components all reading the same models.
@@ -141,4 +141,27 @@ fn with_nothing_running_or_waiting_no_frame_is_requested_after_the_animations_en
         "the pill is redrawn at rest"
     );
     assert_eq!(pending_frames(cx), 0, "a frame is requested at rest");
+}
+
+#[gpui_kit::test]
+fn with_reduced_motion_a_state_change_is_there_at_full_size_at_once(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let status = cx.new(|_| Status::new(AgentState::Running));
+    let (board, cx) = board(std::slice::from_ref(&status), 1, cx);
+    let pill = board.read_with(cx, |b, _| b.pills[0].clone());
+
+    let pill_redraws = count_redraws(&pill, cx);
+    cx.update(|_, cx| status.update(cx, |s, cx| s.set(AgentState::Completed, cx)));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.render_frame(cx));
+    let full = cx.update(|w, _| w.find(pill_id(AgentState::Completed)).bounds());
+    assert!(
+        full.size.height >= px(17.),
+        "the pill is at full size: {full:?}"
+    );
+    assert_eq!(pending_frames(cx), 0);
+    let after_change = pill_redraws.get();
+    advance(cx, Duration::from_secs(1));
+    assert_eq!(pill_redraws.get(), after_change);
 }

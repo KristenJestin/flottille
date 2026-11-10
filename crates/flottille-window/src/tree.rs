@@ -3,16 +3,17 @@
 //! request). Every row is its own view, so one session changing redraws its row and nothing else;
 //! a folded project, and the "Ended" group, show the strongest mark of what they hold.
 
+use crate::glyphs;
+use crate::state::{AgentState, StateIcon, Status};
 use std::collections::HashSet;
 use std::f32::consts::FRAC_PI_2;
 
 use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, PANEL};
-use flottille_ui::rows::{TWO_LINES, TreeLevel};
+use flottille_ui::rows::TWO_LINES;
 use flottille_ui::{
-    AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, Tie, TreeRow,
-    fade, hoverable, meta, palette, presence, presence_of, section_label, space, tipped,
-    tree_children, tree_tie,
+    Button, Fold, Icon, Item, Listing, Menu, Modal, Tie, TreeRow, fade, hoverable, meta, palette,
+    presence, presence_of, section_label, space, tipped, tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -26,6 +27,37 @@ use crate::model::{Place, ago};
 use crate::session::end_sentence;
 use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell};
+
+/// The levels of Flottille's left tree: what a row stands for, drawn with the parts of the tree
+/// the kit has: a project is a first-level row, the main folder and a workspace a row with a
+/// folder or a branch before it, a session a plain row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeLevel {
+    Project,
+    /// The project's own folder, `main`.
+    Main,
+    Workspace,
+    Session,
+}
+
+impl TreeLevel {
+    /// The row of this level.
+    pub fn row(
+        self,
+        id: impl Into<ElementId>,
+        title: impl Into<SharedString>,
+        cx: &App,
+    ) -> TreeRow {
+        let row = TreeRow::new(id, title);
+        let p = palette(cx);
+        match self {
+            Self::Project => row.top(),
+            Self::Main => row.leading(flottille_ui::icon(Icon::Folder).text_color(p.faint)),
+            Self::Workspace => row.leading(flottille_ui::icon(Icon::Branch).text_color(p.faint)),
+            Self::Session => row,
+        }
+    }
+}
 
 /// The element id of a project's row.
 pub fn project_id(name: &str) -> ElementId {
@@ -604,27 +636,24 @@ impl Render for ProjectNode {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shell = self.shell.clone();
         let name = self.name.clone();
-        let row = TreeRow::new(
-            project_id(&self.name),
-            TreeLevel::Project,
-            self.name.clone(),
-        )
-        .expanded(self.open)
-        .trailing(trailing(
-            project_commands_id(&self.name),
-            self.commands,
-            self.mark.icon(&format!("project-{}", self.name)),
-            cx,
-        ))
-        .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
-        .on_click(cx.listener(move |_, _, window, cx| {
-            let project = name.clone();
-            shell
-                .update(cx, |shell, cx| {
-                    shell.open(Selection::Project(project), window, cx)
-                })
-                .ok();
-        }));
+        let row = TreeLevel::Project
+            .row(project_id(&self.name), self.name.clone(), cx)
+            .expanded(self.open)
+            .trailing(trailing(
+                project_commands_id(&self.name),
+                self.commands,
+                self.mark.icon(&format!("project-{}", self.name)),
+                cx,
+            ))
+            .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
+            .on_click(cx.listener(move |_, _, window, cx| {
+                let project = name.clone();
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.open(Selection::Project(project), window, cx)
+                    })
+                    .ok();
+            }));
         div()
             .flex()
             .flex_col()
@@ -757,7 +786,8 @@ impl EndedNode {
 impl Render for EndedNode {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let count = self.sessions.read(cx).rows.len();
-        let row = TreeRow::new(ended_id(), TreeLevel::Session, "Ended")
+        let row = TreeLevel::Session
+            .row(ended_id(), "Ended", cx)
             .unfolds_upward()
             .trailing(meta(count.to_string(), cx))
             .expanded(self.open)
@@ -1058,7 +1088,7 @@ impl SessionRow {
                         Actions::End => menu.entry(
                             session_end_id(&id),
                             "End session…",
-                            Some(Icon::Stop),
+                            Some(glyphs::STOP),
                             move |_, cx| {
                                 let id = id.clone();
                                 shell.update(cx, |shell, cx| shell.ask_end_of(&id, cx)).ok();
@@ -1226,7 +1256,8 @@ impl Render for SessionRow {
         self.renders += 1;
         let shell = self.shell.clone();
         let id = self.id.clone();
-        let mut row = TreeRow::new(session_id(&self.id), TreeLevel::Session, self.title.clone())
+        let mut row = TreeLevel::Session
+            .row(session_id(&self.id), self.title.clone(), cx)
             .selected(self.selected)
             .on_click(move |_, window, cx| {
                 let session = id.clone();

@@ -73,7 +73,7 @@ fn window<'a>(
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
-    cx.update(|cx| flottille_ui::init_with(env, cx));
+    cx.update(|cx| flottille_window::init_with(env, cx));
     let connect: Connect = Arc::new(user.connector());
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1280.), px(800.)));
@@ -600,7 +600,7 @@ fn mark_of(
     shell: &Entity<Shell>,
     id: &str,
     cx: &mut VisualTestContext,
-) -> Option<flottille_ui::AgentState> {
+) -> Option<flottille_window::state::AgentState> {
     shell.read_with(cx, |s, cx| {
         s.session(id).and_then(|row| row.read(cx).mark())
     })
@@ -618,14 +618,14 @@ fn a_folded_root_shows_that_a_led_session_runs(cx: &mut TestAppContext) {
     let (lead, led) = lead_and_led(&user);
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "the led session runs", |cx| {
-        mark_of(&shell, &led, cx) == Some(flottille_ui::AgentState::Running)
+        mark_of(&shell, &led, cx) == Some(flottille_window::state::AgentState::Running)
     });
     settle(cx);
 
     // Unfolded, each row shows its own: the led session spins, its pilot waits for it.
     assert_eq!(
         mark_of(&shell, &lead, cx),
-        Some(flottille_ui::AgentState::Waiting)
+        Some(flottille_window::state::AgentState::Waiting)
     );
 
     // Folded, the pilot's row shows what its hidden led session does.
@@ -634,7 +634,7 @@ fn a_folded_root_shows_that_a_led_session_runs(cx: &mut TestAppContext) {
     assert_eq!(listed(&shell, cx), std::slice::from_ref(&lead));
     assert_eq!(
         mark_of(&shell, &lead, cx),
-        Some(flottille_ui::AgentState::Running),
+        Some(flottille_window::state::AgentState::Running),
         "the folded root spins for the session it hides"
     );
 
@@ -643,10 +643,10 @@ fn a_folded_root_shows_that_a_led_session_runs(cx: &mut TestAppContext) {
     settle(cx);
     assert_eq!(
         mark_of(&shell, &lead, cx),
-        Some(flottille_ui::AgentState::Waiting)
+        Some(flottille_window::state::AgentState::Waiting)
     );
     assert_eq!(
         mark_of(&shell, &led, cx),
-        Some(flottille_ui::AgentState::Running)
+        Some(flottille_window::state::AgentState::Running)
     );
 }

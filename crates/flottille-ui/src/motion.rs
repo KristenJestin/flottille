@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-/// A block, row, card or agent appears.
+/// A block, row, card or item appears.
 pub const ENTER: Duration = Duration::from_millis(240);
 /// A level folds, a drawer slides, a state icon or pill swaps, a highlight moves.
 pub const PANEL: Duration = Duration::from_millis(280);

@@ -1,5 +1,5 @@
 //! `RadioChoices`: two to four kinds of a thing in a form, each with a line that says what it
-//! means (a skill is "A file of the project" or "A text Flottille keeps"). Sized to their text.
+//! means (a note is "A file of the folder" or "A text the app keeps"). Sized to their text.
 //! The chosen one's ring takes the accent and its dot scales in over [`PANEL`](crate::motion::PANEL);
 //! each choice fades its hover.
 

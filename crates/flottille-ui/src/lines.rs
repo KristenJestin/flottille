@@ -1,26 +1,24 @@
 //! The small parts the cards of a page are made of: a [`Chip`] under a title, a card's
 //! [`CardHead`], a [`LabelledLine`] (an icon, a label, a value), a block's [`caption`], a
-//! [`FlatRow`] (a session in its place), a [`StepRow`] of a setup and a card's [`FooterAction`].
+//! [`FlatRow`] (a row in its place), a card's [`FooterAction`].
 //!
 //! Each part that is clicked fades its hover; none draws a separator: the [`Card`](crate::Card)
 //! draws them between its blocks.
 
-use std::ops::Range;
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, HighlightStyle, InteractiveElement,
-    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement,
-    Styled, StyledText, TestSupportExt, Window, div, px,
+    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
+    TestSupportExt, Window, div, px,
 };
 
 use crate::color::mix;
 use crate::cut::tipped_when_cut;
 use crate::icons::{Icon, icon};
-use crate::interact::{hoverable, selectable, tint};
+use crate::interact::{hoverable, selectable};
 use crate::menu::Menu;
-use crate::motion::PANEL;
 use crate::theme::palette;
 use crate::typography::Type;
 
@@ -312,7 +310,7 @@ pub fn lines_block(lines: impl IntoIterator<Item = AnyElement>) -> impl IntoElem
         .children(lines)
 }
 
-/// The caption above a block of a card: `SESSIONS 1`, `SETUP STEP 2 OF 3`. Its label is the
+/// The caption above a block of a card: `ITEMS 1`, `SETUP STEP 2 OF 3`. Its label is the
 /// caption in words (`Setup · step 2 of 3`).
 pub fn caption(
     id: impl Into<ElementId>,
@@ -370,7 +368,7 @@ impl FlatRow {
         self
     }
 
-    /// Mono, faint, on the right: a time, the agents.
+    /// Mono, faint, on the right: a time, a count.
     pub fn meta(mut self, element: impl IntoElement) -> Self {
         self.meta = Some(element.into_any_element());
         self
@@ -451,7 +449,7 @@ impl RenderOnce for FlatRow {
             div()
                 .id(ElementId::Name(format!("{id}-actions").into()))
                 .flex_none()
-                // The menu's clicks are its own, not the row's (which opens the session).
+                // The menu's clicks are its own, not the row's (which opens the row).
                 .on_click(|_, _, cx| cx.stop_propagation())
                 .child(menu)
                 .test_support()
@@ -464,153 +462,7 @@ impl RenderOnce for FlatRow {
     }
 }
 
-/// How a step of a setup reads: the one running in the text ink, the ones done muted, the ones
-/// to do faint, a failed one in the failure colour.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StepTone {
-    Done,
-    Now,
-    Todo,
-    Failed,
-}
-
-/// One step of a setup: its mark, what it does (`Run` and `pnpm install`, mono) and its time.
-/// 30 px high at least. A step that can be opened fades its hover.
-#[derive(IntoElement)]
-pub struct StepRow {
-    id: ElementId,
-    mark: AnyElement,
-    verb: SharedString,
-    object: Option<SharedString>,
-    time: Option<SharedString>,
-    time_id: ElementId,
-    tone: StepTone,
-    on_click: Option<OnClick>,
-}
-
-impl StepRow {
-    /// The row `id`, its time `time_id`.
-    pub fn new(
-        id: impl Into<ElementId>,
-        mark: impl IntoElement,
-        verb: impl Into<SharedString>,
-        tone: StepTone,
-        time_id: impl Into<ElementId>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            mark: mark.into_any_element(),
-            verb: verb.into(),
-            object: None,
-            time: None,
-            time_id: time_id.into(),
-            tone,
-            on_click: None,
-        }
-    }
-
-    pub fn object(mut self, object: impl Into<SharedString>) -> Self {
-        self.object = Some(object.into());
-        self
-    }
-
-    pub fn time(mut self, time: impl Into<SharedString>) -> Self {
-        self.time = Some(time.into());
-        self
-    }
-
-    pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
-        self.on_click = Some(Rc::new(f));
-        self
-    }
-}
-
-impl RenderOnce for StepRow {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let p = palette(cx);
-        let ink = match self.tone {
-            StepTone::Done => p.mute,
-            StepTone::Now => p.text,
-            StepTone::Todo => p.faint,
-            StepTone::Failed => p.fail,
-        };
-        // Its ink moves when the step's state changes: to do, running, done, failed.
-        let ink = tint(self.id.clone(), ink, PANEL, window, cx);
-        let said = match &self.object {
-            Some(object) => format!("{} {object}", self.verb),
-            None => self.verb.to_string(),
-        };
-        let time = self.time.map(|time| {
-            div()
-                .id(self.time_id)
-                .aria_label(time.clone())
-                .flex_none()
-                .mono(11.)
-                .text_color(p.faint)
-                .child(time)
-                .test_support()
-        });
-        let clickable = self.on_click.is_some();
-        let id = self.id.clone();
-        let mut row = div()
-            .id(self.id)
-            .aria_label(SharedString::from(said))
-            .min_h(px(30.))
-            .px(px(14.))
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .ui_text()
-            .text_size(px(12.5))
-            .text_color(ink)
-            .child(
-                div()
-                    .size(px(16.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(self.mark),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_baseline()
-                    .gap(px(5.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(self.verb)
-                    .when_some(self.object, |d, object| {
-                        d.child(tipped_when_cut(
-                            div()
-                                .id(ElementId::Name(format!("{id}-object").into()))
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .mono(12.)
-                                .child(object.clone()),
-                            object,
-                            window,
-                            cx,
-                        ))
-                    }),
-            )
-            .children(time);
-        if let Some(on_click) = self.on_click {
-            row = row
-                .cursor_pointer()
-                .on_click(move |event, window, cx| on_click(event, window, cx));
-        }
-        hoverable(row, move |d, t| {
-            let t = if clickable { t } else { 0.0 };
-            d.bg(p.hover.opacity(t))
-        })
-    }
-}
-
-/// The last row of a card: "+ New session in main", faint until hovered. 40 px high.
+/// The last row of a card: "+ New item in main", faint until hovered. 40 px high.
 #[derive(IntoElement)]
 pub struct FooterAction {
     id: ElementId,
@@ -629,7 +481,7 @@ impl FooterAction {
         }
     }
 
-    /// A place still being prepared takes no session yet: the row stays, dimmed.
+    /// A place still being prepared takes no item yet: the row stays, dimmed.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
@@ -669,19 +521,4 @@ impl RenderOnce for FooterAction {
             d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
         })
     }
-}
-
-/// A message as it was typed, each command it used (`commands`, byte ranges of `/name`) drawn as
-/// an accent chip in its line: the accent's ink, medium, on the accent's faint fill. A chip is a
-/// run of the text, so that the line wraps as the words do.
-pub fn commanded_text(text: &str, commands: &[Range<usize>], cx: &App) -> StyledText {
-    let p = palette(cx);
-    let chip = HighlightStyle {
-        color: Some(p.acc),
-        background_color: Some(p.acc.opacity(0.14)),
-        font_weight: Some(FontWeight::MEDIUM),
-        ..Default::default()
-    };
-    StyledText::new(text.to_owned())
-        .with_highlights(commands.iter().map(|range| (range.clone(), chip)))
 }

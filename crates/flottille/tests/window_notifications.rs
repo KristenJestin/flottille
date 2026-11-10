@@ -12,13 +12,13 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Answer, Mcp, server_of};
-use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::conversation::{Block, STARTED_SESSION_KIND};
 use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
 use flottille_window::shell::{bell_line_id, bell_session_id};
+use flottille_window::state::AgentState;
 use flottille_window::tree::{Trailing, session_id, session_mark_id, session_unread_id};
 use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{Bounds, Entity, Pixels, TestAppContext, VisualTestContext, px, size};
@@ -159,7 +159,7 @@ fn window<'a>(
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
-    cx.update(|cx| flottille_ui::init_with(env, cx));
+    cx.update(|cx| flottille_window::init_with(env, cx));
     let connect: Connect = Arc::new(user.connector());
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1440.), px(800.)));

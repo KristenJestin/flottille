@@ -1,7 +1,7 @@
 //! The matching of a quick switcher: the words typed against a title and the words around it,
 //! with no regard for case or accents, and where in the title they were found.
 //!
-//! Every word typed must be found, in the title or in its context (the project a session is in).
+//! Every word typed must be found, in the title or in its context (the folder an item is in).
 //! A word is found as a piece of the title, best at the start of a word of it; failing that, as
 //! its letters in order, the closer together the better and never spread over more than twice
 //! its length. In the context a word is found only as a piece of it. It is a plain scorer: a row is shown if

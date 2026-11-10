@@ -5,15 +5,17 @@
 //! say the project's changed go quiet: the window never asks a forge or a tracker itself. A row unfolds when it
 //! comes, folds away when it goes (a filter, a round), and moves to its place.
 
+use crate::glyphs;
+use crate::state::{AgentState, StateIcon, Status};
 use std::collections::HashMap;
 use std::time::Duration;
 
 use flottille_ui::fuzzy;
 use flottille_ui::motion::PANEL;
 use flottille_ui::{
-    AgentState, Block, Button, Card, EmptyLine, Field, FlatRow, Icon, LINE_GAP, LabelledLine,
-    ListCard, ListRow, Listing, Modal, Section, Segmented, Select, SelectOption, StateIcon, Status,
-    Switch, Tabs, Type, changing, enter, fade, icon, palette, presence, presence_of, space, tipped,
+    Block, Button, Card, EmptyLine, Field, FlatRow, Icon, LINE_GAP, LabelledLine, ListCard,
+    ListRow, Listing, Modal, Section, Segmented, Select, SelectOption, Switch, Tabs, Type,
+    changing, enter, fade, icon, palette, presence, presence_of, space, tipped,
 };
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -900,8 +902,8 @@ impl ProjectItems {
         let p = palette(cx);
         let id = row.id();
         let plain = icon(match row.kind.as_str() {
-            "pull" => Icon::PullRequest,
-            _ => Icon::Ticket,
+            "pull" => glyphs::PULL_REQUEST,
+            _ => glyphs::TICKET,
         })
         .size(px(14.))
         .text_color(p.faint);
@@ -1145,7 +1147,7 @@ impl ProjectItems {
         if let Some(author) = &row.author {
             facts.push(fact(
                 "item-detail-author",
-                Icon::Agents,
+                glyphs::AGENTS,
                 "Author",
                 author.clone(),
             ));
@@ -1153,7 +1155,7 @@ impl ProjectItems {
         if !row.assignees.is_empty() {
             facts.push(fact(
                 "item-detail-assignees",
-                Icon::Agents,
+                glyphs::AGENTS,
                 "Assignees",
                 row.assignees.join(", "),
             ));
@@ -1537,12 +1539,12 @@ impl Render for ProjectItems {
                 .unwrap_or_default();
             let (glyph, text) = match tab {
                 Kind::Pulls => (
-                    Icon::PullRequest,
+                    glyphs::PULL_REQUEST,
                     "No forge is set for the project's repositories: set one in its Settings to \
                      list their pull requests.",
                 ),
                 Kind::Tickets => (
-                    Icon::Ticket,
+                    glyphs::TICKET,
                     "No tracker is set for the project: set one in its Settings to list its \
                      tickets.",
                 ),
@@ -1648,8 +1650,8 @@ impl Render for ProjectItems {
                 EmptyLine::new(
                     "project-items-empty",
                     match tab {
-                        Kind::Pulls => Icon::PullRequest,
-                        Kind::Tickets => Icon::Ticket,
+                        Kind::Pulls => glyphs::PULL_REQUEST,
+                        Kind::Tickets => glyphs::TICKET,
                     },
                     empty_said,
                 ),

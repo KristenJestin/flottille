@@ -2672,7 +2672,7 @@ fn appearance_json(appearance: flottille_ui::omarchy::Appearance) -> Value {
     use flottille_ui::theme::Shade;
     let theme = match appearance.source {
         Source::Omarchy => "omarchy",
-        Source::Flottille => "flottille",
+        Source::Own => "flottille",
     };
     let shade = match appearance.shade {
         Shade::Light => "light",
@@ -2687,7 +2687,7 @@ pub fn appearance_of(shown: &Value) -> Result<flottille_ui::omarchy::Appearance,
     use flottille_ui::theme::Shade;
     let source = match shown["theme"].as_str() {
         Some("omarchy") => Source::Omarchy,
-        Some("flottille") => Source::Flottille,
+        Some("flottille") => Source::Own,
         other => return Err(format!("an unknown theme: {other:?}")),
     };
     let shade = match shown["shade"].as_str() {

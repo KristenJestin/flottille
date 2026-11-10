@@ -106,7 +106,7 @@ pub fn quoted_title(title: &str) -> String {
     }
 }
 
-/// A sentence that quotes a session's title: `before`, the title, then `after`, on one line. The
+/// A sentence that quotes a title: `before`, the title, then `after`, on one line. The
 /// title takes what room the words leave, in the window's emphasis (medium, in the text's ink), cut
 /// with an ellipsis and said whole in its tooltip when cut; it never wraps the sentence. The
 /// element is `id`, labelled with the whole sentence; the title is `<id>-title`. Style the size and

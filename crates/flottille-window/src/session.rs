@@ -13,6 +13,8 @@
 //!
 //! The root agent has no name on screen: where a text names it, it is "the conversation".
 
+use crate::glyphs;
+use crate::state::{AgentState, Pill, StateIcon, Status};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
@@ -26,10 +28,10 @@ use flottille_ui::card::Block as CardBlock;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette,
-    Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter,
-    fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence, presence_of,
-    section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
+    Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette,
+    PulsingLabel, Side, Skeleton, Toast, Type, awaiting, changing, enter, fade, fold_frame,
+    follow_theme, hoverable, icon, palette, path_line, presence, presence_of, section_label,
+    selectable, space, text_region, tipped_when_cut, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -5105,7 +5107,7 @@ impl Render for Row {
                     .text_color(p.faint)
                     .aria_label(said_by)
                     .child(
-                        icon(if *sent { Icon::Send } else { Icon::Agents })
+                        icon(if *sent { Icon::Send } else { glyphs::AGENTS })
                             .size(px(12.))
                             .flex_none()
                             .text_color(p.faint),
@@ -7654,7 +7656,7 @@ impl Render for SessionRail {
                 };
                 fact_line(
                     format!("rail-line-pull-{name}"),
-                    Some(Icon::PullRequest),
+                    Some(glyphs::PULL_REQUEST),
                     key,
                     pull.label(),
                     pull_hover(row, cx),
@@ -7770,7 +7772,7 @@ impl Render for SessionRail {
             let row = hoverable(row, move |d, t| d.text_color(mix(p.mute, p.text, t)));
             fact_line(
                 "rail-line-ticket".to_owned(),
-                Some(Icon::Ticket),
+                Some(glyphs::TICKET),
                 "Ticket",
                 ticket.reference.clone(),
                 row,
@@ -8165,7 +8167,7 @@ fn agent_menu(
     menu.entry(
         "rail-agent-end",
         "End session…",
-        Some(Icon::Stop),
+        Some(glyphs::STOP),
         move |_, cx| {
             ender.update(cx, |page, cx| page.ask_end(cx)).ok();
         },
@@ -8259,7 +8261,7 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
     if let Some(link) = link_ticket {
         let (label, glyph) = match ticket_linked {
             true => ("Change the ticket…", Icon::Change),
-            false => ("Link a ticket…", Icon::Ticket),
+            false => ("Link a ticket…", glyphs::TICKET),
         };
         menu = menu.entry("workspace-link-ticket", label, Some(glyph), move |_, cx| {
             link(cx)
@@ -9563,7 +9565,7 @@ impl Render for Reply {
                             .when(swap > 0.0, |d| {
                                 d.child(
                                     div().absolute().inset_0().opacity(swap).child(
-                                        Button::round("reply-stop", Icon::Stop, STOP)
+                                        Button::round("reply-stop", glyphs::STOP, STOP)
                                             .disabled(self.interrupting)
                                             .on_click(
                                                 cx.listener(|this, _, _, cx| this.interrupt(cx)),

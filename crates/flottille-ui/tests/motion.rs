@@ -8,7 +8,7 @@ use std::time::Duration;
 use common::{Desktop, advance, count_redraws, init, pending_frames};
 use flottille_ui::motion::PANEL;
 use flottille_ui::theme::{palette, set_palette};
-use flottille_ui::{AgentState, Fold, Palette, Pill, Status};
+use flottille_ui::{Fold, Palette};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, ParentElement, Pixels, Render, Styled,
@@ -25,30 +25,19 @@ impl Render for Content {
 
 struct Page {
     fold: Entity<Fold>,
-    pill: Entity<Pill>,
 }
 
 impl Render for Page {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(self.fold.clone())
-            .child(self.pill.clone())
+        div().size_full().flex().flex_col().child(self.fold.clone())
     }
 }
 
-fn page<'a>(
-    status: &Entity<Status>,
-    cx: &'a mut TestAppContext,
-) -> (Entity<Page>, &'a mut VisualTestContext) {
-    let status = status.clone();
+fn page(cx: &mut TestAppContext) -> (Entity<Page>, &mut VisualTestContext) {
     cx.add_window_view(move |_, cx| {
         let content = cx.new(|_| Content);
         Page {
             fold: cx.new(|_| Fold::new("fold", content, true)),
-            pill: cx.new(|cx| Pill::new(status, cx)),
         }
     })
 }
@@ -63,8 +52,7 @@ fn fold_height(cx: &mut VisualTestContext) -> Pixels {
 #[gpui_kit::test]
 fn a_fold_animates_and_then_stops(cx: &mut TestAppContext) {
     init(cx, Desktop::new(false).env());
-    let status = cx.new(|_| Status::new(AgentState::Completed));
-    let (page, cx) = page(&status, cx);
+    let (page, cx) = page(cx);
     let fold = page.read_with(cx, |p, _| p.fold.clone());
     assert_eq!(fold_height(cx), px(120.));
     let redraws = count_redraws(&fold, cx);
@@ -100,9 +88,8 @@ fn a_fold_animates_and_then_stops(cx: &mut TestAppContext) {
 fn with_reduced_motion_values_jump_to_their_target(cx: &mut TestAppContext) {
     init(cx, Desktop::new(false).env());
     cx.update(|cx| cx.set_reduce_motion(true));
-    let status = cx.new(|_| Status::new(AgentState::Running));
-    let (page, cx) = page(&status, cx);
-    let (fold, pill) = page.read_with(cx, |p, _| (p.fold.clone(), p.pill.clone()));
+    let (page, cx) = page(cx);
+    let fold = page.read_with(cx, |p, _| p.fold.clone());
     assert_eq!(fold_height(cx), px(120.));
 
     // A fold: closed at once, no frame asked for.
@@ -110,24 +97,6 @@ fn with_reduced_motion_values_jump_to_their_target(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(fold_height(cx), px(0.));
     assert_eq!(pending_frames(cx), 0);
-
-    // A state change: the new pill is there at full size at once.
-    let pill_redraws = count_redraws(&pill, cx);
-    cx.update(|_, cx| status.update(cx, |s, cx| s.set(AgentState::Completed, cx)));
-    cx.run_until_parked();
-    cx.update(|window, cx| window.render_frame(cx));
-    let full = cx.update(|w, _| {
-        w.find(flottille_ui::state::pill_id(AgentState::Completed))
-            .bounds()
-    });
-    assert!(
-        full.size.height >= px(17.),
-        "the pill is at full size: {full:?}"
-    );
-    assert_eq!(pending_frames(cx), 0);
-    let after_change = pill_redraws.get();
-    advance(cx, Duration::from_secs(1));
-    assert_eq!(pill_redraws.get(), after_change);
 
     // A theme change: the palette is the new one at once, no cross-fade.
     let mut other = Palette::base();

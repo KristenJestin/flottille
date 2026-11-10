@@ -1,8 +1,8 @@
-//! Rows: [`TreeRow`] for the left tree (project › place › session) and [`ListRow`] for a session
-//! in a card, a sub-agent, a running agent, a result of a search.
+//! Rows: [`TreeRow`] for a tree of folding levels and [`ListRow`] for an item of a card or a
+//! result of a search.
 //!
-//! A row's state mark is a [`StateIcon`](crate::StateIcon) or [`Pill`](crate::Pill) view handed in
-//! by the screen, so a state change or a spinner tick redraws that mark and not the row.
+//! A row's status mark is a view handed in by the screen, so a change of the mark or a tick of
+//! its animation redraws that mark and not the row.
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -29,24 +29,16 @@ type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 type Decorate = Box<dyn FnOnce(Stateful<Div>) -> Stateful<Div> + 'static>;
 type OnEnter = Box<dyn Fn(&mut App) + 'static>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TreeLevel {
-    /// 32 px, weight 500, a chevron.
-    Project,
-    /// The project's own folder, `main`: a folder icon.
-    Main,
-    /// A workspace: a git-branch icon.
-    Workspace,
-    Session,
-}
-
+/// A row of a tree. The tree has no fixed depth: a row is placed under another with
+/// [`tree_children`], which indents it, and what a level is (a folder, a branch) is said by the
+/// row's [`leading`](Self::leading) mark.
 #[derive(IntoElement)]
 pub struct TreeRow {
     id: ElementId,
-    level: TreeLevel,
+    top: bool,
     title: SharedString,
     expanded: Option<bool>,
-    /// A chevron on a row that is no project's, which turns up as what it holds unfolds above it.
+    /// A chevron on a row that is no first-level row's, which turns up as what it holds unfolds above it.
     upward: bool,
     selected: bool,
     trailing: Option<AnyElement>,
@@ -62,16 +54,17 @@ pub struct TreeRow {
 /// The height of a tree row that holds a second line.
 pub const TWO_LINES: f32 = 40.;
 
-/// The element id of a project row's chevron, which folds and unfolds the level below.
+/// The element id of a row's chevron, which folds and unfolds the level below.
 pub fn toggle_id(row: impl Into<ElementId>) -> ElementId {
     ElementId::NamedChild(std::sync::Arc::new(row.into()), "toggle".into())
 }
 
 impl TreeRow {
-    pub fn new(id: impl Into<ElementId>, level: TreeLevel, title: impl Into<SharedString>) -> Self {
+    /// A row of the tree, 28 px high.
+    pub fn new(id: impl Into<ElementId>, title: impl Into<SharedString>) -> Self {
         Self {
             id: id.into(),
-            level,
+            top: false,
             title: title.into(),
             expanded: None,
             upward: false,
@@ -85,20 +78,26 @@ impl TreeRow {
         }
     }
 
+    /// A row of the first level: 32 px, weight 500, a chevron before its title.
+    pub fn top(mut self) -> Self {
+        self.top = true;
+        self
+    }
+
     /// A mark before the title: what kind of row it is, said in its own tooltip.
     pub fn leading(mut self, element: impl IntoElement) -> Self {
         self.leading = Some(element.into_any_element());
         self
     }
 
-    /// A faint line under the title (the place a session works in): the row takes two lines, and
+    /// A faint line under the title (the place an item works in): the row takes two lines, and
     /// its trailing mark and actions stay on the title's.
     pub fn second(mut self, element: impl IntoElement) -> Self {
         self.second = Some(element.into_any_element());
         self
     }
 
-    /// Whether the level below is open; a project row turns its chevron with it.
+    /// Whether the level below is open; a first-level row turns its chevron with it.
     pub fn expanded(mut self, expanded: bool) -> Self {
         self.expanded = Some(expanded);
         self
@@ -110,7 +109,7 @@ impl TreeRow {
         self
     }
 
-    /// The open session.
+    /// The open row.
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
@@ -146,9 +145,9 @@ impl RenderOnce for TreeRow {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let (state, now) = feel(&self.id, window, cx);
-        let project = self.level == TreeLevel::Project;
+        let top = self.top;
         let chosen = choose(&state, self.selected, window, cx);
-        let ink = if project {
+        let ink = if top {
             p.text
         } else {
             mix(mix(p.mute, p.text, now.hover), p.text, chosen)
@@ -164,8 +163,8 @@ impl RenderOnce for TreeRow {
             .w_full()
             .flex()
             .items_center()
-            .gap(px(if project { 8. } else { 7. }))
-            .h(px(match (project, self.second.is_some()) {
+            .gap(px(if top { 8. } else { 7. }))
+            .h(px(match (top, self.second.is_some()) {
                 (true, _) => 32.,
                 (false, false) => 28.,
                 (false, true) => TWO_LINES,
@@ -175,20 +174,20 @@ impl RenderOnce for TreeRow {
             .bg(background)
             .text_color(ink)
             .ui_text()
-            .text_size(px(if project { 13.5 } else { 13. }))
-            .when(project, |d| d.font_weight(FontWeight::MEDIUM))
+            .text_size(px(if top { 13.5 } else { 13. }))
+            .when(top, |d| d.font_weight(FontWeight::MEDIUM))
             .when(self.expanded.is_some(), |d| {
                 d.aria_expanded(self.expanded == Some(true))
             });
-        // A session's row turns a chevron when it folds a level of its own (`on_toggle`). It sits
-        // after the title, so that every session of a level starts its title at the same x, with
+        // A row turns a chevron when it folds a level of its own (`on_toggle`). It sits
+        // after the title, so that every row of a level starts its title at the same x, with
         // or without children under it.
         let folds = self.on_toggle.is_some();
         let mut fold = None;
-        if let Some(turn) = chevron_turn.filter(|_| project || self.upward || folds) {
+        if let Some(turn) = chevron_turn.filter(|_| top || self.upward || folds) {
             let angle = match self.upward {
                 false => -FRAC_PI_2 * turn,
-                // Folded (1) points right as a project's does; open (0) points up.
+                // Folded (1) points right as a first-level row's does; open (0) points up.
                 true => -PI + FRAC_PI_2 * turn,
             };
             let chevron = icon(Icon::Chevron)
@@ -212,20 +211,15 @@ impl RenderOnce for TreeRow {
                     .into_any_element(),
                 None => chevron.into_any_element(),
             };
-            match project || self.upward {
+            match top || self.upward {
                 true => row = row.child(chevron),
                 false => fold = Some(chevron),
             }
         }
-        match self.level {
-            TreeLevel::Main => row = row.child(icon(Icon::Folder).text_color(p.faint)),
-            TreeLevel::Workspace => row = row.child(icon(Icon::Branch).text_color(p.faint)),
-            TreeLevel::Project | TreeLevel::Session => {}
-        }
         if let Some(leading) = self.leading {
             row = row.child(leading);
         }
-        // A title that changes (a session its agent or the user named) fades to the new one.
+        // A title that changes (one the user or a program named) fades to the new one.
         let title_id = ElementId::Name(format!("{}-title", self.id).into());
         let opacity = changed(&title_id, &self.title, window, cx);
         let title = tipped_when_cut(
@@ -331,10 +325,10 @@ pub fn tree_children(children: impl IntoIterator<Item = AnyElement>, cx: &App) -
         .children(children)
 }
 
-/// Where a session's row sits among the sessions its pilot leads, so that a connector can tie it
+/// Where a row sits among the rows its lead leads, so that a connector can tie it
 /// to the row above: one entry of `through` for each ancestor under the first row of the tree,
 /// true while that ancestor has a sibling below it (its line goes on past this row), and whether
-/// this row is the last of its pilot's.
+/// this row is the last of its lead's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tie {
     pub through: Vec<bool>,
@@ -348,7 +342,7 @@ impl Tie {
     }
 }
 
-/// How far each level of led sessions is indented: `space::XL`, the step the window draws it with.
+/// How far each level of led rows is indented: `space::XL`, the step the window draws it with.
 const TIE_INDENT: f32 = 24.;
 /// Where the connector's first line runs: under the first letters of a row of the first level.
 const TIE_ROOT: f32 = 14.;
@@ -369,7 +363,7 @@ pub fn tie_turn_id(row: impl Into<ElementId>) -> ElementId {
     ElementId::NamedChild(std::sync::Arc::new(tie_id(row)), "turn".into())
 }
 
-/// The element id of the line that goes on below a row's turn, to the next row of its pilot's.
+/// The element id of the line that goes on below a row's turn, to the next row of its lead's.
 pub fn tie_below_id(row: impl Into<ElementId>) -> ElementId {
     ElementId::NamedChild(std::sync::Arc::new(tie_id(row)), "below".into())
 }
@@ -382,7 +376,7 @@ pub fn tie_through_id(row: impl Into<ElementId>, level: usize) -> ElementId {
     )
 }
 
-/// The connector of a session's row to its pilot's: a thin line that comes down from the row
+/// The connector of a led row to its lead's: a thin line that comes down from the row
 /// above and turns right into the row, at the middle of its first line (`first_line`, from the
 /// row's top), going on below it while the row has a sibling after it, and the lines of the
 /// ancestors that go on past it. Draw it over the row, in a block that starts where the row's
@@ -470,7 +464,7 @@ pub fn meta(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
         .child(text.into())
 }
 
-/// A section label: mono 11 px, uppercase, faint (`PROJECTS`, `AGENTS`).
+/// A section label: mono 11 px, uppercase, faint (`PLACES`, `RECENT`).
 pub fn section_label(text: &str, cx: &App) -> impl IntoElement {
     let p = palette(cx);
     div()

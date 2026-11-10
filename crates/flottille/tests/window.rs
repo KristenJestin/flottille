@@ -4,6 +4,7 @@
 
 mod common;
 
+use flottille_window::state::AgentState;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -12,9 +13,8 @@ use std::time::{Duration, Instant};
 use common::User;
 use common::mcp::Mcp;
 use flottille_core::workspace::StepState;
+use flottille_ui::Icon;
 use flottille_ui::omarchy::Environment;
-use flottille_ui::state::icon_id;
-use flottille_ui::{AgentState, Icon};
 use flottille_window::Shell;
 use flottille_window::actions::Changes;
 use flottille_window::composer::{Choice, Composer, Menu, PlaceChoice};
@@ -28,6 +28,7 @@ use flottille_window::project_settings::{
 use flottille_window::session::{RailRow, Reply, SessionPage};
 use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
+use flottille_window::state::icon_id;
 use flottille_window::tree::{project_id, session_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -130,7 +131,7 @@ fn window<'a>(
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
-    cx.update(|cx| flottille_ui::init_with(env, cx));
+    cx.update(|cx| flottille_window::init_with(env, cx));
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(width), px(800.)));
     (shell, cx)
@@ -7358,7 +7359,7 @@ fn stop_during_a_turn_cancels_it_and_the_next_message_is_taken(cx: &mut TestAppC
         assert!(
             window
                 .within("reply-stop")
-                .try_find(Icon::Stop.glyph_id())
+                .try_find(flottille_window::glyphs::STOP.glyph_id())
                 .is_some(),
             "the composer's Stop draws the filled square"
         )

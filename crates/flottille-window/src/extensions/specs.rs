@@ -4,6 +4,7 @@
 //! every gesture is a `spec.*` method of the daemon, its result a toast. Nothing of it shows in a
 //! project where Specs is off.
 
+use crate::glyphs;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
 
@@ -2457,7 +2458,7 @@ impl Render for SpecPage {
                         ElementId::Name(format!("spec-session-{agent}").into()),
                         title,
                     )
-                    .leading(icon(Icon::Agents).size(px(14.)).text_color(p.faint))
+                    .leading(icon(glyphs::AGENTS).size(px(14.)).text_color(p.faint))
                     .line("Writes the spec")
                     .on_click(move |_, window, cx| {
                         let selection = Selection::Session(agent.clone());

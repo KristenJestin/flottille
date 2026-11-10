@@ -5,7 +5,7 @@ mod common;
 
 use common::{Desktop, advance, init, pending_frames};
 use flottille_ui::motion::{HOVER, TOOLTIP};
-use flottille_ui::{ListRow, TreeLevel, TreeRow};
+use flottille_ui::{ListRow, TreeRow};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, TestAppContext,
@@ -29,7 +29,7 @@ impl Render for Rows {
             .flex_col()
             .test_support()
             .child(ListRow::new("list-row", self.0).line(SENTENCE))
-            .child(TreeRow::new("rail-row", TreeLevel::Session, self.0))
+            .child(TreeRow::new("rail-row", self.0))
     }
 }
 

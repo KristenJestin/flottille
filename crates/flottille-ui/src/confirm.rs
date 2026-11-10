@@ -58,7 +58,7 @@ impl Confirm {
         self
     }
 
-    /// The danger button's label: a verb and its object ("Remove task", "End 3 agents").
+    /// The danger button's label: a verb and its object ("Remove task", "End 3 items").
     pub fn action(mut self, label: impl Into<SharedString>) -> Self {
         self.action = label.into();
         self
