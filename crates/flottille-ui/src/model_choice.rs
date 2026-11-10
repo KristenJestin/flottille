@@ -4,7 +4,7 @@
 //! as the rule and, on its second line, what it gives today; a choice that is not a model comes
 //! before the models. "No model" is never an entry: a feature is turned off by its switch.
 //!
-//! The kit knows no provider: the screen gives the models the daemon knows ([`ModelEntry`]).
+//! The kit knows no provider: the screen gives the models the application knows ([`ModelEntry`]).
 
 use std::rc::Rc;
 
@@ -125,7 +125,7 @@ impl ModelChoice {
         }
     }
 
-    /// The first option, a default that is a rule (`Strongest of the session's provider`), its
+    /// The first option, a default that is a rule (`Strongest of the provider`), its
     /// second line what it gives today (`Opus for Claude`).
     pub fn default(
         mut self,
@@ -139,7 +139,8 @@ impl ModelChoice {
         self
     }
 
-    /// In a project: the first option is `As in Settings`, its second line what it gives.
+    /// Where a value is inherited: the first option is `As in Settings`, its second line what it
+    /// gives.
     pub fn inherited(mut self, gives: impl Into<SharedString>) -> Self {
         self.first = Some(First {
             title: "As in Settings".into(),
@@ -148,7 +149,8 @@ impl ModelChoice {
         self
     }
 
-    /// A choice that is not a model (`The session's own agent`), before the models.
+    /// A choice that is not a model (a summary written by the conversation itself), before the
+    /// models.
     pub fn choice(
         mut self,
         key: impl Into<SharedString>,
@@ -171,7 +173,7 @@ impl ModelChoice {
         self
     }
 
-    /// Flottille picked the model chosen, and the user has not seen its notice yet.
+    /// The application picked the model chosen, and the user has not seen its notice yet.
     pub fn picked(mut self, picked: bool) -> Self {
         self.picked = picked;
         self

@@ -16,12 +16,15 @@ use gpui_kit::{
     VisualTestContext, Window, div, px, size,
 };
 
+/// What a choice reported: what was chosen, and its effort.
+type Seen = Rc<RefCell<Vec<(Chosen, Option<SharedString>)>>>;
+
 /// A window holding one choice, which keeps what was chosen.
 struct Host {
     chosen: Chosen,
     effort: Option<SharedString>,
     picked: bool,
-    seen: Rc<RefCell<Vec<(Chosen, Option<SharedString>)>>>,
+    seen: Seen,
 }
 
 fn models() -> Vec<ModelEntry> {
@@ -36,7 +39,7 @@ impl Render for Host {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (this, seen) = (cx.entity().downgrade(), self.seen.clone());
         let choice = ModelChoice::new("judge", "Model", self.chosen.clone())
-            .default("Strongest of the session's provider", "Opus for Claude")
+            .default("Strongest of the provider", "Opus for Claude")
             .models(models())
             .effort(self.effort.clone())
             .picked(self.picked)
@@ -54,14 +57,7 @@ impl Render for Host {
     }
 }
 
-fn host(
-    cx: &mut TestAppContext,
-    chosen: Chosen,
-) -> (
-    Entity<Host>,
-    &mut VisualTestContext,
-    Rc<RefCell<Vec<(Chosen, Option<SharedString>)>>>,
-) {
+fn host(cx: &mut TestAppContext, chosen: Chosen) -> (Entity<Host>, &mut VisualTestContext, Seen) {
     init(cx, Desktop::new(false).env());
     let seen = Rc::new(RefCell::new(Vec::new()));
     let given = seen.clone();
@@ -103,7 +99,7 @@ fn a_model_choice_says_its_default_and_what_it_gives(cx: &mut TestAppContext) {
     let (_, cx, seen) = host(cx, Chosen::First);
     assert_eq!(
         label("judge-model", cx).as_deref(),
-        Some("Strongest of the session's provider"),
+        Some("Strongest of the provider"),
         "the default is chosen and said as its rule"
     );
     assert_eq!(
