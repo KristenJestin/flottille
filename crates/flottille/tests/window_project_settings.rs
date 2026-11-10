@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use flottille_window::Shell;
-use flottille_window::project_settings::ProjectSettingsPage;
+use flottille_window::project_settings::{ProjectSettingsPage, Reveal};
 use flottille_window::settings::SettingsPage;
 use flottille_window::shell::Selection;
 use gpui_design_system::omarchy::Environment;
@@ -116,6 +116,22 @@ fn top(cx: &mut VisualTestContext, id: &str) -> f32 {
     cx.update(|window, _| f32::from(window.find(id).bounds().origin.y))
 }
 
+fn left(cx: &mut VisualTestContext, id: &str) -> f32 {
+    let id = id.to_owned();
+    cx.update(|window, _| f32::from(window.find(id).bounds().origin.x))
+}
+
+/// The window's clock and frames going on for `by`, with no wait for the daemon.
+fn run_for(by: Duration, cx: &mut VisualTestContext) {
+    let mut gone = Duration::ZERO;
+    while gone < by {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        gone += Duration::from_millis(16);
+    }
+}
+
 fn click(cx: &mut VisualTestContext, id: &str) {
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
@@ -193,6 +209,14 @@ fn project_settings_have_five_tabs_and_open_on_repositories(cx: &mut TestAppCont
         );
     }
     assert!(!present(cx, "project-settings-tabs-specs"));
+    let xs: Vec<f32> = TABS
+        .iter()
+        .map(|key| left(cx, &format!("project-settings-tabs-{key}")))
+        .collect();
+    assert!(
+        xs.windows(2).all(|pair| pair[0] < pair[1]),
+        "the tabs are in their order, left to right: {xs:?}"
+    );
     cx.update(|window, _| {
         assert_eq!(
             window.find("project-settings-tabs-repositories").selected(),
@@ -586,4 +610,81 @@ fn the_global_page_names_a_project_that_turns_it_off(cx: &mut TestAppContext) {
                 })
             })
     });
+}
+
+#[gpui_kit::test]
+fn each_section_of_a_tab_enters_in_its_turn(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, "app", cx);
+    let ids = ["workspaces", "branches", "setup"].map(|part| format!("enter-settings-app-{part}"));
+    let y = |id: &String, cx: &mut VisualTestContext| top(cx, id);
+
+    cx.update(|window, cx| window.click("project-settings-tabs-workspaces", cx));
+    run_for(Duration::from_millis(300), cx);
+    let waiting: Vec<f32> = ids.iter().map(|id| y(id, cx)).collect();
+    settle(cx);
+    let arrived: Vec<f32> = ids.iter().map(|id| y(id, cx)).collect();
+    let rise = |at: usize| waiting[at] - arrived[at];
+    assert!(
+        rise(0) + 0.5 < rise(1) && rise(1) + 0.5 < rise(2),
+        "each section has risen less than the one after it: {:?}",
+        [rise(0), rise(1), rise(2)]
+    );
+}
+
+#[gpui_kit::test]
+fn the_tickets_open_settings_shows_the_tracker_in_view(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = user.path("work/many");
+    for at in 0..14 {
+        let dir = folder.join(format!("r{at:02}"));
+        user.git_init(&dir);
+        std::fs::write(dir.join("README.md"), "start\n").unwrap();
+        user.git(&dir, &["add", "."]);
+        user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+    }
+    user.call("project.add", json!({"folder": folder, "name": "many"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(1280.), px(720.)));
+    let in_view = |id: &str, cx: &mut VisualTestContext| {
+        let id = id.to_owned();
+        cx.update(|window, _| {
+            let page = window.find("project-settings-page").bounds();
+            let at = window.find(id).bounds();
+            at.origin.y >= page.origin.y && at.bottom() <= page.bottom()
+        })
+    };
+
+    open_settings(&shell, "many", cx);
+    assert!(
+        !in_view("tracker-title", cx),
+        "the fourteen repositories push the tracker out of the window"
+    );
+    // The tickets' Open Settings, a repository's chip, the vault's link: all of them go here.
+    shell.update_in(cx, |s, window, cx| {
+        s.open_project_settings_at("many", Reveal::Tracker, window, cx)
+    });
+    settle(cx);
+    assert!(
+        in_view("tracker-title", cx),
+        "the tracker is brought in view"
+    );
+
+    // Another tab starts at its top, not where the page was scrolled to.
+    shell.update_in(cx, |s, window, cx| {
+        s.open_project_settings_at("many", Reveal::Tasks, window, cx)
+    });
+    settle(cx);
+    assert!(in_view("tasks-title", cx), "the tasks start at the top");
+    shell.update_in(cx, |s, window, cx| {
+        s.open_project_settings_at("many", Reveal::Tracker, window, cx)
+    });
+    run_for(Duration::from_millis(2000), cx);
+    assert!(
+        in_view("tracker-title", cx),
+        "also from another tab, whose rows enter above it, and once they have"
+    );
 }

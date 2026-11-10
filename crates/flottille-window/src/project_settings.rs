@@ -12,9 +12,11 @@
 
 use crate::glyphs;
 use std::collections::HashMap;
+use std::time::Instant;
 
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_core::project::{branch_matches, cycle_sentence};
+use gpui_design_system::motion::{ENTER, MAX_STAGGER, STAGGER};
 use gpui_design_system::{
     Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, Section,
     Select, SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type, awaiting, changing, enter,
@@ -24,8 +26,8 @@ use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    TestSupportExt as _, WeakEntity, Window, div, px, relative,
+    ParentElement, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, TestSupportExt as _, WeakEntity, Window, div, px, relative,
 };
 use serde_json::{Value, json};
 
@@ -86,6 +88,9 @@ pub const SECTIONS: [(&str, &str); 5] = [
     ("instructions", "Instructions"),
     ("features", "Features"),
 ];
+
+/// The sections of the Repositories tab, in order: the page's children, which a link scrolls to.
+const REPOSITORIES_SECTIONS: [&str; 2] = ["repositories", "tracker"];
 
 /// Which forge a repository is on, as the form chooses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -366,6 +371,12 @@ pub struct ProjectSettingsPage {
     tab: usize,
     /// The row of Features whose page is open, by its name: kept while another tab is shown.
     feature: Option<String>,
+    /// The scroll of the tab shown, to bring a section in view from a link.
+    scroll: ScrollHandle,
+    /// The section a link scrolls to (its place in the tab) and until when it is held there: the
+    /// rows of a tab that was not shown enter one after the other above it, and the section keeps
+    /// its place at the top meanwhile.
+    scroll_to: Option<(usize, Instant)>,
     /// The views of the pages of Features, made once.
     feature_pages: HashMap<String, Entity<FeaturePage>>,
     name: String,
@@ -495,6 +506,8 @@ impl ProjectSettingsPage {
             revealed: None,
             tab: 0,
             feature: None,
+            scroll: ScrollHandle::new(),
+            scroll_to: None,
             feature_pages: HashMap::new(),
             name,
             folder: String::new(),
@@ -2288,6 +2301,21 @@ impl ProjectSettingsPage {
         if let Reveal::Feature(name) = &at {
             self.feature = Some(name.clone());
         }
+        // The tab may already be shown, scrolled: the link says where it starts, or the section
+        // it is about.
+        match &at {
+            Reveal::Tracker => {
+                let at = REPOSITORIES_SECTIONS
+                    .iter()
+                    .position(|part| *part == "tracker")
+                    .expect("a section of the tab");
+                self.scroll_to = Some((
+                    at,
+                    cx.background_executor().now() + STAGGER * MAX_STAGGER as u32 + ENTER,
+                ));
+            }
+            _ => self.scroll.set_offset(Point::default()),
+        }
         self.revealed = Some(at);
         cx.notify();
     }
@@ -2535,6 +2563,14 @@ impl Render for ProjectSettingsPage {
             .child(
                 PageHeader::new("project-settings-header", "Settings")
                     .crumb(crumb)
+        if let Some((at, until)) = self.scroll_to {
+            self.scroll.scroll_to_top_of_item(at);
+            if cx.background_executor().now() < until {
+                window.request_animation_frame();
+            } else {
+                self.scroll_to = None;
+            }
+        }
                     .path(SharedString::from(shown_folder(&self.folder)))
                     .more(self.more.clone()),
             )
@@ -2574,40 +2610,40 @@ impl Render for ProjectSettingsPage {
         // Only the tab shown is built: what it holds enters again as it is shown, and what a
         // section keeps (its rows' places) is kept by its own view.
         let core = self.tab.min(SECTIONS.len() - 1);
-        let shown_key = SECTIONS[core].0;
-        let shown: gpui_kit::AnyElement = match shown_key {
-            "repositories" => div()
-                .flex()
-                .flex_col()
-                .gap(space::XXL)
-                .child(self.repositories_section(cx))
-                .child(self.tracker_section(cx))
-                .into_any_element(),
-            "workspaces" => div()
-                .flex()
-                .flex_col()
-                .gap(space::XXL)
-                .child(self.workspaces.clone())
-                .child(self.branches_section(window, cx))
-                .child(self.setup.clone())
-                .into_any_element(),
-            "tasks" => self.tasks.clone().into_any_element(),
-            "instructions" => div()
-                .flex()
-                .flex_col()
-                .gap(space::XXL)
-                .child(self.rules.clone())
-                .child(self.commands.clone())
-                .child(self.skills.clone())
-                .child(self.message_checks.clone())
-                .child(self.pull_request_template.clone())
-                .into_any_element(),
-            _ => self.features_tab(cx),
+        let blocks: Vec<(&str, gpui_kit::AnyElement)> = match SECTIONS[core].0 {
+            "repositories" => vec![
+                (
+                    "repositories",
+                    self.repositories_section(cx).into_any_element(),
+                ),
+                ("tracker", self.tracker_section(cx).into_any_element()),
+            ],
+            "workspaces" => vec![
+                ("workspaces", self.workspaces.clone().into_any_element()),
+                (
+                    "branches",
+                    self.branches_section(window, cx).into_any_element(),
+                ),
+                ("setup", self.setup.clone().into_any_element()),
+            ],
+            "tasks" => vec![("tasks", self.tasks.clone().into_any_element())],
+            "instructions" => vec![
+                ("rules", self.rules.clone().into_any_element()),
+                ("commands", self.commands.clone().into_any_element()),
+                ("skills", self.skills.clone().into_any_element()),
+                ("checks", self.message_checks.clone().into_any_element()),
+                (
+                    "template",
+                    self.pull_request_template.clone().into_any_element(),
+                ),
+            ],
+            _ => vec![("features", self.features_tab(cx))],
         };
         let this = cx.entity().downgrade();
         let tabs = SECTIONS.iter().zip(counts).fold(
             Tabs::new("project-settings-tabs", "Sections", core),
             |tabs, ((key, label), count)| match count {
+            .track_scroll(&self.scroll)
                 Some(count) => tabs.counted(*key, *label, count.to_string()),
                 None => tabs.tab(*key, *label),
             },
@@ -2639,8 +2675,8 @@ impl Render for ProjectSettingsPage {
                 enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
             ))
             .child(column(enter(key("tabs"), 1, tabs).into_any_element()));
-        // Each section enters as it is shown (its state is dropped while it is not drawn, so it
-        // plays again), after the tabs.
+        // Each section of the tab enters as it is shown (its state is dropped while it is not
+        // drawn, so it plays again), one after the other, after the tabs.
         let page = div()
             .id("project-settings-page")
             .w_full()
@@ -2653,7 +2689,11 @@ impl Render for ProjectSettingsPage {
             .px(pad)
             .pt(space::XL)
             .pb(space::XXXL)
-            .child(column(enter(key(shown_key), 2, shown).into_any_element()));
+            .children(blocks.into_iter().enumerate().map(|(n, (part, section))| {
+                column(enter(key(part), 2 + n, section).into_any_element())
+                    .when(n > 0, |d| d.mt(space::XXL))
+            }))
+            .test_support();
         div()
             .size_full()
             .flex()
