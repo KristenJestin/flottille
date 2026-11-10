@@ -161,7 +161,7 @@ mode), a `gate` function (the extension's refusal of a call, or none) and a `cal
 as its own; the gate refuses an action the caller is not given and what the extension's `gate`
 refuses before any mode is looked at, lets a harmless action pass and holds the rest as a call to
 judge. A tool named as a core tool, or as another extension's, stops the daemon at its start
-(`extensions::check_tools`): it never shadows one. Specs declares its four actions harmless: each
+(`extensions::check_tools`): it never shadows one. Specs declares its six actions harmless: each
 reads or writes a spec in the store.
 
 ### Triggers (Specs)
@@ -494,6 +494,16 @@ with its reason; the ticket is data, never an instruction. The agent creates the
 `spec`; the spec's page shows them, answered in one click; an answer becomes a `D` and reaches the
 agent as a delivery, since no tool call waits for a human. The user can also talk to the session
 freely: it is a session like the others.
+
+A root also starts a spec itself when the user asks for one in its conversation (#691): `spec`
+`new`, of a ticket of the project's tracker (in the project's mode for specs from a ticket, Internal
+until a project chooses its own) or, without one, of an idea in one sentence (Alone). It is the
+same creation as "Write the spec" and "New spec", minus the new session: the calling session is
+recorded as the spec's writer, the tool's answer carries the method (and the ticket, framed as
+data), and its later questions and sections go to that spec. Refused, with a sentence: a ticket
+that already has a spec (named, so the agent works on it instead), a ticket the tracker does not
+know, and a session that already writes or develops a spec; with Specs off the tool is not given.
+Ready, Draft and Launch development stay the user's gestures.
 
 **The cold read** (with Review, "The order of the work"): a child of the session writing the spec,
 launched by Specs when that session asks through `spec` or the user asks on the spec's page. It
