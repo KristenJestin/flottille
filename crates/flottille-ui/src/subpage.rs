@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ElementId, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
+    AnyView, App, ElementId, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
     RenderOnce, SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window, div, px,
 };
 
@@ -40,10 +40,11 @@ struct Entry {
 
 /// What a subpage remembers between frames: how far the page is in (0 the list, 1 the page), the
 /// entry it last showed (whose row keeps its mark while the list comes back, and whose name the
-/// path line keeps while it leaves) and whether Escape has been given its focus.
+/// path line keeps while it leaves), the page itself while it slides out, and whether Escape has been given its focus.
 struct Slide {
     motion: Motion,
     last: Option<SharedString>,
+    page: Option<AnyView>,
     focused: bool,
 }
 
@@ -54,7 +55,7 @@ pub struct Subpage {
     entries: Vec<Entry>,
     open: Option<SharedString>,
     on_open: Option<OnOpen>,
-    page: Option<AnyElement>,
+    page: Option<AnyView>,
 }
 
 impl Subpage {
@@ -107,9 +108,10 @@ impl Subpage {
         self
     }
 
-    /// The page of the entry that is open; given only while one is.
-    pub fn page(mut self, page: impl IntoElement) -> Self {
-        self.page = Some(page.into_any_element());
+    /// The page of the entry that is open, a view: the subpage keeps it until the page has slid
+    /// out, so the screen gives it only while an entry is open and nothing while it leaves.
+    pub fn page(mut self, page: impl Into<AnyView>) -> Self {
+        self.page = Some(page.into());
         self
     }
 }
@@ -127,6 +129,7 @@ impl RenderOnce for Subpage {
         let state = window.use_keyed_state(key, cx, |_, _| Slide {
             motion: Motion::settled(if open { 1.0 } else { 0.0 }),
             last: self.open.clone(),
+            page: None,
             focused: false,
         });
         let focus = window
@@ -141,20 +144,31 @@ impl RenderOnce for Subpage {
         let now = cx.background_executor().now();
         let reduce = cx.reduce_motion();
         let target = if open { 1.0 } else { 0.0 };
-        let (motion, last, focused) = state.update(cx, |slide, _| {
+        let (motion, last, focused, page) = state.update(cx, |slide, _| {
             if self.open.is_some() {
                 slide.last = self.open.clone();
+                slide.page = self.page.clone();
             }
             if slide.motion.target() != target {
                 slide.motion.animate(target, PANEL, now, reduce);
             }
-            (slide.motion, slide.last.clone(), slide.focused)
+            (
+                slide.motion,
+                slide.last.clone(),
+                slide.focused,
+                slide.page.clone(),
+            )
         });
         let running = motion.is_running(now);
         if running {
             window.request_animation_frame();
         } else {
-            state.update(cx, |slide, _| slide.motion.settle(now));
+            state.update(cx, |slide, _| {
+                slide.motion.settle(now);
+                if !open {
+                    slide.page = None;
+                }
+            });
         }
         // Escape reaches the focused element: the page takes the focus as it opens, unless
         // something in it (a field) already holds it.
@@ -251,6 +265,8 @@ impl RenderOnce for Subpage {
                 .when(!open, |d| d.absolute().top_0().left_0())
                 .left(px(SLIDE * (1.0 - at)))
                 .opacity(at)
+                // How far the page is in, for a test and for assistive technology.
+                .aria_value(format!("{at}"))
                 .when(open, |d| {
                     d.on_key_down(move |event: &KeyDownEvent, window, cx| {
                         if event.keystroke.key == "escape"
@@ -262,7 +278,7 @@ impl RenderOnce for Subpage {
                     })
                 })
                 .child(path)
-                .children(self.page)
+                .children(page)
                 .test_support()
         });
 

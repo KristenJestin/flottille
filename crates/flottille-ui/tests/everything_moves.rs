@@ -1029,3 +1029,53 @@ fn reduced_motion_jumps_between_list_and_page(cx: &mut TestAppContext) {
     cx.update(|window, _| assert!(window.try_find("review-page").is_none()));
     assert_eq!(pending_frames(cx), 0);
 }
+
+#[gpui_kit::test]
+fn going_back_the_page_slides_out_and_fades_while_the_list_comes_back(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    let (_, cx) = cx.add_window_view(|_, _| Settings::new());
+    let list = left("feat-specs", cx);
+    cx.update(|window, cx| window.click("feat-review", cx));
+    advance(cx, PANEL * 2);
+    let page = left("feat-page", cx);
+    let shown = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window
+                .find("feat-page")
+                .value()
+                .and_then(|v| v.parse::<f32>().ok())
+        })
+    };
+    assert_eq!(shown(cx), Some(1.0), "at rest the page is fully there");
+
+    cx.update(|window, cx| window.click("feat-back", cx));
+    advance(cx, PANEL / 2);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("review-page").is_some(),
+            "half way the page is still drawn"
+        );
+    });
+    let leaving = left("feat-page", cx);
+    let fading = shown(cx).expect("the page says how far it is");
+    assert!(
+        leaving > page && leaving < page + px(32.),
+        "it slides out to the right: {page:?} < {leaving:?} < {:?}",
+        page + px(32.)
+    );
+    assert!(0.0 < fading && fading < 1.0, "and fades: {fading}");
+    let coming = left("feat-specs", cx);
+    assert!(coming < list, "while the list comes back from the left");
+
+    advance(cx, PANEL * 2);
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("feat-page").is_none(),
+            "at the end it is gone"
+        );
+        assert!(window.try_find("review-page").is_none());
+    });
+    assert_eq!(left("feat-specs", cx), list);
+    assert_eq!(pending_frames(cx), 0);
+}

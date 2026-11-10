@@ -84,6 +84,16 @@ struct Components {
     tracker: usize,
     drawer: Entity<Drawer>,
     feature: Option<SharedString>,
+    feature_page: Option<Entity<FeaturePage>>,
+}
+
+/// The page of a feature of the Subpage tile.
+struct FeaturePage(SharedString);
+
+impl Render for FeaturePage {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().h(px(120.)).child(format!("The page of {}", self.0))
+    }
 }
 
 struct RunDetail;
@@ -239,6 +249,7 @@ impl Components {
             tracker: 0,
             drawer,
             feature: None,
+            feature_page: None,
         }
     }
 
@@ -341,13 +352,14 @@ impl Components {
             .open(self.feature.as_deref())
             .on_open(move |key, _, cx| {
                 this.update(cx, |this, cx| {
+                    this.feature_page = key.clone().map(|key| cx.new(|_| FeaturePage(key)));
                     this.feature = key;
                     cx.notify();
                 })
                 .ok();
             });
-        if let Some(key) = &self.feature {
-            features = features.page(div().h(px(120.)).child(format!("The page of {key}")));
+        if let Some(page) = &self.feature_page {
+            features = features.page(page.clone());
         }
         Self::tile("Subpage", cx).w(px(420.)).child(features)
     }

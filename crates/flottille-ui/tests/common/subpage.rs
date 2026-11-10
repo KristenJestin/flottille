@@ -4,13 +4,28 @@
 
 use flottille_ui::{Icon, Subpage, Tabs, icon};
 use gpui_kit::{
-    Context, InteractiveElement as _, IntoElement, ParentElement, Render, SharedString, Styled,
-    TestSupportExt as _, Window, div, px,
+    AnyView, AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement, Render,
+    SharedString, Styled, TestSupportExt as _, Window, div, px,
 };
+
+/// The page of one feature, a view of its own as a screen's page is.
+pub struct Page(pub SharedString);
+
+impl Render for Page {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id(SharedString::from(format!("{}-page", self.0)))
+            .h(px(200.))
+            .child(icon(Icon::Check))
+            .child(format!("The page of {}", self.0))
+            .test_support()
+    }
+}
 
 pub struct Settings {
     pub tab: usize,
     pub open: Option<SharedString>,
+    pub page: Option<AnyView>,
     /// What the list told it to open: a key, or `None` for back.
     pub told: Vec<Option<SharedString>>,
 }
@@ -20,6 +35,7 @@ impl Settings {
         Self {
             tab: 0,
             open: None,
+            page: None,
             told: Vec::new(),
         }
     }
@@ -68,20 +84,14 @@ impl Render for Settings {
                 .on_open(move |key, _, cx| {
                     this.update(cx, |this, cx| {
                         this.told.push(key.clone());
+                        this.page = key.clone().map(|key| cx.new(|_| Page(key)).into());
                         this.open = key;
                         cx.notify();
                     })
                     .ok();
                 });
-            if let Some(key) = &self.open {
-                subpage = subpage.page(
-                    div()
-                        .id(SharedString::from(format!("{key}-page")))
-                        .h(px(200.))
-                        .child(icon(Icon::Check))
-                        .child(format!("The page of {key}"))
-                        .test_support(),
-                );
+            if let Some(page) = &self.page {
+                subpage = subpage.page(page.clone());
             }
             div().child(subpage).into_any_element()
         } else {
