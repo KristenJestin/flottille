@@ -273,16 +273,18 @@ async fn compare(daemon: &Weak<Daemon>, name: &str, peer: &Peer<RoleClient>) {
     }
 }
 
-/// The secrets the declaration names, read from the vault: only an entry every project sees.
+/// The secrets the declaration names, read from the vault: only an entry every project sees, and
+/// bound to no other use than this connection.
 async fn secrets(
     daemon: &Daemon,
+    connection: &str,
     entries: &BTreeMap<String, String>,
 ) -> Result<Vec<(String, String)>, String> {
     let mut read = Vec::new();
     for (to, entry) in entries {
         read.push((
             to.clone(),
-            crate::vault::every_project_s(daemon, entry).await?,
+            crate::vault::every_project_s(daemon, connection, entry).await?,
         ));
     }
     Ok(read)
@@ -310,7 +312,10 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
             flottille_core::paths::ensure_private_dir(&folder)
                 .map_err(|error| could_not(error.to_string()))?;
             let mut env = crate::runs::beside(daemon).map_err(could_not)?;
-            for (name, secret) in secrets(daemon, &declaration.env).await.map_err(could_not)? {
+            for (name, secret) in secrets(daemon, &declaration.name, &declaration.env)
+                .await
+                .map_err(could_not)?
+            {
                 env.insert(OsString::from(name), OsString::from(secret));
             }
             let mut command = tokio::process::Command::new(&words[0]);
@@ -371,7 +376,7 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
         }
         Reach::Url(url) => {
             let mut headers = HashMap::new();
-            for (name, secret) in secrets(daemon, &declaration.headers)
+            for (name, secret) in secrets(daemon, &declaration.name, &declaration.headers)
                 .await
                 .map_err(could_not)?
             {

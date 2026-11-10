@@ -378,3 +378,50 @@ fn a_set_from_an_ask_under_another_name_keeps_the_other_entry_and_tells_the_agen
     }
     assert!(!body.contains(SECRET), "{body}");
 }
+
+#[test]
+fn an_entry_made_from_a_feature_is_bound_to_it() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    let (mcp, _) = root_in(&user);
+    assert!(!ask(&mcp, "jira-time", "to log time").error);
+    let number = asks(&user)[0]["ask"].as_u64().unwrap();
+
+    // The card of the worklog's request makes the entry the worklog's.
+    user.call(
+        "vault.ask_set",
+        json!({"ask": number, "secret": SECRET, "username": ACCOUNT}),
+    )
+    .unwrap();
+    assert_eq!(entry(&user, "jira-time")["for"], "worklog:app");
+
+    // So does a set from a feature's own screen, which says what it is for.
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": "s3cret-of-almanac", "for": "connection:almanac"}),
+    )
+    .unwrap();
+    assert_eq!(entry(&user, "almanac-token")["for"], "connection:almanac");
+
+    // Replacing its secret from the Vault page, which names no use, keeps the binding; another
+    // use is refused, naming the one it has.
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": "an0ther-w0rklog-t0ken", "username": ACCOUNT,
+            "project": "app"}),
+    )
+    .unwrap();
+    assert_eq!(entry(&user, "jira-time")["for"], "worklog:app");
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "jira-time", "secret": "an0ther-w0rklog-t0ken",
+                "for": "connection:almanac"}),
+        )
+        .unwrap_err();
+    assert!(
+        refused.contains("the worklog of the project app"),
+        "{refused}"
+    );
+    assert!(!refused.contains("an0ther-w0rklog-t0ken"), "{refused}");
+}

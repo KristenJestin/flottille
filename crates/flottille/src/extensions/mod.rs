@@ -557,6 +557,15 @@ fn active_in(paths: &Paths, extension: &Extension, project: &Project) -> bool {
 
 /// What the user declared under the extension's table of `extensions.toml`
 /// (`Extension::declared`), checked; nothing when the file holds none.
+/// Whether the feature of an extension a vault entry is bound to (`bound`, `connection:<name>`)
+/// names the entry `entry` now.
+pub fn bound_names(daemon: &Daemon, bound: &str, entry: &str) -> bool {
+    match bound.split_once(':') {
+        Some(("connection", name)) => connections::names(daemon, name, entry),
+        _ => false,
+    }
+}
+
 pub fn declared(paths: &Paths, extension: &Extension) -> Result<Vec<Value>, String> {
     Ok(global(paths)?
         .remove(extension.name)
