@@ -483,7 +483,8 @@ fn header(text: &str, key: &str) -> Vec<LoginField> {
     for (at, _) in lower.match_indices(key) {
         let key_start = if key == "password" {
             // A key ending in it (`POSTGRES_PASSWORD`, `db-password`, `spring.datasource.password`),
-            // alone on its line but for a diff's mark, a YAML list's dash or an `export`.
+            // alone on its line but for a diff's mark, a YAML list's dash and its quote, or an
+            // `export`.
             let key_start = text[..at]
                 .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
                 .map_or(0, |before| {
@@ -491,6 +492,7 @@ fn header(text: &str, key: &str) -> Vec<LoginField> {
                 });
             let line = text[..key_start].rsplit('\n').next().unwrap_or_default();
             let line = line.trim_start_matches([' ', '\t', '+', '-']);
+            let line = line.strip_prefix(['"', '\'']).unwrap_or(line);
             let line = line
                 .strip_prefix("export")
                 .filter(|rest| rest.starts_with([' ', '\t']))
@@ -1268,5 +1270,22 @@ mod tests {
             interface Db {\n  dbPassword: string;\n}\n\
             - Password: 8 chars minimum\n";
         assert_eq!(masked_at_each_cut(code), code);
+    }
+
+    #[test]
+    fn a_quoted_compose_list_item_password_is_masked() {
+        let text = "environment:\n  - \"POSTGRES_PASSWORD=fake-double-0123\"\n\
+            \x20 - 'POSTGRES_PASSWORD=fake-single-0123'\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("  - \"POSTGRES_PASSWORD=[masked]\"\n"),
+            "{masked}"
+        );
+        assert!(
+            masked.contains("  - 'POSTGRES_PASSWORD=[masked]'\n"),
+            "{masked}"
+        );
     }
 }

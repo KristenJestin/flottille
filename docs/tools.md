@@ -420,7 +420,7 @@ pending requests.
   `Authorization`, `X-Api-Key` or `Cookie` header whose key is not quoted (`Authorization: Bearer
   …` of a header, YAML or `curl -v`, `Proxy-Authorization`, `Set-Cookie`), an `Authorization`'s
   scheme kept, or of a key ending in `password` that starts its line (`password:` or
-  `POSTGRES_PASSWORD=` of YAML, a list's `- `, `export `, `spring.datasource.password=`
+  `POSTGRES_PASSWORD=` of YAML, a list's `- ` or `- "`, `export `, `spring.datasource.password=`
   with no space, not code's `self.password = …`), to the end of its line or a quote, or the next
   line of a YAML block (`password: |`), unless, unquoted, it holds a space or ends in `;` (prose
   and code: `- Password: 8 chars minimum`, `dbPassword: string;`), but a
