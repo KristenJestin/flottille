@@ -5,6 +5,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use flottille_core::provider;
+use flottille_ui::{Chosen, ModelEntry};
 use serde_json::Value;
 
 /// The `provider.list` reads, numbered as they are asked, whoever asks: answers come back in any
@@ -296,6 +297,56 @@ impl Providers {
     /// The providers a session can start on, in order.
     pub fn offered(&self) -> impl Iterator<Item = &Provider> {
         self.list.iter().filter(|p| p.offered())
+    }
+
+    /// What a `ModelChoice` offers: the models of the providers enabled and ready, as the daemon
+    /// knows them; a provider whose models no session said yet, by its default.
+    pub fn model_entries(&self) -> Vec<ModelEntry> {
+        let mut entries = Vec::new();
+        for provider in self.offered() {
+            let listed: Vec<&Model> = provider
+                .models
+                .iter()
+                .flatten()
+                .filter(|m| m.id != crate::composer::DEFAULT)
+                .collect();
+            if listed.is_empty() {
+                entries.push(ModelEntry::new(
+                    provider.name.clone(),
+                    provider.title.clone(),
+                    None,
+                    self.model_said(&provider.name, None)
+                        .unwrap_or_else(|| "its default model".to_owned()),
+                ));
+            }
+            for model in listed {
+                entries.push(
+                    ModelEntry::new(
+                        provider.name.clone(),
+                        provider.title.clone(),
+                        Some(model.id.clone().into()),
+                        model.label(),
+                    )
+                    .efforts(model.efforts.clone().unwrap_or_default()),
+                );
+            }
+        }
+        entries
+    }
+
+    /// A model chosen as a `ModelChoice` shows it: the provider's default (no model, or its own
+    /// `default`) is its default model's entry, once a session said it.
+    pub fn chosen(&self, provider: &str, model: Option<&str>) -> Chosen {
+        let model = model
+            .filter(|m| *m != crate::composer::DEFAULT)
+            .map(str::to_owned)
+            .or_else(|| {
+                self.get(provider)
+                    .filter(|p| p.offered())
+                    .and_then(|p| p.default_model())
+                    .map(|m| m.id.clone())
+            });
+        Chosen::Model(provider.to_owned().into(), model.map(Into::into))
     }
 
     /// Why no session can start, one sentence per provider; empty when one can, or while the

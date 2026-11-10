@@ -15,7 +15,7 @@ use flottille_window::conversation::Block;
 use flottille_window::session::SessionPage;
 use flottille_window::settings::SettingsPage;
 use flottille_window::tree::session_id;
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
@@ -157,8 +157,8 @@ fn the_compaction_tab_shows_the_compactor_its_settings_and_its_guidance(cx: &mut
 
     for id in [
         "compaction-title",
-        "compactor-model",
-        "compactor-effort",
+        "compaction-switch",
+        "compaction-summary-model",
         "compaction-automatic",
         "compaction-threshold",
         "compaction-maximum",
@@ -168,7 +168,7 @@ fn the_compaction_tab_shows_the_compactor_its_settings_and_its_guidance(cx: &mut
         "compaction-after-expiry",
         "compaction-minimum",
         "compaction-lifetimes",
-        "compactor-cost",
+        "compaction-summary-cost",
         "compaction-guidance-title",
         "compaction-guidance-text",
         "compaction-guidance-reset",
@@ -192,10 +192,9 @@ fn the_compaction_tab_shows_the_compactor_its_settings_and_its_guidance(cx: &mut
         page.read_with(cx, |p, _| p.compaction().is_some_and(|c| !c.automatic))
     });
 
-    // None folds the settings away, with their motion: still drawn a frame after.
-    page.update(cx, |page, cx| {
-        page.set_compaction(json!({"compactor": "none"}), cx)
-    });
+    // The switch turned off folds the settings away, with their motion: still drawn a frame
+    // after.
+    cx.update(|window, cx| window.click("compaction-switch", cx));
     until(&shell, cx, "no compactor", |cx| {
         page.read_with(cx, |p, _| {
             p.compaction().is_some_and(|c| c.compactor.is_none())
@@ -214,25 +213,30 @@ fn the_summary_choices_are_named_in_the_users_words(cx: &mut TestAppContext) {
     let (shell, cx) = window(&user, cx);
     open_compaction_tab(&shell, cx);
 
-    // The select's menu names each choice by what it does, with its one line.
-    cx.update(|window, cx| window.click("compaction-summary", cx));
+    // One select: the session's own agent first, with its one line, then the models; never
+    // "None", which is the switch's.
+    assert_eq!(
+        label(cx, "compaction-summary-field-label").as_deref(),
+        Some("Summary written by")
+    );
+    cx.update(|window, cx| window.click("compaction-summary-model", cx));
     settle(cx);
     assert_eq!(
-        label(cx, "compaction-summary-compactor").as_deref(),
-        Some("A model you choose")
-    );
-    assert_eq!(
-        label(cx, "compaction-summary-compactor-line").as_deref(),
-        Some("A separate model summarises the conversation.")
-    );
-    assert_eq!(
-        label(cx, "compaction-summary-agent").as_deref(),
+        label(cx, "compaction-summary-model-agent").as_deref(),
         Some("The session's own agent")
     );
     assert_eq!(
-        label(cx, "compaction-summary-agent-line").as_deref(),
+        label(cx, "compaction-summary-model-agent-line").as_deref(),
         Some("The agent summarises its own conversation, in its session.")
     );
+    cx.update(|window, _| {
+        assert!(window.try_find_by_label("None").is_none());
+        assert!(
+            window
+                .try_find_by_label("None (each program compacts on its own)")
+                .is_none()
+        );
+    });
 }
 
 #[gpui_kit::test]
@@ -725,7 +729,7 @@ fn the_conversation_shows_one_divider_with_the_sizes_and_the_summary_folded(
 
     // The Compaction tab says who writes the summary, and keeps its settings without a compactor.
     let page = open_compaction_tab(&shell, cx);
-    assert!(visible(cx, "compaction-summary"));
+    assert!(visible(cx, "compaction-summary-model"));
     assert!(visible(cx, "compaction-threshold"));
     page.read_with(cx, |p, _| {
         assert!(p.compaction().is_some_and(|c| c.by_agent));

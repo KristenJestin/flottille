@@ -14,8 +14,9 @@ use std::collections::HashMap;
 use flottille_ui::omarchy::{self, Appearance, Source};
 use flottille_ui::theme::Shade;
 use flottille_ui::{
-    Field, Icon, ListCard, ListRow, PageHeader, Section, Segmented, Select, SelectOption, Switch,
-    Tabs, Toast, enter, hoverable, icon, palette, presence, presence_of, space, toast, turning,
+    Chosen, Field, Icon, ListCard, ListRow, ModelChoice, PageHeader, Section, Segmented, Select,
+    SelectOption, Switch, Tabs, Toast, enter, hoverable, icon, palette, presence, presence_of,
+    space, toast, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -131,15 +132,14 @@ fn provider_title(provider: &str) -> &str {
 /// What the Compaction tab says under its title.
 const COMPACTION_SENTENCE: &str = "When an agent's context fills up, a separate model or the \
      session's own agent writes a summary of its conversation, and the agent goes on in a new \
-     session from its brief and the summary. With None chosen for the model, each agent's \
-     program compacts on its own.";
+     session from its brief and the summary.";
 
-/// What the compactor's picker calls no compactor.
-pub const NO_COMPACTOR: &str = "None (each program compacts on its own)";
+/// What the compaction's switch says under its label.
+pub const COMPACTION_HINT: &str = "When an agent's context fills up, its conversation is \
+     summarised and it goes on from the summary. Off, each program compacts on its own.";
 
-/// What the page says of the compactor's cost.
-pub const COMPACTOR_COST: &str =
-    "Each compaction is a turn of the compactor's model: it uses your quota on that provider.";
+/// What the page says of the summary's cost, under the model that writes it.
+pub const COMPACTOR_COST: &str = "Each summary is a turn of this model, on your own quota.";
 
 /// Where Settings was opened at, from a warning or a notice that leads to a section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,10 +240,10 @@ pub struct SettingsPage {
     workspaces: Entity<WorkspacesFolder>,
     /// The vault's entries, set and removed on this page.
     vault: Entity<VaultSection>,
-    /// The judge's picker whose list is open.
-    judge_menu: Option<JudgeMenu>,
     /// A judge chosen, until the daemon lists it.
     judge_pending: bool,
+    /// The judge's switch flipped, until the daemon answers: what it was asked to become.
+    judge_turning: Option<bool>,
     /// The daemon's refusal of the last judge chosen.
     judge_refused: Option<String>,
     /// "How Auto works" is unfolded.
@@ -279,12 +279,6 @@ pub struct SettingsPage {
     scroll: ScrollHandle,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JudgeMenu {
-    Provider,
-    Model,
-}
-
 /// A judge, or a compactor, as the daemon lists it: its provider and its model, the provider's
 /// default when none.
 pub type Judge = (String, Option<String>);
@@ -296,12 +290,12 @@ pub const AUTO: [&str; 2] = [
     "Base calls always come to you, in Ask as in Auto: they never reach the judge.",
 ];
 
-/// What the judge's picker calls no judge.
-pub const NO_JUDGE: &str = "No judge (Auto asks like Ask)";
+/// What the judge's switch says under its label.
+pub const JUDGE_HINT: &str = "The rules pass what is known to be harmless; the model allows the \
+     rest or asks you. It never denies.";
 
-/// What the page says of the judge's cost, beside its pickers.
-pub const JUDGE_QUOTA: &str =
-    "Each judgement is a turn of the judge's model: it uses your quota on that provider.";
+/// What the page says of the judge's cost, under its model.
+pub const JUDGE_QUOTA: &str = "Each decision is a turn of this model, on your own quota.";
 
 impl SettingsPage {
     pub fn new(
@@ -325,8 +319,8 @@ impl SettingsPage {
             pending: HashMap::new(),
             refused: HashMap::new(),
             narrow: false,
-            judge_menu: None,
             judge_pending: false,
+            judge_turning: None,
             judge_refused: None,
             how: false,
             developer: None,
@@ -461,82 +455,6 @@ impl SettingsPage {
         cx.notify();
     }
 
-    /// What the compactor's picker offers: `(key, label, the compactor it chooses)`, None first,
-    /// then each enabled provider's default model and each model it lists.
-    pub fn compactor_entries(&self) -> Vec<(String, String, Option<Judge>)> {
-        let mut entries = vec![("none".to_owned(), NO_COMPACTOR.to_owned(), None)];
-        for provider in self.providers.list.iter().filter(|p| p.enabled) {
-            entries.push((
-                format!("{}-default", provider.name),
-                format!(
-                    "{} · {}",
-                    provider.title,
-                    self.providers
-                        .model_said(&provider.name, None)
-                        .unwrap_or_else(|| "Model not known yet".to_owned())
-                ),
-                Some((provider.name.clone(), None)),
-            ));
-            for model in provider.models.iter().flatten() {
-                entries.push((
-                    format!("{}-{}", provider.name, model.id),
-                    format!(
-                        "{} · {}",
-                        provider.title,
-                        model.name.as_deref().unwrap_or(&model.id)
-                    ),
-                    Some((provider.name.clone(), Some(model.id.clone()))),
-                ));
-            }
-        }
-        // A compactor the providers do not list (a model written by hand, or picked before its
-        // provider's models were read) is still shown.
-        if let Some(Some((provider, model, _))) =
-            self.compaction.as_ref().map(|c| c.compactor.clone())
-            && !entries
-                .iter()
-                .any(|(_, _, chosen)| chosen.as_ref() == Some(&(provider.clone(), model.clone())))
-        {
-            let title = self
-                .providers
-                .get(&provider)
-                .map_or(provider.clone(), |p| p.title.clone());
-            let label = match &model {
-                Some(model) => format!("{title} · {model}"),
-                None => format!(
-                    "{title} · {}",
-                    self.providers
-                        .model_said(&provider, None)
-                        .unwrap_or_else(|| "Model not known yet".to_owned())
-                ),
-            };
-            entries.push((format!("{provider}-own"), label, Some((provider, model))));
-        }
-        entries
-    }
-
-    /// The efforts the chosen compactor's model offers.
-    fn compactor_efforts(&self) -> Vec<String> {
-        let Some(Some((provider, model, _))) =
-            self.compaction.as_ref().map(|c| c.compactor.clone())
-        else {
-            return Vec::new();
-        };
-        let Some(provider) = self.providers.get(&provider) else {
-            return Vec::new();
-        };
-        provider
-            .models
-            .iter()
-            .flatten()
-            .find(|m| match &model {
-                Some(model) => &m.id == model,
-                None => m.default,
-            })
-            .and_then(|m| m.efforts.clone())
-            .unwrap_or_default()
-    }
-
     fn compaction_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let shown = self.compaction.clone().unwrap_or(Compaction {
@@ -555,105 +473,59 @@ impl SettingsPage {
         });
         let off = self.compaction.is_none() || self.compaction_pending;
         let this = cx.entity().downgrade();
-        let entries = self.compactor_entries();
-        let chosen = entries
-            .iter()
-            .position(|(_, _, choice)| {
-                choice.as_ref()
-                    == shown
-                        .compactor
-                        .as_ref()
-                        .map(|(provider, model, _)| (provider.clone(), model.clone()))
-                        .as_ref()
-            })
-            .unwrap_or(0);
-        let choices: Vec<Option<Judge>> = entries.iter().map(|e| e.2.clone()).collect();
-        let options = entries.iter().map(|(key, label, choice)| {
-            let option = SelectOption::new(
-                SharedString::from(key.clone()),
-                SharedString::from(label.clone()),
-            );
-            match choice {
-                None => option
-                    .line("Flottille never compacts: each agent's program does, as it chooses."),
-                Some(_) => option,
-            }
-        });
-        let picker = Select::new("compactor-model", options, chosen)
-            .disabled(off)
-            .on_choose({
-                let this = this.clone();
-                move |index, _, cx| {
-                    let compactor = match &choices[index] {
-                        None => json!("none"),
-                        Some((provider, model)) => json!({"provider": provider, "model": model}),
-                    };
-                    this.update(cx, |this, cx| {
-                        this.set_compaction(json!({"compactor": compactor}), cx)
-                    })
-                    .ok();
-                }
-            });
-        let efforts = self.compactor_efforts();
-        let chosen_effort = shown
-            .compactor
-            .as_ref()
-            .and_then(|(_, _, effort)| effort.clone());
-        let mut levels: Vec<Option<String>> = vec![None];
-        levels.extend(efforts.iter().cloned().map(Some));
-        if let Some(own) = &chosen_effort
-            && !efforts.contains(own)
-        {
-            levels.push(Some(own.clone()));
-        }
-        let effort_at = levels.iter().position(|l| *l == chosen_effort).unwrap_or(0);
-        let effort_options = levels.iter().map(|level| match level {
-            None => SelectOption::new("default", "The model's default"),
-            Some(level) => SelectOption::new(
-                SharedString::from(level.clone()),
-                SharedString::from(level.clone()),
-            ),
-        });
-        let compactor_now = shown.compactor.clone();
-        let effort_picker = Select::new("compactor-effort", effort_options, effort_at)
-            .disabled(off)
-            .on_choose({
-                let this = this.clone();
-                let levels = levels.clone();
-                move |index, _, cx| {
-                    let Some((provider, model, _)) = compactor_now.clone() else {
-                        return;
-                    };
-                    let compactor =
-                        json!({"provider": provider, "model": model, "effort": levels[index]});
-                    this.update(cx, |this, cx| {
-                        this.set_compaction(json!({"compactor": compactor}), cx)
-                    })
-                    .ok();
-                }
-            });
         let some = shown.compactor.is_some() || shown.by_agent;
-        let summary = Select::new(
-            "compaction-summary",
-            [
-                SelectOption::new("compactor", "A model you choose")
-                    .line("A separate model summarises the conversation."),
-                SelectOption::new("agent", "The session's own agent")
-                    .line("The agent summarises its own conversation, in its session."),
-            ],
-            usize::from(shown.by_agent),
-        )
-        .disabled(off)
-        .on_choose({
-            let this = this.clone();
-            move |index, _, cx| {
-                let source = if index == 1 { "agent" } else { "compactor" };
-                this.update(cx, |this, cx| {
-                    this.set_compaction(json!({"summary": source}), cx)
-                })
-                .ok();
+        let switch = Switch::new("compaction-switch", some, "Compact long conversations")
+            .hint(COMPACTION_HINT)
+            .disabled(off)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let on = this
+                    .compaction
+                    .as_ref()
+                    .is_some_and(|c| c.compactor.is_some() || c.by_agent);
+                let params = if on {
+                    json!({"compactor": "none", "summary": "compactor"})
+                } else {
+                    json!({"compactor": "pick"})
+                };
+                this.set_compaction(params, cx)
+            }));
+        let chosen = match (&shown.compactor, shown.by_agent) {
+            (_, true) => Chosen::Choice("agent".into()),
+            (Some((provider, model, _)), false) => {
+                self.providers.chosen(provider, model.as_deref())
             }
-        });
+            (None, false) => Chosen::First,
+        };
+        let summary = ModelChoice::new("compaction-summary", "Summary written by", chosen)
+            .choice(
+                "agent",
+                "The session's own agent",
+                "The agent summarises its own conversation, in its session.",
+            )
+            .models(self.providers.model_entries())
+            .effort(
+                shown
+                    .compactor
+                    .as_ref()
+                    .and_then(|(_, _, effort)| effort.clone().map(Into::into)),
+            )
+            .picked(shown.picked)
+            .cost(COMPACTOR_COST)
+            .disabled(off)
+            .on_choose({
+                let this = this.clone();
+                move |chosen, effort, _, cx| {
+                    let params = match chosen {
+                        Chosen::Model(provider, model) => json!({
+                            "summary": "compactor",
+                            "compactor": {"provider": provider, "model": model, "effort": effort},
+                        }),
+                        _ => json!({"summary": "agent"}),
+                    };
+                    this.update(cx, |this, cx| this.set_compaction(params, cx))
+                        .ok();
+                }
+            });
         let automatic = Switch::new("compaction-automatic", shown.automatic, "Compact automatically")
             .hint("On, an agent is compacted at the end of a turn once its context passes the threshold or the maximum size. Off, only when you ask, from a session's menu.")
             .disabled(off)
@@ -774,12 +646,7 @@ impl SettingsPage {
             .flex()
             .flex_col()
             .gap(space::MD)
-            .child(Field::new(
-                "compactor-effort-field",
-                "Effort",
-                effort_picker,
-            ))
-            .child(automatic)
+.child(automatic)
             .child(Field::new(
                 "compaction-threshold-field",
                 "Threshold",
@@ -813,14 +680,6 @@ impl SettingsPage {
                     )))
                     .child(format!("Prompt cache lifetimes. {lifetimes}"))
                     .test_support(),
-            )
-            .child(
-                div()
-                    .id("compactor-cost")
-                    .text_size(px(12.))
-                    .text_color(p.faint)
-                    .child(COMPACTOR_COST)
-                    .test_support(),
             );
         let card = div()
             .id("compaction")
@@ -831,15 +690,14 @@ impl SettingsPage {
             .bg(p.card)
             .border_1()
             .border_color(p.line)
+            .child(switch)
             .child(
-                Field::new("compaction-summary-field", "Summary written by", summary).hint(
-                    "A model you choose, or the session's own agent in a handoff of a fixed shape.",
-                ),
-            )
-            .child(
-                div()
-                    .pt(space::MD)
-                    .child(Field::new("compactor-field", "Compactor", picker)),
+                presence(
+                    "compaction-summary-block",
+                    some,
+                    div().pt(space::MD).child(summary),
+                )
+                .gap(space::MD),
             )
             .child(
                 presence(
@@ -908,6 +766,9 @@ impl SettingsPage {
         // A switch shows what it was asked to become until the daemon lists it so.
         self.pending
             .retain(|name, enabled| providers.get(name).is_some_and(|p| p.enabled != *enabled));
+        if self.judge_turning == Some(providers.judge.is_some()) {
+            self.judge_turning = None;
+        }
         if self.providers != *providers {
             self.providers = providers.clone();
             cx.notify();
@@ -973,86 +834,8 @@ impl SettingsPage {
         }
     }
 
-    /// What the judge's picker offers: `(id, label, chosen, the judge it chooses)`.
-    pub fn judge_entries(&self, menu: JudgeMenu) -> Vec<(String, String, bool, Option<Judge>)> {
-        let judge = self.providers.judge.as_ref();
-        match menu {
-            JudgeMenu::Provider => {
-                let mut entries = vec![(
-                    "judge-choice-none".to_owned(),
-                    NO_JUDGE.to_owned(),
-                    judge.is_none(),
-                    None,
-                )];
-                for provider in self.providers.offered() {
-                    entries.push((
-                        format!("judge-choice-{}", provider.name),
-                        provider.title.clone(),
-                        judge.is_some_and(|(name, _)| name == &provider.name),
-                        Some((provider.name.clone(), None)),
-                    ));
-                }
-                entries
-            }
-            JudgeMenu::Model => {
-                let Some((name, model)) = judge else {
-                    return Vec::new();
-                };
-                let models = self
-                    .providers
-                    .get(name)
-                    .and_then(|p| p.models.clone())
-                    .unwrap_or_default();
-                // The row that names none: the provider's default model by its name, once known.
-                let first = self
-                    .providers
-                    .model_said(name, None)
-                    .unwrap_or_else(|| "Model not known yet".to_owned());
-                let default = self
-                    .providers
-                    .get(name)
-                    .and_then(|p| p.default_model())
-                    .map(|m| m.id.clone());
-                let mut entries = vec![(
-                    "judge-model-default".to_owned(),
-                    first,
-                    model.is_none() || model == &default,
-                    Some((name.clone(), None)),
-                )];
-                // The default model is that first row, not a second one.
-                for listed in models
-                    .into_iter()
-                    .filter(|m| m.id != crate::composer::DEFAULT && Some(&m.id) != default.as_ref())
-                {
-                    entries.push((
-                        format!("judge-model-{}", listed.id),
-                        listed.id.clone(),
-                        model.as_deref() == Some(listed.id.as_str()),
-                        Some((name.clone(), Some(listed.id))),
-                    ));
-                }
-                entries
-            }
-        }
-    }
-
-    /// The judge's picker whose list is open.
-    pub fn judge_menu(&self) -> Option<JudgeMenu> {
-        self.judge_menu
-    }
-
-    pub fn toggle_judge_menu(&mut self, menu: JudgeMenu, cx: &mut Context<Self>) {
-        self.judge_menu = if self.judge_menu == Some(menu) {
-            None
-        } else {
-            Some(menu)
-        };
-        cx.notify();
-    }
-
     /// Asks the daemon for this judge, or for none.
     pub fn choose_judge(&mut self, judge: Option<Judge>, cx: &mut Context<Self>) {
-        self.judge_menu = None;
         if self.judge_pending || judge == self.providers.judge {
             cx.notify();
             return;
@@ -1071,9 +854,39 @@ impl SettingsPage {
         cx.notify();
     }
 
+    /// Whether the judge's switch shows it on: what it was asked to become while the daemon has
+    /// not answered.
+    pub fn judge_on(&self) -> bool {
+        self.judge_turning
+            .unwrap_or_else(|| self.providers.judge.is_some())
+    }
+
+    /// The judge's switch: off writes no judge (`judge = "none"`), on asks the daemon to pick
+    /// one as for a user who never chose.
+    fn flip_judge(&mut self, cx: &mut Context<Self>) {
+        if self.judge_pending {
+            return;
+        }
+        let on = !self.judge_on();
+        self.judge_turning = Some(on);
+        if !on {
+            self.choose_judge(None, cx);
+            return;
+        }
+        self.judge_pending = true;
+        self.judge_refused = None;
+        self.shell
+            .update(cx, |shell, _| shell.perform(Command::PickJudge))
+            .ok();
+        cx.notify();
+    }
+
     /// The daemon's answer to a judge chosen: a toast says it.
     pub fn judge_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         self.judge_pending = false;
+        if refused.is_some() {
+            self.judge_turning = None;
+        }
         match &refused {
             Some(why) => toast(
                 Toast::failure("The judge was not changed").detail(why.clone()),
@@ -1653,26 +1466,34 @@ impl SettingsPage {
 
     fn judge_section(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let select = |menu: JudgeMenu, id: &'static str, cx: &mut Context<Self>| {
-            let entries = self.judge_entries(menu);
-            let chosen = entries.iter().position(|e| e.2).unwrap_or(0);
-            let judges: Vec<Option<Judge>> = entries.iter().map(|e| e.3.clone()).collect();
-            let options = entries.into_iter().map(|(key, label, _, _)| {
-                let key = key.trim_start_matches("judge-").to_owned();
-                SelectOption::new(SharedString::from(key), SharedString::from(label))
-            });
-            let this = cx.entity().downgrade();
-            Select::new(id, options, chosen)
-                .disabled(self.judge_pending)
-                .on_choose(move |index, _, cx| {
-                    let judge = judges[index].clone();
-                    this.update(cx, |this, cx| this.choose_judge(judge, cx))
-                        .ok();
-                })
+        let on = self.judge_on();
+        let switch = Switch::new("judge-switch", on, "Let a model decide in Auto")
+            .hint(JUDGE_HINT)
+            .disabled(self.judge_pending)
+            .on_click(cx.listener(|this, _, _, cx| this.flip_judge(cx)));
+        let chosen = match &self.providers.judge {
+            Some((provider, model)) => self.providers.chosen(provider, model.as_deref()),
+            None => Chosen::First,
         };
-        let provider = select(JudgeMenu::Provider, "judge-provider", cx);
-        let has_model = self.providers.judge.is_some();
-        let model = select(JudgeMenu::Model, "judge-model", cx);
+        let this = cx.entity().downgrade();
+        // A judge runs on its model's own effort: the daemon keeps none for it.
+        let models = self
+            .providers
+            .model_entries()
+            .into_iter()
+            .map(|entry| entry.efforts(Vec::<String>::new()));
+        let model = ModelChoice::new("judge", "Model", chosen)
+            .models(models)
+            .picked(self.providers.judge_picked)
+            .cost(JUDGE_QUOTA)
+            .disabled(self.judge_pending)
+            .on_choose(move |chosen, _, _, cx| {
+                if let Chosen::Model(provider, model) = chosen {
+                    let judge = (provider.to_string(), model.map(|m| m.to_string()));
+                    this.update(cx, |this, cx| this.choose_judge(Some(judge), cx))
+                        .ok();
+                }
+            });
         let turned = turning("judge-how-chevron", self.how, window, cx);
         let how = hoverable(
             div()
@@ -1703,16 +1524,7 @@ impl SettingsPage {
                     .text_color(p.mute)
                     .child(*text)
                     .test_support()
-            }))
-            .child(
-                div()
-                    .id("judge-quota")
-                    .aria_label(JUDGE_QUOTA)
-                    .text_size(px(12.5))
-                    .text_color(p.mute)
-                    .child(JUDGE_QUOTA)
-                    .test_support(),
-            );
+            }));
         let card = div()
             .id("judge")
             .p(space::LG)
@@ -1723,30 +1535,12 @@ impl SettingsPage {
             .bg(p.card)
             .border_1()
             .border_color(p.line)
-            .child(
-                div()
-                    .flex()
-                    .gap(space::MD)
-                    .child(div().flex_1().min_w_0().child(Field::new(
-                        "judge-provider-field",
-                        "Provider",
-                        provider,
-                    )))
-                    .child(div().flex_1().min_w_0().child(presence(
-                        "judge-model-block",
-                        has_model,
-                        Field::new("judge-model-field", "Model", model),
-                    ))),
-            )
+            .child(switch)
+            .child(presence("judge-model-block", on, model).gap(space::MD))
             .child(how)
             .child(presence("judge-how-block", self.how, lines).gap(space::MD))
             .test_support();
-        Section::new("judge", "Auto judge")
-            .sentence(
-                "In Auto, a small model decides the calls the rules do not know to be harmless. \
-                 It never denies: it allows, or asks you.",
-            )
-            .child(card)
+        Section::new("judge", "Auto judge").child(card)
     }
 
     fn provider_row(&self, provider: &Provider, cx: &mut Context<Self>) -> ListRow {

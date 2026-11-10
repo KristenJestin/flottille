@@ -2546,69 +2546,100 @@ fn the_composer_shows_full_in_the_alarm_colour(cx: &mut TestAppContext) {
 fn the_auto_judge_is_chosen_in_settings_which_say_it_uses_the_quota(cx: &mut TestAppContext) {
     let user = providers_user();
     project(&user, "atlas");
+    learn_models(&user, "atlas", "opencode", "open/small");
+    user.call("provider.set_judge", json!({"provider": "opencode"}))
+        .unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
-    // "No judge" is said before the daemon is asked; the judge's card is drawn once it answered.
-    until(&shell, cx, "the judge's picker shows none", |cx| {
-        page.read_with(cx, |page, _| {
-            page.providers().known && page.judge_shown().0 == "No judge"
-        })
+    until(&shell, cx, "the judge is shown", |cx| {
+        page.read_with(cx, |page, _| page.judge_shown().0 == "OpenCode")
     });
     settle(cx);
-    cx.update(|window, _| assert!(window.find("judge-provider").visible()));
-    // What Auto does, and that it uses the quota, is one click away: "How Auto works".
-    cx.update(|window, cx| window.click("judge-how", cx));
-    settle(cx);
+    // One select of the models, the cost said once under it.
     assert_eq!(
-        text_of("judge-quota", cx).as_deref(),
+        text_of("judge-model", cx).as_deref(),
+        Some("OpenCode · open/small")
+    );
+    assert_eq!(
+        text_of("judge-cost", cx).as_deref(),
         Some(flottille_window::settings::JUDGE_QUOTA)
     );
-
-    cx.update(|window, cx| window.click("judge-provider", cx));
+    cx.update(|window, cx| window.click("judge-model", cx));
     settle(cx);
-    cx.update(|window, cx| window.click("judge-provider-choice-opencode", cx));
+    cx.update(|window, cx| window.click("judge-model-opencode-open-medium", cx));
     until(&shell, cx, "the page shows the judge chosen", |cx| {
         page.read_with(cx, |page, _| {
-            page.judge_shown() == ("OpenCode".into(), Some("model not known yet".into()))
+            page.judge_shown() == ("OpenCode".into(), Some("open/medium".into()))
         })
     });
-    // No session of OpenCode said its models: the picker never says "default".
-    let labels: Vec<String> = page.read_with(cx, |page, _| {
-        page.judge_entries(flottille_window::settings::JudgeMenu::Model)
-            .into_iter()
-            .map(|entry| entry.1)
-            .collect()
-    });
-    assert_eq!(labels[0], "Model not known yet");
-    assert!(
-        labels.iter().all(|l| !l.to_lowercase().contains("default")),
-        "{labels:?}"
-    );
     let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
     assert!(
-        file.contains("[judge]") && file.contains("provider = \"opencode\""),
-        "{file}"
-    );
-    // The model's select unfolds once a judge is chosen.
-    settle(cx);
-    cx.update(|window, _| assert!(window.find("judge-model").visible()));
-
-    cx.update(|window, cx| window.click("judge-provider", cx));
-    settle(cx);
-    cx.update(|window, cx| window.click("judge-provider-choice-none", cx));
-    until(&shell, cx, "the page shows no judge again", |cx| {
-        page.read_with(cx, |page, _| page.judge_shown().0 == "No judge")
-    });
-    // Chosen none, kept apart from never chosen: no judge is ever picked for this user.
-    let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
-    assert!(
-        !file.contains("[judge]") && file.contains("judge = \"none\""),
+        file.contains("provider = \"opencode\"") && file.contains("model = \"open/medium\""),
         "{file}"
     );
 }
 
 #[gpui_kit::test]
-fn settings_explain_auto_in_two_lines_and_offer_no_judge(cx: &mut TestAppContext) {
+fn the_judge_is_turned_off_by_its_switch_and_writes_none(cx: &mut TestAppContext) {
+    let user = providers_user();
+    user.call("provider.set_judge", json!({"provider": "opencode"}))
+        .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the judge is shown", |cx| {
+        page.read_with(cx, |page, _| page.judge_shown().0 == "OpenCode")
+    });
+    settle(cx);
+    assert_eq!(
+        text_of("judge-switch-label", cx).as_deref(),
+        Some("Let a model decide in Auto")
+    );
+    cx.update(|window, _| assert!(window.find("judge-model").visible()));
+    cx.update(|window, cx| window.click("judge-switch", cx));
+    until(&shell, cx, "the page shows no judge", |cx| {
+        page.read_with(cx, |page, _| page.providers().judge.is_none())
+    });
+    let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
+    assert!(
+        !file.contains("[judge]") && file.contains("judge = \"none\""),
+        "{file}"
+    );
+    // The model folds away with the switch: no select says "none".
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("judge-model").is_none()));
+}
+
+#[gpui_kit::test]
+fn turning_the_judge_on_picks_one_as_for_a_new_user(cx: &mut TestAppContext) {
+    // Claude installed (the fake `claude`) and signed in: its smallest model is the one picked.
+    let user = User::with_fake_claude();
+    user.call("provider.set_judge", json!({"provider": null}))
+        .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the providers are read", |cx| {
+        page.read_with(cx, |page, _| page.providers().known)
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("judge-model").is_none()));
+    cx.update(|window, cx| window.click("judge-switch", cx));
+    until(&shell, cx, "the judge picked is shown", |cx| {
+        page.read_with(cx, |page, _| {
+            page.providers().judge == Some(("claude".into(), Some("haiku".into())))
+        })
+    });
+    settle(cx);
+    let shown = text_of("judge-model", cx).unwrap();
+    assert!(shown.starts_with("Claude · "), "{shown}");
+    let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
+    assert!(
+        file.contains("[judge]") && !file.contains("picked"),
+        "{file}"
+    );
+}
+
+#[gpui_kit::test]
+fn settings_explain_auto_in_two_lines(cx: &mut TestAppContext) {
     let user = providers_user();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
@@ -2628,11 +2659,6 @@ fn settings_explain_auto_in_two_lines_and_offer_no_judge(cx: &mut TestAppContext
     let [rules, base] = flottille_window::settings::AUTO;
     assert!(rules.contains("known to be harmless") && rules.contains("your own quota"));
     assert!(base.contains("Base calls always come to you"));
-    let none = page.read_with(cx, |page, _| {
-        page.judge_entries(flottille_window::settings::JudgeMenu::Provider)[0].clone()
-    });
-    assert_eq!(none.1, "No judge (Auto asks like Ask)");
-    assert_eq!(none.3, None);
 }
 
 #[gpui_kit::test]
@@ -2841,18 +2867,11 @@ fn the_judge_s_model_picker_names_the_provider_s_default_model_once_it_is_known(
     project(&user, "atlas");
     // A session of OpenCode says its models, and the one it takes.
     learn_models(&user, "atlas", "opencode", "open/small");
+    // The judge on the provider's default, by no model.
+    user.call("provider.set_judge", json!({"provider": "opencode"}))
+        .unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
-    // "No judge" is said before the daemon is asked; the judge's card is drawn once it answered.
-    until(&shell, cx, "the judge's picker shows none", |cx| {
-        page.read_with(cx, |page, _| {
-            page.providers().known && page.judge_shown().0 == "No judge"
-        })
-    });
-    settle(cx);
-    cx.update(|window, cx| window.click("judge-provider", cx));
-    settle(cx);
-    cx.update(|window, cx| window.click("judge-provider-choice-opencode", cx));
     until(
         &shell,
         cx,
@@ -2863,22 +2882,25 @@ fn the_judge_s_model_picker_names_the_provider_s_default_model_once_it_is_known(
             })
         },
     );
-    let labels: Vec<String> = page.read_with(cx, |page, _| {
-        page.judge_entries(flottille_window::settings::JudgeMenu::Model)
-            .into_iter()
-            .map(|entry| entry.1)
-            .collect()
-    });
-    assert_eq!(labels, ["open/small", "open/medium"]);
-    let first = page.read_with(cx, |page, _| {
-        page.judge_entries(flottille_window::settings::JudgeMenu::Model)[0].clone()
-    });
-    assert!(first.2, "the default model's row is the chosen one");
+    settle(cx);
+    // The default model's entry is the chosen one, never a second "default" entry.
     assert_eq!(
-        first.3,
-        Some(("opencode".to_owned(), None)),
-        "it names none"
+        text_of("judge-model", cx).as_deref(),
+        Some("OpenCode · open/small")
     );
+    cx.update(|window, cx| window.click("judge-model", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find("judge-model-opencode-open-small").selected(),
+            Some(true)
+        );
+        assert!(
+            window
+                .try_find("judge-model-opencode-default-own")
+                .is_none()
+        );
+    });
 }
 
 #[test]
@@ -3946,7 +3968,7 @@ fn the_judge_tab_holds_the_auto_judge_and_its_guidance(cx: &mut TestAppContext) 
     );
     cx.update(|window, _| {
         for id in [
-            "judge-provider",
+            "judge-switch",
             "judge-how",
             "judge-guidance-text",
             "judge-guidance-reach",
@@ -3999,7 +4021,7 @@ fn a_link_to_the_guidance_opens_the_judge_tab(cx: &mut TestAppContext) {
     };
     let judge_in_sight = |cx: &mut VisualTestContext| {
         cx.update(|window, _| {
-            let picker = window.find("judge-provider").bounds();
+            let picker = window.find("judge-switch").bounds();
             picker.top() >= px(0.) && picker.bottom() <= window.viewport_size().height
         })
     };
