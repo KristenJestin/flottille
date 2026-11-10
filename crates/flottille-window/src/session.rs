@@ -6703,7 +6703,7 @@ impl SessionRail {
         cx.notify();
     }
 
-    /// The confirmation's "Remove workspace": the same command the project page's card sends.
+    /// The confirmation's "Remove workspace": the same command the project page's place sends.
     fn remove_workspace(&mut self, cx: &mut Context<Self>) {
         self.confirming = false;
         let Some(name) = self.workspace.clone() else {
@@ -7478,7 +7478,7 @@ impl Render for SessionRail {
             .children(rows)
             .test_support();
 
-        // The workspace: one labelled line each, as its card on the project page.
+        // The workspace: one labelled line each, as its place on the project page.
         let pull_of = |path: &str| {
             self.place
                 .iter()
@@ -8204,6 +8204,7 @@ fn workspace_menu_of(
                         .ok();
                 })
             }),
+            prepare: None,
             remove: removable.then(|| -> WorkspaceAction {
                 Box::new(move |cx| {
                     removes.update(cx, |rail, cx| rail.ask_removal(cx)).ok();
@@ -8215,7 +8216,7 @@ fn workspace_menu_of(
 }
 
 /// What a workspace's "⋯" offers, wherever it is drawn: the rail's Workspace and the workspace's
-/// card on the project page build it with this, so that both say the same.
+/// place on the project page build it with this, so that both say the same.
 pub struct WorkspaceActions {
     pub open_in_editor: WorkspaceAction,
     /// A ticket is linked to the workspace: its menu offers to change and to unlink it, not to
@@ -8224,13 +8225,15 @@ pub struct WorkspaceActions {
     /// Shows where a ticket is typed; `None` where the workspace links none.
     pub link_ticket: Option<WorkspaceAction>,
     pub unlink_ticket: Option<WorkspaceAction>,
+    /// Plays its setup again; `None` where it is not prepared from.
+    pub prepare: Option<WorkspaceAction>,
     /// Asks before removing it; `None` where it is not removed from.
     pub remove: Option<WorkspaceAction>,
 }
 
 pub type WorkspaceAction = Box<dyn Fn(&mut App)>;
 
-/// What a toast says of a workspace's removal, from the project page's card or the session's
+/// What a toast says of a workspace's removal, from the project page's place or the session's
 /// rail: removed, or not removed with the refusal's detail.
 pub(crate) fn removal_toast(name: &str, refused: Option<&str>) -> Toast {
     match refused {
@@ -8249,6 +8252,7 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
         ticket_linked,
         link_ticket,
         unlink_ticket,
+        prepare,
         remove,
     } = actions;
     let mut menu = Menu::new(
@@ -8279,6 +8283,14 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
             move |_, cx| unlink(cx),
         );
     }
+    if let Some(prepare) = prepare {
+        menu = menu.entry(
+            "workspace-prepare",
+            "Prepare again",
+            Some(Icon::Restart),
+            move |_, cx| prepare(cx),
+        );
+    }
     if let Some(remove) = remove {
         menu = menu.danger("remove-workspace", "Remove workspace…", move |_, cx| {
             remove(cx)
@@ -8288,7 +8300,7 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
 }
 
 /// A pull request's row: its number and state, and its checks' mark, drawn by shape as well as
-/// colour. The place card draws the same.
+/// colour. The project page's place draws the same.
 pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<Div> {
     let p = palette(cx);
     let (mark, color, said) = match pull.mark.as_deref() {

@@ -13,7 +13,7 @@ use flottille_core::workspace::StepState;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
-use flottille_window::project::{PlaceCard, ProjectPage};
+use flottille_window::project::{PlaceBlock, ProjectPage};
 use flottille_window::shell::Selection;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -154,8 +154,8 @@ fn card_of(
     page: &Entity<ProjectPage>,
     name: &str,
     cx: &mut VisualTestContext,
-) -> Option<Entity<PlaceCard>> {
-    page.read_with(cx, |page, cx| page.card(&Some(name.to_owned()), cx))
+) -> Option<Entity<PlaceBlock>> {
+    page.read_with(cx, |page, cx| page.block(&Some(name.to_owned()), cx))
 }
 
 /// The row of the first `Run` step in `state` on the card of `name`, once there is one.

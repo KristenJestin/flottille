@@ -825,7 +825,7 @@ impl Composer {
             .collect()
     }
 
-    /// Why no session can start, as the daemon says it, and the way to the settings page.
+    /// No provider is ready to start a session: one line, and the way to the providers' settings.
     fn render_not_ready(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let why = self.providers.why_none();
         if why.is_empty() {
@@ -836,29 +836,23 @@ impl Composer {
         Some(
             div()
                 .id("composer-not-ready")
+                .aria_label(SharedString::from(why.join(" ")))
                 .px(space::MD)
                 .pt(space::SM)
                 .pb(space::XS)
                 .flex()
-                .flex_col()
+                .items_center()
                 .gap(space::XS)
                 .text_size(px(12.5))
-                .text_color(p.faint)
-                .child(
-                    div()
-                        .text_color(p.mute)
-                        .child("No provider can start a session:"),
-                )
-                .children(
-                    why.into_iter()
-                        .map(|line| div().child(SharedString::from(line))),
-                )
+                .text_color(p.mute)
+                .child("No provider is ready.")
                 .child(hoverable(
                     div()
                         .id("open-settings")
-                        .mt(px(2.))
                         .cursor_pointer()
-                        .child("Open the settings")
+                        .medium()
+                        .text_color(p.text)
+                        .child("Open Settings")
                         .on_click(move |_, window, cx| {
                             shell
                                 .update(cx, |shell, cx| {
@@ -866,7 +860,7 @@ impl Composer {
                                 })
                                 .ok();
                         }),
-                    move |d, t| d.text_color(mix(p.mute, p.text, t)),
+                    move |d, t| d.text_color(mix(p.text, p.acc, t)),
                 )),
         )
     }
@@ -910,7 +904,7 @@ impl Composer {
         }
         // Not a place: it opens the page's new-workspace modal, the one its own button opens.
         items.push(
-            MenuItem::new("place-choice-new", "New workspace")
+            MenuItem::new("place-choice-new", "New workspace…")
                 .leading(Icon::Plus)
                 .on_click(Self::handler(cx, |this, window, cx| {
                     this.menu = None;

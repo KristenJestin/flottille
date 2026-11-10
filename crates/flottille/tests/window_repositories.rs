@@ -1,6 +1,6 @@
 //! The scenarios of a project's repositories in the window (#140, #167): the project's settings
 //! list them and add, remove and detect them again; the new-workspace form takes some of them, each from
-//! the base chosen for it; a workspace's card and the session's rail say where each repository
+//! the base chosen for it; a workspace's place and the session's rail say where each repository
 //! stands. On GPUI's test platform in front of a real daemon, with throwaway repositories (one
 //! with no remote) and temporary XDG folders. No window opens on a screen.
 
@@ -14,7 +14,7 @@ use common::User;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
-use flottille_window::project::{PlaceCard, ProjectPage};
+use flottille_window::project::{PlaceBlock, ProjectPage};
 use flottille_window::project_settings::ProjectSettingsPage;
 use flottille_window::repositories::ProjectRepositories;
 use flottille_window::session::SessionPage;
@@ -411,7 +411,7 @@ fn the_new_workspace_form_creates_a_workspace_with_two_of_three_repositories(
 }
 
 #[gpui_kit::test]
-fn a_workspace_s_card_and_the_rail_show_where_each_repository_stands(cx: &mut TestAppContext) {
+fn a_workspace_s_place_and_the_rail_show_where_each_repository_stands(cx: &mut TestAppContext) {
     let user = user();
     trio(&user);
     user.call(
@@ -434,24 +434,26 @@ fn a_workspace_s_card_and_the_rail_show_where_each_repository_stands(cx: &mut Te
     std::fs::write(api.join("draft.rs"), "draft\n").unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "trio", cx);
-    let card = |cx: &mut VisualTestContext| -> Option<Entity<PlaceCard>> {
-        page_of(&shell, cx).read_with(cx, |page, cx| page.card(&Some("login".to_owned()), cx))
+    let card = |cx: &mut VisualTestContext| -> Option<Entity<PlaceBlock>> {
+        page_of(&shell, cx).read_with(cx, |page, cx| page.block(&Some("login".to_owned()), cx))
     };
     until(
         &shell,
         cx,
-        "the card says where its repositories stand",
+        "the place says where its repositories stand",
         |cx| card(cx).is_some_and(|card| card.read_with(cx, |c, _| !c.statuses().is_empty())),
     );
     settle(cx);
 
-    assert_eq!(
-        label_of("repository-line-login-api", cx).as_deref(),
-        Some("Repository api 1 ahead · 1 uncommitted")
+    // The place's faint line, in labelled values.
+    let said = label_of("place-facts-login", cx).unwrap_or_default();
+    assert!(
+        said.contains("api: 1 commit ahead, 1 file changed"),
+        "{said}"
     );
-    assert_eq!(
-        label_of("repository-line-login-lib", cx).as_deref(),
-        Some("Repository lib 0 ahead · clean · no remote origin: started from the local main")
+    assert!(
+        said.contains("lib: clean, no remote origin: started from the local main"),
+        "{said}"
     );
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
 

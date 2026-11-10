@@ -317,7 +317,7 @@ fn the_values_of_the_ticket_and_the_pull_request_are_drawn_at_the_size_of_the_ot
 }
 
 #[gpui_kit::test]
-fn the_project_page_s_workspace_card_lists_the_ticket_above_the_pull_request(
+fn the_project_page_s_workspace_row_shows_its_pull_request_then_its_ticket(
     cx: &mut TestAppContext,
 ) {
     let user = user();
@@ -330,17 +330,26 @@ fn the_project_page_s_workspace_card_lists_the_ticket_above_the_pull_request(
     until(
         &shell,
         cx,
-        "the ticket and the pull request on the card",
+        "the ticket and the pull request on the place's row",
         |cx| present(cx, "ticket-login") && present(cx, "pull-login-api"),
     );
     settle(cx);
 
-    let ticket = rect(cx, "ticket-login");
-    let pull = rect(cx, "pull-login-api");
-    assert!(
-        ticket.bottom() <= pull.origin.y,
-        "{ticket:?} above {pull:?}"
+    let (ticket, pull, row) = (
+        rect(cx, "ticket-login"),
+        rect(cx, "pull-login-api"),
+        rect(cx, "place-row-login"),
     );
+    assert!(
+        pull.right() <= ticket.origin.x,
+        "{pull:?} before {ticket:?}"
+    );
+    for chip in [ticket, pull] {
+        assert!(
+            chip.origin.y >= row.origin.y && chip.bottom() <= row.bottom(),
+            "{chip:?} on {row:?}"
+        );
+    }
 }
 
 // ── Removing the workspace from the session's rail (#384) ────────────────────────────────────

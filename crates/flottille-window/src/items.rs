@@ -14,8 +14,8 @@ use flottille_ui::fuzzy;
 use flottille_ui::motion::PANEL;
 use flottille_ui::{
     Block, Button, Card, EmptyLine, Field, FlatRow, Icon, LINE_GAP, LabelledLine, ListCard,
-    ListRow, Listing, Modal, Section, Segmented, Select, SelectOption, Switch, Tabs, Type,
-    changing, enter, fade, icon, palette, presence, presence_of, space, tipped,
+    ListRow, Listing, Modal, Segmented, Select, SelectOption, Switch, Type, changing, fade, icon,
+    palette, presence, presence_of, space, tipped,
 };
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -473,7 +473,8 @@ impl Detail {
     }
 }
 
-/// The project page's "Pull requests and tickets".
+/// The project page's Pull requests, Tickets and Specs tabs: the page draws the tabs, this the
+/// one chosen.
 pub struct ProjectItems {
     shell: WeakEntity<Shell>,
     project: String,
@@ -487,6 +488,9 @@ pub struct ProjectItems {
     search: Option<Entity<Search>>,
     /// The repository whose pull requests alone are listed.
     repository: Option<String>,
+    /// The workspace each pull request is of, by its repository and number, as the page last read
+    /// the workspaces: its row says `in <workspace>`.
+    workspaces: HashMap<(String, String), String>,
     /// The rows as drawn, one list per tab: a row that leaves folds away before it is gone.
     lists: [Listing<ItemRow>; 2],
     /// The CI mark of each pull request that has or had checks, by its row's id: its own view,
@@ -536,6 +540,7 @@ impl ProjectItems {
             query: String::new(),
             search: None,
             repository: None,
+            workspaces: HashMap::new(),
             lists: [Listing::default(), Listing::default()],
             marks: HashMap::new(),
             scroll: ScrollHandle::new(),
@@ -698,6 +703,41 @@ impl ProjectItems {
         self.specs_chosen = false;
         self.to_the_top();
         cx.notify();
+    }
+
+    /// How many rows each list keeps: the pull requests', the tickets'.
+    pub fn counts(&self) -> [usize; 2] {
+        [self.kept(Kind::Pulls).len(), self.kept(Kind::Tickets).len()]
+    }
+
+    /// How many specs the project has, while Specs is on in it: its tab shows then.
+    pub fn specs_count(&self, cx: &App) -> Option<usize> {
+        self.specs_on(cx).then(|| {
+            self.shell
+                .upgrade()
+                .map(|shell| {
+                    let registry = shell.read(cx).extensions().clone();
+                    registry.read(cx).specs().of(&self.project).len()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    /// The list chosen; none while it is Specs.
+    pub fn chosen(&self, cx: &App) -> Option<Kind> {
+        (!self.specs_shown(cx)).then_some(self.tab)
+    }
+
+    /// Which workspace each pull request is of: its row says it.
+    pub fn set_workspaces(
+        &mut self,
+        workspaces: HashMap<(String, String), String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspaces != workspaces {
+            self.workspaces = workspaces;
+            cx.notify();
+        }
     }
 
     /// Chooses the Specs tab.
@@ -943,7 +983,14 @@ impl ProjectItems {
             }
             _ => plain.into_any_element(),
         };
-        let facts = row.facts(&self.project, repositories, self.shown, now);
+        let mut facts = row.facts(&self.project, repositories, self.shown, now);
+        if let Some(workspace) = self
+            .workspaces
+            .get(&(row.repository.clone(), row.key.clone()))
+            .filter(|_| row.kind == "pull")
+        {
+            facts.push(("in", workspace.clone()));
+        }
         let said = facts
             .iter()
             .map(|(label, value)| match label {
@@ -999,11 +1046,12 @@ impl ProjectItems {
             })
     }
 
-    /// The filters of the chosen tab: the states, the user's own, and a repository for the pull
-    /// requests of a project of several.
+    /// The filters of the chosen tab, on one row: the states, the user's own, a repository for
+    /// the pull requests of a project of several, and the search.
     fn filters(
         &self,
         forges: &[String],
+        search: Entity<Search>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1027,18 +1075,14 @@ impl ProjectItems {
             }
         });
         let unknown = self.mine_unknown(self.tab);
-        let mine = Switch::new(
-            "project-items-mine",
-            self.mine && unknown.is_none(),
-            "Mine only",
-        )
-        .disabled(unknown.is_some())
-        .on_click({
-            let this = this.clone();
-            move |_, _, cx| {
-                this.update(cx, |this, cx| this.toggle_mine(cx)).ok();
-            }
-        });
+        let mine = Switch::new("project-items-mine", self.mine && unknown.is_none(), "Mine")
+            .disabled(unknown.is_some())
+            .on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |this, cx| this.toggle_mine(cx)).ok();
+                }
+            });
         let mine = div().id("project-items-mine-switch").child(mine);
         let mine = match unknown {
             Some(why) => tipped(mine, why, 32., window, cx).into_any_element(),
@@ -1081,11 +1125,16 @@ impl ProjectItems {
         div()
             .flex()
             .flex_wrap()
-            .items_center()
+            .items_end()
             .gap(space::LG)
             .child(states)
             .child(mine)
             .children(repository)
+            .child(
+                div()
+                    .w(px(240.))
+                    .child(Field::new("project-items-search", "Search", search)),
+            )
             .into_any_element()
     }
 
@@ -1501,36 +1550,8 @@ impl Render for ProjectItems {
                 )
             },
         );
-        let this = cx.weak_entity();
         // Specs' tab, while Specs is on in the project.
-        let specs_on = self.specs_on(cx);
-        let specs_shown = specs_on && self.specs_chosen;
-        let spec_count = specs_on.then(|| {
-            self.shell
-                .upgrade()
-                .map(|shell| {
-                    let registry = shell.read(cx).extensions().clone();
-                    registry.read(cx).specs().of(&self.project).len()
-                })
-                .unwrap_or_default()
-        });
-        let chosen = if specs_shown { 2 } else { tab.index() };
-        let tabs = Tabs::new("project-items-tabs", "Lists", chosen)
-            .counted("pulls", "Pull requests", counts[0].to_string())
-            .counted("tickets", "Tickets", counts[1].to_string())
-            .when_some(spec_count, |tabs, count| {
-                tabs.counted("specs", "Specs", count.to_string())
-            })
-            .on_choose({
-                let this = this.clone();
-                move |at, _, cx| {
-                    this.update(cx, |this, cx| match at {
-                        2 => this.choose_specs(cx),
-                        at => this.choose([Kind::Pulls, Kind::Tickets][at], cx),
-                    })
-                    .ok();
-                }
-            });
+        let specs_shown = self.specs_shown(cx);
         let not_set = {
             let (shell, project) = (self.shell.clone(), self.project.clone());
             let first = read
@@ -1538,19 +1559,11 @@ impl Render for ProjectItems {
                 .and_then(|read| read.repositories.first().cloned())
                 .unwrap_or_default();
             let (glyph, text) = match tab {
-                Kind::Pulls => (
-                    glyphs::PULL_REQUEST,
-                    "No forge is set for the project's repositories: set one in its Settings to \
-                     list their pull requests.",
-                ),
-                Kind::Tickets => (
-                    glyphs::TICKET,
-                    "No tracker is set for the project: set one in its Settings to list its \
-                     tickets.",
-                ),
+                Kind::Pulls => (glyphs::PULL_REQUEST, "No forge set for this project."),
+                Kind::Tickets => (glyphs::TICKET, "No tracker set for this project."),
             };
             EmptyLine::new("project-items-not-set", glyph, text).action(
-                Button::secondary("project-items-settings", "Open Settings").on_click(
+                Button::secondary("project-items-settings", "Choose one in Settings").on_click(
                     move |_, window, cx| {
                         let at = match tab {
                             Kind::Pulls => Reveal::Repository(first.clone()),
@@ -1568,27 +1581,16 @@ impl Render for ProjectItems {
         let searching = !self.query.trim().is_empty();
         let total = self.narrowed(tab).count();
         let count = count_said(self.shown, total, counts[tab.index()], searching);
-        let finder = div()
-            .flex()
-            .items_end()
-            .justify_between()
-            .gap(space::LG)
-            .child(div().w(px(320.)).child(Field::new(
-                "project-items-search",
-                "Search",
-                search.clone(),
-            )))
-            .child(changing("project-items-count-fade", count, move |count| {
-                div()
-                    .id("project-items-count")
-                    .aria_label(count.clone())
-                    .pb(space::SM)
-                    .text_size(px(13.))
-                    .text_color(p.mute)
-                    .child(count)
-                    .test_support()
-                    .into_any_element()
-            }));
+        let count_line = changing("project-items-count-fade", count, move |count| {
+            div()
+                .id("project-items-count")
+                .aria_label(count.clone())
+                .text_size(px(13.))
+                .text_color(p.mute)
+                .child(count)
+                .test_support()
+                .into_any_element()
+        });
         let empty_said = match (tab, self.shown) {
             (Kind::Pulls, Shown::Open) => "No open pull request.",
             (Kind::Pulls, Shown::Closed) => "No closed or merged pull request.",
@@ -1610,14 +1612,14 @@ impl Render for ProjectItems {
                 "project-items-filters-block",
                 set == Some(true),
                 {
-                    let filters = self.filters(&forges, window, cx);
+                    let filters = self.filters(&forges, search.clone(), window, cx);
                     div()
                         .pb(space::MD)
                         .flex()
                         .flex_col()
-                        .gap(space::MD)
+                        .gap(space::SM)
                         .child(filters)
-                        .child(finder)
+                        .child(count_line)
                 },
             ))
             .child(presence_of(
@@ -1663,11 +1665,6 @@ impl Render for ProjectItems {
                     card.into_any_element()
                 }),
             ));
-        let shown_key = match tab {
-            _ if specs_shown => "specs",
-            Kind::Pulls => "pulls",
-            Kind::Tickets => "tickets",
-        };
         let body = match specs_shown {
             true => {
                 let (shell, project) = (self.shell.clone(), self.project.clone());
@@ -1679,19 +1676,15 @@ impl Render for ProjectItems {
             false => body.into_any_element(),
         };
         let modal = self.detail_modal(cx);
-        Section::new("project-items", "Pull requests and tickets")
-            .sentence(
-                "What Flottille keeps of the project's forges and tracker, read again every \
-                 minute while the window is open.",
-            )
-            .child(tabs)
-            .child(enter(
-                ElementId::Name(format!("enter-items-{}-{shown_key}", self.project).into()),
-                0,
-                body,
-            ))
+        let specs_on = self.specs_on(cx);
+        div()
+            .id("project-items")
+            .flex()
+            .flex_col()
+            .child(body)
             .children(modal)
-            .when(specs_on, |section| section.child(self.write_spec.clone()))
+            .when(specs_on, |d| d.child(self.write_spec.clone()))
+            .test_support()
     }
 }
 
