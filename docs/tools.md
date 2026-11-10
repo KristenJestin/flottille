@@ -1071,11 +1071,17 @@ change" says, and called through the gate as every other.
 
 | Tool | |
 |---|---|
-| `spec {action: read \| write \| ask \| questions \| amend, spec, section?, content?, questions?, why?}` | `read`: a spec of the project, whole (`spec.show`'s answer, `docs/protocol.md`). `write {section, content}`: one section of the spec this session writes, whole, as `spec.write` takes it. `ask {questions}`: a wave of questions for the user, each `{question, options, recommended, reason}`: two options at least, none empty or twice, `recommended` one of them, and the reason it is recommended; one question that does not fit refuses the wave, saying which and why. The answers come later, each as a delivery (`[flottille:specs]`) saying the `D` it became: the call waits for no one. `questions`: the questions asked of the spec, numbered, open or answered with their `D`. `amend {section, content, why}`, the development session's only: a `C` or a `D` the user decided during the development, added or changed, with why; `section` is `behaviour` or `decisions`, `content` one item as `write` takes it (`{id?, text}`, `{id?, question, decision, set_aside}`), its `id` naming the item it changes, none for a new one. The user accepts or refuses it (`spec.amendment`); the answer comes later as a delivery, saying the identifier an accepted one took: the call waits for no one. |
+| `spec {action: new \| read \| write \| ask \| questions \| amend, spec?, ticket?, idea?, section?, content?, questions?, why?}` | `new {ticket?, idea?}`: starts a spec this session then writes, as "Write the spec" and "New spec" do, minus a new session: of `ticket`, a ticket of the project's tracker, in the project's mode for specs from a ticket (Internal until a project chooses its own), or without one of `idea`, one sentence, Alone; the answer is the method, and the ticket framed as data. `spec`, the spec's number, is every other action's. `read`: a spec of the project, whole (`spec.show`'s answer, `docs/protocol.md`). `write {section, content}`: one section of the spec this session writes, whole, as `spec.write` takes it. `ask {questions}`: a wave of questions for the user, each `{question, options, recommended, reason}`: two options at least, none empty or twice, `recommended` one of them, and the reason it is recommended; one question that does not fit refuses the wave, saying which and why. The answers come later, each as a delivery (`[flottille:specs]`) saying the `D` it became: the call waits for no one. `questions`: the questions asked of the spec, numbered, open or answered with their `D`. `amend {section, content, why}`, the development session's only: a `C` or a `D` the user decided during the development, added or changed, with why; `section` is `behaviour` or `decisions`, `content` one item as `write` takes it (`{id?, text}`, `{id?, question, decision, set_aside}`), its `id` naming the item it changes, none for a new one. The user accepts or refuses it (`spec.amendment`); the answer comes later as a delivery, saying the identifier an accepted one took: the call waits for no one. |
 
-- **Who writes.** A spec is written by the session "New spec" or "Write the spec" started for it
-  (its `writer`); `write` and `ask` by another session, or of a spec with no writing session, are
-  refused: `spec 3 is written by session …: this session does not write it`.
+- **How a spec starts.** With `new`, when the user asks a root for a spec, or by the user's "New
+  spec" and "Write the spec". `new` is refused for a ticket that already has a spec (`ticket ABC-7
+  already has a spec: spec 3, "…"`: work on it instead), a ticket the tracker does not know, and a
+  session that already writes or develops a spec (`this session writes spec 3, "…": a session
+  works on one spec`, the gate's, in every mode).
+- **Who writes.** A spec is written by the session "New spec" or "Write the spec" started for it,
+  or by the root that started it with `new` (its `writer`); `write` and `ask` by another session,
+  or of a spec with no writing session, are refused: `spec 3 is written by session …: this session
+  does not write it`.
 - **Who amends.** Only the session developing the spec now (the one its last "Launch development"
   started, while it runs) has `amend` of it: another root's, a session of an earlier development
   resumed included, is refused (`spec 3 is developed by session …: only the session
@@ -1088,8 +1094,8 @@ change" says, and called through the gate as every other.
   spec past Draft (`spec 3 is Ready: it is locked, and only the user sends it back to Draft`) or
   that the session does not write, and an `amend` by a session that does not develop the spec or
   of a Draft, are refused by the gate itself, Full mode included. The rest passes in every mode:
-  Specs declares its five actions harmless, since each reads or writes a spec in Flottille's store
-  and nothing else.
+  Specs declares its six actions harmless, since each reads or writes a spec in Flottille's store
+  and nothing else (`new` makes a Draft, and nothing else).
 - **Departures.** The session writing an internal spec keeps, with `write` `departures` (a text),
   where the spec departs from its tickets: a case left out, a rule decided otherwise. The user
   reads it and, at Done, posts it or not; no action of `spec` posts anything, nor writes a ticket.
