@@ -972,7 +972,16 @@ impl Guards {
             };
             match wait {
                 Wait::Closing(mut closing) => {
-                    let _ = closing.wait_for(|closed| *closed).await;
+                    // Its task died before it said it ended: the group goes, its marker left to
+                    // say at the next start that its place was not put back.
+                    if closing.wait_for(|closed| *closed).await.is_err() {
+                        self.groups.lock().unwrap().retain(|group| {
+                            !group
+                                .closing
+                                .as_ref()
+                                .is_some_and(|other| other.same_channel(&closing))
+                        });
+                    }
                 }
                 Wait::Taken(mut taken) => {
                     let noted = taken.wait_for(Option::is_some).await.is_ok_and(|taken| {
@@ -1849,6 +1858,38 @@ mod tests {
         made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
         let restored = next.leave().await.unwrap();
         assert_eq!(restored.put_back, [".claude/settings.json"]);
+    }
+
+    #[tokio::test]
+    async fn a_dead_leave_task_does_not_hold_a_run_forever() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        made(&root.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let guards = Guards::default();
+        // A put-back whose task died before it said it ended.
+        let (closed, closing) = watch::channel(false);
+        guards.groups.lock().unwrap().push(Group {
+            root: real(&root),
+            runs: Vec::new(),
+            snapshot: watch::channel(None).1,
+            closing: Some(closing),
+            marker: kept.join(MARKERS).join("dead.json"),
+        });
+        drop(closed);
+
+        let guard = tokio::time::timeout(
+            Duration::from_secs(10),
+            guards.enter(&root, &[], None, &kept, "run"),
+        )
+        .await
+        .expect("held forever by a dead put-back")
+        .unwrap();
+
+        made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
+        let restored = guard.leave().await.unwrap();
+        assert_eq!(restored.put_back, [".claude/settings.json"]);
+        assert!(guards.groups.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
