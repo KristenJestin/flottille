@@ -1081,12 +1081,35 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Chosen {
+                #[serde(default)]
                 provider: Option<String>,
                 #[serde(default)]
                 model: Option<String>,
+                /// A judge picked as for a user who never chose: the window's switch turned on.
+                #[serde(default)]
+                pick: bool,
             }
-            let Chosen { provider, model } = serde_json::from_value(params)?;
+            let Chosen {
+                provider,
+                model,
+                pick,
+            } = serde_json::from_value(params)?;
             let judge = match provider {
+                None if pick => {
+                    let settings = Settings::load(&daemon.paths)
+                        .map_err(|error| Failure::new("invalid-config", error))?;
+                    let (provider, model) = ready_pick(&settings).ok_or_else(|| {
+                        Failure::new(
+                            "unavailable",
+                            "no provider is enabled, installed and signed in to pick a judge from",
+                        )
+                    })?;
+                    Some(Judge {
+                        provider: provider.to_owned(),
+                        model: model.map(str::to_owned),
+                        picked: false,
+                    })
+                }
                 None => None,
                 Some(name) => {
                     let provider = get(&name).ok_or_else(|| {
@@ -1347,6 +1370,20 @@ pub fn smallest_ready(settings: &Settings) -> Option<(&'static str, &'static str
         let check = Check::of(provider, settings, Version::Skip);
         let signed_in = check.login_present || check.api_key.is_some();
         (check.program.is_some() && check.ready() && signed_in).then_some((provider.name, *model))
+    })
+}
+
+/// What a switch turned on picks (the judge's, the compaction's): the smallest model of the
+/// first provider ready among those Flottille lists (`smallest_ready`), else the first provider
+/// enabled, installed and signed in, on its default model.
+pub fn ready_pick(settings: &Settings) -> Option<(&'static str, Option<&'static str>)> {
+    if let Some((provider, model)) = smallest_ready(settings) {
+        return Some((provider, Some(model)));
+    }
+    PROVIDERS.iter().find_map(|provider| {
+        let check = Check::of(provider, settings, Version::Skip);
+        let signed_in = check.login_present || check.api_key.is_some();
+        (check.program.is_some() && check.ready() && signed_in).then_some((provider.name, None))
     })
 }
 

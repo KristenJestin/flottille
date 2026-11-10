@@ -1629,3 +1629,40 @@ fn four_identical_calls_in_one_turn_give_the_judge_the_same_newest_message() {
         assert_eq!(prompt, &prompts[0]);
     }
 }
+
+#[test]
+fn a_judge_turned_on_again_is_picked_as_for_a_new_user() {
+    let user = User::with_fake_claude().with_fake_escalation();
+    user.call("provider.set_judge", json!({"provider": null}))
+        .unwrap();
+
+    let answer = user
+        .call("provider.set_judge", json!({"pick": true}))
+        .unwrap();
+
+    assert_eq!(
+        answer["judge"],
+        json!({"provider": "claude", "model": "haiku"}),
+        "{answer}"
+    );
+    let file = providers_file(&user);
+    let written: toml_edit::DocumentMut = file.parse().unwrap();
+    assert_eq!(
+        written["judge"]["provider"].as_str(),
+        Some("claude"),
+        "{file}"
+    );
+    assert!(written["judge"].get("picked").is_none(), "{file}");
+}
+
+#[test]
+fn a_judge_cannot_be_picked_when_no_provider_is_ready() {
+    // Every provider stands on the fake agent, a test override: none is installed and signed in.
+    let user = User::with_fake_agent().with_fake_escalation();
+    let refused = user
+        .call("provider.set_judge", json!({"pick": true}))
+        .unwrap_err();
+    assert_eq!(refused.0, "unavailable", "{refused:?}");
+    assert!(refused.1.contains("signed in"), "{refused:?}");
+    assert!(user.call("provider.list", json!({})).unwrap()["judge"].is_null());
+}
