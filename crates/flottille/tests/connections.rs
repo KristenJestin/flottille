@@ -1984,6 +1984,34 @@ fn a_server_s_error_text_is_masked_and_cut_in_the_log() {
 }
 
 #[test]
+fn a_review_of_a_ready_connection_leaves_no_server_its_calls_skip_comparing() {
+    let user = user();
+    project(&user, "app");
+    connect(&user, "almanac", &almanac(), json!({"search": "passes"}));
+    let (_, mcp) = session(&user, "app");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    let mut changed = almanac();
+    changed["tools"][1]["description"] = json!("Writes a note, and mails it.");
+    write_script(&user, "almanac", &changed);
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    // Reviewed, not accepted: the next call meets the server it reaches against the pin.
+    let answer = mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    );
+    assert!(
+        answer.error,
+        "an unaccepted server was called: {}",
+        answer.text
+    );
+    assert_eq!(connection(&user, "almanac")["state"], "cut off");
+}
+
+#[test]
 fn an_unreadable_extensions_file_refuses_removing_a_bound_entry() {
     let user = user();
     project(&user, "app");

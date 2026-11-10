@@ -1456,8 +1456,8 @@ fn diff(declaration: &Declaration, row: &Row, now: &Listing) -> Value {
 /// `connection.accept {name, actions?}`: pins what the last review showed, keeping the settings
 /// of the actions that did not change and judging every new one; `actions` sets some, by name
 /// (judged, passes, asked or off). On a connection already pinned and due no review, it sets
-/// them alone. The server the review started is stopped before the pin: a change it announced
-/// since is seen when it starts again, against the pin.
+/// them alone. The server the review started is stopped before the pin, and no other starts until
+/// it is written: a change it announced since is seen when it starts again, against the pin.
 async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
     let name = named(&params)?;
     let declaration = declaration(&daemon.paths, &name)?;
@@ -1503,20 +1503,23 @@ async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
         }
         settings.insert(action.clone(), setting.to_owned());
     }
-    if due {
-        client::stop(daemon, &name).await;
+    let pin = || {
+        write_row(
+            daemon,
+            &name,
+            |row| {
+                row.pin = Some(listing);
+                row.pinned_for = Some(digest);
+                row.settings = settings;
+                row.cut_off = None;
+            },
+            None,
+        )
+    };
+    match due {
+        true => client::stopped(daemon, &name, pin).await?,
+        false => pin()?,
     }
-    write_row(
-        daemon,
-        &name,
-        |row| {
-            row.pin = Some(listing);
-            row.pinned_for = Some(digest);
-            row.settings = settings;
-            row.cut_off = None;
-        },
-        None,
-    )?;
     in_space(daemon, |space| {
         space.tables().execute(
             "UPDATE ext_connections_connections SET accepted_at = ?2 WHERE name = ?1",

@@ -582,6 +582,31 @@ pub async fn stop(daemon: &Arc<Daemon>, name: &str) {
     }
 }
 
+/// Stops the connection's server, after its running call, and does `then` before another call or
+/// review may start one: what `then` writes is what the next server is compared with.
+pub async fn stopped<T>(daemon: &Arc<Daemon>, name: &str, then: impl FnOnce() -> T) -> T {
+    let server = server_of(daemon, name);
+    let (stopped, done) = holding(&server, then).await;
+    if stopped {
+        super::changed_event(daemon, name, None);
+    }
+    done
+}
+
+/// `stopped` on the server itself: whether one ran, and what `then` gave.
+async fn holding<T>(server: &Server, then: impl FnOnce() -> T) -> (bool, T) {
+    let mut turn = server.turn.lock().await;
+    let stopped = match turn.take() {
+        Some(running) => {
+            *server.leader.lock().unwrap() = None;
+            stop_running(running).await;
+            true
+        }
+        None => false,
+    };
+    (stopped, then())
+}
+
 /// Every server stops with the daemon, a call running or not.
 pub async fn stop_all(daemon: &Arc<Daemon>) {
     let servers: Vec<Arc<Server>> = daemon
@@ -615,7 +640,9 @@ fn not_started(why: &str, mask: impl FnOnce(&str) -> String) -> String {
     )
 }
 
-/// Starts the server afresh for a review: what it announces now.
+/// Starts the server afresh for a review: what it announces now. One that is not what the
+/// connection was accepted as is not kept: the next call starts it again and meets it against
+/// the pin, which a call does not do with a server already running.
 pub async fn review(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Listing, String> {
     let server = server_of(daemon, &declaration.name);
     let mut turn = server.turn.lock().await;
@@ -634,7 +661,11 @@ pub async fn review(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<L
         }
     };
     let listing = running.listing.clone();
-    keep(daemon, &declaration.name, &server, &mut turn, running);
+    let pin = super::row(daemon, &declaration.name).pin;
+    match pin.is_some_and(|pin| !super::changes(&pin, &listing).is_empty()) {
+        true => stop_running(running).await,
+        false => keep(daemon, &declaration.name, &server, &mut turn, running),
+    }
     Ok(listing)
 }
 
@@ -791,6 +822,16 @@ fn failed_framed(what: &str, masked: &str) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn accept_holds_the_server_until_the_pin_is_written() {
+        let server = Server::default();
+        let (_, held) = holding(&server, || server.turn.try_lock().is_err()).await;
+        assert!(
+            held,
+            "a review could start a server before the pin is written"
+        );
+    }
 
     #[test]
     fn a_notice_after_a_restart_lists_the_new_server() {
