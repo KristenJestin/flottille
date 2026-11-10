@@ -332,7 +332,7 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         .into_iter()
         .find(|entry| entry.name == asked.name)
         .and_then(|entry| entry.bound);
-    let (bound, project) = match (given(asked.bound), had) {
+    let bound = match (given(asked.bound), had) {
         (Some(new), Some(own)) if new != own => {
             return Err(Failure::refused(format!(
                 "the vault entry {} is bound to {}: remove it first, or choose another name",
@@ -340,12 +340,13 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
                 use_said(&own).unwrap_or(own.clone())
             )));
         }
-        // A worklog's entry is its project's alone: no other project's agent learns it exists.
-        (Some(new), _) => {
-            let project = bound_checked(daemon, &new, project.as_deref())?;
-            (Some(new), project)
-        }
-        (None, had) => (had, project),
+        (Some(new), _) => Some(new),
+        (None, had) => had,
+    };
+    // A worklog's entry is its project's alone: no other project's agent learns it exists.
+    let project = match &bound {
+        Some(bound) => bound_checked(daemon, bound, project.as_deref())?,
+        None => project,
     };
     let entry = Entry {
         name: asked.name,

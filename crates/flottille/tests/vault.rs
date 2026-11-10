@@ -604,3 +604,49 @@ fn an_entry_bound_to_a_worklog_is_never_shown_to_another_project_s_agents() {
     assert!(answer.text.contains("jira-time"), "{}", answer.text);
     assert!(!answer.text.contains("for:"), "{}", answer.text);
 }
+
+#[test]
+fn setting_a_bound_entry_again_checks_its_binding() {
+    let user = User::with_fake_agent();
+    project(&user, "alpha");
+    project(&user, "beta");
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": SECRET, "for": "worklog:alpha"}),
+    )
+    .unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET, "for": "connection:almanac"}),
+    )
+    .unwrap();
+
+    // Another project, without naming the use again: the binding is checked, not kept as is.
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "jira-time", "secret": SECRET, "project": "beta"}),
+        )
+        .unwrap_err();
+    assert!(refused.contains("beta"), "{refused}");
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "almanac-token", "secret": SECRET, "project": "alpha"}),
+        )
+        .unwrap_err();
+    assert!(refused.contains("the connection almanac"), "{refused}");
+
+    let listed = user.call("vault.list", json!({})).unwrap();
+    let project_of = |name: &str| {
+        listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .map(|entry| entry["project"].clone())
+            .unwrap()
+    };
+    assert_eq!(project_of("jira-time"), "alpha", "{listed}");
+    assert_eq!(project_of("almanac-token"), Value::Null, "{listed}");
+}
