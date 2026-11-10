@@ -766,3 +766,76 @@ fn the_tickets_open_settings_shows_the_tracker_in_view(cx: &mut TestAppContext) 
         "also from another tab, whose rows enter above it, and once they have"
     );
 }
+
+/// A project with fourteen repositories, so that its Tracker is below the fold of a short window.
+fn many_repositories(user: &User) {
+    let folder = user.path("work/many");
+    for at in 0..14 {
+        let dir = folder.join(format!("r{at:02}"));
+        user.git_init(&dir);
+        std::fs::write(dir.join("README.md"), "start\n").unwrap();
+        user.git(&dir, &["add", "."]);
+        user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+    }
+    user.call("project.add", json!({"folder": folder, "name": "many"}))
+        .unwrap();
+}
+
+/// Whether the element is inside the visible part of the project's page.
+fn in_view(cx: &mut VisualTestContext, id: &str) -> bool {
+    let id = id.to_owned();
+    cx.update(|window, _| {
+        let page = window.find("project-settings-page").bounds();
+        let at = window.find(id).bounds();
+        at.origin.y >= page.origin.y && at.bottom() <= page.bottom()
+    })
+}
+
+#[gpui_kit::test]
+fn a_tab_chosen_while_the_tracker_is_held_starts_at_its_top(cx: &mut TestAppContext) {
+    let user = user();
+    many_repositories(&user);
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(1280.), px(720.)));
+    open_settings(&shell, "many", cx);
+
+    shell.update_in(cx, |s, window, cx| {
+        s.open_project_settings_at("many", Reveal::Tracker, window, cx)
+    });
+    run_for(Duration::from_millis(100), cx);
+    // Another tab, well within the hold: its first section is the one in view, not its second.
+    cx.update(|window, cx| window.click("project-settings-tabs-instructions", cx));
+    run_for(Duration::from_millis(2000), cx);
+    assert!(
+        in_view(cx, "rules-title"),
+        "Instructions start at Rules, the first of its sections"
+    );
+}
+
+#[gpui_kit::test]
+fn the_user_s_wheel_ends_the_hold_on_the_tracker(cx: &mut TestAppContext) {
+    let user = user();
+    many_repositories(&user);
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(1280.), px(720.)));
+    open_settings(&shell, "many", cx);
+
+    shell.update_in(cx, |s, window, cx| {
+        s.open_project_settings_at("many", Reveal::Tracker, window, cx)
+    });
+    run_for(Duration::from_millis(100), cx);
+    let page = cx.update(|window, _| window.find("project-settings-page").bounds());
+    let held = top(cx, "tracker-title") - f32::from(page.origin.y);
+    // The user reads what is above it: the wheel moves the page up by 200 px.
+    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+        position: page.center(),
+        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(200.))),
+        ..Default::default()
+    });
+    run_for(Duration::from_millis(1500), cx);
+    let after = top(cx, "tracker-title") - f32::from(page.origin.y);
+    assert!(
+        after > held + 100.0,
+        "the page stays where the user put it: the tracker was {held} px under the top, now {after}"
+    );
+}

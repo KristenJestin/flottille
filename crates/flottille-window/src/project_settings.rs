@@ -2341,9 +2341,13 @@ impl ProjectSettingsPage {
 
     /// Chooses the tab of that section: it shows alone.
     pub fn choose(&mut self, entry: usize, cx: &mut Context<Self>) {
+        // The section a link held is not the one of another tab.
+        self.scroll_to = None;
         let entry = entry.min(SECTIONS.len() - 1);
         if self.tab != entry {
             self.tab = entry;
+            // A tab starts at its top, not where the former one was scrolled to.
+            self.scroll.set_offset(Point::default());
             cx.notify();
         }
     }
@@ -2644,6 +2648,8 @@ impl Render for ProjectSettingsPage {
         let page = div()
             .id("project-settings-page")
             .track_scroll(&self.scroll)
+            // The user's own scroll ends the hold on a section: the page stays where they put it.
+            .on_scroll_wheel(cx.listener(|this, _, _, _| this.scroll_to = None))
             .w_full()
             .flex_1()
             .min_h_0()
