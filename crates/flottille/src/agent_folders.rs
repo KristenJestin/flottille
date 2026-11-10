@@ -1212,7 +1212,8 @@ impl Guards {
 
 /// The group whose snapshot `taken` could not be taken gives back the groups it took in, their
 /// own snapshots kept for the runs still going on there: refused, it strands none of them. One
-/// whose runs all ended meanwhile is put back now.
+/// whose runs all ended meanwhile is put back now, before the group's own put-back, if it is
+/// waiting for the snapshot, says it missing.
 async fn split(
     groups: &Arc<std::sync::Mutex<Vec<Group>>>,
     taken: &watch::Sender<Option<Taken>>,
@@ -1223,17 +1224,22 @@ async fn split(
     let mut ended = Vec::new();
     {
         let mut groups = locked(groups);
-        // Its runs all ended while it was taken: its put-back waits for it and says it missing.
         let Some(at) = groups
             .iter()
-            .position(|group| group.snapshot.same_channel(&this) && group.closing.is_none())
+            .position(|group| group.snapshot.same_channel(&this))
         else {
             return;
         };
-        let outer = groups.remove(at);
-        let _ = std::fs::remove_file(marker);
+        // Unless its runs all ended while it was taken: its put-back, waiting for it, removes
+        // it and its marker.
+        let runs = if groups[at].closing.is_none() {
+            let _ = std::fs::remove_file(marker);
+            groups.remove(at).runs
+        } else {
+            Vec::new()
+        };
         for mut group in inside {
-            group.runs.retain(|run| outer.runs.contains(run));
+            group.runs.retain(|run| runs.contains(run));
             if !group.runs.is_empty() {
                 groups.push(group);
                 continue;
@@ -2353,6 +2359,51 @@ mod tests {
         assert!(!restored.missing, "{restored:?}");
         assert_eq!(restored.put_back, [".claude/settings.json"]);
         assert!(!planted.exists());
+        assert!(guards.groups.lock().unwrap().is_empty());
+        assert!(interrupted(&kept).is_empty());
+    }
+
+    /// Lets the other tasks go on until `done` holds of the groups.
+    async fn until(guards: &Guards, done: impl Fn(&[Group]) -> bool) {
+        while !done(&guards.groups.lock().unwrap()) {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_outer_run_whose_group_is_already_closing_puts_back_the_inner_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("p");
+        let inner = outer.join("svc");
+        made(&inner.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let planted = inner.join(".claude/settings.json");
+        let guards = Arc::new(Guards::default());
+        let a = guards.enter(&inner, &[], None, &kept, "a").await.unwrap();
+        made(&planted, "{\"hooks\": {}}\n");
+
+        // A run in the outer place takes in the inner one's group; its start is given up while
+        // its snapshot is taken.
+        let release = hold(real(&outer));
+        let o = entering(&guards, &outer, &kept, "o");
+        until(&guards, |groups| {
+            groups.iter().any(|g| g.runs.contains(&"o".into()))
+        })
+        .await;
+        o.abort();
+        assert!(o.await.is_err_and(|error| error.is_cancelled()));
+        until(&guards, |groups| groups.iter().all(|g| g.runs == ["a"])).await;
+
+        // The inner run ends before the outer snapshot fails: the outer group is closing.
+        let leaving = tokio::spawn(a.leave());
+        until(&guards, |groups| groups.iter().all(|g| g.closing.is_some())).await;
+        drop(release);
+        let restored = leaving.await.unwrap().unwrap();
+
+        // The outer place was never noted, but the inner one was: what was planted there goes.
+        assert!(restored.missing, "{restored:?}");
+        assert!(!planted.exists());
+        assert!(kept.join("a/.claude/settings.json").exists());
         assert!(guards.groups.lock().unwrap().is_empty());
         assert!(interrupted(&kept).is_empty());
     }
