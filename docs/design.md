@@ -788,8 +788,10 @@ line names, every program a wrapper or a runner runs included:
   folder is outside it (reached through a link), whose agent folders are not looked at. A run
   whose place's agent folders could not be noted is refused, with a sentence: nothing it wrote
   there would be put back. Past the bound on the contents kept (64 MiB), the settings files
-  (`settings.json`, `settings.local.json`, `config.toml`, `.mcp.json`, `.claude.json`) are kept
-  first, then the smallest. A run waits for
+  (`settings.json`, `settings.local.json`, `config.toml`, `.mcp.json`, `.claude.json`) and the
+  scripts below `.claude/hooks/` are kept first, then the smallest; a file written between the
+  look at the agent folders and the read of its content keeps none (its change is said, not put
+  back). A run waits for
   the snapshot of its place, and for a put-back going on there, never for another place's. What this does not cover: a process that outlives its run (one that
   left the run's session, `setsid`), a long `serve` run until it ends, and a run going on when
   the daemon stops or crashes, whose place is not put back: a marker of each place guarded
