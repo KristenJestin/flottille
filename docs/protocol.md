@@ -460,10 +460,15 @@ is off globally, the projects' switches kept.
   "guidance", "commands"}`, `enabled` being the global switch, `error` why `extensions.toml`
   cannot be used (`null` when it can; the extension is then off), `guidance` whether it has one
   (`<name>.show`, below), `commands` the words of its composer commands (`["review"]`),
-  `settings` each `{"key", "label", "hint", "kind", "per_project", "value", "set"}` with its
+  `settings` each `{"key", "label", "hint", "kind", "per_project", "value", "set", "default"}` with its
   global value (its default when not `set`), `kind` being `"language"`, `"model"` (a slot,
   `{"provider", "model"?, "effort"?}`, `null` for the extension's own choice) or `{"subset": [...]}`
-  (some of those values, in their order), and
+  (some of those values, in their order); `default` is `null` except for a `"model"` slot, where it
+  says what the slot gives left unset, `{"rule", "gives"}`: `rule` the extension's rule in words
+  (`"One size smaller"`) and `gives` each provider enabled and ready now (`{"claude": "sonnet"}`)
+  with the model the extension runs on for it, `null` when the provider has not said what it
+  offers or offers no such model (it runs on its own). A client says these words and holds no table
+  of models of its own; and
   `projects` each `{"project", "enabled", "switch", "settings", "error"}`: whether it is active
   there, the project's own switch (`null` when its file says none) and values. `errors` names the
   projects' `[extensions.<name>]` of an extension Flottille does not know.
