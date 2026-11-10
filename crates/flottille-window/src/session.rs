@@ -43,10 +43,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, Div, ElementId, Entity, EventEmitter,
     Focusable as _, FollowMode, ImageCacheError, ImageSource, InteractiveElement, IntoElement,
-    ListAlignment, ListOffset, ListState, MouseButton, ParentElement, PathBuilder, Pixels, Render,
-    ScrollHandle, SharedString, SharedUri, Stateful, StatefulInteractiveElement, Styled,
-    StyledImage as _, Subscription, Task, TestSupportExt as _, Transformation, WeakEntity, Window,
-    canvas, div, list, point, px, radians,
+    ListAlignment, ListOffset, ListState, MouseButton, ParentElement, Pixels, Render, ScrollHandle,
+    SharedString, SharedUri, Stateful, StatefulInteractiveElement, Styled, StyledImage as _,
+    Subscription, Task, TestSupportExt as _, Transformation, WeakEntity, Window, canvas, div, list,
+    px, radians,
 };
 
 use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer, RunFrom};
@@ -6591,6 +6591,113 @@ fn rail_rows(nodes: &[Node], open: &HashSet<String>) -> Vec<RailRow> {
     rows
 }
 
+/// The height of a child's row in the rail, which the lines that tie it to its parent run over.
+const RAIL_ROW: f32 = 44.;
+
+/// The lines the rail draws on a row to tie the children to their parent: a child turns right
+/// into its row from the line that comes down from its parent, and that line goes on below the
+/// turn while the parent has another child under this one, past every row between them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Lines {
+    /// This row is its parent's first child listed: its line starts at the parent's row.
+    first: bool,
+    /// This row is a child and its parent has another child below it: the line goes on.
+    below: bool,
+    /// The levels (the depth of the children each ties) whose line goes on past this row.
+    through: Vec<u64>,
+}
+
+/// The lines of each row of the rail, in order: `rows` holds, for each row, the parent and the
+/// depth of a child's row, `None` for any other row (a root, the folded "ended" row, a review).
+fn rail_lines(rows: &[Option<(&str, u64)>]) -> Vec<Lines> {
+    // Where the children of each parent start and stop, and their depth.
+    let mut spans: HashMap<&str, (usize, usize, u64)> = HashMap::new();
+    for (at, row) in rows.iter().enumerate() {
+        if let Some((parent, level)) = row {
+            spans
+                .entry(parent)
+                .and_modify(|span| span.1 = at)
+                .or_insert((at, at, *level));
+        }
+    }
+    rows.iter()
+        .enumerate()
+        .map(|(at, row)| {
+            let mut lines = Lines::default();
+            for (parent, &(first, last, level)) in &spans {
+                match row {
+                    Some((own, _)) if own == parent => {
+                        lines.first |= at == first;
+                        lines.below |= at < last;
+                    }
+                    _ if first < at && at < last => lines.through.push(level),
+                    _ => {}
+                }
+            }
+            lines.through.sort_unstable();
+            lines
+        })
+        .collect()
+}
+
+/// The lines a row carries, from `x` of its left: the turn into a child's row at its vertical
+/// middle (`middle`, from the row's top), the line below it, and those that go on past it.
+fn rail_tie(
+    id: &str,
+    lines: &Lines,
+    turn: Option<u64>,
+    middle: f32,
+    height: Option<Pixels>,
+    color: gpui_kit::Hsla,
+) -> Stateful<Div> {
+    let line = |x: f32| div().absolute().left(px(x)).w(px(1.)).bg(color);
+    let x = |level: u64| f32::from(space::LG) * level as f32 - 10.;
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .w_full()
+        .map(|d| match height {
+            Some(height) => d.h(height),
+            None => d.bottom_0(),
+        })
+        .id(ElementId::Name(format!("tie-{id}").into()))
+        .children(lines.through.iter().map(|&level| {
+            line(x(level))
+                .id(ElementId::Name(
+                    format!("elbow-through-{id}-{level}").into(),
+                ))
+                .top_0()
+                .map(|d| match height {
+                    Some(height) => d.h(height),
+                    None => d.bottom_0(),
+                })
+                .test_support()
+        }))
+        .children(turn.map(|level| {
+            let top = if lines.first { -6. } else { 0. };
+            div()
+                .id(ElementId::Name(format!("elbow-turn-{id}").into()))
+                .absolute()
+                .left(px(x(level)))
+                .top(px(top))
+                .w(px(9.))
+                .h(px(middle - top))
+                .border_l_1()
+                .border_b_1()
+                .border_color(color)
+                .rounded_bl(px(6.))
+                .test_support()
+        }))
+        .children(turn.filter(|_| lines.below).map(|level| {
+            line(x(level))
+                .id(ElementId::Name(format!("elbow-below-{id}").into()))
+                .top(px(middle))
+                .bottom_0()
+                .test_support()
+        }))
+}
+
 /// What a review's line says of it, from its pilot's facts: `Review · 3/4 passes · 2 findings`,
 /// and how it ended once it did.
 pub fn review_said(facts: &serde_json::Value) -> String {
@@ -7120,6 +7227,28 @@ impl Render for SessionRail {
                 )
         });
         let listed = self.rows_among(&drawn_open);
+        // The lines that tie each child to its parent, from the order the rows are drawn in.
+        let keys: Vec<String> = listed
+            .iter()
+            .map(|row| match row {
+                RailRow::Agent(id) => id.clone(),
+                RailRow::Ended { parent, .. } => format!("ended-{parent}"),
+                RailRow::Review { pilot, .. } => format!("review-{pilot}"),
+            })
+            .collect();
+        let tied: Vec<Option<(&str, u64)>> = listed
+            .iter()
+            .map(|row| match row {
+                RailRow::Agent(id) => self
+                    .agents
+                    .iter()
+                    .find(|a| &a.id == id)
+                    .and_then(|a| (a.depth > 0).then_some((a.parent.as_deref()?, a.depth))),
+                RailRow::Ended { .. } | RailRow::Review { .. } => None,
+            })
+            .collect();
+        let lines: HashMap<String, Lines> = keys.into_iter().zip(rail_lines(&tied)).collect();
+        let lines_of = |key: &str| lines.get(key).cloned().unwrap_or_default();
         // The chevrons of the "ended" rows turn as their level folds.
         let turns: HashMap<String, f32> = listed
             .iter()
@@ -7182,7 +7311,7 @@ impl Render for SessionRail {
                 (agent.id.clone(), fade(id, on, PANEL, window, cx))
             })
             .collect();
-        let agent_row = |agent: &RailAgent, window: &mut Window, cx: &mut App| {
+        let agent_row = |agent: &RailAgent, tie: &Lines, window: &mut Window, cx: &mut App| {
             let mark = self.marks[&agent.id].clone();
             let page = self.page.clone();
             let target = agent.id.clone();
@@ -7329,7 +7458,7 @@ impl Render for SessionRail {
                 .id(ElementId::Name(format!("rail-row-{}", agent.id).into()))
                 .flex_1()
                 .min_w_0()
-                .h(px(44.))
+                .h(px(RAIL_ROW))
                 .flex()
                 .items_center()
                 .gap(space::SM)
@@ -7339,11 +7468,13 @@ impl Render for SessionRail {
                 .cursor_pointer()
                 .child(
                     div()
+                        .id(ElementId::Name(format!("rail-mark-{}", agent.id).into()))
                         .w(px(16.))
                         .flex_none()
                         .flex()
                         .justify_center()
-                        .child(mark),
+                        .child(mark)
+                        .test_support(),
                 )
                 .child(
                     div()
@@ -7442,17 +7573,20 @@ impl Render for SessionRail {
                 .flex()
                 .items_center()
                 .pl(indent)
-                .when(kid, |d| {
-                    d.child(enter(
+                .when(kid || !tie.through.is_empty(), |d| {
+                    // The lines come in over the row's own entrance, over its whole height.
+                    d.child(div().absolute().top_0().left_0().w_full().child(enter(
                         ElementId::Name(format!("elbow-{}", agent.id).into()),
                         0,
-                        elbow(p.line2)
-                            .absolute()
-                            .left(indent - px(10.))
-                            .top(px(-6.))
-                            .w(px(9.))
-                            .h(px(28.)),
-                    ))
+                        rail_tie(
+                            &agent.id,
+                            tie,
+                            kid.then_some(agent.depth),
+                            RAIL_ROW / 2.,
+                            Some(px(RAIL_ROW)),
+                            p.line2,
+                        ),
+                    )))
                 })
                 .child(selectable(
                     row,
@@ -7461,27 +7595,41 @@ impl Render for SessionRail {
                 ))
                 .test_support()
         };
-        let ended_row = |parent: &str, count: usize, open: bool, turn: f32, cx: &Context<Self>| {
-            let depth = self
-                .agents
-                .iter()
-                .find(|a| a.id == parent)
-                .map_or(1, |a| a.depth + 1);
-            let indent = space::LG * depth as f32;
-            let target = parent.to_owned();
-            let said = SharedString::from(format!("{count} ended"));
-            div().pl(indent).child(ended_row(
-                ElementId::Name(format!("rail-ended-{parent}").into()),
-                said.clone(),
-                said,
-                open,
-                turn,
-                p,
-                cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)),
-            ))
-        };
+        let ended_row =
+            |parent: &str, count: usize, open: bool, turn: f32, tie: &Lines, cx: &Context<Self>| {
+                let depth = self
+                    .agents
+                    .iter()
+                    .find(|a| a.id == parent)
+                    .map_or(1, |a| a.depth + 1);
+                let indent = space::LG * depth as f32;
+                let target = parent.to_owned();
+                let said = SharedString::from(format!("{count} ended"));
+                div()
+                    .relative()
+                    .pl(indent)
+                    .when(!tie.through.is_empty(), |d| {
+                        d.child(rail_tie(
+                            &format!("ended-{parent}"),
+                            tie,
+                            None,
+                            0.,
+                            None,
+                            p.line2,
+                        ))
+                    })
+                    .child(ended_row(
+                        ElementId::Name(format!("rail-ended-{parent}").into()),
+                        said.clone(),
+                        said,
+                        open,
+                        turn,
+                        p,
+                        cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)),
+                    ))
+            };
         // A review's line says its state; a new state fades in as it changes.
-        let review_line = |pilot: &str, open: bool, turn: f32, cx: &Context<Self>| {
+        let review_line = |pilot: &str, open: bool, turn: f32, tie: &Lines, cx: &Context<Self>| {
             let depth = self
                 .agents
                 .iter()
@@ -7495,31 +7643,41 @@ impl Render for SessionRail {
                     .map_or_else(|| "Review".to_owned(), |a| review_said(&a.extensions)),
             );
             let key = review_key(pilot);
-            div().pl(indent).child(runs::ended_row(
-                ElementId::Name(format!("rail-review-{pilot}").into()),
-                said.clone(),
-                changing(
-                    ElementId::Name(format!("rail-review-state-{pilot}").into()),
-                    said,
-                    |said| div().child(said).into_any_element(),
-                ),
-                open,
-                turn,
-                p,
-                cx.listener(move |this, _, _, cx| this.toggle_ended(&key, cx)),
-            ))
+            div()
+                .relative()
+                .pl(indent)
+                .when(!tie.through.is_empty(), |d| {
+                    d.child(rail_tie(
+                        &format!("review-{pilot}"),
+                        tie,
+                        None,
+                        0.,
+                        None,
+                        p.line2,
+                    ))
+                })
+                .child(runs::ended_row(
+                    ElementId::Name(format!("rail-review-{pilot}").into()),
+                    said.clone(),
+                    changing(
+                        ElementId::Name(format!("rail-review-state-{pilot}").into()),
+                        said,
+                        |said| div().child(said).into_any_element(),
+                    ),
+                    open,
+                    turn,
+                    p,
+                    cx.listener(move |this, _, _, cx| this.toggle_ended(&key, cx)),
+                ))
         };
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut listed = listed.into_iter();
         while let Some(row) = listed.next() {
             match row {
                 RailRow::Agent(id) => {
-                    rows.extend(
-                        self.agents
-                            .iter()
-                            .find(|a| a.id == id)
-                            .map(|agent| agent_row(agent, window, cx).into_any_element()),
-                    );
+                    rows.extend(self.agents.iter().find(|a| a.id == id).map(|agent| {
+                        agent_row(agent, &lines_of(&id), window, cx).into_any_element()
+                    }));
                 }
                 RailRow::Ended {
                     parent,
@@ -7532,6 +7690,7 @@ impl Render for SessionRail {
                             count,
                             self.open_ended.contains(&parent),
                             turns.get(&parent).copied().unwrap_or(0.0),
+                            &lines_of(&format!("ended-{parent}")),
                             cx,
                         )
                         .into_any_element(),
@@ -7546,7 +7705,9 @@ impl Render for SessionRail {
                         .filter_map(|row| match row {
                             RailRow::Agent(id) => {
                                 let agent = self.agents.iter().find(|a| a.id == id)?;
-                                Some(agent_row(agent, window, cx).into_any_element())
+                                Some(
+                                    agent_row(agent, &lines_of(&id), window, cx).into_any_element(),
+                                )
                             }
                             RailRow::Ended { .. } | RailRow::Review { .. } => None,
                         })
@@ -7573,6 +7734,7 @@ impl Render for SessionRail {
                             &pilot,
                             self.open_ended.contains(&key),
                             turns.get(&key).copied().unwrap_or(0.0),
+                            &lines_of(&format!("review-{pilot}")),
                             cx,
                         )
                         .into_any_element(),
@@ -7588,7 +7750,9 @@ impl Render for SessionRail {
                         .filter_map(|row| match row {
                             RailRow::Agent(id) => {
                                 let agent = self.agents.iter().find(|a| a.id == id)?;
-                                Some(agent_row(agent, window, cx).into_any_element())
+                                Some(
+                                    agent_row(agent, &lines_of(&id), window, cx).into_any_element(),
+                                )
                             }
                             RailRow::Ended { .. } | RailRow::Review { .. } => None,
                         })
@@ -8474,25 +8638,6 @@ pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<
 pub(crate) fn pull_hover(row: Stateful<Div>, cx: &App) -> gpui_design_system::Hoverable {
     let p = palette(cx);
     hoverable(row, move |d, t| d.text_color(mix(p.mute, p.text, t)))
-}
-
-/// The drawn link from a parent to its child in the rail: down, then right, with a round corner.
-fn elbow(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
-    canvas(
-        |_, _, _| {},
-        move |bounds: Bounds<Pixels>, _, window, _| {
-            let (x, y) = (bounds.origin.x, bounds.origin.y);
-            let (w, h) = (bounds.size.width, bounds.size.height);
-            let mut path = PathBuilder::stroke(px(1.));
-            path.move_to(point(x, y));
-            path.line_to(point(x, y + h - px(6.)));
-            path.curve_to(point(x + px(6.), y + h), point(x, y + h));
-            path.line_to(point(x + w, y + h));
-            if let Ok(path) = path.build() {
-                window.paint_path(path, color);
-            }
-        },
-    )
 }
 
 /// What the daemon said when it took a message: its delivery, and the last event before it.
@@ -10100,6 +10245,55 @@ mod tests {
         let done = serde_json::json!({"review": {"state": "done",
             "passes": {"done": 3, "total": 4}, "findings": 2, "changed": null}});
         assert_eq!(review_said(&done), "Review · 3/4 passes · 2 findings");
+    }
+
+    #[test]
+    fn the_rail_s_line_goes_on_past_a_child_s_own_children_for_its_later_sibling() {
+        // lead, a (child), a1 (a's child), a2 (a's child), b (child), an "ended" row of the lead.
+        let rows = [
+            None,
+            Some(("lead", 1)),
+            Some(("a", 2)),
+            Some(("a", 2)),
+            Some(("lead", 1)),
+            None,
+        ];
+        let lines = rail_lines(&rows);
+        // The lead's line starts at the first child and goes on under each child but the last.
+        assert_eq!(
+            (lines[1].first, lines[1].below),
+            (true, true),
+            "a: the line goes on below its turn"
+        );
+        assert_eq!(
+            (lines[4].first, lines[4].below),
+            (false, false),
+            "b: the last"
+        );
+        // It runs past a's children, whose own line starts under a and stops at the last one.
+        assert_eq!(lines[2].through, [1]);
+        assert_eq!(lines[3].through, [1]);
+        assert!(lines[2].below && !lines[3].below);
+        assert!(lines[2].first && !lines[3].first);
+        // Nothing runs past the last child, nor beside the lead.
+        assert_eq!(lines[0], Lines::default());
+        assert_eq!(lines[5], Lines::default());
+        assert!(lines[4].through.is_empty());
+    }
+
+    #[test]
+    fn the_rail_s_line_runs_through_a_folded_row_between_two_children() {
+        // The "ended" row of a sits between a's last child and b, and the line goes through it.
+        let rows = [
+            None,
+            Some(("lead", 1)),
+            Some(("a", 2)),
+            None,
+            Some(("lead", 1)),
+        ];
+        let lines = rail_lines(&rows);
+        assert_eq!(lines[3].through, [1]);
+        assert!(lines[4].through.is_empty() && !lines[4].below);
     }
 
     fn agent_row(id: &str) -> RailRow {

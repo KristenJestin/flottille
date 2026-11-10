@@ -14,7 +14,7 @@ use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
-use flottille_window::tree::{session_detach_id, session_id, session_menu_id};
+use flottille_window::tree::{session_detach_id, session_id, session_mark_id, session_menu_id};
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::{tie_below_id, tie_id, tie_through_id, tie_turn_id, toggle_id};
 use gpui_kit::test::TestWindowExt;
@@ -789,4 +789,120 @@ fn once_the_pilot_stops_following_the_card_says_it_asks_you(cx: &mut TestAppCont
     settle(cx);
     assert!(label(cx, format!("row-{asked}-asked-title").into()).is_none());
     assert!(label(cx, format!("row-{asked}-asked-note").into()).is_none());
+}
+
+/// A lead with two led sessions that are in a turn, as the sidebar draws them: two-line rows.
+fn two_in_a_turn(user: &User) -> Family {
+    user.fake_script(json!({"turns": [
+        {"when": "begin the docs session", "do": [
+            {"mcp": {"tool": "agent_launch",
+                "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "led"}}},
+            {"mcp": {"tool": "agent_launch",
+                "arguments": {"title": "Tests", "brief": "Run the tests", "kind": "led"}}}]},
+        {"when": "Write the docs", "do": [{"hang": true}]},
+        {"when": "Run the tests", "do": [{"hang": true}]}
+    ]}));
+    project(user);
+    user.call(
+        "agent.start",
+        json!({"project": "atlas", "message": "begin the docs session"}),
+    )
+    .unwrap();
+    eventually("the three sessions exist", || {
+        let held = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+        for request in held.as_array().unwrap() {
+            user.call("approval.approve", json!({"number": request["number"]}))
+                .unwrap();
+        }
+        agents(user).len() == 3
+    });
+    let by_title = |title: &str| {
+        agents(user)
+            .into_iter()
+            .find(|agent| agent["title"] == title)
+            .unwrap_or_else(|| panic!("a session titled {title}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let lead = agents(user)
+        .into_iter()
+        .find(|agent| agent["led_by"].is_null())
+        .expect("the lead")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    Family {
+        lead,
+        docs: by_title("Docs"),
+        spec: String::new(),
+        tests: by_title("Tests"),
+    }
+}
+
+fn the_led_in_a_turn<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (Family, Entity<Shell>, &'a mut VisualTestContext) {
+    let family = two_in_a_turn(user);
+    let (shell, cx) = window(user, cx);
+    until(&shell, cx, "both led sessions spin", |cx| {
+        [&family.docs, &family.tests]
+            .iter()
+            .all(|id| mark_of(&shell, id, cx) == Some(flottille_window::state::AgentState::Running))
+    });
+    settle(cx);
+    (family, shell, cx)
+}
+
+#[gpui_kit::test]
+fn a_led_row_s_tie_turns_at_the_middle_of_its_first_line(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let (family, _shell, cx) = the_led_in_a_turn(&user, cx);
+    cx.update(|window, cx| window.click(toggle_id(session_id(&family.lead)), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(toggle_id(session_id(&family.lead)), cx));
+    settle(cx);
+
+    let near = |a: gpui_kit::Pixels, b: gpui_kit::Pixels| f32::from(a - b).abs() <= 1.;
+    for led in [&family.docs, &family.tests] {
+        let row = bounds(cx, session_id(led));
+        let turn = bounds(cx, tie_turn_id(session_id(led)));
+        let mark = bounds(cx, session_mark_id(led));
+        let title = title_of(cx, led);
+        assert_eq!(turn.top(), row.top(), "it comes down from the row above");
+        // The turn's line is its bottom border, the last pixel of its box.
+        assert!(
+            near(turn.bottom() - px(0.5), mark.center().y),
+            "at the middle of the mark: {turn:?} {mark:?} {row:?}"
+        );
+        assert!(
+            near(turn.bottom() - px(0.5), title.center().y),
+            "at the middle of the title: {turn:?} {title:?} {row:?}"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn the_tie_runs_on_between_two_rows_of_the_same_lead(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let (family, shell, cx) = the_led_in_a_turn(&user, cx);
+
+    let rows = listed(&shell, cx);
+    let (first, second) = (rows[1].clone(), rows[2].clone());
+    let below = bounds(cx, tie_below_id(session_id(&first)));
+    let next = bounds(cx, tie_turn_id(session_id(&second)));
+    let row = bounds(cx, session_id(&first));
+    assert_eq!(
+        below.left(),
+        bounds(cx, tie_turn_id(session_id(&first))).left()
+    );
+    assert_eq!(below.left(), next.left(), "one line: {below:?} {next:?}");
+    assert!(
+        next.top() - below.bottom() <= px(0.5),
+        "no gap between the first row's line and the second row's turn: {below:?} {next:?} {row:?}"
+    );
+    let _ = family;
 }
