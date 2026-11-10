@@ -965,8 +965,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the row and the header; a session an agent started says it in
   its page's header, "started by <agent>", not in the sidebar. A session an agent leads (`led`)
   is the one exception to the flat list: its row sits right under its pilot's session's row,
-  indented one step, tied to it by a `↳` connector (the line from the pilot turning into the row)
-  whose arrowhead has the tooltip "led by <pilot>"; only a led row is indented, every root's title
+  indented one step, tied to it by a connector (the line from the pilot turning into the row,
+  ending there with no arrowhead); only a led row is indented, every root's title
   starts at the same x. The pilot's row gains a chevron, at the end of the row beside its time and
   "⋯", that folds its led rows away with it; folded, its state mark is the most urgent of its own
   and its hidden led sessions' (waits for the user, then running, then its own), nothing else is
