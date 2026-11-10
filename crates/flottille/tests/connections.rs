@@ -1107,11 +1107,8 @@ fn an_entry_bound_to_the_worklog_is_refused_to_a_connection() {
             "env": {"TOKEN": {"vault": "jira-time"}}}),
         )
         .unwrap_err();
-    // The sentence names the entry's use, never its value.
-    assert!(
-        refused.1.contains("the worklog of the project app"),
-        "{refused:?}"
-    );
+    // Bound to a worklog, the entry is its project's alone: the sentence says so, never its value.
+    assert!(refused.1.contains("the project app's alone"), "{refused:?}");
     assert!(!refused.1.contains(SECRET), "{refused:?}");
 
     // An entry bound to one connection is refused to another, and given to its own.
