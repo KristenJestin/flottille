@@ -331,7 +331,7 @@ impl Render for WorkspacesFolder {
         let place = self.place();
 
         let this = cx.entity().downgrade();
-        let mut kinds = RadioChoices::new(id("choice"), "Place");
+        let mut kinds = RadioChoices::new(id("choice"), "Where");
         let order: &[Place] = if project {
             &[Place::Data, Place::Own]
         } else {
@@ -341,8 +341,16 @@ impl Render for WorkspacesFolder {
             kinds = match (kind, project) {
                 (Place::Data, true) => kinds.choice(
                     "data",
-                    "Use the default",
-                    "The folder set for every project in Settings.",
+                    "As in Settings",
+                    // The folder it gives, relative to `~`.
+                    match self
+                        .shown
+                        .as_ref()
+                        .and_then(|shown| shown.default_folder.as_deref())
+                    {
+                        Some(folder) => relative_to_home(folder),
+                        None => "The folder set for every project in Settings.".to_owned(),
+                    },
                 ),
                 (Place::Data, false) => kinds.choice(
                     "data",
@@ -360,8 +368,8 @@ impl Render for WorkspacesFolder {
                 ),
                 (Place::Own, true) => kinds.choice(
                     "own",
-                    "A folder of its own",
-                    "Where this project's workspaces go, whatever the default is.",
+                    "A folder for this project",
+                    "Where its workspaces go, whatever Settings says.",
                 ),
                 (Place::Own, false) => kinds.choice(
                     "own",
@@ -392,17 +400,11 @@ impl Render for WorkspacesFolder {
         let save = Button::primary(id("save"), "Save")
             .disabled(!self.savable(cx))
             .on_click(cx.listener(|this, _, _, cx| this.save(cx)));
-        // The global field shows Save once what is typed differs from what is kept (rule 4); a
-        // project's keeps its button until the project's settings are redone.
-        let save = if project {
-            save.into_any_element()
-        } else {
-            // A presence is as wide as its parent: the button keeps its own width.
-            div()
-                .flex_none()
-                .child(presence(id("save-block"), self.savable(cx), save).gap(space::SM))
-                .into_any_element()
-        };
+        // Save shows once what is typed differs from what is kept (rule 4). A presence is as
+        // wide as its parent: the button keeps its own width.
+        let save = div()
+            .flex_none()
+            .child(presence(id("save-block"), self.savable(cx), save).gap(space::SM));
         // The field unfolds and fades in when "a folder of my own" is chosen, and folds away when
         // another is.
         let path = presence(
@@ -485,18 +487,13 @@ impl Render for WorkspacesFolder {
         })
         .gap(space::MD);
 
-        let (title, sentence): (&str, String) = if project {
-            (
-                "Workspaces folder",
-                format!(
-                    "Where this project's new workspaces are made. It follows the default for \
-                     every project unless it has a folder of its own. {REACH}"
-                ),
-            )
+        // A project's section has no sentence: the choice says it all.
+        let (title, sentence): (&str, Option<&str>) = if project {
+            ("Folder", None)
         } else {
             (
                 "Workspaces folder",
-                "Where new workspaces are made. A project can choose its own.".to_owned(),
+                Some("Where new workspaces are made. A project can choose its own."),
             )
         };
         let section = Section::new(
@@ -508,25 +505,20 @@ impl Render for WorkspacesFolder {
             },
             title,
         )
-        .sentence(sentence)
         // A skeleton stands for the choice until the daemon says it.
         .child(awaiting(
             id("waiting"),
             !known && self.problem.is_none(),
             Skeleton::new(id("skeleton")).h(px(96.)),
-            Field::new(
-                id("choice-field"),
-                if project {
-                    "Workspaces folder"
-                } else {
-                    "Where"
-                },
-                kinds,
-            ),
+            Field::new(id("choice-field"), "Where", kinds),
         ))
         .child(path)
         .child(problem)
         .child(unread);
+        let section = match sentence {
+            Some(sentence) => section.sentence(sentence),
+            None => section,
+        };
         if project {
             section.child(resulting)
         } else {

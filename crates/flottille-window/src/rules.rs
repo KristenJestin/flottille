@@ -614,11 +614,8 @@ impl Render for RulesEditor {
             let shown = self.shown.clone();
             let alone = shown.as_ref().is_some_and(|shown| shown.alone);
             let global = shown.as_ref().map(|shown| {
-                let name = match shown.global_source {
-                    Source::Global => "Your rules for every project",
-                    _ => "Flottille's default rules",
-                };
-                (name, shown.global.clone())
+                // The same thing, the same name, whoever wrote what it says.
+                ("Rules for every project", shown.global.clone())
             });
             let open = self.global_open;
             let turned = turning(id("global-chevron"), open, window, cx);
@@ -666,7 +663,7 @@ impl Render for RulesEditor {
                         .test_support(),
                 )
                 .child(div().flex().child(
-                    Button::quiet(id("global-edit"), "Edit them in Settings").on_click(
+                    Button::quiet(id("global-edit"), "Edit in Settings").on_click(
                         move |_, window, cx| {
                             shell
                                 .update(cx, |shell, cx| {

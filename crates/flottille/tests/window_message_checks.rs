@@ -100,7 +100,7 @@ fn open_rules(
     let page = page(cx).unwrap();
     let rules = SECTIONS
         .iter()
-        .position(|(key, _)| *key == "rules")
+        .position(|(key, _)| *key == "instructions")
         .unwrap();
     page.update(cx, |page, cx| page.choose(rules, cx));
     settle(cx);
@@ -113,7 +113,8 @@ fn type_checks(checks: &Entity<MessageChecks>, text: &str, cx: &mut VisualTestCo
         .read_with(cx, |checks, _| checks.field().cloned())
         .unwrap();
     cx.update(|window, cx| field.update(cx, |field, cx| field.set_value(text, window, cx)));
-    cx.run_until_parked();
+    // Save unfolds once what is typed differs from what is saved.
+    settle(cx);
 }
 
 fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
@@ -152,9 +153,12 @@ fn the_settings_field_saves_the_message_checks(cx: &mut TestAppContext) {
         assert!(window.find("message-checks-text-desk").visible());
         assert_eq!(
             window.find("message-checks-field-desk-label").label(),
-            Some("Checks, one command line each")
+            Some("One command line per line")
         );
-        assert!(window.find("message-checks-save-desk").visible());
+        assert!(
+            window.try_find("message-checks-save-desk").is_none(),
+            "no Save at rest"
+        );
     });
 
     // Two lines, a blank one between them left out.

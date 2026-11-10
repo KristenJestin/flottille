@@ -5,7 +5,8 @@
 //! (`project.set_conventions`), and the field shows what the daemon says next.
 
 use gpui_design_system::{
-    Button, Field, Section, Toast, Type as _, follow_theme, growing, palette, space, toast,
+    Button, Field, Section, Toast, Type as _, follow_theme, growing, palette, presence, space,
+    toast,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::{
@@ -44,14 +45,14 @@ impl Kind {
 
     fn label(self) -> &'static str {
         match self {
-            Kind::BranchFormat => "Branch format",
+            Kind::BranchFormat => "Allowed names",
             Kind::PullRequestTemplate => "Template, in Markdown",
         }
     }
 
     fn hint(self) -> &'static str {
         match self {
-            Kind::BranchFormat => "Off when empty. Anchor it with ^ and $ to match whole names.",
+            Kind::BranchFormat => "Empty: any name. Anchor with ^ and $.",
             Kind::PullRequestTemplate => {
                 "Off when empty: a pull request opened without a \
                                           description has none."
@@ -282,9 +283,17 @@ impl Render for Convention {
         };
         let (project, kind) = (self.project.clone(), self.kind);
         let id = |part: &str| ElementId::Name(format!("{}-{part}-{project}", kind.id()).into());
-        let save = Button::primary(id("save"), "Save")
-            .disabled(!self.savable(cx))
-            .on_click(cx.listener(|this, _, _, cx| this.save(cx)));
+        // Save unfolds beside the field once what is typed differs from what is kept (rule 4); a
+        // presence is as wide as its parent, so the button keeps its own width.
+        let save = div().flex_none().child(
+            presence(
+                id("save-block"),
+                self.savable(cx),
+                Button::primary(id("save"), "Save")
+                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+            )
+            .gap(space::SM),
+        );
         let control = match field {
             Text::Line(field) => div()
                 .flex()

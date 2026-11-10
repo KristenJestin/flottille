@@ -1307,8 +1307,8 @@ impl Render for TasksSection {
         let section = Section::new("tasks", "Tasks")
             .count(count.to_string())
             .sentence(
-                "The command lines the project runs. Agents run them by name; the project page \
-                 has a Run for each.",
+                "Command lines the project runs: tests, builds, servers. Agents run them by \
+                 name; you run them from a place's ▶ on the project page.",
             )
             .action(
                 Button::secondary("add-task", "New task")

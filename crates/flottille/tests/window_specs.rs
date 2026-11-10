@@ -359,7 +359,7 @@ fn turning_specs_on_unfolds_its_settings(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn the_project_section_shows_only_while_specs_is_on_globally(cx: &mut TestAppContext) {
+fn the_project_page_of_specs_shows_only_while_specs_is_on_globally(cx: &mut TestAppContext) {
     let user = user();
     project(&user);
     let (shell, cx) = window(&user, cx);
@@ -370,18 +370,22 @@ fn the_project_section_shows_only_while_specs_is_on_globally(cx: &mut TestAppCon
         })
     });
     settle(cx);
+    // No tab of its own: Specs is a row of the project's Features.
     assert!(!found(cx, "project-settings-tabs-specs"));
+    click(cx, "project-settings-tabs-features");
+    until(&shell, cx, "Specs is a faded row while it is off", |cx| {
+        found(cx, "project-features-specs-off")
+    });
 
     turn(&user, true, None);
-    until(&shell, cx, "the project's Specs tab shows", |cx| {
-        found(cx, "project-settings-tabs-specs")
+    until(&shell, cx, "the row opens its page", |cx| {
+        found(cx, "project-features-specs") && !found(cx, "project-features-specs-off")
     });
-    click(cx, "project-settings-tabs-specs");
+    click(cx, "project-features-specs");
     settle(cx);
-    assert_eq!(label(cx, "specs-title").as_deref(), Some("Specs"));
     assert_eq!(
         label(cx, "project-specs-switch-label").as_deref(),
-        Some("On in this project")
+        Some("Write specs before building")
     );
     assert!(found(cx, "project-specs-setting-language-label"));
 
@@ -397,10 +401,10 @@ fn the_project_section_shows_only_while_specs_is_on_globally(cx: &mut TestAppCon
         !found(cx, "project-specs-setting-language-label")
     });
 
-    // Off globally, the section goes, the project's switch kept.
+    // Off globally, the row is faded again, the project's switch kept.
     turn(&user, false, None);
-    until(&shell, cx, "the project's Specs tab goes", |cx| {
-        !found(cx, "project-settings-tabs-specs")
+    until(&shell, cx, "the row is faded again", |cx| {
+        found(cx, "project-features-specs-off")
     });
     assert_eq!(listed(&user)["projects"][0]["switch"], false);
 }

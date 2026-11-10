@@ -906,7 +906,7 @@ impl Render for SkillsSection {
             .count(count.to_string())
             .sentence(SENTENCE)
             .action(
-                Button::secondary("add-skill", "Add skill")
+                Button::secondary("add-skill", "New skill")
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
             )
