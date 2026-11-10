@@ -22,6 +22,7 @@ pub mod lines;
 pub mod listing;
 pub mod menu;
 pub mod modal;
+pub mod model_choice;
 pub mod motion;
 pub mod omarchy;
 pub mod page;
@@ -60,6 +61,7 @@ pub use lines::{
 pub use listing::{Item, Listing, Placement};
 pub use menu::Menu;
 pub use modal::Modal;
+pub use model_choice::{Chosen, ModelChoice, ModelEntry};
 pub use omarchy::Environment;
 pub use page::{EmptyLine, PageHeader, Section};
 pub use path::path_line;

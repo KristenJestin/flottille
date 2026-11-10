@@ -37,6 +37,7 @@ pub struct SelectOption {
     key: SharedString,
     title: SharedString,
     line: Option<SharedString>,
+    group: Option<SharedString>,
 }
 
 impl SelectOption {
@@ -46,11 +47,23 @@ impl SelectOption {
             key: key.into(),
             title: title.into(),
             line: None,
+            group: None,
         }
     }
 
     pub fn line(mut self, line: impl Into<SharedString>) -> Self {
         self.line = Some(line.into());
+        self
+    }
+
+    pub fn key(&self) -> SharedString {
+        self.key.clone()
+    }
+
+    /// The group it belongs to: the list says the group's name, `<select id>-group-<n>`, above
+    /// the first option of each group.
+    pub fn group(mut self, group: impl Into<SharedString>) -> Self {
+        self.group = Some(group.into());
         self
     }
 }
@@ -69,6 +82,7 @@ pub struct Select {
     options: Vec<SelectOption>,
     chosen: usize,
     fit: bool,
+    width: Option<Pixels>,
     disabled: bool,
     on_choose: Option<OnChoose>,
 }
@@ -86,6 +100,7 @@ impl Select {
             options: options.into_iter().collect(),
             chosen,
             fit: false,
+            width: None,
             disabled: false,
             on_choose: None,
         }
@@ -94,6 +109,12 @@ impl Select {
     /// As wide as its words (at least 220 px) instead of its column's width.
     pub fn fit(mut self) -> Self {
         self.fit = true;
+        self
+    }
+
+    /// Exactly `width` wide, its list too: a narrow select beside another.
+    pub fn width(mut self, width: Pixels) -> Self {
+        self.width = Some(width);
         self
     }
 
@@ -186,10 +207,10 @@ impl RenderOnce for Select {
                     .children(chosen.as_ref().map(|o| o.title.clone())),
             )
             .child(icon(Icon::Choose).size(px(12.)).text_color(p.faint));
-        field = if self.fit {
-            field.min_w(px(220.))
-        } else {
-            field.w_full()
+        field = match (self.width, self.fit) {
+            (Some(width), _) => field.w(width),
+            (None, true) => field.min_w(px(220.)),
+            (None, false) => field.w_full(),
         };
         if self.disabled {
             field = field.opacity(0.35);
@@ -216,17 +237,44 @@ impl RenderOnce for Select {
             .relative()
             .flex()
             .flex_col()
-            .map(|d| if self.fit { d.self_start() } else { d.w_full() })
+            .map(|d| match (self.width, self.fit) {
+                (Some(width), _) => d.flex_none().w(width),
+                (None, true) => d.self_start(),
+                (None, false) => d.w_full(),
+            })
             .child(field);
         if t == 0.0 && !open {
             return root;
         }
         let on_choose = self.on_choose.clone();
+        let mut groups = 0;
         let items = self
             .options
             .iter()
             .enumerate()
-            .map(|(index, option)| {
+            .flat_map(|(index, option)| {
+                let header = option
+                    .group
+                    .clone()
+                    .filter(|group| {
+                        index == 0 || self.options[index - 1].group.as_ref() != Some(group)
+                    })
+                    .map(|group| {
+                        groups += 1;
+                        div()
+                            .id(part(&self.id, &format!("group-{groups}")))
+                            .aria_label(group.clone())
+                            .flex_none()
+                            .pt(px(if groups == 1 { 4. } else { 8. }))
+                            .pb(px(4.))
+                            .px(px(10.))
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.faint)
+                            .child(group)
+                            .test_support()
+                            .into_any_element()
+                    });
                 let is_chosen = index == self.chosen;
                 let (pick, on_choose) = (set_open.clone(), on_choose.clone());
                 let mut item = div()
@@ -270,7 +318,7 @@ impl RenderOnce for Select {
                             .test_support(),
                     );
                 }
-                selectable(item, is_chosen, move |d, hover, on| {
+                let item = selectable(item, is_chosen, move |d, hover, on| {
                     d.bg(p.hover.opacity(hover)).child(
                         div()
                             .absolute()
@@ -280,7 +328,8 @@ impl RenderOnce for Select {
                             .child(icon(Icon::Check).size(px(12.)).text_color(p.text)),
                     )
                 })
-                .into_any_element()
+                .into_any_element();
+                header.into_iter().chain([item])
             })
             .collect();
         let dismiss: Option<Handler> = open.then(|| {
