@@ -45,7 +45,7 @@ fn main() {
     });
 }
 
-struct Agent {
+struct Member {
     name: &'static str,
     model: &'static str,
     doing: &'static str,
@@ -54,7 +54,7 @@ struct Agent {
 }
 
 struct Gallery {
-    agents: Vec<Agent>,
+    members: Vec<Member>,
     thinking: Entity<PulsingLabel>,
     open_fold: Entity<Fold>,
     shut_fold: Entity<Fold>,
@@ -91,13 +91,13 @@ impl Render for DrawerContent {
             .p(px(12.))
             .flex()
             .flex_col()
-            .child(section_label("Agents", cx))
+            .child(section_label("Members", cx))
             .children(
                 self.rows
                     .iter()
                     .enumerate()
                     .map(|(i, (mark, state, name, model))| {
-                        ListRow::new(("drawer-agent", i), *name)
+                        ListRow::new(("drawer-member", i), *name)
                             .leading(icon(*mark).text_color(p.faint))
                             .detail(*model)
                             .trailing(meta(*state, cx))
@@ -109,29 +109,29 @@ impl Render for DrawerContent {
 
 impl Gallery {
     fn new(drawer_open: bool, cx: &mut Context<Self>) -> Self {
-        let agent = |name, model, doing, mark, state| Agent {
+        let member = |name, model, doing, mark, state| Member {
             name,
             model,
             doing,
             mark,
             state,
         };
-        let agents = vec![
-            agent(
+        let members = vec![
+            member(
                 "api-tests",
                 "Sonnet",
                 "app-api · TTL units",
                 Icon::Check,
                 "completed",
             ),
-            agent(
+            member(
                 "web-form",
                 "Sonnet",
                 "asked lead · #3",
                 Icon::Clock,
                 "waiting",
             ),
-            agent(
+            member(
                 "docs-pass",
                 "Haiku",
                 "docs · timeout default",
@@ -157,7 +157,7 @@ impl Gallery {
             drawer
         });
         Self {
-            agents,
+            members,
             thinking,
             open_fold,
             shut_fold,
@@ -225,8 +225,8 @@ impl Render for Gallery {
                     .flex_wrap()
                     .gap(px(8.))
                     .items_center()
-                    .child(Button::primary("b-new", "New session").leading(Icon::Plus))
-                    .child(Button::secondary("b-ws", "New workspace").leading(Icon::Plus))
+                    .child(Button::primary("b-new", "New item").leading(Icon::Plus))
+                    .child(Button::secondary("b-folder", "New folder").leading(Icon::Plus))
                     .child(Button::quiet("b-deny", "Deny"))
                     .child(Button::primary("b-once", "Allow once")),
             )
@@ -243,15 +243,15 @@ impl Render for Gallery {
                     .child(Button::icon(
                         "i-edit",
                         Icon::OpenInEditor,
-                        "Open the workspace in your editor",
+                        "Open the folder in your editor",
                     ))
                     .child(
                         Button::icon("i-settings", Icon::Settings, "Settings")
                             .badge(Badge::alert()),
                     )
-                    .child(Button::icon("i-menu", Icon::Menu, "Projects"))
+                    .child(Button::icon("i-menu", Icon::Menu, "Libraries"))
                     .child(div().ml(px(8.)).child(flottille_ui::Tooltip::view(
-                        "Open the workspace in your editor".into(),
+                        "Open the folder in your editor".into(),
                         cx,
                     ))),
             )
@@ -279,7 +279,7 @@ impl Render for Gallery {
                 .bg(p.side)
                 .flex()
                 .flex_col()
-                .child(section_label("Projects", cx))
+                .child(section_label("Libraries", cx))
                 .child(TreeRow::new("t-atlas", "atlas").top().expanded(true))
                 .child(tree_children(
                     [
@@ -293,12 +293,12 @@ impl Render for Gallery {
                             cx,
                         )
                         .into_any_element(),
-                        TreeRow::new("t-ws", "fix-session-timeout")
+                        TreeRow::new("t-ws", "fix-timeout")
                             .leading(icon(Icon::Branch).text_color(p.faint))
                             .into_any_element(),
                         tree_children(
                             [
-                                TreeRow::new("t-s2", "Sessions expire too early")
+                                TreeRow::new("t-s2", "Tokens expire too early")
                                     .selected(true)
                                     .trailing(icon(Icon::Bell).text_color(p.wait))
                                     .into_any_element(),
@@ -323,28 +323,27 @@ impl Render for Gallery {
                 ),
         );
 
-        let place =
-            Card::new()
-                .title(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(icon(Icon::Branch).text_color(p.faint))
-                        .child("fix-session-timeout"),
-                )
-                .meta("from develop · +2 −1")
-                .child(div().p(px(4.)).flex().flex_col().children(
-                    self.agents.iter().enumerate().map(|(i, a)| {
-                        enter(("enter-agent", i), i, {
-                            ListRow::new(("agent", i), a.name)
-                                .leading(icon(a.mark).text_color(p.faint))
-                                .detail(a.model)
-                                .meta(a.doing)
-                                .trailing(meta(a.state, cx))
-                        })
-                    }),
-                ));
+        let place = Card::new()
+            .title(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(icon(Icon::Branch).text_color(p.faint))
+                    .child("fix-timeout"),
+            )
+            .meta("from develop · +2 −1")
+            .child(div().p(px(4.)).flex().flex_col().children(
+                self.members.iter().enumerate().map(|(i, a)| {
+                    enter(("enter-member", i), i, {
+                        ListRow::new(("member", i), a.name)
+                            .leading(icon(a.mark).text_color(p.faint))
+                            .detail(a.model)
+                            .meta(a.doing)
+                            .trailing(meta(a.state, cx))
+                    })
+                }),
+            ));
 
         let approval = Card::new()
             .attention()
@@ -396,7 +395,7 @@ impl Render for Gallery {
                         div()
                             .mono(12.5)
                             .font_weight(FontWeight::NORMAL)
-                            .child("app-api/src/auth/session.ts"),
+                            .child("app-api/src/auth/token.ts"),
                     ),
             )
             .meta("+2 −1")
@@ -404,17 +403,17 @@ impl Render for Gallery {
                 div()
                     .py(px(6.))
                     .child(diff_line(
-                        "export function sessionTtlMs(env: Env) {",
+                        "export function tokenTtlMs(env: Env) {",
                         None,
                         p.mute,
                     ))
                     .child(diff_line(
-                        "-  return env.SESSION_TTL / 6;",
+                        "-  return env.TOKEN_TTL / 6;",
                         Some(p.del),
                         p.fail,
                     ))
                     .child(diff_line(
-                        "+  return env.SESSION_TTL * 1000;",
+                        "+  return env.TOKEN_TTL * 1000;",
                         Some(p.add),
                         p.ok,
                     ))
@@ -454,12 +453,12 @@ impl Render for Gallery {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child("atlas"),
                 )
-                .child(div().child("Geist 13.5 — Sessions expire after 5 minutes instead of 30."))
+                .child(div().child("Geist 13.5 — Tokens expire after 5 minutes instead of 30."))
                 .child(
                     div()
                         .mono(12.)
                         .text_color(p.mute)
-                        .child("Geist Mono — ~/projects/atlas · develop · 0123456789"),
+                        .child("Geist Mono — ~/code/atlas · develop · 0123456789"),
                 ),
         );
 

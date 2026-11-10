@@ -6,7 +6,7 @@
 //! ```
 //!
 //! `--dialog` opens a form dialog, `--confirm` a confirmation, `--drawer` a detail drawer,
-//! `--menu` a list row's "⋯" menu, `--light` draws Flottille's light palette. Two toasts are said when the window opens: a failure, which
+//! `--menu` a list row's "⋯" menu, `--light` draws the light palette. Two toasts are said when the window opens: a failure, which
 //! stays, and a success, which leaves after four seconds.
 
 use flottille_ui::{
@@ -171,7 +171,7 @@ impl Components {
         let header_menu = cx.new(|cx| {
             Menu::new("page-more", "More", cx)
                 .entry("page-open", "Open in editor", None, |_, _| {})
-                .danger("page-remove", "Remove project…", |_, _| {})
+                .danger("page-remove", "Remove folder…", |_, _| {})
         });
         let row_menus = ["style", "release"]
             .into_iter()
@@ -212,13 +212,13 @@ impl Components {
         }
         cx.defer_in(window, |_, _, cx| {
             toast(
-                Toast::failure("The workspace was not removed")
+                Toast::failure("The folder was not removed")
                     .detail("4 files are not committed in atlas."),
                 cx,
             );
             toast(
                 Toast::success("Forges and tracker saved")
-                    .detail("Flottille reads GitHub for api and web from now on."),
+                    .detail("The sync reads the mirror for api and web from now on."),
                 cx,
             );
         });
@@ -278,12 +278,12 @@ impl Components {
             .child(
                 Self::kind("primary", cx)
                     .child(Button::primary("b-save", "Save"))
-                    .child(Button::primary("b-new", "New session").leading(Icon::Plus))
+                    .child(Button::primary("b-new", "New item").leading(Icon::Plus))
                     .child(Button::primary("b-create", "Create").disabled(true)),
             )
             .child(
                 Self::kind("secondary", cx)
-                    .child(Button::secondary("b-ws", "New workspace").leading(Icon::Plus))
+                    .child(Button::secondary("b-folder", "New folder").leading(Icon::Plus))
                     .child(Button::secondary("b-settings", "Settings").leading(Icon::Settings))
                     .child(Button::secondary("b-run", "Run").leading(Icon::Play)),
             )
@@ -296,13 +296,13 @@ impl Components {
             .child(
                 Self::kind("danger", cx)
                     .child(Button::danger("b-remove", "Remove task"))
-                    .child(Button::danger("b-end", "End 2 agents"))
+                    .child(Button::danger("b-end", "Delete 2 files"))
                     .child(note("only in a confirmation")),
             )
             .child(
                 Self::kind("icon", cx)
                     .child(Button::icon("b-more", Icon::More, "More"))
-                    .child(Button::icon("b-add", Icon::Plus, "Add a project"))
+                    .child(Button::icon("b-add", Icon::Plus, "Add an item"))
                     .child(
                         Button::icon("b-bell", Icon::Bell, "Waiting for you")
                             .badge(Badge::count(2)),
@@ -343,7 +343,7 @@ impl Components {
             )
     }
 
-    fn workspace(&self, cx: &App) -> gpui_kit::Div {
+    fn folder(&self, cx: &App) -> gpui_kit::Div {
         let p = palette(cx);
         let line = |glyph: Icon, key: &'static str, value: AnyElement| {
             div()
@@ -379,7 +379,7 @@ impl Components {
         Self::tile("Card blocks", cx)
             .child(
                 Card::new()
-                    .id("workspace-card")
+                    .id("folder-card")
                     .title(title)
                     .meta("+18 −1")
                     .block(
@@ -410,7 +410,7 @@ impl Components {
                     .block(Block::new())
                     .block(
                         Block::new().child(
-                            ListRow::new("ws-session", "Write the help page")
+                            ListRow::new("folder-item", "Write the help page")
                                 .leading(icon(Icon::File).text_color(p.faint))
                                 .meta("1h"),
                         ),
@@ -454,7 +454,7 @@ impl Components {
                             )
                             .child(
                                 Switch::new("check", self.check, "A check")
-                                    .hint("Its result is told to the agent that ran it.")
+                                    .hint("Its result is told to whoever ran it.")
                                     .on_click(move |_, _, cx| {
                                         b.update(cx, |this, cx| {
                                             this.check = !this.check;
@@ -532,14 +532,14 @@ impl Components {
         RadioChoices::new("source", "What it is")
             .choice(
                 "file",
-                "A file of the project",
-                "Read where the agent works: its workspace's copy when it has one.",
+                "A file of the folder",
+                "Read from where it is used: the local copy when there is one.",
             )
             .leading(Icon::File)
             .choice(
                 "text",
-                "A text Flottille keeps",
-                "Kept in Flottille's data folder, never in the project.",
+                "A text the app keeps",
+                "Kept in the app's data folder, never beside the files.",
             )
             .leading(Icon::Text)
             .chosen(self.source)
@@ -573,12 +573,7 @@ impl Components {
                 PageHeader::new("page", "atlas")
                     .path("~/work/atlas")
                     .action("page-settings", "Settings", Some(Icon::Settings), |_, _| {})
-                    .action(
-                        "page-new-workspace",
-                        "New workspace",
-                        Some(Icon::Plus),
-                        |_, _| {},
-                    )
+                    .action("page-new-folder", "New folder", Some(Icon::Plus), |_, _| {})
                     .more(self.header_menu.clone())
                     .below(chip),
             )
@@ -586,7 +581,7 @@ impl Components {
                 Section::new("skills", "Skills")
                     .count("1")
                     .sentence(
-                        "Texts an agent reads when its task needs them. It sees their names and \
+                        "Texts a helper reads when its task needs them. It sees their names and \
                          one line; it opens one with a tool.",
                     )
                     .action(Button::secondary("add-skill", "Add skill").leading(Icon::Plus)),
@@ -622,19 +617,19 @@ impl Components {
             .child(
                 div().flex_1().child(
                     Field::new("skill-when", "Read it when", Self::input(&self.when, cx))
-                        .error(Some("Say when an agent should read it.".into())),
+                        .error(Some("Say when it should be read.".into())),
                 ),
             );
         Modal::new("skill-modal", "Add a skill")
             .sentence(
-                "A text an agent reads when its task needs it. It sees the name and the line; \
+                "A text a helper reads when its task needs it. It sees the name and the line; \
                  it opens the skill with a tool.",
             )
             .child(names)
             .child(Field::new("skill-source", "What it is", source))
             .child(
                 Field::new("skill-file", "File", Self::input(&self.file, cx))
-                    .hint("A path in the project folder."),
+                    .hint("A path in the folder."),
             )
             .child(Field::new(
                 "skill-tracker",
@@ -678,7 +673,7 @@ impl Render for Components {
                     .gap(px(24.))
                     .child(self.buttons(cx))
                     .child(self.lists(cx))
-                    .child(self.workspace(cx))
+                    .child(self.folder(cx))
                     .child(self.page(cx))
                     .child(controls),
             )

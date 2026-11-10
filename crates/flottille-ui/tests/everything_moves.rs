@@ -236,7 +236,7 @@ impl Render for Reach {
         let segmented = Segmented::new(
             "theme",
             "Theme",
-            [("omarchy", "Omarchy"), ("flottille", "Flottille")],
+            [("omarchy", "Omarchy"), ("plain", "Plain")],
             1,
         );
         div().size_full().child(if self.taken {
