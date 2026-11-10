@@ -976,6 +976,28 @@ fn an_accepted_change_keeps_the_settings_of_unchanged_actions_and_judges_the_new
 }
 
 #[test]
+fn accept_holds_the_server_until_the_pin_is_written() {
+    // The daemon of a test build checks, as it writes the pin, that it holds the server the
+    // review left running: stopped first and pinned after, it would not.
+    let user = user();
+    project(&user, "app");
+    connect(&user, "almanac", &almanac(), json!({"search": "passes"}));
+    let (_, mcp) = session(&user, "app");
+    let mut changed = almanac();
+    changed["tools"][2]["description"] = json!("Opens a page, any page.");
+    cut_after(&user, &mcp, &changed);
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call("connection.accept", json!({"name": "almanac"}))
+        .unwrap();
+    assert_eq!(connection(&user, "almanac")["state"], "ready");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+}
+
+#[test]
 fn editing_the_command_asks_for_a_new_review() {
     let user = user();
     let mcp = connected(&user);
@@ -1939,24 +1961,34 @@ fn a_server_s_error_text_is_masked_and_cut_in_the_log() {
         "conn_almanac",
         json!({"action": "search", "arguments": {"query": "a"}}),
     ));
-    // Its listing fails, in its own words: the log has them masked and cut.
+    // Its listing fails, in its own words: the log has them masked and cut. The secret lies
+    // across the cut at 100 characters (`listing its tools: Mcp error: -32000: broken ` is 45 of
+    // them, a few more or less still across): cut first, its first half would stay unmasked.
     let mut failing = script.clone();
-    failing["list_error"] = json!(format!("broken {SECRET} {}", "y".repeat(5_000)));
+    failing["list_error"] = json!(format!(
+        "broken {}{SECRET}{}",
+        "y".repeat(45),
+        "y".repeat(5_000)
+    ));
     write_script(&user, "almanac", &failing);
     std::fs::write(&trigger, "").unwrap();
     eventually("the failed listing logged", || {
         daemon_log(&user).contains("listing its tools")
     });
     let log = daemon_log(&user);
-    assert!(!log.contains(SECRET), "{log}");
-    assert!(log.contains("broken [masked]"), "{log}");
+    assert!(!log.contains(&SECRET[..6]), "{log}");
+    assert!(log.contains("[masked]"), "{log}");
     assert!(!log.contains(&"y".repeat(200)), "{log}");
 
-    // It fails to start, its first error line long and holding the secret: masked and cut in
-    // what the list says, the event and the review's error.
+    // It fails to start, its first error line long and holding the secret across the cut at 100
+    // characters: masked and cut in what the list says, the event and the review's error.
     restart(&user, "almanac");
     let mut broken = almanac();
-    broken["stderr"] = json!(format!("fatal {SECRET} {}", "z".repeat(5_000)));
+    broken["stderr"] = json!(format!(
+        "fatal {}{SECRET}{}",
+        "z".repeat(84),
+        "z".repeat(5_000)
+    ));
     broken["exit"] = json!(3);
     write_script(&user, "almanac", &broken);
     let watch = user.watch(&[]);
@@ -1976,8 +2008,8 @@ fn a_server_s_error_text_is_masked_and_cut_in_the_log() {
         ("the list", &listed),
         ("the review", &review),
     ] {
-        assert!(!said.contains(SECRET), "{what}: {said}");
-        assert!(said.contains("fatal [masked]"), "{what}: {said}");
+        assert!(!said.contains(&SECRET[..6]), "{what}: {said}");
+        assert!(said.contains("[masked]"), "{what}: {said}");
         assert!(!said.contains(&"z".repeat(200)), "{what}: {said}");
     }
     assert!(!daemon_log(&user).contains(SECRET));

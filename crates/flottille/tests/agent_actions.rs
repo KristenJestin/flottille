@@ -265,6 +265,44 @@ fn a_tracker_change_says_the_worklog_entry() {
 }
 
 #[test]
+fn in_full_mode_changing_the_tracker_site_with_a_token_is_asked() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let jira = |site: &str, projects: &[&str], token: &str| json!({"kind": "jira", "site": site, "projects": projects, "worklog_token": token});
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "tracker": jira("acme.atlassian.net", &["ABC"], "jira-time")}),
+    )
+    .unwrap();
+    let (id, mcp) = root(&user, None);
+    cli(&user, &["agent", "mode", &id, "full"]).unwrap();
+    let before = file(&user);
+
+    // Another host, or another entry, for the token: the user's word, even in Full.
+    for tracker in [
+        jira("evil.example", &["ABC"], "jira-time"),
+        jira("acme.atlassian.net", &["ABC"], "other-time"),
+    ] {
+        let number = held(mcp.call(
+            "project",
+            json!({"action": "set_settings", "tracker": tracker}),
+        ));
+        assert_eq!(request(&user, number)["class"], "base", "{tracker}");
+        let says = request(&user, number)["says"].to_string();
+        assert!(says.contains("will be sent to"), "{says}");
+        assert_eq!(file(&user), before);
+    }
+    // The same host and entry: Full lets it through at once.
+    let said = done(mcp.call(
+        "project",
+        json!({"action": "set_settings",
+            "tracker": jira("acme.atlassian.net", &["ABC", "DEF"], "jira-time")}),
+    ));
+    assert!(said.contains("Saved."), "{said}");
+    assert!(file(&user).contains("DEF"), "{}", file(&user));
+}
+
+#[test]
 fn a_settings_change_says_what_changes_and_keeps_the_file_s_comments() {
     let user = User::with_fake_agent();
     project(&user);

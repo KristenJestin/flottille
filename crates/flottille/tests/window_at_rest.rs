@@ -420,7 +420,9 @@ fn the_window_draws_no_frame_at_rest_on_settings(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn the_window_draws_no_frame_at_rest_on_the_models_chosen_in_settings(cx: &mut TestAppContext) {
+fn the_window_draws_no_frame_at_rest_on_each_tab_of_settings_and_a_feature_s_page(
+    cx: &mut TestAppContext,
+) {
     let user = User::with_fake_agent();
     idle_session(&user);
     user.call("provider.set_judge", json!({"provider": "claude"}))
@@ -432,15 +434,18 @@ fn the_window_draws_no_frame_at_rest_on_the_models_chosen_in_settings(cx: &mut T
         shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
     });
     cx.update(|window, cx| window.click("settings", cx));
-    until(&shell, cx, "the judge's model is shown", |cx| {
-        cx.update(|window, _| window.try_find("judge-model").is_some())
+    until(&shell, cx, "the providers are shown", |cx| {
+        cx.update(|window, _| window.try_find("providers-title").is_some())
     });
     settle(&shell, cx);
-    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the judge");
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "agents");
 
+    // The five tabs, each shown by one of its parts.
     for (tab, shown) in [
-        ("compaction", "compaction-switch"),
-        ("review", "review-models"),
+        ("approvals", "judge-model"),
+        ("features", "features-review"),
+        ("vault", "vault-title"),
+        ("general", "appearance-title"),
     ] {
         cx.update(|window, cx| window.click(format!("settings-tabs-{tab}"), cx));
         until(&shell, cx, "the tab is shown", |cx| {
@@ -448,6 +453,23 @@ fn the_window_draws_no_frame_at_rest_on_the_models_chosen_in_settings(cx: &mut T
         });
         settle(&shell, cx);
         assert_eq!(frames_at_rest(&shell, cx), (0, 0), "{tab}");
+    }
+
+    // A feature's page, drawn from its declaration, and the compaction's.
+    cx.update(|window, cx| window.click("settings-tabs-features", cx));
+    settle(&shell, cx);
+    for (row, shown) in [
+        ("review", "review-models"),
+        ("compaction", "compaction-switch"),
+    ] {
+        cx.update(|window, cx| window.click(format!("features-{row}"), cx));
+        until(&shell, cx, "the page is shown", |cx| {
+            cx.update(|window, _| window.try_find(shown).is_some())
+        });
+        settle(&shell, cx);
+        assert_eq!(frames_at_rest(&shell, cx), (0, 0), "{row}");
+        cx.update(|window, cx| window.click("features-back", cx));
+        settle(&shell, cx);
     }
 }
 

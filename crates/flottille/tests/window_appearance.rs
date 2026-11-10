@@ -139,14 +139,14 @@ fn settle(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
-/// Opens Settings on its Appearance tab.
+/// Opens Settings on its General tab, which holds Appearance.
 fn open_appearance(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SettingsPage> {
     cx.update(|window, cx| window.click("settings", cx));
     until(shell, cx, "the settings page is shown", |cx| {
         shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
     });
     settle(cx);
-    cx.update(|window, cx| window.click("settings-tabs-appearance", cx));
+    cx.update(|window, cx| window.click("settings-tabs-general", cx));
     settle(cx);
     let page = shell
         .read_with(cx, |s, cx| s.main().read(cx).settings_page().cloned())

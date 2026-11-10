@@ -1,5 +1,5 @@
 //! The compaction in the window (#309), on GPUI's test platform in front of a real daemon whose
-//! agents and compactor are fake ACP agents: the Compaction tab of Settings, the notice of a
+//! agents and compactor are fake ACP agents: the compaction's page of Settings, the notice of a
 //! compactor Flottille picked, the session's menu entry that compacts, and the conversation's line
 //! that unfolds to the summary. No window opens on a screen.
 
@@ -137,10 +137,12 @@ fn open_compaction_tab(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Ent
     let page = shell
         .read_with(cx, |s, cx| s.main().read(cx).settings_page().cloned())
         .unwrap();
-    cx.update(|window, cx| window.click("settings-tabs-compaction", cx));
+    cx.update(|window, cx| window.click("settings-tabs-features", cx));
     until(shell, cx, "the compaction is read", |cx| {
-        page.read_with(cx, |p, _| p.compaction().is_some())
+        page.read_with(cx, |p, _| p.compaction().is_some()) && present(cx, "features-compaction")
     });
+    settle(cx);
+    cx.update(|window, cx| window.click("features-compaction", cx));
     settle(cx);
     page
 }
@@ -150,33 +152,41 @@ fn shown(user: &User) -> Value {
 }
 
 #[gpui_kit::test]
-fn the_compaction_tab_shows_the_compactor_its_settings_and_its_guidance(cx: &mut TestAppContext) {
+fn the_compaction_page_shows_the_compactor_its_settings_and_its_guidance(cx: &mut TestAppContext) {
     let user = user("");
     let (shell, cx) = window(&user, cx);
     let page = open_compaction_tab(&shell, cx);
 
     for id in [
-        "compaction-title",
         "compaction-switch",
+        "compaction-usage",
         "compaction-summary-model",
         "compaction-automatic",
         "compaction-threshold",
-        "compaction-maximum",
-        "compaction-kept",
-        "compaction-before-expiry",
-        "compaction-margin",
-        "compaction-after-expiry",
-        "compaction-minimum",
-        "compaction-lifetimes",
         "compaction-summary-cost",
         "compaction-guidance-title",
         "compaction-guidance-text",
         "compaction-guidance-reset",
-        "compaction-guidance-save",
+        "compaction-more",
     ] {
         assert!(visible(cx, id), "{id}");
     }
     assert!(visible(cx, "compaction-guidance-reach"));
+    assert!(!present(cx, "compaction-guidance-save"), "no Save at rest");
+    // The rarely set ones are folded under More settings.
+    assert!(!visible(cx, "compaction-maximum"));
+    cx.update(|window, cx| window.click("compaction-more", cx));
+    settle(cx);
+    for id in [
+        "compaction-maximum",
+        "compaction-kept",
+        "compaction-before-expiry",
+        "compaction-after-expiry",
+        "compaction-minimum",
+        "compaction-lifetimes",
+    ] {
+        assert!(visible(cx, id), "{id}");
+    }
     let lifetimes = label(cx, "compaction-lifetimes").unwrap();
     assert!(
         lifetimes.contains("Claude: an hour") && lifetimes.contains("Codex: unknown"),
@@ -268,11 +278,13 @@ fn a_compactor_flottille_picked_is_said_once_in_a_notice_that_opens_settings(
     until(&shell, cx, "the settings show the compaction", |cx| {
         shell.read_with(cx, |s, cx| {
             s.main().read(cx).settings_page().is_some_and(|page| {
-                page.read(cx).tab()
+                let page = page.read(cx);
+                page.tab()
                     == flottille_window::settings::SECTIONS
                         .iter()
-                        .position(|(key, _)| *key == "compaction")
+                        .position(|(key, _)| *key == "features")
                         .unwrap()
+                    && page.open_feature() == Some("compaction")
             })
         })
     });
@@ -727,7 +739,7 @@ fn the_conversation_shows_one_divider_with_the_sizes_and_the_summary_folded(
     });
     let (shell, cx) = window(&user, cx);
 
-    // The Compaction tab says who writes the summary, and keeps its settings without a compactor.
+    // The compaction's page says who writes the summary, and keeps its settings without a compactor.
     let page = open_compaction_tab(&shell, cx);
     assert!(visible(cx, "compaction-summary-model"));
     assert!(visible(cx, "compaction-threshold"));

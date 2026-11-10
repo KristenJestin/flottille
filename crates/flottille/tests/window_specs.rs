@@ -185,13 +185,17 @@ fn open(shell: &Entity<Shell>, cx: &mut VisualTestContext, selection: Selection)
     shell.update_in(cx, |s, window, cx| s.open(selection, window, cx));
 }
 
-/// The window on Settings, the Specs tab chosen once Specs is listed.
+/// The window on Settings, Specs' page opened from the Features tab once Specs is listed.
 fn open_specs_tab(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     open(shell, cx, Selection::Settings);
-    until(shell, cx, "the Specs tab is offered", |cx| {
-        found(cx, "settings-tabs-specs")
+    until(shell, cx, "the Features tab is offered", |cx| {
+        found(cx, "settings-tabs-features")
     });
-    click(cx, "settings-tabs-specs");
+    click(cx, "settings-tabs-features");
+    until(shell, cx, "the Specs row is offered", |cx| {
+        found(cx, "features-specs")
+    });
+    click(cx, "features-specs");
     settle(cx);
 }
 
@@ -290,24 +294,24 @@ fn question_of(user: &User, spec: u64) -> u64 {
 }
 
 #[gpui_kit::test]
-fn specs_tab_off_shows_the_switch_and_one_line(cx: &mut TestAppContext) {
+fn specs_page_off_shows_the_switch_its_sentence_and_its_usage_line(cx: &mut TestAppContext) {
     let user = user();
     project(&user);
     let (shell, cx) = window(&user, cx);
     open_specs_tab(&shell, cx);
     at_rest(cx);
 
-    // Its title, its switch with the declaration's sentence as hint, and nothing else.
-    assert_eq!(label(cx, "specs-title").as_deref(), Some("Specs"));
-    assert_eq!(label(cx, "specs-switch-label").as_deref(), Some("On"));
+    // Its switch, labelled with what it does, the declaration's sentence as hint, its usage
+    // line, and nothing else.
+    assert_eq!(
+        label(cx, "specs-switch-label").as_deref(),
+        Some("Write specs before building")
+    );
     assert_eq!(label(cx, "specs-switch-hint").as_deref(), Some(SENTENCE));
+    assert!(found(cx, "specs-usage"));
     assert!(!found(cx, "specs-setting-language-label"));
-    // After the Judge, before the Providers.
-    let at = |cx: &mut VisualTestContext, id: &str| {
-        cx.update(|window, _| window.find(id.to_owned()).bounds().origin.x)
-    };
-    assert!(at(cx, "settings-tabs-judge") < at(cx, "settings-tabs-specs"));
-    assert!(at(cx, "settings-tabs-specs") < at(cx, "settings-tabs-providers"));
+    // It is no tab: a row of Features.
+    assert!(!found(cx, "settings-tabs-specs"));
 }
 
 #[gpui_kit::test]
@@ -331,7 +335,7 @@ fn turning_specs_on_unfolds_its_settings(cx: &mut TestAppContext) {
     at_rest(cx);
     assert_eq!(
         label(cx, "specs-setting-language-label").as_deref(),
-        Some("Language")
+        Some("Written in")
     );
 
     // Chosen, a language is the daemon's.

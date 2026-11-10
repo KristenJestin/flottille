@@ -70,14 +70,12 @@ fn run_for(by: Duration, cx: &mut VisualTestContext) {
     }
 }
 
-/// Opens Settings on its Sessions tab, once the page knows the setting.
+/// Opens Settings on its Agents tab, which holds Sessions, once the page knows the setting.
 fn open_sessions(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SettingsPage> {
     cx.update(|window, cx| window.click("settings", cx));
     until(shell, cx, "the settings page is shown", |cx| {
         shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
     });
-    settle(cx);
-    cx.update(|window, cx| window.click("settings-tabs-sessions", cx));
     settle(cx);
     let page = shell
         .read_with(cx, |s, cx| s.main().read(cx).settings_page().cloned())

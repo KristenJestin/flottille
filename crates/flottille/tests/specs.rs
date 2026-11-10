@@ -131,6 +131,47 @@ fn specs_is_off_until_the_user_turns_it_on() {
 }
 
 #[test]
+fn the_declaration_says_its_row_its_switch_and_its_usage_line() {
+    let user = User::new();
+    let listed = user.call("extension.list", json!({})).unwrap();
+    let specs = specs(&listed);
+    assert_eq!(specs["switch"], "Write specs before building");
+    assert_eq!(specs["place"]["icon"], "file-text");
+    assert!(specs["place"]["line"].as_str().unwrap().contains("spec"));
+    assert!(
+        specs["usage"]
+            .as_str()
+            .unwrap()
+            .contains("**Write the spec**"),
+        "the words found elsewhere in the window are in bold: {}",
+        specs["usage"]
+    );
+    assert_eq!(specs["settings"][0]["label"], "Written in");
+    // Every part says what a row and a page need, and a switch never reads like its state.
+    for extension in listed["extensions"].as_array().unwrap() {
+        for key in ["switch", "usage"] {
+            assert!(
+                !extension[key].as_str().unwrap().is_empty(),
+                "{} has no {key}",
+                extension["name"]
+            );
+        }
+        for key in ["icon", "line"] {
+            assert!(
+                !extension["place"][key].as_str().unwrap().is_empty(),
+                "{} has no {key}",
+                extension["name"]
+            );
+        }
+        let switch = extension["switch"].as_str().unwrap();
+        assert!(
+            !["On", "Enabled", "Use"].contains(&switch),
+            "{switch} says a state"
+        );
+    }
+}
+
+#[test]
 fn specs_on_globally_is_on_in_every_project() {
     let user = User::new();
     project(&user, "app");

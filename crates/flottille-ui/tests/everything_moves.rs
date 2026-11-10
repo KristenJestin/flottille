@@ -953,6 +953,46 @@ fn a_tree_row_whose_title_changes_fades_to_the_new_one(cx: &mut TestAppContext) 
     );
 }
 
+// ── A list row whose state tag changes ─────────────────────────────────────────────────────────
+
+struct Tagged {
+    tag: SharedString,
+}
+
+impl Render for Tagged {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(320.))
+            .child(flottille_ui::ListRow::new("tagged-row", "Review").tag(self.tag.clone()))
+    }
+}
+
+#[gpui_kit::test]
+fn a_list_row_s_state_tag_fades_when_it_changes_and_then_stops_asking_for_frames(
+    cx: &mut TestAppContext,
+) {
+    init(cx, Desktop::new(false).env());
+    let (view, cx) = cx.add_window_view(|_, _| Tagged { tag: "Off".into() });
+    cx.update(|window, cx| window.render_frame(cx));
+    advance(cx, HOVER);
+    assert_eq!(pending_frames(cx), 0, "a first tag is simply there");
+
+    cx.update(|_, cx| {
+        view.update(cx, |tagged, cx| {
+            tagged.tag = "On".into();
+            cx.notify()
+        })
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(pending_frames(cx) > 0, "the new tag fades in");
+    advance(cx, HOVER * 2);
+    assert_eq!(pending_frames(cx), 0);
+    assert_eq!(
+        cx.update(|window, _| window.find("tagged-row-tag-0").label().map(str::to_owned)),
+        Some("On".to_owned())
+    );
+}
+
 // ── Subpage ────────────────────────────────────────────────────────────────────────────────────
 
 fn left(id: &str, cx: &mut VisualTestContext) -> Pixels {

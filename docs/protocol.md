@@ -456,8 +456,12 @@ in every project, off in a project whose switch says `enabled = false`, and off 
 is off globally, the projects' switches kept.
 
 - `extension.list` answers `{"extensions", "errors"}`: for each extension `{"name", "title",
-  "sentence", "scope", "on_by_default", "place", "enabled", "error", "settings", "projects",
-  "guidance", "commands"}`, `enabled` being the global switch, `error` why `extensions.toml`
+  "sentence", "switch", "usage", "scope", "on_by_default", "place", "enabled", "error",
+  "settings", "projects", "guidance", "commands"}`, `switch` the label of its switch (what it does:
+  `Review changes`), `usage` the line that says where and how it acts (`**` around the words found
+  elsewhere in the window), `place` `{"icon", "line", "order"}` of its row of Settings' Features
+  (a Lucide icon by its file name, the line that says what it is for, its place among the rows),
+  `enabled` being the global switch, `error` why `extensions.toml`
   cannot be used (`null` when it can; the extension is then off), `guidance` whether it has one
   (`<name>.show`, below), `commands` the words of its composer commands (`["review"]`),
   `settings` each `{"key", "label", "hint", "kind", "per_project", "value", "set", "default"}` with its

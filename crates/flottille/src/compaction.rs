@@ -829,7 +829,7 @@ pub fn ask(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent) -> Result
     let settings = settings(daemon)?;
     if !settings.by_agent && settings.compactor.is_none() {
         return Err(Failure::refused(
-            "there is no compactor: choose one in Settings, Compaction, and the agent's CLI \
+            "there is no compactor: choose one in Settings, Features, Compaction, and the agent's CLI \
              compacts on its own until then",
         ));
     }

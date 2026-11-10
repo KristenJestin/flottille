@@ -700,7 +700,8 @@ with says so. Reading another session says the mode of that session's tree too.
   passes at once, base calls included (a forced push, a workspace removed with what it would
   lose, inline interpreter code, a script the agent wrote), with no request and no judge, but for
   the first message of a session to another it did not start, whose leave only the user gives
-  (§7.2). Bare mode
+  (§7.2), and a tracker change that would send the worklog's token to another site or name
+  another entry for it (`docs/tickets.md`, "Logging time"). Bare mode
   stays: the agent has only Flottille's tools, and every refusal below stays a refusal, those that
   keep the user's logins and Flottille itself included. Each call it let through is recorded as
   allowed by Full mode (`gate` `full` in its `agent.tool_served` event and in the developer log),
@@ -1303,7 +1304,7 @@ fold; a panel or a menu that opens or closes; a page and its sections, one after
 eight waits, whatever the length). At rest nothing moves and nothing is redrawn. An issue about
 the window without its animations is incomplete.
 
-Colours: the user chooses them in Settings, Appearance, and the daemon keeps the choice
+Colours: the user chooses them in Settings, General, Appearance, and the daemon keeps the choice
 (`appearance.toml`, `docs/protocol.md`) for every window and a restart: **Omarchy**, the current
 Omarchy theme's colours followed live, or **Flottille**, Flottille's own palette, **Light** or
 **Dark**, even on an Omarchy desktop. Until the user chooses, Omarchy when an Omarchy theme is
