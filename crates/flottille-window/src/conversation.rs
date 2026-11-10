@@ -113,9 +113,11 @@ pub enum Block {
         answers: Option<Vec<question::Answer>>,
     },
     /// A question a led session asked its pilot with `ask`: the pilot answers it; the card only
-    /// shows the user what was asked.
+    /// shows the user what was asked. `moved` once the pilot stopped following the session and
+    /// the question went to the user: it is a card of the user's now, and this one folds away.
     Asked {
         text: String,
+        moved: bool,
     },
     /// The agent asked the user for a vault entry a feature of Flottille names and that is
     /// missing (`vault.asked`): what Flottille prefilled and the agent's reason. `open` until the
@@ -934,6 +936,9 @@ impl Conversation {
             }
             "agent.asked" if data["to"] == "user" => {
                 let mut changes = self.close(Some(event.at));
+                if !data["moved_from"].is_null() {
+                    changes.extend(self.move_asked(&text("question")));
+                }
                 changes.extend(self.push(Block::Question {
                     seq: event.seq,
                     text: text("question"),
@@ -960,6 +965,7 @@ impl Conversation {
                 let mut changes = self.close(Some(event.at));
                 changes.extend(self.push(Block::Asked {
                     text: text("question"),
+                    moved: false,
                 }));
                 changes
             }
@@ -1066,6 +1072,21 @@ impl Conversation {
         self.seqs.push(self.last_seq);
         self.deliveries.push(None);
         vec![Change::Added]
+    }
+
+    /// The question `text`, asked of a pilot that no longer follows the session, was asked of the
+    /// user again: its card of the pilot's is the last one of that text still waiting.
+    fn move_asked(&mut self, text: &str) -> Vec<Change> {
+        let at = self.blocks.iter().rposition(
+            |block| matches!(block, Block::Asked { text: asked, moved: false } if asked == text),
+        );
+        match at.map(|at| (at, &mut self.blocks[at])) {
+            Some((at, Block::Asked { moved, .. })) => {
+                *moved = true;
+                vec![Change::Changed(at)]
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// A row that is not a tool call comes: the reasoning that ran has ended, and the list of
@@ -2371,7 +2392,8 @@ mod tests {
             c.blocks(),
             [
                 Block::Asked {
-                    text: "Cover the logout too?".into()
+                    text: "Cover the logout too?".into(),
+                    moved: true,
                 },
                 Block::Question {
                     seq: 2,

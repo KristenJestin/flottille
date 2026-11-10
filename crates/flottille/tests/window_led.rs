@@ -5,6 +5,7 @@
 
 mod common;
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,9 @@ use common::User;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::{tie_below_id, tie_id, tie_through_id, tie_turn_id, toggle_id};
 use flottille_window::Shell;
+use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
+use flottille_window::session::SessionPage;
 use flottille_window::tree::{session_detach_id, session_id, session_menu_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -666,4 +669,120 @@ fn a_folded_root_shows_that_a_led_session_runs(cx: &mut TestAppContext) {
         mark_of(&shell, &led, cx),
         Some(flottille_window::state::AgentState::Running)
     );
+}
+
+const QUESTION: &str = "Cover the logout too?";
+
+/// A lead that starts a led session, which asks its pilot a question and goes on.
+fn asking() -> User {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "begin the docs session", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "led"}}}]},
+        {"when": "Write the docs", "do": [
+            {"mcp": {"tool": "ask", "arguments": {"question": QUESTION}}},
+            {"say": "Asked."}]}
+    ]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user
+}
+
+/// The page of the led session, opened from its row.
+fn open_led(shell: &Entity<Shell>, led: &str, cx: &mut VisualTestContext) -> Entity<SessionPage> {
+    until(shell, cx, "the led session's row", |cx| {
+        label(cx, session_id(led)).is_some()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(led), cx));
+    until(shell, cx, "the led session's page", |cx| {
+        shell
+            .read_with(cx, |s, cx| s.main().read(cx).session_page().cloned())
+            .is_some()
+    });
+    shell
+        .read_with(cx, |s, cx| s.main().read(cx).session_page().cloned())
+        .unwrap()
+}
+
+/// The row of the first block of the conversation that `pick` finds.
+fn row_of(
+    page: &Entity<SessionPage>,
+    pick: impl Fn(&Block) -> bool,
+    cx: &mut VisualTestContext,
+) -> Option<usize> {
+    page.read_with(cx, |page, cx| {
+        page.conversation().read(cx).blocks().iter().position(&pick)
+    })
+}
+
+#[gpui_kit::test]
+fn a_led_session_s_question_card_says_it_asks_its_pilot(cx: &mut TestAppContext) {
+    let user = asking();
+    let (_, led) = lead_and_led(&user);
+    let (shell, cx) = window(&user, cx);
+    let page = open_led(&shell, &led, cx);
+
+    let seen = Cell::new(None);
+    until(&shell, cx, "the card of the question", |cx| {
+        seen.set(row_of(
+            &page,
+            |block| matches!(block, Block::Asked { .. }),
+            cx,
+        ));
+        seen.get()
+            .is_some_and(|at| label(cx, format!("row-{at}-asked-title").into()).is_some())
+    });
+    let at = seen.get().unwrap();
+    assert_eq!(
+        label(cx, format!("row-{at}-asked-title").into()).as_deref(),
+        Some("Write the docs asks its pilot begin the docs session")
+    );
+    assert_eq!(
+        label(cx, format!("row-{at}-asked-note").into()).as_deref(),
+        Some("Its pilot answers at the end of its turn; you can answer here too.")
+    );
+    // A card of the user's own would say it asks them, with a field.
+    assert!(row_of(&page, |block| matches!(block, Block::Question { .. }), cx).is_none());
+}
+
+#[gpui_kit::test]
+fn once_the_pilot_stops_following_the_card_says_it_asks_you(cx: &mut TestAppContext) {
+    let user = asking();
+    let (_, led) = lead_and_led(&user);
+    let (shell, cx) = window(&user, cx);
+    let page = open_led(&shell, &led, cx);
+    let seen = Cell::new(None);
+    until(&shell, cx, "the card of the question", |cx| {
+        seen.set(row_of(
+            &page,
+            |block| matches!(block, Block::Asked { .. }),
+            cx,
+        ));
+        seen.get()
+            .is_some_and(|at| label(cx, format!("row-{at}-asked-title").into()).is_some())
+    });
+    let asked = seen.get().unwrap();
+
+    // The user takes the session from its pilot: its open question goes to them.
+    user.call("agent.detach", json!({"agent": led})).unwrap();
+
+    let seen = Cell::new(None);
+    until(&shell, cx, "the question is the user's", |cx| {
+        seen.set(row_of(
+            &page,
+            |block| matches!(block, Block::Question { .. }),
+            cx,
+        ));
+        seen.get()
+            .is_some_and(|at| label(cx, format!("row-{at}-question-title").into()).is_some())
+    });
+    let now = seen.get().unwrap();
+    assert_eq!(
+        label(cx, format!("row-{now}-question-title").into()).as_deref(),
+        Some("Write the docs asks you")
+    );
+    // The card of the pilot folds away: nobody is waiting for it any more.
+    settle(cx);
+    assert!(label(cx, format!("row-{asked}-asked-title").into()).is_none());
+    assert!(label(cx, format!("row-{asked}-asked-note").into()).is_none());
 }

@@ -321,8 +321,12 @@ pub fn open_card(at: usize, title: &str, when: SharedString, card: Entity<Questi
         .child(div().px(space::LG).py(space::MD).child(card))
 }
 
+/// What a card of a led session's question says under its title: who answers it, and that the
+/// user may too.
+pub const ASKED_NOTE: &str = "Its pilot answers at the end of its turn; you can answer here too.";
+
 /// A card's title, named for who reads it.
-fn heading(at: usize, part: &str, said: String) -> impl IntoElement {
+pub(crate) fn heading(at: usize, part: &str, said: String) -> impl IntoElement {
     let said = SharedString::from(said);
     div()
         .id(ElementId::Name(format!("row-{at}-{part}").into()))
