@@ -883,6 +883,14 @@ pub struct Guards {
     groups: Arc<std::sync::Mutex<Vec<Group>>>,
 }
 
+/// The groups, locked: each change of them is whole once made, so one left by a panic is used
+/// as it is, never a second panic.
+fn locked(groups: &std::sync::Mutex<Vec<Group>>) -> std::sync::MutexGuard<'_, Vec<Group>> {
+    groups
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The runs that go on in a place, or in places inside it.
 struct Group {
     root: PathBuf,
@@ -1068,7 +1076,7 @@ impl Guards {
         };
         loop {
             let wait = {
-                let mut groups = self.groups.lock().unwrap();
+                let mut groups = locked(&self.groups);
                 let overlaps =
                     |group: &Group| root.starts_with(&group.root) || group.root.starts_with(&root);
                 match groups
@@ -1093,15 +1101,25 @@ impl Guards {
             };
             match wait {
                 Wait::Closing(mut closing) => {
-                    // Its task died before it said it ended: the group goes, its marker left to
-                    // say at the next start that its place was not put back.
+                    // Its task died before it said it ended: its put-back is done again, before
+                    // the run notes the place, which would hold what was not put back.
                     if closing.wait_for(|closed| *closed).await.is_err() {
-                        self.groups.lock().unwrap().retain(|group| {
-                            !group
-                                .closing
-                                .as_ref()
-                                .is_some_and(|other| other.same_channel(&closing))
-                        });
+                        let dead = locked(&self.groups)
+                            .iter_mut()
+                            .find(|group| {
+                                group
+                                    .closing
+                                    .as_ref()
+                                    .is_some_and(|other| other.same_channel(&closing))
+                            })
+                            .map(|group| {
+                                let (closed, closing) = watch::channel(false);
+                                group.closing = Some(closing);
+                                (group.snapshot.clone(), closed, group.marker.clone())
+                            });
+                        if let Some((snapshot, closed, marker)) = dead {
+                            put_back_again(self.groups.clone(), snapshot, closed, marker).await;
+                        }
                     }
                 }
                 Wait::Taken(mut taken) => {
@@ -1152,18 +1170,18 @@ impl Guards {
             marker: marker.clone(),
         });
         let (home, kept, at) = (home.map(Path::to_owned), kept.to_owned(), root.to_owned());
-        let tops = tops.to_vec();
+        let (tops, groups) = (tops.to_vec(), self.groups.clone());
         tokio::spawn(async move {
             // Before the run starts, and before the markers of the places it takes in go.
             mark(&marker, &at);
             let mut taken_in = Vec::new();
             let mut lost = false;
-            for mut group in inside {
+            let mut inside = inside;
+            for group in &mut inside {
                 let snapshot = match group.snapshot.wait_for(Option::is_some).await {
                     Ok(snapshot) => snapshot.clone().flatten(),
                     Err(_) => None,
                 };
-                let _ = std::fs::remove_file(&group.marker);
                 match (group.root.strip_prefix(&at), snapshot) {
                     (Ok(relative), Some(snapshot)) => {
                         taken_in.push((relative.to_owned(), snapshot))
@@ -1179,9 +1197,55 @@ impl Guards {
             })
             .await
             .ok();
+            if snapshot.as_ref().is_some_and(|snapshot| !snapshot.missing) {
+                for group in &inside {
+                    let _ = std::fs::remove_file(&group.marker);
+                }
+            } else {
+                split(&groups, &taken, inside, &marker).await;
+            }
             let _ = taken.send(Some(snapshot));
         });
         snapshot
+    }
+}
+
+/// The group whose snapshot `taken` could not be taken gives back the groups it took in, their
+/// own snapshots kept for the runs still going on there: refused, it strands none of them. One
+/// whose runs all ended meanwhile is put back now.
+async fn split(
+    groups: &Arc<std::sync::Mutex<Vec<Group>>>,
+    taken: &watch::Sender<Option<Taken>>,
+    inside: Vec<Group>,
+    marker: &Path,
+) {
+    let this = taken.subscribe();
+    let mut ended = Vec::new();
+    {
+        let mut groups = locked(groups);
+        // Its runs all ended while it was taken: its put-back waits for it and says it missing.
+        let Some(at) = groups
+            .iter()
+            .position(|group| group.snapshot.same_channel(&this) && group.closing.is_none())
+        else {
+            return;
+        };
+        let outer = groups.remove(at);
+        let _ = std::fs::remove_file(marker);
+        for mut group in inside {
+            group.runs.retain(|run| outer.runs.contains(run));
+            if !group.runs.is_empty() {
+                groups.push(group);
+                continue;
+            }
+            let (closed, closing) = watch::channel(false);
+            group.closing = Some(closing);
+            ended.push((group.snapshot.clone(), closed, group.marker.clone()));
+            groups.push(group);
+        }
+    }
+    for (snapshot, closed, marker) in ended {
+        put_back_again(groups.clone(), snapshot, closed, marker).await;
     }
 }
 
@@ -1231,8 +1295,8 @@ impl Drop for Guard {
 /// The run `run` leaves its group: the last one puts the place back, in a task of its own that
 /// goes on if the one waiting for it is given up, a run that starts there meanwhile waiting.
 async fn leave(groups: Arc<std::sync::Mutex<Vec<Group>>>, run: String) -> Option<Restored> {
-    let (mut snapshot, closed, marker) = {
-        let mut groups = groups.lock().unwrap();
+    let (snapshot, closed, marker) = {
+        let mut groups = locked(&groups);
         let group = groups.iter_mut().find(|group| group.runs.contains(&run))?;
         group.runs.retain(|other| *other != run);
         if !group.runs.is_empty() {
@@ -1242,35 +1306,65 @@ async fn leave(groups: Arc<std::sync::Mutex<Vec<Group>>>, run: String) -> Option
         group.closing = Some(closing);
         (group.snapshot.clone(), closed, group.marker.clone())
     };
-    tokio::spawn(async move {
-        let taken = match snapshot.wait_for(Option::is_some).await {
-            Ok(taken) => taken.clone().flatten(),
-            Err(_) => None,
-        };
-        // Not taken, nothing is known of what the runs changed: said, never passed over.
-        let missing = Restored {
-            missing: true,
-            ..Restored::default()
-        };
-        let restored = match taken {
-            Some(taken) => tokio::task::spawn_blocking(move || taken.restore(&run))
-                .await
-                .unwrap_or(missing),
-            None => missing,
-        };
-        let _ = std::fs::remove_file(&marker);
-        let this = closed.subscribe();
-        groups.lock().unwrap().retain(|group| {
-            !group
-                .closing
-                .as_ref()
-                .is_some_and(|closing| closing.same_channel(&this))
-        });
-        let _ = closed.send(true);
-        restored
-    })
-    .await
-    .ok()
+    tokio::spawn(put_back(groups, snapshot, closed, marker, run))
+        .await
+        .ok()
+}
+
+/// The put-back of a group's place, by the run `run`: what it removes is kept in its folder.
+/// Once done, the group goes and `closed` says so.
+async fn put_back(
+    groups: Arc<std::sync::Mutex<Vec<Group>>>,
+    mut snapshot: watch::Receiver<Option<Taken>>,
+    closed: watch::Sender<bool>,
+    marker: PathBuf,
+    run: String,
+) -> Restored {
+    let taken = match snapshot.wait_for(Option::is_some).await {
+        Ok(taken) => taken.clone().flatten(),
+        Err(_) => None,
+    };
+    // Not taken, nothing is known of what the runs changed: said, never passed over.
+    let missing = Restored {
+        missing: true,
+        ..Restored::default()
+    };
+    let restored = match taken {
+        Some(taken) => tokio::task::spawn_blocking(move || taken.restore(&run))
+            .await
+            .unwrap_or(missing),
+        None => missing,
+    };
+    let _ = std::fs::remove_file(&marker);
+    let this = closed.subscribe();
+    locked(&groups).retain(|group| {
+        !group
+            .closing
+            .as_ref()
+            .is_some_and(|closing| closing.same_channel(&this))
+    });
+    let _ = closed.send(true);
+    restored
+}
+
+/// `put_back` of a group no run of which is left to say it, the run that started guarding it
+/// named by its marker: what it did goes to the daemon's log.
+async fn put_back_again(
+    groups: Arc<std::sync::Mutex<Vec<Group>>>,
+    snapshot: watch::Receiver<Option<Taken>>,
+    closed: watch::Sender<bool>,
+    marker: PathBuf,
+) {
+    let run = marker
+        .file_stem()
+        .map(|run| run.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let restored = tokio::spawn(put_back(groups, snapshot, closed, marker, run.clone()))
+        .await
+        .ok();
+    if let Some(text) = restored.as_ref().and_then(said) {
+        eprintln!("flottille: the agent folders guarded by the run {run}:{text}");
+    }
 }
 
 #[cfg(test)]
@@ -2163,5 +2257,103 @@ mod tests {
 
         assert!(elsewhere.join("old-run/notes.md").exists());
         assert!(!kept.with_extension("aside").join("old-run").exists());
+    }
+
+    /// A put-back whose task died after its group closed, its snapshot taken before the run
+    /// planted `planted`.
+    fn dead_put_back(guards: &Guards, root: &Path, kept: &Path, planted: &Path) {
+        let snapshot = Arc::new(Snapshot::take(root, None, kept));
+        made(planted, "{\"hooks\": {}}\n");
+        let marker = kept.join(MARKERS).join("dead.json");
+        mark(&marker, root);
+        let (closed, closing) = watch::channel(false);
+        let (taken, snapshot) = watch::channel(Some(Some(snapshot)));
+        std::mem::forget(taken);
+        guards.groups.lock().unwrap().push(Group {
+            root: real(root),
+            runs: Vec::new(),
+            snapshot,
+            closing: Some(closing),
+            marker,
+        });
+        drop(closed);
+    }
+
+    #[tokio::test]
+    async fn a_dead_put_back_is_done_before_the_next_run_notes_its_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        made(&root.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let planted = root.join(".claude/settings.json");
+        let guards = Guards::default();
+        dead_put_back(&guards, &root, &kept, &planted);
+
+        let guard = guards.enter(&root, &[], None, &kept, "run").await.unwrap();
+
+        // Put back before the run's snapshot: the planted hook is not its start.
+        assert!(!planted.exists());
+        assert!(kept.join("dead/.claude/settings.json").exists());
+        made(&planted, "{\"hooks\": {}}\n");
+        let restored = guard.leave().await.unwrap();
+        assert_eq!(restored.put_back, [".claude/settings.json"]);
+        assert!(!planted.exists());
+        assert!(interrupted(&kept).is_empty());
+        assert!(guards.groups.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_lock_does_not_make_a_run_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        made(&root.join("README.md"), "\n");
+        let guards = Guards::default();
+        let groups = guards.groups.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = groups.lock().unwrap();
+            panic!("poisons the lock");
+        })
+        .join();
+        assert!(guards.groups.is_poisoned());
+
+        let guard = guards
+            .enter(&root, &[], None, &dir.path().join("kept"), "run")
+            .await
+            .unwrap();
+        made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
+        let restored = guard.leave().await.unwrap();
+
+        assert_eq!(restored.put_back, [".claude/settings.json"]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_outer_run_does_not_strand_a_run_going_on_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("p");
+        let inner = outer.join("svc");
+        made(&inner.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let planted = inner.join(".claude/settings.json");
+        let guards = Guards::default();
+        let a = guards.enter(&inner, &[], None, &kept, "a").await.unwrap();
+        made(&planted, "{\"hooks\": {}}\n");
+
+        // A run in the outer place takes in the inner one's group; its own snapshot fails.
+        drop(hold(real(&outer)));
+        let Err(why) = guards.enter(&outer, &[], None, &kept, "o").await else {
+            panic!("a run whose agent folders could not be noted went ahead");
+        };
+        assert!(why.contains("could not be noted"), "{why}");
+
+        // The inner run's snapshot is still its group's: a run there starts, and the last to
+        // end puts back what the first planted.
+        let b = guards.enter(&inner, &[], None, &kept, "b").await.unwrap();
+        assert_eq!(a.leave().await, None);
+        let restored = b.leave().await.unwrap();
+        assert!(!restored.missing, "{restored:?}");
+        assert_eq!(restored.put_back, [".claude/settings.json"]);
+        assert!(!planted.exists());
+        assert!(guards.groups.lock().unwrap().is_empty());
+        assert!(interrupted(&kept).is_empty());
     }
 }
