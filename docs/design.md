@@ -524,11 +524,13 @@ agent wrote is data.
    not seen, for a context that did not grow since the session started or its last compaction
    failed, nor for a provider whose cache lifetime is not established (`docs/agents.md`, "The
    prompt cache's lifetime"); the Compaction tab says each provider's. Once an agent's cache
-   expired, the composer's toolbar's **Compact** control, always in its place beside the mode (disabled,
-   its tooltip saying why, while there is nothing to compact), is enabled and ticked from the
-   setting (its tooltip says why): unticked, the message goes to the session as it is; ticked, it
-   compacts first even with the setting off. The composer keeps its height: an option of the
-   composer is a control of its toolbar, never a block above it. A
+   expired, the composer's toolbar's **Compact** control shows just left of **Send**, ticked from
+   the setting (its tooltip says why): unticked, the message goes to the session as it is; ticked, it
+   compacts first even with the setting off. While there is nothing to compact the control is not
+   drawn, no disabled control and no tooltip saying why not; it unfolds and fades in when the cache
+   expires, and folds away and fades out after a compaction or a turn that warms the cache again.
+   The composer keeps its height: an option of the composer is a control of its toolbar, never a
+   block above it. A
    message from Flottille itself (a child's news, a delivery) follows the setting.
 7. **The agent's own handoff**: **Summary written by** (`summary` in `compaction.toml`) is the
    compactor (the default, all of the above, shown in the window as **A model you choose**) or
