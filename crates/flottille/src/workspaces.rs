@@ -1405,16 +1405,29 @@ async fn prepare_steps(
             .insert((id, step.position), live.clone());
         // A line runs what the repositories hold, which an agent may have written: what it
         // writes in their agent folders is put back, as an agent's run's.
+        // Refused when they could not be noted: the line does not run.
         let guarded = match step.action {
-            Action::Run { .. } => Some(guard_step(daemon, &workspace, &step).await),
-            _ => None,
+            Action::Run { .. } => guard_step(daemon, &workspace, &step).await.map(Some),
+            _ => Ok(None),
         };
-        let mut outcome = match services_of(daemon, &workspace, &step).await {
-            Ok(()) => run_step(&workspace, &step, &live).await,
-            Err(why) => Err(StepFailure {
-                doing: step.doing(),
-                output: why,
-            }),
+        let (guarded, mut outcome) = match guarded {
+            Ok(guarded) => (
+                guarded,
+                match services_of(daemon, &workspace, &step).await {
+                    Ok(()) => run_step(&workspace, &step, &live).await,
+                    Err(why) => Err(StepFailure {
+                        doing: step.doing(),
+                        output: why,
+                    }),
+                },
+            ),
+            Err(why) => (
+                None,
+                Err(StepFailure {
+                    doing: step.doing(),
+                    output: format!("refused: {why}"),
+                }),
+            ),
         };
         if let Some((guard, about)) = guarded
             && let Some(restored) = guard.leave().await
@@ -1554,7 +1567,7 @@ async fn guard_step(
     daemon: &Arc<Daemon>,
     workspace: &Workspace,
     step: &Step,
-) -> (crate::agent_folders::Guard, Value) {
+) -> Result<(crate::agent_folders::Guard, Value), String> {
     let id = format!("setup-{}-{}-{}", workspace.id, step.position, now_ms());
     let tops: Vec<PathBuf> = workspace
         .repositories
@@ -1572,10 +1585,10 @@ async fn guard_step(
             &daemon.paths.state.join("agent-folders"),
             &id,
         )
-        .await;
+        .await?;
     let about = json!({"agent": null, "project": workspace.project, "workspace": workspace.name,
         "run": id, "folder": workspace.folder});
-    (guard, about)
+    Ok((guard, about))
 }
 
 async fn blocking(

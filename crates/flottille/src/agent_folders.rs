@@ -928,7 +928,8 @@ pub struct Guard {
 impl Guards {
     /// Guards the agent folders of `root` while the run `run` goes on there. `kept`, where a
     /// put-back keeps what it removes, a folder per run. It returns once the snapshot the run
-    /// shares is taken.
+    /// shares is taken, or why the run is refused when it could not be: nothing the run writes
+    /// there would be put back.
     pub async fn enter(
         &self,
         root: &Path,
@@ -936,7 +937,7 @@ impl Guards {
         home: Option<&Path>,
         kept: &Path,
         run: &str,
-    ) -> Guard {
+    ) -> Result<Guard, String> {
         let root = real(root);
         let guard = Guard {
             groups: self.groups.clone(),
@@ -974,8 +975,21 @@ impl Guards {
                     let _ = closing.wait_for(|closed| *closed).await;
                 }
                 Wait::Taken(mut taken) => {
-                    let _ = taken.wait_for(Option::is_some).await;
-                    return guard;
+                    let noted = taken.wait_for(Option::is_some).await.is_ok_and(|taken| {
+                        taken
+                            .clone()
+                            .flatten()
+                            .is_some_and(|snapshot| !snapshot.missing)
+                    });
+                    if noted {
+                        return Ok(guard);
+                    }
+                    guard.leave().await;
+                    return Err(format!(
+                        "the agent folders of {} could not be noted before the run, so what it \
+                         would write there could not be put back",
+                        root.display()
+                    ));
                 }
             }
         }
@@ -1614,9 +1628,9 @@ mod tests {
 
         // The outer run starts first and plants; the inner one starts while it goes on.
         let guards = Guards::default();
-        let a = guards.enter(&outer, &[], None, &kept, "a").await;
+        let a = guards.enter(&outer, &[], None, &kept, "a").await.unwrap();
         made(&planted, "{\"hooks\": {}}\n");
-        let b = guards.enter(&inner, &[], None, &kept, "b").await;
+        let b = guards.enter(&inner, &[], None, &kept, "b").await.unwrap();
         assert_eq!(a.leave().await, None);
         assert!(planted.exists());
         let restored = b.leave().await.unwrap();
@@ -1625,9 +1639,9 @@ mod tests {
 
         // The inner run starts first and plants; the outer one starts while it goes on.
         let guards = Guards::default();
-        let b = guards.enter(&inner, &[], None, &kept, "b2").await;
+        let b = guards.enter(&inner, &[], None, &kept, "b2").await.unwrap();
         made(&planted, "{\"hooks\": {}}\n");
-        let a = guards.enter(&outer, &[], None, &kept, "a2").await;
+        let a = guards.enter(&outer, &[], None, &kept, "a2").await.unwrap();
         assert_eq!(b.leave().await, None);
         assert!(planted.exists());
         a.leave().await.unwrap();
@@ -1642,8 +1656,9 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let guard =
-            runtime.block_on(guards.enter(dir.path(), &[], None, &dir.path().join("kept"), "r"));
+        let guard = runtime
+            .block_on(guards.enter(dir.path(), &[], None, &dir.path().join("kept"), "r"))
+            .unwrap();
         drop(runtime);
         drop(guard);
     }
@@ -1668,7 +1683,7 @@ mod tests {
             kept.to_owned(),
             run.to_owned(),
         );
-        tokio::spawn(async move { guards.enter(&root, &[], None, &kept, &run).await })
+        tokio::spawn(async move { guards.enter(&root, &[], None, &kept, &run).await.unwrap() })
     }
 
     #[tokio::test]
@@ -1685,7 +1700,10 @@ mod tests {
 
         // A run elsewhere starts and ends while the large place is looked at.
         let other = tokio::time::timeout(Duration::from_secs(10), async {
-            let guard = guards.enter(&small, &[], None, &kept, "small").await;
+            let guard = guards
+                .enter(&small, &[], None, &kept, "small")
+                .await
+                .unwrap();
             made(&small.join(".claude/settings.json"), "{\"hooks\": {}}\n");
             guard.leave().await
         })
@@ -1713,7 +1731,10 @@ mod tests {
         made(&root.join("README.md"), "\n");
         let kept = dir.path().join("kept");
         let guards = Arc::new(Guards::default());
-        let first = guards.enter(&root, &[], None, &kept, "first").await;
+        let first = guards
+            .enter(&root, &[], None, &kept, "first")
+            .await
+            .unwrap();
         made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
         let release = hold(real(&root).join(".put-back"));
         let leaving = tokio::spawn(first.leave());
@@ -1739,7 +1760,8 @@ mod tests {
         let guards = Guards::default();
         let mut guard = guards
             .enter(&root, &[], None, &dir.path().join("kept"), "run")
-            .await;
+            .await
+            .unwrap();
         let (told, heard) = tokio::sync::oneshot::channel();
         guard.tell(Box::new(move |restored| {
             let _ = told.send(restored);
@@ -1765,13 +1787,16 @@ mod tests {
         let guards = Guards::default();
 
         // Put back, a place leaves no marker.
-        let guard = guards.enter(&root, &[], None, &kept, "done").await;
+        let guard = guards.enter(&root, &[], None, &kept, "done").await.unwrap();
         assert_eq!(std::fs::read_dir(kept.join(".guarded")).unwrap().count(), 1);
         guard.leave().await;
         assert!(interrupted(&kept).is_empty());
 
         // The daemon stops during a run: its marker stays, found once, and is gone.
-        let guard = guards.enter(&root, &[], None, &kept, "going").await;
+        let guard = guards
+            .enter(&root, &[], None, &kept, "going")
+            .await
+            .unwrap();
         std::mem::forget(guard);
         let found = interrupted(&kept);
         assert_eq!(found.len(), 1);
@@ -1804,23 +1829,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_snapshot_that_fails_is_said_unchecked_not_passed_over() {
+    async fn a_snapshot_that_fails_refuses_the_run() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("place");
         made(&root.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
         drop(hold(real(&root)));
         let guards = Guards::default();
 
-        let guard = guards
-            .enter(&root, &[], None, &dir.path().join("kept"), "run")
-            .await;
-        made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
-        let restored = guard.leave().await.unwrap();
+        let Err(why) = guards.enter(&root, &[], None, &kept, "run").await else {
+            panic!("a run whose agent folders could not be noted went ahead");
+        };
 
-        assert!(restored.missing, "{restored:?}");
-        let text = said(&restored).unwrap();
-        assert!(text.contains("could not be noted before the run"), "{text}");
+        assert!(why.contains("could not be noted"), "{why}");
         assert!(guards.groups.lock().unwrap().is_empty());
+        assert!(interrupted(&kept).is_empty());
+        // The next run takes a snapshot of its own.
+        let next = guards.enter(&root, &[], None, &kept, "next").await.unwrap();
+        made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
+        let restored = next.leave().await.unwrap();
+        assert_eq!(restored.put_back, [".claude/settings.json"]);
     }
 
     #[tokio::test]
@@ -1832,9 +1860,9 @@ mod tests {
         let kept = dir.path().join("kept");
 
         // P starts and plants a hook; L starts while P goes on.
-        let planting = guards.enter(&root, &[], None, &kept, "p").await;
+        let planting = guards.enter(&root, &[], None, &kept, "p").await.unwrap();
         made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
-        let later = guards.enter(&root, &[], None, &kept, "l").await;
+        let later = guards.enter(&root, &[], None, &kept, "l").await.unwrap();
 
         // P ends first: L still goes on, nothing is put back yet.
         assert_eq!(planting.leave().await, None);
@@ -1849,7 +1877,7 @@ mod tests {
         );
 
         // A run that starts after takes a snapshot of its own.
-        let next = guards.enter(&root, &[], None, &kept, "n").await;
+        let next = guards.enter(&root, &[], None, &kept, "n").await.unwrap();
         made(&root.join(".codex/config.toml"), "\n");
         next.leave().await.unwrap();
         assert!(!root.join(".codex/config.toml").exists());
