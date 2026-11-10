@@ -1163,3 +1163,45 @@ fn the_window_draws_no_frame_at_rest_on_a_spec_page_with_amendments(cx: &mut Tes
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_reply_with_code_blocks(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "show the blocks", "do": [{"say":
+            "Run this:\n\n```sh\ncargo test\n```\n\nThen, as it is:\n\n```\nfirst line\n```"}]}
+    ]}));
+    let id = idle_session(&user);
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "show the blocks"}),
+    )
+    .unwrap();
+    eventually("the lead answered and is idle again", || {
+        let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+        shown["agent"]["state"] == "idle" && shown.to_string().contains("first line")
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(
+        &shell,
+        cx,
+        "the code blocks' Copy buttons are there",
+        |cx| {
+            cx.update(|window, _| {
+                (0..80).any(|at| window.try_find(format!("copy-code-{at}")).is_some())
+            })
+        },
+    );
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
