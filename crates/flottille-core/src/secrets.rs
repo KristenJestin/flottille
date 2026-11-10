@@ -266,9 +266,20 @@ fn tokens(text: &str) -> Vec<(usize, usize)> {
 /// How the keys whose string value is a token end, lowercase and without `_` or `-`: an agent's
 /// login file (Claude's `.credentials.json`: `accessToken`, `refreshToken`; Codex's `auth.json`:
 /// `id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY`) and others like it
-/// (`clientSecret`, `primaryApiKey`), wherever such a file is shown (a diff, a stash, a revision
-/// of it).
-const LOGIN_KEY_ENDS: [&str; 3] = ["token", "apikey", "secret"];
+/// (`clientSecret`, `primaryApiKey`, `password`, an HTTP header's `Authorization`), wherever such
+/// a file is shown (a diff, a stash, a revision of it).
+const LOGIN_KEY_ENDS: [&str; 5] = ["token", "apikey", "secret", "password", "authorization"];
+
+/// A tokenizer's special tokens (`pad_token`: `<pad>`), which are no login.
+const TOKENIZER_KEYS: [&str; 7] = [
+    "padtoken",
+    "bostoken",
+    "eostoken",
+    "unktoken",
+    "septoken",
+    "clstoken",
+    "masktoken",
+];
 
 /// Whether `key` names a token (`LOGIN_KEY_ENDS`).
 fn login_key(key: &str) -> bool {
@@ -277,7 +288,7 @@ fn login_key(key: &str) -> bool {
         .filter(|c| !matches!(c, '_' | '-'))
         .map(|c| c.to_ascii_lowercase())
         .collect();
-    LOGIN_KEY_ENDS.iter().any(|end| key.ends_with(end))
+    LOGIN_KEY_ENDS.iter().any(|end| key.ends_with(end)) && !TOKENIZER_KEYS.contains(&key.as_str())
 }
 
 /// A key of `LOGIN_KEY_ENDS` in a text, quoted, from its opening quote.
@@ -897,6 +908,29 @@ mod tests {
         for cut in 1..text.len() {
             assert_eq!(streamed(text, &[cut], &BTreeMap::new()), masked, "{cut}");
         }
+    }
+
+    #[test]
+    fn a_password_or_an_authorization_key_is_masked() {
+        let text = "{\"password\": \"fake-pass-0123456789\", \"db_password\": \"fake-db-0123\", \
+            \"Authorization\": \"Bearer fake-bearer-0123456789\", \
+            \"proxy-authorization\": \"Basic fake-basic-0123\"}\n";
+        let masked = mask(text, &BTreeMap::new());
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(masked.contains("\"password\": \"[masked]\""), "{masked}");
+        assert!(
+            masked.contains("\"Authorization\": \"[masked]\""),
+            "{masked}"
+        );
+    }
+
+    #[test]
+    fn a_tokenizer_s_special_token_is_not_masked() {
+        let text = "{\"pad_token\": \"<pad>\", \"bos_token\": \"<s>\", \"eos_token\": \"</s>\", \
+            \"unk_token\": \"<unk>\", \"sep_token\": \"[SEP]\", \"cls_token\": \"[CLS]\", \
+            \"mask_token\": \"[MASK]\"}\n";
+        assert_eq!(mask(text, &BTreeMap::new()), text);
     }
 
     #[test]

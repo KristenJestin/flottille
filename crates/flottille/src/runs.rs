@@ -81,8 +81,9 @@ pub struct Live {
     /// the user), its project and its name: a second waits while the services it needs start,
     /// then joins the first.
     serving: Mutex<HashMap<Serving, Arc<tokio::sync::Mutex<()>>>>,
-    /// The agent folders of each place an agent's run goes on in (`agent_folders`).
-    guards: crate::agent_folders::Guards,
+    /// The agent folders of each place an agent's run, or a workspace's setup line, goes on in
+    /// (`agent_folders`).
+    pub(crate) guards: crate::agent_folders::Guards,
 }
 
 /// A task that keeps running, by its owner, its project and its name.
@@ -544,7 +545,7 @@ pub async fn run(
     // A line the gate let through at once only reads, or writes the files it names; a task, or
     // a line of the same words, may run anything.
     let guarded = match approved || run.name.is_some() || a_task(daemon, place, &words) {
-        true => Some(guard(daemon, place, &id).await),
+        true => Some(guard(daemon, place, &run).await),
         false => None,
     };
     if let Err(why) = start(
@@ -934,19 +935,68 @@ fn start(
 
 /// The agent folders of an agent's place before one of its runs: the gate refuses every write
 /// there it sees, and a line may write there without naming one (`agent_folders`).
-async fn guard(daemon: &Daemon, place: &Place, id: &str) -> Guard {
+async fn guard(daemon: &Arc<Daemon>, place: &Place, run: &Run) -> Guard {
     let kept = daemon.paths.state.join("agent-folders");
     let tops: Vec<std::path::PathBuf> = place
         .repositories
         .iter()
         .map(|(_, folder)| folder.clone())
         .collect();
-    daemon
+    let mut guard = daemon
         .mcp
         .runs
         .guards
-        .enter(&place.root, &tops, place.home.as_deref(), &kept, id)
-        .await
+        .enter(&place.root, &tops, place.home.as_deref(), &kept, &run.id)
+        .await;
+    let (daemon, about) = (daemon.clone(), guarded_run(run));
+    guard.tell(Box::new(move |restored| {
+        tell_put_back(&daemon, &about, &restored)
+    }));
+    guard
+}
+
+/// What the events of a guarded run's put-back say of it.
+fn guarded_run(run: &Run) -> Value {
+    json!({"agent": run.agent, "project": run.project, "run": run.id, "folder": run.folder})
+}
+
+/// Tells the user what a put-back did, or could not check: the result it is said in may be
+/// another agent's run, which ended last in the place, or none when the run did not start
+/// (`run.agent_folders_put_back`, `run.agent_folders_unchecked`).
+pub(crate) fn tell_put_back(
+    daemon: &Daemon,
+    about: &Value,
+    restored: &crate::agent_folders::Restored,
+) {
+    let with = |more: Value| {
+        let mut data = about.clone();
+        data.as_object_mut()
+            .unwrap()
+            .extend(more.as_object().unwrap().clone());
+        data
+    };
+    let mut told = Vec::new();
+    if restored.unchecked || restored.missing || !restored.unreached.is_empty() {
+        told.push((
+            "run.agent_folders_unchecked",
+            with(
+                json!({"too_large": restored.unchecked, "missing": restored.missing,
+                "unreached": restored.unreached}),
+            ),
+        ));
+    }
+    if !restored.put_back.is_empty() || !restored.left.is_empty() {
+        told.push((
+            "run.agent_folders_put_back",
+            with(json!({"put_back": restored.put_back, "left": restored.left,
+                "kept": restored.kept})),
+        ));
+    }
+    for (name, data) in told {
+        if let Err(error) = daemon.emit(name, data) {
+            eprintln!("flottille daemon: run {}: {error}", about["run"]);
+        }
+    }
 }
 
 /// Whether `words` are the line of one of the project's tasks, which the gate lets through as it.
@@ -1121,20 +1171,12 @@ async fn follow(
         going.output.lock().unwrap().push(&buffer[..read]);
     }
     // What it wrote in an agent folder of its place without naming it is put back, and its
-    // result says so. A place too large to check all of is the user's to hear of too: the agent
-    // may not tell them.
+    // result says so. The user hears of it too: the agent may not tell them.
     let guarded = going.guarded.lock().unwrap().take();
     if let Some(guard) = guarded
         && let Some(restored) = guard.leave().await
     {
-        if restored.unchecked {
-            let run = &going.run;
-            let data = json!({"agent": run.agent, "project": run.project, "run": run.id,
-                "folder": run.folder});
-            if let Err(error) = daemon.emit("run.agent_folders_unchecked", data) {
-                eprintln!("flottille daemon: run {}: {error}", run.id);
-            }
-        }
+        tell_put_back(&daemon, &guarded_run(&going.run), &restored);
         if let Some(said) = crate::agent_folders::said(&restored) {
             going.output.lock().unwrap().push(said.as_bytes());
         }
@@ -1530,7 +1572,7 @@ pub async fn restart_by_user(
             .is_some_and(|going| going.notify.load(Ordering::SeqCst)),
     };
     let guarded = match owner {
-        Some(_) => Some(guard(daemon, &place, &id).await),
+        Some(_) => Some(guard(daemon, &place, &run).await),
         None => None,
     };
     if let Err(why) = start(
@@ -2129,6 +2171,22 @@ pub(crate) async fn wait_ready(daemon: &Daemon, id: &str) -> bool {
 }
 
 // The daemon's start and stop.
+
+/// At daemon start, before any workspace preparation resumes (its setup line's guard writes a
+/// live marker): a place guarded when the daemon stopped was not put back, the user hears of it.
+pub fn tell_guarded_at_start(daemon: &Daemon) {
+    let kept = daemon.paths.state.join("agent-folders");
+    crate::agent_folders::drop_old(&kept);
+    for place in crate::agent_folders::interrupted(&kept) {
+        let run = daemon.read(|store| store.run(&place.run)).ok().flatten();
+        let data = json!({"agent": run.as_ref().and_then(|run| run.agent.clone()),
+            "project": run.as_ref().map(|run| run.project.clone()), "run": place.run,
+            "folder": place.root, "too_large": false, "interrupted": true});
+        if let Err(error) = daemon.emit("run.agent_folders_unchecked", data) {
+            eprintln!("flottille daemon: run {}: {error}", place.run);
+        }
+    }
+}
 
 /// At daemon start: kills the run process groups a previous daemon left running, each only when
 /// its leader is still the process it started, and marks their runs interrupted.

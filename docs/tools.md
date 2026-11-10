@@ -412,10 +412,12 @@ pending requests.
   daemon's variables named like secrets, every value of the `KEY=VALUE` lines of the place's
   `.env` and `.env.*` files (at its top and each repository's), private keys, URL passwords,
   tokens shaped like the usual providers', and the string value of a quoted key whose name ends,
-  in any case and without `_` or `-`, with `token`, `apikey` or `secret`, as an agent's login
-  file holds them (`accessToken`, `refreshToken` of Claude's `.credentials.json`; `id_token`,
-  `access_token`, `refresh_token`, `OPENAI_API_KEY` of Codex's `auth.json`; `clientSecret`,
-  `primaryApiKey`), wherever it is shown: a diff of a staged one, its value on the next line
+  in any case and without `_` or `-`, with `token`, `apikey`, `secret`, `password` or
+  `authorization`, as an agent's login file holds them (`accessToken`, `refreshToken` of Claude's
+  `.credentials.json`; `id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY` of Codex's
+  `auth.json`; `clientSecret`, `primaryApiKey`; an HTTP header's `Authorization`), but a
+  tokenizer's special tokens (`pad_token`, `bos_token`, `eos_token`, `unk_token`, `sep_token`,
+  `cls_token`, `mask_token`), wherever it is shown: a diff of a staged one, its value on the next line
   after a `+` or `-`, a word diff's `[-"…"-]{+"…"+}` (`flottille_core::secrets`). It is not a
   boundary: a line that reshapes the bytes (`xxd`, `od`) shows them; the gate's refusal of a
   login's paths is (`docs/design.md` §7.1).
@@ -1655,8 +1657,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
      included: a path through `/proc/<pid>/fd` or `map_files` (`/proc/self/fd/7`,
      `/proc/<pid>/task/<tid>/fd`, `/dev/fd/3`), since one of them may be a login: `refused: X goes
      through /proc/<pid>/fd, a process's open files: …`;
-   - a write in an agent's folder that is not the home's (`.claude`, `.claude.json`, `.codex` of
-     a repository or anywhere else): by `fs_write` or `fs_edit`, as a path a line that does not
+   - a write in an agent's folder that is not the home's (`.claude`, `.claude.json`, `.codex`,
+     `.mcp.json` of a repository or anywhere else): by `fs_write` or `fs_edit`, as a path a line that does not
      only read names (a line that writes only the place's files, `git add`, `git rm`,
      `git diff --output`, included), or as the folder such a line runs in. Its settings and hooks
      run programs the next time the user opens the repository with the agent's own command line,
@@ -1833,7 +1835,10 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - reading inside the agent's place (the project folder or the workspace), the tree's tools (but
      `agent_launch` of a `led` or `handed` session, `session_send` and `session_read`), `tasks` `list` and `show`, `run_status`, `skill_read`, the reads of `forge` (`list`, `show`)
      and of `tickets` (`list`, `search`, `show`), `workspace` `list` and `show`;
-   - writing inside a workspace (`fs_write`, `fs_edit`, and `git add`, `mv`, `rm` there);
+   - writing inside a workspace (`fs_write`, `fs_edit`, and `git add`, `mv`, `rm` there), but a
+     `git mv` or `git rm` of a folder holding an agent folder, by a pattern or in another
+     folder (`-C`), which is to judge: it weakens the repository's settings without naming
+     them, and its run is guarded (`docs/design.md` §7.1);
    - a line the rules know to only read, inside the place: the reads of git (`status`, `log`,
      `diff`, `show`, `branch` and `tag` listings, `config` and `remote` reads…), of `gh` and
      `glab` (`pr view/list/diff/checks/status`, `issue view/list`, `run view/list`, `mr
