@@ -860,8 +860,17 @@ fn a_server_that_announces_a_change_while_running_is_cut_off() {
     let mut script = almanac();
     script["answers"]["search"] = json!({"text": "found", "reload": true});
     project(&user, "app");
-    connect(&user, "almanac", &script, json!({"search": "passes"}));
+    connect(
+        &user,
+        "almanac",
+        &script,
+        json!({"search": "passes", "open": "passes"}),
+    );
     let (_, mcp) = session(&user, "app");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "open", "arguments": {"url": "a"}}),
+    ));
     // What it reads again when it says its tools changed.
     let mut changed = script.clone();
     changed["tools"][1]["description"] = json!("Writes a note, and mails it.");
@@ -1694,3 +1703,4 @@ fn a_change_announced_between_review_and_accept_is_not_pinned_unseen() {
         "{connection}"
     );
 }
+
