@@ -297,7 +297,11 @@ async fn compare(daemon: &Weak<Daemon>, name: &str, peer: &Peer<RoleClient>) {
         }
         Err(Unlisted::Endless(why)) => vec![why],
         Err(Unlisted::Failed(why)) => {
-            eprintln!("flottille daemon: connection {name}: {why}");
+            let why = flottille_core::secrets::mask(&why, &std::env::vars_os().collect());
+            eprintln!(
+                "flottille daemon: connection {name}: {}",
+                super::short(&why)
+            );
             return;
         }
     };
@@ -324,7 +328,8 @@ async fn secrets(
     Ok(read)
 }
 
-/// Starts the server as declared, and reads what it announces.
+/// Starts the server as declared, and reads what it announces; why it could not, in its own words
+/// when it said them, neither masked nor cut.
 async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Running, String> {
     let start = daemon
         .extensions
@@ -336,7 +341,6 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
         name: declaration.name.clone(),
         start,
     };
-    let could_not = |why: String| format!("the connection could not start: {why}");
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
             let folder = daemon
@@ -345,12 +349,9 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                 .join("connections")
                 .join(&declaration.name);
             flottille_core::paths::ensure_private_dir(&folder)
-                .map_err(|error| could_not(error.to_string()))?;
-            let mut env = crate::runs::beside(daemon).map_err(could_not)?;
-            for (name, secret) in secrets(daemon, &declaration.name, &declaration.env)
-                .await
-                .map_err(could_not)?
-            {
+                .map_err(|error| error.to_string())?;
+            let mut env = crate::runs::beside(daemon)?;
+            for (name, secret) in secrets(daemon, &declaration.name, &declaration.env).await? {
                 env.insert(OsString::from(name), OsString::from(secret));
             }
             let mut command = tokio::process::Command::new(&words[0]);
@@ -364,12 +365,12 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
             let mut child = crate::children::spawn(crate::children::in_own_session(&mut command))
-                .map_err(|error| could_not(format!("{}: {error}", words[0])))?;
+                .map_err(|error| format!("{}: {error}", words[0]))?;
             let leader = child.id();
             let (Some(stdout), Some(stdin), Some(stderr)) =
                 (child.stdout.take(), child.stdin.take(), child.stderr.take())
             else {
-                return Err(could_not("its streams could not be opened".into()));
+                return Err("its streams could not be opened".into());
             };
             // The first line of its error output says why it failed, when it does.
             let first = Arc::new(Mutex::new(None::<String>));
@@ -405,25 +406,21 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                         (None, Ok(Err(error))) => error.to_string(),
                         (None, Ok(Ok(_))) => unreachable!("matched above"),
                     };
-                    return Err(could_not(why));
+                    return Err(why);
                 }
             }
         }
         Reach::Url(url) => {
             let mut headers = HashMap::new();
-            for (name, secret) in secrets(daemon, &declaration.name, &declaration.headers)
-                .await
-                .map_err(could_not)?
-            {
+            for (name, secret) in secrets(daemon, &declaration.name, &declaration.headers).await? {
                 let name = http::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|error| could_not(error.to_string()))?;
-                let mut value = http::HeaderValue::from_str(&secret).map_err(|_| {
-                    could_not(format!("the vault entry for {name} is no header's value"))
-                })?;
+                    .map_err(|error| error.to_string())?;
+                let mut value = http::HeaderValue::from_str(&secret)
+                    .map_err(|_| format!("the vault entry for {name} is no header's value"))?;
                 value.set_sensitive(true);
                 headers.insert(name, value);
             }
-            let client = http_client(url).map_err(could_not)?;
+            let client = http_client(url)?;
             let config =
                 StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(headers);
             let transport = StreamableHttpClientTransport::with_client(client, config);
@@ -432,8 +429,8 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                 handler.serve_with_lifecycle(transport, ClientLifecycleMode::Initialize),
             )
             .await
-            .map_err(|_| could_not("it did not answer within 30 seconds".into()))?
-            .map_err(|error| could_not(error.to_string()))?;
+            .map_err(|_| "it did not answer within 30 seconds".to_owned())?
+            .map_err(|error| error.to_string())?;
             (served, None)
         }
     };
@@ -453,7 +450,7 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                 start,
             })
             .await;
-            return Err(could_not(why));
+            return Err(why);
         }
     };
     // Its own words, shown in a cut-off, an event and the inbox: masked from the start.
@@ -609,6 +606,15 @@ pub async fn stop_all(daemon: &Arc<Daemon>) {
     }
 }
 
+/// Why the server could not start, masked by `mask` before it is cut: a secret is never cut in
+/// two, half of it left unmasked.
+fn not_started(why: &str, mask: impl FnOnce(&str) -> String) -> String {
+    format!(
+        "the connection could not start: {}",
+        super::short(&mask(why))
+    )
+}
+
 /// Starts the server afresh for a review: what it announces now.
 pub async fn review(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Listing, String> {
     let server = server_of(daemon, &declaration.name);
@@ -620,7 +626,9 @@ pub async fn review(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<L
     let running = match start(daemon, declaration).await {
         Ok(running) => running,
         Err(why) => {
-            let why = flottille_core::secrets::mask_also(&why, &std::env::vars_os().collect(), &[]);
+            let why = not_started(&why, |why| {
+                flottille_core::secrets::mask(why, &std::env::vars_os().collect())
+            });
             *server.failing.lock().unwrap() = Some(why.clone());
             return Err(why);
         }
@@ -661,7 +669,7 @@ pub async fn call(
         let running = match start(daemon, &declaration).await {
             Ok(running) => running,
             Err(why) => {
-                let why = crate::mcp::masked(&why, &grant.place);
+                let why = not_started(&why, |why| crate::mcp::masked(why, &grant.place));
                 *server.failing.lock().unwrap() = Some(why.clone());
                 drop(turn);
                 super::changed_event(daemon, name, Some(&why));

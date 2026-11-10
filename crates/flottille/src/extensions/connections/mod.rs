@@ -496,14 +496,17 @@ impl Listing {
 
     /// Its name and version, each cut at `SERVER_CHARS`: the review shows them whole.
     fn version(&self) -> String {
-        let said = |key: &str| {
-            let text = self.server[key].as_str().unwrap_or("?");
-            match text.chars().count() > SERVER_CHARS {
-                true => format!("{}…", text.chars().take(SERVER_CHARS).collect::<String>()),
-                false => text.to_owned(),
-            }
-        };
+        let said = |key: &str| short(self.server[key].as_str().unwrap_or("?"));
         format!("{} {}", said("name"), said("version"))
+    }
+}
+
+/// A server's own words where the daemon says them in a line (a cut-off, why it failed, its
+/// log), already masked: cut at `SERVER_CHARS`.
+fn short(text: &str) -> String {
+    match text.chars().count() > SERVER_CHARS {
+        true => format!("{}…", text.chars().take(SERVER_CHARS).collect::<String>()),
+        false => text.to_owned(),
     }
 }
 
