@@ -876,6 +876,34 @@ pub fn interrupted(kept: &Path) -> Vec<Interrupted> {
     found
 }
 
+/// How long what a put-back removed or replaced is kept.
+const KEPT_DAYS: u64 = 30;
+
+/// Drops what the put-backs kept more than `KEPT_DAYS` ago, one folder per run.
+pub fn drop_old(kept: &Path) {
+    let Some(before) = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(KEPT_DAYS * 24 * 3600))
+    else {
+        return;
+    };
+    for entry in std::fs::read_dir(kept).into_iter().flatten().flatten() {
+        if entry.file_name() == MARKERS
+            || !std::fs::symlink_metadata(entry.path())
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|modified| modified < before)
+        {
+            continue;
+        }
+        // Never through a link: one is removed, not what it leads to.
+        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+            eprintln!(
+                "flottille daemon: cannot drop {}: {error}",
+                entry.path().display()
+            );
+        }
+    }
+}
+
 /// What a run that enters waits for.
 enum Wait {
     /// A put-back of its place, before it looks at the groups again.
@@ -1750,6 +1778,29 @@ mod tests {
         assert_eq!(found[0].run, "going");
         assert_eq!(found[0].root, real(&root));
         assert!(interrupted(&kept).is_empty());
+    }
+
+    #[test]
+    fn what_a_put_back_kept_is_dropped_once_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().join("kept");
+        made(&kept.join("old-run/.claude/settings.json"), "{}\n");
+        made(&kept.join("new-run/.claude/settings.json"), "{}\n");
+        made(&kept.join(".guarded/going.json"), "{}\n");
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(40 * 24 * 3600);
+        for old in [kept.join("old-run"), kept.join(".guarded")] {
+            std::fs::File::open(&old)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+
+        drop_old(&kept);
+
+        assert!(!kept.join("old-run").exists());
+        assert!(kept.join("new-run/.claude/settings.json").exists());
+        // The markers of the places guarded are not what a put-back kept.
+        assert!(kept.join(".guarded/going.json").exists());
     }
 
     #[tokio::test]

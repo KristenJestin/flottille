@@ -2179,7 +2179,9 @@ pub async fn settle_at_start(daemon: &Daemon) {
         crate::children::end_session(pid).await;
     }
     // A place guarded when the daemon stopped was not put back: the user hears of it.
-    for place in crate::agent_folders::interrupted(&daemon.paths.state.join("agent-folders")) {
+    let kept = daemon.paths.state.join("agent-folders");
+    crate::agent_folders::drop_old(&kept);
+    for place in crate::agent_folders::interrupted(&kept) {
         let run = daemon.read(|store| store.run(&place.run)).ok().flatten();
         let data = json!({"agent": run.as_ref().and_then(|run| run.agent.clone()),
             "project": run.as_ref().map(|run| run.project.clone()), "run": place.run,

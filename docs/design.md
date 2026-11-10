@@ -756,7 +756,8 @@ line names, every program a wrapper or a runner runs included:
   first notes the agent folders, a run in an outer place takes in what the inner ones noted,
   the last to end puts them back, and its result says so, as does an entry of the user's inbox
   (`run.agent_folders_put_back`), even when no run started. What the put-back removes or overwrites is moved to Flottille's state folder
-  (`agent-folders/<run>`), which the result names: a user's own edit there during the run is
+  (`agent-folders/<run>`, dropped at the daemon's start once older than 30 days), which the
+  result names: a user's own edit there during the run is
   undone, never lost. It writes nothing below a folder that is no longer a real one (a link
   made since, to the home or anywhere): that entry is said as not put back; each folder is
   opened by its handle, never through a link, so one made a link while the put-back goes on
