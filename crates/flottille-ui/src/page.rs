@@ -265,22 +265,54 @@ impl ParentElement for Section {
 }
 
 impl RenderOnce for Section {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
+        // A title and a tag are what a person named: cut with an ellipsis (the whole text in a
+        // tooltip) so that the count and the buttons stay inside the page.
+        let title = tipped_when_cut(
+            div()
+                .id(part(&self.id, "title"))
+                .aria_label(self.title.clone())
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(13.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(self.title.clone()),
+            self.title,
+            window,
+            cx,
+        );
+        let tag = self.tag.map(|tag| {
+            tipped_when_cut(
+                div()
+                    .id(part(&self.id, "tag"))
+                    .aria_label(tag.clone())
+                    .min_w_0()
+                    .max_w(px(160.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .mono(11.)
+                    .text_color(p.faint)
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(p.line)
+                    .child(tag.clone()),
+                tag,
+                window,
+                cx,
+            )
+        });
         let head = div()
             .min_h(px(30.))
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(
-                div()
-                    .id(part(&self.id, "title"))
-                    .aria_label(self.title.clone())
-                    .text_size(px(13.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.title)
-                    .test_support(),
-            )
+            .child(title)
             .when_some(self.count, |d, count| {
                 d.child(
                     div()
@@ -292,22 +324,7 @@ impl RenderOnce for Section {
                         .test_support(),
                 )
             })
-            .when_some(self.tag, |d, tag| {
-                d.child(
-                    div()
-                        .id(part(&self.id, "tag"))
-                        .aria_label(tag.clone())
-                        .mono(11.)
-                        .text_color(p.faint)
-                        .px(px(6.))
-                        .py(px(1.))
-                        .rounded(px(5.))
-                        .border_1()
-                        .border_color(p.line)
-                        .child(tag)
-                        .test_support(),
-                )
-            })
+            .children(tag)
             .child(div().flex_1())
             .children(self.actions);
         let sentence = self.sentence.map(|sentence| {
