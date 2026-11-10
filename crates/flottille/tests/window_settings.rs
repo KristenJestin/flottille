@@ -424,6 +424,19 @@ fn save_appears_only_after_a_change(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn shade_unfolds_only_for_flottille(cx: &mut TestAppContext) {
     let user = user();
+    // The desktop is described by temporary files: an Omarchy with an invented theme.
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=omarchy\n").unwrap();
+    let colors = Environment {
+        os_release: user.path("os-release"),
+        state_home: user.path("state"),
+    }
+    .colors_path();
+    std::fs::create_dir_all(colors.parent().unwrap()).unwrap();
+    std::fs::write(
+        &colors,
+        "background = \"#0e1116\"\nforeground = \"#c9d1d9\"\naccent = \"#f0883e\"\n",
+    )
+    .unwrap();
     user.call(
         "appearance.set",
         json!({"theme": "flottille", "shade": "dark"}),
@@ -444,6 +457,16 @@ fn shade_unfolds_only_for_flottille(cx: &mut TestAppContext) {
     for id in ["appearance-title", "workspaces-title", "developer-title"] {
         assert!(visible(cx, id), "{id}");
     }
+
+    click(cx, "appearance-theme-omarchy");
+    until(&shell, cx, "the desktop's theme is kept", |_| {
+        user.call("appearance.show", json!({})).unwrap()["theme"] == "omarchy"
+    });
+    settle(cx);
+    assert!(
+        !present(cx, "appearance-shade"),
+        "Shade folds away with the desktop's theme"
+    );
 }
 
 #[gpui_kit::test]
