@@ -1,7 +1,7 @@
 //! A spent quota in the window (`docs/design.md` §5.9), on GPUI's test platform in front of a real
 //! daemon whose agent is the fake ACP agent answering with Claude's words: the session's state said
 //! once, `Out of quota, resets at 13:00`, in the sidebar and the rail; the composer's chip
-//! `Resume at 13:00` for this session alone; and the setting of Settings, Sessions, off by
+//! `Resume at 13:00` for this session alone; and the setting of Settings, Agents, off by
 //! default. Each unfolds and folds away, and the page rests. No window opens on a screen.
 
 mod common;
