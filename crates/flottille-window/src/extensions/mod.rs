@@ -42,6 +42,47 @@ pub struct Setting {
     /// Its global value: its default when not `set`.
     pub value: Value,
     pub set: bool,
+    /// For a `model` slot, what it gives left unset, as the daemon says it.
+    pub default: Option<SlotDefault>,
+}
+
+/// What a model slot left on its default does: the daemon's rule in words, and the model it runs
+/// on for each provider ready (`None`: the provider's own).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlotDefault {
+    pub rule: String,
+    pub gives: Vec<(String, Option<String>)>,
+}
+
+impl Setting {
+    /// The first option of a model slot, as it says it: the rule, and what it gives today for
+    /// each provider, in the words of the providers' own names for their models.
+    pub fn default_said(&self, providers: &crate::providers::Providers) -> (String, String) {
+        let Some(default) = &self.default else {
+            return ("Its feature's choice".into(), "Chosen when it runs".into());
+        };
+        let gives = default
+            .gives
+            .iter()
+            .map(|(provider, model)| {
+                let title = providers
+                    .get(provider)
+                    .map_or(provider.clone(), |p| p.title.clone());
+                match model {
+                    Some(model) => {
+                        let said = providers
+                            .get(provider)
+                            .and_then(|p| p.model(model))
+                            .map_or(model.clone(), |m| m.label());
+                        format!("{said} for {title}")
+                    }
+                    None => format!("{title}'s own model"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        (default.rule.clone(), gives)
+    }
 }
 
 /// What a project says of it.
@@ -112,6 +153,17 @@ impl Listed {
                     per_project: setting["per_project"] == true,
                     value: setting["value"].clone(),
                     set: setting["set"] == true,
+                    default: setting["default"]["rule"].as_str().map(|rule| SlotDefault {
+                        rule: rule.to_owned(),
+                        gives: setting["default"]["gives"]
+                            .as_object()
+                            .into_iter()
+                            .flatten()
+                            .map(|(provider, model)| {
+                                (provider.clone(), model.as_str().map(str::to_owned))
+                            })
+                            .collect(),
+                    }),
                 })
                 .collect(),
             projects: value["projects"]
@@ -470,7 +522,7 @@ fn control(
     id: &str,
     providers: &crate::providers::Providers,
 ) -> Option<AnyElement> {
-    let (rule, gives) = model_default(name, &setting.key);
+    let (rule, gives) = setting.default_said(providers);
     let (registry, name, project_name, setting_of) = (
         registry.downgrade(),
         name.to_owned(),
@@ -611,14 +663,6 @@ fn control(
             Some(choice.into_any_element())
         }
         _ => None,
-    }
-}
-
-/// The default of a model slot, as its first option says it: its rule and what it gives today.
-fn model_default(name: &str, key: &str) -> (&'static str, &'static str) {
-    match name {
-        review::NAME => review::model_default(key),
-        _ => ("Its feature's choice", "Chosen when it runs"),
     }
 }
 
@@ -897,4 +941,66 @@ pub fn project_section(
             .child(card)
             .into_any_element(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::providers::Providers;
+
+    fn providers() -> Providers {
+        Providers::of(Ok(&json!({"providers": [
+            {"name": "claude", "title": "Claude", "enabled": true, "ready": true, "why": null,
+             "warnings": [], "program": {"name": "claude", "present": true, "path": "/usr/bin/claude",
+             "version": "1.0.0", "checked": "1.0.0"},
+             "login": {"present": true, "path": "/tmp/login", "api_key": null}, "override": null,
+             "models": [{"id": "big", "name": "Big", "efforts": null},
+                        {"id": "small", "name": "Small", "efforts": null}]}
+        ]})))
+    }
+
+    /// What the daemon lists for Review: a slot left on its default, saying what it gives.
+    fn listed(gives: Value) -> Listed {
+        Listed::of(&json!({
+            "name": "review", "title": "Review", "sentence": "", "scope": "project",
+            "place": {"tab": "Review", "order": 1}, "enabled": true, "error": null,
+            "settings": [{"key": "bugs_model", "label": "Bugs", "hint": "", "kind": "model",
+                "per_project": true, "value": null, "set": false,
+                "default": {"rule": "The daemon's rule", "gives": gives}}],
+            "projects": [], "guidance": false
+        }))
+    }
+
+    #[test]
+    fn a_default_slot_says_the_model_the_daemon_picks() {
+        let providers = providers();
+        let said = |gives| listed(gives).settings[0].default_said(&providers);
+        assert_eq!(
+            said(json!({"claude": "big"})),
+            ("The daemon's rule".to_owned(), "Big for Claude".to_owned())
+        );
+        // The daemon's table changes: the window's words follow, it holds none.
+        assert_eq!(
+            said(json!({"claude": "small"})),
+            (
+                "The daemon's rule".to_owned(),
+                "Small for Claude".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn a_default_slot_names_a_provider_that_runs_on_its_own_model() {
+        let said = listed(json!({"claude": null})).settings[0].default_said(&providers());
+        assert_eq!(said.1, "Claude's own model");
+    }
+
+    #[test]
+    fn a_default_slot_says_each_provider_the_daemon_names() {
+        let said =
+            listed(json!({"claude": "big", "other": "x"})).settings[0].default_said(&providers());
+        assert_eq!(said.1, "Big for Claude, x for other");
+    }
 }

@@ -26,6 +26,7 @@ use crate::daemon::Daemon;
 use crate::gate::Verdict;
 use crate::mcp::{Definition, Grant, Outcome};
 use crate::projects::{self, Failure};
+use crate::providers::{self, Provider};
 
 pub use command::run;
 
@@ -221,7 +222,7 @@ pub struct Setting {
 }
 
 /// The kinds of a setting's value: each comes with its first need.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub enum Kind {
     /// A language tag (`en`, `fr-FR`); by default the user's, the locale of the daemon.
     Language,
@@ -231,8 +232,13 @@ pub enum Kind {
         default: &'static [&'static str],
     },
     /// A model slot: `{provider, model?, effort?}`, each checked when it is used; none set leaves
-    /// the choice to the extension (`null`).
-    Model,
+    /// the choice to the extension (`null`). `rule` says what the extension does with a slot left
+    /// unset, and `gives` the model it then runs on for a provider: what `extension.list` says of
+    /// it, so that no client holds a table of its own.
+    Model {
+        rule: &'static str,
+        gives: fn(&Daemon, &'static Provider) -> Option<String>,
+    },
 }
 
 /// What an extension's method answers, once its work is done.
@@ -330,7 +336,7 @@ fn checked(kind: Kind, value: &Value) -> Result<Value, String> {
                     .collect::<Vec<_>>()
             ))
         }
-        Kind::Model => {
+        Kind::Model { .. } => {
             let refuse = || {
                 format!(
                     "must be a model slot such as {{provider = \"claude\", model = \"opus\", \
@@ -379,15 +385,28 @@ fn default_of(kind: Kind) -> Value {
     match kind {
         Kind::Language => json!(user_language()),
         Kind::Subset { default, .. } => json!(default),
-        Kind::Model => Value::Null,
+        Kind::Model { .. } => Value::Null,
     }
+}
+
+/// What a model slot left on its default does, for `extension.list`: its rule, and the model it
+/// runs on for each provider ready (`null`: the provider's own). `null` for any other kind.
+fn default_says(daemon: &Daemon, ready: &[&'static Provider], kind: Kind) -> Value {
+    let Kind::Model { rule, gives } = kind else {
+        return Value::Null;
+    };
+    let gives: Map<String, Value> = ready
+        .iter()
+        .map(|provider| (provider.name.to_owned(), json!(gives(daemon, provider))))
+        .collect();
+    json!({"rule": rule, "gives": gives})
 }
 
 fn kind_word(kind: Kind) -> Value {
     match kind {
         Kind::Language => json!("language"),
         Kind::Subset { of, .. } => json!({"subset": of}),
-        Kind::Model => json!("model"),
+        Kind::Model { .. } => json!("model"),
     }
 }
 
@@ -1091,6 +1110,7 @@ fn list(daemon: &Daemon) -> Value {
             }
         }
     }
+    let ready = providers::ready(daemon);
     let extensions: Vec<Value> = ALL
         .iter()
         .map(|extension| {
@@ -1107,6 +1127,7 @@ fn list(daemon: &Daemon) -> Value {
                 .iter()
                 .map(|setting| {
                     json!({
+                        "default": default_says(daemon, &ready, setting.kind),
                         "key": setting.key,
                         "label": setting.label,
                         "hint": setting.hint,
