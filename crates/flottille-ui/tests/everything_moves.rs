@@ -8,6 +8,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use common::subpage::Settings;
 use common::{Desktop, advance, init, pending_frames};
 use flottille_ui::motion::{ENTER, HOVER, MAX_STAGGER, PANEL, RISE, STAGGER};
 use flottille_ui::{
@@ -950,4 +951,81 @@ fn a_tree_row_whose_title_changes_fades_to_the_new_one(cx: &mut TestAppContext) 
         cx.update(|window, _| window.find("titled-row").label().map(str::to_owned)),
         Some("Release notes".to_owned())
     );
+}
+
+// ── Subpage ────────────────────────────────────────────────────────────────────────────────────
+
+fn left(id: &str, cx: &mut VisualTestContext) -> Pixels {
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.find(id.to_string()).bounds().left()
+    })
+}
+
+#[gpui_kit::test]
+fn the_page_slides_in_and_the_list_out(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    let (_, cx) = cx.add_window_view(|_, _| Settings::new());
+    let list = left("feat-specs", cx);
+    advance(cx, PANEL);
+    assert_eq!(pending_frames(cx), 0, "the list at rest draws nothing");
+
+    cx.update(|window, cx| window.click("feat-review", cx));
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(pending_frames(cx) > 0, "the page is on its way");
+    advance(cx, PANEL / 3);
+    let leaving = left("feat-specs", cx);
+    let arriving = left("review-page", cx);
+    advance(cx, PANEL * 2);
+    let page = left("review-page", cx);
+    assert!(
+        leaving < list,
+        "the list leaves to the left: {leaving:?} < {list:?}"
+    );
+    assert!(
+        arriving > page,
+        "the page comes in from the right: {arriving:?} > {page:?}"
+    );
+    cx.update(|window, _| {
+        assert!(window.try_find("feat-specs").is_none(), "the list is gone");
+    });
+    assert_eq!(pending_frames(cx), 0, "nothing is drawn once it arrived");
+
+    // Back is the reverse: the list comes in from the left.
+    cx.update(|window, cx| window.click("feat-back", cx));
+    advance(cx, PANEL / 3);
+    let returning = left("feat-specs", cx);
+    advance(cx, PANEL * 2);
+    assert_eq!(left("feat-specs", cx), list, "it is where it was");
+    assert!(
+        returning < list,
+        "the list comes back from the left: {returning:?} < {list:?}"
+    );
+    cx.update(|window, _| assert!(window.try_find("review-page").is_none()));
+    // The row that was left keeps its hover while it goes, and lets go of it.
+    advance(cx, PANEL * 2);
+    assert_eq!(pending_frames(cx), 0);
+}
+
+#[gpui_kit::test]
+fn reduced_motion_jumps_between_list_and_page(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (_, cx) = cx.add_window_view(|_, _| Settings::new());
+    let list = left("feat-specs", cx);
+
+    cx.update(|window, cx| window.click("feat-review", cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| {
+        assert!(window.try_find("feat-specs").is_none());
+        assert!(window.try_find("review-page").is_some());
+    });
+    assert_eq!(pending_frames(cx), 0);
+
+    cx.update(|window, cx| window.click("feat-back", cx));
+    cx.run_until_parked();
+    assert_eq!(left("feat-specs", cx), list);
+    cx.update(|window, _| assert!(window.try_find("review-page").is_none()));
+    assert_eq!(pending_frames(cx), 0);
 }

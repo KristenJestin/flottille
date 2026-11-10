@@ -1,6 +1,8 @@
 //! What the scenario suites share: a desktop of temporary files, and ways to count frames.
 #![allow(dead_code)]
 
+pub mod subpage;
+
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;

@@ -696,8 +696,10 @@ impl RenderOnce for ListRow {
                 .py(px(8.))
                 .rounded(radius::LIST_ROW)
         };
-        let tags = self.tags.into_iter().map(|tag| {
+        let tags = self.tags.into_iter().enumerate().map(|(index, tag)| {
             div()
+                .id(ElementId::Name(format!("{}-tag-{index}", self.id).into()))
+                .aria_label(tag.clone())
                 .flex_none()
                 .mono(11.)
                 .text_color(p.faint)
@@ -708,6 +710,7 @@ impl RenderOnce for ListRow {
                 .border_color(p.line)
                 .whitespace_nowrap()
                 .child(tag)
+                .test_support()
         });
         let mono = self.mono;
         let mut row = row

@@ -11,13 +11,14 @@
 
 use flottille_ui::{
     Badge, Block, Button, Card, Confirm, Drawer, EmptyLine, Field, Icon, Icons, ListCard, ListRow,
-    Menu, Modal, PageHeader, RadioChoices, Section, Segmented, Select, SelectOption, Switch, Toast,
-    ToastStack, Type, icon, palette, space, toast,
+    Menu, Modal, PageHeader, RadioChoices, Section, Segmented, Select, SelectOption, Subpage,
+    Switch, Toast, ToastStack, Type, icon, palette, space, toast,
 };
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, IntoElement,
-    ParentElement, Render, Styled, Window, WindowBounds, WindowOptions, div, px, size,
+    ParentElement, Render, SharedString, Styled, Window, WindowBounds, WindowOptions, div, px,
+    size,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -82,6 +83,7 @@ struct Components {
     source: usize,
     tracker: usize,
     drawer: Entity<Drawer>,
+    feature: Option<SharedString>,
 }
 
 struct RunDetail;
@@ -236,6 +238,7 @@ impl Components {
             source: 0,
             tracker: 0,
             drawer,
+            feature: None,
         }
     }
 
@@ -309,6 +312,44 @@ impl Components {
                     )
                     .child(note("always a tooltip")),
             )
+    }
+
+    fn subpage(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let this = cx.entity().downgrade();
+        let mut features = Subpage::new("features", "Features")
+            .entry(
+                "review",
+                Icon::Check,
+                "Review",
+                "On",
+                "Read the changes before they are kept",
+            )
+            .entry(
+                "specs",
+                Icon::Text,
+                "Specs",
+                "Off",
+                "Write the spec before building",
+            )
+            .entry(
+                "connections",
+                Icon::Plus,
+                "Connections",
+                "2 on",
+                "Reach other services",
+            )
+            .open(self.feature.as_deref())
+            .on_open(move |key, _, cx| {
+                this.update(cx, |this, cx| {
+                    this.feature = key;
+                    cx.notify();
+                })
+                .ok();
+            });
+        if let Some(key) = &self.feature {
+            features = features.page(div().h(px(120.)).child(format!("The page of {key}")));
+        }
+        Self::tile("Subpage", cx).w(px(420.)).child(features)
     }
 
     fn lists(&self, cx: &App) -> gpui_kit::Div {
@@ -657,6 +698,7 @@ impl Render for Components {
             _ => None,
         };
         let controls = self.controls(cx);
+        let subpage = self.subpage(cx);
         div()
             .size_full()
             .relative()
@@ -673,6 +715,7 @@ impl Render for Components {
                     .gap(px(24.))
                     .child(self.buttons(cx))
                     .child(self.lists(cx))
+                    .child(subpage)
                     .child(self.folder(cx))
                     .child(self.page(cx))
                     .child(controls),
