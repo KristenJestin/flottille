@@ -517,10 +517,21 @@ fn header(text: &str, key: &str) -> Vec<LoginField> {
         if !matches!(bytes[colon], b':' | b'=') {
             continue;
         }
+        // A dotted key is a setting's only as `key=value` (`spring.datasource.password=…`): with
+        // spaces around it, it is code (`self.password = password`).
+        if text[key_start..at].contains('.')
+            && (colon != at + key.len()
+                || bytes[colon] != b'='
+                || bytes.get(colon + 1) == Some(&b' '))
+        {
+            continue;
+        }
         let mut start = spaces(colon + 1);
-        if start < len && matches!(bytes[start], b'"' | b'\'') {
+        let quoted = start < len && matches!(bytes[start], b'"' | b'\'');
+        if quoted {
             start += 1;
         }
+        let mut block = false;
         // A YAML block value (`password: |`, `>-`): the secret is on the next line.
         if start < len && matches!(bytes[start], b'|' | b'>') {
             let mark = start
@@ -537,6 +548,7 @@ fn header(text: &str, key: &str) -> Vec<LoginField> {
             }
             if bytes[after] == b'\n' {
                 start = spaces(after + 1);
+                block = true;
             }
         }
         let word = start
@@ -563,6 +575,15 @@ fn header(text: &str, key: &str) -> Vec<LoginField> {
         // Its spaces at the end are not part of it.
         let end = start + text[start..stop].trim_end().len();
         if end == start {
+            continue;
+        }
+        // An unquoted password of several words is prose (`- Password: 8 chars minimum`), one
+        // ending in `;` code (`dbPassword: string;`).
+        if key == "password"
+            && !quoted
+            && !block
+            && (text[start..end].contains([' ', '\t']) || text[start..end].ends_with(';'))
+        {
             continue;
         }
         field.values.push((start, end));
@@ -1238,5 +1259,14 @@ mod tests {
             password_hash: a column of the users table\n\
             Passwords: see the docs.\n";
         assert_eq!(mask(prose, &BTreeMap::new()), prose);
+    }
+
+    #[test]
+    fn code_and_a_bullet_naming_a_password_stay_clear() {
+        let code = "    self.password = password\n\
+            this.dbPassword = hash(pw);\n\
+            interface Db {\n  dbPassword: string;\n}\n\
+            - Password: 8 chars minimum\n";
+        assert_eq!(masked_at_each_cut(code), code);
     }
 }
