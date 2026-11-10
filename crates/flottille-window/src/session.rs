@@ -32,7 +32,7 @@ use gpui_design_system::{
     Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette,
     PulsingLabel, Side, Skeleton, Toast, Type, awaiting, changing, enter, fade, fold_frame,
     follow_theme, hoverable, icon, palette, path_line, presence, presence_of, section_label,
-    selectable, space, text_region, tipped_when_cut, toast, turning,
+    selectable, space, text_region, tint, tipped_when_cut, toast, turning,
 };
 use gpui_kit::base::input::{
     Escape, Input, InputEvent, InputState, MoveDown, MoveUp, TextareaState,
@@ -3414,9 +3414,20 @@ impl ConversationView {
         };
         let (open, pieces) = (group.open, group_line(&group.summary, group.cut));
         let failed = (group.summary.failed > 0).then(|| format!("{} failed", group.summary.failed));
+        let retried =
+            (group.summary.retried > 0).then(|| format!("{} retried", group.summary.retried));
         let line_id = self.line_id(segment);
         let p = palette(cx);
         let id = |part: &str| ElementId::Name(format!("{line_id}{part}").into());
+        // The first of the two moves from the red to the faint ink when a retry turns the one
+        // failure into a retried call.
+        let first = tint(
+            id("-ink"),
+            if failed.is_some() { p.fail } else { p.faint },
+            HOVER,
+            window,
+            cx,
+        );
         let said = SharedString::from(pieces.join(" · "));
         let turn = turning(id("-chevron"), open, window, cx);
         // The kinds and the running step are what can be long: they are cut with an ellipsis,
@@ -3435,21 +3446,32 @@ impl ConversationView {
                 } else {
                     None
                 };
-                match (failed.as_ref() == Some(&piece), part) {
-                    (true, _) => div()
+                let counted = [
+                    (&failed, "-failed", p.fail),
+                    (&retried, "-retried", p.faint),
+                ]
+                .into_iter()
+                .find(|(said, ..)| said.as_ref() == Some(&piece))
+                .map(|(_, part, ink)| (part, ink));
+                match (counted, part) {
+                    (Some((part, ink)), _) => div()
                         .flex()
                         .flex_none()
                         .child(lead)
                         .child(
                             div()
-                                .id(id("-failed"))
-                                .text_color(p.fail)
+                                .id(id(part))
+                                .text_color(if part == "-failed" || failed.is_none() {
+                                    first
+                                } else {
+                                    ink
+                                })
                                 .aria_label(SharedString::from(piece.clone()))
                                 .child(piece.clone())
                                 .test_support(),
                         )
                         .into_any_element(),
-                    (false, Some(part)) => div()
+                    (None, Some(part)) => div()
                         .flex()
                         .min_w_0()
                         .child(div().flex_none().child(lead))
@@ -3466,7 +3488,7 @@ impl ConversationView {
                             cx,
                         ))
                         .into_any_element(),
-                    (false, None) => div()
+                    (None, None) => div()
                         .flex_none()
                         .child(format!("{lead}{piece}"))
                         .into_any_element(),
@@ -3715,6 +3737,9 @@ pub fn group_line(summary: &Summary, cut: bool) -> Vec<String> {
     }
     if summary.failed > 0 {
         pieces.push(format!("{} failed", summary.failed));
+    }
+    if summary.retried > 0 {
+        pieces.push(format!("{} retried", summary.retried));
     }
     pieces.extend(summary.running.clone());
     pieces.extend(summary.ms.map(seconds));
@@ -4832,6 +4857,8 @@ fn call_state(call: &Call) -> AgentState {
     match call.state {
         CallState::Running => AgentState::Running,
         CallState::Done => AgentState::Completed,
+        // Refused for its input and made again right: nothing went wrong that was not mended.
+        CallState::Failed if call.retried => AgentState::Denied,
         CallState::Failed => AgentState::Failed,
         CallState::Interrupted => AgentState::Stopped,
     }
@@ -5474,6 +5501,31 @@ impl Render for Row {
                                             cx,
                                         ),
                                     })
+                                    .child(presence_of(
+                                        ElementId::Name(
+                                            format!("step-{}-{at}-refusal-line", self.at).into(),
+                                        ),
+                                        call.reason
+                                            .clone()
+                                            .filter(|_| call.retried)
+                                            .map(SharedString::from),
+                                        {
+                                            let id = ElementId::Name(
+                                                format!("step-{}-{at}-refusal", self.at).into(),
+                                            );
+                                            let ink = p.faint;
+                                            move |why| {
+                                                div()
+                                                    .id(id)
+                                                    .mono(11.5)
+                                                    .text_color(ink)
+                                                    .aria_label(why.clone())
+                                                    .child(why)
+                                                    .test_support()
+                                                    .into_any_element()
+                                            }
+                                        },
+                                    ))
                                     .child(presence(
                                         ElementId::Name(
                                             format!("step-{}-{at}-cut-line", self.at).into(),
@@ -9772,6 +9824,9 @@ mod tests {
             cut: None,
             shows: false,
             asked: true,
+            input_refused: false,
+            retried: false,
+            reason: None,
         }
     }
 

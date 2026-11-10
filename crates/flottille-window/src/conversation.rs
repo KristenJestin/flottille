@@ -238,6 +238,14 @@ pub struct Call {
     pub shows: bool,
     /// Its arguments are known: an agent may send them in an update after the call is first said.
     pub asked: bool,
+    /// The daemon refused it for its input, the tool's own rule, before anything ran
+    /// (`input_refused` of `agent.tool_served`).
+    pub input_refused: bool,
+    /// It was refused for its input and a call of the same tool then passed in the same turn: the
+    /// agent got it right, so it is no failure to count.
+    pub retried: bool,
+    /// What the failed call answered, for a step that is not counted as failed to say it.
+    pub reason: Option<String>,
 }
 
 impl Call {
@@ -342,6 +350,8 @@ pub struct Summary {
     /// The kinds of its calls and deliveries, in the order they were first used.
     pub kinds: Vec<String>,
     pub failed: usize,
+    /// The calls refused for their input and made again right.
+    pub retried: usize,
     /// How long it took, from its first step to its last; none while a step runs.
     pub ms: Option<u64>,
     /// The step running now, as the line names it.
@@ -381,6 +391,7 @@ impl Summary {
                         seen(call.since);
                         call.until.into_iter().for_each(&mut seen);
                         match call.state {
+                            CallState::Failed if call.retried => summary.retried += 1,
                             CallState::Failed => summary.failed += 1,
                             CallState::Running => summary.running = Some(running(call)),
                             _ => {}
@@ -500,6 +511,10 @@ pub struct Conversation {
     /// The calls whose result was cut at the source, by their id: how many characters were left
     /// out.
     cuts: HashMap<String, u64>,
+    /// The calls the daemon refused for their input, by their id.
+    input_refused: HashSet<String>,
+    /// The calls of the turn running, in order: a refusal is retried by a later one of its turn.
+    turn: Vec<String>,
     /// The text of each `session_send` call, by its id, then, once held, by its request.
     sends: HashMap<String, String>,
     held_sends: HashMap<u64, String>,
@@ -536,6 +551,8 @@ impl Conversation {
             pending_approvals: VecDeque::new(),
             judged: HashMap::new(),
             cuts: HashMap::new(),
+            input_refused: HashSet::new(),
+            turn: Vec::new(),
             sends: HashMap::new(),
             held_sends: HashMap::new(),
             ended_lines: HashSet::new(),
@@ -674,7 +691,22 @@ impl Conversation {
             self.pending_approvals.pop_front();
             changes.extend(self.add_approval(number));
         }
+        if is_user_turn(event)
+            || matches!(
+                event.name.as_str(),
+                "agent.turn_ended" | "agent.died" | "agent.failed" | "agent.ended"
+            )
+        {
+            self.turn.clear();
+        }
         changes.extend(self.fold(event));
+        if matches!(event.name.as_str(), "agent.tool_call" | "agent.tool_served") {
+            for change in self.settle_retries() {
+                if !changes.contains(&change) {
+                    changes.push(change);
+                }
+            }
+        }
         // A time that could not be logged for want of the project's vault entry: its line, with
         // the button to the project's Settings, comes after the step that was refused.
         if event.name == "agent.tool_served" && event.data["setup"] == "time_logging" {
@@ -760,11 +792,15 @@ impl Conversation {
                     until: None,
                     allowed_by: self.judged.get(&text("id")).map(|by| (*by).into()),
                     cut: self.cuts.get(&text("id")).copied(),
+                    input_refused: self.input_refused.contains(&text("id")),
+                    retried: false,
+                    reason: None,
                 };
                 let call = Call {
                     until: (call.state != CallState::Running).then_some(event.at),
                     ..call
                 };
+                self.turn.push(call.id.clone());
                 let running = call.state == CallState::Running;
                 let id = call.id.clone();
                 match self.blocks.last_mut() {
@@ -867,10 +903,11 @@ impl Conversation {
                     _ => None,
                 };
                 let cut = data["cut"]["left_out"].as_u64();
+                let refused = data["input_refused"] == true;
                 let Some(key) = data["call_key"].as_str() else {
                     return Vec::new();
                 };
-                if by.is_none() && cut.is_none() {
+                if by.is_none() && cut.is_none() && !refused {
                     return Vec::new();
                 }
                 if let Some(by) = by {
@@ -878,6 +915,9 @@ impl Conversation {
                 }
                 if let Some(left_out) = cut {
                     self.cuts.insert(key.to_owned(), left_out);
+                }
+                if refused {
+                    self.input_refused.insert(key.to_owned());
                 }
                 // The call is shown already: its step says who let it through and that its
                 // result was cut.
@@ -893,6 +933,7 @@ impl Conversation {
                             call.allowed_by = Some(by.into());
                         }
                         call.cut = cut.or(call.cut);
+                        call.input_refused |= refused;
                         vec![Change::Changed(at)]
                     }
                     None => Vec::new(),
@@ -1157,6 +1198,35 @@ impl Conversation {
         rows.into_iter().map(Change::Changed).collect()
     }
 
+    /// Marks the calls of the turn the daemon refused for their input and a later call of the
+    /// same tool passed: they were made again right.
+    fn settle_retries(&mut self) -> Vec<Change> {
+        let mut changes = Vec::new();
+        let mut passed = HashSet::new();
+        for id in self.turn.iter().rev() {
+            let Some(&at) = self.calls.get(id) else {
+                continue;
+            };
+            let Some(Block::Steps { calls }) = self.blocks.get_mut(at) else {
+                continue;
+            };
+            let Some(call) = calls.iter_mut().find(|call| call.id == *id) else {
+                continue;
+            };
+            let retried = call.input_refused
+                && call.state == CallState::Failed
+                && passed.contains(&call.name);
+            if call.state == CallState::Done {
+                passed.insert(call.name.clone());
+            }
+            if call.retried != retried {
+                call.retried = retried;
+                changes.push(Change::Changed(at));
+            }
+        }
+        changes
+    }
+
     fn update_call(&mut self, event: &Event) -> Vec<Change> {
         let data = &event.data;
         let id = data["id"].as_str().unwrap_or_default();
@@ -1193,6 +1263,9 @@ impl Conversation {
             && call.state != CallState::Interrupted
         {
             call.state = call_state(Some(status));
+            if call.state == CallState::Failed {
+                call.reason = result_text(data);
+            }
             if call.state != CallState::Running && call.until.is_none() {
                 call.until = Some(event.at);
             }
@@ -1854,6 +1927,22 @@ fn notes(output: &Value) -> Vec<(String, String)> {
         }
     }
     found
+}
+
+/// What a call answered, as the agent sent it: the text of its content, else its output when that
+/// is a text.
+fn result_text(data: &Value) -> Option<String> {
+    let mut texts = Vec::new();
+    for item in data["content"].as_array().into_iter().flatten() {
+        if let Some(text) = item["content"]["text"].as_str() {
+            texts.push(text);
+        }
+    }
+    if texts.is_empty() {
+        texts.extend(data["raw_output"].as_str());
+    }
+    let text = texts.join("\n");
+    (!text.trim().is_empty()).then_some(text)
 }
 
 fn strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
@@ -3784,5 +3873,139 @@ mod tests {
         c.apply(&said(3, "ok", Some("m2")));
 
         assert_eq!(texts(&c), ["The slow check.", "ok"]);
+    }
+
+    /// A call of `tool` as the server and the agent say it, from its start to its end: the
+    /// server's record of the call comes before the agent sees it done.
+    fn ended(seq: u64, id: &str, tool: &str, refusal: Option<&str>, outcome: &str) -> Vec<Event> {
+        let mut served = json!({"tool": tool, "call_key": id, "gate": "allow", "outcome": outcome});
+        if refusal.is_some() {
+            served["input_refused"] = json!(true);
+        }
+        vec![
+            event(
+                seq,
+                "agent.tool_call",
+                json!({"id": id, "title": format!("mcp__flottille__{tool}"),
+                    "status": "in_progress", "raw_input": {"title": "Site"}}),
+            ),
+            event(seq + 1, "agent.tool_served", served),
+            event(
+                seq + 2,
+                "agent.tool_call",
+                json!({"id": id, "update": true,
+                    "status": if outcome == "ok" { "completed" } else { "failed" },
+                    "content": [{"type": "content", "content": {"type": "text",
+                        "text": refusal.unwrap_or("the call failed: no")}}]}),
+            ),
+        ]
+    }
+
+    fn summed(events: &[Vec<Event>]) -> (Summary, Vec<Call>) {
+        let mut c = root();
+        for event in events.iter().flatten() {
+            c.apply(event);
+        }
+        let calls = c
+            .blocks()
+            .iter()
+            .flat_map(|block| match block {
+                Block::Steps { calls } => calls.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        (Summary::of(c.blocks(), c.times()), calls)
+    }
+
+    const TWO_WORDS: &str = "refused: a title is 3 to 8 words, this one has 2";
+
+    #[test]
+    fn an_input_refusal_retried_right_counts_as_retried_not_failed() {
+        let (said, calls) = summed(&[
+            ended(1, "a", "session_title", Some(TWO_WORDS), "refused"),
+            ended(4, "b", "session_title", None, "ok"),
+        ]);
+
+        assert_eq!(
+            (said.steps, said.failed, said.retried),
+            (2, 0, 1),
+            "{said:?}"
+        );
+        assert!(calls[0].retried && !calls[1].retried);
+    }
+
+    #[test]
+    fn a_refusal_turns_into_retried_when_the_retry_ends_and_not_before() {
+        let mut c = root();
+        let mut counts = Vec::new();
+        for event in [
+            ended(1, "a", "session_title", Some(TWO_WORDS), "refused"),
+            ended(4, "b", "session_title", None, "ok"),
+        ]
+        .iter()
+        .flatten()
+        {
+            c.apply(event);
+            let said = Summary::of(c.blocks(), c.times());
+            counts.push((said.failed, said.retried));
+        }
+
+        assert_eq!(
+            counts,
+            [(0, 0), (0, 0), (1, 0), (1, 0), (1, 0), (0, 1)],
+            "failed until the retry passes"
+        );
+    }
+
+    #[test]
+    fn an_input_refusal_not_retried_stays_failed() {
+        let (said, _) = summed(&[
+            ended(1, "a", "session_title", Some(TWO_WORDS), "refused"),
+            // Another tool that succeeded is no retry.
+            ended(4, "b", "fs_read", None, "ok"),
+        ]);
+        assert_eq!((said.failed, said.retried), (1, 0), "{said:?}");
+
+        // Nor is a retry of another turn.
+        let mut c = root();
+        for event in ended(1, "a", "session_title", Some(TWO_WORDS), "refused") {
+            c.apply(&event);
+        }
+        c.apply(&event(4, "agent.turn_ended", json!({})));
+        for event in ended(5, "b", "session_title", None, "ok") {
+            c.apply(&event);
+        }
+        let said = Summary::of(c.blocks(), c.times());
+        assert_eq!((said.failed, said.retried), (1, 0), "{said:?}");
+
+        // Nor a retry that failed too.
+        let (said, _) = summed(&[
+            ended(1, "a", "session_title", Some(TWO_WORDS), "refused"),
+            ended(4, "b", "session_title", Some(TWO_WORDS), "refused"),
+        ]);
+        assert_eq!((said.failed, said.retried), (2, 0), "{said:?}");
+    }
+
+    #[test]
+    fn a_command_that_failed_stays_failed() {
+        // Not refused for its input, whatever the agent did next.
+        let (said, calls) = summed(&[
+            ended(1, "a", "run", None, "failed"),
+            ended(4, "b", "run", None, "ok"),
+        ]);
+        assert_eq!((said.failed, said.retried), (1, 0), "{said:?}");
+        assert!(!calls[0].retried);
+    }
+
+    #[test]
+    fn a_retried_step_keeps_its_refusal_and_its_reason() {
+        let (_, calls) = summed(&[
+            ended(1, "a", "session_title", Some(TWO_WORDS), "refused"),
+            ended(4, "b", "session_title", None, "ok"),
+        ]);
+
+        assert_eq!(calls[0].state, CallState::Failed, "nothing is hidden");
+        assert_eq!(calls[0].reason.as_deref(), Some(TWO_WORDS));
+        assert_eq!(calls[1].reason, None);
     }
 }

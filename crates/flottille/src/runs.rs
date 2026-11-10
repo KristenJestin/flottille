@@ -1469,7 +1469,12 @@ pub async fn restart_by_user(
                     r.needs,
                     r.serve,
                 ),
-                Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
+                Err(
+                    Outcome::Refused(why)
+                    | Outcome::Invalid(why)
+                    | Outcome::Failed(why)
+                    | Outcome::Held(why),
+                ) => {
                     return Err(why);
                 }
                 Err(Outcome::Done(_)) => unreachable!("a request is refused or it fits"),

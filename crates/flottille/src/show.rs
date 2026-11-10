@@ -51,7 +51,7 @@ fn refuse(why: impl std::fmt::Display) -> String {
 fn asked(place: &Place, args: &Value) -> Result<(Link, Option<String>), String> {
     let args: Arguments = match arguments("web", args.clone()) {
         Ok(args) => args,
-        Err(Outcome::Refused(why)) => return Err(why),
+        Err(Outcome::Invalid(why)) => return Err(why),
         Err(_) => unreachable!("arguments only refuse"),
     };
     let title = args

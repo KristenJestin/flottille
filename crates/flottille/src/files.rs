@@ -1413,6 +1413,7 @@ mod tests {
         match outcome {
             Outcome::Done(text)
             | Outcome::Refused(text)
+            | Outcome::Invalid(text)
             | Outcome::Failed(text)
             | Outcome::Held(text) => text,
         }
@@ -1939,6 +1940,7 @@ mod at_once {
         match outcome {
             Outcome::Done(text)
             | Outcome::Refused(text)
+            | Outcome::Invalid(text)
             | Outcome::Failed(text)
             | Outcome::Held(text) => text,
         }
