@@ -471,3 +471,56 @@ fn no_source_of_the_window_uses_the_tooltip_that_follows_the_pointer() {
         found.join("\n")
     );
 }
+
+// ── 15. One way to choose a model ──────────────────────────────────────────────────────────────
+
+/// A `Select` whose block (back to its function, its match arm or its closure) speaks of models,
+/// a judge or a compactor: a choice of a model built outside `ModelChoice`.
+fn model_selects(source: &str) -> Vec<(usize, String)> {
+    let lines: Vec<(usize, &str)> = code(source).collect();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, line))| line.contains("Select::new("))
+        .filter(|(at, _)| {
+            let mut block = Vec::new();
+            for (_, line) in lines[..=*at].iter().rev() {
+                block.push(*line);
+                if line.starts_with("fn ")
+                    || line.starts_with("pub fn ")
+                    || line.starts_with("pub(crate) fn ")
+                    || line.contains("=> {")
+                    || line.contains("= |")
+                {
+                    break;
+                }
+            }
+            block.iter().any(|line| {
+                let line = line.to_lowercase();
+                ["model", "judge", "compactor"]
+                    .iter()
+                    .any(|word| line.contains(word))
+            })
+        })
+        .map(|(_, (at, line))| (*at, (*line).to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_select_of_models_outside_model_choice_is_refused() {
+    let sample = "fn judge_section(&self) {\n\
+                  let entries = self.judge_entries();\n\
+                  let options = entries.iter().map(|e| SelectOption::new(e.0, e.1));\n\
+                  Select::new(\"judge-model\", options, chosen)\n\
+                  }\n\
+                  fn sessions_section(&self) {\n\
+                  Select::new(\"sessions-days\", options, chosen)\n\
+                  }";
+    assert_eq!(model_selects(sample).len(), 1);
+    let found = offenders(model_selects);
+    assert!(
+        found.is_empty(),
+        "a model is chosen with `ModelChoice` (rule 15), never a `Select` of its own:\n{}",
+        found.join("\n")
+    );
+}
