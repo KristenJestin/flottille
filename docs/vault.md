@@ -61,7 +61,9 @@ An entry made for one precise feature is that feature's alone. `for` names it:
   refused, naming the feature and what stops working: its feature's own screen names another
   entry first (the entry then goes as any), or the removal is confirmed
   (`vault.remove {name, confirmed: true}`, `flottille vault remove <name> --confirmed`, the Vault
-  page's confirmation, which says what stops working).
+  page's confirmation, which says what stops working). When the file that would name it cannot be
+  read (an `extensions.toml` that does not parse), whether it is named cannot be told: the removal
+  is refused the same way, saying why, until the file is mended or the removal confirmed.
 - **Unbound entries behave as they always did**, and every entry that existed before uses were
   added is unbound: no worklog token or connection of the user's stops working.
 
@@ -152,4 +154,7 @@ The tests never reach the user's keyring: their daemon's configuration folder ho
 with `backend = "memory"`, which keeps the secrets in the daemon's memory, lost when it stops. The
 daemon says so in its log at start. `locked = true` in the same file, read again at each use, plays
 a locked keyring. It is chosen by the daemon's configuration, never by an environment variable an
-agent could set for what it runs.
+agent could set for what it runs. Only a test build has it (`cargo test` builds without
+optimisation): a release build that finds `backend = "memory"` says in its log that it refuses it
+and uses the system's keyring, and never reads a secret from that file, so that no user's file
+holds secrets in plain text.

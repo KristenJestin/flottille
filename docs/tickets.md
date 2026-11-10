@@ -668,7 +668,7 @@ tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "20
   `setup: "time_logging"` (`docs/events.md`), and the conversation shows a line and a `Set up
   time logging` button that opens the project's Settings at Tracker. The token is in no card, result, log, event nor the store: what Jira
   answers is masked of it, and so is every error.
-- **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), logging time with the vault entry `<name>``, so that the user sees which credentials a worklog would use.
+- **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), logging time with the vault entry `<name>``, so that the user sees which credentials a worklog would use. The entry is bound to the project's worklog, not to a host: when the site or the entry changes, the card says where the secret goes too (`Log time with it: the secret of the vault entry `<name>` will be sent to <site>`).
 - **GitHub is refused with a sentence** (`GitHub issues have no time tracking`), and so are a
   duration or a start that is wrong, before anyone is asked.
 - **It is a ticket write**, judged like `comment`: held in Ask, allowed in Full, and the card says
