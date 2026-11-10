@@ -502,6 +502,11 @@ fn kind_of(folder: BorrowedFd, name: &OsStr) -> Option<Kind> {
 fn read_file(folder: BorrowedFd, name: &OsStr) -> std::io::Result<Vec<u8>> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | crate::nofollow::READ;
     let file = std::fs::File::from(rustix::fs::openat(folder, name, flags, Mode::empty())?);
+    read_open(&file)
+}
+
+/// The content of `file`, opened, when it is a file not larger than `KEPT_MAX`.
+fn read_open(file: &std::fs::File) -> std::io::Result<Vec<u8>> {
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::other("not a file"));
     }
@@ -509,6 +514,32 @@ fn read_file(folder: BorrowedFd, name: &OsStr) -> std::io::Result<Vec<u8>> {
     file.take(KEPT_MAX + 1).read_to_end(&mut content)?;
     if content.len() as u64 > KEPT_MAX {
         return Err(std::io::Error::other("too large to keep"));
+    }
+    Ok(content)
+}
+
+/// `read_file`, when the file read is still the one `noted`: the same inode, size and times,
+/// looked at once it is read, so that a write before or while it was read is seen.
+fn read_noted(folder: BorrowedFd, name: &OsStr, noted: &Kind) -> std::io::Result<Vec<u8>> {
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | crate::nofollow::READ;
+    let file = std::fs::File::from(rustix::fs::openat(folder, name, flags, Mode::empty())?);
+    let content = read_open(&file)?;
+    let stat = rustix::fs::fstat(&file)?;
+    let Kind::File {
+        len,
+        modified,
+        changed,
+        inode,
+        ..
+    } = noted
+    else {
+        return Err(std::io::Error::other("not a file"));
+    };
+    if (stat.st_ino as u64, stat.st_size as u64) != (*inode, *len)
+        || (stat.st_mtime as i64, stat.st_mtime_nsec as i64) != *modified
+        || (stat.st_ctime as i64, stat.st_ctime_nsec as i64) != *changed
+    {
+        return Err(std::io::Error::other("written since it was noted"));
     }
     Ok(content)
 }
@@ -692,16 +723,18 @@ impl Walk<'_> {
             return;
         };
         let mut wanted = std::mem::take(&mut self.wanted);
-        wanted.sort_by_key(|(path, len)| (!settings(path), *len));
+        wanted.sort_by_key(|(path, len)| (!settings(path) && !hook(path), *len));
         for (path, len) in wanted {
             if self.held + len > KEPT_TOTAL {
                 continue;
             }
+            race(&path);
             let Ok((folder, name)) = parent(self.top.as_fd(), &path) else {
                 continue;
             };
-            // It may have grown since it was looked at.
-            if let Ok(content) = read_file(folder.as_fd(), name)
+            // Written since it was noted, its content is not the one before the run: none is
+            // kept, and a change is said, not put back.
+            if let Ok(content) = read_noted(folder.as_fd(), name, &self.entries[&path])
                 && self.held + content.len() as u64 <= KEPT_TOTAL
             {
                 self.held += content.len() as u64;
@@ -728,6 +761,16 @@ fn settings(path: &Path) -> bool {
             name.as_encoded_bytes()
                 .eq_ignore_ascii_case(file.as_bytes())
         })
+    })
+}
+
+/// Whether `path` is below the `hooks` folder of a `.claude` folder, in any case: a script its
+/// settings run.
+fn hook(path: &Path) -> bool {
+    let parts: Vec<&OsStr> = path.components().map(|part| part.as_os_str()).collect();
+    parts.windows(3).any(|parts| {
+        parts[0].as_encoded_bytes().eq_ignore_ascii_case(b".claude")
+            && parts[1].as_encoded_bytes().eq_ignore_ascii_case(b"hooks")
     })
 }
 
@@ -840,6 +883,14 @@ pub struct Guards {
     groups: Arc<std::sync::Mutex<Vec<Group>>>,
 }
 
+/// The groups, locked: each change of them is whole once made, so one left by a panic is used
+/// as it is, never a second panic.
+fn locked(groups: &std::sync::Mutex<Vec<Group>>) -> std::sync::MutexGuard<'_, Vec<Group>> {
+    groups
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The runs that go on in a place, or in places inside it.
 struct Group {
     root: PathBuf,
@@ -932,26 +983,54 @@ pub fn drop_old(kept: &Path) {
     else {
         return;
     };
-    // A link in its place leads to folders that are not the put-backs': none is dropped.
-    if !std::fs::symlink_metadata(kept).is_ok_and(|meta| meta.is_dir()) {
+    let before = before
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64);
+    // A link in its place leads to folders that are not the put-backs': none is dropped. What
+    // is dropped is by its handle: one made a link since leads nowhere.
+    let Ok(folder) = rustix::fs::open(kept, FOLDER, Mode::empty()) else {
         return;
-    }
-    for entry in std::fs::read_dir(kept).into_iter().flatten().flatten() {
-        if entry.file_name() == MARKERS
-            || !std::fs::symlink_metadata(entry.path())
-                .and_then(|meta| meta.modified())
-                .is_ok_and(|modified| modified < before)
+    };
+    for name in names(folder.as_fd()) {
+        if name == MARKERS
+            || !rustix::fs::statat(&folder, &name, AtFlags::SYMLINK_NOFOLLOW)
+                .is_ok_and(|stat| stat.st_mtime < before)
         {
             continue;
         }
-        // Never through a link: one is removed, not what it leads to.
-        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+        race(Path::new(&name));
+        if let Err(error) = remove_all(folder.as_fd(), &name) {
             eprintln!(
                 "flottille daemon: cannot drop {}: {error}",
-                entry.path().display()
+                kept.join(&name).display()
             );
         }
     }
+}
+
+/// The names in the open `folder`, `.` and `..` left out.
+fn names(folder: BorrowedFd) -> Vec<OsString> {
+    rustix::fs::Dir::read_from(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| OsString::from_vec(entry.file_name().to_bytes().to_vec()))
+        .filter(|name| name != "." && name != "..")
+        .collect()
+}
+
+/// Removes the entry `name` of `folder` and what is below it, each folder opened by its handle,
+/// never through a link: one is removed, not what it leads to.
+fn remove_all(folder: BorrowedFd, name: &OsStr) -> std::io::Result<()> {
+    let stat = rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+        return Ok(rustix::fs::unlinkat(folder, name, AtFlags::empty())?);
+    }
+    let below = rustix::fs::openat(folder, name, FOLDER, Mode::empty())?;
+    for inside in names(below.as_fd()) {
+        remove_all(below.as_fd(), &inside)?;
+    }
+    Ok(rustix::fs::unlinkat(folder, name, AtFlags::REMOVEDIR)?)
 }
 
 /// What a run that enters waits for.
@@ -997,7 +1076,7 @@ impl Guards {
         };
         loop {
             let wait = {
-                let mut groups = self.groups.lock().unwrap();
+                let mut groups = locked(&self.groups);
                 let overlaps =
                     |group: &Group| root.starts_with(&group.root) || group.root.starts_with(&root);
                 match groups
@@ -1022,15 +1101,25 @@ impl Guards {
             };
             match wait {
                 Wait::Closing(mut closing) => {
-                    // Its task died before it said it ended: the group goes, its marker left to
-                    // say at the next start that its place was not put back.
+                    // Its task died before it said it ended: its put-back is done again, before
+                    // the run notes the place, which would hold what was not put back.
                     if closing.wait_for(|closed| *closed).await.is_err() {
-                        self.groups.lock().unwrap().retain(|group| {
-                            !group
-                                .closing
-                                .as_ref()
-                                .is_some_and(|other| other.same_channel(&closing))
-                        });
+                        let dead = locked(&self.groups)
+                            .iter_mut()
+                            .find(|group| {
+                                group
+                                    .closing
+                                    .as_ref()
+                                    .is_some_and(|other| other.same_channel(&closing))
+                            })
+                            .map(|group| {
+                                let (closed, closing) = watch::channel(false);
+                                group.closing = Some(closing);
+                                (group.snapshot.clone(), closed, group.marker.clone())
+                            });
+                        if let Some((snapshot, closed, marker)) = dead {
+                            put_back_again(self.groups.clone(), snapshot, closed, marker).await;
+                        }
                     }
                 }
                 Wait::Taken(mut taken) => {
@@ -1081,18 +1170,18 @@ impl Guards {
             marker: marker.clone(),
         });
         let (home, kept, at) = (home.map(Path::to_owned), kept.to_owned(), root.to_owned());
-        let tops = tops.to_vec();
+        let (tops, groups) = (tops.to_vec(), self.groups.clone());
         tokio::spawn(async move {
             // Before the run starts, and before the markers of the places it takes in go.
             mark(&marker, &at);
             let mut taken_in = Vec::new();
             let mut lost = false;
-            for mut group in inside {
+            let mut inside = inside;
+            for group in &mut inside {
                 let snapshot = match group.snapshot.wait_for(Option::is_some).await {
                     Ok(snapshot) => snapshot.clone().flatten(),
                     Err(_) => None,
                 };
-                let _ = std::fs::remove_file(&group.marker);
                 match (group.root.strip_prefix(&at), snapshot) {
                     (Ok(relative), Some(snapshot)) => {
                         taken_in.push((relative.to_owned(), snapshot))
@@ -1108,9 +1197,55 @@ impl Guards {
             })
             .await
             .ok();
+            if snapshot.as_ref().is_some_and(|snapshot| !snapshot.missing) {
+                for group in &inside {
+                    let _ = std::fs::remove_file(&group.marker);
+                }
+            } else {
+                split(&groups, &taken, inside, &marker).await;
+            }
             let _ = taken.send(Some(snapshot));
         });
         snapshot
+    }
+}
+
+/// The group whose snapshot `taken` could not be taken gives back the groups it took in, their
+/// own snapshots kept for the runs still going on there: refused, it strands none of them. One
+/// whose runs all ended meanwhile is put back now.
+async fn split(
+    groups: &Arc<std::sync::Mutex<Vec<Group>>>,
+    taken: &watch::Sender<Option<Taken>>,
+    inside: Vec<Group>,
+    marker: &Path,
+) {
+    let this = taken.subscribe();
+    let mut ended = Vec::new();
+    {
+        let mut groups = locked(groups);
+        // Its runs all ended while it was taken: its put-back waits for it and says it missing.
+        let Some(at) = groups
+            .iter()
+            .position(|group| group.snapshot.same_channel(&this) && group.closing.is_none())
+        else {
+            return;
+        };
+        let outer = groups.remove(at);
+        let _ = std::fs::remove_file(marker);
+        for mut group in inside {
+            group.runs.retain(|run| outer.runs.contains(run));
+            if !group.runs.is_empty() {
+                groups.push(group);
+                continue;
+            }
+            let (closed, closing) = watch::channel(false);
+            group.closing = Some(closing);
+            ended.push((group.snapshot.clone(), closed, group.marker.clone()));
+            groups.push(group);
+        }
+    }
+    for (snapshot, closed, marker) in ended {
+        put_back_again(groups.clone(), snapshot, closed, marker).await;
     }
 }
 
@@ -1160,8 +1295,8 @@ impl Drop for Guard {
 /// The run `run` leaves its group: the last one puts the place back, in a task of its own that
 /// goes on if the one waiting for it is given up, a run that starts there meanwhile waiting.
 async fn leave(groups: Arc<std::sync::Mutex<Vec<Group>>>, run: String) -> Option<Restored> {
-    let (mut snapshot, closed, marker) = {
-        let mut groups = groups.lock().unwrap();
+    let (snapshot, closed, marker) = {
+        let mut groups = locked(&groups);
         let group = groups.iter_mut().find(|group| group.runs.contains(&run))?;
         group.runs.retain(|other| *other != run);
         if !group.runs.is_empty() {
@@ -1171,35 +1306,65 @@ async fn leave(groups: Arc<std::sync::Mutex<Vec<Group>>>, run: String) -> Option
         group.closing = Some(closing);
         (group.snapshot.clone(), closed, group.marker.clone())
     };
-    tokio::spawn(async move {
-        let taken = match snapshot.wait_for(Option::is_some).await {
-            Ok(taken) => taken.clone().flatten(),
-            Err(_) => None,
-        };
-        // Not taken, nothing is known of what the runs changed: said, never passed over.
-        let missing = Restored {
-            missing: true,
-            ..Restored::default()
-        };
-        let restored = match taken {
-            Some(taken) => tokio::task::spawn_blocking(move || taken.restore(&run))
-                .await
-                .unwrap_or(missing),
-            None => missing,
-        };
-        let _ = std::fs::remove_file(&marker);
-        let this = closed.subscribe();
-        groups.lock().unwrap().retain(|group| {
-            !group
-                .closing
-                .as_ref()
-                .is_some_and(|closing| closing.same_channel(&this))
-        });
-        let _ = closed.send(true);
-        restored
-    })
-    .await
-    .ok()
+    tokio::spawn(put_back(groups, snapshot, closed, marker, run))
+        .await
+        .ok()
+}
+
+/// The put-back of a group's place, by the run `run`: what it removes is kept in its folder.
+/// Once done, the group goes and `closed` says so.
+async fn put_back(
+    groups: Arc<std::sync::Mutex<Vec<Group>>>,
+    mut snapshot: watch::Receiver<Option<Taken>>,
+    closed: watch::Sender<bool>,
+    marker: PathBuf,
+    run: String,
+) -> Restored {
+    let taken = match snapshot.wait_for(Option::is_some).await {
+        Ok(taken) => taken.clone().flatten(),
+        Err(_) => None,
+    };
+    // Not taken, nothing is known of what the runs changed: said, never passed over.
+    let missing = Restored {
+        missing: true,
+        ..Restored::default()
+    };
+    let restored = match taken {
+        Some(taken) => tokio::task::spawn_blocking(move || taken.restore(&run))
+            .await
+            .unwrap_or(missing),
+        None => missing,
+    };
+    let _ = std::fs::remove_file(&marker);
+    let this = closed.subscribe();
+    locked(&groups).retain(|group| {
+        !group
+            .closing
+            .as_ref()
+            .is_some_and(|closing| closing.same_channel(&this))
+    });
+    let _ = closed.send(true);
+    restored
+}
+
+/// `put_back` of a group no run of which is left to say it, the run that started guarding it
+/// named by its marker: what it did goes to the daemon's log.
+async fn put_back_again(
+    groups: Arc<std::sync::Mutex<Vec<Group>>>,
+    snapshot: watch::Receiver<Option<Taken>>,
+    closed: watch::Sender<bool>,
+    marker: PathBuf,
+) {
+    let run = marker
+        .file_stem()
+        .map(|run| run.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let restored = tokio::spawn(put_back(groups, snapshot, closed, marker, run.clone()))
+        .await
+        .ok();
+    if let Some(text) = restored.as_ref().and_then(said) {
+        eprintln!("flottille: the agent folders guarded by the run {run}:{text}");
+    }
 }
 
 #[cfg(test)]
@@ -2028,5 +2193,167 @@ mod tests {
         assert!(!root.join(".codex/config.toml").exists());
         // The last run of a place to leave takes its entry with it.
         assert!(guards.groups.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_file_written_after_it_was_noted_keeps_no_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let settings = root.join(".claude/settings.json");
+        made(&settings, "{}\n");
+        let planted = settings.clone();
+        // Something writes it between the walk that noted it and the read of its content.
+        racing(".claude/settings.json", move || {
+            made(&planted, "{\"hooks\": {}}\n")
+        });
+
+        let snapshot = Snapshot::take(&root, None, &dir.path().join("kept"));
+
+        assert!(snapshot.contents.is_empty(), "{:?}", snapshot.contents);
+        // Its version is not put back as the one before the run.
+        let restored = snapshot.restore("run");
+        assert_eq!(restored.left, [".claude/settings.json"]);
+        assert!(!settings.exists());
+    }
+
+    #[test]
+    fn hook_scripts_are_kept_first_past_the_total_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let hook = "#!/bin/sh\n".repeat(100);
+        made(&root.join(".claude/hooks/start.sh"), &hook);
+        made(&root.join("app/.CLAUDE/Hooks/stop.sh"), &hook);
+        // Smaller files that would fill the bound before the hooks if they were not kept first.
+        let medium = "m".repeat(600);
+        for n in 0..6 {
+            made(&root.join(format!(".claude/commands/{n}.md")), &medium);
+        }
+
+        let snapshot = Snapshot::take(&root, None, &dir.path().join("kept"));
+
+        let kept: Vec<&Path> = snapshot.contents.keys().map(PathBuf::as_path).collect();
+        for path in [".claude/hooks/start.sh", "app/.CLAUDE/Hooks/stop.sh"] {
+            assert!(kept.contains(&Path::new(path)), "{path}: {kept:?}");
+        }
+        let held: usize = snapshot.contents.values().map(Vec::len).sum();
+        assert!(held as u64 <= KEPT_TOTAL, "{held}");
+    }
+
+    #[test]
+    fn the_kept_folder_made_a_link_while_old_ones_are_dropped_is_not_gone_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().join("kept");
+        let elsewhere = dir.path().join("elsewhere");
+        made(&kept.join("old-run/.claude/settings.json"), "{}\n");
+        made(&elsewhere.join("old-run/notes.md"), "mine\n");
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(40 * 24 * 3600);
+        std::fs::File::open(kept.join("old-run"))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        racing("old-run", swapped(kept.clone(), elsewhere.clone()));
+
+        drop_old(&kept);
+
+        assert!(elsewhere.join("old-run/notes.md").exists());
+        assert!(!kept.with_extension("aside").join("old-run").exists());
+    }
+
+    /// A put-back whose task died after its group closed, its snapshot taken before the run
+    /// planted `planted`.
+    fn dead_put_back(guards: &Guards, root: &Path, kept: &Path, planted: &Path) {
+        let snapshot = Arc::new(Snapshot::take(root, None, kept));
+        made(planted, "{\"hooks\": {}}\n");
+        let marker = kept.join(MARKERS).join("dead.json");
+        mark(&marker, root);
+        let (closed, closing) = watch::channel(false);
+        let (taken, snapshot) = watch::channel(Some(Some(snapshot)));
+        std::mem::forget(taken);
+        guards.groups.lock().unwrap().push(Group {
+            root: real(root),
+            runs: Vec::new(),
+            snapshot,
+            closing: Some(closing),
+            marker,
+        });
+        drop(closed);
+    }
+
+    #[tokio::test]
+    async fn a_dead_put_back_is_done_before_the_next_run_notes_its_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        made(&root.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let planted = root.join(".claude/settings.json");
+        let guards = Guards::default();
+        dead_put_back(&guards, &root, &kept, &planted);
+
+        let guard = guards.enter(&root, &[], None, &kept, "run").await.unwrap();
+
+        // Put back before the run's snapshot: the planted hook is not its start.
+        assert!(!planted.exists());
+        assert!(kept.join("dead/.claude/settings.json").exists());
+        made(&planted, "{\"hooks\": {}}\n");
+        let restored = guard.leave().await.unwrap();
+        assert_eq!(restored.put_back, [".claude/settings.json"]);
+        assert!(!planted.exists());
+        assert!(interrupted(&kept).is_empty());
+        assert!(guards.groups.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_lock_does_not_make_a_run_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        made(&root.join("README.md"), "\n");
+        let guards = Guards::default();
+        let groups = guards.groups.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = groups.lock().unwrap();
+            panic!("poisons the lock");
+        })
+        .join();
+        assert!(guards.groups.is_poisoned());
+
+        let guard = guards
+            .enter(&root, &[], None, &dir.path().join("kept"), "run")
+            .await
+            .unwrap();
+        made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
+        let restored = guard.leave().await.unwrap();
+
+        assert_eq!(restored.put_back, [".claude/settings.json"]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_outer_run_does_not_strand_a_run_going_on_inside() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("p");
+        let inner = outer.join("svc");
+        made(&inner.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let planted = inner.join(".claude/settings.json");
+        let guards = Guards::default();
+        let a = guards.enter(&inner, &[], None, &kept, "a").await.unwrap();
+        made(&planted, "{\"hooks\": {}}\n");
+
+        // A run in the outer place takes in the inner one's group; its own snapshot fails.
+        drop(hold(real(&outer)));
+        let Err(why) = guards.enter(&outer, &[], None, &kept, "o").await else {
+            panic!("a run whose agent folders could not be noted went ahead");
+        };
+        assert!(why.contains("could not be noted"), "{why}");
+
+        // The inner run's snapshot is still its group's: a run there starts, and the last to
+        // end puts back what the first planted.
+        let b = guards.enter(&inner, &[], None, &kept, "b").await.unwrap();
+        assert_eq!(a.leave().await, None);
+        let restored = b.leave().await.unwrap();
+        assert!(!restored.missing, "{restored:?}");
+        assert_eq!(restored.put_back, [".claude/settings.json"]);
+        assert!(!planted.exists());
+        assert!(guards.groups.lock().unwrap().is_empty());
+        assert!(interrupted(&kept).is_empty());
     }
 }
