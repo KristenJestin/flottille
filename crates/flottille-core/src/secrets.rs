@@ -452,14 +452,16 @@ fn login_fields(text: &str) -> Vec<LoginField> {
 /// The schemes of an `Authorization` header said before its credentials, which are kept.
 const SCHEMES: [&str; 5] = ["bearer", "basic", "digest", "token", "negotiate"];
 
-/// The keys of `headers`: an HTTP header's that carry credentials, and YAML's `password`.
+/// The keys of `headers`: an HTTP header's that carry credentials, and one ending in `password`.
 const HEADERS: [&str; 4] = ["authorization", "x-api-key", "cookie", "password"];
 
 /// Each header of `HEADERS` whose key is not quoted (an HTTP header, YAML, `curl -v`'s
 /// `> Authorization: Bearer …`, `Proxy-Authorization`, `Set-Cookie`), and one that may still be
 /// coming at the text's end. Its value, an `Authorization`'s scheme left out, runs to the end of
-/// its line or a quote. A `password` is one only at the start of its line (YAML's
-/// `  password: …`, a diff's `+password: …`): in prose, its colon starts a sentence.
+/// its line or a quote, or is the next line of a YAML block (`|`, `>`). A key ending in
+/// `password` is one only at the start of its line (YAML's `  db_password: …`, a diff's
+/// `+password: …`, a list's `- POSTGRES_PASSWORD=…`, `export PASSWORD=…`,
+/// `spring.datasource.password=…`): in prose, its colon starts a sentence.
 fn headers(text: &str) -> Vec<LoginField> {
     let mut found: Vec<LoginField> = HEADERS.iter().flat_map(|key| header(text, key)).collect();
     found.sort_by_key(|field| field.at);
@@ -479,19 +481,31 @@ fn header(text: &str, key: &str) -> Vec<LoginField> {
     };
     let mut found = Vec::new();
     for (at, _) in lower.match_indices(key) {
-        if at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_') {
+        let key_start = if key == "password" {
+            // A key ending in it (`POSTGRES_PASSWORD`, `db-password`, `spring.datasource.password`),
+            // alone on its line but for a diff's mark, a YAML list's dash or an `export`.
+            let key_start = text[..at]
+                .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+                .map_or(0, |before| {
+                    before + text[before..].chars().next().map_or(1, char::len_utf8)
+                });
+            let line = text[..key_start].rsplit('\n').next().unwrap_or_default();
+            let line = line.trim_start_matches([' ', '\t', '+', '-']);
+            let line = line
+                .strip_prefix("export")
+                .filter(|rest| rest.starts_with([' ', '\t']))
+                .unwrap_or(line);
+            if !line.chars().all(|c| matches!(c, ' ' | '\t')) {
+                continue;
+            }
+            key_start
+        } else if at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_') {
             continue;
-        }
-        if key == "password"
-            && !text[..at]
-                .rsplit('\n')
-                .next()
-                .is_some_and(|line| line.chars().all(|c| matches!(c, ' ' | '\t' | '+' | '-')))
-        {
-            continue;
-        }
+        } else {
+            at
+        };
         let mut field = LoginField {
-            at,
+            at: key_start,
             values: Vec::new(),
             end: coming,
         };
@@ -506,6 +520,24 @@ fn header(text: &str, key: &str) -> Vec<LoginField> {
         let mut start = spaces(colon + 1);
         if start < len && matches!(bytes[start], b'"' | b'\'') {
             start += 1;
+        }
+        // A YAML block value (`password: |`, `>-`): the secret is on the next line.
+        if start < len && matches!(bytes[start], b'|' | b'>') {
+            let mark = start
+                + 1
+                + bytes[start + 1..]
+                    .iter()
+                    .position(|byte| !matches!(byte, b'-' | b'+' | b'0'..=b'9'))
+                    .unwrap_or(len - start - 1);
+            let after = spaces(mark);
+            let after = after + usize::from(bytes[after..].starts_with(b"\r"));
+            if after == len {
+                found.push(field);
+                break;
+            }
+            if bytes[after] == b'\n' {
+                start = spaces(after + 1);
+            }
         }
         let word = start
             + bytes[start..]
@@ -1131,5 +1163,80 @@ mod tests {
             mask_ranges("abcdefghij", vec![(1, 8), (3, 5)]),
             "a[masked]ij"
         );
+    }
+
+    /// `text` masked, the same whole and streamed cut at each byte.
+    fn masked_at_each_cut(text: &str) -> String {
+        let masked = mask(text, &BTreeMap::new());
+        for cut in 1..text.len() {
+            assert_eq!(streamed(text, &[cut], &BTreeMap::new()), masked, "{cut}");
+        }
+        masked
+    }
+
+    #[test]
+    fn an_unquoted_key_ending_in_password_is_masked() {
+        let text = "services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: fake-env-0123\n\
+            environment:\n  - POSTGRES_PASSWORD=fake-list-0123\n\
+            db_password: fake-db-0123\n+db-password: fake-diff-0123\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("      POSTGRES_PASSWORD: [masked]\n"),
+            "{masked}"
+        );
+        assert!(
+            masked.contains("  - POSTGRES_PASSWORD=[masked]\n"),
+            "{masked}"
+        );
+        assert!(masked.contains("\ndb_password: [masked]\n"), "{masked}");
+    }
+
+    #[test]
+    fn an_exported_password_is_masked() {
+        let text = "export PASSWORD=fake-export-0123\n+export DB_PASSWORD=\"fake-quoted-0123\"\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(masked.contains("export PASSWORD=[masked]\n"), "{masked}");
+    }
+
+    #[test]
+    fn a_dotted_password_key_is_masked() {
+        let text = "spring.datasource.url=jdbc:postgresql://db.example.test/app\n\
+            spring.datasource.password=fake-dotted-0123\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("spring.datasource.password=[masked]\n"),
+            "{masked}"
+        );
+        assert!(masked.contains("db.example.test/app\n"), "{masked}");
+    }
+
+    #[test]
+    fn a_yaml_block_password_is_masked() {
+        let text = "database:\n  password: |\n    fake-block-0123\n  user: app\n\
+            db_password: >-\n  fake-folded-0123\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("  password: |\n    [masked]\n  user: app\n"),
+            "{masked}"
+        );
+    }
+
+    #[test]
+    fn prose_about_a_password_stays_clear() {
+        let prose = "the password is wrong\n\
+            The password is wrong: try again.\n\
+            Set POSTGRES_PASSWORD in the .env file.\n\
+            Check that db_password: is set, then export it.\n\
+            password_hash: a column of the users table\n\
+            Passwords: see the docs.\n";
+        assert_eq!(mask(prose, &BTreeMap::new()), prose);
     }
 }

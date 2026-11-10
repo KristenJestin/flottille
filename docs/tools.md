@@ -419,8 +419,9 @@ pending requests.
   `aws_secret_access_key`, `private_key`; an HTTP header's `Authorization`), and the value of an
   `Authorization`, `X-Api-Key` or `Cookie` header whose key is not quoted (`Authorization: Bearer
   …` of a header, YAML or `curl -v`, `Proxy-Authorization`, `Set-Cookie`), an `Authorization`'s
-  scheme kept, or of a `password:` that starts its line (YAML), to the end of its line or a
-  quote, but a
+  scheme kept, or of a key ending in `password` that starts its line (`password:` or
+  `POSTGRES_PASSWORD=` of YAML, a list's `- `, `export `, `spring.datasource.password=`), to the
+  end of its line or a quote, or the next line of a YAML block (`password: |`), but a
   tokenizer's special tokens (`pad_token`, `bos_token`, `eos_token`, `unk_token`, `sep_token`,
   `cls_token`, `mask_token`), wherever it is shown: a diff of a staged one, its value on the next line
   after a `+` or `-`, a word diff's `[-"…"-]{+"…"+}` (`flottille_core::secrets`). It is not a
