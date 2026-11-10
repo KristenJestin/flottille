@@ -1353,10 +1353,10 @@ session that ended and an empty text.
   delivery, `session`, urgent (on its next tool result in a turn, a new turn otherwise), under a
   line naming the sender (`agent 0123456789ab wrote to this session:`): it is an agent's words,
   never the user's. Its answer, a `session_send` the other way, comes back the same way.
-- **No endless back and forth.** When the two agents of a following (a pilot and its led session) write to each other five times
+- **No endless back and forth.** When the two agents of a following (a pilot and its led session) write to each other fifty times
   (`session_send`, from either, each with the turn it causes) with no message of the user's in
   either session, the following pauses: no more wakes, and a `session_send` between the two is
-  refused at once (`refused: paused: you two wrote to each other five times without the user;
+  refused at once (`refused: paused: you two wrote to each other fifty times without the user;
   wait for their message`); `session.following_paused` is emitted, the user's inbox says that the
   two sessions talk without them (`kind` `paused`), the window's rail says it under the following
   with a Resume, and `forge show` says it is paused. A message of the user's to either session, or
