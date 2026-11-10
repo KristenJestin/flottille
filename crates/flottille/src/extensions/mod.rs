@@ -73,6 +73,11 @@ pub struct Extension {
     pub sentence: &'static str,
     pub scope: Scope,
     pub on_by_default: bool,
+    /// The label of its switch: what turning it on does (`Review changes`), never its state.
+    pub switch: &'static str,
+    /// Where and how it acts, shown on its page even while it is off; the words found elsewhere
+    /// in the window are between `**` (`Used by **/review** in a session's composer.`).
+    pub usage: &'static str,
     /// Where its settings appear in the window.
     pub place: Place,
     pub settings: &'static [Setting],
@@ -207,8 +212,13 @@ pub enum Scope {
 /// Where an extension's settings appear: a section of a screen that exists comes with the first
 /// extension that needs it.
 pub enum Place {
-    /// A tab of its own in Settings, at its place among the tabs.
-    Tab { title: &'static str, order: u32 },
+    /// A row of Settings' Features, at its place among the rows, which opens its page: its Lucide
+    /// icon (by its file name) and the one line that says what it is for.
+    Row {
+        icon: &'static str,
+        line: &'static str,
+        order: u32,
+    },
 }
 
 pub struct Setting {
@@ -1120,7 +1130,7 @@ fn list(daemon: &Daemon) -> Value {
                     }),
                 })
                 .collect();
-            let Place::Tab { title, order } = extension.place;
+            let Place::Row { icon, line, order } = extension.place;
             json!({
                 "name": extension.name,
                 "title": extension.title,
@@ -1130,7 +1140,9 @@ fn list(daemon: &Daemon) -> Value {
                     Scope::Global => "global",
                 },
                 "on_by_default": extension.on_by_default,
-                "place": {"tab": title, "order": order},
+                "switch": extension.switch,
+                "usage": extension.usage,
+                "place": {"icon": icon, "line": line, "order": order},
                 "enabled": enabled,
                 "error": error,
                 "settings": settings,

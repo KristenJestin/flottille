@@ -28,13 +28,16 @@ pub const EXTENSION: Extension = Extension {
                guessing. It runs no model on its own.",
     scope: Scope::Project,
     on_by_default: false,
-    place: Place::Tab {
-        title: "Specs",
+    switch: "Write specs before building",
+    usage: "Used from a ticket's **Write the spec**, and from **Specs** in a project's page.",
+    place: Place::Row {
+        icon: "file-text",
+        line: "A spec of each task, written with you before an agent builds it.",
         order: 2,
     },
     settings: &[Setting {
         key: "language",
-        label: "Language",
+        label: "Written in",
         hint: "The language specs are written in; yours by default",
         kind: Kind::Language,
         per_project: true,
