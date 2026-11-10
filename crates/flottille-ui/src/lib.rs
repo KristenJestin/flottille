@@ -7,6 +7,7 @@
 
 pub mod button;
 pub mod card;
+pub mod choice_row;
 pub mod color;
 pub mod confirm;
 pub mod cut;
@@ -45,6 +46,7 @@ use gpui_kit::App;
 
 pub use button::{Badge, Button, ButtonKind, Tooltip, tipped};
 pub use card::{Block, Card};
+pub use choice_row::ChoiceRow;
 pub use confirm::Confirm;
 pub use cut::{QUOTED_CHARS, quoted, quoted_title, tipped_when_cut};
 pub use drawer::{Drawer, Side};

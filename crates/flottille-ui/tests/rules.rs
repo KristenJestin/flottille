@@ -12,9 +12,9 @@ use std::time::Duration;
 use common::{Desktop, advance, init, pending_frames};
 use flottille_ui::motion::{ENTER, HOVER, MODAL, PANEL};
 use flottille_ui::{
-    Block, Button, Card, Confirm, Drawer, EmptyLine, Field, Icon, ListCard, ListRow, Menu,
-    PageHeader, RadioChoices, Segmented, Select, SelectOption, Switch, Toast, ToastStack, space,
-    toast,
+    Block, Button, Card, ChoiceRow, Confirm, Drawer, EmptyLine, Field, Icon, ListCard, ListRow,
+    Menu, PageHeader, RadioChoices, Segmented, Select, SelectOption, Switch, Toast, ToastStack,
+    space, toast,
 };
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{
@@ -592,6 +592,96 @@ fn choosing_a_radio_choice_reports_it_and_its_dot_scales_in(cx: &mut TestAppCont
     );
     advance(cx, PANEL * 2);
     assert_eq!(bounds("source-text-dot", cx).size.width, full);
+    assert_eq!(pending_frames(cx), 0);
+}
+
+const LONG: &str = "You drop me a bundle or a clone of the real repository, and I replay its \
+                    commits one by one so that the history stays whole in the new place.";
+
+#[gpui_kit::test]
+fn a_choice_row_has_its_description_under_its_label(cx: &mut TestAppContext) {
+    let (_, cx) = host(cx, |_, _| {
+        ChoiceRow::new("pick-a", "One initial commit")
+            .description("We start from this snapshot.")
+            .into_any_element()
+    });
+    cx.update(|window, _| {
+        assert_eq!(window.find("pick-a").label(), Some("One initial commit"));
+        assert_eq!(
+            window.find("pick-a-line").label(),
+            Some("We start from this snapshot.")
+        );
+    });
+    let (row, label, line) = (
+        bounds("pick-a", cx),
+        bounds("pick-a-label", cx),
+        bounds("pick-a-line", cx),
+    );
+    assert!(label.bottom() <= line.top(), "the line is under the label");
+    assert_eq!(label.left(), line.left(), "both start at one x");
+    assert!(row.contains(&line.origin) && line.right() <= row.right());
+}
+
+#[gpui_kit::test]
+fn a_long_choice_description_wraps_and_stays_in_its_row(cx: &mut TestAppContext) {
+    let (_, cx) = host(cx, |_, _| {
+        div()
+            .w(px(320.))
+            .child(ChoiceRow::new("pick-b", "I send you the history").description(LONG))
+            .into_any_element()
+    });
+    let (row, line) = (bounds("pick-b", cx), bounds("pick-b-line", cx));
+    assert_eq!(row.size.width, px(320.), "the row is the room it has");
+    assert!(line.right() <= row.right(), "never off its row: {line:?}");
+    assert!(line.size.height > px(34.), "it wraps on several lines");
+    assert!(line.bottom() <= row.bottom());
+}
+
+#[gpui_kit::test]
+fn a_choice_row_s_mark_is_round_or_square_and_fills_when_chosen(cx: &mut TestAppContext) {
+    let chosen = Rc::new(Cell::new(false));
+    let seen = chosen.clone();
+    let (view, cx) = host(cx, move |_, cx| {
+        let (seen, this) = (seen.clone(), cx.entity().downgrade());
+        div()
+            .child(ChoiceRow::new("round", "Yes"))
+            .child(
+                ChoiceRow::new("square", "Alice")
+                    .square()
+                    .chosen(seen.get())
+                    .on_click(move |_, cx| {
+                        seen.set(!seen.get());
+                        this.update(cx, |_, cx| cx.notify()).ok();
+                    }),
+            )
+            .into_any_element()
+    });
+    assert!(
+        shown("round-dot", cx),
+        "one choice: a round mark with a dot"
+    );
+    assert!(!shown("round-tick", cx));
+    assert!(
+        shown("square-tick", cx),
+        "several: a square mark with a tick"
+    );
+    assert!(!shown("square-dot", cx));
+    assert_eq!(chosen.get(), false);
+    assert_eq!(bounds("square-tick", cx).size.width, px(0.), "nothing yet");
+    assert_eq!(cx.update(|w, _| w.find("square").selected()), Some(false));
+
+    cx.update(|window, cx| window.click("square", cx));
+    assert!(chosen.get());
+    redraw(&view, cx);
+    advance(cx, PANEL / 3);
+    let growing = bounds("square-tick", cx).size.width;
+    advance(cx, PANEL * 2);
+    let full = bounds("square-tick", cx).size.width;
+    assert!(
+        px(0.) < growing && growing < full,
+        "the tick grows: {growing:?} of {full:?}"
+    );
+    assert_eq!(cx.update(|w, _| w.find("square").selected()), Some(true));
     assert_eq!(pending_frames(cx), 0);
 }
 
