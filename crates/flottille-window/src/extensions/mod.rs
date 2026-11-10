@@ -1022,7 +1022,9 @@ mod tests {
     fn listed(gives: Value) -> Listed {
         Listed::of(&json!({
             "name": "review", "title": "Review", "sentence": "", "scope": "project",
-            "place": {"tab": "Review", "order": 1}, "enabled": true, "error": null,
+            "place": {"icon": "review", "line": "Checks each ticket's work", "order": 1},
+            "switch": "Review the work", "usage": "Runs a **review** pass on each ticket.",
+            "enabled": true, "error": null,
             "settings": [{"key": "bugs_model", "label": "Bugs", "hint": "", "kind": "model",
                 "per_project": true, "value": null, "set": false,
                 "default": {"rule": "The daemon's rule", "gives": gives}}],
