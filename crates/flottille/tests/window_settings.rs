@@ -5,7 +5,10 @@
 
 mod common;
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -52,12 +55,21 @@ fn window<'a>(
     user: &User,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let connect: flottille_window::link::Connect = Arc::new(user.connector());
+    window_through(user, connect, cx)
+}
+
+/// A window whose every connection to the daemon is made through `connect`.
+fn window_through<'a>(
+    user: &User,
+    connect: flottille_window::link::Connect,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
     let env = Environment {
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
     cx.update(|cx| flottille_window::init_with(env, cx));
-    let connect: flottille_window::link::Connect = Arc::new(user.connector());
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1280.), px(2400.)));
     (shell, cx)
@@ -535,7 +547,7 @@ fn the_log_path_unfolds_only_with_developer_mode(cx: &mut TestAppContext) {
 
     click(cx, "developer-switch");
     until(&shell, cx, "the daemon says it is on", |cx| {
-        page.read_with(cx, |p, _| p.developer_on())
+        page.read_with(cx, |p, _| p.developer().is_some_and(|d| d.log))
     });
     settle(cx);
     assert!(visible(cx, "developer-file"), "on: the path unfolds");
@@ -546,8 +558,67 @@ fn the_log_path_unfolds_only_with_developer_mode(cx: &mut TestAppContext) {
 
     click(cx, "developer-switch");
     until(&shell, cx, "the daemon says it is off", |cx| {
-        page.read_with(cx, |p, _| !p.developer_on())
+        page.read_with(cx, |p, _| p.developer().is_some_and(|d| !d.log))
     });
     settle(cx);
     assert!(!present(cx, "developer-file"), "off again: it folds away");
+}
+
+/// `connect` as a window's connection, except that a request for the providers waits for `open`:
+/// the daemon answers it late, as a slow machine does.
+fn holding_providers(
+    connect: impl Fn() -> std::io::Result<UnixStream> + Send + Sync + 'static,
+    open: Arc<AtomicBool>,
+) -> flottille_window::link::Connect {
+    Arc::new(move || {
+        let (window, relay) = UnixStream::pair()?;
+        let daemon = connect()?;
+        let (mut to_window, mut from_daemon) = (relay.try_clone()?, daemon.try_clone()?);
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut from_daemon, &mut to_window);
+        });
+        let open = open.clone();
+        std::thread::spawn(move || {
+            let mut to_daemon = daemon;
+            for line in BufReader::new(relay).lines().map_while(Result::ok) {
+                let held = serde_json::from_str::<serde_json::Value>(&line)
+                    .is_ok_and(|request| request["method"] == "provider.list");
+                while held && !open.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if writeln!(to_daemon, "{line}").is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(window)
+    })
+}
+
+#[gpui_kit::test]
+fn the_auto_judge_waits_as_a_skeleton_until_the_providers_are_known(cx: &mut TestAppContext) {
+    let user = user();
+    let open = Arc::new(AtomicBool::new(false));
+    let connect = holding_providers(user.connector(), open.clone());
+    let (shell, cx) = window_through(&user, connect, cx);
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the settings page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
+    });
+    let page = shell
+        .read_with(cx, |s, cx| s.main().read(cx).settings_page().cloned())
+        .unwrap();
+    tab(&shell, cx, "approvals");
+    assert!(!page.read_with(cx, |p, _| p.providers().known));
+    assert!(present(cx, "judge-skeleton"), "the judge waits");
+    assert!(!present(cx, "judge-switch"), "its card is not drawn yet");
+    assert!(visible(cx, "judge-title"), "its title stays");
+
+    open.store(true, Ordering::SeqCst);
+    until(&shell, cx, "the providers are listed", |cx| {
+        page.read_with(cx, |p, _| p.providers().known)
+    });
+    settle(cx);
+    assert!(visible(cx, "judge-switch"), "the judge replaces its skeleton");
+    assert!(!present(cx, "judge-skeleton"));
 }

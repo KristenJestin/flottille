@@ -1627,7 +1627,13 @@ impl SettingsPage {
                 presence("judge-model-block", on, div().pt(space::MD).child(model)).gap(space::MD),
             )
             .test_support();
-        Section::new("judge", "Auto judge").child(card)
+        // Its models are the providers': the card crossfades in from a skeleton once they are known.
+        Section::new("judge", "Auto judge").child(awaiting(
+            "judge-waiting",
+            !self.providers.known,
+            Skeleton::new("judge-skeleton").h(px(96.)),
+            card,
+        ))
     }
 
     /// A provider's row: its switch carries its name, its version is a tag (its program's path in
@@ -1932,14 +1938,7 @@ impl Render for SettingsPage {
                 ("sessions", self.sessions_section(cx).into_any_element()),
             ],
             "approvals" => vec![
-                (
-                    "judge",
-                    if self.providers.known {
-                        self.judge_section(cx).into_any_element()
-                    } else {
-                        div().into_any_element()
-                    },
-                ),
+                ("judge", self.judge_section(cx).into_any_element()),
                 ("guidance", self.judge_guidance.clone().into_any_element()),
             ],
             "features" => vec![("features", self.features_tab(cx))],
