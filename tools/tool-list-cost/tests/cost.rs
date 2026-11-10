@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use tool_list_cost::{
     Counter, LEVELS, Level, help_tool, list_cost, misuse_report, one_line, report, slimmed,
-    tool_cost, usage_report,
+    tool_cost, usage_report, without_rules,
 };
 
 fn notes() -> Value {
@@ -36,11 +36,23 @@ fn ping() -> Value {
     })
 }
 
+/// What a prompt is like: the enforced text, the user's rules between two rules, the role.
+fn instructions(rules: &str) -> String {
+    let rules = if rules.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n---\n\n# How to work\n\n{rules}")
+    };
+    format!("Enforced text.{rules}\n\n---\n\n# Your role: worker\n\nDo the task.")
+}
+
 fn dump() -> Value {
     json!({
         "kinds": [
-            {"kind": "root", "project": "plain", "tools": [notes(), ping()]},
-            {"kind": "worker", "project": "plain", "tools": [ping()]}
+            {"kind": "root", "project": "plain", "tools": [notes(), ping()],
+             "instructions": instructions("the rules of every project")},
+            {"kind": "worker", "project": "plain", "tools": [ping()],
+             "instructions": instructions("")}
         ],
         "misuses": [
             {"tool": "notes", "mistake": "no arguments", "arguments": {},
@@ -264,6 +276,32 @@ fn a_proposal_says_what_each_kind_saves_when_only_the_named_tools_are_slimmed() 
     let ping = list_cost(&counter, &[ping()], &[], Level::Whole);
     assert!(
         report.contains(&format!("| worker | plain | {ping} | 0 |")),
+        "{report}"
+    );
+}
+
+#[test]
+fn the_rules_of_every_project_are_taken_out_of_a_prompt_and_nothing_else() {
+    let with = instructions("the rules of every project");
+    assert_eq!(without_rules(&with), instructions(""));
+    assert_eq!(without_rules(&instructions("")), instructions(""));
+}
+
+#[test]
+fn the_report_says_what_a_session_starts_with_the_prompt_and_the_list_of_each_kind() {
+    let counter = Counter::new();
+    let report = report(&counter, &dump(), &[]);
+    let prompt = counter.tokens(&instructions("the rules of every project"));
+    let bare = counter.tokens(&instructions(""));
+    let list =
+        |tools: &[Value]| -> usize { tools.iter().map(|t| tool_cost(&counter, t).total).sum() };
+    let root = list(&[notes(), ping()]);
+    assert!(
+        report.contains(&format!(
+            "| root | plain | {prompt} | {bare} | {root} | {} | {} |",
+            prompt + root,
+            bare + root
+        )),
         "{report}"
     );
 }

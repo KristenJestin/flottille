@@ -63,8 +63,9 @@ fn declare_forge_and_tracker(user: &User, name: &str) {
     .unwrap();
 }
 
-/// A root of `project` and its MCP session; in Full, so that nothing the test launches is held.
-fn root(user: &User, project: &str, workspace: Option<&str>) -> (String, Mcp) {
+/// A root of `project`, its MCP session and the place of its `session/new` among the requests;
+/// in Full, so that nothing the test launches is held.
+fn root(user: &User, project: &str, workspace: Option<&str>) -> (String, Mcp, usize) {
     let opened = user.received_requests("session/new").len();
     let mut params = json!({"project": project, "message": "hello"});
     if let Some(workspace) = workspace {
@@ -75,27 +76,42 @@ fn root(user: &User, project: &str, workspace: Option<&str>) -> (String, Mcp) {
     let (url, authorization) = server_of(user, opened);
     user.call("agent.mode", json!({"agent": id, "mode": "full"}))
         .unwrap();
-    (id, Mcp::initialize(&url, &authorization))
+    (id, Mcp::initialize(&url, &authorization), opened)
 }
 
-/// What `agent_launch` with `arguments` started: its MCP session.
-fn launched(user: &User, parent: &Mcp, arguments: Value) -> Mcp {
+/// What `agent_launch` with `arguments` started: its MCP session and the place of its
+/// `session/new` among the requests.
+fn launched(user: &User, parent: &Mcp, arguments: Value) -> (Mcp, usize) {
     let opened = user.received_requests("session/new").len();
     let answer = parent.call("agent_launch", arguments);
     assert!(!answer.error, "{}", answer.text);
     let (url, authorization) = server_of(user, opened);
-    Mcp::initialize(&url, &authorization)
+    (Mcp::initialize(&url, &authorization), opened)
 }
 
-/// The MCP session of the last agent session opened whose instructions `which` accepts.
-fn session_of(user: &User, which: impl Fn(&str) -> bool) -> Mcp {
+/// The instructions `session/new` carried to the agent: what its system prompt holds, whole.
+fn instructions_of(opened: &Value) -> String {
+    let prompt = &opened["params"]["_meta"]["claudeCode"]["options"]["systemPrompt"]["prompt"];
+    prompt
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The MCP session of the last agent session opened whose instructions `which` accepts, and the
+/// place of its `session/new` among the requests.
+fn session_of(user: &User, which: impl Fn(&str) -> bool) -> (Mcp, usize) {
     let mut found = None;
     eventually("the session", || {
         found = user
             .received_requests("session/new")
             .into_iter()
+            .enumerate()
             .rev()
-            .find(|opened| {
+            .find(|(_, opened)| {
                 let prompt =
                     opened["params"]["_meta"]["claudeCode"]["options"]["systemPrompt"]["prompt"][2]
                         .as_str()
@@ -104,10 +120,14 @@ fn session_of(user: &User, which: impl Fn(&str) -> bool) -> Mcp {
             });
         found.is_some()
     });
-    let server = &found.unwrap()["params"]["mcpServers"][0];
-    Mcp::initialize(
-        server["url"].as_str().unwrap(),
-        server["headers"][0]["value"].as_str().unwrap(),
+    let (at, opened) = found.unwrap();
+    let server = &opened["params"]["mcpServers"][0];
+    (
+        Mcp::initialize(
+            server["url"].as_str().unwrap(),
+            server["headers"][0]["value"].as_str().unwrap(),
+        ),
+        at,
     )
 }
 
@@ -116,6 +136,8 @@ struct Kind {
     kind: &'static str,
     project: &'static str,
     mcp: Mcp,
+    /// The instructions the agent was given, which ride in every request beside the list.
+    instructions: String,
 }
 
 impl Kind {
@@ -167,21 +189,21 @@ fn kinds(user: &User) -> Vec<Kind> {
         launched(user, parent, arguments)
     };
 
-    let (_, plain) = root(user, "plain", None);
-    let plain_worker = child(&plain, "plain worker", None);
-    let (_, full) = root(user, "full", None);
-    let worker = child(&full, "worker", None);
-    let lead_child = child(&full, "lead child", Some("lead"));
-    let led = launched(
+    let (_, plain, plain_at) = root(user, "plain", None);
+    let (plain_worker, plain_worker_at) = child(&plain, "plain worker", None);
+    let (_, full, full_at) = root(user, "full", None);
+    let (worker, worker_at) = child(&full, "worker", None);
+    let (lead_child, lead_child_at) = child(&full, "lead child", Some("lead"));
+    let (led, led_at) = launched(
         user,
         &full,
         json!({"kind": "led", "title": "led", "brief": "Do the work.", "new_workspace": "l"}),
     );
-    let (session, extended) = root(user, "app", Some("w"));
-    let extended_worker = child(&extended, "extended worker", None);
+    let (session, extended, extended_at) = root(user, "app", Some("w"));
+    let (extended_worker, extended_worker_at) = child(&extended, "extended worker", None);
     user.call("review.start", json!({"agent": session}))
         .unwrap();
-    let pilot = session_of(user, |prompt| {
+    let (pilot, pilot_at) = session_of(user, |prompt| {
         prompt.contains("You are the pilot of a review")
     });
     let text = pilot.call(
@@ -189,62 +211,116 @@ fn kinds(user: &User) -> Vec<Kind> {
         json!({"action": "run_pass", "pass": "bugs", "brief": "the login"}),
     );
     assert!(!text.error, "{}", text.text);
-    let pass = session_of(user, |prompt| {
+    let (pass, pass_at) = session_of(user, |prompt| {
         prompt.contains("You are the bugs pass of a review")
     });
 
+    let opened = user.received_requests("session/new");
+    let kind = |kind: &'static str, project: &'static str, mcp: Mcp, at: usize| Kind {
+        kind,
+        project,
+        mcp,
+        instructions: instructions_of(&opened[at]),
+    };
     vec![
-        Kind {
-            kind: "root",
-            project: "plain",
-            mcp: plain,
-        },
-        Kind {
-            kind: "worker",
-            project: "plain",
-            mcp: plain_worker,
-        },
-        Kind {
-            kind: "root",
-            project: "full",
-            mcp: full,
-        },
-        Kind {
-            kind: "worker",
-            project: "full",
-            mcp: worker,
-        },
-        Kind {
-            kind: "worker with the role lead",
-            project: "full",
-            mcp: lead_child,
-        },
-        Kind {
-            kind: "led session",
-            project: "full",
-            mcp: led,
-        },
-        Kind {
-            kind: "root with Specs and Review",
-            project: "app",
-            mcp: extended,
-        },
-        Kind {
-            kind: "worker with Specs and Review",
-            project: "app",
-            mcp: extended_worker,
-        },
-        Kind {
-            kind: "review pilot",
-            project: "app",
-            mcp: pilot,
-        },
-        Kind {
-            kind: "review pass",
-            project: "app",
-            mcp: pass,
-        },
+        kind("root", "plain", plain, plain_at),
+        kind("worker", "plain", plain_worker, plain_worker_at),
+        kind("root", "full", full, full_at),
+        kind("worker", "full", worker, worker_at),
+        kind(
+            "worker with the role lead",
+            "full",
+            lead_child,
+            lead_child_at,
+        ),
+        kind("led session", "full", led, led_at),
+        kind("root with Specs and Review", "app", extended, extended_at),
+        kind(
+            "worker with Specs and Review",
+            "app",
+            extended_worker,
+            extended_worker_at,
+        ),
+        kind("review pilot", "app", pilot, pilot_at),
+        kind("review pass", "app", pass, pass_at),
     ]
+}
+
+/// The server of a connection: one tool per action, a dozen of them, with the words a real
+/// server uses.
+fn almanac() -> Value {
+    let action = |name: &str, says: &str| {
+        json!({"name": name, "description": says, "inputSchema": {"type": "object",
+            "properties": {"query": {"type": "string"}}}})
+    };
+    json!({
+        "server": {"name": "almanac", "version": "1.0.0"},
+        "tools": [
+            action("search", "Finds notes by words."),
+            action("read", "Reads a note."),
+            action("write", "Writes a note."),
+            action("edit", "Changes a note."),
+            action("delete", "Deletes a note."),
+            action("list", "Lists the notes of a folder."),
+            action("tag", "Tags a note."),
+            action("untag", "Removes a tag."),
+            action("link", "Links two notes."),
+            action("recent", "Lists the notes changed lately."),
+            action("export", "Exports a folder."),
+            action("import", "Imports a folder."),
+        ],
+        "answers": {},
+    })
+}
+
+/// A root of a project that sees an entry of the vault and, with `connection`, has one connection:
+/// what the user's own entries and servers add to a root's list. Each is for every project, so
+/// each is measured in a daemon of its own; a session's list follows what changes after it.
+fn the_users_own(user: &User, connection: bool) -> Kind {
+    project(user, "plain");
+    user.call(
+        "vault.set",
+        json!({"name": "notes-token", "secret": "not-a-real-secret-0123456789",
+            "description": "The token of the notes server"}),
+    )
+    .unwrap();
+    if connection {
+        let script = user.path("almanac-script.json");
+        std::fs::write(&script, almanac().to_string()).unwrap();
+        let fake = std::path::Path::new(env!("CARGO_BIN_EXE_flottille"))
+            .with_file_name("flottille-fake-mcp");
+        assert!(
+            fake.exists(),
+            "{} is missing: `cargo build --workspace --bins` first",
+            fake.display()
+        );
+        user.call(
+            "extension.set",
+            json!({"name": "connections", "enabled": true}),
+        )
+        .unwrap();
+        user.call(
+            "connection.add",
+            json!({"name": "almanac", "about": "The user's notes.",
+                "command": [fake, "--script", script]}),
+        )
+        .unwrap();
+        user.call("connection.review", json!({"name": "almanac"}))
+            .unwrap();
+        user.call("connection.accept", json!({"name": "almanac"}))
+            .unwrap();
+    }
+    let (_, mcp, at) = root(user, "plain", None);
+    Kind {
+        kind: if connection {
+            "root with a vault entry and a connection"
+        } else {
+            "root with a vault entry"
+        },
+        project: "plain",
+        mcp,
+        instructions: instructions_of(&user.received_requests("session/new")[at]),
+    }
 }
 
 fn kind<'a>(kinds: &'a [Kind], kind: &str, project: &str) -> &'a Kind {
@@ -273,6 +349,20 @@ fn a_root_is_served_the_tools_its_project_declares() {
     for name in ["spec", "review"] {
         assert!(extended.contains(&name.to_owned()) && !full.contains(&name.to_owned()));
     }
+}
+
+#[test]
+fn a_vault_entry_adds_one_tool_and_a_connection_one_more_whatever_its_actions() {
+    let alone = User::with_fake_agent();
+    alone.fake_script(script());
+    let vault = the_users_own(&alone, false).names();
+    let linked = User::with_fake_agent();
+    linked.fake_script(script());
+    let both = the_users_own(&linked, true).names();
+
+    assert!(vault.contains(&"vault".to_owned()), "{vault:?}");
+    assert_eq!(both.len(), vault.len() + 1, "{vault:?} {both:?}");
+    assert!(both.contains(&"conn_almanac".to_owned()), "{both:?}");
 }
 
 #[test]
@@ -423,11 +513,16 @@ fn the_lists_and_the_answers_to_misuse_are_written_for_the_measure() {
     user.fake_script(script());
     let kinds = kinds(&user);
     let root = kind(&kinds, "root with Specs and Review", "app");
+    let (alone, linked) = (User::with_fake_agent(), User::with_fake_agent());
+    alone.fake_script(script());
+    linked.fake_script(script());
+    let own_kinds = [the_users_own(&alone, false), the_users_own(&linked, true)];
     let dump = json!({
-        "kinds": kinds.iter().map(|k| json!({
+        "kinds": kinds.iter().chain(&own_kinds).map(|k| json!({
             "kind": k.kind,
             "project": k.project,
             "tools": k.mcp.tools(),
+            "instructions": k.instructions,
         })).collect::<Vec<_>>(),
         "misuses": misuses(&root.mcp).into_iter().map(|m| json!({
             "tool": m.tool,
