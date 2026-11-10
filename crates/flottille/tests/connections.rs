@@ -1082,6 +1082,72 @@ fn a_vault_entry_tied_to_one_project_is_refused_for_a_connection() {
     assert!(refused.1.contains("the project app's alone"), "{refused:?}");
 }
 
+#[test]
+fn an_entry_bound_to_the_worklog_is_refused_to_a_connection() {
+    let user = user();
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": SECRET, "for": "worklog:app"}),
+    )
+    .unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": "s3cret-of-almanac-alone",
+            "for": "connection:almanac"}),
+    )
+    .unwrap();
+    turn_on(&user);
+    write_script(&user, "almanac", &almanac());
+    let refused = user
+        .call(
+            "connection.add",
+            json!({"name": "almanac", "about": "Notes.",
+            "command": command_of(&user, "almanac"),
+            "env": {"TOKEN": {"vault": "jira-time"}}}),
+        )
+        .unwrap_err();
+    // Bound to a worklog, the entry is its project's alone: the sentence says so, never its value.
+    assert!(refused.1.contains("the project app's alone"), "{refused:?}");
+    assert!(!refused.1.contains(SECRET), "{refused:?}");
+
+    // An entry bound to one connection is refused to another, and given to its own.
+    write_script(&user, "jotter", &almanac());
+    let refused = user
+        .call(
+            "connection.add",
+            json!({"name": "jotter", "about": "Notes.",
+            "command": command_of(&user, "jotter"),
+            "env": {"TOKEN": {"vault": "almanac-token"}}}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("the connection almanac"), "{refused:?}");
+    let mut script = almanac();
+    script["answers"]["search"] = json!({"env": "TOKEN"});
+    declare(
+        &user,
+        "almanac",
+        &script,
+        json!({"env": {"TOKEN": {"vault": "almanac-token"}}}),
+    );
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes"}}),
+    )
+    .unwrap();
+    let (_, mcp) = session(&user, "app");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    assert_eq!(
+        logged(&user, "almanac", "call")[0]["answered"],
+        "s3cret-of-almanac-alone"
+    );
+}
+
 // ── Results ──────────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1848,4 +1914,136 @@ fn a_server_s_name_and_version_are_masked_and_cut_in_a_cut_off() {
         assert!(said.contains("almanac [masked]"), "{what}: {said}");
         assert!(!said.contains(&"x".repeat(200)), "{what}: {said}");
     }
+}
+
+/// The daemon's log, as it is now.
+fn daemon_log(user: &User) -> String {
+    std::fs::read_to_string(user.path("state/flottille/daemon.log")).unwrap_or_default()
+}
+
+#[test]
+fn a_server_s_error_text_is_masked_and_cut_in_the_log() {
+    let user = user();
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET}),
+    )
+    .unwrap();
+    let trigger = user.path("almanac-notify");
+    let mut script = almanac();
+    script["notify"] = json!({"when": trigger, "times": 1});
+    connect(&user, "almanac", &script, json!({"search": "passes"}));
+    let (_, mcp) = session(&user, "app");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    // Its listing fails, in its own words: the log has them masked and cut.
+    let mut failing = script.clone();
+    failing["list_error"] = json!(format!("broken {SECRET} {}", "y".repeat(5_000)));
+    write_script(&user, "almanac", &failing);
+    std::fs::write(&trigger, "").unwrap();
+    eventually("the failed listing logged", || {
+        daemon_log(&user).contains("listing its tools")
+    });
+    let log = daemon_log(&user);
+    assert!(!log.contains(SECRET), "{log}");
+    assert!(log.contains("broken [masked]"), "{log}");
+    assert!(!log.contains(&"y".repeat(200)), "{log}");
+
+    // It fails to start, its first error line long and holding the secret: masked and cut in
+    // what the list says, the event and the review's error.
+    restart(&user, "almanac");
+    let mut broken = almanac();
+    broken["stderr"] = json!(format!("fatal {SECRET} {}", "z".repeat(5_000)));
+    broken["exit"] = json!(3);
+    write_script(&user, "almanac", &broken);
+    let watch = user.watch(&[]);
+    refused(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    let changed = watch.until(|e| e["name"] == "connection.changed" && !e["data"]["why"].is_null());
+    let event = changed.last().unwrap()["data"]["why"].to_string();
+    let listed = connection(&user, "almanac")["failing"].to_string();
+    let review = user
+        .call("connection.review", json!({"name": "almanac"}))
+        .unwrap_err()
+        .1;
+    for (what, said) in [
+        ("the event", &event),
+        ("the list", &listed),
+        ("the review", &review),
+    ] {
+        assert!(!said.contains(SECRET), "{what}: {said}");
+        assert!(said.contains("fatal [masked]"), "{what}: {said}");
+        assert!(!said.contains(&"z".repeat(200)), "{what}: {said}");
+    }
+    assert!(!daemon_log(&user).contains(SECRET));
+}
+
+#[test]
+fn a_review_of_a_ready_connection_leaves_no_server_its_calls_skip_comparing() {
+    let user = user();
+    project(&user, "app");
+    connect(&user, "almanac", &almanac(), json!({"search": "passes"}));
+    let (_, mcp) = session(&user, "app");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    let mut changed = almanac();
+    changed["tools"][1]["description"] = json!("Writes a note, and mails it.");
+    write_script(&user, "almanac", &changed);
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    // Reviewed, not accepted: the next call meets the server it reaches against the pin.
+    let answer = mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    );
+    assert!(
+        answer.error,
+        "an unaccepted server was called: {}",
+        answer.text
+    );
+    assert_eq!(connection(&user, "almanac")["state"], "cut off");
+}
+
+#[test]
+fn an_unreadable_extensions_file_refuses_removing_a_bound_entry() {
+    let user = user();
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET, "for": "connection:almanac"}),
+    )
+    .unwrap();
+    turn_on(&user);
+    declare(
+        &user,
+        "almanac",
+        &almanac(),
+        json!({"env": {"TOKEN": {"vault": "almanac-token"}}}),
+    );
+    std::fs::write(
+        user.path("config/flottille/extensions.toml"),
+        "[[connections.server]\nname = \n",
+    )
+    .unwrap();
+    // Whether the connection still names it cannot be told: the removal is asked, not done.
+    let refused = user
+        .call("vault.remove", json!({"name": "almanac-token"}))
+        .unwrap_err()
+        .1;
+    assert!(refused.contains("confirm"), "{refused}");
+    assert!(!refused.contains(SECRET), "{refused}");
+    let entries = user.call("vault.list", json!({})).unwrap().to_string();
+    assert!(entries.contains("almanac-token"), "{entries}");
+    user.call(
+        "vault.remove",
+        json!({"name": "almanac-token", "confirmed": true}),
+    )
+    .unwrap();
 }

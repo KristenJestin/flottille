@@ -191,6 +191,8 @@ fn open_page<'a>(
     until(&shell, cx, "the items are read", |cx| {
         items.read_with(cx, |items, _| items.is_read())
     });
+    // The page opens on Work: its lists are tabs beside it.
+    cx.update(|window, cx| window.click("project-tabs-pulls", cx));
     settle(cx);
     (shell, items, cx)
 }
@@ -219,7 +221,7 @@ fn present(cx: &mut VisualTestContext, id: &str) -> bool {
 const ANCHORS: [&str; 5] = [
     "project-header-title",
     "project-items-title",
-    "project-items-tabs",
+    "project-tabs",
     "project-items-list",
     "project-tasks-title",
 ];
@@ -322,7 +324,7 @@ fn the_pull_requests_tab_lists_the_projects_pulls_from_items_list_with_their_ci_
         assert!(facts.contains(fact), "{fact}: {facts}");
     }
     // The tabs count what they list.
-    assert_eq!(label(cx, "project-items-tabs-pulls-count").unwrap(), "3");
+    assert_eq!(label(cx, "project-tabs-pulls-count").unwrap(), "3");
 }
 
 #[gpui_kit::test]
@@ -339,9 +341,9 @@ fn the_tickets_tab_lists_the_tickets_with_their_status(cx: &mut TestAppContext) 
     declare(&user, &["api"], true);
     refresh(&user);
     let (_shell, items, cx) = open_page(&user, cx);
-    assert_eq!(label(cx, "project-items-tabs-tickets-count").unwrap(), "2");
+    assert_eq!(label(cx, "project-tabs-tickets-count").unwrap(), "2");
 
-    click(cx, "project-items-tabs-tickets");
+    click(cx, "project-tabs-tickets");
     settle(cx);
 
     assert_eq!(items.read_with(cx, |items, _| items.tab()), Kind::Tickets);
@@ -415,7 +417,7 @@ fn a_filter_closed_mine_or_repository_changes_the_rows_animated(cx: &mut TestApp
     click(cx, "project-items-repository-web");
     settle(cx);
     assert_eq!(keys(&items, cx), ["7"]);
-    assert_eq!(label(cx, "project-items-tabs-pulls-count").unwrap(), "1");
+    assert_eq!(label(cx, "project-tabs-pulls-count").unwrap(), "1");
 }
 
 #[gpui_kit::test]
@@ -553,11 +555,15 @@ fn a_project_with_no_forge_set_shows_the_not_set_state_with_its_settings_link(
     let (shell, _items, cx) = open_page(&user, cx);
 
     let said = label(cx, "project-items-not-set").unwrap();
-    assert!(said.contains("No forge is set"), "{said}");
-    click(cx, "project-items-tabs-tickets");
+    assert_eq!(said, "No forge set for this project.");
+    assert_eq!(
+        label(cx, "project-items-settings").as_deref(),
+        Some("Choose one in Settings")
+    );
+    click(cx, "project-tabs-tickets");
     settle(cx);
     let said = label(cx, "project-items-not-set").unwrap();
-    assert!(said.contains("No tracker is set"), "{said}");
+    assert_eq!(said, "No tracker set for this project.");
 
     click(cx, "project-items-settings");
     settle(cx);
@@ -915,7 +921,7 @@ fn a_tab_shown_again_does_not_fold_away_rows_that_left_while_it_was_hidden(
     let (_shell, items, cx) = open_page(&user, cx);
     click(cx, "project-items-mine");
     settle(cx);
-    click(cx, "project-items-tabs-tickets");
+    click(cx, "project-tabs-tickets");
     settle(cx);
     let gone = rows(&items, cx)
         .into_iter()
@@ -923,12 +929,12 @@ fn a_tab_shown_again_does_not_fold_away_rows_that_left_while_it_was_hidden(
         .unwrap()
         .id();
     assert!(present(cx, &gone));
-    click(cx, "project-items-tabs-pulls");
+    click(cx, "project-tabs-pulls");
     settle(cx);
 
     click(cx, "project-items-mine");
     settle(cx);
-    click(cx, "project-items-tabs-tickets");
+    click(cx, "project-tabs-tickets");
     a_frame(cx);
 
     assert!(!present(cx, &gone), "it left while the tab was hidden");
@@ -994,7 +1000,7 @@ fn mine_only_is_disabled_with_its_reason_when_who_the_user_is_is_not_known(
     declare(&user, &["api"], true);
     refresh(&user);
     let (_shell, items, cx) = open_page(&user, cx);
-    click(cx, "project-items-tabs-tickets");
+    click(cx, "project-tabs-tickets");
     settle(cx);
     let why = items.read_with(cx, |items, _| items.mine_unknown(Kind::Tickets));
     assert!(
@@ -1045,7 +1051,7 @@ fn mine_only_is_on_by_default_on_both_tabs(cx: &mut TestAppContext) {
         ["1"],
         "the pull requests start with the user's own"
     );
-    click(cx, "project-items-tabs-tickets");
+    click(cx, "project-tabs-tickets");
     settle(cx);
     assert_eq!(
         keys(&items, cx),
@@ -1202,11 +1208,7 @@ fn the_section_s_controls_stay_visible_while_the_list_scrolls(cx: &mut TestAppCo
     many_pulls(&user, 40);
     let (_shell, items, cx) = open_page(&user, cx);
     tall(cx);
-    let controls = [
-        "project-items-tabs",
-        "project-items-state",
-        "project-items-mine",
-    ];
+    let controls = ["project-tabs", "project-items-state", "project-items-mine"];
     let before: Vec<_> = controls.iter().map(|id| bounds(cx, id)).collect();
     let first_id = rows(&items, cx)[0].id();
     let first = bounds(cx, &first_id);
@@ -1294,13 +1296,15 @@ fn a_filter_change_goes_back_to_the_top(cx: &mut TestAppContext) {
     // The other tab.
     wheel(cx, 700.);
     assert!(scrolled(&items, cx) > 0.);
-    click(cx, "project-items-tabs-tickets");
+    click(cx, "project-tabs-tickets");
     settle(cx);
     assert_eq!(scrolled(&items, cx), 0., "a tab went back to the top");
-    click(cx, "project-items-tabs-pulls");
+    click(cx, "project-tabs-pulls");
     settle(cx);
 
     // The search.
+    // The list unfolds again as its tab comes back.
+    settle(cx);
     wheel(cx, 700.);
     assert!(scrolled(&items, cx) > 0.);
     let field = items
@@ -1342,10 +1346,7 @@ fn the_search_filters_by_key_and_title(cx: &mut TestAppContext) {
         label(cx, "project-items-count").as_deref(),
         Some("1 of 40 open")
     );
-    assert_eq!(
-        label(cx, "project-items-tabs-pulls-count").as_deref(),
-        Some("1")
-    );
+    assert_eq!(label(cx, "project-tabs-pulls-count").as_deref(), Some("1"));
 
     // By key: the number, with its hash or without.
     search(cx, "#17");

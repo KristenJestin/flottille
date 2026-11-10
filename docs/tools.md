@@ -412,10 +412,13 @@ pending requests.
   daemon's variables named like secrets, every value of the `KEY=VALUE` lines of the place's
   `.env` and `.env.*` files (at its top and each repository's), private keys, URL passwords,
   tokens shaped like the usual providers', and the string value of a quoted key whose name ends,
-  in any case and without `_` or `-`, with `token`, `apikey`, `secret`, `password` or
-  `authorization`, as an agent's login file holds them (`accessToken`, `refreshToken` of Claude's
-  `.credentials.json`; `id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY` of Codex's
-  `auth.json`; `clientSecret`, `primaryApiKey`; an HTTP header's `Authorization`), but a
+  in any case and without `_` or `-`, with `token`, `apikey`, `secret`, `password`, `passwd`,
+  `secretkey` or `authorization`, as an agent's login file holds them (`accessToken`,
+  `refreshToken` of Claude's `.credentials.json`; `id_token`, `access_token`, `refresh_token`,
+  `OPENAI_API_KEY` of Codex's `auth.json`; `clientSecret`, `primaryApiKey`; an HTTP header's
+  `Authorization`), and the credentials of an `Authorization` header whose key is not quoted
+  (`Authorization: Bearer …` of a header, YAML or `curl -v`, `Proxy-Authorization`), its scheme
+  kept, to the end of its line or a quote, but a
   tokenizer's special tokens (`pad_token`, `bos_token`, `eos_token`, `unk_token`, `sep_token`,
   `cls_token`, `mask_token`), wherever it is shown: a diff of a staged one, its value on the next line
   after a `+` or `-`, a word diff's `[-"…"-]{+"…"+}` (`flottille_core::secrets`). It is not a
@@ -765,7 +768,8 @@ run follows its run and forge subscribe a pull request's checks.`
 ## The vault
 
 **`vault {action: "list"}`** lists the entries of the user's vault the agent's project sees
-(`docs/vault.md`): each name with what it is for, its URL and its username, one field a line. It is
+(`docs/vault.md`): each name with what it is for, its URL and its username, one field a line (the
+use an entry is bound to is not told: it could name another project). It is
 listed to an agent whose project sees at least one entry (a tool that could only say the vault is
 empty is not listed), and the agents of every project get or lose it when an entry is set or
 removed. No action returns a secret: any other action is refused, saying that a secret is never
@@ -1352,10 +1356,10 @@ session that ended and an empty text.
   delivery, `session`, urgent (on its next tool result in a turn, a new turn otherwise), under a
   line naming the sender (`agent 0123456789ab wrote to this session:`): it is an agent's words,
   never the user's. Its answer, a `session_send` the other way, comes back the same way.
-- **No endless back and forth.** When the two agents of a following (a pilot and its led session) write to each other five times
+- **No endless back and forth.** When the two agents of a following (a pilot and its led session) write to each other fifty times
   (`session_send`, from either, each with the turn it causes) with no message of the user's in
   either session, the following pauses: no more wakes, and a `session_send` between the two is
-  refused at once (`refused: paused: you two wrote to each other five times without the user;
+  refused at once (`refused: paused: you two wrote to each other fifty times without the user;
   wait for their message`); `session.following_paused` is emitted, the user's inbox says that the
   two sessions talk without them (`kind` `paused`), the window's rail says it under the following
   with a Resume, and `forge show` says it is paused. A message of the user's to either session, or

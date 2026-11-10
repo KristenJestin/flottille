@@ -1425,10 +1425,13 @@ fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
             "- {}{}\n",
             crate::subscriptions::named(&subscription),
             if subscription.seen["paused"] == true {
-                " (paused: you two wrote to each other five times without the user; a message of \
-                 theirs to either resumes it)"
+                format!(
+                    " (paused: you two wrote to each other {} times without the user; a message \
+                     of theirs to either resumes it)",
+                    crate::subscriptions::EXCHANGES
+                )
             } else {
-                ""
+                String::new()
             }
         ));
     }

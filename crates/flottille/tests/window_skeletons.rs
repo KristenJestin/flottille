@@ -383,7 +383,7 @@ fn card_knows(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<(bool
         let page = s.main().read(cx).project_page()?.clone();
         let card = page
             .read(cx)
-            .cards()
+            .blocks()
             .iter()
             .find(|card| card.read(cx).data().place.as_deref() == Some("login"))?
             .clone();
@@ -420,15 +420,17 @@ fn the_card_waits_with_skeletons_for_its_ticket_and_pull_request_then_shows_them
     let (shell, cx) = open_project(&user, (SLOW_MS, None), cx);
 
     until(&shell, cx, "the card's skeletons", |cx| {
-        present(cx, "ticket-skeleton-login")
+        present(cx, "place-ticket-skeleton-login")
     });
-    assert!(present(cx, "pull-skeleton-login-api"));
+    assert!(present(cx, "place-pull-skeleton-login"));
     assert!(!present(cx, "ticket-login") && !present(cx, "pull-login-api"));
     until(&shell, cx, "the ticket and the pull request", |cx| {
         present(cx, "ticket-login") && present(cx, "pull-login-api")
     });
     settle(cx);
-    assert!(!present(cx, "ticket-skeleton-login") && !present(cx, "pull-skeleton-login-api"));
+    assert!(
+        !present(cx, "place-ticket-skeleton-login") && !present(cx, "place-pull-skeleton-login")
+    );
 }
 
 #[gpui_kit::test]
@@ -446,12 +448,12 @@ fn a_card_whose_repository_has_no_pull_request_loses_its_skeleton(cx: &mut TestA
         (shell, cx)
     };
     until(&shell, cx, "the skeleton", |cx| {
-        present(cx, "pull-skeleton-login-api")
+        present(cx, "place-pull-skeleton-login")
     });
     until(&shell, cx, "the ticket", |cx| present(cx, "ticket-login"));
     settle(cx);
     assert!(
-        !present(cx, "pull-skeleton-login-api") && !present(cx, "pull-login-api"),
+        !present(cx, "place-pull-skeleton-login") && !present(cx, "pull-login-api"),
         "nothing is left where the pull request was waited for"
     );
 }

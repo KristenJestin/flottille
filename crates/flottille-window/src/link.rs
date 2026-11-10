@@ -409,7 +409,7 @@ fn note(seen: &Seen, event: &Event) {
 fn matters(event: &Event) -> bool {
     let name = event.name.as_str();
     match name.split_once('.').map(|(subject, _)| subject) {
-        // A workspace's preparation shows on its card, step by step.
+        // A workspace's preparation shows in its place, step by step.
         Some("project" | "approval" | "daemon" | "workspace") => true,
         // A subscription opening or ending moves the session from waiting to rest.
         Some("subscription") => true,

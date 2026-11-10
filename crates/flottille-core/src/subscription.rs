@@ -7,6 +7,11 @@ use serde_json::Value;
 /// The time of a subscription with no deadline: far enough that the sweep never finds it due.
 pub const NO_DEADLINE: u64 = i64::MAX as u64;
 
+/// How many `session_send` the two sessions of a following write to each other, with no message
+/// of the user's in either, before the following pauses. The sentences that say it are in words
+/// ("fifty"), where a constant cannot build them, and a test of each refers to this one.
+pub const EXCHANGES: u64 = 50;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Subscription {
     pub id: String,

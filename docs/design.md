@@ -348,7 +348,7 @@ An agent that pilots a session (`agent_launch` with `kind: led`) is woken, betwe
 the session ends or fails; a plain turn's end wakes nobody. The delivery names the session, says
 why and holds its last message, masked and cut, after the questions to the pilot that turn asked
 and that still wait, whole. It is a following, a subscription that has no end of its own (§5.6,
-`docs/tools.md`, "Following a session"). Two sessions that write to each other five times
+`docs/tools.md`, "Following a session"). Two sessions that write to each other fifty times
 without the user pause it. A pilot that ends leaves its led sessions going on, handed to the
 user.
 
@@ -432,7 +432,7 @@ The window shows them: the session page's rail lists the session's open subscrip
 request or the ticket, the events, since when and until when: `until merged or closed`,
 `until closed` for a ticket, or the deadline the agent gave; a wake, `Wake: <why>` and when it is due), each with a Cancel that ends it through the daemon
 (`subscription.cancel`); the following of a session an agent started, `Following <title>`, since
-when, and, paused because the two sessions wrote to each other five times without the user, a line
+when, and, paused because the two sessions wrote to each other fifty times without the user, a line
 that says so with a Resume (`subscription.resume`), unfolding when it pauses and folding away when
 it resumes; an agent between turns that waits on one is drawn waiting, not idle, in the
 left tree and in the rail (`Waiting: wake at 10:42` for a wake), and the delivery that wakes the
@@ -783,7 +783,11 @@ line names, every program a wrapper or a runner runs included:
   always looked at whole; the rest of a place of more than 500,000 entries is looked at up to
   that bound, and the result says its agent folders could not all be checked, as does an entry
   of the user's inbox (`run.agent_folders_unchecked`); so does a repository of the place whose
-  folder is outside it (reached through a link), whose agent folders are not looked at, and a snapshot that could not be taken. A run waits for
+  folder is outside it (reached through a link), whose agent folders are not looked at. A run
+  whose place's agent folders could not be noted is refused, with a sentence: nothing it wrote
+  there would be put back. Past the bound on the contents kept (64 MiB), the settings files
+  (`settings.json`, `settings.local.json`, `config.toml`, `.mcp.json`, `.claude.json`) are kept
+  first, then the smallest. A run waits for
   the snapshot of its place, and for a put-back going on there, never for another place's. What this does not cover: a process that outlives its run (one that
   left the run's session, `setsid`), a long `serve` run until it ends, and a run going on when
   the daemon stops or crashes, whose place is not put back: a marker of each place guarded

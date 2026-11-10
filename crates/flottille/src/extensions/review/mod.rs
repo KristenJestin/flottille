@@ -33,6 +33,29 @@ const ROUNDS: u64 = 2;
 /// on its default.
 const STRONGEST: &[(&str, &str)] = &[("claude", "opus")];
 const SMALLER: &[(&str, &str)] = &[("claude", "sonnet")];
+/// What `extension.list` says of those slots (the window words it, it holds no table).
+const STRONGEST_RULE: &str = "Strongest of the session's provider";
+const SMALLER_RULE: &str = "One size smaller";
+
+/// The model the strongest rule gives on a provider: none until one of its sessions said what it
+/// offers, or when it offers no such model.
+fn strongest(daemon: &Daemon, provider: &'static providers::Provider) -> Option<String> {
+    named(daemon, provider, STRONGEST)
+}
+
+/// The model the smaller rule gives: the strongest's when the provider lists no smaller one.
+fn smaller(daemon: &Daemon, provider: &'static providers::Provider) -> Option<String> {
+    named(daemon, provider, SMALLER).or_else(|| strongest(daemon, provider))
+}
+
+fn named(
+    daemon: &Daemon,
+    provider: &'static providers::Provider,
+    list: &[(&str, &str)],
+) -> Option<String> {
+    let (_, model) = list.iter().find(|(name, _)| *name == provider.name)?;
+    providers::offered_model(daemon, provider, model)
+}
 
 pub const EXTENSION: Extension = Extension {
     name: "review",
@@ -63,35 +86,50 @@ pub const EXTENSION: Extension = Extension {
             key: "spec_model",
             label: "The spec",
             hint: "Each expected behaviour met, nothing out of scope. Only for a session that builds a spec.",
-            kind: Kind::Model,
+            kind: Kind::Model {
+                rule: STRONGEST_RULE,
+                gives: strongest,
+            },
             per_project: true,
         },
         Setting {
             key: "bugs_model",
             label: "Bugs",
             hint: "Wrong results, lost data, crashes the change brings.",
-            kind: Kind::Model,
+            kind: Kind::Model {
+                rule: STRONGEST_RULE,
+                gives: strongest,
+            },
             per_project: true,
         },
         Setting {
             key: "standards_model",
             label: "Project rules",
             hint: "The project's AGENTS.md, read from the base branch.",
-            kind: Kind::Model,
+            kind: Kind::Model {
+                rule: STRONGEST_RULE,
+                gives: strongest,
+            },
             per_project: true,
         },
         Setting {
             key: "security_model",
             label: "Security",
             hint: "Secrets, injections, access. Off by default.",
-            kind: Kind::Model,
+            kind: Kind::Model {
+                rule: STRONGEST_RULE,
+                gives: strongest,
+            },
             per_project: true,
         },
         Setting {
             key: "verifier_model",
             label: "Checking the findings",
             hint: "Each finding confirmed before it reaches the session.",
-            kind: Kind::Model,
+            kind: Kind::Model {
+                rule: SMALLER_RULE,
+                gives: smaller,
+            },
             per_project: true,
         },
     ],
@@ -816,15 +854,10 @@ fn slot(
         }
     }
     let provider = providers::get(&session.provider);
-    let named = |list: &[(&str, &str)]| {
-        let provider = provider?;
-        let (_, model) = list.iter().find(|(name, _)| *name == provider.name)?;
-        providers::offered_model(daemon, provider, model)
-    };
-    let model = match pass {
-        VERIFIER => named(SMALLER).or_else(|| named(STRONGEST)),
-        _ => named(STRONGEST),
-    };
+    let model = provider.and_then(|provider| match pass {
+        VERIFIER => smaller(daemon, provider),
+        _ => strongest(daemon, provider),
+    });
     Ok(providers::Asked {
         provider: Some(session.provider.clone()),
         model,

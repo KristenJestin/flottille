@@ -14,7 +14,7 @@ use flottille_core::paths::Paths;
 use flottille_core::project::{Project, valid_name};
 use flottille_core::secrets::{self, VAULT_SHORTEST};
 use flottille_core::store::{Store, now_ms};
-use flottille_core::vault::Entry;
+use flottille_core::vault::{self as uses, Entry, use_said, use_stops};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -25,7 +25,7 @@ use crate::projects::Failure;
 
 /// The file of the daemon's configuration folder that chooses the keyring: `backend = "memory"`
 /// keeps the secrets in the daemon's memory, for the tests, which must never reach the user's
-/// own keyring. A file, not a variable: an agent sets the environment of what it runs, never the
+/// own keyring; a build for users refuses it (`Keyring::chosen`). A file, not a variable: an agent sets the environment of what it runs, never the
 /// daemon's configuration.
 const CHOICE: &str = "keyring.toml";
 
@@ -53,20 +53,39 @@ pub const LOCKED: &str = "the keyring is locked: the user must unlock it in thei
 impl Keyring {
     /// The keyring the configuration chooses: the system's unless the tests' file says otherwise.
     pub fn open(paths: &Paths) -> Keyring {
-        let file = paths.config.join(CHOICE);
+        let (keyring, said) = Self::chosen(paths.config.join(CHOICE), cfg!(debug_assertions));
+        if let Some(said) = said {
+            eprintln!("flottille daemon: {said}");
+        }
+        keyring
+    }
+
+    /// The keyring `file` chooses, and what the daemon says of it. The memory is a test
+    /// build's alone (`cargo test` builds without optimisation, a release with): a user's file
+    /// that asks for it would keep their secrets in plain text, in its table `kept`.
+    fn chosen(file: PathBuf, test_build: bool) -> (Keyring, Option<String>) {
         match setting(&file, "backend").as_deref() {
-            Some("memory") => {
-                eprintln!(
-                    "flottille daemon: the vault's keyring is the daemon's memory ({}): its \
-                     secrets are lost when it stops",
+            Some("memory") if !test_build => {
+                let said = format!(
+                    "{} asks for the memory keyring, which only a test build has: the system's \
+                     keyring is used, and no secret is read from that file",
                     file.display()
                 );
-                Keyring::Memory {
+                (Keyring::Os, Some(said))
+            }
+            Some("memory") => {
+                let said = format!(
+                    "the vault's keyring is the daemon's memory ({}): its secrets are lost when \
+                     it stops",
+                    file.display()
+                );
+                let keyring = Keyring::Memory {
                     kept: Mutex::new(HashMap::new()),
                     file,
-                }
+                };
+                (keyring, Some(said))
             }
-            _ => Keyring::Os,
+            _ => (Keyring::Os, None),
         }
     }
 
@@ -190,6 +209,10 @@ struct Set {
     url: Option<String>,
     username: Option<String>,
     project: Option<String>,
+    /// The one use it is bound to, when it is made from a feature; left out, an entry keeps the
+    /// one it has.
+    #[serde(rename = "for")]
+    bound: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -212,6 +235,9 @@ struct AskDismiss {
 #[serde(deny_unknown_fields)]
 struct Remove {
     name: String,
+    /// The user confirmed what stops working: an entry bound to a feature that names it goes.
+    #[serde(default)]
+    confirmed: bool,
 }
 
 pub async fn call(
@@ -256,13 +282,37 @@ pub async fn call(
             Ok(json!({"dismissed": request.to_json()}))
         }
         "vault.remove" => {
-            let Remove { name } = serde_json::from_value(params)?;
+            let Remove { name, confirmed } = serde_json::from_value(params)?;
             let entries = daemon.read(|store| store.vault_entries())?;
-            if !entries.iter().any(|entry| entry.name == name) {
+            let Some(entry) = entries.iter().find(|entry| entry.name == name) else {
                 return Err(Failure::new(
                     "not-found",
                     format!("the vault has no entry {name}"),
                 ));
+            };
+            if let Some(bound) = &entry.bound
+                && !confirmed
+            {
+                let said = use_said(bound).unwrap_or_else(|| bound.clone());
+                let stops = use_stops(bound).unwrap_or_else(|| "that it stops working".into());
+                match named_by(&daemon, bound, &name) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        return Err(Failure::refused(format!(
+                            "the vault entry {name} is bound to {said}, which names it: removing \
+                             it means {stops}; have it name another entry first, or confirm the \
+                             removal"
+                        )));
+                    }
+                    // An unreadable file cannot say the entry is not named: the guard holds.
+                    Err(why) => {
+                        return Err(Failure::refused(format!(
+                            "the vault entry {name} is bound to {said}, and whether it names it \
+                             cannot be told ({why}): removing it may mean {stops}; mend the file, \
+                             or confirm the removal"
+                        )));
+                    }
+                }
             }
             // The secret first: a keyring that refuses (locked) leaves the entry whole, to be
             // removed again once it is unlocked.
@@ -308,13 +358,36 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         text.map(|text| text.trim().to_owned())
             .filter(|t| !t.is_empty())
     };
+    let project = given(asked.project);
+    let had = daemon
+        .read(|store| store.vault_entries())?
+        .into_iter()
+        .find(|entry| entry.name == asked.name)
+        .and_then(|entry| entry.bound);
+    let bound = match (given(asked.bound), had) {
+        (Some(new), Some(own)) if new != own => {
+            return Err(Failure::refused(format!(
+                "the vault entry {} is bound to {}: remove it first, or choose another name",
+                asked.name,
+                use_said(&own).unwrap_or(own.clone())
+            )));
+        }
+        (Some(new), _) => Some(new),
+        (None, had) => had,
+    };
+    // A worklog's entry is its project's alone: no other project's agent learns it exists.
+    let project = match &bound {
+        Some(bound) => bound_checked(daemon, bound, project.as_deref())?,
+        None => project,
+    };
     let entry = Entry {
         name: asked.name,
         description: given(asked.description),
         url: given(asked.url),
         username: given(asked.username),
-        project: given(asked.project),
+        project,
         updated_at: now_ms(),
+        bound,
     };
     // Masked before it is kept anywhere, so that nothing written after can hold it.
     secrets::add_vault_value(&asked.secret);
@@ -336,11 +409,69 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     Ok(entry.to_json())
 }
 
+/// The project an entry bound to `bound` has, if Flottille knows the use and it fits the entry's
+/// `project`: a project's worklog reads only an entry that project sees, so the entry is the
+/// project's; a connection reads only an entry of every project.
+fn bound_checked(
+    daemon: &Daemon,
+    bound: &str,
+    project: Option<&str>,
+) -> Result<Option<String>, Failure> {
+    let Some(said) = use_said(bound) else {
+        return Err(Failure::refused(format!(
+            "an entry is bound to worklog:<project> or connection:<name>: {bound} is neither"
+        )));
+    };
+    if !crate::extensions::bound_possible(bound) {
+        return Err(Failure::refused(format!(
+            "no connection can be named as {bound} says: a connection's name is lowercase \
+             letters, digits and _"
+        )));
+    }
+    match (bound.split_once(':'), project) {
+        (Some(("worklog", of)), _) if crate::projects::load_project(daemon, of).is_err() => {
+            Err(Failure::refused(format!("no project is named {of}")))
+        }
+        (Some(("worklog", of)), Some(own)) if of != own => Err(Failure::refused(format!(
+            "an entry the project {own} alone sees cannot be bound to {said}"
+        ))),
+        (Some(("worklog", of)), _) => Ok(Some(of.to_owned())),
+        (Some(("connection", _)), Some(own)) => Err(Failure::refused(format!(
+            "an entry bound to {said} is every project's: a connection is given to all, and \
+             the project {own} cannot be its only one"
+        ))),
+        _ => Ok(project.map(str::to_owned)),
+    }
+}
+
+/// Whether the feature the use `bound` stands for names the entry `name` now; why it cannot be
+/// told when the files that declare it cannot be read.
+fn named_by(daemon: &Daemon, bound: &str, name: &str) -> Result<bool, String> {
+    match bound.split_once(':') {
+        Some(("worklog", project)) => Ok(crate::projects::load_project(daemon, project).is_ok_and(
+            |project| {
+                matches!(&project.tracker, Some(ProjectTracker::Jira {
+                    worklog_token: Some(token), ..
+                }) if token == name)
+            },
+        )),
+        _ => crate::extensions::bound_names(daemon, bound, name),
+    }
+}
+
 /// Why the entry `name` cannot be set for `project` from a request: an entry of that name exists
-/// and is not the project's. A request never changes an existing entry's project, so the user
-/// chooses another name.
+/// and is not the project's, or is bound to another use than its worklog. A request never changes
+/// an existing entry's project nor its use, so the user chooses another name.
 fn taken(entries: &[Entry], project: &str, name: &str) -> Option<String> {
     let entry = entries.iter().find(|entry| entry.name == name)?;
+    if let Some(own) = &entry.bound
+        && *own != uses::worklog(project)
+    {
+        return Some(format!(
+            "`{name}` is bound to {}: choose another name",
+            use_said(own).unwrap_or(own.clone())
+        ));
+    }
     match entry.project.as_deref() {
         Some(own) if own == project => None,
         Some(other) => Some(format!(
@@ -376,10 +507,12 @@ async fn ask_set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value
             request.name, request.description
         )));
     }
+    // The only need a request is for is a project's worklog: the entry is made for it.
     let set = set(
         daemon,
         json!({"name": name, "secret": secret, "description": request.description,
-            "username": username, "project": request.project}),
+            "username": username, "project": request.project,
+            "for": uses::worklog(&request.project)}),
     )
     .await?;
     // Under the name asked, `set` answered the request; under another, nothing named it.
@@ -650,19 +783,30 @@ pub async fn load(daemon: &Daemon) {
 const SECRET_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The secret of the entry `name`, for a tool of Flottille's to put where it goes (an HTTP header,
-/// a command's standard input) on behalf of an agent of `project`: never to be returned, logged
-/// or shown. An entry of another project is no entry for it.
-pub async fn secret(daemon: &Daemon, project: &str, name: &str) -> Result<String, String> {
+/// a command's standard input) on behalf of an agent of `project` and for the use `bound` (the
+/// feature reading it): never to be returned, logged or shown. An entry of another project, or
+/// bound to another use, is no entry for it.
+pub async fn secret(
+    daemon: &Daemon,
+    project: &str,
+    bound: &str,
+    name: &str,
+) -> Result<String, String> {
     let entries = daemon
         .read(|store| store.vault_entries())
         .map_err(|error| error.to_string())?;
-    given(&entries, &daemon.vault, project, name).await
+    given(&entries, &daemon.vault, project, bound, name).await
 }
 
-/// The secret of the entry `name`, which must be every project's (no `project` on it), for what
-/// the daemon runs for all of them (a connection's server): never to be returned, logged or shown.
-/// Masked from now on before it is used: the keyring may have been locked at the daemon's start.
-pub async fn every_project_s(daemon: &Daemon, name: &str) -> Result<String, String> {
+/// The secret of the entry `name`, which must be every project's (no `project` on it), for the
+/// server of the connection `connection`, which the daemon runs for all of them: never to be
+/// returned, logged or shown. Masked from now on before it is used: the keyring may have been
+/// locked at the daemon's start.
+pub async fn every_project_s(
+    daemon: &Daemon,
+    connection: &str,
+    name: &str,
+) -> Result<String, String> {
     let entries = daemon
         .read(|store| store.vault_entries())
         .map_err(|error| error.to_string())?;
@@ -673,7 +817,7 @@ pub async fn every_project_s(daemon: &Daemon, name: &str) -> Result<String, Stri
                 "the vault entry {name} is one project's alone, not every project's"
             ));
         }
-        Some(_) => {}
+        Some(entry) => entry.usable_for(&uses::connection(connection))?,
     }
     tokio::time::timeout(SECRET_WAIT, daemon.vault.read(name))
         .await
@@ -687,14 +831,16 @@ async fn given(
     entries: &[Entry],
     keyring: &Keyring,
     project: &str,
+    bound: &str,
     name: &str,
 ) -> Result<String, String> {
-    if !entries
+    let Some(entry) = entries
         .iter()
-        .any(|entry| entry.name == name && entry.seen_by(project))
-    {
+        .find(|entry| entry.name == name && entry.seen_by(project))
+    else {
         return Err(format!("the vault has no entry {name} for this project"));
-    }
+    };
+    entry.usable_for(bound)?;
     tokio::time::timeout(SECRET_WAIT, keyring.read(name))
         .await
         .map_err(|_| format!("the keyring did not answer in time: {LOCKED}"))??
@@ -847,6 +993,7 @@ mod tests {
             username: None,
             project: project.map(str::to_owned),
             updated_at: 0,
+            bound: None,
         }
     }
 
@@ -879,22 +1026,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_memory_keyring_is_refused_outside_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("keyring.toml");
+        std::fs::write(
+            &file,
+            "backend = \"memory\"\n[kept]\ndeploy = \"dep10y-key\"\n",
+        )
+        .unwrap();
+
+        let (keyring, said) = Keyring::chosen(file.clone(), false);
+        assert!(
+            matches!(keyring, Keyring::Os),
+            "a build for users keeps nothing in a file"
+        );
+        let said = said.unwrap();
+        assert!(said.contains("only a test build"), "{said}");
+        assert!(!said.contains("dep10y-key"), "{said}");
+
+        let (keyring, _) = Keyring::chosen(file, true);
+        assert!(matches!(keyring, Keyring::Memory { .. }));
+    }
+
     #[tokio::test]
     async fn another_project_s_entry_is_not_given_to_a_tool() {
         let dir = tempfile::tempdir().unwrap();
         let keyring = memory(&dir.path().join("keyring.toml"));
         let entries = [entry("deploy", Some("app"))];
 
-        let refused = given(&entries, &keyring, "other", "deploy")
+        let refused = given(&entries, &keyring, "other", "worklog:other", "deploy")
             .await
             .unwrap_err();
         assert!(refused.contains("no entry deploy"), "{refused}");
         assert!(!refused.contains("dep10y-key"), "{refused}");
         assert_eq!(
-            given(&entries, &keyring, "app", "deploy").await.unwrap(),
+            given(&entries, &keyring, "app", "worklog:app", "deploy")
+                .await
+                .unwrap(),
             "dep10y-key"
         );
-        assert!(given(&entries, &keyring, "app", "unknown").await.is_err());
+        assert!(
+            given(&entries, &keyring, "app", "worklog:app", "unknown")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -906,7 +1082,7 @@ mod tests {
         let entries = [entry("deploy", None)];
 
         let asked = std::time::Instant::now();
-        let refused = given(&entries, &keyring, "app", "deploy")
+        let refused = given(&entries, &keyring, "app", "worklog:app", "deploy")
             .await
             .unwrap_err();
         assert!(asked.elapsed() < SECRET_WAIT, "answered at once");

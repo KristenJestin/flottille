@@ -1,5 +1,5 @@
-//! The scenarios of #186, the project page's workspace cards: "New session in …" at the card's
-//! bottom, a "⋯" menu on each session row that ends it, and no ended session in the cards. On
+//! The scenarios of #186, the sessions of a place on the project page: a "⋯" menu on each
+//! session row that ends it, and no ended session in the places. On
 //! GPUI's test platform in front of a real daemon whose agents are the fake ACP agent, with a
 //! throwaway user. No window opens on a screen.
 
@@ -12,9 +12,7 @@ use common::User;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
-use flottille_window::project::{
-    PlaceCard, ProjectPage, card_session_end_id, card_session_menu_id,
-};
+use flottille_window::project::{PlaceBlock, ProjectPage, session_end_id, session_menu_id};
 use flottille_window::shell::Selection;
 use flottille_window::tree::ended_id;
 use gpui_kit::test::TestWindowExt;
@@ -135,9 +133,9 @@ fn card_of(
     shell: &Entity<Shell>,
     place: Option<&str>,
     cx: &mut VisualTestContext,
-) -> Entity<PlaceCard> {
+) -> Entity<PlaceBlock> {
     let page = page_of(shell, cx);
-    page.read_with(cx, |page, cx| page.card(&place.map(str::to_owned), cx))
+    page.read_with(cx, |page, cx| page.block(&place.map(str::to_owned), cx))
         .expect("the card is on the page")
 }
 
@@ -169,57 +167,7 @@ fn has(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> bool {
 }
 
 fn row_id(session: &str) -> String {
-    format!("card-session-{session}")
-}
-
-#[gpui_kit::test]
-fn new_session_in_sits_at_the_bottom_of_a_card_taller_than_its_content(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user, "atlas");
-    workspace(&user, "atlas", "alpha");
-    let only = start(&user, "atlas", None, "Release notes");
-    for message in ["One", "Two", "Three", "Four"] {
-        start(&user, "atlas", Some("alpha"), message);
-    }
-    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
-    open_project(&shell, "atlas", cx);
-    until(&shell, cx, "the sessions are on the cards", |cx| {
-        listed(&shell, None, cx).len() == 1 && listed(&shell, Some("alpha"), cx).len() == 4
-    });
-    settle(cx);
-
-    cx.update(|window, _| {
-        let (main, alpha) = (
-            window.find("place-card-main").bounds(),
-            window.find("place-card-alpha").bounds(),
-        );
-        assert_eq!(main.origin.y, alpha.origin.y, "one row");
-        assert_eq!(
-            main.size.height, alpha.size.height,
-            "the cards of a row share a height"
-        );
-        let last = window.find(row_id(&only)).bounds();
-        let new_session = window.find("new-session-in-main").bounds();
-        assert!(
-            new_session.origin.y - last.bottom() > px(80.),
-            "the card is taller than its content: {:?} under {:?}",
-            new_session,
-            last
-        );
-        // The card's border is one pixel.
-        assert!(
-            (main.bottom() - new_session.bottom()).abs() <= px(2.),
-            "the line sits on the card's bottom: {:?} in {:?}",
-            new_session,
-            main
-        );
-        let alpha_new = window.find("new-session-in-alpha").bounds();
-        assert_eq!(
-            alpha_new.bottom(),
-            new_session.bottom(),
-            "the two cards' lines are on one level"
-        );
-    });
+    format!("place-session-{session}")
 }
 
 #[gpui_kit::test]
@@ -238,9 +186,9 @@ fn a_session_row_ends_its_session_from_its_menu_and_the_row_folds_away(cx: &mut 
     // The menu is the row's, under the pointer: it does not open the session.
     cx.update(|window, cx| window.hover(row_id(&end), cx));
     settle(cx);
-    cx.update(|window, cx| window.click(card_session_menu_id(&end), cx));
+    cx.update(|window, cx| window.click(session_menu_id(&end), cx));
     settle(cx);
-    cx.update(|window, cx| window.click(card_session_end_id(&end), cx));
+    cx.update(|window, cx| window.click(session_end_id(&end), cx));
     settle(cx);
     assert!(
         !matches!(
@@ -260,9 +208,9 @@ fn a_session_row_ends_its_session_from_its_menu_and_the_row_folds_away(cx: &mut 
     // Confirmed, it ends and its row folds away, the other staying.
     cx.update(|window, cx| window.hover(row_id(&end), cx));
     settle(cx);
-    cx.update(|window, cx| window.click(card_session_menu_id(&end), cx));
+    cx.update(|window, cx| window.click(session_menu_id(&end), cx));
     settle(cx);
-    cx.update(|window, cx| window.click(card_session_end_id(&end), cx));
+    cx.update(|window, cx| window.click(session_end_id(&end), cx));
     settle(cx);
     cx.update(|window, cx| window.click("sidebar-end-confirm", cx));
     until(&shell, cx, "the session left the card", |cx| {

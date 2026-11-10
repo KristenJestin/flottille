@@ -258,6 +258,7 @@ fn tokens(text: &str) -> Vec<(usize, usize)> {
     found.extend(
         login_fields(text)
             .into_iter()
+            .chain(headers(text))
             .map(|field| (field.at, field.end)),
     );
     found
@@ -266,9 +267,17 @@ fn tokens(text: &str) -> Vec<(usize, usize)> {
 /// How the keys whose string value is a token end, lowercase and without `_` or `-`: an agent's
 /// login file (Claude's `.credentials.json`: `accessToken`, `refreshToken`; Codex's `auth.json`:
 /// `id_token`, `access_token`, `refresh_token`, `OPENAI_API_KEY`) and others like it
-/// (`clientSecret`, `primaryApiKey`, `password`, an HTTP header's `Authorization`), wherever such
-/// a file is shown (a diff, a stash, a revision of it).
-const LOGIN_KEY_ENDS: [&str; 5] = ["token", "apikey", "secret", "password", "authorization"];
+/// (`clientSecret`, `primaryApiKey`, `password`, `passwd`, `secret_key`, an HTTP header's
+/// `Authorization`), wherever such a file is shown (a diff, a stash, a revision of it).
+const LOGIN_KEY_ENDS: [&str; 7] = [
+    "token",
+    "apikey",
+    "secret",
+    "password",
+    "passwd",
+    "secretkey",
+    "authorization",
+];
 
 /// A tokenizer's special tokens (`pad_token`: `<pad>`), which are no login.
 const TOKENIZER_KEYS: [&str; 7] = [
@@ -437,15 +446,95 @@ fn login_fields(text: &str) -> Vec<LoginField> {
     found
 }
 
-/// The string value of each key that names a token, masked.
+/// The schemes of an `Authorization` header said before its credentials, which are kept.
+const SCHEMES: [&str; 5] = ["bearer", "basic", "digest", "token", "negotiate"];
+
+/// Each `Authorization` header whose key is not quoted (an HTTP header, YAML, `curl -v`'s
+/// `> Authorization: Bearer …`, `Proxy-Authorization`), and one that may still be coming at the
+/// text's end. Its value, its scheme left out, runs to the end of its line or a quote.
+fn headers(text: &str) -> Vec<LoginField> {
+    const KEY: &str = "authorization";
+    let (bytes, len) = (text.as_bytes(), text.len());
+    let coming = len + 1;
+    let lower = text.to_ascii_lowercase();
+    let spaces = |mut at: usize| {
+        while at < len && matches!(bytes[at], b' ' | b'\t') {
+            at += 1;
+        }
+        at
+    };
+    let mut found = Vec::new();
+    for (at, _) in lower.match_indices(KEY) {
+        if at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_') {
+            continue;
+        }
+        let mut field = LoginField {
+            at,
+            values: Vec::new(),
+            end: coming,
+        };
+        let colon = spaces(at + KEY.len());
+        if colon == len {
+            found.push(field);
+            break;
+        }
+        if !matches!(bytes[colon], b':' | b'=') {
+            continue;
+        }
+        let mut start = spaces(colon + 1);
+        if start < len && matches!(bytes[start], b'"' | b'\'') {
+            start += 1;
+        }
+        let word = start
+            + bytes[start..]
+                .iter()
+                .position(|byte| !byte.is_ascii_alphabetic())
+                .unwrap_or(len - start);
+        if word == len {
+            found.push(field);
+            break;
+        }
+        if bytes[word] == b' ' && SCHEMES.contains(&&lower[start..word]) {
+            start = spaces(word);
+        }
+        let Some(stop) = bytes[start..]
+            .iter()
+            .position(|byte| matches!(byte, b'\r' | b'\n' | b'"' | b'\''))
+            .map(|stop| start + stop)
+        else {
+            field.values.push((start, len));
+            found.push(field);
+            break;
+        };
+        // Its spaces at the end are not part of it.
+        let end = start + text[start..stop].trim_end().len();
+        if end == start {
+            continue;
+        }
+        field.values.push((start, end));
+        field.end = stop;
+        found.push(field);
+    }
+    found
+}
+
+/// The string value of each key that names a token, and the credentials of each header that
+/// carries them, masked.
 fn mask_login_fields(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut from = 0;
-    for (start, end) in login_fields(text)
+    let mut values: Vec<(usize, usize)> = login_fields(text)
         .into_iter()
+        .chain(headers(text))
         .flat_map(|field| field.values)
         .filter(|(start, end)| end > start)
-    {
+        .collect();
+    values.sort();
+    for (start, end) in values {
+        // Inside a value already masked.
+        if start < from {
+            continue;
+        }
         out.push_str(&text[from..start]);
         out.push_str(MASK);
         from = end;
@@ -923,6 +1012,32 @@ mod tests {
             masked.contains("\"Authorization\": \"[masked]\""),
             "{masked}"
         );
+    }
+
+    #[test]
+    fn an_unquoted_authorization_header_is_masked() {
+        let text = "> GET / HTTP/1.1\r\n> Authorization: Bearer fake-bearer-0123456789\r\n\
+            headers:\n  authorization: \"Bearer fake-yaml-0123456789\"\n\
+            curl -H 'Proxy-Authorization: Basic fake-basic-0123456789' https://example.test\n\
+            Authorization=fake-plain-0123456789\n\
+            {\"passwd\": \"fake-passwd-0123\", \"aws_secret_key\": \"fake-secret-key-0123\"}\n";
+        let masked = mask(text, &BTreeMap::new());
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("> Authorization: Bearer [masked]\r\n"),
+            "{masked}"
+        );
+        assert!(
+            masked.contains("Basic [masked]' https://example.test"),
+            "{masked}"
+        );
+        for cut in 1..text.len() {
+            assert_eq!(streamed(text, &[cut], &BTreeMap::new()), masked, "{cut}");
+        }
+        // Prose that names the header keeps its words.
+        let prose = "Send the token in the Authorization header.\n";
+        assert_eq!(mask(prose, &BTreeMap::new()), prose);
     }
 
     #[test]

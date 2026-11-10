@@ -3349,7 +3349,13 @@ fn moves_agent_folder(call: &Call, layer: &[String]) -> Option<String> {
             shown()
         ));
     }
-    for word in layer[at + 1..].iter().filter(|word| !word.starts_with('-')) {
+    // After `--`, every word is a path, `-weird` too.
+    let paths = layer[at + 1..].iter().scan(false, |ended, word| {
+        let option = !*ended && word.starts_with('-');
+        *ended |= word == "--" || word == "--end-of-options";
+        Some((word, option))
+    });
+    for word in paths.filter(|(_, option)| !option).map(|(word, _)| word) {
         if word.starts_with(':') || word.contains(['*', '?', '[']) {
             return Some(format!(
                 "{} names files by a pattern ({word}), which may reach an agent folder",
@@ -4491,6 +4497,28 @@ mod tests {
         for line in ["git rm -r src", "git mv src lib", "git rm src/a.rs"] {
             assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
         }
+    }
+
+    #[test]
+    fn a_path_after_double_dash_that_starts_with_a_dash_is_checked() {
+        // After `--` (or `--end-of-options`, which git reads the same), every word is a path:
+        // `-weird` is a folder, not an option.
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join("-weird/.claude/settings.json"));
+        made(&fixture.root.join("-plain/a.rs"));
+        for line in [
+            "git rm -r -- -weird",
+            "git mv -- -weird notes",
+            "git rm -r --end-of-options -weird",
+            "git mv --end-of-options -weird notes",
+        ] {
+            assert!(
+                matches!(fixture.run(line), Verdict::Ask(_)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+        assert_eq!(fixture.run("git rm -r -- -plain"), Verdict::Allow);
     }
 
     #[test]

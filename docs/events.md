@@ -265,6 +265,7 @@ secret.
 |---|---|
 | `name` | The entry. |
 | `project` | The only project whose agents see it, `null` for every project. |
+| `for` | The use it is bound to, `null` for none; absent when it was removed. |
 | `removed` | `true` when it was removed; absent when it was set. |
 
 ### `vault.asked`, `vault.ask_joined`, `vault.ask_answered`
@@ -1031,7 +1032,7 @@ An agent's run ended and the daemon could not check all the agent folders of its
 | `folder` | Where it ran. |
 | `too_large` | The place is too large: the agent folders right in it and in its repositories were checked, one further down past 500,000 entries was not. Absent from an event of before it, which was one. |
 | `interrupted` | The daemon stopped or crashed while the place was guarded: found at its next start, nothing there was checked nor put back. `agent` and `project` are the run's, `null` when it is not known. |
-| `missing` | The daemon could not note the agent folders before the run: nothing it changed there is known, nor put back. |
+| `missing` | The daemon could not note all the agent folders before the run: nothing it changed there is known, nor put back. A run whose own snapshot failed is refused instead; this is said of runs already going on inside a place whose snapshot failed. |
 | `unreached` | The folders of the place's repositories that are outside it (reached through a link), whose agent folders were not checked. |
 
 #### `run.agent_folders_put_back`
@@ -1120,7 +1121,7 @@ ends first, `cancelled`.
 #### `session.following_paused`, `session.following_resumed`
 
 The two sessions of a following (`docs/tools.md`, "Sessions that talk to each other") wrote to each
-other five times with no message of the user's in either: the following pauses, and wakes nobody
+other fifty times with no message of the user's in either: the following pauses, and wakes nobody
 until it resumes, and the `session_send` between the two are refused. A message of the user's to
 either session, or the window's Resume (`subscription.resume`), resumes it.
 
@@ -1128,7 +1129,7 @@ either session, or the window's Resume (`subscription.resume`), resumes it.
 |---|---|
 | `agent` | The session that is followed, a root: the user's. |
 | `follower` | The agent that started it and follows it. |
-| `exchanges` | (`paused` only) How many were written: 5. |
+| `exchanges` | (`paused` only) How many were written: 50. |
 
 `flottille inbox` lists a pause as an entry of kind `paused` (`docs/protocol.md`, `inbox.list`).
 

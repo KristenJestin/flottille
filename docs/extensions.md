@@ -831,7 +831,8 @@ tool is a third party's.
 instead of holding a value: the daemon reads it when it starts the server and puts it where it goes
 (a variable of the server's environment, a header of every request to the URL).
 The entry must be one of every project (`vault.md`: no `project` on it), since the server is given
-to all; an entry tied to one project is refused. The agent sees neither the variable nor its
+to all; an entry tied to one project is refused, and so is one bound to another use than this
+connection (`vault.md`, "Bound to one use": `for = "connection:<name>"` makes it this one's alone). The agent sees neither the variable nor its
 value; the value is masked in everything the daemon stores and shows, a server's output and its
 error text included.
 
@@ -963,13 +964,19 @@ events the inbox lists, kind `connections`). The pin and the settings are in
 `ext_connections_connections`. A `help` action of a server's is not offered, as `help` is
 Flottille's. The server's environment is a run's (forge tokens emptied, no `XDG_RUNTIME_DIR`),
 its folder `$XDG_STATE_HOME/flottille/connections/<name>`. A URL is reached with no proxy,
-whatever the daemon's environment says. Accepting stops the server the review started: a change it
-announces before the accept is compared with the pin at its next start. Its tools are listed one
-listing at a time (notices that come during one make one more), within the start's 30 seconds,
+whatever the daemon's environment says. Accepting stops the server the review started, and no
+server of the connection starts until the pin is written: a change it announces before the accept
+is compared with the pin at its next start. A review of an accepted connection whose server is not
+what was accepted does not keep it running: a call compares the server it starts, never one
+already running. Its tools are listed one listing at a time (notices that come during one make one
+more, and a server that starts begins afresh, whatever the stopped one left), within the start's 30 seconds,
 100 pages and 1,000 tools: past them it is cut off, saying why. Every vault secret a connection
 reads is masked from then on, even when the keyring was locked at the daemon's start. A server's
 own words in a failure (an error result, a JSON-RPC error, its first error line) are framed as a
-result is, and a cut-off says its name and version masked and cut at 100 characters.
+result is, and a cut-off says its name and version masked and cut at 100 characters. So is why it
+failed to start (its first error line, or the error), in `failing`, `connection.changed` and the
+review's error, and why its tools could not be listed, in the daemon's log: masked first, then cut,
+so that no secret is cut in two.
 
 **Examples.** The first two are invented; the others are public programs, the first cases of
 0.3.

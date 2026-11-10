@@ -1173,13 +1173,16 @@ impl ProjectSettingsPage {
     }
 
     /// What the `Log time with` select offers, each as its key and its label: none first, then
-    /// the entries the project sees (its own and the global ones) by name, with their username.
-    /// The entry the file names stays in the list when the project does not see it, said so.
+    /// the entries the project sees (its own and the global ones) and no other use is bound to,
+    /// by name, with their username. The entry the file names stays in the list when the project
+    /// does not see it, said so.
     pub fn worklog_options(&self) -> Vec<(String, String)> {
+        let worklog = flottille_core::vault::worklog(&self.name);
         let mut seen: Vec<&VaultEntry> = self
             .vault
             .iter()
             .filter(|entry| entry.project.as_deref().is_none_or(|p| p == self.name))
+            .filter(|entry| entry.bound.as_deref().is_none_or(|b| b == worklog))
             .collect();
         seen.sort_by(|a, b| a.name.cmp(&b.name));
         let mut options = vec![("none".to_owned(), "None".to_owned())];

@@ -414,26 +414,48 @@ fn write(user: &User, from: &Mcp, to: &str, text: &str) {
     eventually("the receiver's turn", || turns(user, to) > before);
 }
 
+/// The exchanges after which a following pauses (`EXCHANGES` of the daemon, which a test cannot
+/// reach: the daemon is a binary).
+const EXCHANGES: usize = 50;
+
+/// `count` exchanges more, starting with the session's message to the lead and alternating, so
+/// that the last of an even number is the lead's: the one a pause leaves without its wake.
+fn exchange(user: &User, mcp: &Mcp, session: &str, second: &Mcp, lead: &str, count: usize) {
+    for i in 0..count {
+        match i % 2 {
+            0 => write(user, second, lead, "from the session"),
+            _ => write(user, mcp, session, "from the lead"),
+        }
+    }
+}
+
 #[test]
-fn five_exchanges_without_the_user_pause_the_following_and_say_so() {
+fn fifty_exchanges_without_the_user_pause_the_following_and_say_so() {
     let user = User::with_fake_agent();
     user.fake_script(asking());
     let (lead, mcp, session, second) = followed(&user, "Fix the login.");
 
-    write(&user, &mcp, &session, "one");
-    eventually("the wake of the first", || wakes(&user, &lead).len() == 2);
-    write(&user, &second, &lead, "two");
-    write(&user, &mcp, &session, "three");
-    eventually("the wake of the third", || wakes(&user, &lead).len() == 3);
-    write(&user, &second, &lead, "four");
-    assert!(inbox(&user).iter().all(|e| e["kind"] != "paused"));
-    write(&user, &mcp, &session, "five");
+    exchange(&user, &mcp, &session, &second, &lead, EXCHANGES - 1);
+    settle();
+    assert!(
+        inbox(&user).iter().all(|e| e["kind"] != "paused"),
+        "paused before the fiftieth"
+    );
+    // The wake of the first question, and one for each message of the lead's.
+    eventually("the wakes", || {
+        wakes(&user, &lead).len() == 1 + EXCHANGES / 2 - 1
+    });
+    write(&user, &mcp, &session, "the fiftieth");
 
     eventually("the inbox says it", || {
         inbox(&user).iter().any(|e| e["kind"] == "paused")
     });
     settle();
-    assert_eq!(wakes(&user, &lead).len(), 3, "a paused following woke");
+    assert_eq!(
+        wakes(&user, &lead).len(),
+        EXCHANGES / 2,
+        "a paused following woke"
+    );
     let entry = inbox(&user)
         .into_iter()
         .find(|e| e["kind"] == "paused")
@@ -449,14 +471,7 @@ fn a_user_message_resumes_a_paused_following() {
     let user = User::with_fake_agent();
     user.fake_script(asking());
     let (lead, mcp, session, second) = followed(&user, "Fix the login.");
-    write(&user, &mcp, &session, "one");
-    write(&user, &second, &lead, "two");
-    write(&user, &mcp, &session, "three");
-    write(&user, &second, &lead, "four");
-    write(&user, &mcp, &session, "five");
-    eventually("the inbox says it", || {
-        inbox(&user).iter().any(|e| e["kind"] == "paused")
-    });
+    pause(&user, &mcp, &session, &second, &lead);
     settle();
     let paused = wakes(&user, &lead).len();
 
@@ -523,13 +538,9 @@ fn the_descriptions_say_where_a_question_goes() {
     assert!(description(&tools, "ask").contains("goes to your parent"));
 }
 
-/// The five exchanges that pause the following of the session by the lead.
+/// The fifty exchanges that pause the following of the session by the lead.
 fn pause(user: &User, mcp: &Mcp, session: &str, second: &Mcp, lead: &str) {
-    write(user, mcp, session, "one");
-    write(user, second, lead, "two");
-    write(user, mcp, session, "three");
-    write(user, second, lead, "four");
-    write(user, mcp, session, "five");
+    exchange(user, mcp, session, second, lead, EXCHANGES);
     eventually("the inbox says it", || {
         inbox(user).iter().any(|e| e["kind"] == "paused")
     });
@@ -558,7 +569,7 @@ fn a_session_send_between_a_paused_pair_is_refused_naming_why() {
     ] {
         assert!(
             refused.starts_with(
-                "refused: paused: you two wrote to each other five times without the user; \
+                "refused: paused: you two wrote to each other fifty times without the user; \
                  wait for their message"
             ),
             "{refused}"
@@ -670,7 +681,7 @@ fn the_pause_and_the_count_survive_a_restart() {
     assert_eq!(listed.len(), 1, "{listed:?}");
     assert_eq!(listed[0]["paused"], true, "{listed:?}");
     let kept = store(&user).subscriptions().unwrap();
-    assert_eq!(kept[0].seen["exchanges"], 5, "{:?}", kept[0].seen);
+    assert_eq!(kept[0].seen["exchanges"], EXCHANGES, "{:?}", kept[0].seen);
 }
 
 #[test]

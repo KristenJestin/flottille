@@ -443,9 +443,9 @@ fn the_specs_tab_lists_each_spec_with_its_status_and_tickets(cx: &mut TestAppCon
     let (shell, cx) = window(&user, cx);
     open_project(&shell, cx);
     until(&shell, cx, "the Specs tab counts them", |cx| {
-        label(cx, "project-items-tabs-specs-count").as_deref() == Some("2")
+        label(cx, "project-tabs-specs-count").as_deref() == Some("2")
     });
-    click(cx, "project-items-tabs-specs");
+    click(cx, "project-tabs-specs");
     at_rest(cx);
 
     let facts = label(cx, &format!("spec-{alone}-facts")).unwrap();
@@ -585,7 +585,7 @@ fn write_the_spec_on_a_ticket_becomes_open_the_spec_once_it_has_one(cx: &mut Tes
     turn(&user, true, None);
     let (shell, cx) = window(&user, cx);
     open_project(&shell, cx);
-    click(cx, "project-items-tabs-tickets");
+    click(cx, "project-tabs-tickets");
     let (five, six) = ticket_rows(&shell, cx);
     at_rest(cx);
     assert_eq!(
@@ -638,12 +638,11 @@ fn no_specs_screen_is_shown_where_specs_is_off(cx: &mut TestAppContext) {
 
     let (shell, cx) = window(&user, cx);
     open_project(&shell, cx);
-    click(cx, "project-items-tabs-tickets");
+    click(cx, "project-tabs-tickets");
     let (five, _) = ticket_rows(&shell, cx);
     at_rest(cx);
     let action = format!("{five}-spec");
-    let none =
-        |cx: &mut VisualTestContext| !found(cx, "project-items-tabs-specs") && !found(cx, &action);
+    let none = |cx: &mut VisualTestContext| !found(cx, "project-tabs-specs") && !found(cx, &action);
     assert!(none(cx), "off globally, no screen of Specs");
 
     // On globally and off in the project: still none there.
@@ -683,9 +682,9 @@ fn no_specs_screen_is_shown_where_specs_is_off(cx: &mut TestAppContext) {
     });
     open_project(&shell, cx);
     until(&shell, cx, "the Specs tab comes", |cx| {
-        found(cx, "project-items-tabs-specs")
+        found(cx, "project-tabs-specs")
     });
-    click(cx, "project-items-tabs-tickets");
+    click(cx, "project-tabs-tickets");
     until(&shell, cx, "the row's action comes", |cx| {
         found(cx, &action)
     });
@@ -987,9 +986,9 @@ fn the_specs_tab_menu_launches_a_development(cx: &mut TestAppContext) {
     let (shell, cx) = window(&user, cx);
     open_project(&shell, cx);
     until(&shell, cx, "the Specs tab counts it", |cx| {
-        label(cx, "project-items-tabs-specs-count").as_deref() == Some("1")
+        label(cx, "project-tabs-specs-count").as_deref() == Some("1")
     });
-    click(cx, "project-items-tabs-specs");
+    click(cx, "project-tabs-specs");
     let more = format!("specs-more-spec-{spec}");
     until(&shell, cx, "the row's menu", |cx| found(cx, &more));
 

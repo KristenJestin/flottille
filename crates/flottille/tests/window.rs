@@ -21,7 +21,7 @@ use flottille_window::composer::{Choice, Composer, Menu, PlaceChoice};
 use flottille_window::conversation::Block;
 use flottille_window::link::{self, Connect};
 use flottille_window::model::{Place, Preparation};
-use flottille_window::project::{NewWorkspace, PlaceCard, ProjectPage};
+use flottille_window::project::{NewWorkspace, PlaceBlock, ProjectPage};
 use flottille_window::project_settings::{
     Dialog, ForgeKind, ProjectSettingsPage, Reveal, SECTIONS, TrackerKind,
 };
@@ -656,6 +656,24 @@ fn recipe(user: &User, project: &str, body: &str) {
     std::fs::write(file, text).unwrap();
 }
 
+/// A place's ▶ Run a task here, then the task picked in its list, as the user does.
+fn run_here(place: &str, task: &str, cx: &mut VisualTestContext) {
+    let row = format!("place-row-{place}");
+    cx.update(|window, cx| window.hover(row, cx));
+    settle(cx);
+    let menu = format!("place-run-{place}");
+    cx.update(|window, cx| window.click(menu, cx));
+    settle(cx);
+    let entry = format!("place-run-{place}-{task}");
+    cx.update(|window, cx| window.click(entry, cx));
+}
+
+/// Unfolds Work's `N ended runs`.
+fn unfold_ended_runs(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.click("project-ended-runs", cx));
+    settle(cx);
+}
+
 fn page_of(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<ProjectPage> {
     shell
         .read_with(cx, |s, cx| s.main().read(cx).project_page().cloned())
@@ -666,9 +684,9 @@ fn card_of(
     shell: &Entity<Shell>,
     place: Option<&str>,
     cx: &mut VisualTestContext,
-) -> Option<Entity<PlaceCard>> {
+) -> Option<Entity<PlaceBlock>> {
     let page = shell.read_with(cx, |s, cx| s.main().read(cx).project_page().cloned())?;
-    page.read_with(cx, |page, cx| page.card(&place.map(str::to_owned), cx))
+    page.read_with(cx, |page, cx| page.block(&place.map(str::to_owned), cx))
 }
 
 /// Lets the page's entrance and every other motion end, then draws.
@@ -717,7 +735,7 @@ fn type_task(text: &str, cx: &mut VisualTestContext) {
     cx.simulate_input(text);
 }
 
-fn titles_in(card: &Entity<PlaceCard>, cx: &mut VisualTestContext) -> Vec<String> {
+fn titles_in(card: &Entity<PlaceBlock>, cx: &mut VisualTestContext) -> Vec<String> {
     card.read_with(cx, |card, _| {
         card.data()
             .sessions
@@ -777,25 +795,25 @@ fn the_page_lists_main_and_two_workspaces_with_their_sessions(cx: &mut TestAppCo
     );
     let page = page_of(&shell, cx);
     let places: Vec<Place> = page.read_with(cx, |page, cx| {
-        page.cards()
+        page.blocks()
             .iter()
             .map(|card| card.read(cx).data().place.clone())
             .collect()
     });
     assert_eq!(
         places,
-        [None, Some("export-csv".into()), Some("login".into())],
-        "main first, then each workspace"
+        [None, Some("login".into()), Some("export-csv".into())],
+        "main first, then each workspace from the newest"
     );
-    let cards = page.read_with(cx, |page, _| page.cards().to_vec());
+    let cards = page.read_with(cx, |page, _| page.blocks().to_vec());
     assert_eq!(titles_in(&cards[0], cx), ["Release notes for 2.4"]);
-    assert_eq!(titles_in(&cards[1], cx), ["CSV export by tenant"]);
+    assert_eq!(titles_in(&cards[2], cx), ["CSV export by tenant"]);
     assert_eq!(
-        titles_in(&cards[2], cx),
+        titles_in(&cards[1], cx),
         ["Review the refresh flow", "Sessions expire too early"]
     );
     assert_eq!(
-        cards[1].read_with(cx, |c, _| c.data().meta.clone()),
+        cards[2].read_with(cx, |c, _| c.data().meta.clone()),
         Some("from main".to_owned())
     );
     assert_eq!(cards[0].read_with(cx, |c, _| c.data().meta.clone()), None);
@@ -807,24 +825,23 @@ fn the_page_lists_main_and_two_workspaces_with_their_sessions(cx: &mut TestAppCo
     settle(cx);
     cx.update(|window, _| {
         for id in [
-            "place-card-main",
-            "place-card-export-csv",
-            "place-card-login",
-            "new-session-in-login",
-            "new-workspace-card",
+            "place-main",
+            "place-export-csv",
+            "place-login",
+            "place-new-session-login",
         ] {
             assert!(window.try_find(id).is_some(), "{id} is not shown");
         }
         let (main, workspace) = (
-            window.find("place-card-main").bounds(),
-            window.find("place-card-export-csv").bounds(),
+            window.find("place-main").bounds(),
+            window.find("place-export-csv").bounds(),
         );
-        assert!(workspace.origin.x > main.origin.x, "two columns");
-        assert_eq!(workspace.origin.y, main.origin.y);
+        assert_eq!(workspace.origin.x, main.origin.x, "one column");
+        assert!(workspace.origin.y > main.origin.y);
     });
 
-    // "New session in login" points the composer there.
-    cx.update(|window, cx| window.click("new-session-in-login", cx));
+    // "New session here" on login points the composer there.
+    cx.update(|window, cx| window.click("place-new-session-login", cx));
     let composer = composer_of(&shell, "atlas", cx);
     assert_eq!(
         composer.read_with(cx, |c, _| c.choice().clone()),
@@ -861,7 +878,7 @@ fn a_failing_recipe_shows_its_output_on_the_card(cx: &mut TestAppContext) {
     });
     let page = page_of(&shell, cx);
     let card = page.read_with(cx, |page, cx| {
-        page.card(&Some("broken".into()), cx).unwrap()
+        page.block(&Some("broken".into()), cx).unwrap()
     });
     let Preparation::Failed { output, .. } =
         card.read_with(cx, |c, _| c.data().preparation.clone())
@@ -907,7 +924,6 @@ fn the_project_page_has_no_running_agents_tab(cx: &mut TestAppContext) {
 fn new_workspace_opens_a_modal_and_escape_closes_it(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
-    // A session in main: a page with nothing in it shows its empty state, not the dashed card.
     start(&user, "atlas", None, "Release notes");
     user.call(
         "project.set_settings",
@@ -958,13 +974,13 @@ fn new_workspace_opens_a_modal_and_escape_closes_it(cx: &mut TestAppContext) {
         assert!(window.try_find("new-workspace-modal").is_none());
         assert!(window.try_find("new-workspace-modal-scrim").is_none());
         assert!(
-            window.try_find("new-workspace-card").is_some(),
-            "the card stays in the grid"
+            window.try_find("new-workspace-card").is_none(),
+            "no dashed card"
         );
     });
 
-    // The dashed card opens it too, and Cancel closes it.
-    cx.update(|window, cx| window.click("new-workspace-card", cx));
+    // The header's action opens it again, and Cancel closes it.
+    cx.update(|window, cx| window.click("new-workspace", cx));
     settle(cx);
     assert!(form.read_with(cx, |f, _| f.is_open()));
     cx.update(|window, cx| window.click("new-workspace-modal-cancel", cx));
@@ -999,27 +1015,23 @@ fn the_composer_has_no_new_task_row(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn the_main_card_has_no_second_header_and_a_workspace_card_keeps_where_it_comes_from(
-    cx: &mut TestAppContext,
-) {
+fn main_has_no_second_line_and_a_workspace_keeps_where_it_comes_from(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     workspace(&user, "atlas", "login");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    until(&shell, cx, "the page shows both cards", |cx| {
+    until(&shell, cx, "the page shows both places", |cx| {
         card_of(&shell, Some("login"), cx).is_some()
     });
     settle(cx);
 
-    cx.update(|window, _| assert!(window.try_find("place-card-main").is_some()));
-    // The project folder's card says what it is beside its name, not in a second line.
-    assert_eq!(
-        text_of("place-head-main-meta", cx).as_deref(),
-        Some("the project folder")
-    );
-    assert_eq!(
-        text_of("place-head-login-meta", cx).as_deref(),
-        Some("from main")
+    cx.update(|window, _| assert!(window.try_find("place-main").is_some()));
+    // `main` says what it is by its name and its icon; a workspace says where it starts from.
+    assert_eq!(text_of("place-facts-main", cx), None);
+    assert!(
+        text_of("place-facts-login", cx).is_some_and(|line| line.starts_with("from main")),
+        "{:?}",
+        text_of("place-facts-login", cx)
     );
 }
 
@@ -1134,8 +1146,8 @@ fn a_workspace_made_from_the_page_s_action_leaves_the_composer_s_place(cx: &mut 
     until(&shell, cx, "the workspace is made", |cx| {
         !form.read_with(cx, |f, _| f.is_open())
     });
-    until(&shell, cx, "the card of the workspace is shown", |cx| {
-        cx.update(|window, _| window.try_find("place-card-from-page").is_some())
+    until(&shell, cx, "the place of the workspace is shown", |cx| {
+        cx.update(|window, _| window.try_find("place-from-page").is_some())
     });
     assert_eq!(
         composer.read_with(cx, |c, _| c.choice().clone()),
@@ -1236,7 +1248,7 @@ fn typing_in_the_composer_does_not_redraw_the_page(cx: &mut TestAppContext) {
     settle(cx);
     let page = page_of(&shell, cx);
     let composer = composer_of(&shell, "atlas", cx);
-    let cards = page.read_with(cx, |page, _| page.cards().to_vec());
+    let cards = page.read_with(cx, |page, _| page.blocks().to_vec());
     let renders = |cx: &mut VisualTestContext| {
         (
             page.read_with(cx, |p, _| p.renders()),
@@ -1605,7 +1617,7 @@ fn a_chosen_workspace_that_stops_being_ready_cannot_take_the_task(cx: &mut TestA
         card_of(&shell, Some("login"), cx).is_some()
     });
     settle(cx);
-    cx.update(|window, cx| window.click("new-session-in-login", cx));
+    cx.update(|window, cx| window.click("place-new-session-login", cx));
     cx.simulate_input("Fix the timeout");
     let composer = composer_of(&shell, "atlas", cx);
     let places = |login_ready: bool| {
@@ -4942,7 +4954,7 @@ fn an_open_dropdown_is_above_the_elements_under_it_and_inside_the_window(cx: &mu
     settle(cx);
     let covers = cx.update(|window, _| {
         let list = window.find("effort-picker-menu").bounds();
-        ["place-card-main", "place-card-login", "new-workspace-card"]
+        ["project-tabs", "place-main", "place-login"]
             .iter()
             .any(|card| {
                 window
@@ -8595,7 +8607,7 @@ fn the_card_and_the_session_menu_have_no_run_procedure_entry(cx: &mut TestAppCon
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
     until(&shell, cx, "the workspace's card is drawn", |cx| {
-        cx.update(|window, _| window.try_find("place-card-login").is_some())
+        cx.update(|window, _| window.try_find("place-login").is_some())
     });
     settle(cx);
     cx.update(|window, _| assert!(window.try_find("run-procedure-login").is_none()));
@@ -10136,113 +10148,6 @@ fn add_project_is_disabled_until_a_usable_result(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_project_with_only_main_and_no_session_shows_an_empty_state(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user, "atlas");
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    open_project(&shell, "atlas", cx);
-    let page = page_of(&shell, cx);
-    until(&shell, cx, "the page knows its places", |cx| {
-        page.read_with(cx, |page, _| page.is_empty())
-    });
-    settle(cx);
-
-    cx.update(|window, _| {
-        assert!(window.find("project-empty").visible());
-        assert!(window.find("empty-new-session").visible());
-        assert!(window.find("empty-new-workspace").visible());
-        assert!(
-            window.try_find("place-card-main").is_none(),
-            "no bare card of main"
-        );
-        assert!(window.try_find("new-workspace-card").is_none());
-    });
-
-    // Its two actions start the work.
-    cx.update(|window, cx| window.click("empty-new-workspace", cx));
-    settle(cx);
-    let form = shell
-        .read_with(cx, |s, _| s.new_workspace_of("atlas").cloned())
-        .unwrap();
-    assert!(form.read_with(cx, |f, _| f.is_open()), "the same modal");
-    cx.update(|window, cx| window.click("new-workspace-modal-cancel", cx));
-    settle(cx);
-
-    cx.update(|window, cx| window.click("empty-new-session", cx));
-    let composer = composer_of(&shell, "atlas", cx);
-    assert_eq!(
-        composer.read_with(cx, |c, _| c.choice().clone()),
-        Choice::Main
-    );
-    cx.simulate_input("Fix the timeout");
-    assert_eq!(
-        composer.read_with(cx, |c, cx| c.field().read(cx).value().to_string()),
-        "Fix the timeout",
-        "the caret is in the composer"
-    );
-}
-
-#[gpui_kit::test]
-fn a_project_with_a_workspace_does_not_show_the_empty_state(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user, "atlas");
-    workspace(&user, "atlas", "login");
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    until(&shell, cx, "the page shows login", |cx| {
-        card_of(&shell, Some("login"), cx).is_some()
-    });
-    settle(cx);
-
-    assert!(!page_of(&shell, cx).read_with(cx, |page, _| page.is_empty()));
-    cx.update(|window, _| {
-        assert!(window.try_find("project-empty").is_none());
-        assert!(window.try_find("place-card-main").is_some());
-        assert!(window.try_find("new-workspace-card").is_some());
-    });
-}
-
-#[gpui_kit::test]
-fn a_project_with_a_session_in_main_does_not_show_the_empty_state(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user, "atlas");
-    start(&user, "atlas", None, "Release notes");
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    until(&shell, cx, "main's card lists the session", |cx| {
-        card_of(&shell, None, cx).is_some_and(|card| !titles_in(&card, cx).is_empty())
-    });
-    settle(cx);
-
-    assert!(!page_of(&shell, cx).read_with(cx, |page, _| page.is_empty()));
-    cx.update(|window, _| {
-        assert!(window.try_find("project-empty").is_none());
-        assert!(window.try_find("new-session-in-main").is_some());
-    });
-}
-
-#[gpui_kit::test]
-fn the_empty_state_gives_way_to_the_page_once_a_workspace_exists(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user, "atlas");
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    open_project(&shell, "atlas", cx);
-    let page = page_of(&shell, cx);
-    until(&shell, cx, "the empty state is shown", |cx| {
-        page.read_with(cx, |page, _| page.is_empty())
-    });
-
-    workspace(&user, "atlas", "login");
-    until(&shell, cx, "the page shows login", |cx| {
-        card_of(&shell, Some("login"), cx).is_some()
-    });
-    settle(cx);
-    assert!(!page.read_with(cx, |page, _| page.is_empty()));
-    cx.update(|window, _| {
-        assert!(window.try_find("project-empty").is_none());
-        assert!(window.try_find("new-workspace-card").is_some());
-    });
-}
-
-#[gpui_kit::test]
 fn agent_steps_are_folded_until_clicked_and_stay_open_while_the_session_is_shown(
     cx: &mut TestAppContext,
 ) {
@@ -11127,7 +11032,7 @@ fn setup_steps_are_added_reordered_and_removed_in_the_setup_section(cx: &mut Tes
 }
 
 #[gpui_kit::test]
-fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut TestAppContext) {
+fn run_a_task_here_in_main_lists_its_run_and_opens_its_output(cx: &mut TestAppContext) {
     let user = user().with_fake_escalation();
     let folder = project(&user, "atlas");
     let say = folder.join("say.sh");
@@ -11155,7 +11060,7 @@ fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut
     });
     settle(cx);
 
-    cx.update(|window, cx| window.click("run-task-say", cx));
+    run_here("main", "say", cx);
     until_time_passes(&shell, cx, "its run ended and is listed", |cx| {
         tasks.read_with(cx, |t, cx| {
             t.commands()
@@ -11170,7 +11075,8 @@ fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut
     assert_eq!(row.last_line, "second");
     settle(cx);
 
-    cx.update(|window, cx| window.click(format!("command-{}", row.run), cx));
+    unfold_ended_runs(cx);
+    cx.update(|window, cx| window.click(format!("ended-run-{}", row.run), cx));
     until(&shell, cx, "its output is open", |cx| {
         tasks.read_with(cx, |t, cx| {
             t.panel()
@@ -11763,15 +11669,25 @@ fn the_repository_chips_are_read_only_and_open_their_row_in_the_project_settings
     cx: &mut TestAppContext,
 ) {
     let user = user();
-    project(&user, "atlas");
+    // A project of two repositories: one of one has no chip, its folder is its repository.
+    let folder = user.path("work/atlas");
+    for name in ["api", "web"] {
+        let dir = folder.join(name);
+        user.git_init(&dir);
+        std::fs::write(dir.join("README.md"), format!("{name}\n")).unwrap();
+        user.git(&dir, &["add", "README.md"]);
+        user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+    }
+    user.call("project.add", json!({"folder": folder, "name": "atlas"}))
+        .unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
-    until(&shell, cx, "the chip says its branch", |cx| {
-        page_of(&shell, cx).read_with(cx, |page, _| page.chips() == ["atlas · main"])
+    until(&shell, cx, "the chips say their branches", |cx| {
+        page_of(&shell, cx).read_with(cx, |page, _| page.chips()) == ["api · main", "web · main"]
     });
     settle(cx);
     cx.update(|window, _| {
-        assert!(window.find("repository-chip-.").visible());
+        assert!(window.find("repository-chip-api").visible());
         for gone in ["project-repositories", "repository-path-field"] {
             assert!(
                 window.try_find(gone).is_none(),
@@ -11780,7 +11696,7 @@ fn the_repository_chips_are_read_only_and_open_their_row_in_the_project_settings
         }
     });
 
-    cx.update(|window, cx| window.click("repository-chip-.", cx));
+    cx.update(|window, cx| window.click("repository-chip-api", cx));
     until(&shell, cx, "the project's settings are open", |cx| {
         settings_of(&shell, cx).is_some()
     });
@@ -11791,38 +11707,23 @@ fn the_repository_chips_are_read_only_and_open_their_row_in_the_project_settings
     let settings = settings_of(&shell, cx).unwrap();
     assert_eq!(
         settings.read_with(cx, |page, _| page.revealed().cloned()),
-        Some(Reveal::Repository(".".into())),
+        Some(Reveal::Repository("api".into())),
         "at the chip's repository"
     );
 }
 
 #[gpui_kit::test]
-fn edit_in_settings_opens_the_project_settings_scrolled_to_their_tasks(cx: &mut TestAppContext) {
+fn run_a_task_here_with_no_task_opens_the_project_settings_at_their_tasks(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
-    user.call(
-        "task.add",
-        json!({"project": "atlas", "name": "say", "line": "echo hi"}),
-    )
-    .unwrap();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     open_project(&shell, "atlas", cx);
-    until(&shell, cx, "the task is listed", |cx| {
-        cx.update(|window, _| window.try_find("project-task-say").is_some())
-    });
-    settle(cx);
-    // The tasks come last on the page, after its pull requests and tickets: scrolled to, as a
-    // user would.
-    cx.update(|window, cx| {
-        window.scroll(
-            "project-items-title",
-            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-4000.))),
-            cx,
-        )
+    until(&shell, cx, "main is drawn", |cx| {
+        cx.update(|window, _| window.try_find("place-row-main").is_some())
     });
     settle(cx);
 
-    cx.update(|window, cx| window.click("edit-tasks-in-settings", cx));
+    run_here("main", "new", cx);
     until(&shell, cx, "the project's settings are open", |cx| {
         settings_of(&shell, cx).is_some()
     });
@@ -11853,9 +11754,7 @@ fn edit_in_settings_opens_the_project_settings_scrolled_to_their_tasks(cx: &mut 
 }
 
 #[gpui_kit::test]
-fn a_workspace_card_shows_the_three_labelled_lines_only_when_they_have_something(
-    cx: &mut TestAppContext,
-) {
+fn a_workspace_s_row_shows_its_chips_only_when_they_have_something(cx: &mut TestAppContext) {
     let user = user().with_fake_gh();
     let folder = project(&user, "app");
     workspace(&user, "app", "fix-login");
@@ -11896,7 +11795,7 @@ fn a_workspace_card_shows_the_three_labelled_lines_only_when_they_have_something
     until(
         &shell,
         cx,
-        "the card has its pull request and its ticket",
+        "the place has its pull request and its ticket",
         |cx| {
             card_of(&shell, Some("fix-login"), cx).is_some_and(|card| {
                 card.read_with(cx, |c, _| {
@@ -11910,38 +11809,29 @@ fn a_workspace_card_shows_the_three_labelled_lines_only_when_they_have_something
     );
     settle(cx);
 
-    assert!(
-        text_of("repository-line-fix-login-app", cx)
-            .is_some_and(|line| line.starts_with("Repository app")),
-        "{:?}",
-        text_of("repository-line-fix-login-app", cx)
-    );
+    // On the row: the pull request with its checks' mark, then the ticket.
     assert_eq!(
         text_of("pull-fix-login-app", cx).as_deref(),
-        Some("Pull request #17 open")
+        Some("#17 open, no checks")
     );
-    assert_eq!(
-        text_of("ticket-fix-login", cx).as_deref(),
-        Some("Ticket #12 Login form submits twice")
+    assert_eq!(text_of("ticket-fix-login", cx).as_deref(), Some("#12"));
+    // Under it, where it stands.
+    assert!(
+        text_of("place-facts-fix-login", cx).is_some_and(|line| line.contains("1 file changed")),
+        "{:?}",
+        text_of("place-facts-fix-login", cx)
     );
     cx.update(|window, _| {
         for gone in [
-            // Nothing ahead, nothing to commit: its repository has nothing to say.
-            "repository-line-plain-app",
             "pull-plain-app",
             "ticket-plain",
             "ticket-main",
-            "repository-line-main-app",
+            "place-facts-main",
         ] {
             assert!(window.try_find(gone).is_none(), "{gone} has nothing to say");
         }
-        // A line between two blocks that exist, never twice: the header, the lines, the
-        // sessions caption is not drawn without sessions, the footer.
-        assert!(window.try_find("place-fix-login-separator-2").is_some());
-        assert!(window.try_find("place-fix-login-separator-3").is_none());
-        assert!(window.try_find("sessions-caption-plain").is_none());
     });
-    // Its lines arrived: nothing is drawn at rest.
+    // Its chips arrived: nothing is drawn at rest.
     assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
 }
 
@@ -12078,7 +11968,7 @@ fn a_run_row_opens_the_run_drawer_and_escape_closes_it(cx: &mut TestAppContext) 
         tasks.read_with(cx, |t, _| t.tasks().is_some_and(|t| !t.is_empty()))
     });
     settle(cx);
-    cx.update(|window, cx| window.click("run-task-say", cx));
+    run_here("main", "say", cx);
     until_time_passes(&shell, cx, "its run ended and is listed", |cx| {
         tasks.read_with(cx, |t, cx| {
             t.commands()
@@ -12096,7 +11986,8 @@ fn a_run_row_opens_the_run_drawer_and_escape_closes_it(cx: &mut TestAppContext) 
     let run = tasks.read_with(cx, |t, cx| t.commands().read(cx).rows()[0].run.clone());
     settle(cx);
 
-    cx.update(|window, cx| window.click(format!("command-{run}"), cx));
+    unfold_ended_runs(cx);
+    cx.update(|window, cx| window.click(format!("ended-run-{run}"), cx));
     until(&shell, cx, "the drawer shows its output", |cx| {
         tasks.read_with(cx, |t, cx| {
             t.panel()
@@ -12144,7 +12035,7 @@ fn a_run_listed_while_running_is_listed_again_once_it_ended(cx: &mut TestAppCont
         tasks.read_with(cx, |t, _| t.tasks().is_some_and(|t| !t.is_empty()))
     });
     settle(cx);
-    cx.update(|window, cx| window.click("run-task-hold", cx));
+    run_here("main", "hold", cx);
     until(&shell, cx, "its run is listed running", |cx| {
         tasks.read_with(cx, |t, cx| {
             t.commands().read(cx).rows().iter().any(|row| row.running())

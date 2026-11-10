@@ -69,8 +69,8 @@ impl Picture {
 /// Where the user ran a task from: the answer goes back there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunFrom {
-    /// The project page's Run, in the project folder.
-    Page,
+    /// A place's ▶ on the project page, in that place (`None`: `main`).
+    Page { workspace: Option<String> },
     /// Run in a task's "⋯" of the project's settings, in the project folder.
     Settings,
     /// A session's rail, in the session's workspace (`None`: `main`).
@@ -364,7 +364,8 @@ pub enum Command {
         name: String,
         from: RunFrom,
     },
-    /// The tasks the user ran in the project, and the output of the one whose panel is open.
+    /// The task runs of the project, the user's and its agents', and the output of the one whose
+    /// panel is open.
     ProjectRuns {
         project: String,
         output: Option<Watch>,
@@ -619,9 +620,13 @@ pub enum VaultWrite {
         username: String,
         /// Every project's when `None`.
         project: Option<String>,
+        /// The one use it is made for (`worklog:<project>`); left out, it keeps the one it has.
+        bound: Option<String>,
     },
     Remove {
         name: String,
+        /// The user confirmed what stops working without it.
+        confirmed: bool,
     },
 }
 
@@ -657,7 +662,9 @@ impl std::fmt::Debug for VaultWrite {
                 .field("name", name)
                 .field("project", project)
                 .finish_non_exhaustive(),
-            VaultWrite::Remove { name } => f.debug_struct("Remove").field("name", name).finish(),
+            VaultWrite::Remove { name, .. } => {
+                f.debug_struct("Remove").field("name", name).finish()
+            }
         }
     }
 }
@@ -1860,12 +1867,16 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                     url,
                     username,
                     project,
+                    bound,
                 } => (
                     "vault.set",
                     json!({"name": name, "secret": secret, "description": description,
-                        "url": url, "username": username, "project": project}),
+                        "url": url, "username": username, "project": project, "for": bound}),
                 ),
-                VaultWrite::Remove { name } => ("vault.remove", json!({"name": name})),
+                VaultWrite::Remove { name, confirmed } => (
+                    "vault.remove",
+                    json!({"name": name, "confirmed": confirmed}),
+                ),
             };
             let refused = match ask_alone(connect, method, params, bounds.quick) {
                 Ok(Ok(_)) => None,
@@ -2137,7 +2148,9 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let mut params = json!({"project": project, "name": name});
             if let RunFrom::Session {
                 workspace: Some(workspace),
-                ..
+            }
+            | RunFrom::Page {
+                workspace: Some(workspace),
             } = &from
             {
                 params["workspace"] = workspace.as_str().into();
@@ -2157,7 +2170,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let listed = ask_alone(
                 connect,
                 "run.list",
-                json!({"project": project, "user": true, "ended": true}),
+                json!({"project": project, "ended": true}),
                 bounds.quick,
             );
             let output = output.and_then(|watch| {

@@ -709,7 +709,7 @@ fn a_paused_following_says_so_in_the_rail_and_resume_resumes_it(cx: &mut TestApp
     for (from, to) in [(&mcp, &session), (&second, &lead)]
         .into_iter()
         .cycle()
-        .take(5)
+        .take(50)
     {
         let sent = from.call("session_send", json!({"session": to, "text": "again"}));
         assert!(!sent.error, "{}", sent.text);

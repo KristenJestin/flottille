@@ -1,87 +1,78 @@
 //! A project's page: it shows and runs, it configures nothing (that is its Settings). Its header
 //! (the name and folder, a read-only chip per repository with the branch it is on, which opens its
-//! row in the settings, Settings and New workspace), the composer that starts a session, "Where
-//! the work happens" (a card per place, `main` first, then each workspace, ending with a card that
-//! makes a new one), its pull requests and tickets, then the runs and the tasks. Each card is its
-//! own view: a session changing redraws its card, a letter typed in the composer redraws neither.
+//! row in the settings, Settings and New workspace), the composer that starts a session, then its
+//! tabs: **Work**, one column of the project's places (`main` first, then the workspaces from the
+//! newest), each with its sessions and the task runs going on there, the ended runs folded at the
+//! bottom; **Pull requests**, **Tickets**, and **Specs** while Specs is on. Each place is its own
+//! view: a session changing redraws its block, a letter typed in the composer redraws neither.
 
-use crate::glyphs;
-use crate::state::{AgentState, StateIcon, Status};
-use crate::steps::{StepRow, StepTone};
+mod ended;
+mod place;
+
+pub use ended::EndedRuns;
+pub use place::{PlaceBlock, block_id, session_end_id, session_menu_id, session_row_id};
+
 use std::collections::HashMap;
 
-use flottille_core::workspace::StepState;
 use flottille_ui::color::mix;
-use flottille_ui::motion::PANEL;
+use flottille_ui::motion::{Motion, PANEL};
 use flottille_ui::{
-    Block, Button, Card, CardHead, Chip, Confirm, Field, FlatRow, FooterAction, Icon, Item,
-    LINE_GAP, LabelledLine, Listing, Menu, Modal, PageHeader, Section, Skeleton, Toast, Type,
-    awaiting, caption, changing, enter, fade, follow_theme, hoverable, icon, lines_block, palette,
-    presence, presence_of, selectable, space, toast,
+    Button, Chip, Field, Icon, Modal, PageHeader, Tabs, Toast, Type, changing, enter, fade,
+    follow_theme, icon, palette, presence, selectable, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
+    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, TestSupportExt as _, WeakEntity, Window, div, point, px,
 };
 
-use crate::actions::{Changes, Command, Details, RepositoryStatus};
-use crate::composer::{Choice, Composer, agents_label};
-use crate::items::ProjectItems;
-use crate::model::{Place, Preparation, SetupLine, ago};
+use crate::actions::{Command, Details, RepositoryStatus};
+use crate::composer::Composer;
+use crate::items::{Kind, ProjectItems};
+use crate::model::{Place, Preparation};
 use crate::project_settings::Reveal;
 use crate::repositories::ProjectRepositories;
-use crate::session::{WorkspaceActions, removal_toast, seconds, workspace_menu};
-use crate::session_link::{PullRequest, TicketFacts};
-use crate::shell::{Selection, Shell, now_ms};
-use crate::tasks::ProjectTasks;
-use crate::tree::place_name;
+use crate::runs::{CommandRow, arrange};
+use crate::shell::{Selection, Shell};
+use crate::tasks::{ProjectTasks, TaskInfo};
 
-/// The element id of a place's card: `place-card-main` or `place-card-<workspace>`.
-pub fn card_id(place: &Place) -> ElementId {
-    ElementId::Name(format!("place-card-{}", place_name(place)).into())
-}
-
-/// The element id of the "⋯" menu a session's row in a place's card offers.
-pub fn card_session_menu_id(id: &str) -> ElementId {
-    ElementId::Name(format!("card-session-menu-{id}").into())
-}
-
-/// The element id of End session in that menu.
-pub fn card_session_end_id(id: &str) -> ElementId {
-    ElementId::Name(format!("card-session-end-{id}").into())
-}
-
-/// A session as a place's card lists it.
+/// A session as its place lists it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionLine {
     pub id: String,
     pub title: String,
     pub agents: usize,
-    pub mark: Option<AgentState>,
+    pub mark: Option<crate::state::AgentState>,
     pub active_at: u64,
     /// The state its row in the tree reads: one state, held once.
-    pub status: Entity<Status>,
+    pub status: Entity<crate::state::Status>,
+    /// The sessions it leads, each with its place.
+    pub leads: Vec<(String, Place)>,
+    /// The session that leads it, and its title.
+    pub pilot: Option<(String, String)>,
+    /// What it asks the user, while it waits for them: the question or the request.
+    pub question: Option<String>,
 }
 
-/// What a place's card shows.
+/// What a place's block shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlaceData {
     pub place: Place,
-    /// `from develop`; `main` has none, its title says what it is.
+    /// `from develop`; `main` has none, its name says what it is.
     pub meta: Option<String>,
     /// Its folder, which "Open in editor" opens.
     pub folder: String,
     /// `Ready` for `main`.
     pub preparation: Preparation,
     /// Each step of its preparation; none for `main`.
-    pub steps: Vec<SetupLine>,
+    pub steps: Vec<crate::model::SetupLine>,
     pub sessions: Vec<SessionLine>,
 }
 
-/// What the page shows of its project, as the shell's read gives it.
+/// What the page shows of its project, as the shell's read gives it: the places in the order
+/// Work lists them, `main` first, then the workspaces from the newest.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectData {
     pub name: String,
@@ -114,29 +105,54 @@ fn home_relative(folder: &str) -> String {
     }
 }
 
+/// The tab of the page shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageTab {
+    Work,
+    /// One of the lists: which one is the items' own.
+    Lists,
+}
+
+/// What the tabs say of the lists, kept so that the page is drawn again only when it changes.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ListsSaid {
+    counts: [usize; 2],
+    specs: Option<usize>,
+    chosen: Option<Kind>,
+}
+
 pub struct ProjectPage {
     shell: WeakEntity<Shell>,
     name: String,
     folder: String,
     repositories: Vec<String>,
     branches: Vec<(String, Option<String>)>,
-    cards: Vec<Entity<PlaceCard>>,
-    /// The place of each card, kept here: reading a card while drawing the page would draw the
-    /// page again each time the card changes.
+    blocks: Vec<Entity<PlaceBlock>>,
+    /// The place of each block, kept here: reading a block while drawing the page would draw the
+    /// page again each time the block changes.
     places: Vec<Place>,
+    /// The blocks as drawn: one that comes unfolds, one that goes folds away.
+    place_rows: flottille_ui::Listing<Place>,
     composer: Entity<Composer>,
     new_workspace: Entity<NewWorkspace>,
-    /// Its tasks, each with Run, and the runs: the user's runs, the run drawer.
+    /// Its tasks and runs, and the run drawer.
     tasks: Entity<ProjectTasks>,
+    ended: Entity<EndedRuns>,
     /// Its repositories as the daemon lists them, read for the new-workspace form's rules; they
     /// are listed and changed in the settings.
     repositories_section: Entity<ProjectRepositories>,
     /// Its pull requests and tickets.
     items: Entity<ProjectItems>,
+    tab: PageTab,
+    /// A tab was chosen since the page opened: its content enters at once, not after the
+    /// page's own entrance.
+    switched: bool,
+    lists: ListsSaid,
     narrow: bool,
-    /// Nothing but `main`, and no session in it: the page says what to start with, instead of a
-    /// section of one bare card. Kept here for the same reason as `places`.
-    empty: bool,
+    /// The page's scroll, which a "leads" link moves to a place, smoothly.
+    scroll: ScrollHandle,
+    scrolling: Option<Motion>,
+    _subscriptions: Vec<Subscription>,
     /// How many times it was drawn: the tests count them.
     renders: usize,
 }
@@ -168,28 +184,38 @@ impl ProjectPage {
         };
         let reading = items.clone();
         cx.defer(move |cx| reading.update(cx, |items, cx| items.read(cx)));
+        let ended = {
+            let tasks = tasks.downgrade();
+            cx.new(|cx| EndedRuns::new(tasks, cx))
+        };
+        let subscriptions = vec![
+            cx.observe(&tasks, |page, _, cx| page.runs_moved(cx)),
+            cx.observe(&items, |page, _, cx| page.lists_moved(cx)),
+        ];
         Self {
             shell,
             name,
             folder: String::new(),
             repositories: Vec::new(),
             branches: Vec::new(),
-            cards: Vec::new(),
+            blocks: Vec::new(),
             places: Vec::new(),
+            place_rows: flottille_ui::Listing::default(),
             composer,
             new_workspace,
             tasks,
+            ended,
             repositories_section,
             items,
+            tab: PageTab::Work,
+            switched: false,
+            lists: ListsSaid::default(),
             narrow: false,
-            empty: false,
+            scroll: ScrollHandle::new(),
+            scrolling: None,
+            _subscriptions: subscriptions,
             renders: 0,
         }
-    }
-
-    /// Whether the page shows its empty state in place of "Where the work happens".
-    pub fn is_empty(&self) -> bool {
-        self.empty
     }
 
     pub fn name(&self) -> &str {
@@ -208,6 +234,10 @@ impl ProjectPage {
         &self.items
     }
 
+    pub fn ended(&self) -> &Entity<EndedRuns> {
+        &self.ended
+    }
+
     pub fn renders(&self) -> usize {
         self.renders
     }
@@ -216,18 +246,32 @@ impl ProjectPage {
         &self.composer
     }
 
-    pub fn cards(&self) -> &[Entity<PlaceCard>] {
-        &self.cards
+    pub fn tab(&self) -> PageTab {
+        self.tab
     }
 
-    pub fn card(&self, place: &Place, cx: &gpui_kit::App) -> Option<Entity<PlaceCard>> {
-        self.cards
+    /// The places' blocks, in the order Work lists them.
+    pub fn blocks(&self) -> &[Entity<PlaceBlock>] {
+        &self.blocks
+    }
+
+    pub fn block(&self, place: &Place, cx: &gpui_kit::App) -> Option<Entity<PlaceBlock>> {
+        self.blocks
             .iter()
-            .find(|card| &card.read(cx).data.place == place)
+            .find(|block| &block.read(cx).data().place == place)
             .cloned()
     }
 
-    /// The chips of the header: each repository and the branch it is on, once known.
+    /// Shows Work, or the lists.
+    pub fn choose(&mut self, tab: PageTab, cx: &mut Context<Self>) {
+        if self.tab != tab {
+            self.tab = tab;
+            cx.notify();
+        }
+    }
+
+    /// Each repository and the branch it is on, once known: the header's chips, drawn for a
+    /// project of several repositories.
     pub fn chips(&self) -> Vec<String> {
         self.chip_parts()
             .into_iter()
@@ -260,47 +304,36 @@ impl ProjectPage {
         }
     }
 
-    /// Brings the page up to `data`; a card whose data did not change is not drawn again.
+    /// Brings the page up to `data`; a block whose data did not change is not drawn again.
     pub fn set(&mut self, data: ProjectData, cx: &mut Context<Self>) {
         let mut changed = self.folder != data.folder || self.repositories != data.repositories;
         self.folder = data.folder;
         self.repositories = data.repositories;
-        let mut old = std::mem::take(&mut self.cards);
-        let mut cards = Vec::new();
-        self.places = data.places.iter().map(|p| p.place.clone()).collect();
-        let empty = !data.places.is_empty()
-            && data
-                .places
-                .iter()
-                .all(|p| p.place.is_none() && p.sessions.is_empty());
-        if self.empty != empty {
-            self.empty = empty;
-            changed = true;
-            self.new_workspace
-                .update(cx, |form, cx| form.set_framed(!empty, cx));
-        }
+        let mut old = std::mem::take(&mut self.blocks);
+        let mut blocks = Vec::new();
+        let places: Vec<Place> = data.places.iter().map(|p| p.place.clone()).collect();
+        changed |= self.places != places;
+        self.places = places;
         for place in data.places {
             let at = old
                 .iter()
-                .position(|card| card.read(cx).data.place == place.place);
-            let card = match at {
+                .position(|block| block.read(cx).data().place == place.place);
+            let block = match at {
                 Some(at) => old.remove(at),
                 None => {
-                    changed = true;
-                    let shell = self.shell.clone();
-                    let project = self.name.clone();
+                    let (shell, page) = (self.shell.clone(), cx.entity().downgrade());
+                    let (project, tasks) = (self.name.clone(), self.tasks.downgrade());
                     let first = place.clone();
-                    let tasks = self.tasks.downgrade();
-                    cx.new(|cx| PlaceCard::new(shell, project, tasks, first, cx))
+                    cx.new(|cx| PlaceBlock::new(shell, page, project, tasks, first, cx))
                 }
             };
-            if card.read(cx).data != place {
-                card.update(cx, |card, cx| card.set(place, cx));
+            if block.read(cx).data() != &place {
+                block.update(cx, |block, cx| block.set(place, cx));
             }
-            cards.push(card);
+            blocks.push(block);
         }
-        changed |= !old.is_empty();
-        self.cards = cards;
+        self.blocks = blocks;
+        self.runs_moved(cx);
         if changed {
             cx.notify();
         }
@@ -316,11 +349,13 @@ impl ProjectPage {
             self.branches = details.branches.clone();
             cx.notify();
         }
-        for card in &self.cards {
-            let Some(name) = card.read(cx).data.place.clone() else {
+        let several = !only_at_root(&self.repositories);
+        let mut in_workspace = HashMap::new();
+        for block in &self.blocks {
+            let Some(name) = block.read(cx).data().place.clone() else {
                 continue;
             };
-            let facts = Facts {
+            let facts = place::Facts {
                 changes: details.changes.get(&name).copied(),
                 pulls: details.pulls.get(&name).cloned().unwrap_or_default(),
                 statuses: details.statuses.get(&name).cloned().unwrap_or_default(),
@@ -328,53 +363,130 @@ impl ProjectPage {
                 pulls_pending: details.pending_pulls.contains(&name),
                 ticket_pending: details.pending_tickets.contains(&name),
             };
-            if card.read(cx).facts != facts {
-                card.update(cx, |card, cx| {
-                    card.facts = facts;
-                    card.sync_menu(cx);
-                    cx.notify();
-                });
+            for pull in &facts.pulls {
+                in_workspace.insert(
+                    (pull.repository.clone(), pull.number.to_string()),
+                    name.clone(),
+                );
             }
+            block.update(cx, |block, cx| block.set_facts(facts, several, cx));
+        }
+        self.items
+            .update(cx, |items, cx| items.set_workspaces(in_workspace, cx));
+    }
+
+    /// The tasks or the runs changed: each place gets the task runs going on there, and the
+    /// fold the last ones that ended. The page itself is not drawn again.
+    fn runs_moved(&mut self, cx: &mut Context<Self>) {
+        let tasks = self.tasks.read(cx);
+        let listed: Vec<TaskInfo> = tasks.tasks().map(<[_]>::to_vec).unwrap_or_default();
+        let rows = tasks.commands().read(cx).rows().to_vec();
+        let arranged = arrange(&rows);
+        let running: Vec<CommandRow> = arranged.running.into_iter().cloned().collect();
+        let ended: Vec<CommandRow> = arranged.kept.into_iter().cloned().collect();
+        for (block, place) in self.blocks.iter().zip(&self.places) {
+            let here: Vec<CommandRow> = running
+                .iter()
+                .filter(|row| &row.workspace == place)
+                .cloned()
+                .collect();
+            block.update(cx, |block, cx| {
+                block.set_tasks(&listed, cx);
+                block.set_runs(here, cx);
+            });
+        }
+        self.ended.update(cx, |view, cx| view.set(ended, cx));
+    }
+
+    /// What the lists say changed: the tabs are drawn again only then.
+    fn lists_moved(&mut self, cx: &mut Context<Self>) {
+        let items = self.items.read(cx);
+        let said = ListsSaid {
+            counts: items.counts(),
+            specs: items.specs_count(cx),
+            chosen: items.chosen(cx),
+        };
+        if self.lists != said {
+            self.lists = said;
+            cx.notify();
         }
     }
 
-    /// The times move on: a card is drawn again only when one of its texts changes.
+    /// Scrolls Work smoothly to the block of `place`, which is highlighted for a moment.
+    pub fn scroll_to(&mut self, place: &Place, cx: &mut Context<Self>) {
+        let Some(block) = self.block(place, cx) else {
+            return;
+        };
+        if let Some(at) = block.read(cx).bounds() {
+            let frame = self.scroll.bounds();
+            let offset = self.scroll.offset();
+            let max = self.scroll.max_offset();
+            let target = (offset.y - (at.origin.y - frame.origin.y) + space::XL)
+                .min(px(0.))
+                .max(-max.y);
+            let now = cx.background_executor().now();
+            let mut motion = Motion::settled(f32::from(offset.y));
+            motion.animate(f32::from(target), PANEL, now, cx.reduce_motion());
+            self.scrolling = Some(motion);
+        }
+        block.update(cx, |block, cx| block.highlight(cx));
+        cx.notify();
+    }
+
+    /// The times move on: a block is drawn again only when one of its texts changes.
     pub fn tick(page: &Entity<Self>, now: u64, cx: &mut gpui_kit::App) {
-        for card in page.read(cx).cards.clone() {
-            if card.read(cx).times(now) != card.read(cx).shown_times {
-                card.update(cx, |_, cx| cx.notify());
+        for block in page.read(cx).blocks.clone() {
+            if block.read(cx).times_changed(now) {
+                block.update(cx, |_, cx| cx.notify());
             }
         }
     }
 }
 
 impl Render for ProjectPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
-        let p = palette(cx);
+        // A "leads" link moves the page to a place over `PANEL`.
+        if let Some(motion) = self.scrolling {
+            let now = cx.background_executor().now();
+            let offset = self.scroll.offset();
+            self.scroll
+                .set_offset(point(offset.x, px(motion.value(now))));
+            match motion.is_running(now) {
+                true => window.request_animation_frame(),
+                false => self.scrolling = None,
+            }
+        }
         let pad = if self.narrow { space::LG } else { space::XXL };
         let key = |part: &str| ElementId::Name(format!("enter-{}-{part}", self.name).into());
         let new_workspace = self.new_workspace.clone();
-        let chips = self.chip_parts().into_iter().map(|(path, label, branch)| {
-            let (shell, project, at) = (self.shell.clone(), self.name.clone(), path.clone());
-            let chip = Chip::new(
-                ElementId::Name(format!("repository-chip-{path}").into()),
-                Icon::Repository,
-                SharedString::from(label),
-            )
-            .on_click(move |_, window, cx| {
-                let at = Reveal::Repository(at.clone());
-                shell
-                    .update(cx, |shell, cx| {
-                        shell.open_project_settings_at(&project, at, window, cx)
-                    })
-                    .ok();
-            });
-            match branch {
-                Some(branch) => chip.faint(SharedString::from(format!("· {branch}"))),
-                None => chip,
-            }
-        });
+        // A project of one repository has no chip: its folder is its repository.
+        let several = self.repositories.len() > 1;
+        let chips =
+            self.chip_parts()
+                .into_iter()
+                .filter(|_| several)
+                .map(|(path, label, branch)| {
+                    let (shell, project, at) =
+                        (self.shell.clone(), self.name.clone(), path.clone());
+                    let chip = Chip::new(
+                        ElementId::Name(format!("repository-chip-{path}").into()),
+                        Icon::Repository,
+                        SharedString::from(label),
+                    )
+                    .on_click(move |_, window, cx| {
+                        let at = Reveal::Repository(at.clone());
+                        shell
+                            .update(cx, |shell, cx| {
+                                shell.open_project_settings_at(&project, at, window, cx)
+                            })
+                            .ok();
+                    });
+                    match branch {
+                        Some(branch) => chip.faint(SharedString::from(format!("· {branch}"))),
+                        None => chip,
+                    }
+                });
         let header = {
             let (shell, name) = (self.shell.clone(), self.name.clone());
             let mut header = PageHeader::new("project-header", self.name.clone())
@@ -401,85 +513,84 @@ impl Render for ProjectPage {
             }
             header
         };
-        let columns = if self.narrow { 1 } else { 2 };
-        let places = self.cards.len();
-        let grid =
-            div()
-                .grid()
-                .grid_cols(columns)
-                .gap(space::MD)
-                .children(self.cards.iter().zip(&self.places).enumerate().map(
-                    |(i, (card, place))| {
-                        enter(
-                            ElementId::Name(
-                                format!("enter-{}-{}", self.name, place_name(place)).into(),
-                            ),
-                            3 + i,
-                            card.clone(),
-                        )
-                    },
-                ))
-                .child(enter(
-                    key("new-workspace"),
-                    3 + places,
-                    self.new_workspace.clone(),
-                ));
-        // What a workspace is, and the two ways to start: the form's modal stays in the tree,
-        // which only the dashed card of the grid carries otherwise.
-        let nothing = {
-            let (shell, project) = (self.shell.clone(), self.name.clone());
-            let new_workspace = self.new_workspace.clone();
-            div()
-                .id("project-empty")
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(space::LG)
-                .py(space::XXL)
-                .child(
-                    div()
-                        .max_w(px(440.))
-                        .text_size(px(13.))
-                        .text_center()
-                        .text_color(p.mute)
-                        .child(
-                            "A workspace is a branch of its own in every repository of the \
-                             project, so a session can work there without touching main.",
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .justify_center()
-                        .gap(space::SM)
-                        .child(
-                            Button::secondary("empty-new-session", "New session in main")
-                                .leading(Icon::Plus)
-                                .on_click(move |_, window, cx| {
-                                    let project = project.clone();
-                                    shell
-                                        .update(cx, |shell, cx| {
-                                            shell.compose_in(&project, Choice::Main, window, cx)
-                                        })
-                                        .ok();
-                                }),
-                        )
-                        .child({
-                            let form = new_workspace.clone();
-                            Button::secondary("empty-new-workspace", "New workspace")
-                                .leading(Icon::Plus)
-                                .on_click(move |_, window, cx| {
-                                    form.update(cx, |form, cx| form.open(window, cx))
-                                })
-                        }),
-                )
-                .child(new_workspace)
-                .test_support()
+
+        // The tabs: Work, the two lists, and Specs while it is on.
+        let chosen = match (self.tab, self.lists.chosen) {
+            (PageTab::Work, _) => 0,
+            (PageTab::Lists, Some(Kind::Pulls)) => 1,
+            (PageTab::Lists, Some(Kind::Tickets)) => 2,
+            (PageTab::Lists, None) => 3,
         };
-        let places_section = Section::new("project-places", "Where the work happens")
-            .count(places.to_string())
-            .child(grid);
+        let this = cx.entity().downgrade();
+        let items = self.items.clone();
+        let tabs = Tabs::new("project-tabs", "Project", chosen)
+            .tab("work", "Work")
+            .counted("pulls", "Pull requests", self.lists.counts[0].to_string())
+            .counted("tickets", "Tickets", self.lists.counts[1].to_string())
+            .when_some(self.lists.specs, |tabs, count| {
+                tabs.counted("specs", "Specs", count.to_string())
+            })
+            .on_choose(move |at, _, cx| {
+                let tab = if at == 0 {
+                    PageTab::Work
+                } else {
+                    PageTab::Lists
+                };
+                match at {
+                    1 => items.update(cx, |items, cx| items.choose(Kind::Pulls, cx)),
+                    2 => items.update(cx, |items, cx| items.choose(Kind::Tickets, cx)),
+                    3 => items.update(cx, |items, cx| items.choose_specs(cx)),
+                    _ => {}
+                }
+                this.update(cx, |page, cx| {
+                    page.switched = true;
+                    page.choose(tab, cx);
+                })
+                .ok();
+            });
+
+        let shown = match self.tab {
+            PageTab::Work => {
+                let (at, reduce) = (cx.background_executor().now(), cx.reduce_motion());
+                let places: Vec<(String, Place)> = self
+                    .places
+                    .iter()
+                    .map(|place| (crate::tree::place_name(place).to_owned(), place.clone()))
+                    .collect();
+                self.place_rows.sync(places, at, reduce);
+                let blocks: Vec<_> = self
+                    .place_rows
+                    .rows()
+                    .filter_map(|row| {
+                        let at = self.places.iter().position(|p| p == row.value)?;
+                        Some((row.key.to_owned(), self.blocks[at].clone(), row.placement))
+                    })
+                    .collect();
+                div()
+                    .id("project-work")
+                    .flex()
+                    .flex_col()
+                    .gap(space::SM)
+                    .children(blocks.into_iter().map(|(key, block, placement)| {
+                        flottille_ui::Item::new(
+                            ElementId::Name(format!("place-item-{key}").into()),
+                            placement,
+                            block,
+                        )
+                        .gap(space::SM)
+                    }))
+                    .child(self.ended.clone())
+                    .test_support()
+                    .into_any_element()
+            }
+            PageTab::Lists => self.items.clone().into_any_element(),
+        };
+        let shown_key = match chosen {
+            0 => "work",
+            1 => "pulls",
+            2 => "tickets",
+            _ => "specs",
+        };
         let column = div()
             .max_w(space::COLUMN + pad * 2.)
             .w_full()
@@ -492,12 +603,21 @@ impl Render for ProjectPage {
             .gap(space::XXL)
             .child(enter(key("header"), 0, header))
             .child(enter(key("composer"), 1, self.composer.clone()))
-            .when(self.empty, |d| d.child(enter(key("empty"), 2, nothing)))
-            .when(!self.empty, |d| {
-                d.child(enter(key("places"), 2, places_section))
-            })
-            .child(enter(key("items"), 4 + places, self.items.clone()))
-            .child(enter(key("tasks"), 5 + places, self.tasks.clone()));
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::LG)
+                    .child(enter(key("tabs"), 2, tabs))
+                    // The tab's content enters again each time it is chosen.
+                    .child(enter(
+                        key(shown_key),
+                        if self.switched { 0 } else { 3 },
+                        shown,
+                    )),
+            )
+            // The form's dialog stays in the tree whatever the tab.
+            .child(self.new_workspace.clone());
         div()
             .id("project-page-frame")
             .relative()
@@ -507,75 +627,11 @@ impl Render for ProjectPage {
                     .id("project-page")
                     .size_full()
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .child(column),
             )
             // The detail of a run slides in over the page, which keeps its scroll beneath it.
             .child(self.tasks.read(cx).drawer().clone())
-    }
-}
-
-/// What a card's own action is doing, while the daemon answers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Busy {
-    Removing,
-    Preparing,
-}
-
-/// What the daemon says of a workspace beyond the shell's read.
-#[derive(Clone, Debug, Default, PartialEq)]
-struct Facts {
-    /// Lines added and removed.
-    changes: Option<Changes>,
-    pulls: Vec<PullRequest>,
-    /// Where each of its repositories stands.
-    statuses: Vec<RepositoryStatus>,
-    ticket: Option<TicketFacts>,
-    /// Its forge has not answered yet.
-    pulls_pending: bool,
-    /// Its ticket is linked and its tracker has not answered yet.
-    ticket_pending: bool,
-}
-
-/// The state a step's mark says.
-fn step_state(state: StepState) -> AgentState {
-    match state {
-        StepState::Done | StepState::Skipped => AgentState::Completed,
-        StepState::Running => AgentState::Running,
-        StepState::Pending => AgentState::Idle,
-        StepState::Failed => AgentState::Failed,
-    }
-}
-
-fn step_word(state: StepState) -> &'static str {
-    match state {
-        StepState::Done => "done",
-        StepState::Skipped => "skipped",
-        StepState::Running => "running",
-        StepState::Pending => "to do",
-        StepState::Failed => "failed",
-    }
-}
-
-/// A labelled line of a place's card.
-#[derive(Clone)]
-enum Line {
-    Repository(RepositoryStatus),
-    /// A repository's pull request, or the wait for it (`true`): a skeleton stands for the line
-    /// until the forge has answered.
-    Pull(String, Option<PullRequest>, bool),
-    /// The ticket, or the wait for it (`true`).
-    Ticket(Option<TicketFacts>, bool),
-}
-
-/// How long a step took, or has been running.
-fn step_time(step: &SetupLine, now: u64) -> Option<String> {
-    match (step.state, step.started_at, step.ended_at) {
-        (StepState::Skipped, ..) => Some("skipped".into()),
-        (StepState::Running, Some(started), _) => Some(seconds(now.saturating_sub(started))),
-        (StepState::Done | StepState::Failed, Some(started), Some(ended)) => {
-            Some(seconds(ended.saturating_sub(started)))
-        }
-        _ => None,
     }
 }
 
@@ -620,758 +676,8 @@ pub(crate) fn removal_refused(
     (!why.is_empty()).then(|| SharedString::from(why.join(" ")))
 }
 
-/// A place's card: its head (name, where it started from, the lines changed, its "⋯"), its
-/// labelled lines (each repository, its pull request, its ticket), its setup while it is
-/// prepared, its sessions, and "New session in …". A line is drawn between two blocks that exist.
-pub struct PlaceCard {
-    shell: WeakEntity<Shell>,
-    project: String,
-    /// The page's runs and their drawer, which a setup step opens in.
-    tasks: WeakEntity<ProjectTasks>,
-    data: PlaceData,
-    facts: Facts,
-    /// The removal's confirmation is open.
-    confirming: bool,
-    busy: Option<Busy>,
-    icons: HashMap<String, Entity<StateIcon>>,
-    /// Each step's mark, by its position: it turns to the step's new state when it changes.
-    marks: HashMap<u32, (Entity<Status>, Entity<StateIcon>)>,
-    /// The labelled lines, the setup's steps and the sessions as last drawn: a row that comes
-    /// unfolds, one that goes folds away.
-    line_rows: Listing<Line>,
-    step_rows: Listing<SetupLine>,
-    session_rows: Listing<SessionLine>,
-    /// Each session row's "⋯" menu, made when the row is first drawn; the card draws again as a
-    /// menu opens and closes.
-    session_menus: HashMap<String, (Entity<Menu>, Subscription)>,
-    menu: Option<Entity<Menu>>,
-    /// A ticket is linked (or being read), as the menu says.
-    linked: bool,
-    /// "Link a ticket" is open, its field made the first time.
-    linking: bool,
-    ticket_field: Option<Entity<InputState>>,
-    ticket_error: Option<SharedString>,
-    _subscriptions: Vec<Subscription>,
-    shown_times: Vec<String>,
-    renders: usize,
-}
-
-impl PlaceCard {
-    fn new(
-        shell: WeakEntity<Shell>,
-        project: String,
-        tasks: WeakEntity<ProjectTasks>,
-        data: PlaceData,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let this = cx.entity().downgrade();
-        let menu = data
-            .place
-            .clone()
-            .map(|name| cx.new(|cx| Self::workspace_menu(&this, &name, false, cx)));
-        let mut card = Self {
-            shell,
-            project,
-            tasks,
-            data: PlaceData {
-                sessions: Vec::new(),
-                ..data.clone()
-            },
-            facts: Facts::default(),
-            confirming: false,
-            busy: None,
-            icons: HashMap::new(),
-            marks: HashMap::new(),
-            line_rows: Listing::default(),
-            step_rows: Listing::default(),
-            session_rows: Listing::default(),
-            session_menus: HashMap::new(),
-            menu,
-            linked: false,
-            linking: false,
-            ticket_field: None,
-            ticket_error: None,
-            _subscriptions: Vec::new(),
-            shown_times: Vec::new(),
-            renders: 0,
-        };
-        card.set(data, cx);
-        card
-    }
-
-    pub fn data(&self) -> &PlaceData {
-        &self.data
-    }
-
-    pub fn changes(&self) -> Option<Changes> {
-        self.facts.changes
-    }
-
-    pub fn pulls(&self) -> &[PullRequest] {
-        &self.facts.pulls
-    }
-
-    pub fn statuses(&self) -> &[RepositoryStatus] {
-        &self.facts.statuses
-    }
-
-    pub fn ticket(&self) -> Option<&TicketFacts> {
-        self.facts.ticket.as_ref()
-    }
-
-    /// Its "⋯" menu, opened: a workspace's card only.
-    pub fn open_menu(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(menu) = &self.menu {
-            menu.update(cx, |m, cx| m.open(window, cx));
-        }
-    }
-
-    /// The removal's confirmation, opened as "Remove workspace…" does.
-    pub fn ask_removal(&mut self, cx: &mut Context<Self>) {
-        self.confirming = true;
-        cx.notify();
-    }
-
-    pub fn renders(&self) -> usize {
-        self.renders
-    }
-
-    /// The workspace's "⋯" menu, for a ticket linked or not.
-    fn workspace_menu(
-        this: &WeakEntity<Self>,
-        name: &str,
-        linked: bool,
-        cx: &mut Context<Menu>,
-    ) -> Menu {
-        let (opening, linking, removing) = (this.clone(), this.clone(), this.clone());
-        workspace_menu(
-            &format!("workspace-menu-{name}"),
-            WorkspaceActions {
-                open_in_editor: Box::new(move |cx| {
-                    opening.update(cx, |card, cx| card.open_in_editor(cx)).ok();
-                }),
-                ticket_linked: linked,
-                link_ticket: Some(Box::new(move |cx| {
-                    linking
-                        .update(cx, |card, cx| {
-                            card.linking = true;
-                            card.ticket_error = None;
-                            cx.notify();
-                        })
-                        .ok();
-                })),
-                unlink_ticket: None,
-                remove: Some(Box::new(move |cx| {
-                    removing
-                        .update(cx, |card, cx| {
-                            card.confirming = true;
-                            cx.notify();
-                        })
-                        .ok();
-                })),
-            },
-            cx,
-        )
-    }
-
-    /// The menu says what applies to the ticket: it is made again when one is linked.
-    fn sync_menu(&mut self, cx: &mut Context<Self>) {
-        let linked = self.facts.ticket.is_some() || self.facts.ticket_pending;
-        let Some(name) = self.data.place.clone().filter(|_| self.linked != linked) else {
-            return;
-        };
-        self.linked = linked;
-        let this = cx.entity().downgrade();
-        self.menu = Some(cx.new(|cx| Self::workspace_menu(&this, &name, linked, cx)));
-    }
-
-    fn set(&mut self, data: PlaceData, cx: &mut Context<Self>) {
-        for session in &data.sessions {
-            let status = session.status.clone();
-            self.icons
-                .entry(session.id.clone())
-                .or_insert_with(|| cx.new(|cx| StateIcon::new(status, cx)));
-        }
-        for step in &data.steps {
-            let (at, state) = (step.position, step_state(step.state));
-            match self.marks.get(&at) {
-                Some((status, _)) => {
-                    if status.read(cx).state() != state {
-                        status.update(cx, |status, cx| status.set(state, cx));
-                    }
-                }
-                None => {
-                    let status = cx.new(|_| Status::new(state));
-                    let icon = {
-                        let status = status.clone();
-                        cx.new(|cx| StateIcon::new(status, cx))
-                    };
-                    self.marks.insert(at, (status, icon));
-                }
-            }
-        }
-        // A preparation started again is under way.
-        if self.data.preparation != data.preparation && self.busy == Some(Busy::Preparing) {
-            self.busy = None;
-        }
-        self.data = data;
-        cx.notify();
-    }
-
-    /// The "⋯" menu of a session's row: End session, which asks first (the confirmation of the
-    /// sidebar and of the session page, counting the agents that end). A session cannot be
-    /// removed: the daemon has no such operation, ending is what there is.
-    fn session_menu(&mut self, session: &str, cx: &mut Context<Self>) {
-        if self.session_menus.contains_key(session) {
-            return;
-        }
-        let (shell, id) = (self.shell.clone(), session.to_owned());
-        let menu = cx.new(|cx| {
-            Menu::new(card_session_menu_id(&id), "Session actions", cx).entry(
-                card_session_end_id(&id),
-                "End session…",
-                Some(glyphs::STOP),
-                {
-                    let id = id.clone();
-                    move |_, cx| {
-                        shell.update(cx, |shell, cx| shell.ask_end_of(&id, cx)).ok();
-                    }
-                },
-            )
-        });
-        let watch = cx.observe(&menu, |_, _, cx| cx.notify());
-        self.session_menus.insert(session.to_owned(), (menu, watch));
-    }
-
-    /// What the daemon answered to this card's removal or new preparation: a toast says it.
-    pub fn answered(&mut self, refused: Option<&str>, cx: &mut Context<Self>) {
-        let name = place_name(&self.data.place).to_owned();
-        let said = match (self.busy.take(), refused) {
-            (Some(Busy::Removing), refused) => removal_toast(&name, refused),
-            (_, None) => Toast::success(format!("Preparing {name} again"))
-                .detail("Its card lists the steps."),
-            (_, Some(why)) => {
-                Toast::failure(format!("{name} was not prepared again")).detail(why.to_owned())
-            }
-        };
-        toast(said, cx);
-        self.confirming = false;
-        cx.notify();
-    }
-
-    /// What the daemon answered to "Link a ticket".
-    pub fn ticket_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
-        if !self.linking {
-            return;
-        }
-        match refused {
-            None => {
-                let typed = self
-                    .ticket_field
-                    .as_ref()
-                    .map(|field| field.read(cx).value().trim().to_owned())
-                    .unwrap_or_default();
-                let name = place_name(&self.data.place).to_owned();
-                toast(
-                    Toast::success(format!("{name} linked to {typed}"))
-                        .detail("Its card shows the ticket."),
-                    cx,
-                );
-                self.linking = false;
-                self.ticket_error = None;
-            }
-            Some(why) => self.ticket_error = Some(why.into()),
-        }
-        cx.notify();
-    }
-
-    fn open_in_editor(&self, cx: &mut Context<Self>) {
-        let folder = self.data.folder.clone();
-        self.shell
-            .update(cx, |shell, _| shell.open_link(&folder))
-            .ok();
-    }
-
-    fn link_ticket(&mut self, cx: &mut Context<Self>) {
-        let (Some(name), Some(field)) = (self.data.place.clone(), self.ticket_field.clone()) else {
-            return;
-        };
-        let typed = field.read(cx).value().trim().to_owned();
-        if typed.is_empty() {
-            self.ticket_error = Some("Type a ticket: #123 or ABC-123.".into());
-            cx.notify();
-            return;
-        }
-        let command = Command::LinkTicket {
-            project: self.project.clone(),
-            name,
-            ticket: Some(typed),
-        };
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
-    }
-
-    /// The texts that move with the time: the sessions' times ago and the running step's.
-    fn times(&self, now: u64) -> Vec<String> {
-        self.data
-            .sessions
-            .iter()
-            .filter(|s| s.mark.is_none())
-            .map(|s| ago(now, s.active_at))
-            .chain(
-                self.data
-                    .steps
-                    .iter()
-                    .filter(|step| step.state == StepState::Running)
-                    .filter_map(|step| step_time(step, now)),
-            )
-            .collect()
-    }
-
-    fn perform(&mut self, busy: Busy, cx: &mut Context<Self>) {
-        let Some(name) = self.data.place.clone() else {
-            return;
-        };
-        let project = self.project.clone();
-        let command = match busy {
-            Busy::Removing => Command::RemoveWorkspace { project, name },
-            Busy::Preparing => Command::PrepareWorkspace { project, name },
-        };
-        self.busy = Some(busy);
-        self.confirming = false;
-        self.shell
-            .update(cx, |shell, _| shell.perform(command))
-            .ok();
-        cx.notify();
-    }
-
-    fn removal_refused(&self) -> Option<SharedString> {
-        let living: Vec<String> = self.data.sessions.iter().map(|s| s.title.clone()).collect();
-        removal_refused(&self.project, &self.facts.statuses, &living)
-    }
-
-    /// The labelled lines that have something to say, each in its frame: a line that comes
-    /// unfolds, one that goes folds away.
-    fn lines(&mut self, name: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut found = Vec::new();
-        // The ticket is why the workspace exists: it comes before the rest.
-        let ticket_pending = self.facts.ticket_pending;
-        if ticket_pending || self.facts.ticket.is_some() {
-            found.push((
-                "ticket".to_owned(),
-                Line::Ticket(self.facts.ticket.clone(), ticket_pending),
-            ));
-        }
-        for status in &self.facts.statuses {
-            let quiet = status.ahead.unwrap_or(0) == 0
-                && status.uncommitted.unwrap_or(0) == 0
-                && status.note.is_none();
-            if !quiet {
-                let key = format!("repository-{}", status.path);
-                found.push((key, Line::Repository(status.clone())));
-            }
-        }
-        match self.facts.pulls_pending {
-            // Which repository has a pull request is not known until the forge answers: a
-            // skeleton for each, which folds away when there is none.
-            true => {
-                for status in &self.facts.statuses {
-                    found.push((
-                        format!("pull-{}", status.path),
-                        Line::Pull(status.path.clone(), None, true),
-                    ));
-                }
-            }
-            false => {
-                for pull in &self.facts.pulls {
-                    found.push((
-                        format!("pull-{}", pull.repository),
-                        Line::Pull(pull.repository.clone(), Some(pull.clone()), false),
-                    ));
-                }
-            }
-        }
-        let (now, reduce) = (cx.background_executor().now(), cx.reduce_motion());
-        self.line_rows.sync(found, now, reduce);
-        let rows: Vec<_> = self
-            .line_rows
-            .rows()
-            .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
-            .collect();
-        rows.into_iter()
-            .map(|(key, line, placement)| {
-                Item::new(
-                    ElementId::Name(format!("line-item-{name}-{key}").into()),
-                    placement,
-                    self.line(name, &line, cx),
-                )
-                .gap(LINE_GAP)
-                .into_any_element()
-            })
-            .collect()
-    }
-
-    fn line(&self, name: &str, line: &Line, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette(cx);
-        match line {
-            Line::Repository(status) => {
-                let label = repository_label(&self.project, &status.path);
-                let mut parts = Vec::new();
-                if let Some(ahead) = status.ahead {
-                    parts.push(format!("{ahead} ahead"));
-                }
-                match status.uncommitted {
-                    Some(0) => parts.push("clean".into()),
-                    Some(files) => parts.push(format!("{files} uncommitted")),
-                    None => {}
-                }
-                // Why it started from its local branch, when it did.
-                parts.extend(status.note.clone());
-                let rest = parts.join(" · ");
-                LabelledLine::new(
-                    ElementId::Name(format!("repository-line-{name}-{label}").into()),
-                    Icon::Repository,
-                    "Repository",
-                    SharedString::from(format!("{label} {rest}")),
-                )
-                .child(
-                    div()
-                        .text_color(p.text)
-                        .medium()
-                        .child(SharedString::from(label.clone())),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_color(p.mute)
-                        .child(SharedString::from(rest)),
-                )
-                .into_any_element()
-            }
-            Line::Pull(repository, pull, pending) => {
-                let label = repository_label(&self.project, repository);
-                let ready = pull.as_ref().map_or_else(
-                    || div().into_any_element(),
-                    |pull| {
-                        let (shell, url) = (self.shell.clone(), pull.url.clone());
-                        let (fill, ink) = match pull.state.as_str() {
-                            "open" => (p.ok_bg, p.ok),
-                            "merged" => (p.run_bg, p.run),
-                            "draft" => (p.card2, p.faint),
-                            _ => (p.fail_bg, p.fail),
-                        };
-                        LabelledLine::new(
-                            ElementId::Name(format!("pull-{name}-{label}").into()),
-                            glyphs::PULL_REQUEST,
-                            "Pull request",
-                            SharedString::from(pull.label()),
-                        )
-                        .on_click(move |_, _, cx| {
-                            shell.update(cx, |shell, _| shell.open_link(&url)).ok();
-                        })
-                        .child(SharedString::from(format!("#{}", pull.number)))
-                        .child(
-                            div()
-                                .h(px(16.))
-                                .px(space::XS)
-                                .rounded(px(5.))
-                                .flex()
-                                .items_center()
-                                .bg(fill)
-                                .text_color(ink)
-                                .mono(9.5)
-                                .medium()
-                                .child(SharedString::from(pull.state.to_uppercase())),
-                        )
-                        .into_any_element()
-                    },
-                );
-                let waiting = LabelledLine::new(
-                    ElementId::Name(format!("pull-skeleton-{name}-{label}").into()),
-                    glyphs::PULL_REQUEST,
-                    "Pull request",
-                    "Reading…",
-                )
-                .child(
-                    Skeleton::new(format!("pull-skeleton-{name}-{label}-value"))
-                        .w(px(72.))
-                        .h(px(10.)),
-                );
-                awaiting(
-                    ElementId::Name(format!("pull-wait-{name}-{label}").into()),
-                    *pending,
-                    waiting,
-                    ready,
-                )
-                .into_any_element()
-            }
-            Line::Ticket(ticket, pending) => {
-                let ready = ticket.as_ref().map_or_else(
-                    || div().into_any_element(),
-                    |ticket| {
-                        let title = ticket
-                            .title
-                            .clone()
-                            .or_else(|| ticket.problem.clone())
-                            .unwrap_or_default();
-                        let mut line = LabelledLine::new(
-                            ElementId::Name(format!("ticket-{name}").into()),
-                            glyphs::TICKET,
-                            "Ticket",
-                            SharedString::from(format!("{} {title}", ticket.reference)),
-                        )
-                        .child(SharedString::from(ticket.reference.clone()))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .ui_text()
-                                .text_size(px(12.5))
-                                .child(SharedString::from(title)),
-                        );
-                        if let Some(url) = ticket.url.clone() {
-                            let shell = self.shell.clone();
-                            line = line.on_click(move |_, _, cx| {
-                                shell.update(cx, |shell, _| shell.open_link(&url)).ok();
-                            });
-                        }
-                        line.into_any_element()
-                    },
-                );
-                let waiting = LabelledLine::new(
-                    ElementId::Name(format!("ticket-skeleton-{name}").into()),
-                    glyphs::TICKET,
-                    "Ticket",
-                    "Reading…",
-                )
-                .child(
-                    Skeleton::new(format!("ticket-skeleton-{name}-value"))
-                        .w(px(160.))
-                        .h(px(10.)),
-                );
-                awaiting(
-                    ElementId::Name(format!("ticket-wait-{name}").into()),
-                    *pending,
-                    waiting,
-                    ready,
-                )
-                .into_any_element()
-            }
-        }
-    }
-
-    /// The setup's steps while it is prepared, and what failed: the block stays built once it
-    /// is ready, so that it folds away instead of vanishing.
-    fn setup(&mut self, name: &str, now: u64, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (at, reduce) = (cx.background_executor().now(), cx.reduce_motion());
-        let steps = self.data.steps.clone();
-        self.step_rows.sync(
-            steps.into_iter().map(|s| (s.position.to_string(), s)),
-            at,
-            reduce,
-        );
-        if self.step_rows.is_empty() {
-            return None;
-        }
-        let p = palette(cx);
-        let total = self.data.steps.len();
-        let failed = matches!(self.data.preparation, Preparation::Failed { .. });
-        let at = self
-            .data
-            .steps
-            .iter()
-            .position(|step| !matches!(step.state, StepState::Done | StepState::Skipped))
-            .unwrap_or(total.saturating_sub(1));
-        let count = match failed {
-            true => format!("failed at step {} of {total}", at + 1),
-            false => format!("step {} of {total}", at + 1),
-        };
-        let rows: Vec<_> = self
-            .step_rows
-            .rows()
-            .map(|row| (row.value.clone(), row.placement))
-            .collect();
-        let rows = rows.into_iter().enumerate().map(|(i, (step, placement))| {
-            let tone = match step.state {
-                StepState::Done | StepState::Skipped => StepTone::Done,
-                StepState::Running => StepTone::Now,
-                StepState::Pending => StepTone::Todo,
-                StepState::Failed => StepTone::Failed,
-            };
-            let mark = div()
-                .id(ElementId::Name(format!("setup-mark-{name}-{i}").into()))
-                .aria_label(step_word(step.state))
-                .children(self.marks.get(&step.position).map(|(_, icon)| icon.clone()))
-                .test_support();
-            let mut row = StepRow::new(
-                ElementId::Name(format!("setup-step-{name}-{i}").into()),
-                mark,
-                SharedString::from(step.verb.clone()),
-                tone,
-                ElementId::Name(format!("setup-time-{name}-{i}").into()),
-            );
-            if let Some(object) = &step.object {
-                row = row.object(SharedString::from(object.clone()));
-            }
-            if let Some(time) = step_time(&step, now) {
-                row = row.time(SharedString::from(time));
-            }
-            // A command that ran or runs opens in the run drawer, and so does a step that failed
-            // (the drawer says why); one still to do, or skipped, did nothing yet to show, and a
-            // copy or a link that went well has no output.
-            if match step.state {
-                StepState::Running | StepState::Done => step.runs,
-                StepState::Failed => true,
-                _ => false,
-            } {
-                let (tasks, workspace, position) =
-                    (self.tasks.clone(), name.to_owned(), step.position);
-                row = row.on_click(move |_, _, cx| {
-                    tasks
-                        .update(cx, |tasks, cx| tasks.open_step(&workspace, position, cx))
-                        .ok();
-                });
-            }
-            Item::new(
-                ElementId::Name(format!("step-item-{name}-{}", step.position).into()),
-                placement,
-                row,
-            )
-        });
-        let output = match &self.data.preparation {
-            Preparation::Failed { output, .. } => Some(SharedString::from(output.clone())),
-            _ => None,
-        };
-        let failure = {
-            let (name, again) = (
-                name.to_owned(),
-                cx.listener(|this: &mut Self, _, _, cx| this.perform(Busy::Preparing, cx)),
-            );
-            let busy = self.busy;
-            let (field, fail_line, mute) = (p.field, p.fail_line, p.mute);
-            presence_of(
-                ElementId::Name(format!("failure-{name}").into()),
-                output,
-                move |output| {
-                    div()
-                        .px(space::MD)
-                        .pt(space::XS)
-                        .flex()
-                        .flex_col()
-                        .gap(space::SM)
-                        .child(
-                            div()
-                                .id(ElementId::Name(format!("failure-output-{name}").into()))
-                                .max_h(px(160.))
-                                .overflow_y_scroll()
-                                .py(space::SM)
-                                .px(space::MD)
-                                .rounded(px(8.))
-                                .bg(field)
-                                .border_1()
-                                .border_color(fail_line)
-                                .mono(11.5)
-                                .text_color(mute)
-                                .child(output)
-                                .test_support(),
-                        )
-                        .child(
-                            div().flex().justify_end().child(
-                                Button::secondary(
-                                    ElementId::Name(format!("retry-{name}").into()),
-                                    if busy == Some(Busy::Preparing) {
-                                        "Preparing again…"
-                                    } else {
-                                        "Prepare again"
-                                    },
-                                )
-                                .disabled(busy.is_some())
-                                .on_click(again),
-                            ),
-                        )
-                        .into_any_element()
-                },
-            )
-        };
-        Some(
-            div()
-                .pt(space::XS)
-                .pb(space::SM)
-                .flex()
-                .flex_col()
-                .child(caption(
-                    ElementId::Name(format!("setup-{name}").into()),
-                    "Setup",
-                    SharedString::from(count),
-                    cx,
-                ))
-                .children(rows)
-                .child(failure)
-                .into_any_element(),
-        )
-    }
-
-    fn link_modal(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) -> Modal {
-        if self.linking && self.ticket_field.is_none() {
-            let field =
-                cx.new(|cx| crate::project_settings::styled_input("#123 or ABC-123", window, cx));
-            self._subscriptions
-                .push(cx.subscribe_in(&field, window, |this, _, event, _, cx| {
-                    if let InputEvent::PressEnter { .. } = event {
-                        this.link_ticket(cx)
-                    }
-                }));
-            let focus = field.read(cx).focus_handle(cx);
-            window.focus(&focus, cx);
-            self.ticket_field = Some(field);
-        }
-        let this = cx.entity().downgrade();
-        let mut modal = Modal::new(
-            ElementId::Name(format!("link-ticket-modal-{name}").into()),
-            format!("Link {name} to a ticket"),
-        )
-        .sentence(
-            "Its card and its sessions show the ticket; agents read it with the tickets tool.",
-        )
-        .open(self.linking)
-        .on_close(move |_, cx| {
-            this.update(cx, |this, cx| {
-                this.linking = false;
-                cx.notify();
-            })
-            .ok();
-        })
-        .action(
-            Button::primary(
-                ElementId::Name(format!("link-ticket-{name}-action").into()),
-                "Link",
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.link_ticket(cx))),
-        );
-        if let Some(field) = &self.ticket_field {
-            modal = modal.child(
-                Field::new(
-                    ElementId::Name(format!("link-ticket-{name}-field").into()),
-                    "Ticket",
-                    input_frame(
-                        ElementId::Name(format!("link-ticket-{name}-input").into()),
-                        field,
-                        cx,
-                    ),
-                )
-                .error(self.ticket_error.clone()),
-            );
-        }
-        modal
-    }
-}
-
 /// A text field's frame in a form: 34 px, the field colours.
-fn input_frame(
+pub(crate) fn input_frame(
     id: impl Into<ElementId>,
     field: &Entity<InputState>,
     cx: &gpui_kit::App,
@@ -1392,225 +698,10 @@ fn input_frame(
         .test_support()
 }
 
-impl Render for PlaceCard {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.renders += 1;
-        let p = palette(cx);
-        let now = now_ms();
-        self.shown_times = self.times(now);
-        let place = self.data.place.clone();
-        let name = place_name(&place).to_owned();
-        let ready = matches!(self.data.preparation, Preparation::Ready);
-        let id = |part: &str| ElementId::Name(format!("{part}-{name}").into());
-
-        let mut head = CardHead::new(
-            id("place-head"),
-            if place.is_none() {
-                Icon::Folder
-            } else {
-                Icon::Branch
-            },
-            SharedString::from(name.clone()),
-        )
-        .meta(match &self.data.meta {
-            Some(meta) => SharedString::from(meta.clone()),
-            None => SharedString::from("the project folder"),
-        });
-        match (&self.data.preparation, self.facts.changes) {
-            (Preparation::Preparing { .. }, _) => {
-                head = head.trailing(div().mono(12.).text_color(p.faint).child("preparing"));
-            }
-            (Preparation::Failed { .. }, _) => {
-                head = head.trailing(div().mono(12.).text_color(p.fail).child("failed"));
-            }
-            (
-                Preparation::Ready,
-                Some(Changes {
-                    added,
-                    removed,
-                    capped,
-                }),
-            ) => {
-                // Capped: the daemon stopped counting new files, there are more.
-                let at_least = if capped { "≥" } else { "" };
-                head = head.trailing(
-                    div()
-                        .id(id("changes"))
-                        .flex_none()
-                        .flex()
-                        .gap(space::XS)
-                        .mono(12.)
-                        .child(div().text_color(p.ok).child(format!("{at_least}+{added}")))
-                        .child(div().text_color(p.fail).child(format!("−{removed}"))),
-                );
-            }
-            _ => {}
-        }
-        head = match &self.menu {
-            Some(menu) => head.trailing(menu.clone()),
-            // The project folder has no action of its own: its head keeps the same right edge.
-            None => head.trailing(div().w(px(8.))),
-        };
-
-        // Each block comes and goes with its line; its rows come and go inside it.
-        let found = self.lines(&name, cx);
-        let mut lines = Block::new().present(id("lines-block"), !self.line_rows.is_empty());
-        if !found.is_empty() {
-            lines = lines.child(lines_block(found));
-        }
-        let steps = self.setup(&name, now, cx);
-        let mut setup =
-            Block::new().present(id("setup-block"), !ready && !self.data.steps.is_empty());
-        if let Some(steps) = steps {
-            setup = setup.child(steps);
-        }
-        let (at, reduce) = (cx.background_executor().now(), cx.reduce_motion());
-        let listed = self.data.sessions.clone();
-        self.session_rows
-            .sync(listed.into_iter().map(|s| (s.id.clone(), s)), at, reduce);
-        // A row that leaves keeps its mark and its menu until it has folded away.
-        let drawn: Vec<String> = self.session_rows.rows().map(|r| r.key.to_owned()).collect();
-        self.icons.retain(|id, _| drawn.contains(id));
-        self.session_menus.retain(|id, _| drawn.contains(id));
-        for key in &drawn {
-            self.session_menu(key, cx);
-        }
-        let mut sessions =
-            Block::new().present(id("sessions-block"), !self.session_rows.is_empty());
-        if self.session_rows.rows().next().is_some() {
-            let shown: Vec<_> = self
-                .session_rows
-                .rows()
-                .map(|row| (row.value.clone(), row.placement))
-                .collect();
-            let rows = shown.into_iter().map(|(session, placement)| {
-                let shell = self.shell.clone();
-                let open = session.id.clone();
-                let meta = match session.agents {
-                    0 | 1 => div()
-                        .child(SharedString::from(match session.mark {
-                            Some(_) => String::new(),
-                            None => ago(now, session.active_at),
-                        }))
-                        .into_any_element(),
-                    n => div()
-                        .flex()
-                        .items_center()
-                        .gap(space::XS)
-                        .child(icon(glyphs::AGENTS).size(px(12.)))
-                        .child(SharedString::from(agents_label(n)))
-                        .into_any_element(),
-                };
-                let row = FlatRow::new(
-                    ElementId::Name(format!("card-session-{}", session.id).into()),
-                    SharedString::from(session.title.clone()),
-                )
-                .when_some(self.icons.get(&session.id).cloned(), |row, icon| {
-                    row.leading(icon)
-                })
-                .meta(meta)
-                .when_some(
-                    self.session_menus.get(&session.id).map(|(m, _)| m.clone()),
-                    |row, menu| row.more(menu),
-                )
-                .on_click(move |_, window, cx| {
-                    let session = open.clone();
-                    shell
-                        .update(cx, |shell, cx| {
-                            shell.open(Selection::Session(session), window, cx)
-                        })
-                        .ok();
-                });
-                Item::new(
-                    ElementId::Name(format!("session-item-{}", session.id).into()),
-                    placement,
-                    row,
-                )
-            });
-            sessions = sessions.child(
-                div()
-                    .pb(space::XS)
-                    .flex()
-                    .flex_col()
-                    .child(caption(
-                        id("sessions-caption"),
-                        "Sessions",
-                        SharedString::from(self.data.sessions.len().to_string()),
-                        cx,
-                    ))
-                    .children(rows),
-            );
-        }
-        let (shell, project) = (self.shell.clone(), self.project.clone());
-        let choice = match &place {
-            None => Choice::Main,
-            Some(name) => Choice::Workspace(name.clone()),
-        };
-        let footer = Block::new().at_bottom().child(
-            FooterAction::new(id("new-session-in"), format!("New session in {name}"))
-                .enabled(ready)
-                .on_click(move |_, window, cx| {
-                    let choice = choice.clone();
-                    shell
-                        .update(cx, |shell, cx| {
-                            shell.compose_in(&project, choice, window, cx)
-                        })
-                        .ok();
-                }),
-        );
-
-        let confirm = {
-            let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
-            Confirm::new(
-                id("workspace-removal"),
-                format!("Remove the workspace {name}?"),
-            )
-            .sentence(
-                "Its folder goes, and each repository's branch that holds no commit of its own. \
-                 Flottille removes it only once all its work is committed and pushed.",
-            )
-            .action("Remove workspace")
-            .refused(self.removal_refused())
-            .open(self.confirming)
-            .on_confirm(move |_, cx| {
-                this.update(cx, |this, cx| this.perform(Busy::Removing, cx))
-                    .ok();
-            })
-            .on_cancel(move |_, cx| {
-                again
-                    .update(cx, |this, cx| {
-                        this.confirming = false;
-                        cx.notify();
-                    })
-                    .ok();
-            })
-        };
-        let link = place.is_some().then(|| self.link_modal(&name, window, cx));
-        div()
-            .id(card_id(&place))
-            .h_full()
-            .child(confirm)
-            .children(link)
-            .child(
-                div().h_full().child(
-                    Card::new()
-                        .id(id("place"))
-                        .fill()
-                        .block(Block::new().child(head))
-                        .block(lines)
-                        .block(setup)
-                        .block(sessions)
-                        .block(footer),
-                ),
-            )
-            .test_support()
-    }
-}
-
 /// How long typing rests before the ticket typed is read.
 const PREVIEW_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
 
-/// The last cell of the grid: a dashed "New workspace" card, which opens the new-workspace modal:
+/// The new-workspace modal, which the header's New workspace and the composer's place open:
 /// its name, its ticket (read as it is typed), the repositories it takes and their bases, its
 /// branch, and a button that creates it, as `flottille workspace create` does (the command line
 /// keeps `--offline`; the window always fetches).
@@ -1637,9 +728,6 @@ pub struct NewWorkspace {
     /// when empty. With the rule its placeholder says.
     bases: HashMap<String, (Entity<InputState>, String)>,
     branch: Entity<InputState>,
-    /// Drawn as the dashed card of the grid; not when the page's empty state carries the
-    /// actions, where only the modal stays.
-    framed: bool,
     /// The name asked for, while the daemon makes it.
     creating: Option<String>,
     /// Opened from the composer's picker: the workspace made becomes the composer's place.
@@ -1708,7 +796,6 @@ impl NewWorkspace {
             rules: HashMap::new(),
             bases: HashMap::new(),
             branch,
-            framed: true,
             creating: None,
             for_composer: false,
             creating_for_composer: false,
@@ -1818,15 +905,6 @@ impl NewWorkspace {
         cx.notify();
     }
 
-    /// Whether the dashed card is drawn; the modal is either way.
-    pub fn set_framed(&mut self, framed: bool, cx: &mut Context<Self>) {
-        if self.framed != framed {
-            self.framed = framed;
-            cx.notify();
-        }
-    }
-
-    /// The ticket field changed: read what it says once typing rests.
     fn ticket_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.ticket.read(cx).value().trim().to_owned();
         self.previews += 1;
@@ -1947,7 +1025,7 @@ impl NewWorkspace {
         cx.notify();
     }
 
-    /// What the daemon answered: made, and the card closes; or refused, and it says why. `true`
+    /// What the daemon answered: made, and the dialog closes; or refused, and it says why. `true`
     /// when the workspace made is to become the composer's place.
     pub fn answered(
         &mut self,
@@ -1962,7 +1040,7 @@ impl NewWorkspace {
                 let name = self.name.read(cx).value().trim().to_owned();
                 toast(
                     Toast::success(format!("Workspace {name} is being prepared"))
-                        .detail("Its card lists the steps of its setup."),
+                        .detail("Its place on the project page lists the steps of its setup."),
                     cx,
                 );
                 self.open = false;
@@ -2026,32 +1104,6 @@ impl NewWorkspace {
 impl Render for NewWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let card = div()
-            .id("new-workspace-card")
-            .aria_label("New workspace")
-            .min_h(px(150.))
-            .h_full()
-            .p(space::XL)
-            .rounded(px(12.))
-            .border_1()
-            .border_dashed()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .ui_text()
-            .text_size(px(13.))
-            .cursor_pointer()
-            .child(icon(Icon::Plus).size(px(16.)).text_color(p.faint))
-            .child(
-                div()
-                    .mt(px(6.))
-                    .text_color(p.text)
-                    .medium()
-                    .child("New workspace"),
-            )
-            .child("a branch of its own in every repository")
-            .on_click(cx.listener(|this, _, window, cx| this.open(window, cx)));
         let creating = self.creating.is_some();
         let this = cx.entity().downgrade();
         let repositories = {
@@ -2197,17 +1249,6 @@ impl Render for NewWorkspace {
                 .disabled(!self.has_name || creating)
                 .on_click(cx.listener(|this, _, _, cx| this.create(cx))),
             );
-        if !self.framed {
-            return div()
-                .id("new-workspace-anchor")
-                .child(modal)
-                .into_any_element();
-        }
-        hoverable(card.child(modal), move |d, t| {
-            d.bg(p.hover.opacity(t))
-                .text_color(mix(p.mute, p.text, t))
-                .border_color(mix(p.line2, p.focus_line, t))
-        })
-        .into_any_element()
+        div().id("new-workspace-anchor").child(modal)
     }
 }

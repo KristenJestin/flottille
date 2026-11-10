@@ -1460,7 +1460,7 @@ fn a_ready_server_on_the_project_page_does_not_say_ready_in_its_detail(cx: &mut 
         .unwrap()
         .to_owned();
     let (shell, cx) = window(&user, 1280., cx);
-    // The runs come last on the page: tall enough to hold them.
+    // The runs are in their place on the page: tall enough to hold them.
     cx.simulate_resize(size(px(1280.), px(2400.)));
     shell.update_in(cx, |s, window, cx| {
         s.open(
@@ -1470,13 +1470,13 @@ fn a_ready_server_on_the_project_page_does_not_say_ready_in_its_detail(cx: &mut 
         )
     });
     until(&shell, cx, "the project page shows the run ready", |cx| {
-        label(cx, &format!("project-run-mark-{run}")).as_deref() == Some("ready")
+        label(cx, &format!("place-run-mark-{run}")).as_deref() == Some("ready")
     });
     settle(cx);
 
-    let detail = label(cx, &format!("command-{run}-detail")).unwrap();
-    assert!(detail.starts_with("task web · "), "{detail}");
-    assert!(!detail.contains("ready"), "the dot says it: {detail}");
+    // Its row in main says the task; the dot says it is ready.
+    let row = label(cx, &format!("place-run-row-{run}")).unwrap();
+    assert_eq!(row, "web", "the dot says it is ready: {row}");
     user.call("run.stop", json!({"run": run})).unwrap();
 }
 
@@ -1589,7 +1589,7 @@ fn a_server_the_user_ran_on_the_project_page_shows_its_dot_and_its_address(
         .unwrap()
         .to_owned();
     let (shell, cx) = window(&user, 1280., cx);
-    // The runs come last on the page: tall enough to hold them.
+    // The runs are in their place on the page: tall enough to hold them.
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let opened: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
     let given = opened.clone();
@@ -1605,15 +1605,15 @@ fn a_server_the_user_ran_on_the_project_page_shows_its_dot_and_its_address(
             cx,
         )
     });
-    let link = format!("project-run-link-{run}");
+    let link = format!("place-run-link-{run}");
     until(&shell, cx, "the project page shows the run ready", |cx| {
-        label(cx, &format!("project-run-mark-{run}")).as_deref() == Some("ready")
+        label(cx, &format!("place-run-mark-{run}")).as_deref() == Some("ready")
     });
     settle(cx);
 
     assert_eq!(label(cx, &link).unwrap(), "main.app.localhost/login");
     assert!(
-        cx.update(|window, _| window.try_find(format!("project-run-dot-{run}")).is_some()),
+        cx.update(|window, _| window.try_find(format!("place-run-dot-{run}")).is_some()),
         "the live dot"
     );
     cx.update(|window, cx| window.click(link.clone(), cx));

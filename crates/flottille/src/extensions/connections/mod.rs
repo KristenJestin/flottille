@@ -349,7 +349,7 @@ impl Declaration {
     }
 }
 
-fn name_ok(name: &str) -> bool {
+pub(super) fn name_ok(name: &str) -> bool {
     !name.is_empty()
         && name.chars().count() <= NAME_CHARS
         && name
@@ -499,14 +499,17 @@ impl Listing {
 
     /// Its name and version, each cut at `SERVER_CHARS`: the review shows them whole.
     fn version(&self) -> String {
-        let said = |key: &str| {
-            let text = self.server[key].as_str().unwrap_or("?");
-            match text.chars().count() > SERVER_CHARS {
-                true => format!("{}…", text.chars().take(SERVER_CHARS).collect::<String>()),
-                false => text.to_owned(),
-            }
-        };
+        let said = |key: &str| short(self.server[key].as_str().unwrap_or("?"));
         format!("{} {}", said("name"), said("version"))
+    }
+}
+
+/// A server's own words where the daemon says them in a line (a cut-off, why it failed, its
+/// log), already masked: cut at `SERVER_CHARS`.
+fn short(text: &str) -> String {
+    match text.chars().count() > SERVER_CHARS {
+        true => format!("{}…", text.chars().take(SERVER_CHARS).collect::<String>()),
+        false => text.to_owned(),
     }
 }
 
@@ -1213,22 +1216,32 @@ fn list(daemon: &Daemon) -> std::result::Result<Value, Failure> {
     Ok(json!({"enabled": on, "error": error, "connections": connections}))
 }
 
-/// Refuses a vault entry tied to one project: a connection is every project's.
+/// Refuses a vault entry tied to one project, a connection being every project's, or bound to
+/// another use than this connection.
 fn entries_checked(daemon: &Daemon, declaration: &Declaration) -> std::result::Result<(), Failure> {
     let entries = daemon.read(|store| store.vault_entries())?;
+    let this = flottille_core::vault::connection(&declaration.name);
     for name in declaration.entries() {
-        if let Some(project) = entries
-            .iter()
-            .find(|entry| &entry.name == name)
-            .and_then(|entry| entry.project.as_ref())
-        {
+        let Some(entry) = entries.iter().find(|entry| &entry.name == name) else {
+            continue;
+        };
+        if let Some(project) = &entry.project {
             return Err(Failure::refused(format!(
                 "the vault entry {name} is the project {project}'s alone: a connection is given to \
                  every project, so the entries it names are every project's"
             )));
         }
+        entry.usable_for(&this).map_err(Failure::refused)?;
     }
     Ok(())
+}
+
+/// Whether the connection `name`, as declared, names the vault entry `entry`; why it cannot be
+/// told when the declarations cannot be read.
+pub fn names(daemon: &Daemon, name: &str, entry: &str) -> std::result::Result<bool, String> {
+    Ok(declarations(&daemon.paths)?
+        .iter()
+        .any(|declaration| declaration.name == name && declaration.entries().any(|e| e == entry)))
 }
 
 fn table_of(declaration: &Declaration) -> std::result::Result<toml_edit::Table, Failure> {
@@ -1446,8 +1459,8 @@ fn diff(declaration: &Declaration, row: &Row, now: &Listing) -> Value {
 /// `connection.accept {name, actions?}`: pins what the last review showed, keeping the settings
 /// of the actions that did not change and judging every new one; `actions` sets some, by name
 /// (judged, passes, asked or off). On a connection already pinned and due no review, it sets
-/// them alone. The server the review started is stopped before the pin: a change it announced
-/// since is seen when it starts again, against the pin.
+/// them alone. The server the review started is stopped before the pin, and no other starts until
+/// it is written: a change it announced since is seen when it starts again, against the pin.
 async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
     let name = named(&params)?;
     let declaration = declaration(&daemon.paths, &name)?;
@@ -1493,20 +1506,23 @@ async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
         }
         settings.insert(action.clone(), setting.to_owned());
     }
-    if due {
-        client::stop(daemon, &name).await;
+    let pin = || {
+        write_row(
+            daemon,
+            &name,
+            |row| {
+                row.pin = Some(listing);
+                row.pinned_for = Some(digest);
+                row.settings = settings;
+                row.cut_off = None;
+            },
+            None,
+        )
+    };
+    match due {
+        true => client::stopped(daemon, &name, pin).await?,
+        false => pin()?,
     }
-    write_row(
-        daemon,
-        &name,
-        |row| {
-            row.pin = Some(listing);
-            row.pinned_for = Some(digest);
-            row.settings = settings;
-            row.cut_off = None;
-        },
-        None,
-    )?;
     in_space(daemon, |space| {
         space.tables().execute(
             "UPDATE ext_connections_connections SET accepted_at = ?2 WHERE name = ?1",

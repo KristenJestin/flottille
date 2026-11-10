@@ -44,6 +44,8 @@ pub struct VaultEntry {
     pub url: Option<String>,
     pub username: Option<String>,
     pub project: Option<String>,
+    /// The one use that reads it (`docs/vault.md`, "Bound to one use").
+    pub bound: Option<String>,
 }
 
 impl VaultEntry {
@@ -55,6 +57,7 @@ impl VaultEntry {
             url: text("url"),
             username: text("username"),
             project: text("project"),
+            bound: text("for"),
         }
     }
 }
@@ -96,6 +99,8 @@ pub struct VaultSection {
     fields: Option<Fields>,
     /// The project the entry is for, chosen in the dialog; every project's when `None`.
     project: Option<String>,
+    /// The use a new entry is made for, when the dialog was opened from that feature.
+    bound: Option<String>,
     saving: bool,
     writing: Option<Writing>,
     form_error: Option<SharedString>,
@@ -119,6 +124,7 @@ impl VaultSection {
             form: Form::Closed,
             fields: None,
             project: None,
+            bound: None,
             saving: false,
             writing: None,
             form_error: None,
@@ -218,6 +224,7 @@ impl VaultSection {
     pub fn add_for(&mut self, project: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.fill(None, window, cx);
         self.come_back = Some(project.to_owned());
+        self.bound = Some(flottille_core::vault::worklog(project));
     }
 
     /// The project to go back to, once the dialog it was opened for is closed (an entry set).
@@ -243,6 +250,7 @@ impl VaultSection {
 
     fn fill(&mut self, entry: Option<&VaultEntry>, window: &mut Window, cx: &mut Context<Self>) {
         self.come_back = None;
+        self.bound = None;
         let fields = self.fields(window, cx);
         let (name, secret, description, url, username) = (
             fields.name.clone(),
@@ -332,6 +340,7 @@ impl VaultSection {
             url: value(&fields.url),
             username: value(&fields.username),
             project: self.project.clone(),
+            bound: self.bound.clone(),
         };
         let writing = match original {
             Some(_) => Writing::Replaced(name),
@@ -353,6 +362,7 @@ impl VaultSection {
         self.write(
             VaultWrite::Remove {
                 name: name.to_owned(),
+                confirmed: true,
             },
             Writing::Removed(name.to_owned()),
             cx,
@@ -423,8 +433,16 @@ impl VaultSection {
         ]
         .into_iter()
         .flatten()
-        .next()
-        .unwrap_or_else(|| "No description".to_owned());
+        .next();
+        let used = entry
+            .bound
+            .as_deref()
+            .and_then(flottille_core::vault::use_said);
+        let line = match (used, line) {
+            (Some(used), Some(line)) => format!("For {used} alone · {line}"),
+            (Some(used), None) => format!("For {used} alone"),
+            (None, line) => line.unwrap_or_else(|| "No description".to_owned()),
+        };
         let row = ListRow::new(
             ElementId::Name(format!("vault-{name}").into()),
             SharedString::from(name.clone()),
@@ -450,10 +468,24 @@ impl VaultSection {
     fn confirm(&self, cx: &mut Context<Self>) -> Confirm {
         let name = self.asked.clone();
         let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
+        // A bound entry says what stops working without it.
+        let stops = self
+            .listed
+            .iter()
+            .flatten()
+            .find(|entry| entry.name == name)
+            .and_then(|entry| entry.bound.as_deref())
+            .and_then(flottille_core::vault::use_stops);
+        let sentence = match stops {
+            Some(stops) => format!(
+                "Its secret is deleted from your keyring, and {stops} while it names this entry."
+            ),
+            None => "Its secret is deleted from your keyring, and the tools that use it can no \
+                     longer."
+                .to_owned(),
+        };
         Confirm::new("vault-removal", format!("Remove the entry {name}?"))
-            .sentence(
-                "Its secret is deleted from your keyring, and the tools that use it can no longer.",
-            )
+            .sentence(sentence)
             .action("Remove entry")
             .open(self.confirming.is_some())
             .on_confirm(move |_, cx| {
