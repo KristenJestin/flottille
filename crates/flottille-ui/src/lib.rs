@@ -33,6 +33,7 @@ pub mod segmented;
 pub mod select;
 pub mod skeleton;
 pub mod space;
+pub mod subpage;
 pub mod switch;
 pub mod tabs;
 pub mod theme;
@@ -75,6 +76,7 @@ pub use rows::{
 pub use segmented::Segmented;
 pub use select::{Select, SelectOption};
 pub use skeleton::{Awaiting, Skeleton, awaiting};
+pub use subpage::Subpage;
 pub use switch::Switch;
 pub use tabs::Tabs;
 pub use theme::{Palette, palette};

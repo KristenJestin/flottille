@@ -161,7 +161,13 @@ the wrong code first).
    at once (Ask | Auto), sized to its words, never in a form; radio choices for two to four kinds
    in a form that each need a line; a select for a list that may grow, more than three options or
    long labels. **[test]** `Segmented` takes at most three choices and a scan refuses it in a
-   dialog.
+   dialog. A switch's label names what it turns on, with a verb or a name ("Review changes",
+   "Claude"), never its state ("On", "Enabled", "Use"): the switch already draws whether it is
+   on. A setting that only means something for one choice (a switch on, a radio chosen) unfolds
+   right under it, its label read after the choice's ("Compact automatically", then "When the
+   context reaches"), never shown greyed elsewhere on the page. A field saved on its own shows
+   no Save at rest: a secondary Save unfolds beside it once its value differs from the saved one,
+   and folds away after it is saved or set back.
 5. **A state is said once per view**: an agent's state by its icon on its own row, "needs you" in
    one place. **[test]** on the session page, "needs you" is said at most once.
 6. **Where things live**: the project page shows and runs, the project settings configure; a
@@ -171,9 +177,18 @@ the wrong code first).
    "Remove…"; an empty list is one dashed line saying what to add and why; reordering is by drag,
    with Move up and Move down in the "⋯". A separator is drawn only between two blocks that exist.
    **[test]** `Card` draws a block's separator only when the block has content.
-8. **Words**: paths relative to the project folder; a remote in its short form, labelled; labelled
-   values when there are more than two, never a run of mono values separated by dots; a section
-   has a title, a count when it is a list, and one sentence saying what it is for.
+8. **Words**: paths relative to the project folder or to `~`, never absolute; a remote in its
+   short form, labelled; labelled values when there are more than two, never a run of mono values
+   separated by dots; a section has a title, a count when it is a list, and one sentence saying
+   what it is for (a section that reads alone, a few switches that say it all, has none). The
+   window speaks of what the user sees and does, never of how Flottille is built: no *pilot*,
+   *pass*, *verifier*, *slot*, *compactor*, *daemon*, *worktree*, *handoff*, no file of the
+   configuration, no path of a login file, no name of an environment variable. A help line is
+   said once: one that four fields share goes up a level and is said there, one that repeats the
+   option chosen goes. Sentence case everywhere. The same gesture has the same verb (**New**
+   step, skill, command, task, entry; **Check again** for any read made anew) and the same thing
+   the same name everywhere ("Rules for every project" in Settings and in a project). Durations,
+   not seconds ("stops after 10 min").
 9. **Spacing**: the scale 4, 8, 12, 16, 24, 32, 48 px (`flottille_ui::space`). **[test]** the
    constants, and a scan refusing any other gap or padding literal in the window crate. A page's
    column is 880 px at most with 32 px between its sections; a dialog is 520 px (640 wide) with
@@ -193,6 +208,39 @@ the wrong code first).
     controls, and animates in, so that nothing moves; a short row (under 740 px) gives the chips
     their icons, never an overflow. **[test]** `window_compaction.rs`, `window_quota.rs` (a 1280
     px window), `window_rules.rs`.
+13. **Tabs by subject; a feature is a row, never a tab.** Settings has five tabs (Agents,
+    Approvals, Features, Vault, General) and six at most, Usage the last; a project's settings
+    have five (Repositories, Workspaces, Tasks, Instructions, Features); the project page four at
+    most and room for a fifth. A new part of Flottille adds no tab: a part the user turns on or
+    off (Specs, Review, the compaction, Connections, later the handbook) is a row of the
+    Features tab, which opens its page in place of the list (`Subpage`); a setting every agent
+    shares is a section of a tab that exists. A tab with a single control is a section of
+    another.
+14. **A feature's page, one pattern.** It starts with the same block, in this order: its switch,
+    labelled with what it does ("Review changes", "Write specs before building", "Compact long
+    conversations", "Let a model decide in Auto"); its hint, one sentence of what it does and
+    what it costs; its **usage line**, which says where and how it acts, the words found
+    elsewhere in the window in bold (`/review`, **Write the spec**, **Compact**, **Auto**),
+    shown even while it is off, so that the user knows what a switch is for before turning it
+    on. Off, the page is that block alone, the rest folding away with the switch. In a
+    project, the same page holds the project's switch, with the global switch's label (the
+    path says the project), and each value a project may set offers **As in Settings** first,
+    its second line the value it gives; a value set in the project carries a dot, "set here",
+    and a link under it, **Use Settings' value**. On the global page, one line names the
+    projects that do otherwise (`notes-app turns it off`, `acme-shop runs Security too`), each
+    a link, and only when there is one.
+15. **One way to choose a model**: `ModelChoice`, wherever a model is chosen (the judge, the
+    compaction's summary, each of Review's checks, what comes later). One select, its entries
+    `<provider> · <model>` grouped by provider, with the effort in a narrow select beside it when
+    the model has efforts. A default that is a rule is the first option, said as the rule and, on
+    its second line, what it gives today (`Strongest of the session's provider`, `Opus for
+    Claude`; in a project, `As in Settings`); a model Flottille picked is the one chosen, marked
+    `picked` until its notice is seen. A choice that is not a model (the compaction's `The
+    session's own agent`) comes before the models. "No model" is never an entry: a feature is
+    turned off by its switch. Under it, one line of cost
+    ("Each decision is a turn of this model, on your own quota."). Several choices in a row are
+    one card with a line each and the compact select on the right, the default and the cost said
+    once under the card, never stacked full-width selects.
 
 The components that hold them:
 
@@ -213,7 +261,9 @@ The components that hold them:
 | `Drawer::detail(id, view, cx)` | a run's detail: 520 px from the right, no scrim, Escape closes; `.show(window, cx)` |
 | `Card::new().id(id).block(Block)` | a card whose separators are drawn only between blocks with content |
 | `ListCard::new(id).row(ListRow)` | rule 7's list; `.scrolling(&ScrollHandle, max_height)` makes a long one scroll inside its card (the screen keeps the handle: it holds the place and takes it back to the top); `ListRow` has `.mono()`, `.tag(t)`, `.line(l)`, `.more(Entity<Menu>)` (its clicks stay its own), `.below(el)` (labelled values, a reason under the title); `.item(id, placement, row)` draws a row of a `Listing` in its `Item`; a search's result has `.pieces(..)` (what matched, in the accent), `.marked(bool)` (the row the keys move to, its fill moving over `HOVER`) and `.on_enter(f)` (the pointer entered it) |
-| `Tabs::new(id, label, chosen).tab(key, words)`, `.counted(key, words, count)`, `.on_choose(f)` | a page of sections shown one at a time (the project's settings, Settings): as many tabs as sections, a count after the name of a list, the marker slides to the tab chosen over `PANEL`; the page draws the chosen section alone, inside an `enter` that plays again as it is chosen again |
+| `Tabs::new(id, label, chosen).tab(key, words)`, `.counted(key, words, count)`, `.on_choose(f)` | a page of sections shown one at a time (Settings, the project's settings, the project page): as many tabs as sections, a count after the name of a list, the marker slides to the tab chosen over `PANEL`; the page draws the chosen section alone, inside an `enter` that plays again as it is chosen again |
+| `Subpage::new(id, label)` | rule 13: a list that opens, in place of itself and inside its tab, the page of one of its rows. `.entry(key, icon, title, tag, line)` draws a row of a `ListCard` (its icon, its name, its state as a tag, said once: `On`, `Off`, `2 on`, and its one line, what it is for, never its state); `.open(Option<key>)`, `.on_open(f)`, `.page(el)`. Above the open page, a path line, `Features / Review`, whose first word is a link back to the list, as Escape is. The page enters sliding from the right while the list leaves to the left, over `PANEL` with a fade; going back does the reverse. The tab keeps the page open while another tab is shown, and a link (a notice, a mode's "unavailable" line, an action of the quick switcher) opens `Settings › Features › Review` directly with the setting in view; ids `<id>-<key>`, `<id>-back` |
+| `ModelChoice::new(id, label, choice)` | rule 15: `.default(rule, gives)` for its first option, `.effort(Option<effort>)`, `.compact()` for a line of a card, `.cost(line)`, `.inherited(gives)` in a project (its first option `As in Settings`), `.on_choose(f)`; the options come from the providers enabled and ready, their models and efforts as the daemon knows them |
 | `Skeleton::new(id)` | rule 11: `.w(px)` (all the room without), `.h(px)` (12 px without), a block in the faint fill that pulses once every `PULSE`, in its own small view; `awaiting(id, pending, skeleton, content)` crossfades it into the content |
 | `EmptyLine::new(id, Icon, text)` | an empty list; `.action(Button)` |
 | `fuzzy::find(query, title, context)` | a search's matching (the window's quick switcher): each word typed in the title, else as a whole in the context, ignoring case, accents and ligatures; a score and the marks, `Match::pieces(title)` for a `ListRow` |

@@ -88,10 +88,10 @@ hold the same value.
 
 ## Choosing the entry for time logging
 
-A Jira project's Settings, Tracker, names the entry (`docs/projects.md`, "Forges and tracker"): the
-select `Log time with` lists the entries the project sees by name and username, but those bound to
-another use, and its link opens the vault's new-entry dialog from there, the entry it makes bound
-to the project's worklog.
+A Jira project's Settings, Repositories tab, Tracker, names the entry (`docs/projects.md`, "Forges
+and tracker"): the select `Log time with` lists the entries the project sees by name and username,
+but those bound to another use, and its link opens the vault's new-entry dialog from there, the
+entry it makes bound to the project's worklog.
 
 ## What agents see
 

@@ -1403,13 +1403,29 @@ async fn prepare_steps(
             .lock()
             .unwrap()
             .insert((id, step.position), live.clone());
-        let outcome = match services_of(daemon, &workspace, &step).await {
+        // A line runs what the repositories hold, which an agent may have written: what it
+        // writes in their agent folders is put back, as an agent's run's.
+        let guarded = match step.action {
+            Action::Run { .. } => Some(guard_step(daemon, &workspace, &step).await),
+            _ => None,
+        };
+        let mut outcome = match services_of(daemon, &workspace, &step).await {
             Ok(()) => run_step(&workspace, &step, &live).await,
             Err(why) => Err(StepFailure {
                 doing: step.doing(),
                 output: why,
             }),
         };
+        if let Some((guard, about)) = guarded
+            && let Some(restored) = guard.leave().await
+        {
+            crate::runs::tell_put_back(daemon, &about, &restored);
+            if let (Err(failure), Some(said)) =
+                (&mut outcome, crate::agent_folders::said(&restored))
+            {
+                failure.output.push_str(&said);
+            }
+        }
 
         let (state, failure, name) = match outcome {
             Ok(StepState::Skipped) => (StepState::Skipped, None, "workspace.step_skipped"),
@@ -1530,6 +1546,36 @@ async fn run_step(
             .map_err(fail)?,
     }
     Ok(StepState::Done)
+}
+
+/// The guard of the workspace's agent folders while a setup line runs, and what its events say
+/// of it.
+async fn guard_step(
+    daemon: &Arc<Daemon>,
+    workspace: &Workspace,
+    step: &Step,
+) -> (crate::agent_folders::Guard, Value) {
+    let id = format!("setup-{}-{}-{}", workspace.id, step.position, now_ms());
+    let tops: Vec<PathBuf> = workspace
+        .repositories
+        .iter()
+        .map(|repository| workspace.folder_of(&repository.path))
+        .collect();
+    let guard = daemon
+        .mcp
+        .runs
+        .guards
+        .enter(
+            &workspace.folder,
+            &tops,
+            std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+            &daemon.paths.state.join("agent-folders"),
+            &id,
+        )
+        .await;
+    let about = json!({"agent": null, "project": workspace.project, "workspace": workspace.name,
+        "run": id, "folder": workspace.folder});
+    (guard, about)
 }
 
 async fn blocking(

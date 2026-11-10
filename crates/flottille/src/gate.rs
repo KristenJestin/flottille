@@ -154,8 +154,9 @@ const SENSITIVE: [&str; 15] = [
     ".local/share/opencode",
 ];
 /// The agents' own folders. The home's hold their logins and the user's own agent settings; one
-/// anywhere else is a repository's configuration, which an agent reads but never writes.
-pub(crate) const AGENT_FOLDERS: [&str; 3] = [".claude", ".claude.json", ".codex"];
+/// anywhere else is a repository's configuration, which an agent reads but never writes:
+/// `.mcp.json` names the programs Claude's command line starts there, once the user agrees.
+pub(crate) const AGENT_FOLDERS: [&str; 4] = [".claude", ".claude.json", ".codex", ".mcp.json"];
 /// A login moved into an agent's folder outside the home.
 pub(crate) const AGENT_LOGINS: [&str; 2] = [".credentials.json", "auth.json"];
 /// Sensitive from the top of the file system only.
@@ -1176,7 +1177,12 @@ fn run(call: &Call) -> Verdict {
                         shown_words(layer)
                     ));
                 }
-                Line::Files => files = true,
+                Line::Files => {
+                    files = true;
+                    if let Some(why) = moves_agent_folder(call, layer) {
+                        found.judge(why);
+                    }
+                }
                 Line::Writes => reads = false,
                 Line::Judge(why) => {
                     reads = false;
@@ -3307,6 +3313,90 @@ fn named<'a>(call: &Call, layers: &'a [Vec<String>]) -> Vec<(&'a str, Resolved, 
     named
 }
 
+/// The most entries of a folder a `git rm` or `git mv` names looked at for an agent folder: past
+/// it, it may hold one.
+const MOVED_ENTRIES_MAX: usize = 10_000;
+
+/// Why a `git rm` or `git mv` of the place's files is held: a folder it names holds an agent
+/// folder, or a pathspec of `git rm` may reach one. Removing one weakens the repository's settings
+/// (its deny rules) without naming them; held, its run is guarded and what it removed there is
+/// put back (`agent_folders`).
+fn moves_agent_folder(call: &Call, layer: &[String]) -> Option<String> {
+    let folder = call.paths.first()?;
+    let at = layer.iter().position(|word| word == "rm" || word == "mv")?;
+    let shown = || shown_words(layer);
+    // Another folder, repository or work tree, or pathspecs read another way (`--icase-pathspecs`
+    // makes `DOCS` reach `docs`): what the words name is not where the gate looks. `-c` was
+    // judged on its own.
+    if git_globals(&layer[1..at])
+        .1
+        .iter()
+        .any(|(option, _)| *option != "-c")
+    {
+        return Some(format!(
+            "{} moves or removes files after a global option of git, which may reach an agent \
+             folder",
+            shown()
+        ));
+    }
+    // The paths are in a file the gate does not read. "--pathspec-f" is still ambiguous.
+    if layer[at + 1..]
+        .iter()
+        .any(|word| abbreviates(word, "pathspec-from-file", 10))
+    {
+        return Some(format!(
+            "{} names its files in a file, which may name an agent folder",
+            shown()
+        ));
+    }
+    for word in layer[at + 1..].iter().filter(|word| !word.starts_with('-')) {
+        if word.starts_with(':') || word.contains(['*', '?', '[']) {
+            return Some(format!(
+                "{} names files by a pattern ({word}), which may reach an agent folder",
+                shown()
+            ));
+        }
+        let path = call.grant.place.resolve(&folder.path, word);
+        if holds_agent_folder(&path.path) {
+            return Some(format!(
+                "{} moves or removes {word}, which holds an agent folder (.claude, .codex…): its \
+                 settings stop applying to the repository",
+                shown()
+            ));
+        }
+    }
+    None
+}
+
+/// Whether the folder `path` holds an agent folder, or more entries than are looked at. Links
+/// are not followed, nor `.git` walked.
+fn holds_agent_folder(path: &Path) -> bool {
+    if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) {
+        return false;
+    }
+    let mut pending = vec![path.to_owned()];
+    let mut seen = 0;
+    while let Some(folder) = pending.pop() {
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            seen += 1;
+            if seen > MOVED_ENTRIES_MAX {
+                return true;
+            }
+            let name = entry.file_name();
+            if AGENT_FOLDERS.iter().any(|agent| {
+                name.as_encoded_bytes()
+                    .eq_ignore_ascii_case(agent.as_bytes())
+            }) {
+                return true;
+            }
+            if name != ".git" && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(entry.path());
+            }
+        }
+    }
+    false
+}
+
 /// Whether a layer is a git command that prints a file of a revision named `rev:path`.
 fn shows_revisions(layer: &[String]) -> bool {
     if base(&layer[0]) != "git" {
@@ -4378,6 +4468,75 @@ mod tests {
     }
 
     #[test]
+    fn git_rm_or_mv_of_a_folder_holding_an_agent_folder_is_judged_not_allowed_at_once() {
+        // It weakens the repository's settings (its deny rules gone) without naming them: held,
+        // its run is guarded and what it removed there is put back.
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join("docs/.claude/settings.json"));
+        made(&fixture.root.join("src/a.rs"));
+        for line in [
+            "git rm -r docs",
+            "git rm -r --cached docs",
+            "git mv docs notes",
+            "git rm -r .",
+            "git rm -r ':(glob)**/settings.json'",
+            "git rm -r '*.json'",
+        ] {
+            assert!(
+                matches!(fixture.run(line), Verdict::Ask(_)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+        for line in ["git rm -r src", "git mv src lib", "git rm src/a.rs"] {
+            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+    }
+
+    #[test]
+    fn git_rm_with_a_pathspec_file_is_judged() {
+        // The paths are in a file the gate does not read: one may hold an agent folder.
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join("docs/.claude/settings.json"));
+        made(&fixture.root.join("list.txt"));
+        for line in [
+            "git rm -r --pathspec-from-file=list.txt",
+            "git rm -r --pathspec-from-file list.txt",
+            "git rm -r --pathspec-from=list.txt",
+            "git mv --pathspec-from-file=list.txt notes",
+        ] {
+            assert!(
+                matches!(fixture.run(line), Verdict::Ask(_)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+    }
+
+    #[test]
+    fn git_rm_after_a_global_option_is_judged() {
+        // `--icase-pathspecs` makes `DOCS` reach `docs`, which the gate does not look for: a global
+        // option may change what the words name.
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join("docs/.claude/settings.json"));
+        made(&fixture.root.join("src/a.rs"));
+        for line in [
+            "git --icase-pathspecs rm -r DOCS",
+            "git --literal-pathspecs rm -r docs",
+            "git --no-pager mv src lib",
+            "git --git-dir=.git rm -r src",
+            "git --git-dir .git rm -r src",
+        ] {
+            assert!(
+                matches!(fixture.run(line), Verdict::Ask(_)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+        assert_eq!(fixture.run("git rm -r src"), Verdict::Allow);
+    }
+
+    #[test]
     fn harmless_known_read_only_commands_pass_in_main_and_in_a_workspace() {
         for fixture in [Fixture::main(), Fixture::workspace()] {
             for line in [
@@ -5317,6 +5476,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn writing_a_repository_s_mcp_json_is_refused_as_an_agent_folder() {
+        // Claude's command line starts the servers a repository's `.mcp.json` names, once the
+        // user agrees, outside the gate.
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join("servers.json"));
+        for verdict in [
+            fixture.file("fs_write", ".mcp.json"),
+            fixture.file("fs_write", "app/.MCP.json"),
+            fixture.run("cp servers.json .mcp.json"),
+        ] {
+            assert!(
+                matches!(&verdict, Verdict::Deny(why)
+                    if why.contains("hooks") && why.contains("ask the user")),
+                "{verdict:?}"
+            );
+        }
+        made(&fixture.root.join(".mcp.json"));
+        assert!(
+            !matches!(fixture.file("fs_read", ".mcp.json"), Verdict::Deny(_)),
+            "a repository's .mcp.json is read as any file"
+        );
     }
 
     #[test]
