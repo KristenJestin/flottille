@@ -57,6 +57,11 @@ fn script() -> Value {
                  "options": [{"label": "Alice"}, {"label": "Bob"}, {"label": "Carol"}]}
             ]}}},
             {"say": "Asked."}]},
+        {"when": "pick one", "do": [
+            {"mcp": {"tool": "ask", "arguments": {"questions": [
+                {"question": PUSH, "options": [{"label": "Yes"}, {"label": "Not yet"}]}
+            ]}}},
+            {"say": "Asked."}]},
         {"when": "long options", "do": [
             {"mcp": {"tool": "ask", "arguments": {"questions": [
                 {"question": PUSH, "options": [
@@ -1166,4 +1171,30 @@ fn a_card_answered_before_a_restart_stays_answered(cx: &mut TestAppContext) {
         "no field to answer again"
     );
     release(&user);
+}
+
+#[gpui_kit::test]
+fn ctrl_enter_answers_a_card_of_options_alone(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "pick one");
+    let (shell, page, cx) = open_session(&user, &id, cx);
+    cx.simulate_resize(size(px(1440.), px(1800.)));
+    until(&shell, cx, "the card", |cx| {
+        questions(&page, cx)
+            .first()
+            .is_some_and(|(at, _)| card_shows(*at, cx))
+    });
+    settle(cx);
+    let at = questions(&page, cx)[0].0;
+    let card = card_of(&page, at, cx);
+
+    // No field is open: the card has only rows, and a click on one is all the user did.
+    click(format!("row-{at}-question-0-option-0"), cx);
+    settle(cx);
+    assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
+    assert!(!card.read_with(cx, |card, cx| card.is_sent(cx)));
+    cx.simulate_keystrokes("ctrl-enter");
+    until(&shell, cx, "the answer went", |cx| {
+        card.read_with(cx, |card, cx| card.is_sent(cx))
+    });
 }

@@ -18,8 +18,8 @@ use flottille_ui::{
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
     StatefulInteractiveElement as _, Styled, Subscription, TestSupportExt as _, WeakEntity, Window,
     div, px,
 };
@@ -75,6 +75,9 @@ pub struct QuestionCard {
     /// "+ Add a note" was clicked.
     noting: Vec<bool>,
     sending: bool,
+    /// What takes `Ctrl+Enter` when no field has the focus: a card of options alone has none
+    /// open, and a click on a row puts the focus here.
+    focus: FocusHandle,
     /// The history says the ask was answered (`agent.answered`): true after a restart too.
     answered: bool,
     _subscriptions: Vec<Subscription>,
@@ -146,6 +149,7 @@ impl QuestionCard {
             fields,
             notes,
             sending: false,
+            focus: cx.focus_handle(),
             answered: false,
             _subscriptions: subscriptions,
         }
@@ -306,8 +310,12 @@ impl QuestionCard {
                 .chosen(self.chosen[n].contains(&label))
                 .on_click({
                     let card = card.clone();
-                    move |_, cx| {
-                        card.update(cx, |card, cx| card.choose(n, &label, cx)).ok();
+                    move |window, cx| {
+                        card.update(cx, |card, cx| {
+                            card.choose(n, &label, cx);
+                            window.focus(&card.focus, cx);
+                        })
+                        .ok();
                     }
                 });
             if question.multiple {
@@ -324,8 +332,12 @@ impl QuestionCard {
                 .chosen(self.other[n])
                 .on_click({
                     let card = card.clone();
-                    move |_, cx| {
-                        card.update(cx, |card, cx| card.choose_other(n, cx)).ok();
+                    move |window, cx| {
+                        card.update(cx, |card, cx| {
+                            card.choose_other(n, cx);
+                            window.focus(&card.focus, cx);
+                        })
+                        .ok();
                     }
                 });
             if question.multiple {
@@ -542,7 +554,17 @@ impl Render for QuestionCard {
             .child(presence(id("answer-open"), !sent, send))
             .child(presence(id("answer-sent"), sent, waits));
         card = card.block(Block::new().child(footer));
-        div().id(id("question-text")).child(card).test_support()
+        div()
+            .id(id("question-text"))
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "enter" && event.keystroke.modifiers.secondary() {
+                    cx.stop_propagation();
+                    this.send(cx);
+                }
+            }))
+            .child(card)
+            .test_support()
     }
 }
 
