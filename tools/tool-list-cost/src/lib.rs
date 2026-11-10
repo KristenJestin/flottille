@@ -221,10 +221,62 @@ fn tools_of(kind: &Value) -> &[Value] {
     kind["tools"].as_array().map_or(&[], Vec::as_slice)
 }
 
+/// A prompt without the user's rules for all projects (`# How to work`, between two rules), which
+/// `roles::instructions` puts after the enforced text when there are any.
+pub fn without_rules(prompt: &str) -> String {
+    const OPEN: &str = "\n\n---\n\n# How to work\n\n";
+    const RULE: &str = "\n\n---\n\n";
+    let Some(start) = prompt.find(OPEN) else {
+        return prompt.to_owned();
+    };
+    let after = start + OPEN.len();
+    match prompt[after..].find(RULE) {
+        Some(end) => format!("{}{}", &prompt[..start], &prompt[after + end..]),
+        None => prompt.to_owned(),
+    }
+}
+
+/// What a session starts with, per kind: the prompt it is given (with the default rules, and
+/// without any rules of the user's) and the list, whose tokens ride in the first request.
+fn start_report(counter: &Counter, dump: &Value) -> String {
+    let mut out = String::from(
+        "## What a session starts with\n\n\
+         | Kind | Project | Prompt | Prompt without the rules | List | Start | Start without the rules |\n\
+         |---|---|---|---|---|---|---|\n",
+    );
+    for kind in kinds(dump) {
+        let Some(prompt) = kind["instructions"].as_str() else {
+            continue;
+        };
+        let with = counter.tokens(prompt);
+        let bare = counter.tokens(&without_rules(prompt));
+        let list: usize = tools_of(kind)
+            .iter()
+            .map(|tool| tool_cost(counter, tool).total)
+            .sum();
+        let _ = writeln!(
+            out,
+            "| {} | {} | {with} | {bare} | {list} | {} | {} |",
+            kind["kind"].as_str().unwrap_or_default(),
+            kind["project"].as_str().unwrap_or_default(),
+            with + list,
+            bare + list,
+        );
+    }
+    out.push('\n');
+    out
+}
+
 /// The report of a dump, in Markdown; with `slim`, what each kind would save were those tools
 /// alone given at each lighter level.
 pub fn report(counter: &Counter, dump: &Value, slim: &[&str]) -> String {
     let mut out = String::new();
+    if kinds(dump)
+        .iter()
+        .any(|kind| kind["instructions"].is_string())
+    {
+        out.push_str(&start_report(counter, dump));
+    }
     out.push_str("## The list of each kind of agent\n\n");
     out.push_str(
         "| Kind | Project | Tools | Characters | Tokens (o200k) | of which descriptions | of which schemas |\n\
