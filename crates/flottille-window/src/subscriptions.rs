@@ -142,7 +142,7 @@ impl SubscriptionRow {
 }
 
 /// What a paused following says, above its Resume.
-pub const PAUSED: &str = "Paused: the two sessions wrote to each other five times without you. \
+pub const PAUSED: &str = "Paused: the two sessions wrote to each other fifty times without you. \
     Resume, or write to either, to go on.";
 
 /// The rail's Subscriptions section.
@@ -382,6 +382,12 @@ mod tests {
             "created_at": 0,
             "expires_at": expires_at,
         }))
+    }
+
+    #[test]
+    fn the_pause_says_the_number_of_exchanges_in_words() {
+        assert_eq!(flottille_core::subscription::EXCHANGES, 50);
+        assert!(PAUSED.contains("fifty times"), "{PAUSED}");
     }
 
     #[test]

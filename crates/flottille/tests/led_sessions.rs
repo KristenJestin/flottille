@@ -484,8 +484,9 @@ fn a_paused_following_sends_the_question_to_the_user() {
     let (session, _) = led(&user, &mcp, "Fix the login.");
     eventually("its first turn", || turns(&user, &session) == 1);
 
-    // The fifth message between them pauses the following; its turn asks.
-    for text in ["Go on.", "Go on.", "Go on.", "Go on.", "Ask now"] {
+    // The fiftieth message between them pauses the following; its turn asks.
+    let texts = (1..50).map(|_| "Go on.").chain(["Ask now"]);
+    for text in texts {
         let sent = mcp.call("session_send", json!({"session": session, "text": text}));
         assert!(!sent.error, "{}", sent.text);
     }
