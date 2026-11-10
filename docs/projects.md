@@ -407,8 +407,8 @@ the user allows, since it rewrites the instructions of every agent created after
 
 `message_checks` lists command lines the user writes, each with `{message}` standing for a file
 that holds a message, for example `pnpm commitlint --edit {message}`. None by default. They are
-set in the file or in the project's Settings, tab Rules, under the rules ("Message checks", one
-line each, Save; `project.set_message_checks`, `docs/protocol.md`); an agent never sets them.
+set in the file or in the project's Settings, Instructions tab, "Commit and pull request checks"
+(one command line per line, Save once changed; `project.set_message_checks`, `docs/protocol.md`); an agent never sets them.
 
 They are the user's configuration, never the repository's. Flottille runs no git hook for an
 agent (`core.hooksPath=/dev/null`, `docs/tools.md`, "Tasks and runs"): a hook is a file the agent
