@@ -11,8 +11,8 @@
 
 use flottille_ui::{
     Badge, Block, Button, Card, Confirm, Drawer, EmptyLine, Field, Icon, Icons, ListCard, ListRow,
-    Menu, Modal, PageHeader, RadioChoices, Section, Segmented, Select, SelectOption, StateIcon,
-    Status, Switch, Toast, ToastStack, Type, icon, palette, space, toast,
+    Menu, Modal, PageHeader, RadioChoices, Section, Segmented, Select, SelectOption, Switch, Toast,
+    ToastStack, Type, icon, palette, space, toast,
 };
 use gpui_kit::base::input::{Input, InputState};
 use gpui_kit::{
@@ -46,11 +46,11 @@ fn main() {
         };
     }
     gpui_kit::application().with_assets(Icons).run(move |cx| {
-        flottille_ui::init(cx);
+        flottille_ui::init(flottille_ui::Identity::new("Components"), cx);
         if light {
             flottille_ui::omarchy::appear(
                 flottille_ui::omarchy::Appearance {
-                    source: flottille_ui::omarchy::Source::Flottille,
+                    source: flottille_ui::omarchy::Source::Own,
                     shade: flottille_ui::theme::Shade::Light,
                 },
                 cx,
@@ -73,7 +73,6 @@ struct Components {
     toasts: Entity<ToastStack>,
     header_menu: Entity<Menu>,
     row_menus: Vec<Entity<Menu>>,
-    session: Entity<StateIcon>,
     name: Entity<InputState>,
     when: Entity<InputState>,
     file: Entity<InputState>,
@@ -128,7 +127,7 @@ impl Render for RunDetail {
                                     .child("Task dev · running for 4m 12s"),
                             ),
                     )
-                    .child(Button::secondary("drawer-stop", "Stop").leading(Icon::Stop))
+                    .child(Button::secondary("drawer-stop", "Stop").leading(Icon::Close))
                     .child(Button::icon("drawer-close", Icon::Close, "Close (Esc)")),
             )
             .child(
@@ -185,8 +184,6 @@ impl Components {
                 })
             })
             .collect::<Vec<_>>();
-        let status = cx.new(|_| Status::new(flottille_ui::AgentState::Idle));
-        let session = cx.new(|cx| StateIcon::new(status, cx));
         let input = |placeholder: &'static str,
                      value: &'static str,
                      window: &mut Window,
@@ -230,7 +227,6 @@ impl Components {
             toasts,
             header_menu,
             row_menus,
-            session,
             name,
             when,
             file,
@@ -399,12 +395,12 @@ impl Components {
                                     mono("pantry  1 ahead · clean").into_any_element(),
                                 ))
                                 .child(line(
-                                    Icon::PullRequest,
+                                    Icon::Branch,
                                     "Pull request",
                                     mono("#17 merged").into_any_element(),
                                 ))
                                 .child(line(
-                                    Icon::Ticket,
+                                    Icon::Text,
                                     "Ticket",
                                     mono("#9 Help page for the pantry file").into_any_element(),
                                 )),
@@ -415,7 +411,7 @@ impl Components {
                     .block(
                         Block::new().child(
                             ListRow::new("ws-session", "Write the help page")
-                                .leading(self.session.clone())
+                                .leading(icon(Icon::File).text_color(p.faint))
                                 .meta("1h"),
                         ),
                     ),

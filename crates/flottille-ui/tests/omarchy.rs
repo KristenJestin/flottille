@@ -153,8 +153,8 @@ fn without_omarchy_the_base_theme_is_used(cx: &mut TestAppContext) {
     assert!(omarchy::last_fallback(&cx.app.borrow()).is_none());
 }
 
-const FLOTTILLE_LIGHT: Appearance = Appearance {
-    source: Source::Flottille,
+const OWN_LIGHT: Appearance = Appearance {
+    source: Source::Own,
     shade: Shade::Light,
 };
 
@@ -164,7 +164,7 @@ fn appear(appearance: Appearance, cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn choosing_flottille_on_omarchy_uses_flottille_s_palette_and_stops_following_the_theme(
+fn choosing_the_own_palette_on_omarchy_uses_it_and_stops_following_the_theme(
     cx: &mut TestAppContext,
 ) {
     let desktop = Desktop::new(true);
@@ -172,10 +172,10 @@ fn choosing_flottille_on_omarchy_uses_flottille_s_palette_and_stops_following_th
     init(cx, desktop.env());
     assert_eq!(cx.update(|cx| omarchy::shown(cx)).source, Source::Omarchy);
 
-    appear(FLOTTILLE_LIGHT, cx);
+    appear(OWN_LIGHT, cx);
     assert_eq!(cx.update(|cx| target_palette(cx)), Palette::light());
-    assert_eq!(cx.update(|cx| omarchy::shown(cx)), FLOTTILLE_LIGHT);
-    // A theme switched on the desktop meanwhile leaves Flottille's palette in place.
+    assert_eq!(cx.update(|cx| omarchy::shown(cx)), OWN_LIGHT);
+    // A theme switched on the desktop meanwhile leaves the own palette in place.
     std::thread::sleep(Duration::from_millis(20));
     desktop.write_colors(&THEME.replace("#f0883e", "#7aa2f7"));
     touch_later(&desktop.env().colors_path());
@@ -186,7 +186,7 @@ fn choosing_flottille_on_omarchy_uses_flottille_s_palette_and_stops_following_th
 
     appear(
         Appearance {
-            source: Source::Flottille,
+            source: Source::Own,
             shade: Shade::Dark,
         },
         cx,
@@ -208,7 +208,7 @@ fn choosing_flottille_on_omarchy_uses_flottille_s_palette_and_stops_following_th
 fn a_new_appearance_cross_fades_then_settles(cx: &mut TestAppContext) {
     let desktop = Desktop::new(false);
     init(cx, desktop.env());
-    appear(FLOTTILLE_LIGHT, cx);
+    appear(OWN_LIGHT, cx);
     // Partway, the colours sit between the two palettes.
     let early = cx.update(|cx| palette(cx));
     assert_ne!(early, Palette::light(), "no jump to the new colours");
@@ -224,18 +224,18 @@ fn a_new_appearance_cross_fades_then_settles(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn off_omarchy_the_omarchy_choice_is_refused_and_flottille_is_shown(cx: &mut TestAppContext) {
+fn off_omarchy_the_omarchy_choice_is_refused_and_the_own_palette_is_shown(cx: &mut TestAppContext) {
     let desktop = Desktop::new(false);
     init(cx, desktop.env());
     let why = cx
         .update(|cx| omarchy::omarchy_refused(cx))
         .expect("Omarchy cannot be chosen");
     assert!(why.contains("Omarchy"), "{why}");
-    // Omarchy wanted, by default: what is shown is Flottille, in the shade kept.
+    // Omarchy wanted, by default: what is shown is the own palette, in the shade kept.
     assert_eq!(
         cx.update(|cx| omarchy::shown(cx)),
         Appearance {
-            source: Source::Flottille,
+            source: Source::Own,
             shade: Shade::Dark,
         }
     );
@@ -247,7 +247,7 @@ fn off_omarchy_the_omarchy_choice_is_refused_and_flottille_is_shown(cx: &mut Tes
         cx,
     );
     assert_eq!(cx.update(|cx| target_palette(cx)), Palette::light());
-    assert_eq!(cx.update(|cx| omarchy::shown(cx)), FLOTTILLE_LIGHT);
+    assert_eq!(cx.update(|cx| omarchy::shown(cx)), OWN_LIGHT);
 }
 
 #[gpui_kit::test]
@@ -259,4 +259,40 @@ fn an_omarchy_theme_that_cannot_be_used_says_why_it_cannot_be_chosen(cx: &mut Te
         .update(|cx| omarchy::omarchy_refused(cx))
         .expect("Omarchy cannot be chosen");
     assert!(why.contains("accent"), "{why}");
+}
+
+/// An application's own look, unlike the kit's: its primary is orange in both shades.
+fn orange(shade: Shade) -> Palette {
+    let mut palette = Palette::own(shade);
+    palette.acc = hex(0xf0883e);
+    palette
+}
+
+#[gpui_kit::test]
+fn the_palette_an_application_gives_is_the_one_shown_off_omarchy(cx: &mut TestAppContext) {
+    let desktop = Desktop::new(false);
+    let identity = flottille_ui::Identity::new("Notes").palette(orange);
+    cx.update(|cx| flottille_ui::init_with(identity, desktop.env(), cx));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| target_palette(cx)), orange(Shade::Dark));
+    appear(
+        Appearance {
+            source: Source::Own,
+            shade: Shade::Light,
+        },
+        cx,
+    );
+    assert_eq!(cx.update(|cx| target_palette(cx)), orange(Shade::Light));
+}
+
+#[gpui_kit::test]
+fn the_refusal_to_follow_omarchy_names_the_application(cx: &mut TestAppContext) {
+    let desktop = Desktop::new(false);
+    cx.update(|cx| {
+        flottille_ui::init_with(flottille_ui::Identity::new("Notes"), desktop.env(), cx)
+    });
+    let why = cx
+        .update(|cx| omarchy::omarchy_refused(cx))
+        .expect("Omarchy cannot be chosen");
+    assert!(why.contains("Notes's colours"), "{why}");
 }

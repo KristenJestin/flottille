@@ -49,9 +49,9 @@ pub enum ToastKind {
 pub struct Toast {
     kind: ToastKind,
     title: SharedString,
-    /// What the title says before a session's title it quotes: the quote takes one line, whatever
+    /// What the title says before the title it quotes: the quote takes one line, whatever
     /// its length.
-    quoting: Option<SharedString>,
+    quoted: Option<SharedString>,
     detail: Option<SharedString>,
     action: Option<Action>,
     key: Option<SharedString>,
@@ -99,14 +99,14 @@ impl Toast {
         Self {
             kind: ToastKind::Success,
             title: title.into(),
-            quoting: None,
+            quoted: None,
             detail: None,
             action: None,
             key: None,
         }
     }
 
-    /// Something that could not be done: "The workspace was not removed".
+    /// Something that could not be done: "The folder was not removed".
     pub fn failure(title: impl Into<SharedString>) -> Self {
         Self {
             kind: ToastKind::Failure,
@@ -114,12 +114,12 @@ impl Toast {
         }
     }
 
-    /// The line quotes a session's title after what it says so far ("Detached from "): the title
-    /// is drawn on the line's one line, in emphasis, cut with an ellipsis to the room the words
-    /// leave, and the toast's [`title`](Self::title) says it whole.
-    pub fn quoting(mut self, title: &str) -> Self {
+    /// The line quotes a title after what it says so far ("Detached from "): the title is drawn
+    /// on the line's one line, in emphasis, cut with an ellipsis to the room the words leave, and
+    /// the toast's [`title`](Self::title) says it whole.
+    pub fn quoted_title(mut self, title: &str) -> Self {
         let title = title.lines().next().unwrap_or_default().trim();
-        self.quoting = Some(self.title.clone());
+        self.quoted = Some(self.title.clone());
         self.title = format!("{}{title}", self.title).into();
         self
     }
@@ -318,7 +318,7 @@ impl ToastStack {
             .min_w_0()
             .flex()
             .flex_col()
-            .child(match &toast.quoting {
+            .child(match &toast.quoted {
                 Some(before) => {
                     let title = toast
                         .title

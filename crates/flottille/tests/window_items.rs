@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::items::{ItemRow, Kind, ProjectItems, Read};
 use flottille_window::shell::Selection;
+use flottille_window::state::AgentState;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
@@ -119,7 +119,7 @@ fn window<'a>(
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
-    cx.update(|cx| flottille_ui::init_with(env, cx));
+    cx.update(|cx| flottille_window::init_with(env, cx));
     let connect: flottille_window::link::Connect = Arc::new(user.connector());
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1280.), px(900.)));

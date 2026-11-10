@@ -7,8 +7,9 @@
 //! every ink is then checked for contrast and moved until it reads. A theme missing a required
 //! key, or unreadable, leaves the base theme in place, with the reason logged.
 //!
-//! The user chooses ([`appear`]): Omarchy, or Flottille's own palette, light or dark, even on an
-//! Omarchy desktop. Omarchy chosen and no theme that can be used, Flottille's in its shade.
+//! The user chooses ([`appear`]): Omarchy, or the application's own palette (see
+//! [`Identity`](crate::Identity)), light or dark, even on an Omarchy desktop. Omarchy chosen and no
+//! theme that can be used, the application's own in its shade.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -225,7 +226,10 @@ pub fn last_fallback(cx: &App) -> Option<String> {
 /// The Omarchy theme as read now.
 fn apply(choice: Choice, cx: &mut App) {
     if let Choice::Fallback(reason) = &choice {
-        eprintln!("flottille: the Omarchy theme is not used, the base theme is: {reason}");
+        crate::identity::log(
+            cx,
+            format_args!("the Omarchy theme is not used, the base theme is: {reason}"),
+        );
     }
     cx.default_global::<Desktop>().read = choice;
     show(cx);
@@ -236,7 +240,7 @@ fn show(cx: &mut App) {
     let shown = shown(cx);
     let palette = match (shown.source, &cx.default_global::<Desktop>().read) {
         (Source::Omarchy, Choice::Omarchy(palette)) => **palette,
-        _ => Palette::flottille(shown.shade),
+        _ => (crate::identity::identity(cx).palette)(shown.shade),
     };
     theme::set_palette(palette, cx);
 }
@@ -247,12 +251,13 @@ pub enum Source {
     /// The desktop's current Omarchy theme, followed live.
     #[default]
     Omarchy,
-    /// Flottille's own palette, in the shade chosen.
-    Flottille,
+    /// The application's own palette, in the shade chosen.
+    Own,
 }
 
-/// The user's choice of the window's colours: Omarchy, or Flottille light or dark. The shade is
-/// kept with Omarchy too: it is Flottille's when no Omarchy theme can be used.
+/// The user's choice of the window's colours: Omarchy, or the application's own, light or dark.
+/// The shade is kept with Omarchy too: it is the application's own when no Omarchy theme can be
+/// used.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Appearance {
     pub source: Source,
@@ -269,15 +274,15 @@ pub fn appear(appearance: Appearance, cx: &mut App) {
     show(cx);
 }
 
-/// The appearance the window shows: the one chosen, or Flottille's in its shade when Omarchy is
-/// chosen and cannot be used.
+/// The appearance the window shows: the one chosen, or the application's own in its shade when
+/// Omarchy is chosen and cannot be used.
 pub fn shown(cx: &App) -> Appearance {
     let desktop = cx.try_global::<Desktop>();
     let wanted = desktop.map(|d| d.wanted).unwrap_or_default();
     let usable = desktop.is_some_and(|d| matches!(d.read, Choice::Omarchy(_)));
     match wanted.source {
         Source::Omarchy if !usable => Appearance {
-            source: Source::Flottille,
+            source: Source::Own,
             ..wanted
         },
         _ => wanted,
@@ -287,14 +292,15 @@ pub fn shown(cx: &App) -> Appearance {
 /// Why Omarchy cannot be chosen here: no Omarchy theme on this desktop, or one that cannot be
 /// used. `None` when it can.
 pub fn omarchy_refused(cx: &App) -> Option<String> {
+    let name = crate::identity::identity(cx).name;
     match cx.try_global::<Desktop>().map(|d| &d.read) {
         Some(Choice::Omarchy(_)) => None,
         Some(Choice::Fallback(reason)) => Some(format!(
-            "The Omarchy theme cannot be used ({reason}): the window uses Flottille's colours."
+            "The Omarchy theme cannot be used ({reason}): the window uses {name}'s colours."
         )),
-        Some(Choice::Base) | None => {
-            Some("Not an Omarchy desktop: the window uses Flottille's colours.".to_owned())
-        }
+        Some(Choice::Base) | None => Some(format!(
+            "Not an Omarchy desktop: the window uses {name}'s colours."
+        )),
     }
 }
 

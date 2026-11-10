@@ -1,7 +1,8 @@
 //! The main area: the page of what is open, a project's ([`ProjectPage`]) or a session's
 //! ([`SessionPage`]).
 
-use flottille_ui::{Status, Type, palette, space};
+use crate::state::Status;
+use flottille_ui::{Type, palette, space};
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
     Styled, WeakEntity, Window, div,

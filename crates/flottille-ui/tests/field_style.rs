@@ -48,12 +48,12 @@ fn style_of(field: &Entity<Probe>, cx: &mut impl gpui_kit::AppContext) -> InputE
 }
 
 fn light(cx: &mut TestAppContext) {
-    cx.update(|cx| set_palette(Palette::flottille(Shade::Light), cx));
+    cx.update(|cx| set_palette(Palette::own(Shade::Light), cx));
     cx.run_until_parked();
 }
 
 fn dark(cx: &mut TestAppContext) {
-    cx.update(|cx| set_palette(Palette::flottille(Shade::Dark), cx));
+    cx.update(|cx| set_palette(Palette::own(Shade::Dark), cx));
     cx.run_until_parked();
 }
 
@@ -63,13 +63,13 @@ fn a_field_made_in_light_takes_the_dark_colours_after_a_switch(cx: &mut TestAppC
     cx.update(|cx| cx.set_reduce_motion(true));
     light(cx);
     let field = made(cx);
-    let in_light = Palette::flottille(Shade::Light);
+    let in_light = Palette::own(Shade::Light);
     let style = style_of(&field, cx);
     assert_eq!(style.foreground, in_light.text);
     assert_eq!(style.muted_foreground, in_light.faint);
 
     dark(cx);
-    let in_dark = Palette::flottille(Shade::Dark);
+    let in_dark = Palette::own(Shade::Dark);
     let style = style_of(&field, cx);
     assert_eq!(style.foreground, in_dark.text, "the text");
     assert_eq!(style.muted_foreground, in_dark.faint, "the placeholder");
@@ -85,25 +85,22 @@ fn a_field_follows_the_palette_through_its_cross_fade(cx: &mut TestAppContext) {
     cx.update(|cx| cx.set_reduce_motion(false));
     let field = made(cx);
     let (_, cx) = cx.add_window_view(|_, _| Blank);
-    cx.update(|_, cx| set_palette(Palette::flottille(Shade::Dark), cx));
+    cx.update(|_, cx| set_palette(Palette::own(Shade::Dark), cx));
     advance(cx, std::time::Duration::from_millis(100));
     let midway = style_of(&field, cx);
     assert_ne!(
         midway.caret,
-        Palette::flottille(Shade::Light).acc,
+        Palette::own(Shade::Light).acc,
         "it left light"
     );
     assert_ne!(
         midway.caret,
-        Palette::flottille(Shade::Dark).acc,
+        Palette::own(Shade::Dark).acc,
         "it is on its way"
     );
 
     advance(cx, std::time::Duration::from_secs(1));
-    assert_eq!(
-        style_of(&field, cx).caret,
-        Palette::flottille(Shade::Dark).acc
-    );
+    assert_eq!(style_of(&field, cx).caret, Palette::own(Shade::Dark).acc);
     assert_eq!(
         style_of(&field, cx).caret,
         cx.update(|_, cx| palette(cx)).acc
@@ -115,9 +112,9 @@ fn the_caret_is_the_accent_colour_on_both_themes(cx: &mut TestAppContext) {
     init(cx, Desktop::new(false).env());
     cx.update(|cx| cx.set_reduce_motion(true));
     for shade in [Shade::Light, Shade::Dark] {
-        cx.update(|cx| set_palette(Palette::flottille(shade), cx));
+        cx.update(|cx| set_palette(Palette::own(shade), cx));
         cx.run_until_parked();
-        let p = Palette::flottille(shade);
+        let p = Palette::own(shade);
         let style = cx.update(|cx| field_style(cx));
         assert_eq!(style.caret, p.acc, "{shade:?}");
         assert_ne!(

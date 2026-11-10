@@ -8,14 +8,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
-use flottille_ui::state::{icon_id, pill_id};
 use flottille_ui::toggle_id;
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::session::{Reply, SessionPage};
+use flottille_window::state::AgentState;
+use flottille_window::state::{icon_id, pill_id};
 use flottille_window::tree::{project_id, session_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -115,7 +115,7 @@ fn window<'a>(
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
-    cx.update(|cx| flottille_ui::init_with(env, cx));
+    cx.update(|cx| flottille_window::init_with(env, cx));
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(width), px(800.)));
     (shell, cx)

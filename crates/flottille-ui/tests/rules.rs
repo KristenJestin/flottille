@@ -316,7 +316,7 @@ fn a_toast_that_quotes_a_session_title_keeps_it_on_one_line(cx: &mut TestAppCont
     cx.update(|_, cx| {
         toast(
             Toast::failure("Not detached from ")
-                .quoting(&format!("{title}\nand a second line"))
+                .quoted_title(&format!("{title}\nand a second line"))
                 .detail("It is not led by anyone."),
             cx,
         )

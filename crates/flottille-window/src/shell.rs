@@ -2,6 +2,8 @@
 //! showing the open page. It follows the daemon through the [`link`](crate::link) and draws
 //! again only the parts a change touches.
 
+use crate::glyphs;
+use crate::state::{AgentState, StateIcon, Status};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -9,9 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, StateIcon, Status,
-    Tie, Toast, ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays,
-    icon, keys_held, open_overlay, palette, presence, pressable, space, toast,
+    Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, Tie, Toast, ToastStack, Type,
+    dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon, keys_held,
+    open_overlay, palette, presence, pressable, space, toast,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
@@ -1100,9 +1102,9 @@ impl Shell {
             ),
             Outcome::Detached { from, refused } => flottille_ui::toast(
                 match refused {
-                    None => flottille_ui::Toast::success("Detached from ").quoting(&from),
+                    None => flottille_ui::Toast::success("Detached from ").quoted_title(&from),
                     Some(why) => flottille_ui::Toast::failure("Not detached from ")
-                        .quoting(&from)
+                        .quoted_title(&from)
                         .detail(why),
                 },
                 cx,
@@ -3199,8 +3201,8 @@ impl Render for BellList {
                 let leading = match self.marks.get(&item.key) {
                     Some(mark) => mark.clone().into_any_element(),
                     None => icon(match item.key.starts_with("ticket-") {
-                        true => Icon::Ticket,
-                        false => Icon::PullRequest,
+                        true => glyphs::TICKET,
+                        false => glyphs::PULL_REQUEST,
                     })
                     .size(px(14.))
                     .text_color(p.acc)

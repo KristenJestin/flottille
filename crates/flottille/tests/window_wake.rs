@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
-use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::session::{SessionPage, clock};
+use flottille_window::state::AgentState;
 use flottille_window::subscriptions::SubscriptionRow;
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
@@ -64,7 +64,7 @@ fn open_session<'a>(
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
-    cx.update(|cx| flottille_ui::init_with(env, cx));
+    cx.update(|cx| flottille_window::init_with(env, cx));
     let connect: flottille_window::link::Connect = Arc::new(user.connector());
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1280.), px(800.)));

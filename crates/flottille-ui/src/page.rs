@@ -238,7 +238,7 @@ impl Section {
         self
     }
 
-    /// A small bordered mono tag after the title: where a text comes from ("Flottille's
+    /// A small bordered mono tag after the title: where a text comes from ("The app's
     /// default"). It is the element `<id>-tag`.
     pub fn tag(mut self, tag: impl Into<SharedString>) -> Self {
         self.tag = Some(tag.into());

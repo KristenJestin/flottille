@@ -13,15 +13,15 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
-use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
-use flottille_ui::state::icon_id;
 use flottille_ui::toggle_id;
 use flottille_window::Shell;
 use flottille_window::composer::Choice;
 use flottille_window::link::Connect;
 use flottille_window::session::{Reply, SessionPage};
 use flottille_window::shell::Selection;
+use flottille_window::state::AgentState;
+use flottille_window::state::icon_id;
 use flottille_window::tree::{
     ended_id, project_id, session_end_id, session_id, session_menu_id, session_resume_id,
 };
@@ -112,7 +112,7 @@ fn window<'a>(
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
-    cx.update(|cx| flottille_ui::init_with(env, cx));
+    cx.update(|cx| flottille_window::init_with(env, cx));
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(width), px(800.)));
     (shell, cx)

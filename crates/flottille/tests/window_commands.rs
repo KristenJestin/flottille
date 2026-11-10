@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Answer, Mcp, server_of};
-use flottille_ui::Icon;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::actions::{RunAct, RunAnswer};
@@ -180,7 +179,7 @@ fn window<'a>(
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
-    cx.update(|cx| flottille_ui::init_with(env, cx));
+    cx.update(|cx| flottille_window::init_with(env, cx));
     let connect: flottille_window::link::Connect = Arc::new(user.connector());
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(width), px(800.)));
@@ -308,7 +307,7 @@ fn the_rail_lists_a_running_command_with_its_line_who_started_it_and_its_last_li
     assert!(
         cx.update(|window, _| window
             .within(format!("command-stop-{run}"))
-            .try_find(Icon::Stop.glyph_id())
+            .try_find(flottille_window::glyphs::STOP.glyph_id())
             .is_some()),
         "the run row's Stop draws the filled square"
     );

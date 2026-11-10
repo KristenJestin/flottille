@@ -7,6 +7,7 @@
 //! The text of a card is what the daemon gave (`says`, the class, the judge's reason, the reasons
 //! it was held, who asked); the window only joins the reasons into sentences.
 
+use crate::state::{AgentState, StateIcon, Status};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -15,8 +16,8 @@ use std::f32::consts::PI;
 use flottille_ui::color::mix;
 use flottille_ui::motion::PANEL;
 use flottille_ui::{
-    AgentState, Button, Icon, Item, Listing, Palette, Placement, StateIcon, Status, Type, fade,
-    hoverable, icon, palette, presence, space, turning,
+    Button, Icon, Item, Listing, Palette, Placement, Type, fade, hoverable, icon, palette,
+    presence, space, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
