@@ -20,18 +20,28 @@
 //!  "tools": [{"name": "search", "description": "…", "inputSchema": {…}, "annotations": {…}}],
 //!  "answers": {"search": {"text": "found it"}},
 //!  "stderr": "a line written to the error output at the start",
-//!  "exit": 3}
+//!  "exit": 3,
+//!  "notify": {"when": "<file>", "times": 50},
+//!  "list_sleep_ms": 100,
+//!  "endless_listing": true}
 //! ```
+//!
+//! On stdio, `tools/list` reads the script again: a test changes the tools of a running server
+//! by writing it. `notify` says its tools changed `times` times, at once, when the file `when`
+//! appears; `list_sleep_ms` slows each listing; `endless_listing` answers every page with a next
+//! one.
 //!
 //! An answer is, in this order of precedence, any of: `sleep_ms` (waits first), `ask`
 //! (`"sampling"`, `"elicitation"` or `"roots"`: sends that request to the client and answers with
 //! what it got back), `reload` (reads the script again and says its tools changed), `env` (the
 //! value of that variable), `echo` (the arguments, as JSON), `text`; `image` adds a picture after
-//! the text, `error` answers that text as an error. With no answer, `ok`.
+//! the text, `error` answers that text as an error. `rpc_error` answers that text as a JSON-RPC
+//! error instead, on stdio. With no answer, `ok`.
 //!
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
-//! the child's pid with `--child`), `initialize` (the client's capabilities), `call` (the tool,
-//! the arguments, when it started and ended, in milliseconds since the epoch).
+//! the child's pid with `--child`), `initialize` (the client's capabilities), `list` (the cursor
+//! asked), `call` (the tool, the arguments, when it started and ended, in milliseconds since the
+//! epoch).
 
 use std::io::{BufRead, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -77,6 +87,17 @@ fn main() {
     if let Some(port_file) = option("--http") {
         return http(&script, &log, &port_file);
     }
+    if let Some(when) = script["notify"]["when"].as_str() {
+        let (when, times) = (when.to_owned(), script["notify"]["times"].as_u64().unwrap_or(1));
+        std::thread::spawn(move || {
+            while !std::path::Path::new(&when).exists() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            for _ in 0..times {
+                send(&json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}));
+            }
+        });
+    }
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     let mut asked = 0u64;
@@ -105,11 +126,28 @@ fn main() {
                 }
                 Ok(result)
             }
-            "tools/list" => Ok(json!({"tools": script["tools"]})),
+            "tools/list" => {
+                script = read(&script_path);
+                write_log(&log, json!({"event": "list", "cursor": params["cursor"]}));
+                if let Some(ms) = script["list_sleep_ms"].as_u64() {
+                    std::thread::sleep(Duration::from_millis(ms));
+                }
+                let mut result = json!({"tools": script["tools"]});
+                if script["endless_listing"] == true {
+                    let next = params["cursor"].as_str().and_then(|c| c.parse::<u64>().ok());
+                    result["nextCursor"] = json!((next.unwrap_or(0) + 1).to_string());
+                }
+                Ok(result)
+            }
             "tools/call" => {
                 let tool = params["name"].as_str().unwrap_or_default().to_owned();
                 let started = now_ms();
                 let answer = script["answers"][&tool].clone();
+                if let Some(message) = answer["rpc_error"].as_str() {
+                    send(&json!({"jsonrpc": "2.0", "id": id,
+                        "error": {"code": -32000, "message": message}}));
+                    continue;
+                }
                 let result = call(&answer, &params["arguments"], &mut lines, &mut asked);
                 if answer["reload"] == true {
                     script = read(&script_path);
