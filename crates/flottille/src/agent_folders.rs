@@ -886,6 +886,10 @@ pub fn drop_old(kept: &Path) {
     else {
         return;
     };
+    // A link in its place leads to folders that are not the put-backs': none is dropped.
+    if !std::fs::symlink_metadata(kept).is_ok_and(|meta| meta.is_dir()) {
+        return;
+    }
     for entry in std::fs::read_dir(kept).into_iter().flatten().flatten() {
         if entry.file_name() == MARKERS
             || !std::fs::symlink_metadata(entry.path())
@@ -1835,6 +1839,24 @@ mod tests {
         assert!(kept.join("new-run/.claude/settings.json").exists());
         // The markers of the places guarded are not what a put-back kept.
         assert!(kept.join(".guarded/going.json").exists());
+    }
+
+    #[test]
+    fn a_kept_folder_replaced_by_a_link_is_not_walked() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        made(&elsewhere.join("old-work/notes.md"), "mine\n");
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(40 * 24 * 3600);
+        std::fs::File::open(elsewhere.join("old-work"))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        let kept = dir.path().join("kept");
+        std::os::unix::fs::symlink(&elsewhere, &kept).unwrap();
+
+        drop_old(&kept);
+
+        assert!(elsewhere.join("old-work/notes.md").exists());
     }
 
     #[tokio::test]
