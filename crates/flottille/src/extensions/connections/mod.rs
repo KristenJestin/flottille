@@ -37,9 +37,12 @@ pub const EXTENSION: Extension = Extension {
                judged or asked like any other.",
     scope: Scope::Global,
     on_by_default: false,
-    place: Place::Tab {
-        title: "Connections",
-        order: 5,
+    switch: "Use connections",
+    usage: "Given to every agent of every project, each server as one tool behind the gate.",
+    place: Place::Row {
+        icon: "plug",
+        line: "Your MCP servers, given to every agent behind the gate.",
+        order: 6,
     },
     settings: &[],
     migrations: &["

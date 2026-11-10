@@ -1,7 +1,7 @@
 //! A spent quota in the window (`docs/design.md` §5.9), on GPUI's test platform in front of a real
 //! daemon whose agent is the fake ACP agent answering with Claude's words: the session's state said
 //! once, `Out of quota, resets at 13:00`, in the sidebar and the rail; the composer's chip
-//! `Resume at 13:00` for this session alone; and the setting of Settings, Sessions, off by
+//! `Resume at 13:00` for this session alone; and the setting of Settings, Agents, off by
 //! default. Each unfolds and folds away, and the page rests. No window opens on a screen.
 
 mod common;
@@ -389,7 +389,6 @@ fn open_sessions_tab(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entit
         shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
     });
     settle(cx);
-    cx.update(|window, cx| window.click("settings-tabs-sessions", cx));
     let page = shell
         .read_with(cx, |s, cx| s.main().read(cx).settings_page().cloned())
         .unwrap();
@@ -410,7 +409,7 @@ fn the_app_setting_is_off_by_default_and_turns_the_composer_s_switch_on(cx: &mut
     assert_eq!(settings.read_with(cx, |p, _| p.resume_said()), Some(false));
     assert_eq!(
         label(cx, "sessions-resume-switch").as_deref(),
-        Some("Resume sessions when the quota resets")
+        Some("Resume when the quota resets")
     );
     cx.update(|window, cx| window.click("sessions-resume-switch", cx));
     until(&shell, cx, "the daemon says on", |cx| {

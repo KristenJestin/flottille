@@ -1303,7 +1303,7 @@ fold; a panel or a menu that opens or closes; a page and its sections, one after
 eight waits, whatever the length). At rest nothing moves and nothing is redrawn. An issue about
 the window without its animations is incomplete.
 
-Colours: the user chooses them in Settings, Appearance, and the daemon keeps the choice
+Colours: the user chooses them in Settings, General, Appearance, and the daemon keeps the choice
 (`appearance.toml`, `docs/protocol.md`) for every window and a restart: **Omarchy**, the current
 Omarchy theme's colours followed live, or **Flottille**, Flottille's own palette, **Light** or
 **Dark**, even on an Omarchy desktop. Until the user chooses, Omarchy when an Omarchy theme is

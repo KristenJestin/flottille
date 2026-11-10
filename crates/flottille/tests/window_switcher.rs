@@ -275,7 +275,7 @@ fn the_results_are_grouped_sessions_projects_actions(cx: &mut TestAppContext) {
     assert_eq!(titles(&said, "Projects"), ["app", "login-fix"]);
     assert_eq!(
         titles(&said, "Actions"),
-        ["Settings: Appearance", "Settings of app"]
+        ["Settings: Approvals", "Settings of app"]
     );
     for heading in ["Sessions", "Projects", "Actions"] {
         assert!(
@@ -333,7 +333,7 @@ fn an_action_is_done_when_chosen(cx: &mut TestAppContext) {
 
     // A tab of Settings is an action too: it opens on that tab.
     open_with_keys(&shell, cx);
-    cx.simulate_input("settings appearance");
+    cx.simulate_input("settings general");
     settle(cx);
     cx.simulate_keystrokes("enter");
     settle(cx);
@@ -346,19 +346,19 @@ fn an_action_is_done_when_chosen(cx: &mut TestAppContext) {
             shell.main().read(cx).settings_page().cloned()
         })
         .expect("Settings is open");
-    let appearance = flottille_window::settings::SECTIONS
+    let general = flottille_window::settings::SECTIONS
         .iter()
-        .position(|(key, _)| *key == "appearance")
+        .position(|(key, _)| *key == "general")
         .unwrap();
     assert_eq!(
         page.read_with(cx, |page, _| page.tab()),
-        appearance,
-        "the Appearance tab"
+        general,
+        "Appearance is on the General tab"
     );
 }
 
 #[gpui_kit::test]
-fn the_switcher_opens_the_judge_tab_with_the_guidance_in_view(cx: &mut TestAppContext) {
+fn the_switcher_opens_approvals_with_the_guidance_in_view(cx: &mut TestAppContext) {
     let world = world();
     let (shell, cx) = ready(&world, cx);
     // A window too short for the judge and its guidance together.
@@ -377,7 +377,11 @@ fn the_switcher_opens_the_judge_tab_with_the_guidance_in_view(cx: &mut TestAppCo
             shell.main().read(cx).settings_page().cloned()
         })
         .expect("Settings is open");
-    assert_eq!(page.read_with(cx, |page, _| page.tab()), 0, "the Judge tab");
+    assert_eq!(
+        page.read_with(cx, |page, _| page.tab()),
+        1,
+        "the Approvals tab"
+    );
     cx.update(|window, _| {
         let text = window.find("judge-guidance-text").bounds();
         assert!(
@@ -437,7 +441,7 @@ fn with_nothing_typed_the_recent_sessions_and_the_actions_are_listed(cx: &mut Te
         "New session",
         "Add a project",
         "Settings",
-        "Settings: Judge",
+        "Settings: Approvals",
     ] {
         assert!(
             actions.iter().any(|a| a == wanted),

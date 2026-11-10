@@ -253,7 +253,7 @@ fn line_of<B: FnOnce(SharedString) -> AnyElement + 'static>(
 }
 
 /// A command with the button that copies it.
-fn command_row(id: String, command: SharedString, p: Palette) -> AnyElement {
+pub(crate) fn command_row(id: String, command: SharedString, p: Palette) -> AnyElement {
     let copied = command.clone();
     div()
         .flex()

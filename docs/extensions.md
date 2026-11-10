@@ -119,7 +119,13 @@ pub struct Extension {
     pub sentence: &'static str,
     pub scope: Scope,              // Global, or Project
     pub on_by_default: bool,
-    /// Where its settings appear: a row of Features, or a section of a screen that exists.
+    /// The label of its switch, what it does ("Review changes"), never its state.
+    pub switch: &'static str,
+    /// Where and how it acts, shown even while it is off; the words found elsewhere in the
+    /// window are between `**`.
+    pub usage: &'static str,
+    /// Where its settings appear: a row of Features (its icon, its line, its order), or a section
+    /// of a screen that exists.
     pub place: Place,
     pub settings: &'static [Setting],
     pub tools: &'static [Tool],

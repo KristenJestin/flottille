@@ -685,22 +685,31 @@ impl RenderOnce for ListRow {
                 .py(px(8.))
                 .rounded(radius::LIST_ROW)
         };
-        let tags = self.tags.into_iter().enumerate().map(|(index, tag)| {
-            div()
-                .id(ElementId::Name(format!("{}-tag-{index}", self.id).into()))
-                .aria_label(tag.clone())
-                .flex_none()
-                .mono(11.)
-                .text_color(p.faint)
-                .px(px(6.))
-                .py(px(1.))
-                .rounded(px(5.))
-                .border_1()
-                .border_color(p.line)
-                .whitespace_nowrap()
-                .child(tag)
-                .test_support()
-        });
+        // A tag whose text changes (On, Off) fades back in rather than jump.
+        let tags: Vec<_> = self
+            .tags
+            .into_iter()
+            .enumerate()
+            .map(|(index, tag)| {
+                let id = ElementId::Name(format!("{}-tag-{index}", self.id).into());
+                let fading = changed(&id, &tag, window, cx);
+                div()
+                    .id(id)
+                    .opacity(fading)
+                    .aria_label(tag.clone())
+                    .flex_none()
+                    .mono(11.)
+                    .text_color(p.faint)
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(p.line)
+                    .whitespace_nowrap()
+                    .child(tag)
+                    .test_support()
+            })
+            .collect();
         let mono = self.mono;
         let mut row = row
             .child(
