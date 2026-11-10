@@ -1082,6 +1082,72 @@ fn a_vault_entry_tied_to_one_project_is_refused_for_a_connection() {
     assert!(refused.1.contains("the project app's alone"), "{refused:?}");
 }
 
+#[test]
+fn an_entry_bound_to_the_worklog_is_refused_to_a_connection() {
+    let user = user();
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": SECRET, "for": "worklog:app"}),
+    )
+    .unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": "s3cret-of-almanac-alone",
+            "for": "connection:almanac"}),
+    )
+    .unwrap();
+    turn_on(&user);
+    write_script(&user, "almanac", &almanac());
+    let refused = user
+        .call(
+            "connection.add",
+            json!({"name": "almanac", "about": "Notes.",
+            "command": command_of(&user, "almanac"),
+            "env": {"TOKEN": {"vault": "jira-time"}}}),
+        )
+        .unwrap_err();
+    // Bound to a worklog, the entry is its project's alone: the sentence says so, never its value.
+    assert!(refused.1.contains("the project app's alone"), "{refused:?}");
+    assert!(!refused.1.contains(SECRET), "{refused:?}");
+
+    // An entry bound to one connection is refused to another, and given to its own.
+    write_script(&user, "jotter", &almanac());
+    let refused = user
+        .call(
+            "connection.add",
+            json!({"name": "jotter", "about": "Notes.",
+            "command": command_of(&user, "jotter"),
+            "env": {"TOKEN": {"vault": "almanac-token"}}}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("the connection almanac"), "{refused:?}");
+    let mut script = almanac();
+    script["answers"]["search"] = json!({"env": "TOKEN"});
+    declare(
+        &user,
+        "almanac",
+        &script,
+        json!({"env": {"TOKEN": {"vault": "almanac-token"}}}),
+    );
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes"}}),
+    )
+    .unwrap();
+    let (_, mcp) = session(&user, "app");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    assert_eq!(
+        logged(&user, "almanac", "call")[0]["answered"],
+        "s3cret-of-almanac-alone"
+    );
+}
+
 // ── Results ──────────────────────────────────────────────────────────────────────────────────
 
 #[test]

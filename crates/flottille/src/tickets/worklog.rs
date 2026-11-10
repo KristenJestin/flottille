@@ -197,6 +197,17 @@ fn entry_of(daemon: &Daemon, project: &Project) -> Result<(String, String), Stri
     let entry = entries
         .iter()
         .find(|entry| &entry.name == name && entry.seen_by(&project.name));
+    // An entry bound to another use is no entry for the worklog, whoever names it.
+    if let Some(entry) = entry {
+        entry
+            .usable_for(&flottille_core::vault::worklog(&project.name))
+            .map_err(|why| {
+                format!(
+                    "refused: {why}: the user chooses another entry in the project's Settings, \
+                     Tracker"
+                )
+            })?;
+    }
     let Some(entry) = entry else {
         return Err(format!(
             "refused: the project's worklog_token names the vault entry {name}, and the vault \
@@ -259,7 +270,14 @@ pub async fn log_time(
         Ok(entry) => entry,
         Err(why) => return Outcome::Refused(why + nothing),
     };
-    let secret = match vault::secret(daemon, &project.name, &name).await {
+    let secret = match vault::secret(
+        daemon,
+        &project.name,
+        &flottille_core::vault::worklog(&project.name),
+        &name,
+    )
+    .await
+    {
         Ok(secret) => secret,
         Err(why) => return Outcome::Refused(format!("refused: {why}{nothing}")),
     };

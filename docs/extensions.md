@@ -825,7 +825,8 @@ tool is a third party's.
 instead of holding a value: the daemon reads it when it starts the server and puts it where it goes
 (a variable of the server's environment, a header of every request to the URL).
 The entry must be one of every project (`vault.md`: no `project` on it), since the server is given
-to all; an entry tied to one project is refused. The agent sees neither the variable nor its
+to all; an entry tied to one project is refused, and so is one bound to another use than this
+connection (`vault.md`, "Bound to one use": `for = "connection:<name>"` makes it this one's alone). The agent sees neither the variable nor its
 value; the value is masked in everything the daemon stores and shows, a server's output and its
 error text included.
 

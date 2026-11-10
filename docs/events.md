@@ -265,6 +265,7 @@ secret.
 |---|---|
 | `name` | The entry. |
 | `project` | The only project whose agents see it, `null` for every project. |
+| `for` | The use it is bound to, `null` for none; absent when it was removed. |
 | `removed` | `true` when it was removed; absent when it was set. |
 
 ### `vault.asked`, `vault.ask_joined`, `vault.ask_answered`

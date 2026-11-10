@@ -555,6 +555,24 @@ fn active_in(paths: &Paths, extension: &Extension, project: &Project) -> bool {
             || of_project(extension, project).is_ok_and(|own| own.enabled != Some(false)))
 }
 
+/// Whether the feature of an extension a vault entry is bound to (`bound`, `connection:<name>`)
+/// names the entry `entry` now.
+pub fn bound_names(daemon: &Daemon, bound: &str, entry: &str) -> bool {
+    match bound.split_once(':') {
+        Some(("connection", name)) => connections::names(daemon, name, entry),
+        _ => false,
+    }
+}
+
+/// Whether the use of an extension's feature a vault entry would be bound to (`bound`,
+/// `connection:<name>`) can exist: a connection's name is checked as connections check theirs.
+pub fn bound_possible(bound: &str) -> bool {
+    match bound.split_once(':') {
+        Some(("connection", name)) => connections::name_ok(name),
+        _ => true,
+    }
+}
+
 /// What the user declared under the extension's table of `extensions.toml`
 /// (`Extension::declared`), checked; nothing when the file holds none.
 pub fn declared(paths: &Paths, extension: &Extension) -> Result<Vec<Value>, String> {

@@ -346,7 +346,7 @@ impl Declaration {
     }
 }
 
-fn name_ok(name: &str) -> bool {
+pub(super) fn name_ok(name: &str) -> bool {
     !name.is_empty()
         && name.chars().count() <= NAME_CHARS
         && name
@@ -1210,22 +1210,33 @@ fn list(daemon: &Daemon) -> std::result::Result<Value, Failure> {
     Ok(json!({"enabled": on, "error": error, "connections": connections}))
 }
 
-/// Refuses a vault entry tied to one project: a connection is every project's.
+/// Refuses a vault entry tied to one project, a connection being every project's, or bound to
+/// another use than this connection.
 fn entries_checked(daemon: &Daemon, declaration: &Declaration) -> std::result::Result<(), Failure> {
     let entries = daemon.read(|store| store.vault_entries())?;
+    let this = flottille_core::vault::connection(&declaration.name);
     for name in declaration.entries() {
-        if let Some(project) = entries
-            .iter()
-            .find(|entry| &entry.name == name)
-            .and_then(|entry| entry.project.as_ref())
-        {
+        let Some(entry) = entries.iter().find(|entry| &entry.name == name) else {
+            continue;
+        };
+        if let Some(project) = &entry.project {
             return Err(Failure::refused(format!(
                 "the vault entry {name} is the project {project}'s alone: a connection is given to \
                  every project, so the entries it names are every project's"
             )));
         }
+        entry.usable_for(&this).map_err(Failure::refused)?;
     }
     Ok(())
+}
+
+/// Whether the connection `name`, as declared, names the vault entry `entry`.
+pub fn names(daemon: &Daemon, name: &str, entry: &str) -> bool {
+    declarations(&daemon.paths).is_ok_and(|all| {
+        all.iter().any(|declaration| {
+            declaration.name == name && declaration.entries().any(|e| e == entry)
+        })
+    })
 }
 
 fn table_of(declaration: &Declaration) -> std::result::Result<toml_edit::Table, Failure> {

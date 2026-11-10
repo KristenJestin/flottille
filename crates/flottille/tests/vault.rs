@@ -92,7 +92,7 @@ fn vault_list_shows_metadata_only() {
         listed["entries"],
         json!([{"name": "jira", "description": "Logs time on Jira",
             "url": "https://tracker.example.com", "username": "dev@example.com",
-            "project": null}]),
+            "project": null, "for": null}]),
         "{listed}"
     );
 
@@ -470,4 +470,210 @@ fn ctrl_c_at_the_secret_s_prompt_gives_the_terminal_its_echo_back() {
         echoes(),
         "the terminal echoes again once the command is interrupted"
     );
+}
+
+/// The project `app`'s tracker, a Jira site whose worklog names the vault entry `entry`.
+fn worklog_names(user: &User, entry: &str) {
+    let folder = user.path("work/app");
+    user.git(
+        &folder,
+        &["remote", "add", "origin", "git@github.com:acme/app.git"],
+    );
+    tracker_names(user, entry);
+}
+
+fn tracker_names(user: &User, entry: &str) {
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}],
+            "tracker": {"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"],
+                "worklog_token": entry}}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn removing_an_entry_in_use_names_its_feature_and_is_refused() {
+    let user = User::with_fake_agent();
+    project(&user, "app");
+    worklog_names(&user, "jira-time");
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": SECRET, "username": "dev@example.com",
+            "project": "app", "for": "worklog:app"}),
+    )
+    .unwrap();
+
+    let (_, refused) = user
+        .call("vault.remove", json!({"name": "jira-time"}))
+        .unwrap_err();
+    assert!(
+        refused.contains("the worklog of the project app"),
+        "{refused}"
+    );
+    assert!(!refused.contains(SECRET), "{refused}");
+    assert_eq!(listed_names(&user), ["jira-time"], "kept whole");
+
+    // With the confirmation that names what stops working, it goes.
+    user.call(
+        "vault.remove",
+        json!({"name": "jira-time", "confirmed": true}),
+    )
+    .unwrap();
+    assert!(listed_names(&user).is_empty());
+
+    // Once its feature names another entry, a bound entry goes as any other.
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": SECRET, "for": "worklog:app"}),
+    )
+    .unwrap();
+    tracker_names(&user, "another-entry");
+    user.call("vault.remove", json!({"name": "jira-time"}))
+        .unwrap();
+    assert!(listed_names(&user).is_empty());
+}
+
+#[test]
+fn an_unbound_entry_works_as_before() {
+    let user = User::with_fake_agent();
+    project(&user, "app");
+    worklog_names(&user, "jira");
+    set_jira(&user);
+
+    let listed = user.call("vault.list", json!({})).unwrap();
+    assert_eq!(listed["entries"][0]["for"], Value::Null, "{listed}");
+    // Named by a feature, it is removed without a word, as before.
+    user.call("vault.remove", json!({"name": "jira"})).unwrap();
+    assert!(listed_names(&user).is_empty());
+
+    // An unknown use is refused rather than kept.
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "jira", "secret": SECRET, "for": "everything"}),
+        )
+        .unwrap_err();
+    assert!(refused.contains("everything"), "{refused}");
+    assert!(listed_names(&user).is_empty());
+}
+
+#[test]
+fn an_entry_bound_to_a_worklog_is_never_shown_to_another_project_s_agents() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "start", "do": [{"say": "ready"}]}]}));
+    project(&user, "alpha");
+    project(&user, "beta");
+    // Bound to alpha's worklog without a project: the entry is alpha's, not every project's.
+    let entry = user
+        .call(
+            "vault.set",
+            json!({"name": "jira-time", "secret": SECRET, "description": "Logs time",
+                "for": "worklog:alpha"}),
+        )
+        .unwrap();
+    assert_eq!(entry["project"], "alpha", "{entry}");
+    user.call(
+        "vault.set",
+        json!({"name": "shared", "secret": "an0ther-s3cret", "description": "For all"}),
+    )
+    .unwrap();
+    // An entry of another project cannot be bound to alpha's worklog.
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "other-time", "secret": SECRET, "project": "beta",
+                "for": "worklog:alpha"}),
+        )
+        .unwrap_err();
+    assert!(refused.contains("beta"), "{refused}");
+
+    // The agent of beta learns neither the entry nor the name of the project alpha.
+    agent(&user, "beta", "start");
+    let (url, authorization) = server_of(&user, 0);
+    let answer = Mcp::initialize(&url, &authorization).call("vault", json!({"action": "list"}));
+    assert!(answer.text.contains("shared"), "{}", answer.text);
+    assert!(!answer.text.contains("jira-time"), "{}", answer.text);
+    assert!(!answer.text.contains("alpha"), "{}", answer.text);
+
+    // The agent of alpha sees its entry, as the docs say: name, description, URL, username.
+    agent(&user, "alpha", "start");
+    let (url, authorization) = server_of(&user, 1);
+    let answer = Mcp::initialize(&url, &authorization).call("vault", json!({"action": "list"}));
+    assert!(answer.text.contains("jira-time"), "{}", answer.text);
+    assert!(!answer.text.contains("for:"), "{}", answer.text);
+}
+
+#[test]
+fn setting_a_bound_entry_again_checks_its_binding() {
+    let user = User::with_fake_agent();
+    project(&user, "alpha");
+    project(&user, "beta");
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": SECRET, "for": "worklog:alpha"}),
+    )
+    .unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET, "for": "connection:almanac"}),
+    )
+    .unwrap();
+
+    // Another project, without naming the use again: the binding is checked, not kept as is.
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "jira-time", "secret": SECRET, "project": "beta"}),
+        )
+        .unwrap_err();
+    assert!(refused.contains("beta"), "{refused}");
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "almanac-token", "secret": SECRET, "project": "alpha"}),
+        )
+        .unwrap_err();
+    assert!(refused.contains("the connection almanac"), "{refused}");
+
+    let listed = user.call("vault.list", json!({})).unwrap();
+    let project_of = |name: &str| {
+        listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .map(|entry| entry["project"].clone())
+            .unwrap()
+    };
+    assert_eq!(project_of("jira-time"), "alpha", "{listed}");
+    assert_eq!(project_of("almanac-token"), Value::Null, "{listed}");
+}
+
+#[test]
+fn a_binding_to_an_impossible_connection_name_is_refused() {
+    let user = User::with_fake_agent();
+    for bound in [
+        "connection:a:b",
+        "connection:Foo",
+        "connection:with-dash",
+        "connection:",
+    ] {
+        let (_, refused) = user
+            .call(
+                "vault.set",
+                json!({"name": "token", "secret": SECRET, "for": bound}),
+            )
+            .unwrap_err();
+        assert!(refused.contains(bound), "{refused}");
+    }
+    assert!(listed_names(&user).is_empty());
+    // A name a connection can have is kept.
+    user.call(
+        "vault.set",
+        json!({"name": "token", "secret": SECRET, "for": "connection:almanac_2"}),
+    )
+    .unwrap();
+    assert_eq!(listed_names(&user), ["token"]);
 }

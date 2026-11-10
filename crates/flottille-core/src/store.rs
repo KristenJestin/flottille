@@ -719,6 +719,11 @@ const MIGRATIONS: &[&str] = &[
         limited_at INTEGER NOT NULL
     ) STRICT;
 ",
+    "
+    -- The one use a vault entry is bound to (`docs/vault.md`, \"Bound to one use\"): only that
+    -- feature reads it. The entries that exist are bound to none, and work as they did.
+    ALTER TABLE vault_entries ADD COLUMN bound TEXT;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -2553,8 +2558,8 @@ impl Store {
     /// The vault's entries, by name.
     pub fn vault_entries(&self) -> Result<Vec<crate::vault::Entry>> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT name, description, url, username, project, updated_at FROM vault_entries \
-             ORDER BY name",
+            "SELECT name, description, url, username, project, updated_at, bound \
+             FROM vault_entries ORDER BY name",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(crate::vault::Entry {
@@ -2564,6 +2569,7 @@ impl Store {
                 username: row.get(3)?,
                 project: row.get(4)?,
                 updated_at: row.get(5)?,
+                bound: row.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -2574,22 +2580,24 @@ impl Store {
     pub fn put_vault_entry(&mut self, entry: &crate::vault::Entry) -> Result<((), Event)> {
         let transaction = self.connection.transaction()?;
         transaction.execute(
-            "INSERT INTO vault_entries (name, description, url, username, project, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (name) DO UPDATE SET \
-             description = ?2, url = ?3, username = ?4, project = ?5, updated_at = ?6",
+            "INSERT INTO vault_entries \
+             (name, description, url, username, project, updated_at, bound) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT (name) DO UPDATE SET \
+             description = ?2, url = ?3, username = ?4, project = ?5, updated_at = ?6, bound = ?7",
             params![
                 entry.name,
                 entry.description,
                 entry.url,
                 entry.username,
                 entry.project,
-                entry.updated_at
+                entry.updated_at,
+                entry.bound
             ],
         )?;
         let event = append_event(
             &transaction,
             "vault.changed",
-            json!({"name": entry.name, "project": entry.project}),
+            json!({"name": entry.name, "project": entry.project, "for": entry.bound}),
         )?;
         transaction.commit()?;
         Ok(((), event))
@@ -2604,7 +2612,7 @@ impl Store {
         let removed = transaction
             .query_row(
                 "DELETE FROM vault_entries WHERE name = ?1 \
-                 RETURNING description, url, username, project, updated_at",
+                 RETURNING description, url, username, project, updated_at, bound",
                 params![name],
                 |row| {
                     Ok(crate::vault::Entry {
@@ -2614,6 +2622,7 @@ impl Store {
                         username: row.get(2)?,
                         project: row.get(3)?,
                         updated_at: row.get(4)?,
+                        bound: row.get(5)?,
                     })
                 },
             )

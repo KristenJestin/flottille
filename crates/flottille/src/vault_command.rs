@@ -39,12 +39,19 @@ pub enum VaultAction {
         /// The only project whose agents see it; every project's when left out
         #[arg(long)]
         project: Option<String>,
+        /// The one use that may read it: worklog:<project> or connection:<name>; any feature
+        /// that names it when left out (an entry set again keeps its use)
+        #[arg(long = "for", value_name = "USE")]
+        bound: Option<String>,
         #[arg(long)]
         json: bool,
     },
     /// Remove an entry and its secret from the keyring
     Remove {
         name: String,
+        /// Remove it though the feature it is bound to names it, which then stops working
+        #[arg(long)]
+        confirmed: bool,
         #[arg(long)]
         json: bool,
     },
@@ -74,18 +81,26 @@ pub fn run(paths: &Paths, action: VaultAction) -> Result<ExitCode> {
             url,
             username,
             project,
+            bound,
             json,
         } => {
             let set = ask(
                 "vault.set",
                 json!({"name": name, "secret": secret, "description": description, "url": url,
-                    "username": username, "project": project}),
+                    "username": username, "project": project, "for": bound}),
             )?;
             let text = format!("Kept the secret of {name} in the keyring.");
             (set, json, text)
         }
-        VaultAction::Remove { name, json } => {
-            let removed = ask("vault.remove", json!({"name": name}))?;
+        VaultAction::Remove {
+            name,
+            confirmed,
+            json,
+        } => {
+            let removed = ask(
+                "vault.remove",
+                json!({"name": name, "confirmed": confirmed}),
+            )?;
             let text = format!("Removed {name} and its secret.");
             (removed, json, text)
         }
@@ -204,6 +219,7 @@ fn list_text(listed: &Value) -> String {
             ("url", "url "),
             ("username", "username "),
             ("project", "project "),
+            ("for", "for "),
         ] {
             if let Some(value) = entry[key].as_str() {
                 text.push_str(&format!("  {label}{value}"));

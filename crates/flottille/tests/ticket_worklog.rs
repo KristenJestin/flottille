@@ -552,3 +552,53 @@ fn time_spent_sums_the_turns_of_a_session() {
         assert!(!answer.text.contains(wrong), "{wrong} in {}", answer.text);
     }
 }
+
+#[test]
+fn an_entry_bound_elsewhere_is_refused_to_the_worklog_and_its_own_logs_time() {
+    let jira = Jira::accepting();
+    let user = user(&jira);
+    jira_with(&user, Some("jira-time"));
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": SECRET, "username": ACCOUNT,
+            "for": "connection:almanac"}),
+    )
+    .unwrap();
+    let (mcp, _) = root_in(&user);
+
+    // Named by the worklog, but another feature's: refused, naming its use, before any card.
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "log_time", "ticket": "ABC-1", "duration": "1h"}),
+    );
+    assert!(said.contains("the connection almanac"), "{said}");
+    assert!(!said.contains(SECRET), "{said}");
+
+    // Bound to this project's worklog, it logs time as an unbound entry does.
+    user.call(
+        "vault.set",
+        json!({"name": "app-time", "secret": SECRET, "username": ACCOUNT,
+            "for": "worklog:app"}),
+    )
+    .unwrap();
+    jira_with_entry(&user, "app-time");
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "log_time", "ticket": "ABC-1", "duration": "1h"}),
+    ));
+    allow(&user, number);
+    assert_eq!(jira.received()[0].authorization, basic());
+}
+
+/// The project's tracker naming the entry `entry` to log time with.
+fn jira_with_entry(user: &User, entry: &str) {
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}],
+            "tracker": {"kind": "jira", "site": SITE, "projects": ["ABC"],
+                "worklog_token": entry}}),
+    )
+    .unwrap();
+}

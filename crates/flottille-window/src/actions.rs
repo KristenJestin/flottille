@@ -620,9 +620,13 @@ pub enum VaultWrite {
         username: String,
         /// Every project's when `None`.
         project: Option<String>,
+        /// The one use it is made for (`worklog:<project>`); left out, it keeps the one it has.
+        bound: Option<String>,
     },
     Remove {
         name: String,
+        /// The user confirmed what stops working without it.
+        confirmed: bool,
     },
 }
 
@@ -658,7 +662,9 @@ impl std::fmt::Debug for VaultWrite {
                 .field("name", name)
                 .field("project", project)
                 .finish_non_exhaustive(),
-            VaultWrite::Remove { name } => f.debug_struct("Remove").field("name", name).finish(),
+            VaultWrite::Remove { name, .. } => {
+                f.debug_struct("Remove").field("name", name).finish()
+            }
         }
     }
 }
@@ -1861,12 +1867,16 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                     url,
                     username,
                     project,
+                    bound,
                 } => (
                     "vault.set",
                     json!({"name": name, "secret": secret, "description": description,
-                        "url": url, "username": username, "project": project}),
+                        "url": url, "username": username, "project": project, "for": bound}),
                 ),
-                VaultWrite::Remove { name } => ("vault.remove", json!({"name": name})),
+                VaultWrite::Remove { name, confirmed } => (
+                    "vault.remove",
+                    json!({"name": name, "confirmed": confirmed}),
+                ),
             };
             let refused = match ask_alone(connect, method, params, bounds.quick) {
                 Ok(Ok(_)) => None,

@@ -770,15 +770,20 @@ door alone reaches them: an agent's only part is the `vault` tool, which lists, 
 for an entry a feature names and that is missing.
 
 - `vault.list {project?}` answers `{"entries": [{"name", "description", "url", "username",
-  "project"}]}`, by name; with `project`, the entries its agents see (its own and every project's).
-- `vault.set {name, secret, description?, url?, username?, project?}` keeps the secret in the
-  keyring and the rest in the store, in place of the entry of that name if there is one, and
-  answers the entry as listed. `invalid-params` for a secret that is not a text; `refused` for a
+  "project", "for"}]}`, by name, `for` the use it is bound to or `null` (`docs/vault.md`, "Bound to
+  one use"); with `project`, the entries its agents see (its own and every project's).
+- `vault.set {name, secret, description?, url?, username?, project?, for?}` keeps the secret in
+  the keyring and the rest in the store, in place of the entry of that name if there is one, and
+  answers the entry as listed. `for` binds it to one use (`worklog:<project>`,
+  `connection:<name>`); left out, the entry keeps the use it has. `refused` for another use, an
+  unknown project in it, a worklog's entry another project alone sees, a connection's entry one
+  project alone sees, or a bound entry given another use (naming the one it has). `invalid-params` for a secret that is not a text; `refused` for a
   name that is not letters, digits, `.`, `_` and `-` (64 at most) or a secret under 6 characters;
   `not-found` for an unknown project; `unavailable` when the keyring cannot be reached, with its
   reason. An empty `description`, `url`, `username` or `project` is left out.
-- `vault.remove {name}` deletes the secret from the keyring, then the entry, and answers
-  `{"removed": <entry>}`; `not-found` when there is none; `unavailable` when the keyring refuses
+- `vault.remove {name, confirmed?}` deletes the secret from the keyring, then the entry, and
+  answers `{"removed": <entry>}`; `refused`, naming the feature and what stops working, for an
+  entry bound to a feature that names it, unless `confirmed`; `not-found` when there is none; `unavailable` when the keyring refuses
   (locked), the entry then left whole.
 
 Both writes emit `vault.changed`, and give the agents of every project the tools their roles have
@@ -795,8 +800,10 @@ The requests agents made for a missing entry (`docs/vault.md`, "Asking the user 
   description and the project the request holds, under `name` when given, else the name it
   holds; `refused` without a username when `takes_username`, and as `vault.set`; `refused` with
   `` `<name>` is used by the project <other>: choose another name`` (`every project` for a global
-  entry) when an entry of that name exists and is not the project's: a request never changes an
-  existing entry's project; `not-found` when no such request is open. Each agent that asked is
+  entry) when an entry of that name exists and is not the project's, or `` `<name>` is bound to
+  <its use>: choose another name`` when it is bound to another use than the project's worklog: a
+  request never changes an existing entry's project nor its use. The entry is bound to the
+  project's worklog; `not-found` when no such request is open. Each agent that asked is
   handed a `vault` delivery, `the user set the vault entry <name>`, which says the project's
   setting still names the entry asked when the user chose another name.
 - `vault.ask_dismiss {ask}` closes it, answers `{"dismissed": <request>}`, and hands each agent
