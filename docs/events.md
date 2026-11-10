@@ -177,6 +177,28 @@ project: `extension.list` says what it is now.
 | `name` | The extension's (`specs`). |
 | `project` | The project whose file changed; `null` for `extensions.toml`. |
 
+### `connection.changed`
+
+A connection was declared, edited, removed, reviewed or accepted, or its server started, stopped
+or failed to start (`docs/extensions.md`, "Connections"): `connection.list` says what it is now.
+
+| Field | |
+|---|---|
+| `name` | The connection's. |
+| `state` | `off`, `awaiting review`, `cut off` or `ready`; `null` once it is removed. |
+| `running` | Whether its server runs. |
+| `why` | Why it failed to start, or what changed when it was cut off; `null` otherwise. |
+
+### `connection.cut_off`
+
+The connection's server is no longer what the user accepted, found as it started or when it said
+its tools changed: its tool left every session, and the inbox lists it (kind `connections`).
+
+| Field | |
+|---|---|
+| `name`, `tool` | The connection's name and its tool (`conn_almanac`). |
+| `changed` | What changed, a sentence each (`the server is now almanac 1.1.0, not almanac 1.0.0`). |
+
 ### `review.started`, `review.progress`, `review.reported`, `review.failed`
 
 A review of a session started, launched or ended a pass, reported, or ended without its findings

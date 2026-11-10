@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use flottille_core::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used, new_id};
 use flottille_core::approval;
-use flottille_core::paths::{Paths, ensure_private_dir};
+use flottille_core::paths::ensure_private_dir;
 use flottille_core::project::Project;
 use flottille_core::protocol::{
     AgentAnswer, AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload,
@@ -120,6 +120,13 @@ pub struct Live {
 /// The user's answers to an ask of the root (`agent.answer`): one message to the root that quotes
 /// each question and gives its answer under it, which answers that ask alone; the answers are
 /// kept with the ask (`agent.answered`, `asked`), for the card that shows them.
+impl Live {
+    /// Whether a process of an agent runs: a session of some project is at work.
+    pub fn any_process(&self) -> bool {
+        !self.processes.lock().unwrap().is_empty()
+    }
+}
+
 fn answer(daemon: &Arc<Daemon>, asked: AgentAnswer) -> Answer {
     let agent = find(daemon, &asked.agent)?;
     refuse_child(daemon, &agent, "answers it")?;
@@ -869,7 +876,7 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
     let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
     let at_depth_limit = depth >= DEPTH_LIMIT;
     let tools = tools_of(
-        &daemon.paths,
+        daemon,
         provider,
         project,
         new.parent.is_none(),
@@ -1263,7 +1270,7 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
 /// whose answer would come from an agent that has no tool to give it, and the extension's: never
 /// an `agent_*` tool nor `approval_answer`.
 pub fn tools_of(
-    paths: &Paths,
+    daemon: &Daemon,
     provider: &Provider,
     project: &Project,
     root: bool,
@@ -1283,7 +1290,7 @@ pub fn tools_of(
         tools.retain(|tool| *tool != ask);
     }
     tools.extend(
-        crate::extensions::tools_for(paths, project, root, launched)
+        crate::extensions::tools_for(daemon, project, root, launched)
             .into_iter()
             .map(|tool| format!("{}{tool}", provider.tool_prefix)),
     );

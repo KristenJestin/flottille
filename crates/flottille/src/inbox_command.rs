@@ -25,6 +25,18 @@ fn inbox_text(listed: &Value) -> String {
     }
     let mut out = String::new();
     for entry in entries {
+        // An entry of no agent's: Flottille's own word, its kind the part it comes from.
+        if entry["agent"].is_null() {
+            out.push_str(&format!(
+                "#{} from {}:\n",
+                entry["seq"],
+                entry["kind"].as_str().unwrap_or("?")
+            ));
+            for line in entry["text"].as_str().unwrap_or_default().lines() {
+                out.push_str(&format!("    {line}\n"));
+            }
+            continue;
+        }
         let place = match entry["workspace"].as_str() {
             Some(workspace) => format!("{}/{workspace}", entry["project"].as_str().unwrap_or("?")),
             None => entry["project"].as_str().unwrap_or("?").to_owned(),

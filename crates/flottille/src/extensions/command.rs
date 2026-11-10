@@ -37,6 +37,7 @@ pub fn run(paths: &Paths, command: Command) -> Result<ExitCode> {
         Command::Extension { action } => extension(paths, action),
         Command::Spec { action } => super::specs::command::run(paths, action),
         Command::Review { session, json } => review(paths, &session, json),
+        Command::Connection { action } => super::connections::command::run(paths, action),
     }
 }
 

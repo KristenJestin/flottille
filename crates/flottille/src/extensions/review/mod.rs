@@ -162,6 +162,9 @@ pub const EXTENSION: Extension = Extension {
         limit: 4_000,
         named: "your review's guidance",
     }),
+    declared: None,
+    dynamic: None,
+    needs_you: &[],
 };
 
 fn starts_no_session(_: &Daemon, _: &str) -> bool {
