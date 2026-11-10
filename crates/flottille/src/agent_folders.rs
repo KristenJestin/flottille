@@ -502,6 +502,11 @@ fn kind_of(folder: BorrowedFd, name: &OsStr) -> Option<Kind> {
 fn read_file(folder: BorrowedFd, name: &OsStr) -> std::io::Result<Vec<u8>> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | crate::nofollow::READ;
     let file = std::fs::File::from(rustix::fs::openat(folder, name, flags, Mode::empty())?);
+    read_open(&file)
+}
+
+/// The content of `file`, opened, when it is a file not larger than `KEPT_MAX`.
+fn read_open(file: &std::fs::File) -> std::io::Result<Vec<u8>> {
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::other("not a file"));
     }
@@ -509,6 +514,32 @@ fn read_file(folder: BorrowedFd, name: &OsStr) -> std::io::Result<Vec<u8>> {
     file.take(KEPT_MAX + 1).read_to_end(&mut content)?;
     if content.len() as u64 > KEPT_MAX {
         return Err(std::io::Error::other("too large to keep"));
+    }
+    Ok(content)
+}
+
+/// `read_file`, when the file read is still the one `noted`: the same inode, size and times,
+/// looked at once it is read, so that a write before or while it was read is seen.
+fn read_noted(folder: BorrowedFd, name: &OsStr, noted: &Kind) -> std::io::Result<Vec<u8>> {
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | crate::nofollow::READ;
+    let file = std::fs::File::from(rustix::fs::openat(folder, name, flags, Mode::empty())?);
+    let content = read_open(&file)?;
+    let stat = rustix::fs::fstat(&file)?;
+    let Kind::File {
+        len,
+        modified,
+        changed,
+        inode,
+        ..
+    } = noted
+    else {
+        return Err(std::io::Error::other("not a file"));
+    };
+    if (stat.st_ino as u64, stat.st_size as u64) != (*inode, *len)
+        || (stat.st_mtime as i64, stat.st_mtime_nsec as i64) != *modified
+        || (stat.st_ctime as i64, stat.st_ctime_nsec as i64) != *changed
+    {
+        return Err(std::io::Error::other("written since it was noted"));
     }
     Ok(content)
 }
@@ -692,16 +723,18 @@ impl Walk<'_> {
             return;
         };
         let mut wanted = std::mem::take(&mut self.wanted);
-        wanted.sort_by_key(|(path, len)| (!settings(path), *len));
+        wanted.sort_by_key(|(path, len)| (!settings(path) && !hook(path), *len));
         for (path, len) in wanted {
             if self.held + len > KEPT_TOTAL {
                 continue;
             }
+            race(&path);
             let Ok((folder, name)) = parent(self.top.as_fd(), &path) else {
                 continue;
             };
-            // It may have grown since it was looked at.
-            if let Ok(content) = read_file(folder.as_fd(), name)
+            // Written since it was noted, its content is not the one before the run: none is
+            // kept, and a change is said, not put back.
+            if let Ok(content) = read_noted(folder.as_fd(), name, &self.entries[&path])
                 && self.held + content.len() as u64 <= KEPT_TOTAL
             {
                 self.held += content.len() as u64;
@@ -728,6 +761,16 @@ fn settings(path: &Path) -> bool {
             name.as_encoded_bytes()
                 .eq_ignore_ascii_case(file.as_bytes())
         })
+    })
+}
+
+/// Whether `path` is below the `hooks` folder of a `.claude` folder, in any case: a script its
+/// settings run.
+fn hook(path: &Path) -> bool {
+    let parts: Vec<&OsStr> = path.components().map(|part| part.as_os_str()).collect();
+    parts.windows(3).any(|parts| {
+        parts[0].as_encoded_bytes().eq_ignore_ascii_case(b".claude")
+            && parts[1].as_encoded_bytes().eq_ignore_ascii_case(b"hooks")
     })
 }
 
@@ -2028,5 +2071,49 @@ mod tests {
         assert!(!root.join(".codex/config.toml").exists());
         // The last run of a place to leave takes its entry with it.
         assert!(guards.groups.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_file_written_after_it_was_noted_keeps_no_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let settings = root.join(".claude/settings.json");
+        made(&settings, "{}\n");
+        let planted = settings.clone();
+        // Something writes it between the walk that noted it and the read of its content.
+        racing(".claude/settings.json", move || {
+            made(&planted, "{\"hooks\": {}}\n")
+        });
+
+        let snapshot = Snapshot::take(&root, None, &dir.path().join("kept"));
+
+        assert!(snapshot.contents.is_empty(), "{:?}", snapshot.contents);
+        // Its version is not put back as the one before the run.
+        let restored = snapshot.restore("run");
+        assert_eq!(restored.left, [".claude/settings.json"]);
+        assert!(!settings.exists());
+    }
+
+    #[test]
+    fn hook_scripts_are_kept_first_past_the_total_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let hook = "#!/bin/sh\n".repeat(100);
+        made(&root.join(".claude/hooks/start.sh"), &hook);
+        made(&root.join("app/.CLAUDE/Hooks/stop.sh"), &hook);
+        // Smaller files that would fill the bound before the hooks if they were not kept first.
+        let medium = "m".repeat(600);
+        for n in 0..6 {
+            made(&root.join(format!(".claude/commands/{n}.md")), &medium);
+        }
+
+        let snapshot = Snapshot::take(&root, None, &dir.path().join("kept"));
+
+        let kept: Vec<&Path> = snapshot.contents.keys().map(PathBuf::as_path).collect();
+        for path in [".claude/hooks/start.sh", "app/.CLAUDE/Hooks/stop.sh"] {
+            assert!(kept.contains(&Path::new(path)), "{path}: {kept:?}");
+        }
+        let held: usize = snapshot.contents.values().map(Vec::len).sum();
+        assert!(held as u64 <= KEPT_TOTAL, "{held}");
     }
 }
