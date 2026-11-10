@@ -290,6 +290,44 @@ fn the_link_adds_an_entry_in_the_vault_and_comes_back(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn an_entry_added_from_the_tracker_is_bound_to_its_worklog(cx: &mut TestAppContext) {
+    let user = user();
+    jira(&user, None);
+    entry(&user, "jira-time", Some(ACCOUNT), Some("app"));
+    let (shell, cx) = window(&user, cx);
+    let _ = tracker_dialog(&shell, cx);
+    cx.update(|window, cx| window.click("tracker-worklog-add", cx));
+    settle(cx);
+    let vault = shell.read_with(cx, |s, cx| {
+        s.main()
+            .read(cx)
+            .settings_page()
+            .expect("Settings is shown")
+            .read(cx)
+            .vault()
+            .clone()
+    });
+    let fields = vault.read_with(cx, |v, _| {
+        [
+            v.name_field().unwrap().clone(),
+            v.secret_field().unwrap().clone(),
+        ]
+    });
+    for (field, text) in fields.into_iter().zip(["app-time", SECRET]) {
+        cx.update(|window, cx| field.update(cx, |f, cx| f.set_value(text, window, cx)));
+    }
+    cx.update(|window, cx| window.click("save-vault-entry", cx));
+    until(&shell, cx, "the entry is set", |_| {
+        user.call("vault.list", json!({})).unwrap()["entries"][0]["name"] == "app-time"
+    });
+    let set = user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
+    // The entry made elsewhere stays any feature's.
+    let other = user.call("vault.list", json!({})).unwrap()["entries"][1].clone();
+    assert_eq!(other["for"], serde_json::Value::Null, "{other}");
+    assert_eq!(set["for"], "worklog:app", "{set}");
+}
+
+#[gpui_kit::test]
 fn the_worklog_select_lists_only_entries_the_project_sees(cx: &mut TestAppContext) {
     let user = user();
     jira(&user, None);
@@ -297,6 +335,11 @@ fn the_worklog_select_lists_only_entries_the_project_sees(cx: &mut TestAppContex
     entry(&user, "jira-time", Some(ACCOUNT), Some("app"));
     entry(&user, "shared", Some(ACCOUNT), None);
     entry(&user, "elsewhere", Some(ACCOUNT), Some("other"));
+    user.call(
+        "vault.set",
+        json!({"name": "notes-key", "secret": SECRET, "for": "connection:almanac"}),
+    )
+    .unwrap();
     let (shell, cx) = window(&user, cx);
     let page = tracker_dialog(&shell, cx);
 
@@ -317,6 +360,10 @@ fn the_worklog_select_lists_only_entries_the_project_sees(cx: &mut TestAppContex
     assert!(
         !has("tracker-worklog-elsewhere", cx),
         "another project's entry is not offered"
+    );
+    assert!(
+        !has("tracker-worklog-notes-key", cx),
+        "an entry bound to another use is not offered"
     );
 }
 
