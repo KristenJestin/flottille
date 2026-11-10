@@ -164,6 +164,9 @@ pub const EXTENSION: Extension = Extension {
     launched: launches_none,
     commands: &[],
     guidance: None,
+    declared: None,
+    dynamic: None,
+    needs_you: &[],
 };
 
 /// Specs launches no agent of its own: the sessions it starts are the user's.

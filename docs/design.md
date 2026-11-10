@@ -211,6 +211,11 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   steps, numbered) and `project` (its settings, its forges and tracker, its rules), and the writes
   of `tasks`, what the window does, each change a call to judge, a change of the tracker or of the
   rules base, a line it sets judged as a run of it (`tools.md`, "The project", `projects.md`);
+- the user's connections (every agent of every project but those a connection excepts, while
+  Connections is on and the connection reviewed): `conn_<name> {action, arguments?, for?}`, one
+  tool per MCP server the user declared, the daemon being its client; its description written by
+  Flottille, `help` answered from what the user accepted, each call judged unless the user marked
+  its action (`tools.md`, "Connections", `extensions.md`, "Connections");
 
 Flottille's own tools:
 
@@ -524,11 +529,13 @@ agent wrote is data.
    not seen, for a context that did not grow since the session started or its last compaction
    failed, nor for a provider whose cache lifetime is not established (`docs/agents.md`, "The
    prompt cache's lifetime"); the Compaction tab says each provider's. Once an agent's cache
-   expired, the composer's toolbar's **Compact** control, always in its place beside the mode (disabled,
-   its tooltip saying why, while there is nothing to compact), is enabled and ticked from the
-   setting (its tooltip says why): unticked, the message goes to the session as it is; ticked, it
-   compacts first even with the setting off. The composer keeps its height: an option of the
-   composer is a control of its toolbar, never a block above it. A
+   expired, the composer's toolbar's **Compact** control shows just left of **Send**, ticked from
+   the setting (its tooltip says why): unticked, the message goes to the session as it is; ticked, it
+   compacts first even with the setting off. While there is nothing to compact the control is not
+   drawn, no disabled control and no tooltip saying why not; it unfolds and fades in when the cache
+   expires, and folds away and fades out after a compaction or a turn that warms the cache again.
+   The composer keeps its height: an option of the composer is a control of its toolbar, never a
+   block above it. A
    message from Flottille itself (a child's news, a delivery) follows the setting.
 7. **The agent's own handoff**: **Summary written by** (`summary` in `compaction.toml`) is the
    compactor (the default, all of the above, shown in the window as **A model you choose**) or
@@ -702,7 +709,15 @@ with says so. Reading another session says the mode of that session's tree too.
   with the user's rights, and the gate does not see what that code touches; only a sandbox would
   close that. The refusals below protect the user from an agent's direct or accidental use of
   what must never be touched; they are **not a sandbox**: a program the agent runs may still do
-  any of it on its own.
+  any of it on its own. The same holds for a connection's server (`extensions.md`,
+  "Connections"): the gate sees the action called and its arguments, never what the server then
+  does with the user's rights, whatever the mode.
+
+A call of a connection is **to judge** by default; the user may mark one action **passes**
+(harmless) or **asked** (base: a card in Ask and Auto, never the judge's). The judge reads the
+action's description as the user accepted it, in a block of its own, escaped, and never the
+server's instructions. An action turned off, arguments that do not fit the accepted schema or a
+limit, and a connection not ready are refused in every mode.
 
 What becomes of a call, by what the gate says of it and the tree's mode:
 
@@ -975,8 +990,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the row and the header; a session an agent started says it in
   its page's header, "started by <agent>", not in the sidebar. A session an agent leads (`led`)
   is the one exception to the flat list: its row sits right under its pilot's session's row,
-  indented one step, tied to it by a `↳` connector (the line from the pilot turning into the row)
-  whose arrowhead has the tooltip "led by <pilot>"; only a led row is indented, every root's title
+  indented one step, tied to it by a connector (the line from the pilot turning into the row,
+  ending there with no arrowhead); only a led row is indented, every root's title
   starts at the same x. The pilot's row gains a chevron, at the end of the row beside its time and
   "⋯", that folds its led rows away with it; folded, its state mark is the most urgent of its own
   and its hidden led sessions' (waits for the user, then running, then its own), nothing else is
@@ -1115,7 +1130,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   nothing under the bar), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
-  Link a ticket… (Change the ticket… once one is linked), Unlink the ticket (only while one is linked) and, for a session in a workspace, Remove workspace…, which
+  Open in editor and, for a session in a workspace (one in the project's folder is offered Open in editor only), Link a ticket… (Change the ticket… once one is linked), Unlink the ticket (only while one is linked) and Remove workspace…, which
   asks as the card does, the dialog refusing it, with the sessions named, while sessions not ended work there; while it runs the section says it is
   being removed, and once removed it folds away, the page staying) and facts, its runs, then, pinned at the very bottom and
   folding away when nothing waits, "Waiting for you", the one place of the page that says the user

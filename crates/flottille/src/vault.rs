@@ -38,7 +38,8 @@ pub enum Keyring {
     /// The Secret Service of the session (`oo7`).
     Os,
     /// The daemon's memory: lost when it stops. Its file is read again at each use: `locked =
-    /// true` there plays a locked keyring, for the tests.
+    /// true` there plays a locked keyring, its table `kept` (name = secret) the secrets a keyring
+    /// held before the daemon started, for the tests.
     Memory {
         kept: Mutex<HashMap<String, String>>,
         file: PathBuf,
@@ -105,7 +106,10 @@ impl Keyring {
     /// the user to unlock it and wait.
     async fn read(&self, name: &str) -> Result<Option<String>, String> {
         match self {
-            Keyring::Memory { kept, file } => Ok(Self::memory(kept, file)?.get(name).cloned()),
+            Keyring::Memory { kept, file } => Ok(Self::memory(kept, file)?
+                .get(name)
+                .cloned()
+                .or_else(|| held_before(file, name))),
             Keyring::Os => {
                 let keyring = os().await?;
                 let items = keyring
@@ -151,6 +155,15 @@ fn setting(file: &Path, key: &str) -> Option<String> {
     item.as_str()
         .map(str::to_owned)
         .or_else(|| item.as_bool().map(|on| on.to_string()))
+}
+
+/// The secret of `name` in the table `kept` of the memory keyring's file.
+fn held_before(file: &Path, name: &str) -> Option<String> {
+    let document = std::fs::read_to_string(file)
+        .ok()?
+        .parse::<toml_edit::DocumentMut>()
+        .ok()?;
+    document.get("kept")?.get(name)?.as_str().map(str::to_owned)
 }
 
 async fn os() -> Result<oo7::Keyring, String> {
@@ -644,6 +657,29 @@ pub async fn secret(daemon: &Daemon, project: &str, name: &str) -> Result<String
         .read(|store| store.vault_entries())
         .map_err(|error| error.to_string())?;
     given(&entries, &daemon.vault, project, name).await
+}
+
+/// The secret of the entry `name`, which must be every project's (no `project` on it), for what
+/// the daemon runs for all of them (a connection's server): never to be returned, logged or shown.
+/// Masked from now on before it is used: the keyring may have been locked at the daemon's start.
+pub async fn every_project_s(daemon: &Daemon, name: &str) -> Result<String, String> {
+    let entries = daemon
+        .read(|store| store.vault_entries())
+        .map_err(|error| error.to_string())?;
+    match entries.iter().find(|entry| entry.name == name) {
+        None => return Err(format!("the vault has no entry {name}")),
+        Some(entry) if entry.project.is_some() => {
+            return Err(format!(
+                "the vault entry {name} is one project's alone, not every project's"
+            ));
+        }
+        Some(_) => {}
+    }
+    tokio::time::timeout(SECRET_WAIT, daemon.vault.read(name))
+        .await
+        .map_err(|_| format!("the keyring did not answer in time: {LOCKED}"))??
+        .ok_or_else(|| format!("the keyring no longer holds the secret of {name}"))
+        .inspect(|secret| secrets::add_vault_value(secret))
 }
 
 /// `secret`, with the entries and the keyring at hand.

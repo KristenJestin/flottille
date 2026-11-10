@@ -425,57 +425,57 @@ fn compactions(user: &User, id: &str) -> usize {
 
 /// The toolbar's controls that stay: where each starts, and how far Send ends from the
 /// composer's right edge.
-fn fixed(cx: &mut VisualTestContext) -> ([gpui_kit::Pixels; 4], gpui_kit::Pixels) {
+fn fixed(cx: &mut VisualTestContext) -> ([gpui_kit::Pixels; 3], gpui_kit::Pixels) {
     cx.update(|window, _| {
-        let left = ["reply-model", "reply-mode", "reply-compact", "attach"]
-            .map(|id| window.find(id).bounds().origin.x);
+        let left =
+            ["reply-model", "reply-mode", "attach"].map(|id| window.find(id).bounds().origin.x);
         let edge = window.find("reply").bounds().right();
         (left, edge - window.find("reply-send").bounds().right())
     })
 }
 
+/// How wide the Compact control is drawn, and how opaque: the widest alpha of what is painted
+/// inside it (its ticked fill).
+fn compact_drawn(cx: &mut VisualTestContext) -> (f32, f32) {
+    cx.update(|window, _| {
+        let Some(found) = window.try_find("reply-compact".to_owned()) else {
+            return (0.0, 0.0);
+        };
+        let bounds = found.bounds().scale(window.scale_factor());
+        let alpha = window
+            .painted_quads()
+            .iter()
+            .filter(|quad| bounds.contains(&quad.bounds.center()))
+            .filter_map(|quad| quad.background.as_solid())
+            .map(|bg| bg.a)
+            .fold(0.0, f32::max);
+        (f32::from(found.bounds().size.width), alpha)
+    })
+}
+
 #[gpui_kit::test]
-fn compact_is_always_in_its_place_and_its_coming_available_moves_nothing(cx: &mut TestAppContext) {
-    let (user, _id, shell, page, cx) = expiring("after_expiry = false", cx);
+fn compact_shows_left_of_send_only_once_there_is_something_to_compact(cx: &mut TestAppContext) {
+    let (user, _id, shell, page, cx) = expiring("", cx);
     assert_eq!(offer(&page, cx), None);
-    // Nothing to compact: it is there, in its words, disabled, and says why.
-    assert!(visible(cx, "reply-compact"));
-    assert_eq!(label(cx, "reply-compact").as_deref(), Some("Compact"));
-    let hint = page
-        .read_with(cx, |page, cx| {
-            page.reply().map(|r| r.read(cx).compact_hint())
-        })
-        .unwrap();
-    assert!(hint.starts_with("Nothing to compact"), "{hint}");
-    let rest = height(cx, "reply");
-    let before = fixed(cx);
-    // A click on it while it is disabled ticks nothing.
-    cx.update(|window, cx| window.click("reply-compact", cx));
-    settle(cx);
-    assert_eq!(offer(&page, cx), None);
+    // Nothing to compact: no control, so no disabled one and no tooltip that says why not.
+    assert!(
+        !present(cx, "reply-compact"),
+        "not drawn while the cache is warm"
+    );
 
     // Claude's cache lives an hour here: not yet expired at 59 minutes.
     user.call("test.advance", json!({"ms": 59 * 60_000}))
         .unwrap();
     settle(cx);
-    assert_eq!(offer(&page, cx), None);
-    assert_eq!(fixed(cx), before);
+    assert!(!present(cx, "reply-compact"), "nor at 59 minutes");
 
     user.call("test.advance", json!({"ms": 2 * 60_000}))
         .unwrap();
     until(&shell, cx, "the chip is offered", |cx| {
         offer(&page, cx).is_some()
     });
-    // Unticked, as the setting is off.
-    assert_eq!(offer(&page, cx), Some(false));
-    one_frame(cx);
-    assert_eq!(
-        fixed(cx),
-        before,
-        "the control moves none of the others while it becomes available"
-    );
     settle(cx);
-    assert_eq!(fixed(cx), before, "nor once it is");
+    assert_eq!(offer(&page, cx), Some(true), "ticked from the setting");
     assert_eq!(label(cx, "reply-compact").as_deref(), Some("Compact"));
     let hint = page
         .read_with(cx, |page, cx| {
@@ -484,8 +484,7 @@ fn compact_is_always_in_its_place_and_its_coming_available_moves_nothing(cx: &mu
         .unwrap();
     assert!(hint.starts_with("Its prompt cache expired"), "{hint}");
 
-    // In the toolbar, on the line of the mode, after it and before Attach, and no block of
-    // its own above it: the composer keeps its height.
+    // At the right end of the toolbar, on its line, just left of Send.
     let (chip, mode, attach, send) = cx.update(|window, _| {
         (
             window.find("reply-compact").bounds(),
@@ -494,18 +493,133 @@ fn compact_is_always_in_its_place_and_its_coming_available_moves_nothing(cx: &mu
             window.find("reply-send").bounds(),
         )
     });
-    assert!(chip.left() >= mode.right(), "beside the mode");
-    assert!(chip.right() <= attach.left(), "before Attach");
-    assert!(attach.right() <= send.left(), "before the send button");
+    assert!(chip.left() >= attach.right(), "after Attach and the mode");
+    assert!(chip.left() >= mode.right());
+    assert!(chip.right() <= send.left(), "left of Send");
     assert!(
-        (chip.center().y - mode.center().y).abs() <= px(1.),
+        send.left() - chip.right() <= px(12.),
+        "just left of Send, not {:?} away",
+        send.left() - chip.right()
+    );
+    assert!(
+        (chip.center().y - send.center().y).abs() <= px(1.),
         "on the toolbar's line"
     );
     assert!(
         !present(cx, "reply-compact-line"),
         "no block above the toolbar"
     );
-    assert_eq!(height(cx, "reply"), rest, "the composer keeps its height");
+}
+
+#[gpui_kit::test]
+fn compact_unfolds_and_folds_away_animated(cx: &mut TestAppContext) {
+    let (user, _id, shell, page, cx) = expiring("", cx);
+    assert_eq!(compact_drawn(cx), (0.0, 0.0));
+    user.call("test.advance", json!({"ms": 61 * 60_000}))
+        .unwrap();
+    until(&shell, cx, "the chip is offered", |cx| {
+        offer(&page, cx).is_some()
+    });
+    let mut unfolding = Vec::new();
+    for _ in 0..30 {
+        one_frame(cx);
+        unfolding.push(compact_drawn(cx));
+    }
+    let (width, opacity) = *unfolding.last().unwrap();
+    assert!(width > 0.0 && opacity > 0.0, "it ends drawn: {unfolding:?}");
+    assert!(
+        unfolding
+            .iter()
+            .any(|&(w, o)| w > 0.0 && w < width && o > 0.0 && o < opacity),
+        "halfway through, its width and opacity are between their ends: {unfolding:?}"
+    );
+
+    // Unticking is no way out; a turn that warms the cache again is.
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("go on");
+    settle(cx);
+    let reply = page.read_with(cx, |page, _| page.reply().cloned()).unwrap();
+    reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    until(&shell, cx, "the chip leaves", |cx| {
+        offer(&page, cx).is_none()
+    });
+    let mut folding = Vec::new();
+    for _ in 0..30 {
+        one_frame(cx);
+        folding.push(compact_drawn(cx));
+    }
+    assert!(
+        folding
+            .iter()
+            .any(|&(w, o)| w > 0.0 && w < width && o > 0.0 && o < opacity),
+        "it folds away over frames, not at once: {folding:?}"
+    );
+    assert_eq!(*folding.last().unwrap(), (0.0, 0.0), "and is gone");
+}
+
+#[gpui_kit::test]
+fn compact_leaves_once_there_is_nothing_to_compact_again(cx: &mut TestAppContext) {
+    let (user, id, shell, page, cx) = expiring("", cx);
+    user.call("test.advance", json!({"ms": 61 * 60_000}))
+        .unwrap();
+    until(&shell, cx, "the chip is offered", |cx| {
+        offer(&page, cx).is_some()
+    });
+    settle(cx);
+    assert!(visible(cx, "reply-compact"));
+
+    // A turn warms the cache again.
+    cx.update(|window, cx| window.click("reply-compact", cx));
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("go on");
+    settle(cx);
+    let reply = page.read_with(cx, |page, _| page.reply().cloned()).unwrap();
+    reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    until(&shell, cx, "the chip leaves", |cx| {
+        offer(&page, cx).is_none()
+    });
+    settle(cx);
+    assert!(!present(cx, "reply-compact"), "not drawn again");
+    eventually("the turn's end", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["name"] == "agent.turn_ended")
+            .count()
+            == 2
+    });
+}
+
+#[gpui_kit::test]
+fn compact_coming_and_going_moves_no_other_control_and_keeps_the_composer_s_height(
+    cx: &mut TestAppContext,
+) {
+    let (user, _id, shell, page, cx) = expiring("after_expiry = false", cx);
+    let rest = height(cx, "reply");
+    let before = fixed(cx);
+
+    user.call("test.advance", json!({"ms": 61 * 60_000}))
+        .unwrap();
+    until(&shell, cx, "the chip is offered", |cx| {
+        offer(&page, cx).is_some()
+    });
+    assert_eq!(
+        offer(&page, cx),
+        Some(false),
+        "unticked, as the setting is off"
+    );
+    for _ in 0..30 {
+        one_frame(cx);
+        assert_eq!(height(cx, "reply"), rest, "the composer keeps its height");
+        let (left, _) = fixed(cx);
+        assert_eq!(left, before.0, "the controls before it stay where they are");
+        let send = cx.update(|window, _| window.find("reply-send").bounds().right());
+        let edge = cx.update(|window, _| window.find("reply").bounds().right());
+        assert_eq!(edge - send, before.1, "and Send too");
+    }
+    assert_eq!(fixed(cx), before, "nor once it is there");
+    assert_eq!(height(cx, "reply"), rest);
 }
 
 #[gpui_kit::test]
@@ -560,12 +674,12 @@ fn unticking_the_chip_sends_without_compacting(cx: &mut TestAppContext) {
     let reply = page.read_with(cx, |page, _| page.reply().cloned()).unwrap();
     reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
 
-    // The turn starts in the same session, and the control goes quiet where it is.
+    // The turn starts in the same session, and the control leaves.
     until(&shell, cx, "the chip leaves", |cx| {
         offer(&page, cx).is_none()
     });
     settle(cx);
-    assert!(visible(cx, "reply-compact"), "it stays, disabled");
+    assert!(!present(cx, "reply-compact"), "it is not drawn again");
     assert_eq!(fixed(cx), before, "and moves none of the others");
     eventually("the turn's end", || {
         user.call("agent.show", json!({"agent": id})).unwrap()["events"]

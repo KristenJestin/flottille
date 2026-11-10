@@ -6,7 +6,6 @@
 use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
 use std::collections::HashSet;
-use std::f32::consts::FRAC_PI_2;
 
 use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, PANEL};
@@ -17,9 +16,9 @@ use flottille_ui::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
+    App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
-    TestSupportExt as _, Transformation, WeakEntity, Window, div, px, radians,
+    TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
 use crate::actions::Command;
@@ -29,31 +28,19 @@ use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell};
 
 /// The levels of Flottille's left tree: what a row stands for, drawn with the parts of the tree
-/// the kit has: a project is a first-level row, the main folder and a workspace a row with a
-/// folder or a branch before it, a session a plain row.
+/// the kit has: a project is a first-level row, a session a plain row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeLevel {
     Project,
-    /// The project's own folder, `main`.
-    Main,
-    Workspace,
     Session,
 }
 
 impl TreeLevel {
     /// The row of this level.
-    pub fn row(
-        self,
-        id: impl Into<ElementId>,
-        title: impl Into<SharedString>,
-        cx: &App,
-    ) -> TreeRow {
+    pub fn row(self, id: impl Into<ElementId>, title: impl Into<SharedString>) -> TreeRow {
         let row = TreeRow::new(id, title);
-        let p = palette(cx);
         match self {
             Self::Project => row.top(),
-            Self::Main => row.leading(flottille_ui::icon(Icon::Folder).text_color(p.faint)),
-            Self::Workspace => row.leading(flottille_ui::icon(Icon::Branch).text_color(p.faint)),
             Self::Session => row,
         }
     }
@@ -97,11 +84,6 @@ pub fn session_rename_id(id: &str) -> ElementId {
 /// The element id of "Detach from …" in the row menu of a session an agent started.
 pub fn session_detach_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-row-detach-{id}").into())
-}
-
-/// The element id of the mark a led session's row starts with, whose tooltip names its pilot.
-pub fn session_led_id(id: &str) -> ElementId {
-    ElementId::Name(format!("session-led-{id}").into())
 }
 
 /// The element id of a session's row.
@@ -637,7 +619,7 @@ impl Render for ProjectNode {
         let shell = self.shell.clone();
         let name = self.name.clone();
         let row = TreeLevel::Project
-            .row(project_id(&self.name), self.name.clone(), cx)
+            .row(project_id(&self.name), self.name.clone())
             .expanded(self.open)
             .trailing(trailing(
                 project_commands_id(&self.name),
@@ -787,7 +769,7 @@ impl Render for EndedNode {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let count = self.sessions.read(cx).rows.len();
         let row = TreeLevel::Session
-            .row(ended_id(), "Ended", cx)
+            .row(ended_id(), "Ended")
             .unfolds_upward()
             .trailing(meta(count.to_string(), cx))
             .expanded(self.open)
@@ -850,11 +832,9 @@ pub struct SessionRow {
     /// The agent that started it, while it is not detached: its menu offers "Detach from …".
     detach: Option<SharedString>,
     menu: Option<(Entity<Menu>, Subscription)>,
-    /// The agent that leads it, while its row sits under its pilot's: the row is indented, and a
-    /// mark before its title says who leads it.
+    /// The agent that leads it, while its row sits under its pilot's: the row is indented and tied
+    /// to it.
     led_by: Option<SharedString>,
-    /// What the mark said last, kept while it fades out.
-    led_said: SharedString,
     /// The state of the session itself, which the mark shows unless it hides a led session that
     /// asks more of the user.
     own: Option<AgentState>,
@@ -902,7 +882,6 @@ impl SessionRow {
             detach: None,
             menu: None,
             led_by: None,
-            led_said: SharedString::default(),
             own: None,
             hidden: None,
             leads: 0,
@@ -937,9 +916,6 @@ impl SessionRow {
     pub fn set_led_by(&mut self, led_by: Option<&str>, cx: &mut Context<Self>) {
         if self.led_by() != led_by {
             self.led_by = led_by.map(|by| SharedString::from(by.to_owned()));
-            if let Some(by) = &self.led_by {
-                self.led_said = format!("led by {}", flottille_ui::quoted_title(by)).into();
-            }
             cx.notify();
         }
     }
@@ -1257,7 +1233,7 @@ impl Render for SessionRow {
         let shell = self.shell.clone();
         let id = self.id.clone();
         let mut row = TreeLevel::Session
-            .row(session_id(&self.id), self.title.clone(), cx)
+            .row(session_id(&self.id), self.title.clone())
             .selected(self.selected)
             .on_click(move |_, window, cx| {
                 let session = id.clone();
@@ -1350,17 +1326,15 @@ impl Render for SessionRow {
             None => (TWO_LINES - (FIRST + LINE)) / 2. + FIRST / 2.,
             Some(_) => 14.,
         };
-        let arrow = (tied > 0.0).then(|| self.led_arrow(window, cx));
         div()
             .relative()
             .pl(space::XL * (self.tie_shown.depth() as f32 * tied))
-            .when_some(arrow, |d, arrow| {
+            .when(tied > 0.0, |d| {
                 d.child(tree_tie(
                     session_id(&self.id),
                     &self.tie_shown,
                     first_line,
                     tied,
-                    arrow,
                     cx,
                 ))
             })
@@ -1372,31 +1346,6 @@ impl Render for SessionRow {
 const DRAFT_SAID: &str = "Draft not sent";
 
 impl SessionRow {
-    /// The arrowhead that ends the connector of a led row, saying who leads it.
-    fn led_arrow(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette(cx);
-        tipped(
-            div()
-                .id(session_led_id(&self.id))
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(12.))
-                .aria_label(self.led_said.clone())
-                .child(
-                    flottille_ui::icon(Icon::Chevron)
-                        .size(px(12.))
-                        .text_color(p.faint)
-                        .with_transformation(Transformation::rotate(radians(-FRAC_PI_2))),
-                ),
-            self.led_said.clone(),
-            12.,
-            window,
-            cx,
-        )
-        .into_any_element()
-    }
-
     /// The pencil of an unsent draft, beside the row's own mark: its ink warms on the pointer.
     fn draft_mark(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);

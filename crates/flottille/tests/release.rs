@@ -3056,6 +3056,121 @@ fn a_branch_that_moved_on_publishes_nothing() {
     assert!(!fake.log().contains("release create"), "{}", fake.log());
 }
 
+/// The step of `verified-on-dev` on main at `abc123`, with a `gh` that answers the query of the
+/// runs with `count` (`None`: the API fails): what it wrote to `$GITHUB_OUTPUT`, and the query.
+fn verified_on_dev(count: Option<u32>) -> (Output, String, String) {
+    let fake = Fake::new();
+    let answer = match count {
+        Some(count) => format!("echo {count}"),
+        None => "echo 'gh: Server Error (HTTP 502)' >&2; exit 1".to_owned(),
+    };
+    let gh = fake.dir.path().join("bin/gh");
+    std::fs::write(
+        &gh,
+        format!("#!/usr/bin/env bash\necho \"$*\" >> \"$FAKE_GH_LOG\"\n{answer}\n"),
+    )
+    .unwrap();
+    let outputs = fake.dir.path().join("outputs");
+    let output = fake.run(
+        &step_script(".github/workflows/ci.yml", "dev"),
+        &[
+            ("GH_TOKEN", "unused"),
+            ("GITHUB_SHA", "abc123"),
+            ("GITHUB_OUTPUT", outputs.to_str().unwrap()),
+        ],
+    );
+    let written = std::fs::read_to_string(outputs).unwrap_or_default();
+    (output, written, fake.log())
+}
+
+#[test]
+fn main_skips_verify_for_a_commit_whose_push_run_on_dev_succeeded() {
+    let (output, written, log) = verified_on_dev(Some(1));
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(written, "verified=true\n");
+    // Only a run of this very workflow, pushed to dev, for this commit, that succeeded.
+    let query = log.lines().next().unwrap();
+    for part in [
+        "repos/o/r/actions/workflows/ci.yml/runs?",
+        "head_sha=abc123",
+        "event=push",
+        "branch=dev",
+        "status=success",
+    ] {
+        assert!(query.contains(part), "{part}: {query}");
+    }
+}
+
+#[test]
+fn main_runs_verify_itself_when_no_push_run_on_dev_succeeded() {
+    let (output, written, _) = verified_on_dev(Some(0));
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(written, "");
+}
+
+#[test]
+fn main_runs_verify_itself_when_the_api_fails() {
+    // A failure says nothing, and fails nothing: `verify` runs, as on any commit.
+    let (output, written, _) = verified_on_dev(None);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(written, "");
+}
+
+#[test]
+fn publish_never_runs_on_a_commit_no_verify_passed_on() {
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    // A job's lines: from its name to the next job's, the next line indented by two spaces only.
+    let job = |name: &str| {
+        let lines: Vec<&str> = workflow.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| *l == format!("  {name}:"))
+            .unwrap_or_else(|| panic!("a job {name}"));
+        lines[at + 1..]
+            .iter()
+            .take_while(|l| !(l.starts_with("  ") && !l.starts_with("   ") && l.ends_with(':')))
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    // `verify` is skipped only when the commit passed it on dev.
+    let verify = job("verify");
+    assert!(verify.contains("needs: verified-on-dev"), "{verify}");
+    assert!(
+        verify.contains(
+            "if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' }}"
+        ),
+        "{verify}"
+    );
+    // `publish` needs `verify` to have passed, or to have been skipped for that reason.
+    let publish = job("publish");
+    assert!(
+        publish.contains("needs: [verified-on-dev, verify, build]"),
+        "{publish}"
+    );
+    let condition: String = publish.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        condition.contains(
+            "&& (needs.verify.result == 'success' || (needs.verify.result == 'skipped' \
+             && needs.verified-on-dev.outputs.verified == 'true'))"
+        ),
+        "{publish}"
+    );
+    assert!(
+        condition.contains("&& needs.build.result == 'success'"),
+        "{publish}"
+    );
+    // Only main asks dev.
+    let asks = job("verified-on-dev");
+    assert!(
+        asks.contains("if: github.ref == 'refs/heads/main' &&"),
+        "{asks}"
+    );
+}
+
 #[test]
 fn the_ci_names_an_alpha_like_a_beta() {
     let script = step_script(".github/workflows/ci.yml", "version");

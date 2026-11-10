@@ -3861,6 +3861,29 @@ fn settings_shown(cx: &mut VisualTestContext) -> Vec<&'static str> {
 /// Clicks the tab of the section `key` in Settings and lets its section arrive.
 fn choose_settings_tab(key: &str, cx: &mut VisualTestContext) {
     let id = format!("settings-tabs-{key}");
+    // The tabs scroll sideways once they are more than their row holds: the tab is brought into
+    // view first, as the user would.
+    for _ in 0..20 {
+        let (row, tab) = cx.update(|window, _| {
+            (
+                window.find("settings-tabs").bounds(),
+                window.find(id.clone()).bounds(),
+            )
+        });
+        let delta = if tab.right() > row.right() {
+            -200.
+        } else if tab.left() < row.left() {
+            200.
+        } else {
+            break;
+        };
+        cx.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: row.center(),
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(delta), px(0.))),
+            ..Default::default()
+        });
+        settle(cx);
+    }
     cx.update(|window, cx| window.click(id, cx));
     settle(cx);
 }

@@ -78,7 +78,7 @@ fn every_text_button_is_30_px_high_whatever_its_kind(cx: &mut TestAppContext) {
             .flex()
             .gap(space::SM)
             .child(Button::primary("primary", "Save"))
-            .child(Button::secondary("secondary", "New workspace").leading(Icon::Plus))
+            .child(Button::secondary("secondary", "New folder").leading(Icon::Plus))
             .child(Button::quiet("quiet", "Cancel"))
             .child(Button::danger("danger", "Remove task"))
             .child(Button::icon("icon", Icon::More, "More"))
@@ -104,7 +104,7 @@ fn a_page_header_draws_its_title_its_path_and_its_actions_on_the_title_s_line(
         PageHeader::new("page", "atlas")
             .path("~/work/atlas")
             .action("page-settings", "Settings", Some(Icon::Settings), |_, _| {})
-            .action("page-new", "New workspace", Some(Icon::Plus), |_, _| {})
+            .action("page-new", "New folder", Some(Icon::Plus), |_, _| {})
             .more(menu)
             .into_any_element()
     });
@@ -154,7 +154,7 @@ fn confirm(cx: &mut TestAppContext) -> (Rc<Asked>, Entity<Host>, &mut VisualTest
         let (yes, no) = (seen.clone(), seen.clone());
         let (yes_view, no_view) = (this.clone(), this);
         Confirm::new("remove-task", "Remove the task test?")
-            .sentence("Agents can no longer run it.")
+            .sentence("Helpers can no longer run it.")
             .action("Remove task")
             .refused(seen.refused.borrow().map(Into::into))
             .open(seen.open.get())
@@ -190,7 +190,7 @@ fn a_confirmation_is_a_dialog_with_its_question_cancel_and_the_danger_button(
         assert!(window.try_find_by_label("Remove the task test?").is_some());
         assert!(
             window
-                .try_find_by_label("Agents can no longer run it.")
+                .try_find_by_label("Helpers can no longer run it.")
                 .is_some()
         );
     });
@@ -267,7 +267,7 @@ fn a_toast_rises_at_the_bottom_right_and_a_success_leaves_after_its_time(cx: &mu
     let (_, cx) = toasts(cx);
     cx.update(|_, cx| {
         toast(
-            Toast::success("Task test saved").detail("Agents run it from now on."),
+            Toast::success("Task test saved").detail("Helpers run it from now on."),
             cx,
         )
     });
@@ -291,7 +291,7 @@ fn a_toast_rises_at_the_bottom_right_and_a_success_leaves_after_its_time(cx: &mu
 #[gpui_kit::test]
 fn a_toast_with_a_long_unbroken_word_stays_inside_the_window(cx: &mut TestAppContext) {
     let (_, cx) = toasts(cx);
-    let path = "/home/user/projects/atlas/apps/front/src/app/pages/(dashboard)/settings/mail-recipient-sheet.html";
+    let path = "/home/user/code/atlas/apps/front/src/app/pages/(dashboard)/settings/mail-recipient-sheet.html";
     let hash = "a3f5c9d2e1b04786a3f5c9d2e1b04786a3f5c9d2e1b04786a3f5c9d2e1b04786";
     cx.update(|_, cx| toast(Toast::success(hash).detail(path), cx));
     advance(cx, ENTER * 2);
@@ -309,7 +309,7 @@ fn a_toast_with_a_long_unbroken_word_stays_inside_the_window(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
-fn a_toast_that_quotes_a_session_title_keeps_it_on_one_line(cx: &mut TestAppContext) {
+fn a_toast_that_quotes_an_item_title_keeps_it_on_one_line(cx: &mut TestAppContext) {
     let (_, cx) = toasts(cx);
     let title = "Bring every route of the public API under the new guard, list the ones that \
                  still miss it and write the docs for each";
@@ -354,7 +354,7 @@ fn a_failure_stays_until_it_is_dismissed_and_several_stack(cx: &mut TestAppConte
     let (_, cx) = toasts(cx);
     cx.update(|_, cx| {
         toast(
-            Toast::failure("The workspace was not removed")
+            Toast::failure("The folder was not removed")
                 .detail("4 files are not committed in atlas."),
             cx,
         );
@@ -382,7 +382,7 @@ fn a_toast_with_an_action_runs_it_on_a_click_and_leaves(cx: &mut TestAppContext)
     let ran = opened.clone();
     cx.update(|_, cx| {
         toast(
-            Toast::success("The agent shares a link: example.org")
+            Toast::success("The helper shares a link: example.org")
                 .action("Open", move |_, _| ran.set(ran.get() + 1)),
             cx,
         );
@@ -419,7 +419,7 @@ fn a_field_draws_its_label_above_its_control_and_its_hint_and_error_under_it(
             "Name",
             div().id("name-input").h(px(34.)).w(px(200.)).test_support(),
         )
-        .hint("Agents run it as commands_run test.")
+        .hint("Helpers run it as commands_run test.")
         .error(said.borrow().map(Into::into))
         .into_any_element()
     });
@@ -540,7 +540,7 @@ fn a_segment_that_cannot_be_chosen_is_shown_and_a_click_on_it_does_nothing(
         Segmented::new(
             "theme",
             "Theme",
-            [("omarchy", "Omarchy"), ("flottille", "Flottille")],
+            [("omarchy", "Omarchy"), ("plain", "Plain")],
             1,
         )
         .unavailable(0)
@@ -561,14 +561,10 @@ fn choosing_a_radio_choice_reports_it_and_its_dot_scales_in(cx: &mut TestAppCont
         RadioChoices::new("source", "What it is")
             .choice(
                 "file",
-                "A file of the project",
-                "Read where the agent works.",
+                "A file of the folder",
+                "Read from where it is used.",
             )
-            .choice(
-                "text",
-                "A text Flottille keeps",
-                "In Flottille's data folder.",
-            )
+            .choice("text", "A text the app keeps", "In the app's data folder.")
             .chosen(seen.get())
             .on_choose(move |index, _, cx| {
                 seen.set(index);
@@ -579,7 +575,7 @@ fn choosing_a_radio_choice_reports_it_and_its_dot_scales_in(cx: &mut TestAppCont
     cx.update(|window, _| {
         assert!(
             window
-                .try_find_by_label("In Flottille's data folder.")
+                .try_find_by_label("In the app's data folder.")
                 .is_some()
         );
         assert_eq!(window.find("source-file").selected(), Some(true));

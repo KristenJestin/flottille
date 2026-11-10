@@ -198,6 +198,8 @@ pub struct Daemon {
     pub inactive_checked: AtomicU64,
     /// Where the vault's secrets are (`docs/vault.md`).
     pub vault: crate::vault::Keyring,
+    /// What the extensions keep while the daemon runs.
+    pub extensions: extensions::Live,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -249,6 +251,7 @@ impl Daemon {
             developer: developer::Log::open(paths),
             inactive_checked: AtomicU64::new(0),
             vault: crate::vault::Keyring::open(paths),
+            extensions: extensions::Live::default(),
             stopping: watch::Sender::new(false),
         }
     }
@@ -476,6 +479,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     }
     agents::stop_all(&daemon).await;
     runs::stop_all(&daemon).await;
+    extensions::stop_all(&daemon).await;
     daemon.emit("daemon.stopping", json!({"reason": reason}))?;
     daemon.events.lock().unwrap().bus = None;
     daemon.stopping.send_replace(true);

@@ -736,6 +736,17 @@ pub(crate) fn environment(
     Ok(env)
 }
 
+/// The environment of a program the daemon runs beside it for every project, in no place (a
+/// connection's server): the daemon's, the forges and the daemon kept out of reach as for a run.
+pub(crate) fn beside(daemon: &Daemon) -> Result<BTreeMap<OsString, OsString>, String> {
+    let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    let empty = daemon.paths.state.join("empty");
+    flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
+    defend(&mut env, &empty, false);
+    env.remove(&OsString::from("XDG_RUNTIME_DIR"));
+    Ok(env)
+}
+
 fn names(place: &Place, repository: &str) -> Names {
     Names {
         workspace: place.workspace.clone().unwrap_or_else(|| "main".into()),

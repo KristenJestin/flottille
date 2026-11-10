@@ -133,20 +133,19 @@ fn unchecked(data: &Value) -> String {
 /// A root's report, its question to the user, or its failure, oldest first. With `after`, the
 /// first `limit` after that number; without, the last `limit` of all.
 fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
-    let events = daemon.read(|store| {
-        store.events_named(
-            &[
-                "agent.reported",
-                "agent.asked",
-                "agent.failed",
-                "session.following_paused",
-                "vault.asked",
-                "run.agent_folders_unchecked",
-                "run.agent_folders_put_back",
-            ],
-            asked.after.unwrap_or(0),
-        )
-    })?;
+    // What an extension says needs the user is no agent's: its own kind, its own text.
+    let extensions = crate::extensions::needs_you();
+    let mut names = vec![
+        "agent.reported",
+        "agent.asked",
+        "agent.failed",
+        "session.following_paused",
+        "vault.asked",
+        "run.agent_folders_unchecked",
+        "run.agent_folders_put_back",
+    ];
+    names.extend(extensions.iter().map(|(event, _, _)| *event));
+    let events = daemon.read(|store| store.events_named(&names, asked.after.unwrap_or(0)))?;
     // A paused following that resumed since says so: the inbox keeps what was sent.
     let resumed = daemon.read(|store| {
         store.events_named(&["session.following_resumed"], asked.after.unwrap_or(0))
@@ -156,6 +155,13 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
         .read(|store| store.events_named(&["vault.ask_answered"], asked.after.unwrap_or(0)))?;
     let mut entries = Vec::new();
     for event in events {
+        if let Some((_, kind, text)) = extensions.iter().find(|(name, _, _)| *name == event.name) {
+            entries.push(json!({
+                "seq": event.seq, "at": event.at, "kind": kind, "agent": null,
+                "project": null, "workspace": null, "text": text(&event.data),
+            }));
+            continue;
+        }
         let kind = match (event.name.as_str(), &event.data["to"]) {
             ("agent.reported", _) => "report",
             ("agent.asked", to) if to == "user" => "question",

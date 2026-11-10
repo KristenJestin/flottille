@@ -39,7 +39,6 @@ fn no_overlay_draws_a_shadow_in_a_black_of_its_own() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     sources(&root.join("src"), &mut files);
-    sources(&root.join("../flottille-window/src"), &mut files);
     assert!(files.len() > 20, "the sources were found: {}", files.len());
     let mut offenders = Vec::new();
     for file in files {

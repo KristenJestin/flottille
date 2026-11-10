@@ -16,7 +16,7 @@ use flottille_window::session::SessionPage;
 use flottille_window::shell::Selection;
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Bounds, Entity, Pixels, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Bounds, Entity, Focusable, Pixels, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 const TITLE: &str = "Write a README that says what the project is for and how to start";
@@ -613,6 +613,66 @@ fn a_session_in_the_main_checkout_offers_no_removal(cx: &mut TestAppContext) {
         !present(cx, "remove-workspace"),
         "a session in the project's folder has no workspace to remove"
     );
+}
+
+#[gpui_kit::test]
+fn a_session_in_the_project_folder_is_offered_no_ticket_to_link(cx: &mut TestAppContext) {
+    let user = user();
+    lead(&user);
+    let main = another_session(&user, None, "Tidy the notes");
+    let (_shell, cx) = open_session(&user, &main, cx);
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    // The menu offers Open in editor only: a ticket belongs to a workspace.
+    let offered: Vec<&str> = [
+        "open-in-editor",
+        "workspace-link-ticket",
+        "workspace-unlink-ticket",
+        "remove-workspace",
+    ]
+    .into_iter()
+    .filter(|id| present(cx, id))
+    .collect();
+    assert_eq!(offered, ["open-in-editor"]);
+}
+
+#[gpui_kit::test]
+fn a_session_in_a_workspace_still_links_a_ticket_from_its_rail(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    with_ticket_and_pull(&user);
+    user.call(
+        "workspace.link_ticket",
+        json!({"project": "app", "name": "login", "ticket": null}),
+    )
+    .unwrap();
+    let (shell, cx) = open_session(&user, &lead, cx);
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("workspace-link-ticket", cx));
+    settle(cx);
+    let field = session_page(&shell, cx)
+        .read_with(cx, |p, cx| p.rail().read(cx).ticket_field().cloned())
+        .expect("the entry shows the field");
+    cx.update(|window, cx| {
+        let focus = field.read(cx).focus_handle(cx);
+        window.focus(&focus, cx)
+    });
+    cx.simulate_input("#7");
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the ticket linked", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, cx| {
+            let rail = p.rail().read(cx);
+            assert_eq!(rail.ticket_error(), None);
+            rail.place().is_some_and(|place| place.ticket.is_some())
+        })
+    });
+    let shown = user
+        .call("workspace.show", json!({"project": "app", "name": "login"}))
+        .unwrap();
+    assert_eq!(shown["ticket"], "#7", "{shown}");
 }
 
 #[gpui_kit::test]

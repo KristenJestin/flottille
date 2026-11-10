@@ -488,6 +488,38 @@ running session of every project the tools its role has now, before the answer (
 "When the tools change"), and a project's own switch does the same through its file. The user's
 door alone reaches these methods: no tool of an agent does.
 
+### The connection methods
+
+Connections' own (`docs/extensions.md`, "Connections"), the user's door alone: no tool of an agent
+reaches them. A connection is answered as its declaration (`name`, `about`, `enabled`, `command`
+or `url`, `env`, `headers`, `only`, `except`) with `tool`, `state` (`off`, `awaiting review`, `cut
+off` or `ready`), `review_due`, `cut_off` (what changed, or `null`), `running`, `failing` (why its
+server did not start, or `null`), `server` (`{name, version}` as accepted) and `actions` (`[{name,
+setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
+
+- `connection.list` answers `{"enabled", "error", "connections"}`: Connections' switch, why
+  `extensions.toml` cannot be used, and each connection.
+- `connection.add {name, about, command | url, env?, headers?, only?, except?, enabled?}` declares
+  one under `[[connections.server]]` of `extensions.toml`, checked key by key as the file is; `env`
+  and `headers` name vault entries (`{"TOKEN": {"vault": "<entry>"}}`), each of every project
+  (an entry tied to one project is `refused`); a `url` is `https://`, or `http://` on this machine.
+- `connection.edit {name, …}` replaces the keys given (`null` removes one; a command drops the URL
+  and the other way round). An edit of the command, the URL, `env`, `headers` or `only` asks for a
+  new review; `about`, `enabled` and `except` do not.
+- `connection.remove {name}` removes it, stops its server and forgets what was accepted.
+- `connection.review {name}` starts its server as declared and answers what it announces against
+  what was accepted: `{"name", "first", "declaration_changed", "cut_off", "changes", "server":
+  {"pinned", "now"}, "instructions": {"pinned", "now"}, "actions": [{"name", "change" (added,
+  removed, changed, unchanged), "pinned", "now", "setting"}], "refused", "limits": [{"argument",
+  "values", "covers", "not"}]}`. `unavailable` when the server does not start.
+- `connection.accept {name, actions?}` pins what the last review showed under the declaration as
+  it is, keeping the settings of the actions that did not change and putting each new or changed
+  one to `judged`; `actions` sets some by name. On a connection already ready, it sets them alone.
+  `refused` before a review.
+
+Each emits `connection.changed`; accepting, turning one on or off and a cut-off give every running
+session the tools it has now before the answer (`docs/tools.md`, "When the tools change").
+
 ### The spec methods
 
 Specs' own (`docs/extensions.md`, "Specs"), each refused while Specs is not active in the spec's
