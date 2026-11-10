@@ -21,7 +21,8 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
   publishes an alpha tag (`vX.Y.Z-alpha.<branch>.N`), its merge into the kit's `main` a beta
   (`vX.Y.Z-beta.N`). Flottille then bumps the `tag` of `gpui-design-system` in both
   `Cargo.toml` files to that tag, in the pull request of the issue that needs it: one line each,
-  and `Cargo.lock`. A screen that needs a component the kit lacks waits for it, never draws its
+  and `Cargo.lock`. An alpha tag may be pinned while both pull requests are open, never on `dev`:
+  the kit deletes a branch's alphas once it is merged, so `dev` pins a beta or a stable only. A screen that needs a component the kit lacks waits for it, never draws its
   own.
 - Results: at rest about 4 draws per second and under 1% of a core; lists of 7,200 rows and grids
   of 720 covers scroll with no frame over the 6 ms budget; animations at full refresh rate.
