@@ -2330,15 +2330,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "font-types"
-version = "0.12.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "835ae9d781464a79026cde387f9cbc650c9a4909d7cf7e658b127e3c35d2f35d"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
 name = "fontconfig-parser"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2826,7 +2817,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-alpha.feat-4-from-flottille.5#78c39aeb66936aa1f377f22ed153df3c4c3306aa"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-beta.2#6421327c6098d2606c8b5cab578aa177058c68cb"
 dependencies = [
  "gpui-kit",
  "toml 1.1.8+spec-1.1.0",
@@ -6602,7 +6593,7 @@ checksum = "7b634fabf032fab15307ffd272149b622260f55974d9fad689292a5d33df02e5"
 dependencies = [
  "bytemuck",
  "core_maths",
- "font-types 0.11.3",
+ "font-types",
 ]
 
 [[package]]
@@ -6612,18 +6603,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4ed38b89c2c77ff968c524145ad65fb010f38af5c7a224b53b81d47ac2daa81"
 dependencies = [
  "bytemuck",
- "font-types 0.11.3",
-]
-
-[[package]]
-name = "read-fonts"
-version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "046a7d674daf459825b32f5062056d6882db0d2f5a479fbd76ccfc870ac18709"
-dependencies = [
- "bytemuck",
- "font-types 0.12.7",
- "once_cell",
+ "font-types",
 ]
 
 [[package]]
@@ -7628,16 +7608,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "skrifa"
-version = "0.44.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
-dependencies = [
- "bytemuck",
- "read-fonts 0.41.0",
-]
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7908,7 +7878,7 @@ version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c2499c2d826531388872b2268718aed907a39bd785ab0dcfe57fab26283f92e"
 dependencies = [
- "skrifa 0.44.0",
+ "skrifa 0.42.1",
  "yazi",
  "zeno",
 ]
@@ -10088,7 +10058,7 @@ version = "0.48.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb731d4c4d93eacc69a1ad2f270f905788a98e4a3438267bcafbe08d3431c8d8"
 dependencies = [
- "font-types 0.11.3",
+ "font-types",
  "indexmap 2.14.2",
  "kurbo 0.13.1",
  "log",
