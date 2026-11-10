@@ -1789,7 +1789,10 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - reading inside the agent's place (the project folder or the workspace), the tree's tools (but
      `agent_launch` of a `led` or `handed` session, `session_send` and `session_read`), `tasks` `list` and `show`, `run_status`, `skill_read`, the reads of `forge` (`list`, `show`)
      and of `tickets` (`list`, `search`, `show`), `workspace` `list` and `show`;
-   - writing inside a workspace (`fs_write`, `fs_edit`, and `git add`, `mv`, `rm` there);
+   - writing inside a workspace (`fs_write`, `fs_edit`, and `git add`, `mv`, `rm` there), but a
+     `git mv` or `git rm` of a folder holding an agent folder, by a pattern or in another
+     folder (`-C`), which is to judge: it weakens the repository's settings without naming
+     them, and its run is guarded (`docs/design.md` §7.1);
    - a line the rules know to only read, inside the place: the reads of git (`status`, `log`,
      `diff`, `show`, `branch` and `tag` listings, `config` and `remote` reads…), of `gh` and
      `glab` (`pr view/list/diff/checks/status`, `issue view/list`, `run view/list`, `mr

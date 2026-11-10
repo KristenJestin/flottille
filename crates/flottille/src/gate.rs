@@ -1177,7 +1177,12 @@ fn run(call: &Call) -> Verdict {
                         shown_words(layer)
                     ));
                 }
-                Line::Files => files = true,
+                Line::Files => {
+                    files = true;
+                    if let Some(why) = moves_agent_folder(call, layer) {
+                        found.judge(why);
+                    }
+                }
                 Line::Writes => reads = false,
                 Line::Judge(why) => {
                     reads = false;
@@ -3308,6 +3313,76 @@ fn named<'a>(call: &Call, layers: &'a [Vec<String>]) -> Vec<(&'a str, Resolved, 
     named
 }
 
+/// The most entries of a folder a `git rm` or `git mv` names looked at for an agent folder: past
+/// it, it may hold one.
+const MOVED_ENTRIES_MAX: usize = 10_000;
+
+/// Why a `git rm` or `git mv` of the place's files is held: a folder it names holds an agent
+/// folder, or a pathspec of `git rm` may reach one. Removing one weakens the repository's settings
+/// (its deny rules) without naming them; held, its run is guarded and what it removed there is
+/// put back (`agent_folders`).
+fn moves_agent_folder(call: &Call, layer: &[String]) -> Option<String> {
+    let folder = call.paths.first()?;
+    let at = layer.iter().position(|word| word == "rm" || word == "mv")?;
+    let shown = || shown_words(layer);
+    // Another folder or work tree: what the words name is not where the gate looks.
+    if layer[1..at]
+        .iter()
+        .any(|word| word.starts_with("-C") || word.starts_with("--work-tree"))
+    {
+        return Some(format!(
+            "{} moves or removes files of another folder, which may hold an agent folder",
+            shown()
+        ));
+    }
+    for word in layer[at + 1..].iter().filter(|word| !word.starts_with('-')) {
+        if word.starts_with(':') || word.contains(['*', '?', '[']) {
+            return Some(format!(
+                "{} names files by a pattern ({word}), which may reach an agent folder",
+                shown()
+            ));
+        }
+        let path = call.grant.place.resolve(&folder.path, word);
+        if holds_agent_folder(&path.path) {
+            return Some(format!(
+                "{} moves or removes {word}, which holds an agent folder (.claude, .codex…): its \
+                 settings stop applying to the repository",
+                shown()
+            ));
+        }
+    }
+    None
+}
+
+/// Whether the folder `path` holds an agent folder, or more entries than are looked at. Links
+/// are not followed, nor `.git` walked.
+fn holds_agent_folder(path: &Path) -> bool {
+    if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) {
+        return false;
+    }
+    let mut pending = vec![path.to_owned()];
+    let mut seen = 0;
+    while let Some(folder) = pending.pop() {
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            seen += 1;
+            if seen > MOVED_ENTRIES_MAX {
+                return true;
+            }
+            let name = entry.file_name();
+            if AGENT_FOLDERS.iter().any(|agent| {
+                name.as_encoded_bytes()
+                    .eq_ignore_ascii_case(agent.as_bytes())
+            }) {
+                return true;
+            }
+            if name != ".git" && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(entry.path());
+            }
+        }
+    }
+    false
+}
+
 /// Whether a layer is a git command that prints a file of a revision named `rev:path`.
 fn shows_revisions(layer: &[String]) -> bool {
     if base(&layer[0]) != "git" {
@@ -4374,6 +4449,32 @@ mod tests {
         assert_eq!(fixture.file("fs_write", "src/a.rs"), Verdict::Allow);
         assert_eq!(fixture.file("fs_edit", "src/a.rs"), Verdict::Allow);
         for line in ["git add src", "git mv a b", "git rm src/a.rs"] {
+            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+    }
+
+    #[test]
+    fn git_rm_or_mv_of_a_folder_holding_an_agent_folder_is_judged_not_allowed_at_once() {
+        // It weakens the repository's settings (its deny rules gone) without naming them: held,
+        // its run is guarded and what it removed there is put back.
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join("docs/.claude/settings.json"));
+        made(&fixture.root.join("src/a.rs"));
+        for line in [
+            "git rm -r docs",
+            "git rm -r --cached docs",
+            "git mv docs notes",
+            "git rm -r .",
+            "git rm -r ':(glob)**/settings.json'",
+            "git rm -r '*.json'",
+        ] {
+            assert!(
+                matches!(fixture.run(line), Verdict::Ask(_)),
+                "{line}: {:?}",
+                fixture.run(line)
+            );
+        }
+        for line in ["git rm -r src", "git mv src lib", "git rm src/a.rs"] {
             assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
         }
     }
