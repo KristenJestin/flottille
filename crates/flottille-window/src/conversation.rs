@@ -1486,7 +1486,7 @@ impl Conversation {
                     .rsplit_once(WHERE_QUESTIONS_GO)
                     .map_or(text, |(brief, _)| brief);
                 Block::Message {
-                    from: format!("started by {}", flottille_ui::quoted_title(who)),
+                    from: format!("started by {}", gpui_design_system::quoted_title(who)),
                     text: text.to_owned(),
                     images: Vec::new(),
                     commands: None,
@@ -1632,7 +1632,7 @@ pub const STARTED_SESSION_KIND: &str = "started session";
 fn started_session(title: String) -> Block {
     Block::Notice {
         kind: STARTED_SESSION_KIND.into(),
-        text: flottille_ui::quoted_title(&title),
+        text: gpui_design_system::quoted_title(&title),
     }
 }
 

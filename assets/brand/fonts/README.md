@@ -1,7 +1,8 @@
 # The fonts of the brand
 
 The fonts the scene and the social previews are drawn with, so that they render the same on every
-machine. They are the window's own faces, the same files as `crates/flottille-ui/assets/fonts/`.
+machine. They are the window's own faces, the same files as the `assets/fonts/` of the kit
+(`gpui-design-system`); `OFL.txt` is the fonts' licence a build ships (`tools/package.sh`).
 
 | Font | Files | Licence | Source |
 |---|---|---|---|

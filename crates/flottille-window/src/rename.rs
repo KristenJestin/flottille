@@ -2,7 +2,7 @@
 //! page's header, a dialog with one labelled field. The daemon names it (`agent.rename`), its
 //! agent can no longer change it, and the result is a toast.
 
-use flottille_ui::{Button, Field, Modal, space};
+use gpui_design_system::{Button, Field, Modal, space};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     Context, Entity, Focusable as _, IntoElement, ParentElement, Render, SharedString, Styled,

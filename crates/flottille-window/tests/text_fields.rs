@@ -1,6 +1,7 @@
-//! A text field takes its style from `flottille_ui::field_style`, and keeps it with the theme
-//! through `follow_theme`. A source scan holds it: a field made with a style of its own would
-//! keep the colours of the theme it was made in.
+//! A text field takes its style from `gpui_design_system::field_style`, and keeps it with the
+//! theme through `follow_theme`. A source scan holds it: a field made with a style of its own
+//! would keep the colours of the theme it was made in. The kit's own fields are held by the same
+//! scan in the kit (`tests/text_fields.rs`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -60,16 +61,9 @@ fn every_text_field_takes_its_style_from_the_helper() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     sources(&root.join("src"), &mut files);
-    sources(&root.join("../flottille-ui/src"), &mut files);
     assert!(files.len() > 20, "the sources were found: {}", files.len());
     let mut offenders = Vec::new();
     for file in files {
-        // The helper is where a style is built.
-        if file.ends_with("flottille-ui/src/field.rs")
-            || file.ends_with("../flottille-ui/src/field.rs")
-        {
-            continue;
-        }
         let source = fs::read_to_string(&file).unwrap();
         for (at, line) in faults(&source) {
             offenders.push(format!("{}:{at}: {line}", file.display()));
@@ -77,7 +71,7 @@ fn every_text_field_takes_its_style_from_the_helper() {
     }
     assert!(
         offenders.is_empty(),
-        "a text field takes its style from flottille_ui::field_style, through follow_theme:\n{}",
+        "a text field takes its style from gpui_design_system::field_style, through follow_theme:\n{}",
         offenders.join("\n")
     );
 }

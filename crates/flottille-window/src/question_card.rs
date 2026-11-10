@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 
 use flottille_core::question::{Answer, Question};
-use flottille_ui::{
+use gpui_design_system::{
     Block, Button, Card, ChoiceRow, Field, Icon, Toast, Type as _, changing, icon, palette,
     presence, quoted_title, space, toast,
 };
@@ -101,7 +101,7 @@ impl QuestionCard {
                     if let Some(placeholder) = placeholder {
                         field = field.placeholder(placeholder);
                     }
-                    flottille_ui::follow_theme(&mut field, cx);
+                    gpui_design_system::follow_theme(&mut field, cx);
                     field
                 });
                 subscriptions.push(cx.subscribe_in(
@@ -381,7 +381,7 @@ impl QuestionCard {
             div().ml(space::XXL).child(Field::new(
                 id(format!("{part}-{n}-field")),
                 label,
-                flottille_ui::growing(id(format!("{part}-{n}-height")), frame),
+                gpui_design_system::growing(id(format!("{part}-{n}-height")), frame),
             ))
         };
         let several = question.multiple.then(|| {

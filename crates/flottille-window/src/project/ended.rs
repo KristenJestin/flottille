@@ -1,7 +1,7 @@
 //! The bottom of Work: `3 ended runs`, folded, the last task runs that ended in the project, each
 //! with its place and how it ended. A click on one opens its drawer.
 
-use flottille_ui::{
+use gpui_design_system::{
     FlatRow, Fold, Item, Listing, Placement, icon, palette, presence, space, turning,
 };
 use gpui_kit::{

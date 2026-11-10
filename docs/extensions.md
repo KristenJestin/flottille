@@ -262,7 +262,7 @@ the judge as its one known exception until the judge moves ("The last step").
 ### Screens (Specs)
 
 The window's shell offers places; an extension's window module fills them, built from
-`flottille-ui`'s components and under the rules of the window.
+the components of the kit (`gpui-design-system`) and under the rules of the window.
 
 - **Its settings, in the place it declares**, rendered from the declaration, and its page in a
   project's Features for its per-project switch and values (Specs).
@@ -493,7 +493,7 @@ right while the list leaves to the left, and back the other way; its sections en
 other; the switch moves over `HOVER`; the settings fold and unfold with the switch; a Save
 unfolds once a value changed; an error appears and leaves animated. Each window issue lists what
 it animates and ticks the checklist of `reference/gpui.md`. This note designs no pixels: the
-components of `flottille-ui` hold them.
+components of the kit (`gpui-design-system`) hold them.
 
 ## The extensions
 

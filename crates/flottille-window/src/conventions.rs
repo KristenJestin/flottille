@@ -4,7 +4,7 @@
 //! Each is off when empty. The window writes nothing itself: Save is the daemon's
 //! (`project.set_conventions`), and the field shows what the daemon says next.
 
-use flottille_ui::{
+use gpui_design_system::{
     Button, Field, Section, Toast, Type as _, follow_theme, growing, palette, space, toast,
 };
 use gpui_kit::base::input::{InputEvent, InputState, TextareaState};

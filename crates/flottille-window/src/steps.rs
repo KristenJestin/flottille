@@ -1,11 +1,11 @@
 //! The rows of a setup's steps and the text of a message with its commands, which draw what an
-//! agent does with the parts of `flottille-ui`.
+//! agent does with the parts of the kit (`gpui-design-system`).
 
 use std::ops::Range;
 use std::rc::Rc;
 
-use flottille_ui::motion::PANEL;
-use flottille_ui::{Type, hoverable, palette, tint, tipped_when_cut};
+use gpui_design_system::motion::PANEL;
+use gpui_design_system::{Type, hoverable, palette, tint, tipped_when_cut};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, HighlightStyle, InteractiveElement,

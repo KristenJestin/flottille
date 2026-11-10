@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use flottille_ui::omarchy::Environment;
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext};
 
 /// A desktop of temporary files: an os-release and a state folder.

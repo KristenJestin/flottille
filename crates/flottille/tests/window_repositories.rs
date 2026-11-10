@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::project::{PlaceBlock, ProjectPage};
@@ -20,6 +19,7 @@ use flottille_window::repositories::ProjectRepositories;
 use flottille_window::session::SessionPage;
 use flottille_window::shell::Selection;
 use flottille_window::tree::session_id;
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -833,7 +833,7 @@ fn the_base_list_and_the_add_field_have_the_scale_s_gap_between_them(cx: &mut Te
     };
     assert_eq!(
         gap("base-list", cx),
-        flottille_ui::space::SM,
+        gpui_design_system::space::SM,
         "the list of bases and the field that adds one"
     );
 
@@ -843,7 +843,7 @@ fn the_base_list_and_the_add_field_have_the_scale_s_gap_between_them(cx: &mut Te
         settle(cx);
     }
     page.read_with(cx, |page, _| assert!(page.bases().is_empty()));
-    assert_eq!(gap("base-empty", cx), flottille_ui::space::SM);
+    assert_eq!(gap("base-empty", cx), gpui_design_system::space::SM);
 }
 
 #[gpui_kit::test]

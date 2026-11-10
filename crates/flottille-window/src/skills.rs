@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use flottille_ui::{
+use gpui_design_system::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, RadioChoices,
     Section, Toast, Type, follow_theme, growing, hoverable, icon, palette, presence, space, toast,
 };
@@ -742,13 +742,17 @@ impl SkillsSection {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.pick(&name, entry.folder, window, cx)
                     }));
-                flottille_ui::selectable(row, picked, move |d, t, chosen| {
-                    d.bg(flottille_ui::color::mix(p.hover.opacity(t), p.sel, chosen))
-                        .text_color(flottille_ui::color::mix(
-                            flottille_ui::color::mix(p.mute, p.text, t),
-                            p.text,
-                            chosen,
-                        ))
+                gpui_design_system::selectable(row, picked, move |d, t, chosen| {
+                    d.bg(gpui_design_system::color::mix(
+                        p.hover.opacity(t),
+                        p.sel,
+                        chosen,
+                    ))
+                    .text_color(gpui_design_system::color::mix(
+                        gpui_design_system::color::mix(p.mute, p.text, t),
+                        p.text,
+                        chosen,
+                    ))
                 })
             }));
         let this = cx.entity().downgrade();

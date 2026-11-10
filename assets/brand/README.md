@@ -23,9 +23,9 @@ call, the lead's sentence ("The conversation forwards it: …") and who asked an
 A sub-agent never asks the user directly and never starts an agent of its own
 (`docs/design.md` §5.1 and §7), so the scene shows neither.
 
-The colours are the window's (`crates/flottille-ui/src/theme.rs`): ink `#ececec` on the dark
-ground `#0b0b0b` and `#141414`, `#141414` on a light one, amber `#f5a524` for what waits for the
-user, blue `#7aa7ff` for a running agent, green `#4ade80` for one that reported.
+The colours are the window's (`src/theme.rs` of the kit, `gpui-design-system`): ink `#ececec` on
+the dark ground `#0b0b0b` and `#141414`, `#141414` on a light one, amber `#f5a524` for what waits
+for the user, blue `#7aa7ff` for a running agent, green `#4ade80` for one that reported.
 
 ## What is generated
 

@@ -24,16 +24,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flottille_ui::card::Block as CardBlock;
-use flottille_ui::color::mix;
-use flottille_ui::motion::{HOVER, Motion, PANEL};
-use flottille_ui::{
+use futures::channel::mpsc::UnboundedSender;
+use gpui_design_system::card::Block as CardBlock;
+use gpui_design_system::color::mix;
+use gpui_design_system::motion::{HOVER, Motion, PANEL};
+use gpui_design_system::{
     Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette,
     PulsingLabel, Side, Skeleton, Toast, Type, awaiting, changing, enter, fade, fold_frame,
     follow_theme, hoverable, icon, palette, path_line, presence, presence_of, section_label,
     selectable, space, text_region, tint, tipped_when_cut, toast, turning,
 };
-use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
     Escape, Input, InputEvent, InputState, MoveDown, MoveUp, TextareaState,
 };
@@ -80,7 +80,7 @@ use crate::subscriptions::SubscriptionList;
 use crate::to_end::ToEnd;
 use crate::tree::place_name;
 use crate::waiting::{Waiting, sentences};
-use flottille_ui::drawer::Closed;
+use gpui_design_system::drawer::Closed;
 
 /// Width of the session page's right rail.
 pub const RAIL: f32 = 290.;
@@ -1933,7 +1933,7 @@ impl Render for SessionPage {
                     .text_size(px(14.))
                     .semibold()
                     // A title its agent or the user gives fades in over the one before.
-                    .opacity(flottille_ui::changed(
+                    .opacity(gpui_design_system::changed(
                         &"session-title".into(),
                         &SharedString::from(self.opened.title.clone()),
                         window,
@@ -6162,11 +6162,11 @@ impl Row {
     fn render_asked(&self, moved: bool, cx: &App) -> AnyElement {
         let p = palette(cx);
         let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
-        let title = flottille_ui::quoted_title(&self.title(cx));
+        let title = gpui_design_system::quoted_title(&self.title(cx));
         let said = match self.pilot(cx) {
             Some(pilot) => format!(
                 "{title} asks its pilot {}",
-                flottille_ui::quoted_title(&pilot)
+                gpui_design_system::quoted_title(&pilot)
             ),
             None => format!("{title} asks its pilot"),
         };
@@ -6227,7 +6227,7 @@ impl Row {
             }
         };
         let when = SharedString::from(self.when.map(clock).unwrap_or_default());
-        let title = flottille_ui::quoted_title(&self.title(cx));
+        let title = gpui_design_system::quoted_title(&self.title(cx));
         crate::vault_ask::card(self.at, &title, when, &ask, fields, cx)
     }
 
@@ -6330,7 +6330,7 @@ impl SessionPage {
             .text_size(px(12.))
             .text_color(p.faint)
             // The title on one line, cut, in emphasis: never a sentence wrapped around it.
-            .child(flottille_ui::quoted(
+            .child(gpui_design_system::quoted(
                 id,
                 match id {
                     "session-led-by" => "led by ",
@@ -8430,7 +8430,7 @@ pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<
 }
 
 /// A [`pull_row`] once its handlers and children are on: its hover fades in.
-pub(crate) fn pull_hover(row: Stateful<Div>, cx: &App) -> flottille_ui::Hoverable {
+pub(crate) fn pull_hover(row: Stateful<Div>, cx: &App) -> gpui_design_system::Hoverable {
     let p = palette(cx);
     hoverable(row, move |d, t| d.text_color(mix(p.mute, p.text, t)))
 }
@@ -9218,7 +9218,7 @@ impl Reply {
             .rows()
             .map(|row| {
                 let name = row.value.clone();
-                flottille_ui::Item::new(
+                gpui_design_system::Item::new(
                     ElementId::Name(format!("reply-command-item-{name}").into()),
                     row.placement,
                     div()
@@ -9293,7 +9293,7 @@ impl Reply {
                     cx.listener(move |this, _, window, cx| this.pick(&picked, window, cx)),
                 );
             }
-            let item = flottille_ui::Item::new(
+            let item = gpui_design_system::Item::new(
                 ElementId::Name(format!("slash-item-{name}").into()),
                 row.placement,
                 line,
@@ -9863,11 +9863,11 @@ mod tests {
         let dark = Palette::base();
         let mut light = Palette::base();
         (light.bg, light.card, light.card2, light.text, light.mute) = (
-            flottille_ui::color::hex(0xfafafa),
-            flottille_ui::color::hex(0xf0f0f0),
-            flottille_ui::color::hex(0xe6e6e6),
-            flottille_ui::color::hex(0x1c1c1c),
-            flottille_ui::color::hex(0x555555),
+            gpui_design_system::color::hex(0xfafafa),
+            gpui_design_system::color::hex(0xf0f0f0),
+            gpui_design_system::color::hex(0xe6e6e6),
+            gpui_design_system::color::hex(0x1c1c1c),
+            gpui_design_system::color::hex(0x555555),
         );
         for (p, muted) in [(dark, false), (dark, true), (light, false), (light, true)] {
             let style = markdown_style(&p, muted);

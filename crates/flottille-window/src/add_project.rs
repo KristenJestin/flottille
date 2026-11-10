@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use flottille_ui::{Button, Modal, Type, enter, palette, presence, space};
+use gpui_design_system::{Button, Modal, Type, enter, palette, presence, space};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,

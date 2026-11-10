@@ -8,9 +8,9 @@ use crate::state::{AgentState, StateIcon, Status};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use flottille_ui::drawer::Closed;
-use flottille_ui::motion::HOVER;
-use flottille_ui::{
+use gpui_design_system::drawer::Closed;
+use gpui_design_system::motion::HOVER;
+use gpui_design_system::{
     Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow, Listing,
     Menu, Modal, PageHeader, Placement, Section, Switch, Toast, Type, enter, fade, palette,
     presence, presence_of, space, toast,

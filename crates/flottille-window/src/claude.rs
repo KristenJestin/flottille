@@ -4,7 +4,9 @@
 //! `command.import`); the window only offers what it found: each file with Import, Import all,
 //! and a file that cannot be imported with why.
 
-use flottille_ui::{Button, Icon, ListCard, ListRow, Listing, icon, palette, presence, space};
+use gpui_design_system::{
+    Button, Icon, ListCard, ListRow, Listing, icon, palette, presence, space,
+};
 use gpui_kit::{
     App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, TestSupportExt as _, Window, div, px,
@@ -61,13 +63,13 @@ fn called_after(path: &str) -> String {
 }
 
 /// The toast an import says: what was imported, and what was left out.
-pub fn imported_toast(kind: ClaudeKind, read: &Result<Value, String>) -> flottille_ui::Toast {
+pub fn imported_toast(kind: ClaudeKind, read: &Result<Value, String>) -> gpui_design_system::Toast {
     let noun = match kind {
         ClaudeKind::Skill => ("skill", "skills"),
         ClaudeKind::Command => ("command", "commands"),
     };
     match read {
-        Err(why) => flottille_ui::Toast::failure(format!("The {} were not imported", noun.1))
+        Err(why) => gpui_design_system::Toast::failure(format!("The {} were not imported", noun.1))
             .detail(why.clone()),
         Ok(value) => {
             let names: Vec<&str> = value["imported"]
@@ -82,7 +84,7 @@ pub fn imported_toast(kind: ClaudeKind, read: &Result<Value, String>) -> flottil
                 [one] => format!("{} {one} imported", capital(noun.0)),
                 many => format!("{} {} imported", many.len(), noun.1),
             };
-            let toast = flottille_ui::Toast::success(title);
+            let toast = gpui_design_system::Toast::success(title);
             match skipped {
                 0 => toast.detail("Agents created from now on see them."),
                 n => toast.detail(format!("{n} left out: the list of .claude says why.")),

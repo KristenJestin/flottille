@@ -138,7 +138,7 @@ fn every_result_of_an_action_is_a_toast() {
     let found = offenders(results_under_a_form);
     assert!(
         found.is_empty(),
-        "an action's result is a toast (`flottille_ui::toast`), never a line under a form:\n{}",
+        "an action's result is a toast (`gpui_design_system::toast`), never a line under a form:\n{}",
         found.join("\n")
     );
 }
@@ -230,7 +230,7 @@ fn every_gap_and_padding_of_the_window_is_a_step_of_the_scale() {
     let found = offenders_in(screens, spacing_literals);
     assert!(
         found.is_empty(),
-        "a gap or a padding is a step of `flottille_ui::space` (4, 8, 12, 16, 24, 32, 48):\n{}",
+        "a gap or a padding is a step of `gpui_design_system::space` (4, 8, 12, 16, 24, 32, 48):\n{}",
         found.join("\n")
     );
 }
@@ -267,7 +267,7 @@ fn every_markdown_of_the_window_is_drawn_in_the_palette() {
 // ── A state mark is an icon, never a text character ────────────────────────────────────────────
 
 /// The lines that draw a state mark with a character (`✓ ✗ ● ■ ×`, or `–` alone in a string),
-/// which looks like ASCII next to the stroked icons: a mark is an `Icon` of `flottille-ui`.
+/// which looks like ASCII next to the stroked icons: a mark is an `Icon` of `gpui-design-system`.
 fn text_marks(source: &str) -> Vec<(usize, String)> {
     code(source)
         .filter(|(_, line)| line.chars().any(|c| "✓✗●■×".contains(c)) || line.contains("\"–\""))
@@ -447,7 +447,7 @@ fn no_overlay_of_the_window_draws_a_shadow_in_a_black_of_its_own() {
 }
 
 /// The lines that open GPUI's own tooltip, which follows the pointer: a tooltip is anchored to its
-/// element (`Button::tooltip`, `flottille_ui::tipped`).
+/// element (`Button::tooltip`, `gpui_design_system::tipped`).
 fn pointer_tooltips(source: &str) -> Vec<(usize, String)> {
     code(source)
         .filter(|(_, line)| line.contains(".tooltip(|") || line.contains(".tooltip(move |"))

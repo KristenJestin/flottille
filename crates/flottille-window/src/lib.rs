@@ -57,19 +57,32 @@ pub mod workspaces_folder;
 use futures::StreamExt as _;
 use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 
-/// What the window tells the kit about itself: its name, and the palette of its own look.
-pub fn identity() -> flottille_ui::Identity {
-    flottille_ui::Identity::new("Flottille").palette(flottille_ui::Palette::own)
+/// The id of Flottille's own theme, as the daemon keeps the user's choice (`appearance.show`).
+pub const OWN_THEME: &str = "flottille";
+
+/// The id of the Omarchy desktop source, as the daemon keeps the user's choice.
+pub const OMARCHY: &str = "omarchy";
+
+/// What the window tells the kit about itself: its name, its own look, and the desktop described
+/// by `env`, whose Omarchy theme it offers to follow.
+pub fn identity(env: gpui_design_system::omarchy::Environment) -> gpui_design_system::Identity {
+    gpui_design_system::Identity::new("Flottille")
+        .themes([gpui_design_system::Theme::new(
+            OWN_THEME,
+            "Flottille",
+            gpui_design_system::Palette::own,
+        )])
+        .desktop(gpui_design_system::omarchy::Omarchy::new(env))
 }
 
 /// Initialises the kit for the window.
 pub fn init(cx: &mut gpui_kit::App) {
-    flottille_ui::init(identity(), cx);
+    init_with(gpui_design_system::omarchy::Environment::from_system(), cx);
 }
 
 /// [`init`] with the desktop described by `env` rather than read from the machine.
-pub fn init_with(env: flottille_ui::omarchy::Environment, cx: &mut gpui_kit::App) {
-    flottille_ui::init_with(identity(), env, cx);
+pub fn init_with(env: gpui_design_system::omarchy::Environment, cx: &mut gpui_kit::App) {
+    gpui_design_system::init(identity(env), cx);
 }
 
 pub use instance::Instance;

@@ -8,7 +8,7 @@ use crate::glyphs;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
 
-use flottille_ui::{
+use gpui_design_system::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader,
     RadioChoices, Section, Toast, changing, color, enter, hoverable, icon, palette, presence,
     presence_of, space, toast, turning,
@@ -571,7 +571,7 @@ impl Render for SpecsTab {
             reduce,
         );
         let present = !self.list.is_empty();
-        let rows: Vec<(String, Summary, flottille_ui::Placement)> = self
+        let rows: Vec<(String, Summary, gpui_design_system::Placement)> = self
             .list
             .rows()
             .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
@@ -2137,7 +2137,7 @@ impl Render for SpecPage {
                 .gap(space::SM),
             );
         // The questions: the open ones, each answered in one click; the spec's own open ones.
-        let listed: Vec<(String, Question, flottille_ui::Placement)> = self
+        let listed: Vec<(String, Question, gpui_design_system::Placement)> = self
             .questions
             .rows()
             .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
@@ -2146,7 +2146,7 @@ impl Render for SpecPage {
         for (key, question, placement) in listed {
             let card = self.question_card(&question, window, cx);
             cards.push(
-                flottille_ui::Item::new(
+                gpui_design_system::Item::new(
                     ElementId::Name(format!("{key}-item").into()),
                     placement,
                     card,
@@ -2184,7 +2184,7 @@ impl Render for SpecPage {
                 spec.as_ref().map_or("", |spec| spec.problem.as_str()),
                 cx,
             ));
-        let rows: Vec<(String, (String, String), flottille_ui::Placement)> = self
+        let rows: Vec<(String, (String, String), gpui_design_system::Placement)> = self
             .behaviour
             .rows()
             .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
@@ -2198,7 +2198,7 @@ impl Render for SpecPage {
                 .child(numbered(key.clone(), &id, text, None, cx))
                 .child(self.decided(&key, decided.as_ref(), window, cx));
             lines.push(
-                flottille_ui::Item::new(
+                gpui_design_system::Item::new(
                     ElementId::Name(format!("{key}-item").into()),
                     placement,
                     line,
@@ -2217,7 +2217,7 @@ impl Render for SpecPage {
                 paragraph("spec-behaviour-none", "", cx),
             ))
             .child(div().flex().flex_col().children(lines));
-        let rows: Vec<(String, Decision, flottille_ui::Placement)> = self
+        let rows: Vec<(String, Decision, gpui_design_system::Placement)> = self
             .decisions
             .rows()
             .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
@@ -2245,7 +2245,7 @@ impl Render for SpecPage {
                 ))
                 .child(self.decided(&key, decided.as_ref(), window, cx));
             decision_lines.push(
-                flottille_ui::Item::new(
+                gpui_design_system::Item::new(
                     ElementId::Name(format!("{key}-item").into()),
                     placement,
                     line,
@@ -2265,7 +2265,7 @@ impl Render for SpecPage {
             .child(div().flex().flex_col().children(decision_lines));
         // The amendments: the pending ones, each accepted or refused in one click, folding away
         // once answered; the refused ones folded under their own line.
-        let rows: Vec<(String, Amendment, flottille_ui::Placement)> = self
+        let rows: Vec<(String, Amendment, gpui_design_system::Placement)> = self
             .amendments
             .rows()
             .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
@@ -2274,7 +2274,7 @@ impl Render for SpecPage {
             .into_iter()
             .map(|(key, amendment, placement)| {
                 let card = self.amendment_card(&amendment, cx);
-                flottille_ui::Item::new(
+                gpui_design_system::Item::new(
                     ElementId::Name(format!("{key}-item").into()),
                     placement,
                     card,
@@ -2616,7 +2616,7 @@ impl Render for SpecPage {
 /// identifier, severity and confidence, the C or D it is about (or the code), its place, what is
 /// wrong and its status, which fades to a new one; each enters as it comes. Findings block
 /// nothing: they are said here, never asked about.
-fn findings_section(findings: &[Value], p: flottille_ui::Palette) -> Section {
+fn findings_section(findings: &[Value], p: gpui_design_system::Palette) -> Section {
     let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
     let rows = findings.iter().enumerate().map(|(at, finding)| {
         let id = text(&finding["id"]);

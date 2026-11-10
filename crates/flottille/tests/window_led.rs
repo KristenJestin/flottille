@@ -10,13 +10,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::omarchy::Environment;
-use flottille_ui::{tie_below_id, tie_id, tie_through_id, tie_turn_id, toggle_id};
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
 use flottille_window::tree::{session_detach_id, session_id, session_menu_id};
+use gpui_design_system::omarchy::Environment;
+use gpui_design_system::{tie_below_id, tie_id, tie_through_id, tie_turn_id, toggle_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;

@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::shell::Selection;
@@ -18,6 +17,7 @@ use flottille_window::shell::switcher::{
 use flottille_window::state::AgentState;
 use flottille_window::state::icon_id;
 use flottille_window::tree::session_id;
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;

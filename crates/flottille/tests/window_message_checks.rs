@@ -40,7 +40,7 @@ fn window<'a>(
     connect: Connect,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
-    let env = flottille_ui::omarchy::Environment {
+    let env = gpui_design_system::omarchy::Environment {
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };

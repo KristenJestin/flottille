@@ -8,15 +8,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use flottille_ui::color::mix;
-use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
-use flottille_ui::{
+use futures::StreamExt as _;
+use futures::channel::mpsc::{UnboundedReceiver, unbounded};
+use gpui_design_system::color::mix;
+use gpui_design_system::motion::{ENTER, HOVER, Motion, RISE};
+use gpui_design_system::{
     Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, Tie, Toast, ToastStack, Type,
     dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon, keys_held,
     open_overlay, palette, presence, pressable, space, toast,
 };
-use futures::StreamExt as _;
-use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle,
@@ -720,7 +720,7 @@ impl Shell {
 
     /// Asks the daemon to keep `choice` as the appearance, or what it keeps when there is none.
     /// Each request is numbered; the window only believes the answer to the latest.
-    pub fn ask_appearance(&mut self, choice: Option<flottille_ui::omarchy::Appearance>) {
+    pub fn ask_appearance(&mut self, choice: Option<gpui_design_system::Appearance>) {
         self.appearance_asked += 1;
         let seq = self.appearance_asked;
         self.actions.send(match choice {
@@ -1050,7 +1050,7 @@ impl Shell {
                         }
                     }
                     Ok(_) => {}
-                    Err(why) => flottille_ui::toast(
+                    Err(why) => gpui_design_system::toast(
                         crate::queued::refused_toast(&why, "The message was not taken back"),
                         cx,
                     ),
@@ -1070,7 +1070,7 @@ impl Shell {
                     queued.update(cx, |list, cx| list.answered(&delivery, left, cx));
                 }
                 if let Some(why) = refused {
-                    flottille_ui::toast(
+                    gpui_design_system::toast(
                         crate::queued::refused_toast(&why, "The message was not sent now"),
                         cx,
                     );
@@ -1096,17 +1096,21 @@ impl Shell {
                     page.update(cx, |page, cx| page.resumed(refused, cx));
                 }
             }
-            Outcome::Renamed { refused } => flottille_ui::toast(
+            Outcome::Renamed { refused } => gpui_design_system::toast(
                 match refused {
-                    None => flottille_ui::Toast::success("Session renamed"),
-                    Some(why) => flottille_ui::Toast::failure("Session not renamed").detail(why),
+                    None => gpui_design_system::Toast::success("Session renamed"),
+                    Some(why) => {
+                        gpui_design_system::Toast::failure("Session not renamed").detail(why)
+                    }
                 },
                 cx,
             ),
-            Outcome::Detached { from, refused } => flottille_ui::toast(
+            Outcome::Detached { from, refused } => gpui_design_system::toast(
                 match refused {
-                    None => flottille_ui::Toast::success("Detached from ").quoted_title(&from),
-                    Some(why) => flottille_ui::Toast::failure("Not detached from ")
+                    None => {
+                        gpui_design_system::Toast::success("Detached from ").quoted_title(&from)
+                    }
+                    Some(why) => gpui_design_system::Toast::failure("Not detached from ")
                         .quoted_title(&from)
                         .detail(why),
                 },
@@ -1122,8 +1126,9 @@ impl Shell {
                 {
                     page.update(cx, |page, cx| page.tools_reloaded(after_turn, refused, cx));
                 } else if let Some(why) = refused {
-                    flottille_ui::toast(
-                        flottille_ui::Toast::failure(crate::session::NOT_RELOADED).detail(why),
+                    gpui_design_system::toast(
+                        gpui_design_system::Toast::failure(crate::session::NOT_RELOADED)
+                            .detail(why),
                         cx,
                     );
                 }
@@ -1447,7 +1452,9 @@ impl Shell {
             Outcome::Appearance { seq, .. } if seq != self.appearance_asked => {}
             Outcome::Appearance { written, shown, .. } => {
                 match &shown {
-                    Ok(appearance) => flottille_ui::omarchy::appear(*appearance, cx),
+                    Ok(appearance) => {
+                        gpui_design_system::appearance::appear(appearance.clone(), cx)
+                    }
                     // A choice not kept: the window goes back to what the daemon keeps.
                     Err(_) if written => self.ask_appearance(None),
                     Err(_) => {}
@@ -1496,8 +1503,9 @@ impl Shell {
                 {
                     page.update(cx, |page, cx| page.compacting(after_turn, refused, cx));
                 } else if let Some(why) = refused {
-                    flottille_ui::toast(
-                        flottille_ui::Toast::failure(crate::session::NOT_COMPACTED).detail(why),
+                    gpui_design_system::toast(
+                        gpui_design_system::Toast::failure(crate::session::NOT_COMPACTED)
+                            .detail(why),
                         cx,
                     );
                 }
@@ -2282,7 +2290,7 @@ impl Shell {
             return;
         }
         let mut key = format!("links-{}-{}", link.agent, sharing.row);
-        if !sharing.links.is_empty() && !flottille_ui::toast::shown(&key, cx) {
+        if !sharing.links.is_empty() && !gpui_design_system::toast::shown(&key, cx) {
             sharing.end();
             key = format!("links-{}-{}", link.agent, sharing.row);
         }
@@ -2291,27 +2299,31 @@ impl Shell {
         let toast = match sharing.links.as_slice() {
             [only] => {
                 let target = only.target.clone();
-                flottille_ui::Toast::success(format!("The agent shares a link: {}", only.name()))
-                    .action("Open", move |_, cx| {
-                        shell
-                            .update(cx, |shell, cx| {
-                                crate::open::shown(&shell.follow.opener, &target, cx)
-                            })
-                            .ok();
-                    })
+                gpui_design_system::Toast::success(format!(
+                    "The agent shares a link: {}",
+                    only.name()
+                ))
+                .action("Open", move |_, cx| {
+                    shell
+                        .update(cx, |shell, cx| {
+                            crate::open::shown(&shell.follow.opener, &target, cx)
+                        })
+                        .ok();
+                })
             }
-            shared => {
-                flottille_ui::Toast::success(format!("The agent shares {} links", shared.len()))
-                    .action("Show", move |window, cx| {
-                        shell
-                            .update(cx, |shell, cx| {
-                                shell.open(Selection::Session(session.clone()), window, cx)
-                            })
-                            .ok();
+            shared => gpui_design_system::Toast::success(format!(
+                "The agent shares {} links",
+                shared.len()
+            ))
+            .action("Show", move |window, cx| {
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.open(Selection::Session(session.clone()), window, cx)
                     })
-            }
+                    .ok();
+            }),
         };
-        flottille_ui::toast(toast.keyed(key), cx);
+        gpui_design_system::toast(toast.keyed(key), cx);
     }
 
     /// What the agent said or what the user told it ends the row of links it was sharing.

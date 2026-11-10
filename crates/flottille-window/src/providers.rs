@@ -5,7 +5,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use flottille_core::provider;
-use flottille_ui::{Chosen, ModelEntry};
+use gpui_design_system::{Chosen, ModelEntry};
 use serde_json::Value;
 
 /// The `provider.list` reads, numbered as they are asked, whoever asks: answers come back in any

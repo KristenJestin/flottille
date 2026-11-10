@@ -5,7 +5,7 @@
 //!
 //! Only the workspaces made after a change follow it: the section says so.
 
-use flottille_ui::{
+use gpui_design_system::{
     Button, Field, RadioChoices, Section, Skeleton, Toast, Type as _, awaiting, changing,
     follow_theme, palette, presence, presence_of, space, toast,
 };

@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use flottille_ui::motion::PANEL;
-use flottille_ui::{Button, Icon, Modal, fade, space};
+use gpui_design_system::motion::PANEL;
+use gpui_design_system::{Button, Icon, Modal, fade, space};
 use gpui_kit::{
     AnyElement, App, Context, ElementId, InteractiveElement, IntoElement, KeyDownEvent,
     ParentElement, Render, Styled, StyledImage as _, TestSupportExt as _, Window, div, px,

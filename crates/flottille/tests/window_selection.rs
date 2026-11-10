@@ -8,12 +8,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
-use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
 use flottille_window::tree::session_id;
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::base::Root;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -216,7 +216,7 @@ fn bounds(region: &str, cx: &mut VisualTestContext) -> Bounds<Pixels> {
 /// added up.
 fn highlighted(region: &str, cx: &mut VisualTestContext) -> f32 {
     cx.update(|window, cx| {
-        let selection = flottille_ui::palette(cx).sel;
+        let selection = gpui_design_system::palette(cx).sel;
         let scale = window.scale_factor();
         let bounds = window.find(region.to_owned()).bounds().scale(scale);
         window

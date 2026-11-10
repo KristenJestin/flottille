@@ -12,9 +12,9 @@
 
 use std::collections::HashMap;
 
-use flottille_ui::omarchy::{self, Appearance, Source};
-use flottille_ui::theme::Shade;
-use flottille_ui::{
+use gpui_design_system::appearance::{self, Appearance, Source};
+use gpui_design_system::theme::Shade;
+use gpui_design_system::{
     Button, Chosen, Field, Fold, Icon, ModelChoice, PageHeader, Section, Segmented, Select,
     SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type as _, awaiting, enter, hoverable,
     icon, palette, presence, presence_of, space, tipped, toast, turning,
@@ -125,6 +125,16 @@ pub const MARGINS: [u64; 4] = [2, 5, 10, 15];
 pub const MINIMUMS: [u64; 4] = [20_000, 50_000, 100_000, 200_000];
 /// The sizes kept word for word it offers, in tokens.
 pub const KEPTS: [u64; 4] = [5_000, 10_000, 20_000, 40_000];
+
+/// Why Omarchy cannot be chosen here, in the window's words: the kit's when its theme cannot be
+/// used, ours when this is not an Omarchy desktop.
+fn omarchy_refused(cx: &gpui_kit::App) -> Option<String> {
+    let why = appearance::refused(crate::OMARCHY, cx)?;
+    Some(match appearance::fallback(crate::OMARCHY, cx) {
+        Some(_) => why,
+        None => "Not an Omarchy desktop: the window uses Flottille's colours.".to_owned(),
+    })
+}
 
 /// A provider's name as the window shows it.
 fn provider_title(provider: &str) -> &str {
@@ -727,7 +737,7 @@ impl SettingsPage {
                         page.update(cx, |_, cx| cx.notify());
                     }
                 }),
-            move |d, t| d.text_color(flottille_ui::color::mix(p.faint, p.text, t)),
+            move |d, t| d.text_color(gpui_design_system::color::mix(p.faint, p.text, t)),
         );
         div()
             .flex()
@@ -1129,7 +1139,7 @@ impl SettingsPage {
                         .child(
                             div()
                                 .min_w_0()
-                                .font_family(flottille_ui::typography::MONO)
+                                .font_family(gpui_design_system::typography::MONO)
                                 .text_color(p.faint)
                                 .child(file),
                         )
@@ -1406,11 +1416,11 @@ impl SettingsPage {
 
     /// Uses `appearance` at once, and asks the daemon to keep it for every window.
     pub fn choose_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
-        if !self.appearance_known() || self.appearance == Some(appearance) {
+        if !self.appearance_known() || self.appearance.as_ref() == Some(&appearance) {
             return;
         }
-        self.appearance = Some(appearance);
-        omarchy::appear(appearance, cx);
+        self.appearance = Some(appearance.clone());
+        appearance::appear(appearance.clone(), cx);
         self.shell
             .update(cx, |shell, _| shell.ask_appearance(Some(appearance)))
             .ok();
@@ -1443,9 +1453,9 @@ impl SettingsPage {
     fn appearance_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let known = self.appearance_known();
-        let shown = omarchy::shown(cx);
-        let kept = self.appearance.unwrap_or(shown);
-        let refused = omarchy::omarchy_refused(cx);
+        let shown = appearance::shown(cx);
+        let kept = self.appearance.clone().unwrap_or(shown.clone());
+        let refused = omarchy_refused(cx);
         let row = |label: &'static str, hint: &'static str, control: AnyElement| {
             div()
                 .flex()
@@ -1470,20 +1480,26 @@ impl SettingsPage {
             "Colours",
             [("omarchy", "Omarchy"), ("flottille", "Flottille")],
             match shown.source {
-                Source::Omarchy => 0,
-                Source::Own => 1,
+                Source::Desktop(_) => 0,
+                Source::Theme(_) => 1,
             },
         )
         .disabled(!known)
         .when(refused.is_some(), |s| s.unavailable(0))
         .on_choose(move |index, _, cx| {
             let source = if index == 0 {
-                Source::Omarchy
+                Source::Desktop(crate::OMARCHY.into())
             } else {
-                Source::Own
+                Source::Theme(crate::OWN_THEME.into())
             };
             this.update(cx, |this, cx| {
-                this.choose_appearance(Appearance { source, ..kept }, cx)
+                this.choose_appearance(
+                    Appearance {
+                        source,
+                        shade: kept.shade,
+                    },
+                    cx,
+                )
             })
             .ok();
         });
@@ -1507,7 +1523,7 @@ impl SettingsPage {
             this.update(cx, |this, cx| {
                 this.choose_appearance(
                     Appearance {
-                        source: Source::Own,
+                        source: Source::Theme(crate::OWN_THEME.into()),
                         shade,
                     },
                     cx,
@@ -1569,7 +1585,7 @@ impl SettingsPage {
             .child(
                 presence(
                     "appearance-shade-block",
-                    shown.source == Source::Own,
+                    matches!(shown.source, Source::Theme(_)),
                     row("Shade", "", shade.into_any_element()),
                 )
                 .gap(space::MD),

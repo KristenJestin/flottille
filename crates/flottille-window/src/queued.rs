@@ -14,7 +14,7 @@ use crate::steps::commanded_text;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use flottille_ui::{
+use gpui_design_system::{
     Button, Icon, Item, Listing, Placement, changing, icon, palette, presence, space, tipped,
 };
 use gpui_kit::{
@@ -480,10 +480,10 @@ pub const ALREADY_READ: &str = "already read by the agent";
 
 /// The toast a refused request says. A message the root read first is a title of its own, and
 /// the message shows as sent, like the others; any other refusal says what was not done.
-pub fn refused_toast(why: &str, not_done: &str) -> flottille_ui::Toast {
+pub fn refused_toast(why: &str, not_done: &str) -> gpui_design_system::Toast {
     if why == ALREADY_READ {
-        return flottille_ui::Toast::failure("Already read by the agent")
+        return gpui_design_system::Toast::failure("Already read by the agent")
             .detail("It is sent: it shows in the conversation.");
     }
-    flottille_ui::Toast::failure(not_done.to_owned()).detail(why.to_owned())
+    gpui_design_system::Toast::failure(not_done.to_owned()).detail(why.to_owned())
 }

@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use flottille_ui::Type as _;
-use flottille_ui::color::mix;
-use flottille_ui::{
+use gpui_design_system::Type as _;
+use gpui_design_system::color::mix;
+use gpui_design_system::{
     Button, Card, Icon, Item, Listing, enter, icon, palette, presence, pressable, space,
 };
 use gpui_kit::prelude::FluentBuilder as _;

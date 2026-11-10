@@ -13,12 +13,12 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
-use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
 use flottille_window::tree::session_id;
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::{TestQueryExt, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};

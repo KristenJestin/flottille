@@ -9,9 +9,9 @@
 use std::sync::Arc;
 
 use flottille_core::images::{MAX_IMAGE_BYTES, MAX_IMAGES};
-use flottille_ui::color::mix;
-use flottille_ui::motion::PANEL;
-use flottille_ui::{
+use gpui_design_system::color::mix;
+use gpui_design_system::motion::PANEL;
+use gpui_design_system::{
     Button, Icon, Listing, Skeleton, Toast, enter, fade, hoverable, icon, palette, presence, space,
     toast,
 };

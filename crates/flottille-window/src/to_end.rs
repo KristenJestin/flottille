@@ -5,8 +5,8 @@
 
 use std::time::Duration;
 
-use flottille_ui::motion::{ENTER, HOVER, Motion, PANEL, RISE};
-use flottille_ui::{Button, Icon, fade, palette, space};
+use gpui_design_system::motion::{ENTER, HOVER, Motion, PANEL, RISE};
+use gpui_design_system::{Button, Icon, fade, palette, space};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, ElementId, FollowMode, InteractiveElement as _, IntoElement, ListState,
