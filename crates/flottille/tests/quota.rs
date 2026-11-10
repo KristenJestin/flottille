@@ -47,6 +47,7 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 /// A project `app` over a throwaway repository and a root agent started in its folder with
 /// `message`, idle once its first turn ended: its id.
 fn session(user: &User, message: &str) -> String {
+    move_clock_to(user, 8, 0);
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -106,6 +107,22 @@ fn now(user: &User) -> u64 {
 
 fn advance(user: &User, ms: u64) {
     user.call("test.advance", json!({"ms": ms})).unwrap();
+}
+
+/// Moves the daemon's clock to the next `hour`:`minute` in Paris, far from every reset the fake
+/// agent says (1pm, 3pm), so that no test depends on the real time of day.
+fn move_clock_to(user: &User, hour: i8, minute: i8) {
+    let paris = TimeZone::get("Europe/Paris").unwrap();
+    let here = Timestamp::from_millisecond(now(user) as i64)
+        .unwrap()
+        .to_zoned(paris.clone());
+    let at = |date: jiff::civil::Date| date.at(hour, minute, 0, 0).to_zoned(paris.clone()).unwrap();
+    let mut target = at(here.date());
+    if target <= here {
+        target = at(here.date().tomorrow().unwrap());
+    }
+    let wait = target.timestamp().as_millisecond() - here.timestamp().as_millisecond();
+    advance(user, wait as u64);
 }
 
 fn resume_setting(user: &User, on: bool) {
