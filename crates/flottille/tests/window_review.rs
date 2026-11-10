@@ -354,8 +354,8 @@ fn review_s_tab_has_its_switch_its_passes_its_slots_and_its_guidance(cx: &mut Te
         "review-setting-passes-bugs",
         "review-setting-passes-standards",
         "review-setting-passes-security",
-        "review-setting-bugs_model-select",
-        "review-setting-verifier_model-select",
+        "review-setting-bugs_model-model",
+        "review-setting-verifier_model-model",
         "review-guidance-text",
         "review-guidance-save",
     ] {
@@ -387,6 +387,80 @@ fn review_s_tab_has_its_switch_its_passes_its_slots_and_its_guidance(cx: &mut Te
     until(&shell, cx, "the guidance is kept", |_| {
         user.call("review.show", json!({})).unwrap()["text"] == "Look at the migrations first."
     });
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn review_s_checks_are_one_card_with_a_model_per_line(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user.call("extension.set", json!({"name": "review", "enabled": true}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    shell.update_in(cx, |s, window, cx| s.open(Selection::Settings, window, cx));
+    until(&shell, cx, "the Review tab is offered", |cx| {
+        present(cx, "settings-tabs-review")
+    });
+    cx.update(|window, cx| window.click("settings-tabs-review", cx));
+    until(&shell, cx, "the checks are shown", |cx| {
+        present(cx, "review-models")
+    });
+    settle(cx);
+    let lines = [
+        ("spec_model", "The spec"),
+        ("bugs_model", "Bugs"),
+        ("standards_model", "Project rules"),
+        ("security_model", "Security"),
+        ("verifier_model", "Checking the findings"),
+    ];
+    let card = cx.update(|window, _| window.find("review-models").bounds());
+    let mut above = card.top();
+    for (key, name) in lines {
+        let id = format!("review-setting-{key}");
+        assert_eq!(label(cx, &format!("{id}-label")).as_deref(), Some(name));
+        let (line, select) = cx.update(|window, _| {
+            (
+                window.find(format!("{id}-label")).bounds(),
+                window.find(format!("{id}-model")).bounds(),
+            )
+        });
+        // A line each, inside the one card, the compact select on the right of its name.
+        assert!(
+            card.top() <= line.top() && line.bottom() <= card.bottom(),
+            "{key}"
+        );
+        assert!(line.top() >= above, "{key} comes after the line above");
+        assert!(
+            select.left() > line.right(),
+            "{key}: the select is on the right"
+        );
+        assert!(
+            select.size.width < card.size.width / 2.,
+            "{key}: a compact select"
+        );
+        above = line.bottom();
+    }
+    // The default said once, as its rule with what it gives today; the cost once, under the card.
+    assert_eq!(
+        label(cx, "review-setting-bugs_model-model").as_deref(),
+        Some("Strongest of the session's provider")
+    );
+    assert_eq!(
+        label(cx, "review-setting-verifier_model-model").as_deref(),
+        Some("One size smaller")
+    );
+    let under = label(cx, "review-models-cost").unwrap();
+    assert!(under.contains("on your own quota"), "{under}");
+    assert!(
+        cx.update(|window, _| window.find("review-models-cost").bounds().top()) >= card.bottom()
+    );
+    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+    settle(cx);
+    assert_eq!(
+        label(cx, "review-setting-bugs_model-model-first-line").as_deref(),
+        Some("Opus for Claude")
+    );
     at_rest(cx);
 }
 

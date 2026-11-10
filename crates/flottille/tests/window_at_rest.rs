@@ -377,6 +377,38 @@ fn the_window_draws_no_frame_at_rest_on_settings(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_models_chosen_in_settings(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    user.call("provider.set_judge", json!({"provider": "claude"}))
+        .unwrap();
+    user.call("extension.set", json!({"name": "review", "enabled": true}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the judge's model is shown", |cx| {
+        cx.update(|window, _| window.try_find("judge-model").is_some())
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the judge");
+
+    for (tab, shown) in [
+        ("compaction", "compaction-switch"),
+        ("review", "review-models"),
+    ] {
+        cx.update(|window, cx| window.click(format!("settings-tabs-{tab}"), cx));
+        until(&shell, cx, "the tab is shown", |cx| {
+            cx.update(|window, _| window.try_find(shown).is_some())
+        });
+        settle(&shell, cx);
+        assert_eq!(frames_at_rest(&shell, cx), (0, 0), "{tab}");
+    }
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_the_vault(cx: &mut TestAppContext) {
     let user = User::new();
     user.call(
