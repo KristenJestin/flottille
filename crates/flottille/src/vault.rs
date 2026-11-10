@@ -25,7 +25,7 @@ use crate::projects::Failure;
 
 /// The file of the daemon's configuration folder that chooses the keyring: `backend = "memory"`
 /// keeps the secrets in the daemon's memory, for the tests, which must never reach the user's
-/// own keyring. A file, not a variable: an agent sets the environment of what it runs, never the
+/// own keyring; a build for users refuses it (`Keyring::chosen`). A file, not a variable: an agent sets the environment of what it runs, never the
 /// daemon's configuration.
 const CHOICE: &str = "keyring.toml";
 
@@ -53,20 +53,39 @@ pub const LOCKED: &str = "the keyring is locked: the user must unlock it in thei
 impl Keyring {
     /// The keyring the configuration chooses: the system's unless the tests' file says otherwise.
     pub fn open(paths: &Paths) -> Keyring {
-        let file = paths.config.join(CHOICE);
+        let (keyring, said) = Self::chosen(paths.config.join(CHOICE), cfg!(debug_assertions));
+        if let Some(said) = said {
+            eprintln!("flottille daemon: {said}");
+        }
+        keyring
+    }
+
+    /// The keyring `file` chooses, and what the daemon says of it. The memory is a test
+    /// build's alone (`cargo test` builds without optimisation, a release with): a user's file
+    /// that asks for it would keep their secrets in plain text, in its table `kept`.
+    fn chosen(file: PathBuf, test_build: bool) -> (Keyring, Option<String>) {
         match setting(&file, "backend").as_deref() {
-            Some("memory") => {
-                eprintln!(
-                    "flottille daemon: the vault's keyring is the daemon's memory ({}): its \
-                     secrets are lost when it stops",
+            Some("memory") if !test_build => {
+                let said = format!(
+                    "{} asks for the memory keyring, which only a test build has: the system's \
+                     keyring is used, and no secret is read from that file",
                     file.display()
                 );
-                Keyring::Memory {
+                (Keyring::Os, Some(said))
+            }
+            Some("memory") => {
+                let said = format!(
+                    "the vault's keyring is the daemon's memory ({}): its secrets are lost when \
+                     it stops",
+                    file.display()
+                );
+                let keyring = Keyring::Memory {
                     kept: Mutex::new(HashMap::new()),
                     file,
-                }
+                };
+                (keyring, Some(said))
             }
-            _ => Keyring::Os,
+            _ => (Keyring::Os, None),
         }
     }
 
@@ -991,6 +1010,29 @@ mod tests {
             taken(&entries, "app", "shared").as_deref(),
             Some("`shared` is used by every project: choose another name")
         );
+    }
+
+    #[test]
+    fn the_memory_keyring_is_refused_outside_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("keyring.toml");
+        std::fs::write(
+            &file,
+            "backend = \"memory\"\n[kept]\ndeploy = \"dep10y-key\"\n",
+        )
+        .unwrap();
+
+        let (keyring, said) = Keyring::chosen(file.clone(), false);
+        assert!(
+            matches!(keyring, Keyring::Os),
+            "a build for users keeps nothing in a file"
+        );
+        let said = said.unwrap();
+        assert!(said.contains("only a test build"), "{said}");
+        assert!(!said.contains("dep10y-key"), "{said}");
+
+        let (keyring, _) = Keyring::chosen(file, true);
+        assert!(matches!(keyring, Keyring::Memory { .. }));
     }
 
     #[tokio::test]
