@@ -190,34 +190,38 @@ impl Provider {
         }
     }
 
-    /// What the settings page says of it under its name: `Not used` when its switch is off (the
-    /// switch is right there, and the config file is the CLI's business), else its state.
-    pub fn status(&self) -> String {
-        if self.enabled {
-            self.state()
-        } else {
-            "Not used".into()
+    /// What the settings page says of it, once, on its row (`docs/design.md` §10): `Ready ·
+    /// signed in`, `Not signed in: run claude login`, `Not found on this machine`, or `Off:
+    /// sessions that run keep running` when its switch is off. Never the path of a login file,
+    /// the name of a variable nor a file of the configuration.
+    pub fn said(&self) -> String {
+        if !self.enabled {
+            return "Off: sessions that run keep running".into();
+        }
+        if self.overridden {
+            return if self.ready { "Ready" } else { "Not ready" }.into();
+        }
+        if self.program_path.is_none() {
+            return "Not found on this machine".into();
+        }
+        if let Some(why) = &self.why {
+            // The daemon's clause may end with how to change a file: the line stops before it.
+            let why = why.strip_prefix("is not ready: ").unwrap_or(why);
+            let why = why.split(" (").next().unwrap_or(why);
+            return format!("Not ready: {why}");
+        }
+        match (self.login_present, &self.api_key) {
+            (true, _) => "Ready · signed in".into(),
+            (false, Some(_)) => "Ready · signed in with an API key".into(),
+            (false, None) => format!("Not signed in: run {}", self.sign_in_command()),
         }
     }
 
-    /// How it signs in, as far as the daemon can see: never a key's value.
-    pub fn sign_in(&self) -> String {
-        match (&self.login, self.login_present, &self.api_key) {
-            (Some(login), true, _) => format!("Signs in with its CLI's login: {login}"),
-            (_, _, Some(key)) => format!("Signs in with the API key in {key}"),
-            _ if self.overridden => "A test program stands for it and its sign-in".into(),
-            _ => "No sign-in Flottille can see: its CLI's login or an API key in the environment"
-                .into(),
-        }
-    }
-
-    /// Its program as the daemon found it.
-    pub fn program_line(&self) -> String {
-        match (&self.program_path, &self.version) {
-            _ if self.overridden => format!("{} · a test program stands for it", self.program),
-            (Some(path), Some(version)) => format!("{} {version} · {path}", self.program),
-            (Some(path), None) => format!("{} · {path}", self.program),
-            (None, _) => format!("{} is not on PATH", self.program),
+    /// The command that signs its program in.
+    pub fn sign_in_command(&self) -> String {
+        match self.program.as_str() {
+            "opencode" => "opencode auth login".into(),
+            program => format!("{program} login"),
         }
     }
 
@@ -411,25 +415,35 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_says_its_state_and_its_sign_in_and_never_a_key_s_value() {
+    fn a_provider_says_its_state_once_and_never_a_path_nor_a_variable() {
         let providers = Providers::of(Ok(&listed()));
         let claude = providers.get("claude").unwrap();
         assert_eq!(claude.state(), "Ready");
-        assert_eq!(
-            claude.sign_in(),
-            "Signs in with its CLI's login: /home/someone/.claude/.credentials.json"
-        );
-        assert_eq!(claude.program_line(), "claude 2.1.295 · /usr/bin/claude");
+        assert_eq!(claude.said(), "Ready · signed in");
         let opencode = providers.get("opencode").unwrap();
+        assert_eq!(opencode.said(), "Not found on this machine");
+        let mut keyed = listed();
+        keyed["providers"][0]["login"]["present"] = json!(false);
+        keyed["providers"][0]["login"]["api_key"] = json!("ANTHROPIC_API_KEY");
+        let keyed = Providers::of(Ok(&keyed));
         assert_eq!(
-            opencode.state(),
-            "opencode is not ready: `opencode` is not on PATH (install it)"
+            keyed.get("claude").unwrap().said(),
+            "Ready · signed in with an API key"
         );
+        let mut unsigned = listed();
+        unsigned["providers"][0]["login"]["present"] = json!(false);
+        let unsigned = Providers::of(Ok(&unsigned));
         assert_eq!(
-            opencode.sign_in(),
-            "Signs in with the API key in OPENAI_API_KEY"
+            unsigned.get("claude").unwrap().said(),
+            "Not signed in: run claude login"
         );
-        assert_eq!(opencode.program_line(), "opencode is not on PATH");
+        let mut off = listed();
+        off["providers"][0]["enabled"] = json!(false);
+        let off = Providers::of(Ok(&off));
+        assert_eq!(
+            off.get("claude").unwrap().said(),
+            "Off: sessions that run keep running"
+        );
     }
 
     #[test]

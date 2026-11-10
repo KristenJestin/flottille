@@ -543,6 +543,9 @@ impl Shell {
     /// is shown as it is now.
     fn extensions_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings.update(cx, |_, cx| cx.notify());
+        let features = self.settings.read(cx).features(&self.extensions, cx);
+        self.switcher
+            .update(cx, |switcher, cx| switcher.set_features(features, cx));
         if let Some(page) = self.project_settings.clone() {
             page.update(cx, |_, cx| cx.notify());
         }

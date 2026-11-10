@@ -1,8 +1,9 @@
 //! The places the window gives the parts of Flottille the user can turn off (`docs/extensions.md`,
-//! "In the window"): each one's tab of Settings and its section of a project's settings, drawn
-//! here from what it declares (`extension.list`), never by the part itself; and its screens (a
-//! project tab, a page, an action on a row), shown only where it is on. The window never says what
-//! these parts are called in the code: each is a feature of the app, under its own title.
+//! "In the window"): each one's row of Settings' Features and the page it opens, and its section
+//! of a project's settings, drawn here from what it declares (`extension.list`), never by the part
+//! itself; and its screens (a project tab, a page, an action on a row), shown only where it is on.
+//! The window never says what these parts are called in the code: each is a feature of the app,
+//! under its own title.
 
 pub mod review;
 pub mod specs;
@@ -11,13 +12,13 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use flottille_ui::{
-    Chosen, Field, ModelChoice, Section, Select, SelectOption, Switch, Toast, enter, palette,
+    Chosen, Field, Icon, ModelChoice, Section, Select, SelectOption, Switch, Toast, enter, palette,
     presence, presence_of, space, toast,
 };
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Task, TestSupportExt as _,
-    WeakEntity, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, FontWeight, HighlightStyle,
+    InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement,
+    Styled, StyledText, Task, TestSupportExt as _, WeakEntity, div, px,
 };
 use serde_json::{Map, Value, json};
 
@@ -62,13 +63,19 @@ pub struct InProject {
 pub struct Listed {
     pub name: String,
     pub title: String,
-    /// What it does and what it costs: the line its tab shows alone while it is off.
+    /// What it does and what it costs: the line its page shows with its switch while it is off.
     pub sentence: String,
     /// It touches a project: a project may turn it off, and its settings have a section there.
     pub per_project: bool,
-    /// The title of its tab of Settings, and its place among the others.
-    pub tab: String,
+    /// Its row of Features: the icon (a Lucide file name), the line that says what it is for, and
+    /// its place among the rows.
+    pub icon: String,
+    pub line: String,
     pub order: u64,
+    /// The label of its switch, and the usage line under it (`**` around the words found
+    /// elsewhere in the window).
+    pub switch: String,
+    pub usage: String,
     /// The global switch.
     pub enabled: bool,
     /// Why its file cannot be used: it is off until it can.
@@ -87,8 +94,11 @@ impl Listed {
             title: text(&value["title"]),
             sentence: text(&value["sentence"]),
             per_project: value["scope"] == "project",
-            tab: text(&value["place"]["tab"]),
+            icon: text(&value["place"]["icon"]),
+            line: text(&value["place"]["line"]),
             order: value["place"]["order"].as_u64().unwrap_or(u64::MAX),
+            switch: text(&value["switch"]),
+            usage: text(&value["usage"]),
             enabled: value["enabled"] == true,
             error: value["error"].as_str().map(str::to_owned),
             settings: value["settings"]
@@ -244,13 +254,11 @@ impl Registry {
             .is_some_and(|listed| listed.active_in(project))
     }
 
-    /// The tabs of Settings they have, in their order: each one's name and title.
-    pub fn tabs(&self) -> Vec<(String, String)> {
-        let mut tabs: Vec<&Listed> = self.list.iter().collect();
-        tabs.sort_by_key(|listed| listed.order);
-        tabs.into_iter()
-            .map(|listed| (listed.name.clone(), listed.tab.clone()))
-            .collect()
+    /// The rows of Settings' Features they have, in their order.
+    pub fn rows(&self) -> Vec<&Listed> {
+        let mut rows: Vec<&Listed> = self.list.iter().collect();
+        rows.sort_by_key(|listed| listed.order);
+        rows
     }
 
     /// The sections a project's settings have: those that touch a project and are on globally.
@@ -262,7 +270,7 @@ impl Registry {
             .collect();
         tabs.sort_by_key(|listed| listed.order);
         tabs.into_iter()
-            .map(|listed| (listed.name.clone(), listed.tab.clone()))
+            .map(|listed| (listed.name.clone(), listed.title.clone()))
             .collect()
     }
 
@@ -745,11 +753,39 @@ fn fields<'a>(
         .into_any_element()
 }
 
-/// The card of a switch, its settings unfolding under it while it is on, and why the daemon
-/// cannot use its file, when it cannot.
+/// A usage line (`docs/reference/gpui.md`, rule 14): where and how a feature acts, the words found
+/// elsewhere in the window in bold (`**` around them in what the declaration says). Its label is
+/// the plain text.
+pub fn usage_line(id: impl Into<SharedString>, usage: &str, cx: &App) -> impl IntoElement {
+    let p = palette(cx);
+    let mut plain = String::new();
+    let mut bold = Vec::new();
+    for (at, piece) in usage.split("**").enumerate() {
+        if at % 2 == 1 {
+            bold.push(plain.len()..plain.len() + piece.len());
+        }
+        plain.push_str(piece);
+    }
+    let strong = HighlightStyle {
+        color: Some(p.text),
+        font_weight: Some(FontWeight::MEDIUM),
+        ..Default::default()
+    };
+    div()
+        .id(id.into())
+        .aria_label(SharedString::from(plain.clone()))
+        .text_size(px(12.5))
+        .text_color(p.mute)
+        .child(StyledText::new(plain).with_highlights(bold.into_iter().map(|at| (at, strong))))
+        .test_support()
+}
+
+/// The card of a switch, its usage line under it, its settings unfolding under that while it is
+/// on, and why the daemon cannot use its file, when it cannot.
 fn card(
     id: &str,
     switch: Switch,
+    usage: Option<AnyElement>,
     on: bool,
     settings: AnyElement,
     error: Option<String>,
@@ -766,6 +802,7 @@ fn card(
         .border_1()
         .border_color(p.line)
         .child(switch)
+        .children(usage.map(|usage| div().pt(space::SM).child(usage)))
         .child(
             presence_of(
                 SharedString::from(format!("{id}-error-block")),
@@ -797,9 +834,10 @@ fn card(
         .test_support()
 }
 
-/// The tab of Settings of `name`: its switch at the top with its sentence as hint and, while it
-/// is on, its settings (`docs/extensions.md`, "In the window"). Off, the switch and that one line.
-pub fn settings_tab(registry: &Entity<Registry>, name: &str, cx: &App) -> Option<AnyElement> {
+/// The page of the feature `name` (`docs/extensions.md`, "In the window"; rule 14): its switch,
+/// labelled with what it does, its sentence as hint and its usage line, then, while it is on, its
+/// settings and its guidance. Off, that block alone.
+pub fn feature_page(registry: &Entity<Registry>, name: &str, cx: &App) -> Option<AnyElement> {
     let read = registry.read(cx);
     let listed = read.listed(name)?.clone();
     let on = read.switch_on(name, None);
@@ -814,14 +852,20 @@ pub fn settings_tab(registry: &Entity<Registry>, name: &str, cx: &App) -> Option
                 .ok();
         }
     };
-    let switch = Switch::new(SharedString::from(format!("{name}-switch")), on, "On")
-        .hint(listed.sentence.clone())
-        .disabled(pending)
-        .on_click(flip);
+    let switch = Switch::new(
+        SharedString::from(format!("{name}-switch")),
+        on,
+        listed.switch.clone(),
+    )
+    .hint(listed.sentence.clone())
+    .disabled(pending)
+    .on_click(flip);
     let settings = fields(registry, &listed, None, listed.settings.iter(), name, cx);
+    let usage = usage_line(format!("{name}-usage"), &listed.usage, cx).into_any_element();
     let card = card(
         name,
         switch,
+        Some(usage),
         on && listed.enabled,
         settings,
         listed.error.clone(),
@@ -841,12 +885,25 @@ pub fn settings_tab(registry: &Entity<Registry>, name: &str, cx: &App) -> Option
         div()
             .flex()
             .flex_col()
-            .child(
-                Section::new(SharedString::from(name.to_owned()), listed.tab.clone()).child(card),
-            )
+            .child(enter(
+                SharedString::from(format!("{name}-page-enter")),
+                0,
+                card,
+            ))
             .children(guidance)
             .into_any_element(),
     )
+}
+
+/// The icon a declaration names (a Lucide file name): those the window embeds, else a generic one.
+pub fn icon_named(name: &str) -> Icon {
+    match name {
+        "file-text" => Icon::Lucide("file-text"),
+        "scan-search" => Icon::Lucide("scan-search"),
+        "shrink" => Icon::Lucide("shrink"),
+        "plug" => Icon::Lucide("plug"),
+        _ => Icon::Lucide("blocks"),
+    }
 }
 
 /// The section of a project's settings of `name`: the project's switch and, while it is on, the
@@ -891,9 +948,9 @@ pub fn project_section(
     let error = listed
         .in_project(project)
         .and_then(|side| side.error.clone());
-    let card = card(&prefix, switch, on, settings, error, cx);
+    let card = card(&prefix, switch, None, on, settings, error, cx);
     Some(
-        Section::new(SharedString::from(name.to_owned()), listed.tab.clone())
+        Section::new(SharedString::from(name.to_owned()), listed.title.clone())
             .child(card)
             .into_any_element(),
     )

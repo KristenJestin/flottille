@@ -1,28 +1,30 @@
-//! The settings page: every provider Flottille knows, enabled or not with a switch, how it signs
-//! in, and whether its agents can run here, as the daemon says it (`provider.list`). The window
-//! never writes `providers.toml` itself: a switch asks the daemon (`provider.enable`,
-//! `provider.disable`), and the page follows what the daemon lists next. The Auto judge is
-//! chosen here too (`provider.set_judge`), and its guidance edited (`judge.set`). The window's
-//! appearance is chosen (`appearance.set`): the Omarchy theme or Flottille's own, light or dark.
-//! The vault's entries are added, replaced and removed (`vault.*`, `crate::vault`).
-//! Last, the developer mode is switched (`developer.set`), its log's path beside the switch. The
-//! page is tabs, one section shown at a time; the Judge tab holds two, the Auto judge and then
-//! its guidance.
+//! The settings page, in five tabs by subject (`docs/reference/gpui.md`, rule 13): Agents (the
+//! providers, the rules for every project, the long tool results, the sessions), Approvals (the
+//! Auto judge and what it is told), Features (a list of rows, each opening its page: the compaction
+//! here, the others drawn from their declaration, `crate::extensions`), Vault and General (the
+//! appearance, the workspaces folder, the developer mode). Every provider Flottille knows is
+//! enabled or not with a switch, as the daemon says it (`provider.list`). The window never writes
+//! `providers.toml` itself: a switch asks the daemon (`provider.enable`, `provider.disable`), and
+//! the page follows what the daemon lists next. The Auto judge is chosen here too
+//! (`provider.set_judge`), and its guidance edited (`judge.set`). The window's appearance is chosen
+//! (`appearance.set`). The vault's entries are added, replaced and removed (`vault.*`,
+//! `crate::vault`). The developer mode is switched (`developer.set`).
 
 use std::collections::HashMap;
 
 use flottille_ui::omarchy::{self, Appearance, Source};
 use flottille_ui::theme::Shade;
 use flottille_ui::{
-    Chosen, Field, Icon, ListCard, ListRow, ModelChoice, PageHeader, Section, Segmented, Select,
-    SelectOption, Switch, Tabs, Toast, enter, hoverable, icon, palette, presence, presence_of,
-    space, toast, turning,
+    Button, Chosen, Field, Fold, Icon, ModelChoice, PageHeader, Section, Segmented, Select,
+    SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type as _, awaiting, enter, hoverable,
+    icon, palette, presence, presence_of, space, tipped, toast, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Point,
-    Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
-    Transformation, WeakEntity, Window, div, px, radians,
+    AnyElement, AnyView, AppContext as _, Context, ElementId, Entity, InteractiveElement,
+    IntoElement, ParentElement, Point, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, TestSupportExt as _, Transformation, WeakEntity, Window,
+    div, px, radians,
 };
 use serde_json::{Value, json};
 
@@ -34,22 +36,27 @@ use crate::shell::Shell;
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
-/// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 9] = [
-    ("judge", "Judge"),
-    ("providers", "Providers"),
-    ("compaction", "Compaction"),
-    ("rules", "Rules"),
-    ("workspaces", "Workspaces"),
+/// The tabs of the page, in order: each one's key and label. A new part of Flottille adds none
+/// (rule 13): it is a row of Features.
+pub const SECTIONS: [(&str, &str); 5] = [
+    ("agents", "Agents"),
+    ("approvals", "Approvals"),
+    ("features", "Features"),
     ("vault", "Vault"),
-    ("sessions", "Sessions"),
-    ("appearance", "Appearance"),
-    ("developer", "Developer mode"),
+    ("general", "General"),
 ];
 
-/// The blocks of the Judge tab, top to bottom: each one is a section of the page, entering on its
+/// The blocks of the Agents tab, top to bottom: each one is a section of the page, entering on its
 /// own.
-const JUDGE_BLOCKS: [&str; 2] = ["judge", "guidance"];
+const AGENTS_BLOCKS: [&str; 4] = ["providers", "rules", "tool-results", "sessions"];
+
+/// The blocks of the Approvals tab: the Auto judge, then what it is told.
+const APPROVALS_BLOCKS: [&str; 2] = ["judge", "guidance"];
+
+/// The row of Features that is the compaction's, and its place among the declared ones: after
+/// Review, before Connections.
+pub const COMPACTION: &str = "compaction";
+const COMPACTION_ORDER: u64 = 5;
 
 /// The compaction as the daemon says it (`compaction.show`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,7 +115,7 @@ impl Compaction {
     }
 }
 
-/// The thresholds the Compaction tab offers, in percent; the daemon takes 10 to 95.
+/// The thresholds the compaction's page offers, in percent; the daemon takes 10 to 95.
 pub const THRESHOLDS: [u64; 5] = [50, 60, 70, 80, 90];
 /// The maximum sizes it offers, in tokens, after No ceiling.
 pub const MAXIMUMS: [u64; 4] = [100_000, 150_000, 200_000, 400_000];
@@ -129,10 +136,12 @@ fn provider_title(provider: &str) -> &str {
     }
 }
 
-/// What the Compaction tab says under its title.
-const COMPACTION_SENTENCE: &str = "When an agent's context fills up, a separate model or the \
-     session's own agent writes a summary of its conversation, and the agent goes on in a new \
-     session from its brief and the summary.";
+/// The compaction's row of Features.
+const COMPACTION_LINE: &str = "Long conversations summarised so agents keep going.";
+
+/// Where and how the compaction acts (`**` around the words found elsewhere in the window).
+const COMPACTION_USAGE: &str = "Automatic past the threshold below, or **Compact** in a session's \
+     ⋯ menu, or the **Compact** control in its composer, left of Send, once the cache expired.";
 
 /// What the compaction's switch says under its label.
 pub const COMPACTION_HINT: &str = "When an agent's context fills up, its conversation is \
@@ -141,37 +150,39 @@ pub const COMPACTION_HINT: &str = "When an agent's context fills up, its convers
 /// What the page says of the summary's cost, under the model that writes it.
 pub const COMPACTOR_COST: &str = "Each summary is a turn of this model, on your own quota.";
 
-/// Where Settings was opened at, from a warning or a notice that leads to a section.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where Settings was opened at, from a warning or a notice that leads to a setting: the tab that
+/// holds it, with the setting in view.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reveal {
-    /// No judge is chosen (the mode's warning, the judge notice).
+    /// No judge is chosen (the mode's warning, the judge notice): Approvals.
     Judge,
-    /// No provider can start a session (the composer's "Open the settings").
+    /// No provider can start a session (the composer's "Open the settings"): Agents.
     Providers,
-    /// The Auto judge's guidance: the Judge tab, scrolled to the guidance under the judge.
+    /// The Auto judge's guidance: Approvals, scrolled to what the judge is told.
     Guidance,
-    /// The rules for every project (the link above a project's rules).
+    /// The rules for every project (the link above a project's rules): Agents, scrolled to them.
     Rules,
-    /// The compaction (the notice of the compactor picked).
+    /// The compaction (the notice of the compactor picked): its page of Features.
     Compaction,
     /// The vault (a Jira project's link to add the entry it logs time with).
     Vault,
+    /// The page of a feature, by its name: its row of Features opened.
+    Feature(String),
 }
 
 impl Reveal {
-    /// The index of its section in [`SECTIONS`].
-    fn entry(self) -> usize {
+    /// The index of its tab in [`SECTIONS`].
+    fn tab(&self) -> usize {
         let key = match self {
-            Reveal::Judge | Reveal::Guidance => "judge",
-            Reveal::Providers => "providers",
-            Reveal::Rules => "rules",
-            Reveal::Compaction => "compaction",
+            Reveal::Providers | Reveal::Rules => "agents",
+            Reveal::Judge | Reveal::Guidance => "approvals",
+            Reveal::Compaction | Reveal::Feature(_) => "features",
             Reveal::Vault => "vault",
         };
         SECTIONS
             .iter()
             .position(|(k, _)| *k == key)
-            .expect("a section of the page")
+            .expect("a tab of the page")
     }
 }
 
@@ -189,10 +200,9 @@ pub struct Developer {
 /// own, shown as one more option.
 pub const LIMITS: [usize; 4] = [4_000, 8_000, 16_000, 32_000];
 
-/// What the Tool results section says under its title.
-const TOOL_RESULTS_SENTENCE: &str = "A tool result longer than this reaches the agent as its beginning and its end, \
-     with the number of characters left out; the agent reads the rest by ranges, and only that \
-     session can. It saves the agent's context. For every project and every agent.";
+/// What the Long tool results section says under its title.
+const TOOL_RESULTS_SENTENCE: &str = "A longer result reaches the agent as its start and its end; \
+     the agent reads the rest when it needs it.";
 
 /// The days the Sessions select offers. The daemon takes any number from 1 to 90
 /// (`docs/protocol.md`): a file edited by hand keeps its own, shown as one more option.
@@ -202,21 +212,16 @@ pub const DAYS: [u64; 7] = [1, 3, 7, 14, 30, 60, 90];
 const FIRST_DAYS: u64 = 7;
 
 /// What the Sessions switch does, under its label.
-pub const SESSIONS_HINT: &str = "A session with no activity for that many days is ended as End session \
-     ends it. One with work waiting is never ended.";
-
-/// What the Sessions section says under its title.
-const SESSIONS_SENTENCE: &str = "Sessions pile up: one that finished its work stays open until you end it. \
-     Off, nothing is ended on its own, and a session whose quota ran out waits for you.";
+pub const SESSIONS_HINT: &str =
+    "Ends a session idle for the days below. One with work waiting is never ended.";
 
 /// What the switch that resumes sessions at their quota's reset does, under its label.
-pub const RESUME_HINT: &str = "A session whose quota ran out is told to continue at the reset. \
-     Each session's composer can switch it for that session alone.";
+pub const RESUME_HINT: &str = "A session stopped by its quota goes on at the reset. Each session \
+     can change it in its composer.";
 
 /// What the developer mode's switch logs, under its label.
-pub const DEVELOPER_HINT: &str = "Each gate decision with its reasons, the judge's input and \
-     answer, requests, deliveries and agent processes, one JSON object per line, every secret \
-     masked.";
+pub const DEVELOPER_HINT: &str = "Why each call was allowed, held or refused, one JSON line each, \
+     secrets masked. For working on Flottille.";
 
 pub struct SettingsPage {
     shell: WeakEntity<Shell>,
@@ -246,8 +251,6 @@ pub struct SettingsPage {
     judge_turning: Option<bool>,
     /// The daemon's refusal of the last judge chosen.
     judge_refused: Option<String>,
-    /// "How Auto works" is unfolded.
-    how: bool,
     /// The developer mode, once the daemon said it.
     developer: Option<Developer>,
     /// The developer mode's switch flipped, until the daemon answers: what it was asked to become.
@@ -272,27 +275,52 @@ pub struct SettingsPage {
     appearance_unread: Option<String>,
     /// The tab chosen: the index of its section in [`SECTIONS`].
     tab: usize,
-    /// The tab of a part of Flottille the user can turn off, by its name, when it is the one
-    /// chosen instead.
-    own_tab: Option<String>,
-    /// The scroll of the section shown, to bring the guidance in view from a link.
+    /// The row of Features whose page is open, by its key: kept while another tab is shown.
+    feature: Option<String>,
+    /// The views of the parts the page draws inside a `Subpage` or a `Fold`, made once.
+    parts: HashMap<Part, Entity<PagePart>>,
+    /// The compaction's rare settings, folded under "More settings".
+    more: Option<Entity<Fold>>,
+    /// The scroll of the section shown, to bring a block in view from a link.
     scroll: ScrollHandle,
+}
+
+/// A part of the page that is a view of its own, because a `Subpage` or a `Fold` holds a view.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Part {
+    /// The page of a row of Features, by its key.
+    Feature(String),
+    /// What the compaction's "More settings" holds.
+    CompactionMore,
+}
+
+/// A view that has the page draw one of its parts: it observes the page and the registry, and
+/// draws again when either changes.
+pub struct PagePart {
+    page: WeakEntity<SettingsPage>,
+    part: Part,
+}
+
+impl Render for PagePart {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let part = self.part.clone();
+        self.page
+            .update(cx, |page, cx| page.draw_part(&part, window, cx))
+            .unwrap_or_else(|_| div().into_any_element())
+    }
 }
 
 /// A judge, or a compactor, as the daemon lists it: its provider and its model, the provider's
 /// default when none.
 pub type Judge = (String, Option<String>);
 
-/// Auto, in two lines, beside the judge's pickers.
-pub const AUTO: [&str; 2] = [
-    "In Auto, the rules pass what is known to be harmless, and a small model on your own quota \
-     decides the rest: it allows a call, or asks you.",
-    "Base calls always come to you, in Ask as in Auto: they never reach the judge.",
-];
-
 /// What the judge's switch says under its label.
 pub const JUDGE_HINT: &str = "The rules pass what is known to be harmless; the model allows the \
      rest or asks you. It never denies.";
+
+/// Where and how the judge acts (`**` around the words found elsewhere in the window).
+pub const JUDGE_USAGE: &str = "Used by sessions in **Auto**, chosen in each session's composer. \
+     Base calls always come to you.";
 
 /// What the page says of the judge's cost, under its model.
 pub const JUDGE_QUOTA: &str = "Each decision is a turn of this model, on your own quota.";
@@ -322,7 +350,6 @@ impl SettingsPage {
             judge_pending: false,
             judge_turning: None,
             judge_refused: None,
-            how: false,
             developer: None,
             developer_pending: None,
             tool_results: None,
@@ -334,7 +361,9 @@ impl SettingsPage {
             appearance: None,
             appearance_unread: None,
             tab: 0,
-            own_tab: None,
+            feature: None,
+            parts: HashMap::new(),
+            more: None,
             scroll: ScrollHandle::new(),
         }
     }
@@ -347,24 +376,23 @@ impl SettingsPage {
     /// Chooses the tab of that section: it shows alone.
     pub fn choose(&mut self, entry: usize, cx: &mut Context<Self>) {
         let entry = entry.min(SECTIONS.len() - 1);
-        if self.tab != entry || self.own_tab.is_some() {
+        if self.tab != entry {
             self.tab = entry;
-            self.own_tab = None;
             cx.notify();
         }
     }
 
-    /// Chooses the tab of the part of Flottille named `name` (Specs).
-    pub fn choose_own(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.own_tab.as_deref() != Some(name) {
-            self.own_tab = Some(name.to_owned());
-            cx.notify();
-        }
+    /// The row of Features whose page is open.
+    pub fn open_feature(&self) -> Option<&str> {
+        self.feature.as_deref()
     }
 
-    /// The tab of a part of Flottille that is the one chosen, by its name.
-    pub fn own_tab(&self) -> Option<&str> {
-        self.own_tab.as_deref()
+    /// Opens the page of a row of Features, or goes back to the list.
+    pub fn set_feature(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+        if self.feature != key {
+            self.feature = key;
+            cx.notify();
+        }
     }
 
     /// The registry of the shell, while it is there.
@@ -374,23 +402,33 @@ impl SettingsPage {
             .map(|shell| shell.read(cx).extensions().clone())
     }
 
-    /// Opened at a section: its tab is the one chosen.
+    /// Opened at a setting: its tab is the one chosen, its page the one open, and it is in view.
     pub fn reveal(&mut self, at: Reveal, cx: &mut Context<Self>) {
-        self.choose(at.entry(), cx);
-        // The Judge tab is already shown when the link comes from where the page was left
-        // scrolled: the link says where the page starts.
-        match at {
-            Reveal::Guidance => {
-                let at = JUDGE_BLOCKS
-                    .iter()
-                    .position(|key| *key == "guidance")
-                    .expect("a block of the Judge tab");
-                self.scroll.scroll_to_top_of_item(at);
+        self.choose(at.tab(), cx);
+        // The tab may already be shown, scrolled: the link says where the page starts.
+        match &at {
+            Reveal::Guidance => self.scroll_to(&APPROVALS_BLOCKS, "guidance"),
+            Reveal::Rules => self.scroll_to(&AGENTS_BLOCKS, "rules"),
+            Reveal::Compaction => {
+                self.feature = Some(COMPACTION.to_owned());
+                self.scroll.set_offset(Point::default());
             }
-            Reveal::Judge | Reveal::Compaction => self.scroll.set_offset(Point::default()),
-            Reveal::Providers | Reveal::Rules | Reveal::Vault => {}
+            Reveal::Feature(name) => {
+                self.feature = Some(name.clone());
+                self.scroll.set_offset(Point::default());
+            }
+            Reveal::Judge | Reveal::Providers => self.scroll.set_offset(Point::default()),
+            Reveal::Vault => {}
         }
         cx.notify();
+    }
+
+    fn scroll_to(&self, blocks: &[&str], block: &str) {
+        let at = blocks
+            .iter()
+            .position(|key| *key == block)
+            .expect("a block of the tab");
+        self.scroll.scroll_to_top_of_item(at);
     }
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
@@ -455,7 +493,11 @@ impl SettingsPage {
         cx.notify();
     }
 
-    fn compaction_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The compaction's page of Features (`docs/extensions.md`, "Compaction"): its switch, its
+    /// sentence and its usage line, and while it is on the summary's model, "Compact
+    /// automatically" with the threshold under it, "More settings" folded, and what a summary
+    /// keeps.
+    fn compaction_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
         let shown = self.compaction.clone().unwrap_or(Compaction {
             compactor: None,
@@ -526,19 +568,105 @@ impl SettingsPage {
                         .ok();
                 }
             });
-        let automatic = Switch::new("compaction-automatic", shown.automatic, "Compact automatically")
-            .hint("On, an agent is compacted at the end of a turn once its context passes the threshold or the maximum size. Off, only when you ask, from a session's menu.")
-            .disabled(off)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let on = this.compaction.as_ref().is_some_and(|c| c.automatic);
-                this.set_compaction(json!({"automatic": !on}), cx)
-            }));
-        let select_of = |id: &'static str,
-                         values: Vec<Option<u64>>,
-                         now: Option<u64>,
-                         label: fn(Option<u64>) -> String,
-                         key: &'static str,
-                         this: WeakEntity<Self>| {
+        let automatic = Switch::new(
+            "compaction-automatic",
+            shown.automatic,
+            "Compact automatically",
+        )
+        .hint("At the end of a turn, past the threshold. Off, only when you ask.")
+        .disabled(off)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let on = this.compaction.as_ref().is_some_and(|c| c.automatic);
+            this.set_compaction(json!({"automatic": !on}), cx)
+        }));
+        let select = Self::compaction_select(off, this);
+        let threshold = select(
+            "compaction-threshold",
+            THRESHOLDS.iter().map(|v| Some(*v)).collect(),
+            Some(shown.threshold),
+            |v| format!("{} % of the context window", v.unwrap_or(0)),
+            "threshold",
+        );
+        let more = self.more_settings(window, cx);
+        let card = div()
+            .id("compaction")
+            .p(space::LG)
+            .flex()
+            .flex_col()
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(switch)
+            .child(div().pt(space::SM).child(crate::extensions::usage_line(
+                "compaction-usage",
+                COMPACTION_USAGE,
+                cx,
+            )))
+            .child(
+                presence(
+                    "compaction-summary-block",
+                    some,
+                    div().pt(space::MD).child(summary),
+                )
+                .gap(space::MD),
+            )
+            .child(
+                presence(
+                    "compaction-settings-block",
+                    some,
+                    div()
+                        .pt(space::MD)
+                        .flex()
+                        .flex_col()
+                        .gap(space::MD)
+                        .child(automatic)
+                        .child(
+                            presence(
+                                "compaction-threshold-block",
+                                shown.automatic,
+                                Field::new(
+                                    "compaction-threshold-field",
+                                    "When the context reaches",
+                                    threshold,
+                                ),
+                            )
+                            .gap(space::MD),
+                        )
+                        .child(more),
+                )
+                .gap(space::MD),
+            )
+            .test_support();
+        div()
+            .flex()
+            .flex_col()
+            .child(enter("compaction-page-enter", 0, card))
+            .child(
+                presence(
+                    "compaction-guidance-block",
+                    some,
+                    self.compaction_guidance.clone(),
+                )
+                .gap(space::XXL),
+            )
+            .into_any_element()
+    }
+
+    /// A select of numbers, one of which is chosen, for a setting of the compaction: the value in
+    /// force is offered too when a file edited by hand holds another.
+    #[allow(clippy::type_complexity)]
+    fn compaction_select(
+        off: bool,
+        this: WeakEntity<Self>,
+    ) -> impl Fn(
+        &'static str,
+        Vec<Option<u64>>,
+        Option<u64>,
+        fn(Option<u64>) -> String,
+        &'static str,
+    ) -> Select {
+        move |id, values, now, label, key| {
             let mut values = values;
             if !values.contains(&now) {
                 values.push(now);
@@ -552,6 +680,7 @@ impl SettingsPage {
                 )
             });
             let picked = values.clone();
+            let this = this.clone();
             Select::new(id, options, at)
                 .disabled(off)
                 .on_choose(move |index, _, cx| {
@@ -559,18 +688,79 @@ impl SettingsPage {
                     this.update(cx, |this, cx| this.set_compaction(json!({key: value}), cx))
                         .ok();
                 })
+        }
+    }
+
+    /// "More settings": a header with a turning chevron, and under it, folded, what is rarely
+    /// set.
+    fn more_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let page = cx.entity();
+        let fold = match self.more.clone() {
+            Some(fold) => fold,
+            None => {
+                let content: AnyView = self.part_view(Part::CompactionMore, cx).into();
+                let fold = cx.new(|_| Fold::new("compaction-more-fold", content, false));
+                self.more = Some(fold.clone());
+                fold
+            }
         };
-        let threshold = select_of(
-            "compaction-threshold",
-            THRESHOLDS.iter().map(|v| Some(*v)).collect(),
-            Some(shown.threshold),
-            |v| format!("{} % of the context window", v.unwrap_or(0)),
-            "threshold",
-            this.clone(),
+        let open = fold.read(cx).is_open();
+        let turned = turning("compaction-more-chevron", open, window, cx);
+        let header = hoverable(
+            div()
+                .id("compaction-more")
+                .aria_label("More settings")
+                .flex()
+                .items_center()
+                .gap(space::XS)
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .child(icon(Icon::Chevron).size(px(12.)).with_transformation(
+                    Transformation::rotate(radians(-std::f32::consts::FRAC_PI_2 * turned)),
+                ))
+                .child("More settings")
+                .on_click({
+                    let fold = fold.clone();
+                    move |_, _, cx| {
+                        fold.update(cx, |fold, cx| fold.toggle(cx));
+                        page.update(cx, |_, cx| cx.notify());
+                    }
+                }),
+            move |d, t| d.text_color(flottille_ui::color::mix(p.faint, p.text, t)),
         );
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .child(header)
+            .child(fold)
+            .into_any_element()
+    }
+
+    /// What "More settings" holds: the maximum size, the messages kept as they are, the two
+    /// settings around the cache's expiry and the cache lifetime of each provider.
+    fn compaction_more(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let shown = self.compaction.clone().unwrap_or(Compaction {
+            compactor: None,
+            picked: false,
+            by_agent: false,
+            automatic: true,
+            threshold: 70,
+            maximum: None,
+            kept: 20_000,
+            before_expiry: false,
+            margin: 5,
+            after_expiry: true,
+            minimum: 50_000,
+            lifetimes: Vec::new(),
+        });
+        let off = self.compaction.is_none() || self.compaction_pending;
+        let select = Self::compaction_select(off, cx.entity().downgrade());
         let mut maximums: Vec<Option<u64>> = vec![None];
         maximums.extend(MAXIMUMS.iter().map(|v| Some(*v)));
-        let maximum = select_of(
+        let maximum = select(
             "compaction-maximum",
             maximums,
             shown.maximum,
@@ -579,53 +769,47 @@ impl SettingsPage {
                 Some(v) => format!("{} tokens", grouped(v as usize)),
             },
             "maximum",
-            this.clone(),
         );
-        let kept = select_of(
+        let kept = select(
             "compaction-kept",
             KEPTS.iter().map(|v| Some(*v)).collect(),
             Some(shown.kept),
             |v| format!("{} tokens", grouped(v.unwrap_or(0) as usize)),
             "kept",
-            this.clone(),
         );
         let before_expiry = Switch::new(
             "compaction-before-expiry",
             shown.before_expiry,
-            "Compact before the cache expires",
+            "Compact an idle agent before its cache expires",
         )
-        .hint("An agent at rest is compacted the margin before its prompt cache expires, so that its next turn reads a short history.")
         .disabled(off)
         .on_click(cx.listener(move |this, _, _, cx| {
             let on = this.compaction.as_ref().is_some_and(|c| c.before_expiry);
             this.set_compaction(json!({"before_expiry": !on}), cx)
         }));
-        let margin = select_of(
+        let margin = select(
             "compaction-margin",
             MARGINS.iter().map(|v| Some(*v)).collect(),
             Some(shown.margin),
             |v| format!("{} minutes before", v.unwrap_or(0)),
             "margin",
-            this.clone(),
         );
         let after_expiry = Switch::new(
             "compaction-after-expiry",
             shown.after_expiry,
-            "Compact a session resumed after its cache expired",
+            "Compact when a session comes back after its cache expired",
         )
-        .hint("A message to an agent whose prompt cache expired compacts it first, then goes to the new session. The composer lets you choose for each message.")
         .disabled(off)
         .on_click(cx.listener(move |this, _, _, cx| {
             let on = this.compaction.as_ref().is_some_and(|c| c.after_expiry);
             this.set_compaction(json!({"after_expiry": !on}), cx)
         }));
-        let minimum = select_of(
+        let minimum = select(
             "compaction-minimum",
             MINIMUMS.iter().map(|v| Some(*v)).collect(),
             Some(shown.minimum),
             |v| format!("{} tokens", grouped(v.unwrap_or(0) as usize)),
             "minimum",
-            this,
         );
         let lifetimes = shown
             .lifetimes
@@ -642,34 +826,28 @@ impl SettingsPage {
             })
             .collect::<Vec<_>>()
             .join(" · ");
-        let settings = div()
+        div()
             .flex()
             .flex_col()
             .gap(space::MD)
-.child(automatic)
+            .pl(space::LG)
+            .child(Field::new("compaction-maximum-field", "Or above", maximum))
             .child(Field::new(
-                "compaction-threshold-field",
-                "Threshold",
-                threshold,
+                "compaction-kept-field",
+                "Recent messages kept as they are",
+                kept,
             ))
-            .child(
-                Field::new("compaction-maximum-field", "Maximum size", maximum)
-                    .hint("Compact there even when the window is larger."),
-            )
-            .child(
-                Field::new("compaction-kept-field", "Kept word for word", kept)
-                    .hint("The latest messages given again as they are, after the summary."),
-            )
             .child(before_expiry)
             .child(
-                Field::new("compaction-margin-field", "Margin", margin)
-                    .hint("How long before the cache expires an agent at rest is compacted."),
+                presence(
+                    "compaction-margin-block",
+                    shown.before_expiry,
+                    Field::new("compaction-margin-field", "How long before", margin),
+                )
+                .gap(space::MD),
             )
             .child(after_expiry)
-            .child(
-                Field::new("compaction-minimum-field", "Minimum size", minimum)
-                    .hint("Below it, neither compacts around the cache's expiry: a small session costs little to read again."),
-            )
+            .child(Field::new("compaction-minimum-field", "Not below", minimum))
             .child(
                 div()
                     .id("compaction-lifetimes")
@@ -680,37 +858,8 @@ impl SettingsPage {
                     )))
                     .child(format!("Prompt cache lifetimes. {lifetimes}"))
                     .test_support(),
-            );
-        let card = div()
-            .id("compaction")
-            .p(space::LG)
-            .flex()
-            .flex_col()
-            .rounded(px(12.))
-            .bg(p.card)
-            .border_1()
-            .border_color(p.line)
-            .child(switch)
-            .child(
-                presence(
-                    "compaction-summary-block",
-                    some,
-                    div().pt(space::MD).child(summary),
-                )
-                .gap(space::MD),
             )
-            .child(
-                presence(
-                    "compaction-settings-block",
-                    some,
-                    div().pt(space::MD).child(settings),
-                )
-                .gap(space::MD),
-            )
-            .test_support();
-        Section::new("compaction", "Compaction")
-            .sentence(COMPACTION_SENTENCE)
-            .child(card)
+            .into_any_element()
     }
 
     pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
@@ -725,18 +874,13 @@ impl SettingsPage {
         &self.providers
     }
 
-    /// What the page says of a provider, line by line: its state, its sign-in, its program, its
-    /// warnings and the daemon's refusal of its switch.
+    /// What the page says of a provider, line by line: its state, once, and the daemon's refusal
+    /// of its switch.
     pub fn said_of(&self, name: &str) -> Vec<String> {
         let Some(provider) = self.providers.get(name) else {
             return Vec::new();
         };
-        let mut lines = vec![
-            provider.status(),
-            provider.sign_in(),
-            provider.program_line(),
-        ];
-        lines.extend(provider.warnings.iter().cloned());
+        let mut lines = vec![provider.said()];
         lines.extend(self.refused.get(name).cloned());
         lines
     }
@@ -993,12 +1137,7 @@ impl SettingsPage {
                 .gap(space::MD),
             )
             .test_support();
-        Section::new("developer", "Developer mode")
-            .sentence(
-                "A log for working on Flottille: why each call was allowed, held or refused. Off, \
-                 nothing more is written.",
-            )
-            .child(card)
+        Section::new("developer", "Developer mode").child(card)
     }
 
     /// Whether the daemon said the limit of tool results.
@@ -1081,13 +1220,9 @@ impl SettingsPage {
                 this.update(cx, |this, cx| this.choose_tool_results(limit, cx))
                     .ok();
             });
-        Section::new("tool-results", "Tool results")
+        Section::new("tool-results", "Long tool results")
             .sentence(TOOL_RESULTS_SENTENCE)
-            .child(Field::new(
-                "tool-results-field",
-                "Cut results longer than",
-                select,
-            ))
+            .child(Field::new("tool-results-field", "Cut above", select))
     }
 
     /// Whether the daemon said the setting of inactive sessions.
@@ -1227,11 +1362,9 @@ impl SettingsPage {
                 presence(
                     "sessions-days-block",
                     shown.is_some(),
-                    div().pt(space::MD).child(Field::new(
-                        "sessions-days-field",
-                        "Inactive for",
-                        select,
-                    )),
+                    div()
+                        .pt(space::MD)
+                        .child(Field::new("sessions-days-field", "After", select)),
                 )
                 .gap(space::MD),
             )
@@ -1239,7 +1372,7 @@ impl SettingsPage {
         let resume = Switch::new(
             "sessions-resume-switch",
             self.resume_pending.or(self.resume).unwrap_or(false),
-            "Resume sessions when the quota resets",
+            "Resume when the quota resets",
         )
         .hint(RESUME_HINT)
         .disabled(self.resume.is_none() || self.resume_pending.is_some())
@@ -1253,16 +1386,14 @@ impl SettingsPage {
             .border_color(p.line)
             .child(resume)
             .test_support();
-        Section::new("sessions", "Sessions")
-            .sentence(SESSIONS_SENTENCE)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::MD)
-                    .child(card)
-                    .child(resume_card),
-            )
+        Section::new("sessions", "Sessions").child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::MD)
+                .child(card)
+                .child(resume_card),
+        )
     }
 
     /// Whether the daemon answered about the window's appearance, with it or with why it cannot
@@ -1334,7 +1465,7 @@ impl SettingsPage {
         let this = cx.entity().downgrade();
         let theme = Segmented::new(
             "appearance-theme",
-            "Theme",
+            "Colours",
             [("omarchy", "Omarchy"), ("flottille", "Flottille")],
             match shown.source {
                 Source::Omarchy => 0,
@@ -1393,7 +1524,7 @@ impl SettingsPage {
             .border_1()
             .border_color(p.line)
             .child(row(
-                "Theme",
+                "Colours",
                 "Omarchy follows your desktop's theme as it changes.",
                 theme.into_any_element(),
             ))
@@ -1437,34 +1568,15 @@ impl SettingsPage {
                 presence(
                     "appearance-shade-block",
                     shown.source == Source::Own,
-                    row(
-                        "Shade",
-                        "Flottille's own colours, light or dark.",
-                        shade.into_any_element(),
-                    ),
+                    row("Shade", "", shade.into_any_element()),
                 )
                 .gap(space::MD),
             )
             .test_support();
-        Section::new("appearance", "Appearance")
-            .sentence(
-                "Where the window's colours come from: your desktop's Omarchy theme, or \
-                 Flottille's own. A choice applies at once, in every window.",
-            )
-            .child(card)
+        Section::new("appearance", "Appearance").child(card)
     }
 
-    /// Whether "How Auto works" is unfolded.
-    pub fn is_how_open(&self) -> bool {
-        self.how
-    }
-
-    pub fn toggle_how(&mut self, cx: &mut Context<Self>) {
-        self.how = !self.how;
-        cx.notify();
-    }
-
-    fn judge_section(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn judge_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let on = self.judge_on();
         let switch = Switch::new("judge-switch", on, "Let a model decide in Auto")
@@ -1494,63 +1606,43 @@ impl SettingsPage {
                         .ok();
                 }
             });
-        let turned = turning("judge-how-chevron", self.how, window, cx);
-        let how = hoverable(
-            div()
-                .id("judge-how")
-                .aria_label("How Auto works")
-                .flex()
-                .items_center()
-                .gap(space::XS)
-                .cursor_pointer()
-                .text_size(px(12.5))
-                .child(icon(Icon::Chevron).size(px(12.)).with_transformation(
-                    Transformation::rotate(radians(-std::f32::consts::FRAC_PI_2 * turned)),
-                ))
-                .child("How Auto works")
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_how(cx))),
-            move |d, t| d.text_color(flottille_ui::color::mix(p.faint, p.text, t)),
-        );
-        let lines = div()
-            .flex()
-            .flex_col()
-            .gap(space::XS)
-            .pl(space::LG)
-            .children(AUTO.iter().enumerate().map(|(n, text)| {
-                div()
-                    .id(ElementId::Name(format!("judge-auto-{n}").into()))
-                    .aria_label(*text)
-                    .text_size(px(12.5))
-                    .text_color(p.mute)
-                    .child(*text)
-                    .test_support()
-            }));
         let card = div()
             .id("judge")
             .p(space::LG)
             .flex()
             .flex_col()
-            .gap(space::MD)
             .rounded(px(12.))
             .bg(p.card)
             .border_1()
             .border_color(p.line)
             .child(switch)
-            .child(presence("judge-model-block", on, model).gap(space::MD))
-            .child(how)
-            .child(presence("judge-how-block", self.how, lines).gap(space::MD))
+            .child(div().pt(space::SM).child(crate::extensions::usage_line(
+                "judge-usage",
+                JUDGE_USAGE,
+                cx,
+            )))
+            .child(
+                presence("judge-model-block", on, div().pt(space::MD).child(model)).gap(space::MD),
+            )
             .test_support();
         Section::new("judge", "Auto judge").child(card)
     }
 
-    fn provider_row(&self, provider: &Provider, cx: &mut Context<Self>) -> ListRow {
+    /// A provider's row: its switch carries its name, its version is a tag (its program's path in
+    /// the tooltip) and one line says its state, once.
+    fn provider_row(
+        &self,
+        provider: &Provider,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let p = palette(cx);
         let name = provider.name.clone();
         let on = self.switch_on(&name);
         let switch = Switch::new(
             ElementId::Name(format!("provider-switch-{name}").into()),
             on,
-            "Use",
+            SharedString::from(provider.title.clone()),
         )
         .disabled(self.pending.contains_key(&name))
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1573,85 +1665,106 @@ impl SettingsPage {
             .when(!provider.offered(), |d| {
                 d.border_1().border_color(state_color)
             });
-        let line = |text: String, color| {
-            div()
-                .text_size(px(12.5))
-                .text_color(color)
-                .child(SharedString::from(text))
-        };
-        let below = div()
+        let said = SharedString::from(provider.said());
+        let state = div()
+            .flex()
+            .items_center()
+            .gap(space::SM)
+            .text_size(px(12.5))
+            .text_color(state_color)
+            .child(mark)
+            // The daemon's sentence wraps rather than run past the row.
+            .child(
+                div()
+                    .id(ElementId::Name(
+                        format!("provider-state-{}", provider.name).into(),
+                    ))
+                    .aria_label(said.clone())
+                    .flex_1()
+                    .min_w_0()
+                    .child(said)
+                    .test_support(),
+            );
+        let version = provider.version.clone().map(|version| {
+            let tag = div()
+                .id(ElementId::Name(
+                    format!("provider-version-{}", provider.name).into(),
+                ))
+                .aria_label(SharedString::from(version.clone()))
+                .flex_none()
+                .mono(11.)
+                .text_color(p.faint)
+                .px(space::SM)
+                .py(space::XS)
+                .rounded(px(5.))
+                .border_1()
+                .border_color(p.line)
+                .whitespace_nowrap()
+                .child(SharedString::from(version));
+            match &provider.program_path {
+                Some(path) => tipped(tag, SharedString::from(path.clone()), 20., window, cx)
+                    .into_any_element(),
+                None => tag.into_any_element(),
+            }
+        });
+        div()
             .id(ElementId::Name(
-                format!("provider-{}", provider.name).into(),
+                format!("provider-row-{}", provider.name).into(),
             ))
-            .mt(px(2.))
+            .px(space::LG)
+            .py(space::MD)
             .flex()
             .flex_col()
-            .gap(space::XS)
+            .gap(space::SM)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(space::SM)
-                    .text_size(px(12.5))
-                    .text_color(state_color)
-                    .child(mark)
-                    // The daemon's sentence wraps rather than run past the row.
-                    .child({
-                        let status = SharedString::from(provider.status());
-                        div()
-                            .id(ElementId::Name(
-                                format!("provider-state-{}", provider.name).into(),
-                            ))
-                            .aria_label(status.clone())
-                            .flex_1()
-                            .min_w_0()
-                            .child(status)
-                            .test_support()
-                    }),
+                    .gap(space::MD)
+                    .child(div().flex_1().min_w_0().child(switch))
+                    .children(version),
             )
-            .child(line(provider.sign_in(), p.faint))
-            .children(
-                provider
-                    .warnings
-                    .iter()
-                    .map(|warning| line(format!("Warning: {warning}"), p.mute)),
-            )
-            .test_support();
-        let detail = match &provider.version {
-            Some(version) => format!("{} {version}", provider.program),
-            None => provider.program_line(),
-        };
-        ListRow::new(
-            ElementId::Name(format!("provider-row-{}", provider.name).into()),
-            SharedString::from(provider.title.clone()),
-        )
-        .detail(SharedString::from(detail))
-        .below(below)
-        .trailing(switch)
+            .child(state)
+            .into_any_element()
     }
-}
 
-impl Render for SettingsPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The Providers section: a card of rows, a skeleton in its place until the daemon says them.
+    fn providers_section(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
-        let pad = if self.narrow { space::LG } else { space::XXL };
-        let header = PageHeader::new("settings-header", "Settings");
-        let rows: Vec<ListRow> = self
+        let known = self.providers.known;
+        let rows: Vec<AnyElement> = self
             .providers
             .list
-            .clone()
             .iter()
-            .map(|provider| self.provider_row(provider, cx))
+            .map(|provider| self.provider_row(provider, window, cx))
             .collect();
-        let listed = rows.len();
+        let listed = !rows.is_empty();
+        let list = div()
+            .id("provider-list")
+            .flex()
+            .flex_col()
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .children(rows.into_iter().enumerate().map(|(at, row)| {
+                div()
+                    .when(at > 0, |d| d.border_t_1().border_color(p.line))
+                    .child(row)
+            }));
+        let check = Button::secondary("providers-check", "Check again").on_click(cx.listener(
+            |this, _, _, cx| {
+                this.shell
+                    .update(cx, |shell, _| shell.perform(Command::ReadProviders))
+                    .ok();
+            },
+        ));
         // What is in use, not how many rows there are: three rows with one switched on count one.
         let count = self.providers.offered().count();
-        let providers = Section::new("providers", "Providers")
-            .count(count.to_string())
-            .sentence(
-                "The agent programs installed on this machine and signed in. Disabling one stops \
-                 no agent that runs; Flottille never shows a key, only whether one is set.",
-            )
+        Section::new("providers", "Providers")
+            .when(known, |section| section.count(count.to_string()))
+            .sentence("The agent programs Flottille can start. Each signs in with its own login.")
+            .action(check)
             .child(presence_of(
                 "providers-error-line",
                 self.providers.error.clone().map(SharedString::from),
@@ -1665,131 +1778,191 @@ impl Render for SettingsPage {
                         .into_any_element()
                 },
             ))
-            .child(presence(
-                "providers-asking",
-                !self.providers.known,
-                div()
-                    .text_size(px(12.5))
-                    .text_color(p.faint)
-                    .child("Asking the daemon…"),
+            .child(awaiting(
+                "providers-waiting",
+                !known,
+                Skeleton::new("providers-skeleton").h(px(96.)),
+                presence("provider-list-block", listed, list),
             ))
-            .child(presence(
-                "provider-list-block",
-                listed > 0,
-                ListCard::new("provider-list").rows(rows),
-            ))
-            .into_any_element();
-        // Every section is built on each frame, as on a project's settings.
-        // The Judge tab holds two: the Auto judge, then its guidance.
-        let judge_tab: Vec<(&str, AnyElement)> = JUDGE_BLOCKS
-            .iter()
-            .map(|key| {
-                let block = match *key {
-                    "judge" if self.providers.known => {
-                        self.judge_section(window, cx).into_any_element()
-                    }
-                    "judge" => div().into_any_element(),
-                    _ => self.judge_guidance.clone().into_any_element(),
-                };
-                (*key, block)
-            })
-            .collect();
-        let mut sections: Vec<Vec<(&str, AnyElement)>> = vec![
-            judge_tab,
-            vec![
-                ("providers", providers),
+            .into_any_element()
+    }
+
+    /// The rows of Features, by key and title: what the quick switcher offers a page of.
+    pub fn features(
+        &self,
+        registry: &Entity<Registry>,
+        cx: &gpui_kit::App,
+    ) -> Vec<(String, String)> {
+        self.feature_rows(Some(registry.clone()), cx)
+            .into_iter()
+            .map(|row| (row.0, row.2))
+            .collect()
+    }
+
+    /// The row of a part of Flottille in Features: its key, icon, title, state tag and line.
+    fn feature_rows(
+        &self,
+        registry: Option<Entity<Registry>>,
+        cx: &gpui_kit::App,
+    ) -> Vec<(String, Icon, String, String, String, u64)> {
+        let mut rows = Vec::new();
+        if let Some(registry) = registry {
+            let registry = registry.read(cx);
+            for listed in registry.rows() {
+                let on = registry.switch_on(&listed.name, None);
+                rows.push((
+                    listed.name.clone(),
+                    crate::extensions::icon_named(&listed.icon),
+                    listed.title.clone(),
+                    if on { "On" } else { "Off" }.to_owned(),
+                    listed.line.clone(),
+                    listed.order,
+                ));
+            }
+        }
+        let on = self
+            .compaction
+            .as_ref()
+            .is_some_and(|c| c.compactor.is_some() || c.by_agent);
+        rows.push((
+            COMPACTION.to_owned(),
+            crate::extensions::icon_named("shrink"),
+            "Compaction".to_owned(),
+            if on { "On" } else { "Off" }.to_owned(),
+            COMPACTION_LINE.to_owned(),
+            COMPACTION_ORDER,
+        ));
+        rows.sort_by_key(|row| row.5);
+        rows
+    }
+
+    /// The Features tab: a list of rows that opens the page of one in its place.
+    fn features_tab(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let registry = self.registry(cx);
+        let rows = self.feature_rows(registry.clone(), cx);
+        let known = self.compaction.is_some()
+            && registry
+                .as_ref()
+                .is_none_or(|registry| registry.read(cx).is_known());
+        let open = self
+            .feature
+            .clone()
+            .filter(|key| rows.iter().any(|row| &row.0 == key));
+        let this = cx.entity().downgrade();
+        let mut subpage = Subpage::new("features", "Features")
+            .open(open.as_deref())
+            .on_open(move |key, _, cx| {
+                this.update(cx, |this, cx| {
+                    this.set_feature(key.map(|key| key.to_string()), cx)
+                })
+                .ok();
+            });
+        for (key, icon, title, tag, line, _) in rows {
+            subpage = subpage.entry(key, icon, title, tag, line);
+        }
+        if let Some(key) = open {
+            subpage = subpage.page(self.part_view(Part::Feature(key), cx));
+        }
+        awaiting(
+            "features-waiting",
+            !known,
+            Skeleton::new("features-skeleton").h(px(120.)),
+            subpage,
+        )
+        .into_any_element()
+    }
+
+    /// The view of a part, made once; it observes the page and the registry.
+    fn part_view(&mut self, part: Part, cx: &mut Context<Self>) -> Entity<PagePart> {
+        if let Some(view) = self.parts.get(&part) {
+            return view.clone();
+        }
+        let page = cx.entity();
+        let registry = self.registry(cx);
+        let view = cx.new({
+            let part = part.clone();
+            let weak = page.downgrade();
+            move |cx| {
+                cx.observe(&page, |_, _, cx| cx.notify()).detach();
+                if let Some(registry) = &registry {
+                    cx.observe(registry, |_, _, cx| cx.notify()).detach();
+                }
+                PagePart { page: weak, part }
+            }
+        });
+        self.parts.insert(part, view.clone());
+        view
+    }
+
+    /// Draws one part of the page, for the view that holds it.
+    fn draw_part(
+        &mut self,
+        part: &Part,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match part {
+            Part::CompactionMore => self.compaction_more(cx),
+            Part::Feature(key) if key == COMPACTION => self.compaction_page(window, cx),
+            Part::Feature(key) => self
+                .registry(cx)
+                .and_then(|registry| crate::extensions::feature_page(&registry, key, cx))
+                .unwrap_or_else(|| div().into_any_element()),
+        }
+    }
+}
+
+impl Render for SettingsPage {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let pad = if self.narrow { space::LG } else { space::XXL };
+        let header = PageHeader::new("settings-header", "Settings");
+        // Only the tab shown is built: what a tab holds enters again as it is shown.
+        let tab = self.tab.min(SECTIONS.len() - 1);
+        let blocks: Vec<(&str, AnyElement)> = match SECTIONS[tab].0 {
+            "agents" => vec![
+                ("providers", self.providers_section(window, cx)),
+                ("rules", self.rules.clone().into_any_element()),
                 (
                     "tool-results",
                     self.tool_results_section(cx).into_any_element(),
                 ),
+                ("sessions", self.sessions_section(cx).into_any_element()),
             ],
-            vec![
-                ("compaction", self.compaction_section(cx).into_any_element()),
+            "approvals" => vec![
                 (
-                    "compaction-guidance",
-                    self.compaction_guidance.clone().into_any_element(),
+                    "judge",
+                    if self.providers.known {
+                        self.judge_section(cx).into_any_element()
+                    } else {
+                        div().into_any_element()
+                    },
                 ),
+                ("guidance", self.judge_guidance.clone().into_any_element()),
             ],
-            vec![("rules", self.rules.clone().into_any_element())],
-            vec![("workspaces", self.workspaces.clone().into_any_element())],
-            vec![("vault", self.vault.clone().into_any_element())],
-            vec![("sessions", self.sessions_section(cx).into_any_element())],
-            vec![("appearance", self.appearance_section(cx).into_any_element())],
-            vec![("developer", self.developer_section(cx).into_any_element())],
-        ];
-        // The tabs of the parts of Flottille the user can turn off come after the Judge's, in
-        // their order; each is drawn from what it declares.
-        let registry = self.registry(cx);
-        let own: Vec<(String, String)> = registry
-            .as_ref()
-            .map(|registry| registry.read(cx).tabs())
-            .unwrap_or_default();
-        let own_shown = self.own_tab.as_ref().and_then(|name| {
-            let drawn = crate::extensions::settings_tab(registry.as_ref()?, name, cx)?;
-            Some((name.clone(), drawn))
-        });
-        let mut order: Vec<Tab> = vec![Tab::Core(0)];
-        order.extend(own.iter().map(|(name, _)| Tab::Own(name.clone())));
-        order.extend((1..SECTIONS.len()).map(Tab::Core));
-        let core = self.tab.min(sections.len() - 1);
-        let (chosen, shown) = match own_shown {
-            Some((name, drawn)) => (
-                order
-                    .iter()
-                    .position(|tab| *tab == Tab::Own(name.clone()))
-                    .unwrap_or(0),
-                vec![(SharedString::from(name), drawn)],
-            ),
-            None => (
-                order
-                    .iter()
-                    .position(|tab| *tab == Tab::Core(core))
-                    .unwrap_or(0),
-                sections
-                    .swap_remove(core)
-                    .into_iter()
-                    .map(|(part, section)| (SharedString::from(part), section))
-                    .collect(),
-            ),
+            "features" => vec![("features", self.features_tab(cx))],
+            "vault" => vec![("vault", self.vault.clone().into_any_element())],
+            _ => vec![
+                ("appearance", self.appearance_section(cx).into_any_element()),
+                ("workspaces", self.workspaces.clone().into_any_element()),
+                ("developer", self.developer_section(cx).into_any_element()),
+            ],
         };
         let vault = self.vault.read(cx).entries().map(<[_]>::len);
         let this = cx.entity().downgrade();
-        let chooses = order.clone();
-        let tabs = order
+        let tabs = SECTIONS
             .iter()
             .fold(
-                Tabs::new("settings-tabs", "Sections", chosen),
-                |tabs, tab| match tab {
-                    Tab::Own(name) => {
-                        let title = own
-                            .iter()
-                            .find(|(n, _)| n == name)
-                            .map(|(_, title)| title.clone())
-                            .unwrap_or_default();
-                        tabs.tab(SharedString::from(name.clone()), title)
+                Tabs::new("settings-tabs", "Sections", tab),
+                |tabs, (key, label)| match *key {
+                    "vault" if let Some(entries) = vault => {
+                        tabs.counted(*key, *label, entries.to_string())
                     }
-                    Tab::Core(at) => {
-                        let (key, label) = SECTIONS[*at];
-                        match key {
-                            // The count shows once the daemon listed them, so it does not jump.
-                            "providers" if self.providers.known => {
-                                tabs.counted(key, label, count.to_string())
-                            }
-                            "vault" if let Some(entries) = vault => {
-                                tabs.counted(key, label, entries.to_string())
-                            }
-                            _ => tabs.tab(key, label),
-                        }
-                    }
+                    _ => tabs.tab(*key, *label),
                 },
             )
             .on_choose(move |at, _, cx| {
-                let tab = chooses[at].clone();
-                this.update(cx, |this, cx| match tab {
-                    Tab::Core(entry) => this.choose(entry, cx),
-                    Tab::Own(name) => this.choose_own(&name, cx),
-                })
-                .ok();
+                this.update(cx, |this, cx| this.choose(at, cx)).ok();
             });
         let key = |part: &str| ElementId::Name(format!("enter-settings-{part}").into());
         let column = |element: AnyElement| {
@@ -1827,8 +2000,8 @@ impl Render for SettingsPage {
             .px(pad)
             .pt(space::XL)
             .pb(space::XXXL)
-            .children(shown.into_iter().enumerate().map(|(n, (part, section))| {
-                column(enter(key(&part), 2 + n, section).into_any_element())
+            .children(blocks.into_iter().enumerate().map(|(n, (part, section))| {
+                column(enter(key(part), 2 + n, section).into_any_element())
                     .when(n > 0, |d| d.mt(space::XXL))
             }));
         div()
@@ -1839,14 +2012,6 @@ impl Render for SettingsPage {
             .child(top)
             .child(page)
     }
-}
-
-/// A tab of the page: a section of [`SECTIONS`], or the tab of a part of Flottille the user can
-/// turn off, by its name.
-#[derive(Clone, Debug, PartialEq)]
-enum Tab {
-    Core(usize),
-    Own(String),
 }
 
 /// A count of characters with its thousands set apart: `8,000`.
@@ -1864,7 +2029,10 @@ pub(crate) fn grouped(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMPACTION_SENTENCE, TOOL_RESULTS_SENTENCE, grouped};
+    use super::{
+        COMPACTION_HINT, COMPACTION_LINE, COMPACTION_USAGE, COMPACTOR_COST, TOOL_RESULTS_SENTENCE,
+        grouped,
+    };
 
     #[test]
     fn the_sentence_of_the_tool_results_section_has_no_run_of_spaces() {
@@ -1875,19 +2043,15 @@ mod tests {
     }
 
     #[test]
-    fn the_compaction_sentence_names_the_choices_in_the_words_of_the_select() {
-        assert!(
-            COMPACTION_SENTENCE.contains("a separate model"),
-            "{COMPACTION_SENTENCE}"
-        );
-        assert!(
-            COMPACTION_SENTENCE.contains("the session's own agent"),
-            "{COMPACTION_SENTENCE}"
-        );
-        assert!(
-            !COMPACTION_SENTENCE.contains("compactor"),
-            "{COMPACTION_SENTENCE}"
-        );
+    fn the_compaction_never_says_compactor() {
+        for text in [
+            COMPACTION_LINE,
+            COMPACTION_USAGE,
+            COMPACTION_HINT,
+            COMPACTOR_COST,
+        ] {
+            assert!(!text.contains("compactor"), "{text}");
+        }
     }
 
     #[test]

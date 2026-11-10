@@ -662,7 +662,7 @@ impl std::fmt::Debug for VaultWrite {
     }
 }
 
-/// The setting of the Sessions tab a choice wrote.
+/// The setting of Sessions a choice wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionsSetting {
     Days,
