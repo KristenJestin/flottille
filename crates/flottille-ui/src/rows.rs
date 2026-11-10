@@ -685,22 +685,33 @@ impl RenderOnce for ListRow {
                 .py(px(8.))
                 .rounded(radius::LIST_ROW)
         };
-        let tags = self.tags.into_iter().enumerate().map(|(index, tag)| {
-            div()
-                .id(ElementId::Name(format!("{}-tag-{index}", self.id).into()))
-                .aria_label(tag.clone())
-                .flex_none()
-                .mono(11.)
-                .text_color(p.faint)
-                .px(px(6.))
-                .py(px(1.))
-                .rounded(px(5.))
-                .border_1()
-                .border_color(p.line)
-                .whitespace_nowrap()
-                .child(tag)
-                .test_support()
-        });
+        // A tag is a word or a path someone wrote: it is cut with an ellipsis at 160 px (its
+        // whole text in a tooltip) so that the title keeps its room, rather than push the row
+        // out of its place.
+        let tags: Vec<AnyElement> = self
+            .tags
+            .into_iter()
+            .enumerate()
+            .map(|(index, tag)| {
+                let element = div()
+                    .id(ElementId::Name(format!("{}-tag-{index}", self.id).into()))
+                    .aria_label(tag.clone())
+                    .min_w_0()
+                    .max_w(px(160.))
+                    .overflow_hidden()
+                    .mono(11.)
+                    .text_color(p.faint)
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(p.line)
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(tag.clone());
+                tipped_when_cut(element, tag, window, cx)
+            })
+            .collect();
         let mono = self.mono;
         let mut row = row
             .child(
