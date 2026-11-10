@@ -1753,10 +1753,6 @@ fn a_server_that_never_ends_its_listing_is_cut_off() {
         connection(&user, "almanac")["state"] == "cut off"
     });
     let why = connection(&user, "almanac")["cut_off"].clone();
-    assert!(
-        why.as_str().unwrap().contains("pages of tools"),
-        "{why}"
-    );
+    assert!(why.as_str().unwrap().contains("pages of tools"), "{why}");
     assert!(!has(&mcp, "conn_almanac"));
 }
-

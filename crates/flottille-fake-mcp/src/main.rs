@@ -88,7 +88,10 @@ fn main() {
         return http(&script, &log, &port_file);
     }
     if let Some(when) = script["notify"]["when"].as_str() {
-        let (when, times) = (when.to_owned(), script["notify"]["times"].as_u64().unwrap_or(1));
+        let (when, times) = (
+            when.to_owned(),
+            script["notify"]["times"].as_u64().unwrap_or(1),
+        );
         std::thread::spawn(move || {
             while !std::path::Path::new(&when).exists() {
                 std::thread::sleep(Duration::from_millis(20));
@@ -134,7 +137,9 @@ fn main() {
                 }
                 let mut result = json!({"tools": script["tools"]});
                 if script["endless_listing"] == true {
-                    let next = params["cursor"].as_str().and_then(|c| c.parse::<u64>().ok());
+                    let next = params["cursor"]
+                        .as_str()
+                        .and_then(|c| c.parse::<u64>().ok());
                     result["nextCursor"] = json!((next.unwrap_or(0) + 1).to_string());
                 }
                 Ok(result)

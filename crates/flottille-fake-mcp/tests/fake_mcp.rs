@@ -15,8 +15,10 @@ fn a_change_notice_comes_when_its_file_appears_and_the_listing_is_read_again() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("script.json");
     let trigger = dir.path().join("notify");
-    let tool = |description: &str| json!([{"name": "search", "description": description,
-        "inputSchema": {"type": "object"}}]);
+    let tool = |description: &str| {
+        json!([{"name": "search", "description": description,
+        "inputSchema": {"type": "object"}}])
+    };
     std::fs::write(
         &script,
         json!({"server": {"name": "almanac", "version": "1.0.0"}, "tools": tool("Finds."),
