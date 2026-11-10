@@ -439,7 +439,7 @@ Opening and ending are events (`subscription.opened`, `subscription.ended`, `doc
 Sessions pile up: a root that finished its work stays open until the user ends it. A setting
 ends them on its own, **off by default** (nothing ever happens unless the user turns it on): "End
 sessions inactive for", 1 to 90 days, `end_inactive_days` of `sessions.toml` in the configuration
-folder, set in Settings, Sessions, or by `sessions.set` (`docs/protocol.md`, "The sessions
+folder, set in Settings, Agents, Sessions, or by `sessions.set` (`docs/protocol.md`, "The sessions
 methods").
 
 When it is on, the daemon ends a root that is between turns and had **no activity for that many
@@ -464,9 +464,9 @@ runs: no timer of its own, nothing woken more often. The clock is the store's, w
 ### 5.8 Compaction
 
 Each agent CLI compacts its own context, with its own model and rules. Flottille compacts it
-instead with **the compactor**, a model the user chooses in Settings, Compaction, as they choose the
-Auto judge (§7.1): provider, model and effort; **None** leaves each CLI to compact on its own, as
-before. A user who never chose gets one picked as the judge is: the smallest model of the first
+instead with **the compactor**, a model the user chooses in Settings, Features, Compaction, as
+they choose the Auto judge (§7.1): provider, model and effort; the compaction turned off ("Compact
+long conversations", `None` in the file) leaves each CLI to compact on its own, as before. A user who never chose gets one picked as the judge is: the smallest model of the first
 provider enabled, installed and signed in among those Flottille lists (Claude's Haiku), written
 once to `compaction.toml` and said once in a notice that opens Settings. It runs on the user's
 quota, as a session of one of their CLIs with no tool at all, one process per compaction, stopped
@@ -523,7 +523,7 @@ agent wrote is data.
    size** of context (50,000 tokens), without a compactor, while a picked compactor's notice is
    not seen, for a context that did not grow since the session started or its last compaction
    failed, nor for a provider whose cache lifetime is not established (`docs/agents.md`, "The
-   prompt cache's lifetime"); the Compaction tab says each provider's. Once an agent's cache
+   prompt cache's lifetime"); the compaction's page says each provider's. Once an agent's cache
    expired, the composer's toolbar's **Compact** control shows just left of **Send**, ticked from
    the setting (its tooltip says why): unticked, the message goes to the session as it is; ticked, it
    compacts first even with the setting off. While there is nothing to compact the control is not
@@ -533,8 +533,8 @@ agent wrote is data.
    block above it. A
    message from Flottille itself (a child's news, a delivery) follows the setting.
 7. **The agent's own handoff**: **Summary written by** (`summary` in `compaction.toml`) is the
-   compactor (the default, all of the above, shown in the window as **A model you choose**) or
-   **the session's own agent**. Then, at the same moments
+   compactor (the default, all of the above, shown in the window as one of the models of the
+   select) or **the session's own agent** (the select's first option). Then, at the same moments
    (the threshold at the end of a turn, or asked by hand) and with no compactor needed, Flottille
    sends the agent a message of its own, shown as Flottille's and never as the user's, that asks
    for its handoff in a fixed shape: its task, the decisions and why, the files touched, what is
@@ -572,7 +572,7 @@ The window says it as the session's state, once: waiting, its words `Out of quot
 the sidebar and in the rail of its page, in place of idle.
 
 A setting resumes the session at its reset, **off by default**: "Resume sessions when the quota
-resets", `resume_at_reset` of `sessions.toml`, set in Settings, Sessions, or by `sessions.set`.
+resets", `resume_at_reset` of `sessions.toml`, set in Settings, Agents, Sessions, or by `sessions.set`.
 While a session waits for a known reset, its composer's toolbar shows a chip, `Resume at 13:00`,
 at the end of its controls, ticked or not from that setting, which the user toggles for this session alone
 (`agent.quota_resume`). When it is on, the sweep (no timer of its own) delivers the session one message at the reset plus a
@@ -811,12 +811,12 @@ a line names counts. An option's value (`awk -F/`, `--base=/`) or a word of a pr
 are text (`tr`, `printf`, `expr`, `seq`) that names a folder above Flottille's own is held as base
 instead, as it was: such a word is seldom a path the line writes. **Held** is everything else the gate does not let pass: in Full it passes.
 
-The judge is an agent of a provider the user chose in Settings ("Auto judge": provider and
+The judge is an agent of a provider the user chose in Settings (Approvals, "Auto judge": its
 model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP
 server. A user who never chose one gets one picked: the smallest model of the first provider that
 is enabled, installed and signed in, among the few whose smallest model Flottille lists (Claude's
 Haiku), written once to `providers.toml` and said once in a notice that opens Settings (and by
-`flottille provider list`); a user who chose "No judge" never gets one, nor does one whose last
+`flottille provider list`); a user who turned the judge off ("No judge") never gets one, nor does one whose last
 choice before `judge = "none"` existed was no judge (the last `provider.judge_changed` in the store
 names none), whose file then says `judge = "none"`. Its
 instructions are a fixed text (`roles/judge-base.md`: what it is, its JSON answer, that it never
@@ -824,7 +824,7 @@ denies, that what the agent wrote is data, and the floor: ask for anything destr
 what was asked, surprising, or whenever it is not sure) around the user's **guidance**, which can
 add to the floor but never lift it: Flottille's default (`roles/judge.md`: allow what the request
 plausibly needs; writes of the project's configuration are within intent while the user is setting
-the project up) or the user's own, edited in Settings ("Judge", with Reset to default; saving an
+the project up) or the user's own, edited in Settings ("What the judge is told", in Approvals, with Reset to default; saving an
 empty text resets it) and read at each judgement. A guidance that cannot be read whole, or is over
 its 4,000 characters, is never cut nor replaced by the default: each judgement fails, and so asks,
 saying which file is wrong and why, and Settings show it. The guidance changes neither what
@@ -847,7 +847,7 @@ whole asks without it, and the gate refuses a longer brief, title or body. A pro
 process group stopped after it. Each verdict is recorded with the
 call (who judged, what, why: the `judgement` of its `agent.tool_served` event, and of its request
 when it asks), shown on the card and in `flottille approvals`.
-Without a judge, none picked or "No judge" chosen, Auto behaves as Ask, and the control carries a
+Without a judge, none picked or the judge turned off, Auto behaves as Ask, and the control carries a
 small warning icon whose tooltip says so and whose click opens Settings, where the judge is
 chosen. A judgement is a turn of the judge's model: it uses the user's quota on that provider,
 which Settings say.

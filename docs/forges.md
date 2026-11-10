@@ -253,14 +253,16 @@ and state, and its checks as one mark drawn by shape as well as colour (`✓` pa
 pull request with the system's default handler. The session page watches its workspace while it is
 open.
 
-The project's Settings put, under each repository that declares a forge, the state of the program
-it needs (`✓ gh 2.60.0 · signed in to github.com`, or `✗ bkt not found` with the installation
-page and its command, or `✗ gh 2.60.0 · not signed in to github.com` with the sign-in commands), and
-the Tracker row the same for `acli` or `gh`; "Check programs" (Repositories) and "Check again"
-(Tracker) read them anew. Each line unfolds and fades in as it comes and folds away as it goes. When the state itself
+The project's Settings (Repositories tab) say, in each repository's Forge value, the state of the
+program it needs (`GitHub · gh ✓`, its version and the host it is signed in to in the tooltip), and
+when it is not ready, a line saying what is missing (`bkt not found` with the installation page
+and its command, or `gh is not signed in to github.com` with the sign-in command) and a quiet Check
+again on that line only; the Tracker the same for `acli` or `gh`. The tab reads them anew when it
+opens, after a change of forge or tracker, and each time the window takes the focus back while it
+is shown (`design.md` §10). Each line unfolds and fades in as it comes and folds away as it goes. When the state itself
 changes (not found, signed out, signed in to another site, ready), the old line folds away and
 fades out while the new one unfolds and fades in, and the ink moves from red to green with them. A
-read that fails is a toast and leaves what was known; the buttons stay enabled to ask again.
+read that fails is a toast and leaves what was known; Check again stays enabled to ask again.
 
 ## Bitbucket
 
