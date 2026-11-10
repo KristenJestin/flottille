@@ -1011,6 +1011,21 @@ An agent's run ended and the daemon could not check all the agent folders of its
 | `missing` | The daemon could not note the agent folders before the run: nothing it changed there is known, nor put back. |
 | `unreached` | The folders of the place's repositories that are outside it (reached through a link), whose agent folders were not checked. |
 
+#### `run.agent_folders_put_back`
+
+The put-back of a run's place (`docs/design.md` §7.1) put back, or could not put back, what was
+written in its agent folders. The run named is the last of the place's runs to end, which may not
+be the one that wrote, nor one that started: the result of that run says it too, when it ran.
+`flottille inbox` lists it as an entry of kind `put_back`, for a child's run too.
+
+| Field | |
+|---|---|
+| `agent`, `project`, `run` | |
+| `folder` | Where it ran. |
+| `put_back` | The entries put back as they were, relative to the place. |
+| `left` | The entries it could not put back. |
+| `kept` | Where what it removed or replaced is kept, `null` when nothing was. |
+
 #### `run.dismissed`
 
 The user dismissed a command that ended (`run.dismiss`): it is no longer listed.

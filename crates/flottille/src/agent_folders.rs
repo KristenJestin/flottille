@@ -817,12 +817,17 @@ enum Wait {
     Taken(watch::Receiver<Option<Taken>>),
 }
 
+/// What is told of the put-back a guard dropped without `leave` did: the run never started, and
+/// no result of it says so.
+pub type Told = Box<dyn FnOnce(Restored) + Send>;
+
 /// One run's share of its place's guard: `leave` once it ends.
 pub struct Guard {
     groups: Arc<std::sync::Mutex<Vec<Group>>>,
     /// The run's id: where its put-back keeps what it removes, if it is the last.
     run: String,
     left: bool,
+    told: Option<Told>,
 }
 
 impl Guards {
@@ -842,6 +847,7 @@ impl Guards {
             groups: self.groups.clone(),
             run: run.to_owned(),
             left: false,
+            told: None,
         };
         loop {
             let wait = {
@@ -936,6 +942,11 @@ impl Guards {
 }
 
 impl Guard {
+    /// What to tell of its put-back if it is dropped without `leave`.
+    pub fn tell(&mut self, told: Told) {
+        self.told = Some(told);
+    }
+
     /// The run ended: the last one of its place puts the agent folders back.
     pub async fn leave(mut self) -> Option<Restored> {
         self.left = true;
@@ -951,7 +962,17 @@ impl Drop for Guard {
         }
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
-                runtime.spawn(leave(self.groups.clone(), self.run.clone()));
+                let (left, told) = (
+                    leave(self.groups.clone(), self.run.clone()),
+                    self.told.take(),
+                );
+                runtime.spawn(async move {
+                    if let Some(restored) = left.await
+                        && let Some(told) = told
+                    {
+                        told(restored);
+                    }
+                });
             }
             // Only when the daemon stops: nothing is left to put back for.
             Err(_) => eprintln!(
@@ -1606,6 +1627,32 @@ mod tests {
         // Its snapshot was taken once the hook was gone: it is not put back again.
         let next = next.await.unwrap();
         assert_eq!(next.leave().await, Some(Restored::default()));
+        assert!(!root.join(".claude").exists());
+    }
+
+    #[tokio::test]
+    async fn a_guard_dropped_without_leave_still_tells_what_it_put_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        made(&root.join("README.md"), "\n");
+        let guards = Guards::default();
+        let mut guard = guards
+            .enter(&root, &[], None, &dir.path().join("kept"), "run")
+            .await;
+        let (told, heard) = tokio::sync::oneshot::channel();
+        guard.tell(Box::new(move |restored| {
+            let _ = told.send(restored);
+        }));
+        made(&root.join(".claude/settings.json"), "{\"hooks\": {}}\n");
+
+        // The run never started: its guard is dropped.
+        drop(guard);
+        let restored = tokio::time::timeout(Duration::from_secs(10), heard)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(restored.put_back, [".claude/settings.json"]);
         assert!(!root.join(".claude").exists());
     }
 

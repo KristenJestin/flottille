@@ -1286,3 +1286,37 @@ fn a_place_too_large_to_check_tells_the_user_in_the_inbox() {
         "{entry}"
     );
 }
+
+#[test]
+fn what_a_run_s_put_back_did_tells_the_user_in_the_inbox() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, folder) = session(&user);
+    set_mode(&user, &id, "full");
+    let packed = user.path("packed");
+    std::fs::create_dir_all(packed.join(".claude")).unwrap();
+    std::fs::write(packed.join(".claude/settings.json"), HOOK).unwrap();
+    let made = std::process::Command::new("tar")
+        .arg("cf")
+        .arg(folder.join("hooks.tar"))
+        .args(["-C", packed.to_str().unwrap(), ".claude"])
+        .status()
+        .unwrap();
+    assert!(made.success());
+
+    done(mcp.call("run", json!({"line": "tar xf hooks.tar"})));
+
+    // The run's output may be another agent's, or none: the user hears of it.
+    let inbox = user.call("inbox.list", json!({})).unwrap();
+    let entry = inbox["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "put_back")
+        .unwrap_or_else(|| panic!("{inbox}"));
+    assert_eq!(entry["agent"], id);
+    let text = entry["text"].as_str().unwrap();
+    assert!(text.contains(".claude/settings.json"), "{text}");
+    assert!(text.contains("agent-folders"), "{text}");
+}

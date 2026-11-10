@@ -36,6 +36,47 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
     }
 }
 
+/// The text of the daemon's own word of a run.
+fn daemon_text(kind: &str, data: &Value) -> String {
+    match kind {
+        "put_back" => put_back(data),
+        _ => unchecked(data),
+    }
+}
+
+/// What a `run.agent_folders_put_back` tells the user: what the put-back of a run's place did.
+fn put_back(data: &Value) -> String {
+    let list = |key: &str| {
+        data[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut said = vec![format!(
+        "A run in {} wrote in agent folders (.claude, .claude.json, .codex, .mcp.json), whose \
+         settings and hooks run programs when you open the place with an agent's own command \
+         line; its run {} ended last there",
+        data["folder"].as_str().unwrap_or_default(),
+        data["run"].as_str().unwrap_or_default()
+    )];
+    let (put, left) = (list("put_back"), list("left"));
+    if !put.is_empty() {
+        said.push(format!("Flottille put back as they were: {put}"));
+    }
+    if !left.is_empty() {
+        said.push(format!(
+            "Flottille could not put back: {left}, look at them before you open it"
+        ));
+    }
+    if let Some(kept) = data["kept"].as_str() {
+        said.push(format!("what it removed or replaced is kept in {kept}"));
+    }
+    format!("{}.", said.join("; "))
+}
+
 /// What a `run.agent_folders_unchecked` tells the user: why the agent folders of a run's place
 /// were not all checked after it.
 fn unchecked(data: &Value) -> String {
@@ -93,6 +134,7 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
                 "session.following_paused",
                 "vault.asked",
                 "run.agent_folders_unchecked",
+                "run.agent_folders_put_back",
             ],
             asked.after.unwrap_or(0),
         )
@@ -113,15 +155,24 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             ("session.following_paused", _) => "paused",
             ("vault.asked", _) => "vault",
             ("run.agent_folders_unchecked", _) => "unchecked",
+            ("run.agent_folders_put_back", _) => "put_back",
             _ => continue,
         };
-        let Some(id) = event.data["agent"].as_str() else {
-            continue;
+        // The daemon's own word of a run is the user's to hear too: a child's, or one of an
+        // agent no longer known (a daemon that stopped during it).
+        let daemon_s = matches!(kind, "unchecked" | "put_back");
+        let agent: Option<Agent> = match event.data["agent"].as_str() {
+            Some(id) => daemon.read(|store| store.agent(id))?,
+            None => None,
         };
-        let agent: Option<Agent> = daemon.read(|store| store.agent(id))?;
-        // The daemon's own word of a child's run is the user's to hear too.
-        let Some(agent) = agent.filter(|agent| agent.parent.is_none() || kind == "unchecked")
-        else {
+        let Some(agent) = agent.filter(|agent| agent.parent.is_none() || daemon_s) else {
+            if daemon_s {
+                entries.push(json!({
+                    "seq": event.seq, "at": event.at, "kind": kind,
+                    "agent": event.data["agent"], "project": event.data["project"],
+                    "workspace": event.data["workspace"], "text": daemon_text(kind, &event.data),
+                }));
+            }
             continue;
         };
         let resolved = (kind == "paused"
@@ -148,7 +199,7 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             "paused" => json!(paused),
             "report" => event.data["text"].clone(),
             "question" => event.data["question"].clone(),
-            "unchecked" => json!(unchecked(&event.data)),
+            "unchecked" | "put_back" => json!(daemon_text(kind, &event.data)),
             "vault" => json!(format!(
                 "It asks you to set the vault entry {} of {}: {}",
                 event.data["name"].as_str().unwrap_or_default(),
@@ -196,6 +247,22 @@ mod tests {
             "missing": true}),
         );
         assert!(text.contains("could not note its agent folders"), "{text}");
+    }
+
+    #[test]
+    fn a_put_back_entry_says_what_was_put_back_left_and_kept() {
+        let text = put_back(&json!({"run": "r1", "folder": "/work/app",
+            "put_back": [".claude/settings.json"], "left": [".codex/big.bin"],
+            "kept": "/state/agent-folders/r1"}));
+        assert!(
+            text.contains("put back as they were: .claude/settings.json"),
+            "{text}"
+        );
+        assert!(
+            text.contains("could not put back: .codex/big.bin"),
+            "{text}"
+        );
+        assert!(text.contains("/state/agent-folders/r1"), "{text}");
         // One stored before it said why was a place too large.
         let text = unchecked(&json!({"run": "r1", "folder": "/work/app"}));
         assert!(text.contains("too large for Flottille to check"), "{text}");

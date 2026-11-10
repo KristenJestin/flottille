@@ -754,7 +754,8 @@ line names, every program a wrapper or a runner runs included:
   through at once only reads, or writes the files it names. Runs that overlap in a place, or in
   places one inside the other (a repository's folder in its project's), share one guard: the
   first notes the agent folders, a run in an outer place takes in what the inner ones noted,
-  the last to end puts them back, and its result says so. What the put-back removes or overwrites is moved to Flottille's state folder
+  the last to end puts them back, and its result says so, as does an entry of the user's inbox
+  (`run.agent_folders_put_back`), even when no run started. What the put-back removes or overwrites is moved to Flottille's state folder
   (`agent-folders/<run>`), which the result names: a user's own edit there during the run is
   undone, never lost. It writes nothing below a folder that is no longer a real one (a link
   made since, to the home or anywhere): that entry is said as not put back; each folder is

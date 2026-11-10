@@ -33,13 +33,14 @@ fn inbox_text(listed: &Value) -> String {
             Some("report") => "report of",
             Some("question") => "question of",
             Some("unchecked") => "agent folders not all checked after a run of",
+            Some("put_back") => "agent folders put back after a run of",
             _ => "failure of",
         };
-        out.push_str(&format!(
-            "#{} {what} agent {} ({place}):\n",
-            entry["seq"],
-            entry["agent"].as_str().unwrap_or("?")
-        ));
+        let who = match entry["agent"].as_str() {
+            Some(agent) => format!("agent {agent}"),
+            None => "no agent".into(),
+        };
+        out.push_str(&format!("#{} {what} {who} ({place}):\n", entry["seq"]));
         for line in entry["text"].as_str().unwrap_or_default().lines() {
             out.push_str(&format!("    {line}\n"));
         }
