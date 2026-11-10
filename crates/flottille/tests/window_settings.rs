@@ -619,7 +619,10 @@ fn the_auto_judge_waits_as_a_skeleton_until_the_providers_are_known(cx: &mut Tes
         page.read_with(cx, |p, _| p.providers().known)
     });
     settle(cx);
-    assert!(visible(cx, "judge-switch"), "the judge replaces its skeleton");
+    assert!(
+        visible(cx, "judge-switch"),
+        "the judge replaces its skeleton"
+    );
     assert!(!present(cx, "judge-skeleton"));
 }
 
@@ -674,7 +677,10 @@ fn not_found_links_to_how_to_install(cx: &mut TestAppContext) {
         Some("Not found on this machine")
     );
     assert!(visible(cx, "provider-install-claude"));
-    assert!(!present(cx, "provider-sign-in-claude"), "nothing to sign in");
+    assert!(
+        !present(cx, "provider-sign-in-claude"),
+        "nothing to sign in"
+    );
     click(cx, "provider-install-claude");
     let page = label(cx, "provider-install-claude").unwrap();
     assert!(page.starts_with("https://"), "{page}");

@@ -460,10 +460,7 @@ mod tests {
         let mut unsigned = listed();
         unsigned["providers"][0]["login"]["present"] = json!(false);
         let unsigned = Providers::of(Ok(&unsigned));
-        assert_eq!(
-            unsigned.get("claude").unwrap().said(),
-            "Not signed in: run"
-        );
+        assert_eq!(unsigned.get("claude").unwrap().said(), "Not signed in: run");
         assert!(unsigned.get("claude").unwrap().needs_sign_in());
         assert_eq!(
             unsigned.get("claude").unwrap().sign_in_command(),
