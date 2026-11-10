@@ -392,10 +392,19 @@ fn review_s_tab_has_its_switch_its_passes_its_slots_and_its_guidance(cx: &mut Te
 
 #[gpui_kit::test]
 fn review_s_checks_are_one_card_with_a_model_per_line(cx: &mut TestAppContext) {
-    let user = User::with_fake_agent();
+    // The daemon is asked for the models of the provider, which offers the one it picks.
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_LIST_MODELS", "1");
+    user.fake_script(json!({"models": ["opus", "sonnet"]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user.call("extension.set", json!({"name": "review", "enabled": true}))
         .unwrap();
+    eventually("the models the daemon picks", || {
+        review_listed(&user)["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["key"] == "bugs_model" && s["default"]["gives"]["claude"] == "opus")
+    });
     let (shell, cx) = window(&user, cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     shell.update_in(cx, |s, window, cx| s.open(Selection::Settings, window, cx));
@@ -459,7 +468,7 @@ fn review_s_checks_are_one_card_with_a_model_per_line(cx: &mut TestAppContext) {
     settle(cx);
     assert_eq!(
         label(cx, "review-setting-bugs_model-model-first-line").as_deref(),
-        Some("Opus for Claude")
+        Some("opus for Claude")
     );
     at_rest(cx);
 }
