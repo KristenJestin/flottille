@@ -1026,35 +1026,98 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   spec", and a ticket's row offers "Write the spec", or "Open the spec" once it has one; a spec's
   page shows the spec, its questions each answered in one click, Ready and Back to draft, and the
   sessions that worked on it, `docs/extensions.md`, "Specs"), and its tasks, each with Run, which runs it in
-  the project folder, listed below with the rail's rows and output panel; its Settings: each
-  repository's forge and the tracker, each saying whether the command line it needs (`gh`, `bkt`,
-  `acli`) is found, its version and whether it is signed in, and when it is not, how to install it
-  (the program's own page, and a command to copy where one fits most systems) or the command to
-  sign in, with a Check again (`forges.md`; Flottille installs nothing), its Skills (a path picked in the project folder, or a text;
-  added, edited, removed), its Commands (added from a list of the templates and a blank one,
-  edited, removed), its Tasks (a line, where it runs and its flags; a task's "⋯" holds Run, which runs it in the
-  project folder, beside Edit and Remove), its Setup (steps added,
-  edited, removed and reordered, each with its kind, where it is done and its time limit), then
-  its Rules (the global rules above, read-only and folded, with a link to edit them; a switch,
-  "Use only this project's rules"; the project's text editor, Reset to default, and a line saying
-  a change reaches the agents created from now on), and, while Specs is on globally, its Specs
-  section: the project's own switch and its language;
-- Settings, in tabs (Judge, Specs, Providers, Compaction, Rules, Workspaces, Vault (`vault.md`), Sessions, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
-  the one it opens on, and a link to a section opens its tab; the tab of a part of Flottille the
-  user can turn off, Specs, comes after the Judge's, drawn from what it declares: its switch at
-  the top with its one sentence, and nothing else while it is off; on, its settings, which fold
-  away and unfold with the switch, `docs/extensions.md`, "In the window"): the Judge tab holds the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
-  small model on the user's own quota decides the rest, base calls always come to the user; "No
-  judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
-  guidance (its editor, Reset to default, Save and its line on when a change applies; a link to the
-  guidance opens this tab with the guidance in view), then the providers, the
-  Rules for every project, edited the same way as the guidance, the Sessions (a switch, "End inactive sessions", off by default; switched on it chooses 7 days and a select of the days unfolds under it: 1, 3, 7, 14, 30, 60 or 90, and what a file edited by hand says; `sessions.set`, §5.7; and under it a switch, "Resume sessions when the quota resets", off by default, §5.9), the Appearance (the window's colours: Omarchy
-  or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
-  the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
-  switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge
-  Flottille picked is said once in a notice, with Open Settings and Dismiss; the Providers tab ends with a **Tool results** section, global: the limit above which a tool result is cut at the source
-  (a select, 4,000 to 32,000 characters or Off, 8,000 by default; `tools.md`, "Long results"),
-  part of the core and not of an extension;
+  the project folder, listed below with the rail's rows and output panel; its Settings, in five tabs (`reference/gpui.md`, rule 13), opening on the first.
+  **Repositories** holds its **Repositories** (a count; "The git repositories of the project. Each
+  workspace gets its own copy of each.", or for a project of one, "The project folder is the
+  repository."): each a row with **Starts from** (`develop, then main`), **Remote** (`origin ·
+  github.com/acme/shop`, or `local only`) and **Forge**, which says in one value the forge and the
+  state of the command line it needs (`GitHub · gh ✓`, its version and the host it is signed in to
+  in the tooltip; the repository on the forge said only when it differs from the remote's). When the
+  program is not ready, that is the line that says what is missing and what to do: the command to
+  sign in (`gh is not signed in: gh auth login`, with Copy), or the program's own page and a command
+  to copy where one fits most systems (`forges.md`; Flottille installs nothing), and a quiet **Check
+  again** on that line only. A repository the folder holds and the project does not name is a row
+  of the list, `web/ found in the folder`, with Add; an empty list says "No git repository in this
+  folder yet. Flottille looks again when you come back." No button checks the programs or detects the
+  repositories: both are read when the tab opens, after a change of forge or tracker, and again each
+  time the window takes the focus back while the tab is shown, in silence (only a line that changes
+  moves). Under them, its **Tracker** ("Where the project's tickets come from."): **Tickets from**,
+  `Nowhere`, `GitHub issues` or `Jira`, its fields, the state of `gh` or `acli` said as a
+  repository's forge says it, and Log time with (`projects.md`). **Workspaces** holds its
+  **Folder**, with no sentence: **Where**, `As in Settings` (its line the folder it gives, relative
+  to `~`) or `A folder for this project`, whose field unfolds under it; its **Branches** ("How new
+  workspaces name their branch."): **Prefix** (its line `New workspaces get feat/<name>.`) and
+  **Allowed names** (a regular expression; "Empty: any name. Anchor with ^ and $."), a warning
+  unfolding under the field it is about; and its **Setup** ("Done in order when a workspace is made.
+  Drag to reorder."): its steps, each with its kind, where it is done (`in the project folder`) and
+  its time limit (`stops after 10 min`, chosen among durations), added with New step, edited, removed
+  and reordered. **Tasks** holds its tasks ("Command lines the project runs: tests, builds, servers.
+  Agents run them by name; you run them from a place's ▶ on the project page."): a line, where it
+  runs and what it is (`Changes nothing`, `A check (tests, lint)` or `A server`), added with New
+  task; a task's "⋯" holds Run, which runs it in the project folder, beside Edit, Copy to… and
+  Remove…. **Instructions** holds its **Rules** ("What this project's agents are told, after your
+  rules for every project."): **Rules for every project** above, read-only and folded, with Edit in
+  Settings; a switch, "Use only this project's rules"; the project's editor, Reset to default, and
+  Save once it changed, a toast saying a change reaches the agents created from now on; its
+  **Commands** (a count; added from a list of the templates and a blank one with New command,
+  edited, removed); its **Skills** (a count; a path picked in the project folder, or a text; New
+  skill, edited, removed); its **Commit and pull request checks** and its **Pull request template**
+  (`projects.md`). **Features** holds the same list as Settings', of the features that touch a
+  project (Specs, Review, later the handbook): each row opens its page, with the project's switch
+  and the values a project may set, each offering As in Settings first (`reference/gpui.md`, rule
+  14); a feature off in Settings is a faded row whose line, Off in Settings, is a link. A field saved
+  on its own shows its Save only once it changed (rule 4);
+- Settings, in tabs by subject (`reference/gpui.md`, rule 13): **Agents**, **Approvals**,
+  **Features**, **Vault** and **General**, one shown at a time, as in a project's settings. It
+  opens on Agents; a link to a section opens its tab with the section in view; Usage will be the
+  sixth tab and the last. No part of Flottille adds a tab of its own: what the user turns on or
+  off is a row of Features.
+  **Agents** holds four sections. **Providers** (a count; "The agent programs Flottille can
+  start. Each signs in with its own login."): one row per provider, its switch labelled with its
+  name (`Claude`), its version as a tag (the path of its program in the version's tooltip), and
+  one line saying its state once: `Ready · signed in` (or `signed in with an API key`), `Not
+  signed in: run claude login` (the command in a block to copy), `Not found on this machine` with
+  a link to how to install it, `Off: sessions that run keep running`; a warning is one faint line
+  with its icon; Check again, secondary, in the section's header. It names no file of the
+  configuration, no path of a login file, no environment variable. **Rules for every project**
+  ("What every agent is told, in every project. A project adds its own, or uses only its own."):
+  its editor, Reset to default and Save once it changed; saving says in a toast that the agents
+  started from now on follow them. **Long tool results** ("A longer result reaches the agent as
+  its start and its end; the agent reads the rest when it needs it."): **Cut above**, a narrow
+  select, 4,000 to 32,000 characters, 8,000 by default, or Off ("Every result goes to the agent
+  whole."; `tools.md`, "Long results"), part of the core and not of an extension, which moves to
+  Usage's savings when Usage comes. **Sessions**, with no sentence: a switch, "End inactive
+  sessions" ("Ends a session idle for the days below. One with work waiting is never ended."),
+  off by default; switched on it chooses 7 days and **After**, a select of the days, unfolds
+  under it: 1, 3, 7, 14, 30, 60 or 90, and what a file edited by hand says (`sessions.set`,
+  §5.7); under it a switch, "Resume when the quota resets" ("A session stopped by its quota goes
+  on at the reset. Each session can change it in its composer."), off by default, §5.9.
+  **Approvals** holds the **Auto judge**, drawn as a feature's page (`reference/gpui.md`, rule
+  14): its switch, "Let a model decide in Auto" ("The rules pass what is known to be harmless;
+  the model allows the rest or asks you. It never denies."), its usage line ("Used by sessions in
+  **Auto**, chosen in each session's composer. Base calls always come to you."), then its model
+  (`ModelChoice`, rule 15) and the line "Each decision is a turn of this model, on your own
+  quota." The switch off is "No judge" (`judge = "none"`, §7.1): no entry of the select says it.
+  A judge Flottille picked is said once in a notice, with Open Settings, which opens this tab,
+  and Dismiss. Under it, **What the judge is told** ("Added to Flottille's own instructions,
+  which always ask before anything destructive."): its editor, Reset to default and Save once it
+  changed; a link to the guidance opens this tab with the guidance in view.
+  **Features** is the list of the parts of Flottille the user turns on or off (`Subpage`, rule
+  13): Specs, Review, Compaction, then Connections and later the handbook, one row each with its
+  icon, its state as a tag (`On`, `Off`, `2 on`) and one line saying what it is for; a click opens
+  its page in place of the list, under the path `Features / Review` (`docs/extensions.md`, "In
+  the window").
+  **Vault** holds the entries (`vault.md`).
+  **General** holds **Appearance**, with no sentence: **Colours**, Omarchy or Flottille, and for
+  Flottille **Shade**, Light or Dark, unfolding under it, each a segmented choice; off an Omarchy
+  desktop the Omarchy choice is shown disabled, its tooltip saying why. Then **Workspaces folder**
+  ("Where new workspaces are made. A project can choose its own."): **Where**, radios `In
+  Flottille's data folder`, `Beside each project` and `A folder you choose`, each line the folder
+  it gives relative to `~`, and the **Folder** field unfolding under the last (`docs/projects.md`,
+  "Where the workspaces go"). Later **Machines** (§12) comes under it. Last **Developer mode**,
+  with no sentence: a switch, "Log what Flottille decides" ("Why each call was allowed, held or
+  refused, one JSON line each, secrets masked. For working on Flottille."), off by default
+  (`developer.md`), and the path of its log unfolding under it;
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
   their result (a result cut at the source says so on its step, with the number of characters left out), the children launched, a session started for the user as one line, "started session <title>" (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
