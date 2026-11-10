@@ -5,8 +5,10 @@
 
 mod common;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -91,6 +93,40 @@ fn until(
         assert!(Instant::now() < deadline, "{what} never happened");
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// `connect` as a window's connection, and the method of every request sent through it, in order:
+/// what a test asserts on is the method a click would call, not how many requests the window
+/// makes on its own.
+fn tapped(
+    connect: impl Fn() -> std::io::Result<UnixStream> + Send + Sync + 'static,
+) -> (Connect, Arc<Mutex<Vec<String>>>) {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let record = asked.clone();
+    let connect: Connect = Arc::new(move || {
+        let (window, relay) = UnixStream::pair()?;
+        let daemon = connect()?;
+        let answers = (relay.try_clone()?, daemon.try_clone()?);
+        std::thread::spawn(move || {
+            let (mut to_window, mut from_daemon) = answers;
+            let _ = std::io::copy(&mut from_daemon, &mut to_window);
+        });
+        let record = record.clone();
+        std::thread::spawn(move || {
+            let mut to_daemon = daemon;
+            for line in BufReader::new(relay).lines().map_while(Result::ok) {
+                if let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) {
+                    let method = request["method"].as_str().unwrap_or_default();
+                    record.lock().unwrap().push(method.to_owned());
+                }
+                if writeln!(to_daemon, "{line}").is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(window)
+    });
+    (connect, asked)
 }
 
 /// Lets every motion end: the palette's cross-fade, the sections' entrances.
@@ -220,13 +256,8 @@ fn off_omarchy_the_omarchy_choice_is_disabled_and_says_why(cx: &mut TestAppConte
     // Flottille is already kept: a request for Omarchy would be a change.
     let kept = json!({"theme": "flottille", "shade": "light"});
     user.call("appearance.set", kept.clone()).unwrap();
-    let connections = Arc::new(AtomicUsize::new(0));
-    let counted = connections.clone();
-    let through = user.connector();
-    let connect: Connect = Arc::new(move || {
-        counted.fetch_add(1, Ordering::SeqCst);
-        through()
-    });
+    let (connect, asked) = tapped(user.connector());
+    let own = connect.clone();
     let (shell, cx) = window_through(&user, connect, cx);
     open_appearance(&shell, cx);
     assert_eq!(
@@ -247,7 +278,14 @@ fn off_omarchy_the_omarchy_choice_is_disabled_and_says_why(cx: &mut TestAppConte
         "it names what is missing"
     );
 
-    let before = connections.load(Ordering::SeqCst);
+    // A request of the window's own (a refresh, a poll) may land at any moment: it is not
+    // what is asserted, only that no request sets the appearance.
+    let mut refresh = own().unwrap();
+    writeln!(
+        refresh,
+        r#"{{"id": "1", "method": "appearance.show", "params": {{}}}}"#
+    )
+    .unwrap();
     click("appearance-theme-omarchy", cx);
     settle(cx);
     // A request would reach the daemon within milliseconds: the window is given the time of
@@ -258,10 +296,14 @@ fn off_omarchy_the_omarchy_choice_is_disabled_and_says_why(cx: &mut TestAppConte
         cx.run_until_parked();
         std::thread::sleep(Duration::from_millis(25));
     }
-    assert_eq!(
-        connections.load(Ordering::SeqCst),
-        before,
-        "nothing was asked of the daemon"
+    let methods = asked.lock().unwrap().clone();
+    assert!(
+        methods.iter().any(|method| method == "appearance.show"),
+        "the tap sees the requests that go through it: {methods:?}"
+    );
+    assert!(
+        methods.iter().all(|method| method != "appearance.set"),
+        "the choice asked nothing of the daemon to set the appearance: {methods:?}"
     );
     assert_eq!(stored(&user), kept, "nothing was kept");
     assert_eq!(selected("appearance-theme-flottille", cx), Some(true));
