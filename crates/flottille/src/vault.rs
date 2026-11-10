@@ -390,6 +390,12 @@ fn bound_checked(
             "an entry is bound to worklog:<project> or connection:<name>: {bound} is neither"
         )));
     };
+    if !crate::extensions::bound_possible(bound) {
+        return Err(Failure::refused(format!(
+            "no connection can be named as {bound} says: a connection's name is lowercase \
+             letters, digits and _"
+        )));
+    }
     match (bound.split_once(':'), project) {
         (Some(("worklog", of)), _) if crate::projects::load_project(daemon, of).is_err() => {
             Err(Failure::refused(format!("no project is named {of}")))

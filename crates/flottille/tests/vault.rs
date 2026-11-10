@@ -650,3 +650,30 @@ fn setting_a_bound_entry_again_checks_its_binding() {
     assert_eq!(project_of("jira-time"), "alpha", "{listed}");
     assert_eq!(project_of("almanac-token"), Value::Null, "{listed}");
 }
+
+#[test]
+fn a_binding_to_an_impossible_connection_name_is_refused() {
+    let user = User::with_fake_agent();
+    for bound in [
+        "connection:a:b",
+        "connection:Foo",
+        "connection:with-dash",
+        "connection:",
+    ] {
+        let (_, refused) = user
+            .call(
+                "vault.set",
+                json!({"name": "token", "secret": SECRET, "for": bound}),
+            )
+            .unwrap_err();
+        assert!(refused.contains(bound), "{refused}");
+    }
+    assert!(listed_names(&user).is_empty());
+    // A name a connection can have is kept.
+    user.call(
+        "vault.set",
+        json!({"name": "token", "secret": SECRET, "for": "connection:almanac_2"}),
+    )
+    .unwrap();
+    assert_eq!(listed_names(&user), ["token"]);
+}

@@ -346,7 +346,7 @@ impl Declaration {
     }
 }
 
-fn name_ok(name: &str) -> bool {
+pub(super) fn name_ok(name: &str) -> bool {
     !name.is_empty()
         && name.chars().count() <= NAME_CHARS
         && name
