@@ -9,9 +9,9 @@ use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
-    TestSupportExt, Window, div, px,
+    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, HighlightStyle, InteractiveElement,
+    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement,
+    Styled, StyledText, TestSupportExt, Window, div, px,
 };
 
 use crate::color::mix;
@@ -78,23 +78,43 @@ impl RenderOnce for Chip {
             Some(faint) => format!("{} {faint}", self.text),
             None => self.text.to_string(),
         };
+        // One text, the faint part a highlight of it, so that the whole wraps inside the chip
+        // (the label first, the description after it) instead of running past its place.
+        let faint_from = self.text.len() + 1;
+        let text = StyledText::new(label.clone());
+        let text = match self.faint {
+            Some(_) => text.with_highlights([(
+                faint_from..label.len(),
+                HighlightStyle {
+                    color: Some(p.faint),
+                    ..Default::default()
+                },
+            )]),
+            None => text,
+        };
         let mut chip = div()
             .id(self.id)
             .aria_label(SharedString::from(label))
-            .flex_none()
-            .h(px(24.))
+            .max_w_full()
+            .min_h(px(24.))
             .px(px(8.))
+            .py(px(3.))
             .rounded(px(6.))
             .border_1()
             .flex()
-            .items_center()
+            .items_start()
             .gap(px(6.))
             .mono(11.5)
-            .child(icon(self.glyph).size(px(12.)).text_color(p.faint))
-            .child(self.text)
-            .when_some(self.faint, |d, faint| {
-                d.child(div().text_color(p.faint).child(faint))
-            });
+            .line_height(px(16.))
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(16.))
+                    .flex()
+                    .items_center()
+                    .child(icon(self.glyph).size(px(12.)).text_color(p.faint)),
+            )
+            .child(div().min_w_0().child(text));
         if let Some(on_click) = self.on_click {
             chip = chip
                 .cursor_pointer()
