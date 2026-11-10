@@ -262,12 +262,12 @@ fn main() {
                         };
                         let place = |name: &str| Some(name.to_owned());
                         if let Some(name) = &card_menu
-                            && let Some(card) = page.read(cx).card(&place(name), cx)
+                            && let Some(card) = page.read(cx).block(&place(name), cx)
                         {
                             card.update(cx, |c, cx| c.open_menu(window, cx));
                         }
                         if let Some(name) = &remove
-                            && let Some(card) = page.read(cx).card(&place(name), cx)
+                            && let Some(card) = page.read(cx).block(&place(name), cx)
                         {
                             card.update(cx, |c, cx| c.ask_removal(cx));
                         }
@@ -357,7 +357,7 @@ fn main() {
                     .update(cx, |_, _, cx| {
                         let page = shell.read(cx).main().read(cx).project_page().cloned()?;
                         let tasks = page.read(cx).tasks().clone();
-                        tasks.update(cx, |t, cx| t.run(&name, cx));
+                        tasks.update(cx, |t, cx| t.run(&name, None, cx));
                         Some(tasks)
                     })
                     .ok()

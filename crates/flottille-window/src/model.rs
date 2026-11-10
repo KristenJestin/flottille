@@ -41,7 +41,7 @@ pub struct Project {
     pub commands: usize,
 }
 
-/// A workspace as its card shows it.
+/// A workspace as its place on the project page shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Workspace {
     pub project: String,
@@ -55,9 +55,12 @@ pub struct Workspace {
     pub preparation: Preparation,
     /// Each step of its preparation, in order.
     pub steps: Vec<SetupLine>,
+    /// When it was made, in milliseconds since the Unix epoch: the project page lists the newest
+    /// first.
+    pub created_at: u64,
 }
 
-/// One step of a workspace's preparation, as its card lists it: "Run `pnpm install`".
+/// One step of a workspace's preparation, as its place lists it: "Run `pnpm install`".
 #[derive(Clone, Debug, PartialEq)]
 pub struct SetupLine {
     /// Its place in the preparation: the same step keeps it while the list changes.
@@ -175,6 +178,7 @@ impl Workspace {
                 })
                 .map(SetupLine::of)
                 .collect(),
+            created_at: record.created_at,
         }
     }
 }

@@ -726,7 +726,7 @@ impl Shell {
         });
     }
 
-    /// "New session in …": the composer, set to start there.
+    /// A place's "New session here": the composer, set to start there.
     pub fn compose_in(
         &mut self,
         project: &str,
@@ -1349,9 +1349,9 @@ impl Shell {
             } => {
                 if let Some(page) = self.main.read(cx).project_page().cloned()
                     && page.read(cx).name() == project
-                    && let Some(card) = page.read(cx).card(&Some(name.clone()), cx)
+                    && let Some(block) = page.read(cx).block(&Some(name.clone()), cx)
                 {
-                    card.update(cx, |card, cx| card.ticket_answered(refused.clone(), cx));
+                    block.update(cx, |block, cx| block.ticket_answered(refused.clone(), cx));
                     self.perform(Command::Details(project.clone()));
                 }
                 if let Some(page) = self.session_page.clone() {
@@ -1672,7 +1672,7 @@ impl Shell {
                 from,
                 refused,
             } => match from {
-                RunFrom::Page => {
+                RunFrom::Page { .. } => {
                     if let Some(tasks) = self.project_tasks_of(&project, cx) {
                         tasks.update(cx, |tasks, cx| tasks.started(refused, cx));
                     }
@@ -1793,9 +1793,9 @@ impl Shell {
             }
         } else if let Some(page) = self.main.read(cx).project_page().cloned()
             && page.read(cx).name() == project
-            && let Some(card) = page.read(cx).card(&Some(name.to_owned()), cx)
+            && let Some(block) = page.read(cx).block(&Some(name.to_owned()), cx)
         {
-            card.update(cx, |card, cx| card.answered(refused, cx));
+            block.update(cx, |block, cx| block.answered(refused, cx));
         } else if let Some(page) = self.session_page.clone() {
             // A removal asked from the session's rail.
             page.update(cx, |page, cx| {
@@ -1831,7 +1831,38 @@ impl Shell {
                 .map(|s| (s.id.clone(), s.mark))
                 .collect(),
         );
+        let sessions_of: Vec<&crate::model::Session> = self
+            .snapshot
+            .sessions
+            .iter()
+            .filter(|s| s.project == name && !s.ended)
+            .collect();
         let line = |session: &crate::model::Session, cx: &App| {
+            // The sessions it leads, and the one that leads it: each said once, where it works.
+            let leads = sessions_of
+                .iter()
+                .filter(|led| led.pilot.as_deref() == Some(session.id.as_str()))
+                .map(|led| (led.id.clone(), led.place.clone()))
+                .collect();
+            let pilot = session.pilot.as_ref().map(|pilot| {
+                let title = sessions_of
+                    .iter()
+                    .find(|s| &s.id == pilot)
+                    .map(|s| s.title.clone())
+                    .or_else(|| session.led_by.clone())
+                    .unwrap_or_else(|| pilot.clone());
+                (pilot.clone(), title)
+            });
+            let question = (session.mark == Some(crate::state::AgentState::NeedsYou))
+                .then(|| {
+                    self.snapshot
+                        .bell
+                        .iter()
+                        .rev()
+                        .find(|item| item.session == session.id)
+                        .map(|item| item.detail.clone())
+                })
+                .flatten();
             self.sessions.get(&session.id).map(|row| SessionLine {
                 id: session.id.clone(),
                 title: session.title.clone(),
@@ -1839,6 +1870,9 @@ impl Shell {
                 mark: session.mark,
                 active_at: session.active_at,
                 status: row.read(cx).status(),
+                leads,
+                pilot,
+                question,
             })
         };
         let mut places = vec![PlaceData {
@@ -1858,12 +1892,19 @@ impl Shell {
             workspace: None,
             ready: true,
         }];
-        for workspace in self
+        // Work lists the workspaces from the newest to the oldest, in an order nothing changes.
+        let mut workspaces: Vec<&crate::model::Workspace> = self
             .snapshot
             .workspaces
             .iter()
             .filter(|w| w.project == name)
-        {
+            .collect();
+        workspaces.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        for workspace in workspaces {
             let place = Some(workspace.name.clone());
             places.push(PlaceData {
                 meta: Some(format!("from {}", workspace.bases.join(", "))),
@@ -1883,6 +1924,8 @@ impl Shell {
                 ready: workspace.preparation == Preparation::Ready,
             });
         }
+        // The composer's place menu keeps its order by name.
+        choices[1..].sort_by(|a, b| a.workspace.cmp(&b.workspace));
         let data = ProjectData {
             name: name.clone(),
             folder: project.folder.clone(),

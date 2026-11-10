@@ -642,7 +642,7 @@ fn a_new_session_in_a_place_of_the_project_page_starts_there_with_the_field_focu
     );
 
     // In a workspace.
-    cx.update(|window, cx| window.click("new-session-in-login", cx));
+    cx.update(|window, cx| window.click("place-new-session-login", cx));
     settle(cx);
     assert_eq!(
         shell.read_with(cx, |s, _| s.selected().cloned()),
@@ -663,7 +663,7 @@ fn a_new_session_in_a_place_of_the_project_page_starts_there_with_the_field_focu
     );
 
     // In `main`.
-    cx.update(|window, cx| window.click("new-session-in-main", cx));
+    cx.update(|window, cx| window.click("place-new-session-main", cx));
     settle(cx);
     assert_eq!(
         composer.read_with(cx, |c, _| c.choice().clone()),
@@ -734,11 +734,11 @@ fn a_project_s_new_session_focuses_the_composer(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.focus(&focus, cx));
     assert!(!composer_focused(&shell, "app", cx));
 
-    cx.update(|window, cx| window.click("new-session-in-login", cx));
+    cx.update(|window, cx| window.click("place-new-session-login", cx));
     assert!(composer_focused(&shell, "app", cx), "in a workspace");
     let focus = shell.read_with(cx, |s, _| s.focus_handle());
     cx.update(|window, cx| window.focus(&focus, cx));
-    cx.update(|window, cx| window.click("new-session-in-main", cx));
+    cx.update(|window, cx| window.click("place-new-session-main", cx));
     assert!(composer_focused(&shell, "app", cx), "in main");
     settle(cx);
     assert!(
@@ -1063,10 +1063,10 @@ fn a_workspace_without_session_is_not_in_the_sidebar(cx: &mut TestAppContext) {
                 .all(|row| row.label() != Some("empty")),
         )
     });
-    // The project page, which is open, keeps its card: that is where workspaces live.
+    // The project page, which is open, keeps its place: that is where workspaces live.
     assert!(
-        has_id(named("new-session-in-empty"), cx),
-        "the card of the workspace is on the project page"
+        has_id(named("place-new-session-empty"), cx),
+        "the place of the workspace is on the project page"
     );
 }
 
