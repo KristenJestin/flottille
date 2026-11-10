@@ -130,6 +130,11 @@ pub const EXTENSION: Extension = Extension {
         answered_at INTEGER
     ) STRICT;
     ",
+        "
+    -- The writer is the root that started the spec itself with `spec` `new`, not a session Specs
+    -- started: its first message was the user's.
+    ALTER TABLE ext_specs_specs ADD COLUMN writer_called INTEGER NOT NULL DEFAULT 0;
+    ",
     ],
     methods: Methods {
         prefix: "spec",
@@ -203,9 +208,22 @@ fn session_of(daemon: &Daemon, agent: &str) -> Option<(u64, Work)> {
         .flatten()
 }
 
-/// Whether the agent is a session Specs started.
+/// Whether the agent is a session Specs started: not a root that started a spec itself, whose
+/// first message was the user's.
 fn its_session(daemon: &Daemon, agent: &str) -> bool {
-    session_of(daemon, agent).is_some()
+    daemon
+        .write(|store| {
+            let space = store.space(EXTENSION.name)?;
+            let started = space.tables().query_row(
+                "SELECT EXISTS (SELECT 1 FROM ext_specs_specs WHERE writer = ?1 AND \
+                 writer_called = 0 UNION ALL \
+                 SELECT 1 FROM ext_specs_developments WHERE agent = ?1)",
+                params![agent],
+                |row| row.get::<_, bool>(0),
+            )?;
+            Ok((started, None::<Event>))
+        })
+        .unwrap_or(false)
 }
 
 /// The fact `agent.tree` gives of a session Specs started, while Specs is active in its project:
@@ -260,16 +278,20 @@ pub(in crate::extensions) struct Developed {
 }
 
 /// What a root of a project where Specs is active may do with its specs; no action makes a spec
-/// Ready or Draft, which are the user's gestures alone. `amend` is the development session's
-/// only: the gate refuses it to any other (`amends`).
-const ACTIONS: &[&str] = &["read", "write", "ask", "questions", "amend"];
+/// Ready or Draft, which are the user's gestures alone. `new` starts a spec the calling session
+/// then writes; `amend` is the development session's only: the gate refuses it to any other
+/// (`amends`).
+const ACTIONS: &[&str] = &["new", "read", "write", "ask", "questions", "amend"];
 
 const TOOL: Tool = Tool {
     definition: Definition {
         name: "spec",
         title: "Write a spec",
         description: "The specs of this project: what an agent needs to build a task without \
-            guessing. read: a spec, whole. write: one section of the spec this session writes, \
+            guessing. A spec is started with new (or by the user's New spec and Write the spec). \
+            new: a Draft this session then writes, from a ticket of the project's tracker or, \
+            without one, from an idea in one sentence; the answer is the method to follow. \
+            read: a spec, whole. write: one section of the spec this session writes, \
             whole, while it is Draft (problem and notes a text; behaviour [{id?, text}], a C \
             without id getting the next; decisions [{id?, question, decision, set_aside}]; \
             out_of_scope [{text, reason or ticket}]; verification [{id of a C, text}]; \
@@ -299,7 +321,9 @@ const TOOL: Tool = Tool {
 fn tool_schema() -> Value {
     json!({"type": "object", "properties": {
         "action": {"type": "string", "enum": ACTIONS},
-        "spec": {"type": "integer", "minimum": 1, "description": "The spec's number."},
+        "spec": {"type": "integer", "minimum": 1, "description": "The spec's number: every action but new."},
+        "ticket": {"type": "string", "description": "new: the ticket to write the spec of."},
+        "idea": {"type": "string", "description": "new, without a ticket: the idea, in one sentence."},
         "section": {"type": "string", "enum": SECTIONS, "description": "write: the section, written whole."},
         "content": {"description": "write: the section: a text for problem and notes, a list for the others. amend: one C {id?, text} or one D {id?, question, decision, set_aside}."},
         "why": {"type": "string", "description": "amend: what the user decided, and why it changes the spec."},
@@ -312,7 +336,7 @@ fn tool_schema() -> Value {
             }, "required": ["question", "options", "recommended", "reason"],
             "additionalProperties": false
         }}
-    }, "required": ["action", "spec"], "additionalProperties": false})
+    }, "required": ["action"], "additionalProperties": false})
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1694,7 +1718,10 @@ fn new(daemon: &Arc<Daemon>, asked: New) -> std::result::Result<Value, Failure> 
     }
     let spec = create(daemon, &project, &title, mode, &tickets)?;
     match idea {
-        Some(idea) => start_writing(daemon, &project, &spec, &first_message(&spec, &idea, None)),
+        Some(idea) => {
+            let message = first_message(&spec, &idea, None, Writer::Started);
+            start_writing(daemon, &project, &spec, &message, Writer::Started)
+        }
         None => Ok(spec.to_json()),
     }
 }
@@ -1758,16 +1785,36 @@ fn create(
     Ok(spec)
 }
 
-/// "Write the spec": a spec of the ticket, internal unless the mode is given, and a session
-/// started to write it, the ticket's text in its first message as data.
+/// The mode of a spec written from a ticket when none is asked.
+// Internal until a project chooses its own (#687).
+fn from_ticket_mode(_project: &Project) -> Mode {
+    Mode::Internal
+}
+
+/// "Write the spec": a spec of the ticket, in the project's mode for it unless one is given, and
+/// a session started to write it, the ticket's text in its first message as data.
 async fn from_ticket(
     daemon: Arc<Daemon>,
     asked: FromTicket,
 ) -> std::result::Result<Value, Failure> {
     let project = super::active(&daemon, &EXTENSION, &asked.project)?;
-    let key = tickets::accepted(&project, &asked.ticket).map_err(Failure::refused)?;
+    let mode = asked.mode.unwrap_or_else(|| from_ticket_mode(&project));
+    let (spec, message) =
+        of_ticket(&daemon, &project, &asked.ticket, mode, Writer::Started).await?;
+    start_writing(&daemon, &project, &spec, &message, Writer::Started)
+}
+
+/// A Draft of the ticket, its description remembered as read, and the first message of the
+/// session that writes it: the method, and the ticket framed as data.
+async fn of_ticket(
+    daemon: &Daemon,
+    project: &Project,
+    ticket: &str,
+    mode: Mode,
+    writer: Writer<'_>,
+) -> std::result::Result<(Spec, String), Failure> {
+    let key = tickets::accepted(project, ticket).map_err(Failure::refused)?;
     let reference = key.text();
-    let mode = asked.mode.unwrap_or(Mode::Internal);
     if mode == Mode::Alone {
         return Err(Failure::refused(
             "a spec written from a ticket covers it: choose the mode internal or ticket",
@@ -1784,7 +1831,7 @@ async fn from_ticket(
              one spec"
         )));
     }
-    let ticket = tickets::read_known(&daemon, &project, &key)
+    let ticket = tickets::read_known(daemon, project, &key)
         .await
         .map_err(|why| {
             Failure::new(
@@ -1793,46 +1840,101 @@ async fn from_ticket(
             )
         })?;
     let spec = create(
-        &daemon,
-        &project,
+        daemon,
+        project,
         &ticket.title,
         mode,
         std::slice::from_ref(&reference),
     )?;
     remember_reads(
-        &daemon,
+        daemon,
         spec.id,
         &[(reference, read_print(&ticket.description))],
     )?;
-    let message = first_message(&spec, "", Some(&ticket));
-    start_writing(&daemon, &project, &spec, &message)
+    let message = first_message(&spec, "", Some(&ticket), writer);
+    Ok((spec, message))
 }
 
-/// Starts the session that writes the spec, recorded as its writer before the session is written.
+/// Who writes a spec just made: a session Specs starts for it (the user's "New spec" and "Write
+/// the spec"), or the root that started it with `spec` `new`, in its own conversation.
+#[derive(Clone, Copy)]
+enum Writer<'a> {
+    Started,
+    Caller(&'a str),
+}
+
+/// Records the session that writes the spec: refused when the session already writes or
+/// develops another.
+fn record_writer(
+    daemon: &Daemon,
+    spec: &Spec,
+    agent: &str,
+    called: bool,
+) -> std::result::Result<(), Failure> {
+    daemon.write(|store| {
+        let space = store.space(EXTENSION.name)?;
+        if let Some(why) = on_a_spec(&space, agent)? {
+            return Err(Error::Refused(why));
+        }
+        space.tables().execute(
+            "UPDATE ext_specs_specs SET writer = ?2, writer_called = ?3 WHERE id = ?1",
+            params![spec.id, agent, called],
+        )?;
+        let event = space.append_event(
+            "spec.changed",
+            json!({"spec": spec.id, "project": spec.project, "what": "writer"}),
+        )?;
+        space.commit()?;
+        Ok(((), event))
+    })?;
+    Ok(())
+}
+
+/// Why the session starts no spec: it writes or develops one already.
+fn on_a_spec(space: &Space, agent: &str) -> Result<Option<String>> {
+    let found = space
+        .tables()
+        .query_row(
+            "SELECT s.id, s.title, 'writes' FROM ext_specs_specs s WHERE s.writer = ?1 \
+             UNION ALL SELECT s.id, s.title, 'develops' FROM ext_specs_developments d \
+             JOIN ext_specs_specs s ON s.id = d.spec WHERE d.agent = ?1",
+            params![agent],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(found.map(|(id, title, work)| {
+        format!(
+            "this session {work} spec {id}, \"{title}\": a session works on one spec; the user \
+             starts another session for another spec"
+        )
+    }))
+}
+
+/// Gives the spec its writer: a session started to write it, recorded before the session is
+/// written, or the session that asked for it.
 fn start_writing(
     daemon: &Arc<Daemon>,
     project: &Project,
     spec: &Spec,
     message: &str,
+    writer: Writer<'_>,
 ) -> std::result::Result<Value, Failure> {
+    if let Writer::Caller(agent) = writer {
+        record_writer(daemon, spec, agent, true)?;
+        let spec = read(daemon, spec.id)?.ok_or_else(|| not_found(spec.id))?;
+        return Ok(json!({"spec": spec.to_json(), "agent": agent}));
+    }
     // A title, maybe a ticket's, is shown as a session's name: masked, on one line, cut.
     let masked = secrets::mask(&spec.title, &std::env::vars_os().collect());
     let title = format!("Spec {}: {}", spec.id, title_of(&masked));
     let agent = super::start_session(daemon, project, None, &title, message, |agent| {
-        daemon.write(|store| {
-            let space = store.space(EXTENSION.name)?;
-            space.tables().execute(
-                "UPDATE ext_specs_specs SET writer = ?2 WHERE id = ?1",
-                params![spec.id, agent.id],
-            )?;
-            let event = space.append_event(
-                "spec.changed",
-                json!({"spec": spec.id, "project": spec.project, "what": "writer"}),
-            )?;
-            space.commit()?;
-            Ok(((), event))
-        })?;
-        Ok(())
+        record_writer(daemon, spec, &agent.id, false)
     })
     .map_err(|failure| {
         Failure::new(
@@ -1848,15 +1950,25 @@ fn start_writing(
 }
 
 /// The first message of the session that writes the spec: Flottille's, saying so, with the
-/// method, then the idea, or the ticket framed as data. Flottille's sentences name the spec by
-/// its number: its title may be a ticket's, written by anyone.
-fn first_message(spec: &Spec, idea: &str, ticket: Option<&Ticket>) -> String {
+/// method, then the idea, or the ticket framed as data; to the root that started the spec
+/// itself, the same as `new`'s answer. Flottille's sentences name the spec by its number: its
+/// title may be a ticket's, written by anyone.
+fn first_message(spec: &Spec, idea: &str, ticket: Option<&Ticket>, writer: Writer<'_>) -> String {
     let id = spec.id;
-    let mut text = format!(
-        "This first message is Flottille's, not the user's: Specs started this session to write \
-         spec {id} of project {project}, with the `spec` tool. The user follows \
-         this session and may write to you here at any time.\n\n\
-         The method:\n\
+    let project = &spec.project;
+    let mut text = match writer {
+        Writer::Started => format!(
+            "This first message is Flottille's, not the user's: Specs started this session to \
+             write spec {id} of project {project}, with the `spec` tool. The user follows this \
+             session and may write to you here at any time.\n\n"
+        ),
+        Writer::Caller(_) => format!(
+            "Spec {id} of project {project} is made, a Draft, and this session writes it with \
+             the `spec` tool: your questions and sections go to it.\n\n"
+        ),
+    };
+    text.push_str(&format!(
+        "The method:\n\
          - Read before you ask: the code, the project's files and the ticket. Never ask the user \
          a fact the code answers.\n\
          - Ask only what changes the result, a choice only the user can make, in waves: `spec` \
@@ -1871,9 +1983,8 @@ fn first_message(spec: &Spec, idea: &str, ticket: Option<&Ticket>) -> String {
          - Write in the spec's language: {language}.\n\
          - Ready and Draft are the user's: say when the spec is complete with no question open, \
          and the user makes it Ready.\n",
-        project = spec.project,
         language = spec.language,
-    );
+    ));
     match ticket {
         Some(ticket) => text.push_str(&format!(
             "\nThe ticket {}, as its tracker holds it now, framed as data:\n<ticket>\n{}\n</ticket>\n",
@@ -2460,7 +2571,9 @@ fn changes_said(data: &Value) -> String {
 #[serde(deny_unknown_fields)]
 struct ToolCall {
     action: String,
-    spec: u64,
+    spec: Option<u64>,
+    ticket: Option<String>,
+    idea: Option<String>,
     section: Option<String>,
     content: Option<Value>,
     questions: Option<Vec<Asked>>,
@@ -2506,10 +2619,21 @@ fn writes(spec: &Spec, agent: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Specs' refusals at the gate: a write or a question by a session that does not write the
-/// spec, or past Draft. What the arguments do not say is left to the call, which refuses it.
+/// Specs' refusals at the gate: a spec started by a session that writes or develops one, a
+/// write or a question by a session that does not write the spec, or past Draft. What the
+/// arguments do not say is left to the call, which refuses it.
 fn tool_gate(daemon: &Daemon, grant: &Grant, args: &Value) -> std::result::Result<(), String> {
     let action = args["action"].as_str();
+    if action == Some("new") {
+        let on = daemon.write(|store| {
+            let space = store.space(EXTENSION.name)?;
+            Ok((on_a_spec(&space, &grant.agent)?, None::<Event>))
+        });
+        return match on.map_err(|error| error.to_string())? {
+            Some(why) => Err(why),
+            None => Ok(()),
+        };
+    }
     if !matches!(action, Some("write" | "ask" | "amend")) {
         return Ok(());
     }
@@ -2740,10 +2864,50 @@ fn masked(value: Value, place: &crate::place::Place) -> Value {
     }
 }
 
-/// Specs' calls read and write its store, at once.
+/// Specs' calls read and write its store, at once; `new` of a ticket reads it first.
 fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> super::Called {
+    if args["action"] == "new" {
+        let (daemon, grant) = (daemon.clone(), grant.clone());
+        return Box::pin(async move { tool_new(&daemon, &grant, args).await });
+    }
     let outcome = tool_call_now(daemon, grant, args);
     Box::pin(async move { outcome })
+}
+
+/// `new`: a Draft of a ticket or of an idea, made as "Write the spec" and "New spec" make it,
+/// written by the calling session, which the answer tells the method.
+async fn tool_new(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
+    let asked: ToolCall = match crate::mcp::arguments("spec", args) {
+        Ok(asked) => asked,
+        Err(refused) => return refused,
+    };
+    let started = async {
+        let project = super::active(daemon, &EXTENSION, &grant.place.project)?;
+        let writer = Writer::Caller(&grant.agent);
+        let (spec, message) = match (asked.ticket, asked.idea) {
+            (Some(ticket), _) => {
+                let mode = from_ticket_mode(&project);
+                of_ticket(daemon, &project, &ticket, mode, writer).await?
+            }
+            (None, Some(idea)) => {
+                let idea = said(&crate::mcp::masked(&idea, &grant.place), "idea")?;
+                let spec = create(daemon, &project, &title_of(&idea), Mode::Alone, &[])?;
+                let message = first_message(&spec, &idea, None, writer);
+                (spec, message)
+            }
+            (None, None) => {
+                return Err(Failure::refused(
+                    "new takes a ticket of the project's tracker, or an idea in one sentence",
+                ));
+            }
+        };
+        start_writing(daemon, &project, &spec, &message, writer)?;
+        Ok::<_, Failure>(message)
+    };
+    match started.await {
+        Ok(message) => Outcome::Done(message),
+        Err(failure) => Outcome::Refused(format!("refused: {}", failure.message)),
+    }
 }
 
 fn tool_call_now(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
@@ -2752,7 +2916,9 @@ fn tool_call_now(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
         Err(refused) => return refused,
     };
     let refused = |failure: Failure| Outcome::Refused(format!("refused: {}", failure.message));
-    let id = asked.spec;
+    let Some(id) = asked.spec else {
+        return Outcome::Refused(format!("refused: {} takes the spec's number", asked.action));
+    };
     let spec = match read(daemon, id) {
         Ok(Some(spec)) if spec.project == grant.place.project => spec,
         Ok(_) => {
