@@ -47,6 +47,13 @@ fn entries_max() -> usize {
 /// put back.
 const KEPT_MAX: u64 = 1 << 20;
 
+/// The most bytes of a snapshot's files kept, all of them together: past it, a file changed is
+/// said, not put back, as a larger one.
+#[cfg(not(test))]
+const KEPT_TOTAL: u64 = 64 << 20;
+#[cfg(test)]
+const KEPT_TOTAL: u64 = 4096;
+
 // Called with an entry's path, relative to the place, between the check of what is on the way
 // to it and what is done there: a test changes the place in between.
 #[cfg(test)]
@@ -445,16 +452,20 @@ fn kind_of(folder: BorrowedFd, name: &OsStr) -> Option<Kind> {
     })
 }
 
-/// The content of the file `name` of `folder`: never through a link, never waiting on a pipe
-/// put there since it was looked at.
+/// The content of the file `name` of `folder`, when it is not larger than `KEPT_MAX`: never
+/// through a link, never waiting on a pipe put there since it was looked at, never read whole
+/// when it grew since.
 fn read_file(folder: BorrowedFd, name: &OsStr) -> std::io::Result<Vec<u8>> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | crate::nofollow::READ;
-    let mut file = std::fs::File::from(rustix::fs::openat(folder, name, flags, Mode::empty())?);
+    let file = std::fs::File::from(rustix::fs::openat(folder, name, flags, Mode::empty())?);
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::other("not a file"));
     }
     let mut content = Vec::new();
-    file.read_to_end(&mut content)?;
+    file.take(KEPT_MAX + 1).read_to_end(&mut content)?;
+    if content.len() as u64 > KEPT_MAX {
+        return Err(std::io::Error::other("too large to keep"));
+    }
     Ok(content)
 }
 
@@ -510,6 +521,8 @@ struct Walk<'a> {
     tops: &'a [PathBuf],
     skipped: &'a [&'a Path],
     contents: Option<&'a mut BTreeMap<PathBuf, Vec<u8>>>,
+    /// The bytes of `contents`, bound by `KEPT_TOTAL`.
+    held: u64,
     entries: BTreeMap<PathBuf, Kind>,
 }
 
@@ -543,6 +556,7 @@ fn walk(
         tops,
         skipped,
         contents,
+        held: 0,
         entries: BTreeMap::new(),
     };
     let mut seen = 0;
@@ -614,8 +628,10 @@ impl Walk<'_> {
                 if let (Some(contents), Kind::File { len, .. }) =
                     (self.contents.as_deref_mut(), &kind)
                     && *len <= KEPT_MAX
+                    && self.held + len <= KEPT_TOTAL
                     && let Ok(content) = read_file(opened.as_fd(), name)
                 {
+                    self.held += content.len() as u64;
                     contents.insert(path.clone(), content);
                 }
                 self.entries.insert(path, kind);
@@ -1138,6 +1154,26 @@ mod tests {
         assert!(!root.join(".claude").exists(), "{restored:?}");
         assert_eq!(restored.put_back, [".claude/model.bin"]);
         assert!(std::fs::read(kept.join("run/.claude/model.bin")).unwrap() == large);
+    }
+
+    #[test]
+    fn the_kept_contents_have_a_total_bound_past_which_a_change_is_left_and_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let large = "x".repeat(KEPT_TOTAL as usize * 3 / 4);
+        made(&root.join(".claude/a.json"), &large);
+        made(&root.join(".claude/b.json"), &large);
+        let snapshot = Snapshot::take(&root, None, &dir.path().join("kept"));
+        let held: usize = snapshot.contents.values().map(Vec::len).sum();
+        assert!(held as u64 <= KEPT_TOTAL, "{held}");
+
+        made(&root.join(".claude/a.json"), "{\"hooks\": {}}\n");
+        made(&root.join(".claude/b.json"), "{\"hooks\": {}}\n");
+        let restored = snapshot.restore("run");
+
+        assert_eq!(restored.put_back.len(), 1, "{restored:?}");
+        assert_eq!(restored.left.len(), 1, "{restored:?}");
+        assert!(said(&restored).unwrap().contains("could not put back"));
     }
 
     /// Runs `swap` once, the first time the walk or the put-back reaches `at`.
