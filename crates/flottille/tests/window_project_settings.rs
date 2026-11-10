@@ -839,3 +839,38 @@ fn the_user_s_wheel_ends_the_hold_on_the_tracker(cx: &mut TestAppContext) {
         "the page stays where the user put it: the tracker was {held} px under the top, now {after}"
     );
 }
+
+#[gpui_kit::test]
+fn a_project_s_rules_show_no_save_at_rest_and_one_once_they_are_changed(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let (shell, cx) = window(&user, cx);
+    let page = open_settings(&shell, "app", cx);
+    tab(cx, "instructions");
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+    assert!(!present(cx, "rules-save-app"), "no Save at rest");
+
+    let field = editor
+        .read_with(cx, |editor, _| editor.field().cloned())
+        .unwrap();
+    cx.update(|window, cx| {
+        field.update(cx, |field, cx| {
+            field.set_value("Name branches feat/<n>.", window, cx)
+        })
+    });
+    cx.run_until_parked();
+    settle(cx);
+    assert!(visible(cx, "rules-save-app"), "Save unfolds once changed");
+
+    cx.update(|window, cx| field.update(cx, |field, cx| field.set_value("", window, cx)));
+    cx.run_until_parked();
+    settle(cx);
+    assert!(
+        !present(cx, "rules-save-app"),
+        "and folds away once set back"
+    );
+}

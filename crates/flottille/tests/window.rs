@@ -10342,6 +10342,8 @@ fn a_project_s_settings_have_a_rules_section_that_adds_to_the_global_rules_and_r
     });
 
     type_rules(&editor, "Name branches feat/<n>.", cx);
+    // Save unfolds beside the change before it is clicked.
+    settle(cx);
     cx.update(|window, cx| window.click("rules-save-atlas", cx));
     until(&shell, cx, "the project's rules are saved", |cx| {
         editor.read_with(cx, |e, _| e.is_own())
@@ -10558,6 +10560,8 @@ fn a_project_s_settings_say_when_its_rules_repeat_the_global_ones(cx: &mut TestA
 
     // Removing the copy ends the note.
     type_rules(&editor, "Name branches feat/<n>.", cx);
+    // Save unfolds beside the change before it is clicked.
+    settle(cx);
     cx.update(|window, cx| window.click("rules-save-atlas", cx));
     until(&shell, cx, "the note goes", |cx| {
         let repeats = user
@@ -10668,7 +10672,7 @@ fn the_project_s_settings_show_skills_commands_tasks_and_setup_each_in_its_tab(
         });
     }
     choose_tab("rules", cx);
-    cx.update(|window, _| assert!(window.find("rules-save-atlas").visible()));
+    cx.update(|window, _| assert!(window.find("rules-text-atlas").visible()));
 }
 
 #[gpui_kit::test]
