@@ -18,7 +18,7 @@ fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// The window's own components, which were parts of the kit and keep the exact sizes of
+/// The window's own components, which were parts of `flottille-ui` and keep the exact sizes of
 /// the design as the kit's do: only the spacing scan leaves them out, every other scan reads them.
 const COMPONENTS: [&str; 2] = ["state.rs", "steps.rs"];
 
