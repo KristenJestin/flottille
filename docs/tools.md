@@ -1272,10 +1272,14 @@ follow-up, not a wait. The descriptions of `ask`, `report` and `session_send` sa
 
 An ask to the user is answered on its own: several asks waiting are several cards, each answered
 apart (`agent.answer`, `docs/protocol.md`), and an answer from one card answers that ask alone. The
-card names who asks by the session's title (`<title> asks you`), then holds one block per question:
-the question, its options as chips (one or several to choose), and a field of several lines for
-the user's words (`Enter` breaks a line, `Ctrl+Enter` sends; the field grows with its text up to
-eight lines, then scrolls). A choice and words go together. One Answer for the card, enabled once
+card names who asks by the session's title, with an `asks you` tag and how many questions are
+answered (`1 of 3 answered`), then holds one block per question: its number and text, and its
+options as rows (a round mark for one choice, a square one for several, with `several` said once
+at the right of the question), each with its description under its label. The last row is
+"Something else…": picked, it unfolds a field "Your answer" (`Enter` breaks a line, `Ctrl+Enter`
+sends; the field grows with its text up to eight lines, then scrolls), and a question answered this
+way needs its words. Once an option is chosen, "+ Add a note" unfolds a field "Note with your
+choice": a choice and a note go together. A question with no options is that field alone. One Answer for the card, enabled once
 every question has a choice or words. The agent gets one message:
 
 ```

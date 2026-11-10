@@ -779,7 +779,11 @@ fn once_the_pilot_stops_following_the_card_says_it_asks_you(cx: &mut TestAppCont
     let now = seen.get().unwrap();
     assert_eq!(
         label(cx, format!("row-{now}-question-title").into()).as_deref(),
-        Some("Write the docs asks you")
+        Some("Write the docs")
+    );
+    assert_eq!(
+        label(cx, format!("row-{now}-question-tag").into()).as_deref(),
+        Some("asks you")
     );
     // The card of the pilot folds away: nobody is waiting for it any more.
     settle(cx);

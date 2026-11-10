@@ -794,6 +794,134 @@ fn the_window_draws_no_frame_at_rest_on_a_session_with_a_card_of_links_and_a_thu
     );
 }
 
+/// A session that asked three questions (one choice, words, several choices) and waits for the
+/// answers: the user, the session's id and the window.
+fn asked_three(cx: &mut TestAppContext) -> (User, String, Entity<Shell>, &mut VisualTestContext) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "ship it", "do": [
+            {"mcp": {"tool": "ask", "arguments": {"questions": [
+                {"question": "Push `feat/42-export` and open the pull request?",
+                 "options": [{"label": "Yes"},
+                             {"label": "Not yet", "description": "Keep it local"}]},
+                {"question": "Title of the pull request?"},
+                {"question": "Who reviews it?", "multiple": true,
+                 "options": [{"label": "Alice"}, {"label": "Bob"}, {"label": "Carol"}]}
+            ]}}},
+            {"say": "Asked."}]},
+        {"when": "Export orders", "do": [{"say": "Shipping."}]}
+    ]}));
+    let id = idle_session(&user);
+    user.call("agent.send", json!({"agent": id, "message": "ship it"}))
+        .unwrap();
+    eventually("the lead asked and is idle again", || {
+        let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+        shown["agent"]["state"] == "idle"
+            && shown["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["name"] == "agent.asked")
+    });
+    let (shell, cx) = window(&user, cx);
+    // Tall enough for the whole card: the conversation draws the rows in sight.
+    cx.simulate_resize(size(px(1280.), px(1800.)));
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    settle(&shell, cx);
+    (user, id, shell, cx)
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_question_card_open_with_three_questions(
+    cx: &mut TestAppContext,
+) {
+    let (_user, id, shell, cx) = asked_three(cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the card of the questions is there", |cx| {
+        cx.update(|window, _| {
+            (0..12).any(|at| {
+                window
+                    .try_find(format!("row-{at}-question-2-option-2"))
+                    .is_some()
+            })
+        })
+    });
+    settle(&shell, cx);
+    let (with_card, asked) = frames_at_rest(&shell, cx);
+    assert_eq!(asked, 0, "no animation frame asked");
+
+    // The row of a session that needs the user pulses, by design, on every page: the card adds
+    // nothing to what the pulse alone draws.
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("app".into()), window, cx)
+    });
+    until(&shell, cx, "the project's page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
+    });
+    settle(&shell, cx);
+    let (pulse, _) = frames_at_rest(&shell, cx);
+    // Two windows of the same length count the pulse a frame or two apart (where its first and
+    // last frames fall); a card that moved at rest would add a frame per tick, hundreds.
+    assert!(
+        with_card <= pulse + 5,
+        "the open card adds no frame to the pulse of the row: {with_card} against {pulse}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_question_card_folded_to_its_answers(
+    cx: &mut TestAppContext,
+) {
+    let (user, id, shell, cx) = asked_three(cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the card of the questions is there", |cx| {
+        cx.update(|window, _| {
+            (0..12).any(|at| {
+                window
+                    .try_find(format!("row-{at}-question-2-option-2"))
+                    .is_some()
+            })
+        })
+    });
+    let trees = user.call("agent.trees", json!({})).unwrap();
+    let seq = trees["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|tree| tree["agents"].as_array().unwrap().clone())
+        .find(|entry| entry["agent"]["id"] == id)
+        .unwrap()["questions"][0]["seq"]
+        .as_u64()
+        .unwrap();
+    user.call(
+        "agent.answer",
+        json!({"agent": id, "question": seq, "answers": [
+            {"choices": ["Yes"], "text": "Squash it first."},
+            {"text": "Export orders as CSV"},
+            {"choices": ["Alice", "Carol"]}
+        ]}),
+    )
+    .unwrap();
+    until(&shell, cx, "the card folds to its answers", |cx| {
+        cx.update(|window, _| {
+            (0..12).any(|at| {
+                window
+                    .try_find(format!("row-{at}-answered-2-answer"))
+                    .is_some()
+            })
+        })
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
 /// The lead `idle_session` started launches a session it leads, titled `title`, allowed by the
 /// user when it is held: the session's id.
 fn led_by_lead(user: &User, mcp: &common::mcp::Mcp, title: &str) -> String {
