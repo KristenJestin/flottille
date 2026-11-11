@@ -253,6 +253,23 @@ fn tokens(text: &str) -> Vec<(usize, usize)> {
         }
         previous = Some(c);
     }
+    // The last line's indent and a diff's mark, while what follows them is one word, which may
+    // be the key of a setting read from its line's start (`settings`).
+    let line = text.rfind('\n').map_or(0, |at| at + 1);
+    let word =
+        line + text[line..].len() - text[line..].trim_start_matches([' ', '\t', '+', '-']).len();
+    if word > line && text.len() - word <= HELD_WORD && !text[word..].contains(char::is_whitespace)
+    {
+        found.push((line, text.len() + 1));
+    }
+    // A connection string's `; ` or a `-e `, while the key it may be followed by is still coming:
+    // alone, that key would read as a line's, whose value runs further.
+    let last = text.rfind(char::is_whitespace).map_or(0, |at| {
+        at + text[at..].chars().next().map_or(1, char::len_utf8)
+    });
+    if let Some(Place::Pair(at)) = place(&text[..last]) {
+        found.push((at, text.len() + 1));
+    }
     // A login file's field, from its key to the quote that ends its value: past the text's end
     // while that quote is still coming, even after a whitespace.
     found.extend(
@@ -452,18 +469,21 @@ fn login_fields(text: &str) -> Vec<LoginField> {
 /// The schemes of an `Authorization` header said before its credentials, which are kept.
 const SCHEMES: [&str; 5] = ["bearer", "basic", "digest", "token", "negotiate"];
 
-/// The keys of `headers`: an HTTP header's that carry credentials, and one ending in `password`.
-const HEADERS: [&str; 4] = ["authorization", "x-api-key", "cookie", "password"];
+/// The keys of `headers`: an HTTP header's that carry credentials.
+const HEADERS: [&str; 3] = ["authorization", "x-api-key", "cookie"];
 
 /// Each header of `HEADERS` whose key is not quoted (an HTTP header, YAML, `curl -v`'s
 /// `> Authorization: Bearer …`, `Proxy-Authorization`, `Set-Cookie`), and one that may still be
-/// coming at the text's end. Its value, an `Authorization`'s scheme left out, runs to the end of
-/// its line or a quote, or is the next line of a YAML block (`|`, `>`). A key ending in
-/// `password` is one only at the start of its line (YAML's `  db_password: …`, a diff's
-/// `+password: …`, a list's `- POSTGRES_PASSWORD=…`, `export PASSWORD=…`,
-/// `spring.datasource.password=…`): in prose, its colon starts a sentence.
+/// coming at the text's end: its value, an `Authorization`'s scheme left out, runs to the end of
+/// its line or a quote, or is the next line of a YAML block (`|`, `>`). And each setting of a key
+/// that names a secret (`settings`) and each password of a MySQL command line (`mysql_passwords`).
 fn headers(text: &str) -> Vec<LoginField> {
-    let mut found: Vec<LoginField> = HEADERS.iter().flat_map(|key| header(text, key)).collect();
+    let mut found: Vec<LoginField> = HEADERS
+        .iter()
+        .flat_map(|key| header(text, key))
+        .chain(settings(text))
+        .chain(mysql_passwords(text))
+        .collect();
     found.sort_by_key(|field| field.at);
     found
 }
@@ -481,33 +501,11 @@ fn header(text: &str, key: &str) -> Vec<LoginField> {
     };
     let mut found = Vec::new();
     for (at, _) in lower.match_indices(key) {
-        let key_start = if key == "password" {
-            // A key ending in it (`POSTGRES_PASSWORD`, `db-password`, `spring.datasource.password`),
-            // alone on its line but for a diff's mark, a YAML list's dash and its quote, or an
-            // `export`.
-            let key_start = text[..at]
-                .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
-                .map_or(0, |before| {
-                    before + text[before..].chars().next().map_or(1, char::len_utf8)
-                });
-            let line = text[..key_start].rsplit('\n').next().unwrap_or_default();
-            let line = line.trim_start_matches([' ', '\t', '+', '-']);
-            let line = line.strip_prefix(['"', '\'']).unwrap_or(line);
-            let line = line
-                .strip_prefix("export")
-                .filter(|rest| rest.starts_with([' ', '\t']))
-                .unwrap_or(line);
-            if !line.chars().all(|c| matches!(c, ' ' | '\t')) {
-                continue;
-            }
-            key_start
-        } else if at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_') {
+        if at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_') {
             continue;
-        } else {
-            at
-        };
+        }
         let mut field = LoginField {
-            at: key_start,
+            at,
             values: Vec::new(),
             end: coming,
         };
@@ -519,22 +517,11 @@ fn header(text: &str, key: &str) -> Vec<LoginField> {
         if !matches!(bytes[colon], b':' | b'=') {
             continue;
         }
-        // A dotted key is a setting's only as `key=value` (`spring.datasource.password=…`): with
-        // spaces around it, it is code (`self.password = password`).
-        if text[key_start..at].contains('.')
-            && (colon != at + key.len()
-                || bytes[colon] != b'='
-                || bytes.get(colon + 1) == Some(&b' '))
-        {
-            continue;
-        }
         let mut start = spaces(colon + 1);
-        let quoted = start < len && matches!(bytes[start], b'"' | b'\'');
-        if quoted {
+        if start < len && matches!(bytes[start], b'"' | b'\'') {
             start += 1;
         }
-        let mut block = false;
-        // A YAML block value (`password: |`, `>-`): the secret is on the next line.
+        // A YAML block value (`authorization: |`, `>-`): the secret is on the next line.
         if start < len && matches!(bytes[start], b'|' | b'>') {
             let mark = start
                 + 1
@@ -550,7 +537,6 @@ fn header(text: &str, key: &str) -> Vec<LoginField> {
             }
             if bytes[after] == b'\n' {
                 start = spaces(after + 1);
-                block = true;
             }
         }
         let word = start
@@ -579,18 +565,453 @@ fn header(text: &str, key: &str) -> Vec<LoginField> {
         if end == start {
             continue;
         }
-        // An unquoted password of several words is prose (`- Password: 8 chars minimum`), one
-        // ending in `;` code (`dbPassword: string;`).
-        if key == "password"
-            && !quoted
-            && !block
-            && (text[start..end].contains([' ', '\t']) || text[start..end].ends_with(';'))
+        field.values.push((start, end));
+        field.end = stop;
+        found.push(field);
+    }
+    found
+}
+
+/// Whether `key`, lowercase and without `_` or `-`, ends with `end`.
+fn key_ends(key: &str, end: &str) -> bool {
+    let mut key = key
+        .bytes()
+        .rev()
+        .filter(|byte| !matches!(byte, b'_' | b'-'))
+        .map(|byte| byte.to_ascii_lowercase());
+    end.bytes().rev().all(|byte| key.next() == Some(byte))
+}
+
+/// Where the key of a setting is written, which says how its value ends.
+#[derive(PartialEq)]
+enum Place {
+    /// At the start of its line but for a diff's mark, a YAML list's dash and its quote, an
+    /// `export`, a Dockerfile's `ENV`, cmd's `set` or PowerShell's `$env:`.
+    Line,
+    /// After a URL's `?` or `&`: its value ends at the next `&` or `#` too.
+    Query,
+    /// After a connection string's `;` or a `docker run -e` (`--env`), which starts at its byte.
+    Pair(usize),
+}
+
+/// Where the key that starts after `before` is written, if it is where a setting is.
+fn place(before: &str) -> Option<Place> {
+    let line = before.rsplit('\n').next().unwrap_or_default();
+    if line.ends_with(['?', '&']) {
+        return Some(Place::Query);
+    }
+    let words = line.trim_end_matches([' ', '\t']);
+    let at = before.len() - line.len() + words.len();
+    if words.ends_with(';') {
+        return Some(Place::Pair(at - 1));
+    }
+    let option = |name: &str| {
+        words
+            .strip_suffix(name)
+            .is_some_and(|rest| rest.is_empty() || rest.ends_with([' ', '\t']))
+    };
+    if words.len() < line.len()
+        && let Some(name) = ["-e", "--env"].into_iter().find(|name| option(name))
+    {
+        return Some(Place::Pair(at - name.len()));
+    }
+    let line = line.trim_start_matches([' ', '\t', '+', '-']);
+    let line = line.strip_prefix(['"', '\'']).unwrap_or(line);
+    let prefixed = |prefix: &str| {
+        line.get(..prefix.len())
+            .filter(|start| start.eq_ignore_ascii_case(prefix))
+            .map(|_| &line[prefix.len()..])
+    };
+    let line = ["export", "env", "set"]
+        .iter()
+        .find_map(|prefix| prefixed(prefix).filter(|rest| rest.starts_with([' ', '\t'])))
+        .or_else(|| prefixed("$env:"))
+        .unwrap_or(line);
+    line.chars()
+        .all(|c| matches!(c, ' ' | '\t'))
+        .then_some(Place::Line)
+}
+
+/// Whether `text` is a name of code: a letter or `_` first, then letters, digits, `_`, `.` or `:`.
+fn name(text: &str) -> bool {
+    text.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':'))
+}
+
+/// Whether an unquoted value is code rather than a secret: a call or a generic type whose
+/// arguments are none or a name (`read()`, `Optional[str]`, `Vec<u8>`).
+fn code(value: &str) -> bool {
+    let Some(open) = value.find(['(', '[', '<']) else {
+        return false;
+    };
+    let close = match value.as_bytes()[open] {
+        b'(' => ')',
+        b'[' => ']',
+        _ => '>',
+    };
+    let Some(inside) = value[open + 1..].strip_suffix(close) else {
+        return false;
+    };
+    name(&value[..open]) && (inside.is_empty() || name(inside))
+}
+
+/// Whether an unquoted value set with spaces around its `=` is an expression of code: a dotted
+/// name (`self.token`, `resp.json()[…`), a call or an index (`read()`, `os.getenv(` and
+/// `config[` cut at their quote).
+fn expression(value: &str) -> bool {
+    let head = value
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.')))
+        .map_or(value, |end| &value[..end]);
+    name(head)
+        && ((head.contains('.') && !head.ends_with('.'))
+            || code(value)
+            || matches!(&value[head.len()..], "(" | "["))
+}
+
+/// Whether a value set to a password with spaces around its `=` is plainly code, for an ini
+/// file's password may hold dots and brackets: a name of lowercase letters (`password`, `pw`), a
+/// member of `self`, `this` or of a password's name (`self.password`, `cfg.password`), or a call
+/// of such a name with no argument or names (`hash(pw)`, `read()`). Not `Welcome(x)`, `abc.def`.
+fn plain_code(value: &str) -> bool {
+    let lower = |part: &str| {
+        part.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+            && part.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+    };
+    if let Some((call, arguments)) = value.split_once('(') {
+        return call.split('.').all(lower)
+            && arguments.strip_suffix(')').is_some_and(|arguments| {
+                arguments.is_empty() || arguments.split(',').all(|argument| lower(argument.trim()))
+            });
+    }
+    let parts: Vec<&str> = value.split('.').collect();
+    parts.iter().all(|part| lower(part))
+        && (parts.len() == 1
+            || matches!(parts[0], "self" | "this")
+            || parts.last().is_some_and(|last| login_key(last)))
+}
+
+/// Whether a password's setting is a list's requirement, prose: `- Password: 8 chars minimum`, a
+/// capitalised key after `- `, its colon, a number and words.
+fn requirement(before: &str, key: &str, sign: u8, value: &str) -> bool {
+    let mut words = value.split_whitespace();
+    before.trim_start_matches([' ', '\t']) == "- "
+        && key.starts_with(|c: char| c.is_ascii_uppercase())
+        && sign == b':'
+        && words
+            .next()
+            .is_some_and(|number| number.chars().all(|c| c.is_ascii_digit()))
+        && words
+            .next()
+            .is_some_and(|word| word.chars().all(char::is_alphabetic))
+}
+
+/// Each setting whose key is not quoted and names a secret (`login_key`: `password`, `passwd`,
+/// `secret`, `token`, `api_key`, `client_secret`…), and one that may still be coming at the text's
+/// end: where a setting is written (`place`), YAML's `  db_password: …`, a diff's
+/// `+token: …`, a list's `- POSTGRES_PASSWORD=…`, `export PASSWORD=…`, a Dockerfile's
+/// `ENV PASSWORD=…`, cmd's `set PASSWORD=…`, PowerShell's `$env:PASSWORD = "…"`, a URL's
+/// `?password=…`, a connection string's `;Password=…;`, `docker run -e POSTGRES_PASSWORD=…`. In
+/// prose, its colon starts a sentence. Its value runs to the end of its line or a quote, or, as
+/// `key=value` with no space, to a whitespace, and a `;` or `&` too in a URL's query (`#` too), a
+/// connection string or after `-e`; a YAML block's (`|`, `>`) is each of its lines, a diff's
+/// mark left out.
+fn settings(text: &str) -> Vec<LoginField> {
+    let (bytes, len) = (text.as_bytes(), text.len());
+    let coming = len + 1;
+    let spaces = |mut at: usize| {
+        while at < len && matches!(bytes[at], b' ' | b'\t') {
+            at += 1;
+        }
+        at
+    };
+    let key_char = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.');
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < len {
+        if !key_char(bytes[at]) {
+            at += 1;
+            continue;
+        }
+        let key_start = at;
+        while at < len && key_char(bytes[at]) {
+            at += 1;
+        }
+        let key = &text[key_start..at];
+        // A key still coming is the text's last word, which `settled` holds.
+        if at == len {
+            break;
+        }
+        // An `Authorization`'s scheme is kept: `header` masks it.
+        if !LOGIN_KEY_ENDS.iter().any(|end| key_ends(key, end))
+            || key_ends(key, "authorization")
+            || !login_key(key)
         {
+            continue;
+        }
+        let Some(place) = place(&text[..key_start]) else {
+            continue;
+        };
+        // At a line's start, from the line's start: what is before the key (a diff's mark, the
+        // indent of a YAML block's key) says how its value is read.
+        let from = match place {
+            Place::Line => text[..key_start].rfind('\n').map_or(0, |at| at + 1),
+            Place::Pair(at) => at,
+            Place::Query => key_start,
+        };
+        let mut field = LoginField {
+            at: from,
+            values: Vec::new(),
+            end: coming,
+        };
+        let sign = spaces(at);
+        if sign + 1 >= len {
+            if sign == len || matches!(bytes[sign], b':' | b'=') {
+                found.push(field);
+                break;
+            }
+            continue;
+        }
+        if !matches!(bytes[sign], b':' | b'=') {
+            continue;
+        }
+        let tight = sign == at && bytes[sign] == b'=' && !matches!(bytes[sign + 1], b' ' | b'\t');
+        // A dotted key is a setting's only as `key=value` (`spring.datasource.password=…`): with
+        // spaces around it, it is code (`self.password = password`).
+        if !tight && (place != Place::Line || key.contains('.')) {
+            continue;
+        }
+        let mut start = spaces(sign + 1);
+        if start == len {
+            found.push(field);
+            break;
+        }
+        let password = key_ends(key, "password") || key_ends(key, "passwd");
+        // A token's value between angle brackets ends at its `>`, as at a quote
+        // (`token=<…>dir=<…>`); a password's may hold them.
+        let angled = !password && bytes[start] == b'<';
+        let quoted = angled || matches!(bytes[start], b'"' | b'\'');
+        if quoted {
+            start += 1;
+        } else if bytes[sign] == b':'
+            && matches!(bytes[start], b'|' | b'>')
+            && let Some((values, end)) = block(text, key_start, start)
+        {
+            field.values = values;
+            field.end = end;
+            at = end.min(len);
+            found.push(field);
+            if end == coming {
+                break;
+            }
+            continue;
+        }
+        let ends: &[u8] = match (quoted, tight, &place) {
+            _ if angled => b"\r\n>",
+            (false, false, _) if password => b"\r\n",
+            (true, ..) | (false, false, _) => b"\r\n\"'",
+            (false, true, Place::Query) => b"\"'&#",
+            (false, true, Place::Pair(_)) => b"\"'&;",
+            (false, true, Place::Line) => b"\r\n\"'",
+        };
+        // At a line's start, a password's value runs to the line's end (`.env`, `- PASSWORD=a b`,
+        // `password = my secret phrase`), but for a `; ` that ends a connection string's pair
+        // after `key=`; elsewhere, and a token's after `key=`, to a whitespace.
+        let line = !quoted && place == Place::Line && password;
+        let stop = (start..len).find(|&at| {
+            ends.contains(&bytes[at])
+                || (!quoted
+                    && tight
+                    && if line {
+                        bytes[at] == b';' && bytes.get(at + 1).is_some_and(u8::is_ascii_whitespace)
+                    } else {
+                        bytes[at].is_ascii_whitespace()
+                    })
+        });
+        let mut end = stop.unwrap_or(len);
+        if line {
+            // Without a comment after it.
+            end = text[start..end]
+                .find(" #")
+                .or_else(|| text[start..end].find("\t#"))
+                .map_or(end, |comment| start + comment);
+        }
+        end = start + text[start..end].trim_end().len();
+        // A `;` that ends it is the end of a pair: cut where it ends, a connection string's
+        // `; Password=…;` reads as one at a line's start.
+        if !quoted && tight && place == Place::Line && stop.is_some() {
+            end -= usize::from(text[start..end].ends_with(';'));
+        }
+        let value = &text[start..end];
+        // Unquoted, code passes a name on (`password=password,`). A password's value, with spaces
+        // or a colon, is code only plainly (`password = hash(pw)`, `dbPassword: string;`, a
+        // colon's only with its `;`), and prose only as a list's requirement. A token's or a
+        // secret's is prose with several words, and code ends in `;` or `,` (`token: string;`,
+        // `secret: Secret,`), is an expression set with spaces around its `=`
+        // (`token = self.token`), calls or names a type (`Optional[str]`), or is a word or a
+        // number (`token: str`, `max_token: 100`). Punctuation alone is no secret (`token=<>`).
+        let clear = !value.contains(char::is_alphanumeric)
+            || (!quoted
+                && (value.strip_suffix(',') == Some(key)
+                    || if password {
+                        let statement = value.strip_suffix(';');
+                        !tight
+                            && ((bytes[sign] == b'=' && plain_code(statement.unwrap_or(value)))
+                                || statement.is_some_and(plain_code)
+                                || requirement(&text[from..key_start], key, bytes[sign], value))
+                    } else {
+                        (!tight && (value.contains([' ', '\t']) || value.ends_with(';')))
+                            || (bytes[sign] == b'=' && !tight && expression(value))
+                            || value.ends_with(',')
+                            || code(value)
+                            || value.chars().all(|c| c.is_alphabetic())
+                            || value.chars().all(|c| c.is_ascii_digit())
+                    }));
+        let Some(stop) = stop else {
+            // Cut short, it may still change.
+            if !clear && end > start {
+                field.values.push((start, end));
+            }
+            found.push(field);
+            break;
+        };
+        if clear || end == start {
             continue;
         }
         field.values.push((start, end));
         field.end = stop;
         found.push(field);
+    }
+    found
+}
+
+/// The lines of the YAML block whose mark (`|`, `>-`, with a comment after it or not) is at
+/// `mark`, of the key at `key`, and where the block ends, past the text's end while it may still
+/// be coming; `None` if it is not a block. Its lines are those indented more than its key's, the
+/// first may be blank.
+fn block(text: &str, key: usize, mark: usize) -> Option<(Vec<(usize, usize)>, usize)> {
+    let (bytes, len) = (text.as_bytes(), text.len());
+    let coming = len + 1;
+    let spaces = |mut at: usize| {
+        while at < len && matches!(bytes[at], b' ' | b'\t') {
+            at += 1;
+        }
+        at
+    };
+    let indicators = mark
+        + 1
+        + bytes[mark + 1..]
+            .iter()
+            .position(|byte| !matches!(byte, b'-' | b'+' | b'0'..=b'9'))
+            .unwrap_or(len - mark - 1);
+    let mut after = spaces(indicators);
+    if after < len && bytes[after] == b'#' && after > indicators {
+        after = text[after..].find('\n').map_or(len, |end| after + end);
+    }
+    after += usize::from(bytes[after..].starts_with(b"\r"));
+    if after == len {
+        return Some((Vec::new(), coming));
+    }
+    if bytes[after] != b'\n' {
+        return None;
+    }
+    let line_start = text[..key].rfind('\n').map_or(0, |at| at + 1);
+    // In a diff, each line's first byte is its mark (`+`, `-`, ` `), which is no indent: a key
+    // line of context starts with a space, and an indent measured after one more space reads
+    // the same. A key may hold the `-` it starts with (`-password: |`), and a key line may be
+    // unmarked while its block's lines are (`password: |` then `-  old` and `+  new`).
+    let marked = line_start < key && matches!(bytes[line_start], b'+' | b'-' | b' ');
+    let diff = marked
+        || text[after + 1..]
+            .split('\n')
+            .find(|line| !line.trim().is_empty())
+            .is_some_and(|line| line.starts_with(['+', '-']));
+    let key_line = &text[line_start + usize::from(marked)..key];
+    let indent = key_line.len() - key_line.trim_start_matches(' ').len();
+    let mut values = Vec::new();
+    let mut inner = None;
+    let mut line = after + 1;
+    loop {
+        if line >= len {
+            return Some((values, coming));
+        }
+        let from = line + usize::from(diff && matches!(bytes[line], b'+' | b'-' | b' '));
+        let first = spaces(from);
+        let width = first - from;
+        let eol = text[line..].find('\n').map(|end| line + end);
+        let body = first + text[first..eol.unwrap_or(len)].trim_end().len();
+        if body == first {
+            match eol {
+                Some(eol) => {
+                    line = eol + 1;
+                    continue;
+                }
+                // Blank so far: its indent may still grow.
+                None => return Some((values, coming)),
+            }
+        }
+        if width <= indent || inner.is_some_and(|inner| width < inner) {
+            return Some((values, line));
+        }
+        inner.get_or_insert(width);
+        values.push((first, body));
+        match eol {
+            Some(eol) => line = eol + 1,
+            None => return Some((values, coming)),
+        }
+    }
+}
+
+/// The commands of MySQL and MariaDB that take a password as `-p<password>`.
+const MYSQL: [&str; 4] = ["mysql", "mysqldump", "mysqladmin", "mariadb"];
+
+/// Each line that runs a command of `MYSQL`, from its command to the line's end, past the text's
+/// end while the line may still be coming, with the password of each of its `-p<password>`: a
+/// `-p` alone asks for it.
+fn mysql_passwords(text: &str) -> Vec<LoginField> {
+    let len = text.len();
+    let mut found = Vec::new();
+    let mut line_start = 0;
+    for line in text.split_inclusive('\n') {
+        let whole = line.ends_with('\n');
+        let words: Vec<(usize, &str)> = line
+            .split_ascii_whitespace()
+            .map(|word| {
+                (
+                    line_start + (word.as_ptr() as usize - line.as_ptr() as usize),
+                    word,
+                )
+            })
+            .collect();
+        line_start += line.len();
+        let Some(command) = words
+            .iter()
+            .position(|(_, word)| MYSQL.contains(&word.rsplit('/').next().unwrap_or(word)))
+        else {
+            continue;
+        };
+        // Its arguments end where another command starts.
+        let mut values = Vec::new();
+        for &(at, word) in &words[command + 1..] {
+            if matches!(word, "|" | "||" | "&&" | ";") {
+                break;
+            }
+            if word.len() > 2 && word.starts_with("-p") {
+                values.push((at + 2, at + word.trim_end_matches(';').len()));
+            }
+            if word.ends_with(';') {
+                break;
+            }
+        }
+        if whole && values.is_empty() {
+            continue;
+        }
+        found.push(LoginField {
+            at: words[command].0,
+            values,
+            end: if whole { line_start - 1 } else { len + 1 },
+        });
     }
     found
 }
@@ -1287,5 +1708,395 @@ mod tests {
             masked.contains("  - 'POSTGRES_PASSWORD=[masked]'\n"),
             "{masked}"
         );
+    }
+
+    #[test]
+    fn a_password_in_a_url_query_is_masked() {
+        let text = "curl \"https://api.example.test/login?user=app&password=fake-query-0123&next=/\"\n\
+            open https://app.example.test/cb?access_token=fake-access-0123#top now\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("?user=app&password=[masked]&next=/\""),
+            "{masked}"
+        );
+        assert!(
+            masked.contains("?access_token=[masked]#top now"),
+            "{masked}"
+        );
+    }
+
+    #[test]
+    fn a_password_in_a_connection_string_is_masked() {
+        let text = "Server=db.example.test;Database=app;User Id=app;Password=fake-conn-0123;\n\
+            Host=db.example.test; Password=fake-spaced-0123; Port=5432\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("User Id=app;Password=[masked];\n"),
+            "{masked}"
+        );
+        assert!(
+            masked.contains("; Password=[masked]; Port=5432"),
+            "{masked}"
+        );
+    }
+
+    #[test]
+    fn a_docker_env_password_is_masked() {
+        let text = "docker run -e POSTGRES_PASSWORD=fake-docker-0123 -d postgres\n\
+            docker run --env API_TOKEN=fake-env-0123 app\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("-e POSTGRES_PASSWORD=[masked] -d postgres"),
+            "{masked}"
+        );
+    }
+
+    #[test]
+    fn a_mysql_dash_p_password_is_masked() {
+        let text = "mysql -uapp -pfake-mysql-0123 app\n\
+            /usr/bin/mysqldump -h db -pfake-dump-0123 app > out.sql\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(masked.contains("mysql -uapp -p[masked] app\n"), "{masked}");
+        // A `-p` alone prompts for it; other commands' `-p` is no password.
+        let clear = "mysql -p app\nmkdir -p build\ngcc -pthread main.c\n\
+            mysql -p app -e status | grep -piq uptime\nmysql -p app; grep -piq x log\n";
+        assert_eq!(masked_at_each_cut(clear), clear);
+    }
+
+    #[test]
+    fn a_dockerfile_cmd_or_powershell_password_is_masked() {
+        let text = "ENV PASSWORD=fake-dockerfile-0123\n\
+            set PASSWORD=fake-cmd-0123\n\
+            $env:PASSWORD = \"fake-powershell-0123\"\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(masked.contains("ENV PASSWORD=[masked]\n"), "{masked}");
+        assert!(
+            masked.contains("$env:PASSWORD = \"[masked]\"\n"),
+            "{masked}"
+        );
+    }
+
+    #[test]
+    fn an_unquoted_passwd_secret_token_or_api_key_is_masked() {
+        let text = "passwd: fake-passwd-0123\nsecret: fake-secret-0123\n\
+            token: fake-token-0123\napi_key: fake-api-0123\n\
+            oauth:\n  client_secret: fake-client-0123\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(masked.contains("  client_secret: [masked]\n"), "{masked}");
+    }
+
+    #[test]
+    fn a_yaml_block_whose_first_line_is_blank_is_masked() {
+        let text = "database:\n  password: |\n\n    fake-blank-0123\n  user: app\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(masked.contains("\n  user: app\n"), "{masked}");
+    }
+
+    #[test]
+    fn a_yaml_block_with_a_comment_after_its_mark_is_masked() {
+        let text =
+            "database:\n  password: | # the database's\n    fake-comment-0123\n  user: app\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("| # the database's\n    [masked]\n  user: app\n"),
+            "{masked}"
+        );
+    }
+
+    #[test]
+    fn every_line_of_a_yaml_block_is_masked() {
+        let text = "private_key: |\n  fake-first-0123\n  fake-second-0123\n\n  fake-third-0123\nuser: app\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(masked.ends_with("\nuser: app\n"), "{masked}");
+    }
+
+    #[test]
+    fn prose_and_code_naming_a_token_or_secret_stay_clear() {
+        let text = "the token expired\n\
+            interface Login {\n  token: string;\n}\n\
+            secret: Secret,\n\
+            let password = read()\n\
+            let token = read_token()\n\
+            class Login:\n    token: str\n\
+            max_tokens: 100\n\
+            Token: paste it in the settings\n\
+            cd app && pwd\n\
+            login(\n    token=token,\n    api_key=api_key,\n    password=password,\n)\n\
+            SECRET_KEY = os.getenv(\"X\")\n\
+            token = self.token\n\
+            access_token = resp.json()[\"access_token\"]\n\
+            password = password\n\
+            password = self.password\n\
+            password = cfg.password\n\
+            password = hash(pw)\n";
+        assert_eq!(masked_at_each_cut(text), text);
+    }
+
+    #[test]
+    fn a_yaml_block_in_a_diff_is_masked() {
+        let text = "+  password: |\n+    fake-added-0123\n+  user: app\n\
+            -  password: |\n-    fake-removed-0123\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+        assert!(
+            masked.contains("+  password: |\n+    [masked]\n+  user: app\n"),
+            "{masked}"
+        );
+    }
+
+    #[test]
+    fn a_password_holding_a_semicolon_or_an_ampersand_is_masked_whole() {
+        let text = "      - POSTGRES_PASSWORD=fake7;k9&q-0123\nexport PASSWORD=fake;0123&x\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake"), "{masked}");
+        assert!(!masked.contains("0123"), "{masked}");
+        assert!(
+            masked.contains("      - POSTGRES_PASSWORD=[masked]\n"),
+            "{masked}"
+        );
+    }
+
+    #[test]
+    fn a_password_shaped_like_a_call_or_a_type_is_masked() {
+        let text = "password: fakeSummer2024(!)\nDB_PASSWORD=fakeWelcome1[x]\n\
+            PASSWORD=fakeSecret<1>\npassword = fakeSummer(1)\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake"), "{masked}");
+    }
+
+    #[test]
+    fn a_password_ending_in_a_comma_is_masked() {
+        let text = "password: fake-hunter2,\n";
+        let masked = masked_at_each_cut(text);
+
+        assert!(!masked.contains("fake-"), "{masked}");
+    }
+
+    #[test]
+    fn a_yaml_block_changed_under_a_context_key_line_is_masked() {
+        let text = "   password: |\n-    fake-old-0123\n+    fake-new-0123\n   user: app\n";
+        let masked = masked_at_each_cut(text);
+
+        assert_eq!(
+            masked,
+            "   password: |\n-    [masked]\n+    [masked]\n   user: app\n"
+        );
+    }
+
+    #[test]
+    fn a_spaced_password_of_an_ini_file_is_masked() {
+        let text = "[client]\npassword = fake-mycnf-0123\npassword = Welcome1.x\n\
+            password = abc.def\npassword = My.Secret.2024\npassword = Welcome(x)\n";
+        let masked = masked_at_each_cut(text);
+
+        assert_eq!(
+            masked,
+            "[client]\npassword = [masked]\npassword = [masked]\npassword = [masked]\n\
+             password = [masked]\npassword = [masked]\n"
+        );
+    }
+
+    #[test]
+    fn a_tight_value_with_spaces_at_a_line_start_is_masked_whole() {
+        let text = "PASSWORD=correct horse battery\n  - PASSWORD=fake a b  # the db\n";
+        let masked = masked_at_each_cut(text);
+
+        assert_eq!(
+            masked,
+            "PASSWORD=[masked]\n  - PASSWORD=[masked]  # the db\n"
+        );
+    }
+
+    /// Forms `dev` masked before the unquoted keys were widened (#750), each with its secret:
+    /// none may come out clear.
+    const DEV_MASKED: [(&str, &str); 38] = [
+        ("database:\n  password: fake-yaml-0123\n", "fake"),
+        ("      POSTGRES_PASSWORD: fake-env-0123\n", "fake"),
+        (
+            "environment:\n  - POSTGRES_PASSWORD=fake-list-0123\n",
+            "fake",
+        ),
+        ("  - \"POSTGRES_PASSWORD=fake-double-0123\"\n", "fake"),
+        (
+            "db_password: fake-db-0123\n+db-password: fake-diff-0123\n",
+            "fake",
+        ),
+        ("export PASSWORD=fake-export-0123\n", "fake"),
+        ("+export DB_PASSWORD=\"fake-quoted-0123\"\n", "fake"),
+        ("spring.datasource.password=fake-dotted-0123\n", "fake"),
+        ("  password: |\n    fake-block-0123\n  user: app\n", "fake"),
+        ("db_password: >-\n  fake-folded-0123\n", "fake"),
+        ("+  password: |\n+    fake-added-0123\n", "fake"),
+        (
+            "   password: |\n-    fake-old-0123\n+    fake-new-0123\n",
+            "fake-old",
+        ),
+        ("      - POSTGRES_PASSWORD=Xy7;k9&q\n", "k9&q"),
+        ("password: Summer2024(!)\n", "Summer"),
+        ("DB_PASSWORD=Welcome1[x]\n", "Welcome"),
+        ("PASSWORD=Secret<1>\n", "Secret"),
+        ("password: hunter2,\n", "hunter2"),
+        ("password = Welcome1.x\n", "Welcome"),
+        ("password = My.Secret.2024\n", "Secret"),
+        ("password = Welcome(x)\n", "Welcome"),
+        ("PASSWORD=correct horse battery\n", "horse"),
+        ("> Authorization: Bearer fake-bearer-0123456789\r\n", "fake"),
+        // `dev` masks these when the text ends on their line.
+        ("password = s3cret # db", "s3cret"),
+        ("password = s3cret ; db", "s3cret"),
+        ("password = s3cret x", "s3cret"),
+        ("password = s3cret\t# tab", "s3cret"),
+        ("DB_PASSWORD = s3cret # db", "s3cret"),
+        ("  password = s3cret # db", "s3cret"),
+        ("  password: Hunter2x  # TODO rotate", "Hunter2x"),
+        ("POSTGRES_PASSWORD: s3cret # x", "s3cret"),
+        ("password: correct horse battery", "horse"),
+        ("password = my secret phrase", "secret phrase"),
+        ("password: |\n-  oldsec\n+  newsec\n", "oldsec"),
+        ("password: |\n-  oldsec\n+  newsec\n", "newsec"),
+        ("-password: |\n-  fake-removed\n", "fake"),
+        ("-token: |\n  fake-token-0123\n", "fake"),
+        ("-db_password: >-\n  fake-folded\n", "fake"),
+        ("password: hunter\n", "hunter"),
+    ];
+
+    #[test]
+    fn nothing_dev_masks_comes_out_clear() {
+        for (text, secret) in DEV_MASKED {
+            let masked = masked_at_each_cut(text);
+            assert!(!masked.contains(secret), "{text:?} gives {masked:?}");
+        }
+    }
+
+    #[test]
+    fn a_removed_line_opening_a_yaml_block_does_not_panic() {
+        for text in [
+            "-password: |\n-  x",
+            "-token: |\n  x",
+            "-db_password: >-\n  x",
+            "-password: |",
+        ] {
+            masked_at_each_cut(text);
+        }
+    }
+
+    #[test]
+    fn a_spaced_or_colon_password_followed_by_more_text_is_masked() {
+        let text = "password = s3cret # db\nDB_PASSWORD = s3cret ; db\n\
+            \x20 password: Hunter2x  # TODO rotate\npassword: correct horse battery\n";
+        let masked = masked_at_each_cut(text);
+
+        assert_eq!(
+            masked,
+            "password = [masked] # db\nDB_PASSWORD = [masked]\n\
+             \x20 password: [masked]  # TODO rotate\npassword: [masked]\n"
+        );
+    }
+
+    #[test]
+    fn a_yaml_block_of_marked_lines_under_an_unmarked_key_is_masked() {
+        let text = "password: |\n-  fake-old-0123\n+  fake-new-0123\nuser: app\n";
+        let masked = masked_at_each_cut(text);
+
+        assert_eq!(masked, "password: |\n-  [masked]\n+  [masked]\nuser: app\n");
+    }
+
+    #[test]
+    fn an_index_into_a_setting_is_code() {
+        let text = "api_key = config[\"api_key\"]\ntoken = settings[key]\n";
+        assert_eq!(masked_at_each_cut(text), text);
+    }
+
+    #[test]
+    fn a_value_of_punctuation_alone_is_not_a_secret() {
+        for text in [
+            "token=<>",
+            "token=<>\n",
+            "token=<",
+            "token=\"\"\n",
+            "token=",
+            "token=\n",
+            "password: ***\n",
+            "secret = <>\n",
+        ] {
+            assert_eq!(masked_at_each_cut(text), text);
+        }
+        // A placeholder holding a word may be one: the safe side.
+        assert_eq!(masked_at_each_cut("token=<none>\n"), "token=<[masked]>\n");
+    }
+
+    #[test]
+    fn a_token_between_angle_brackets_ends_at_its_bracket() {
+        assert_eq!(masked_at_each_cut("token=<>dir=<>"), "token=<>dir=<>");
+        assert_eq!(
+            masked_at_each_cut("token=<s3cr3t-0123>dir=<x>\n"),
+            "token=<[masked]>dir=<x>\n"
+        );
+        // A password's runs to its line's end.
+        assert_eq!(
+            masked_at_each_cut("PASSWORD=<a>b c\n"),
+            "PASSWORD=[masked]\n"
+        );
+    }
+
+    #[test]
+    fn masking_generated_lines_never_panics() {
+        let parts: [&[&str]; 6] = [
+            &["", "+", "-", " ", "  ", "- ", "+- "],
+            &[
+                "password",
+                "-password",
+                "token",
+                "DB_PASSWORD",
+                "api_key",
+                "x.password",
+                "Password",
+            ],
+            &["", " "],
+            &[":", "=", " = ", ": "],
+            &[
+                "", "|", ">-", "| # c", "\"q", "'", "s3cret", "a b", "f(x)", "8 chars", "a;b&c",
+            ],
+            &["\n", "\n  x\n", "\n-  x\n+  y\n", "\n\n   z", "", "\r\n"],
+        ];
+        // A small linear congruential generator: the same lines at every run.
+        let mut seed: u64 = 750;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (seed >> 33) as usize % n
+        };
+        for _ in 0..400 {
+            let text: String = parts
+                .iter()
+                .map(|choices| choices[next(choices.len())])
+                .collect();
+            mask(&text, &BTreeMap::new());
+            for cut in 1..text.len() {
+                streamed(&text, &[cut], &BTreeMap::new());
+            }
+            let bytes: Vec<usize> = (1..text.len()).collect();
+            streamed(&text, &bytes, &BTreeMap::new());
+        }
     }
 }
