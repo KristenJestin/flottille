@@ -127,6 +127,8 @@ pub struct ProjectRepositories {
     busy: Option<Busy>,
     /// A read of the window's own is on its way: another is not asked meanwhile.
     reading: bool,
+    /// A read was asked meanwhile: made once the one on its way is answered.
+    queued: bool,
     /// How many requests were made: an answer to an older one never replaces a newer one's.
     requests: u64,
     problem: Option<SharedString>,
@@ -142,6 +144,7 @@ impl ProjectRepositories {
             asked: String::new(),
             busy: None,
             reading: false,
+            queued: false,
             requests: 0,
             problem: None,
         }
@@ -198,9 +201,11 @@ impl ProjectRepositories {
     /// Asks the daemon for the repositories as their checkouts stand, in silence: when the tab
     /// opens and when the window takes the focus back. Not while one is on its way, nor while a
     /// request of the user's is: its answer is the list, and a newer read would make it the older
-    /// one, so that its refusal would never be said.
+    /// one, so that its refusal would never be said. It is remembered then, once, and made when
+    /// the answer comes: what changed after the one on its way began is still read.
     pub fn read(&mut self, cx: &mut App) {
         if self.busy.is_some() || self.reading {
+            self.queued = true;
             return;
         }
         self.reading = true;
@@ -293,6 +298,9 @@ impl ProjectRepositories {
             },
         }
         cx.notify();
+        if std::mem::take(&mut self.queued) {
+            self.read(cx);
+        }
     }
 
     /// The confirmation of forgetting a repository.

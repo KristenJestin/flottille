@@ -763,19 +763,23 @@ fn focus_taken_back_while_a_read_runs_starts_no_second_read(cx: &mut TestAppCont
     let (programs, listed) = counted(cx);
 
     // The window comes and goes five times while the answers are on their way (the shell is not
-    // polled: none came): one read of each was asked, not five.
+    // polled: none came): one read of each is on its way, not five.
     for _ in 0..5 {
         leave_and_come_back(cx);
     }
     assert_eq!(counted(cx), (programs + 1, listed + 1));
 
-    // Once they are answered, the next return asks again.
+    // The returns are not lost: one more read of each is made once the first is answered, and
+    // only one.
     until(&shell, cx, "the reads are answered", |cx| {
         checks.read_with(cx, |checks, _| !checks.is_checking())
             && repositories.read_with(cx, |section, _| !section.is_reading())
     });
-    leave_and_come_back(cx);
     assert_eq!(counted(cx), (programs + 2, listed + 2));
+
+    // Nothing is left waiting: the next return asks again, once.
+    leave_and_come_back(cx);
+    assert_eq!(counted(cx), (programs + 3, listed + 3));
 }
 
 #[gpui_kit::test]

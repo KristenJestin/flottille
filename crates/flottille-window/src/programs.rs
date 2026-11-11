@@ -196,6 +196,8 @@ pub struct ProgramChecks {
     asked: bool,
     /// The last read failed.
     failed: bool,
+    /// A silent read was asked while one was on its way: made once that one is answered.
+    queued: bool,
 }
 
 /// What the page shows of a failed Check again (a toast, as for the other reads that fail).
@@ -213,6 +215,7 @@ impl ProgramChecks {
             waiting: None,
             asked: false,
             failed: false,
+            queued: false,
         }
     }
 
@@ -259,11 +262,14 @@ impl ProgramChecks {
 
     /// Reads the programs' state anew, in silence: when the tab opens, after a change of forge or
     /// tracker and when the window takes the focus back. A read that fails changes nothing.
-    /// Nothing while a read is on its way: a window that comes and goes asks for one read, not
-    /// one for each time.
+    /// While a read is on its way, one more is remembered and made when it is answered, however
+    /// many are asked: a window that comes and goes asks for one read at a time, and what
+    /// changed after the one on its way began is still read.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.waiting.is_none() {
             self.read(false, cx);
+        } else {
+            self.queued = true;
         }
     }
 
@@ -312,6 +318,9 @@ impl ProgramChecks {
         }
         self.asked = false;
         cx.notify();
+        if std::mem::take(&mut self.queued) {
+            self.read(false, cx);
+        }
     }
 }
 

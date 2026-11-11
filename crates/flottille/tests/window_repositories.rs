@@ -1515,3 +1515,39 @@ fn the_repository_dialog_says_none_for_no_forge_and_deletes_the_branch_after_mer
     let sentence = label_of("settings-modal-sentence", cx).unwrap();
     assert!(!sentence.contains("read from git"), "{sentence}");
 }
+
+#[gpui_kit::test]
+fn a_repository_cloned_while_a_read_runs_shows_once_the_reads_settle(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = trio(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let section = open_settings(&shell, "trio", cx);
+    until(&shell, cx, "the repositories are read", |cx| {
+        section.read_with(cx, |s, _| s.repositories().is_some() && !s.is_reading())
+    });
+    settle(cx);
+    let first = section.read_with(cx, |s, _| s.last_request());
+
+    // The window comes back: a read is on its way (the shell is not polled, nothing came). A
+    // repository is cloned, and the window comes and goes again before the answer.
+    leave_and_come_back(cx);
+    user.git_init(&folder.join("tools"));
+    leave_and_come_back(cx);
+    assert_eq!(
+        section.read_with(cx, |s, _| s.last_request()),
+        first + 1,
+        "one read on its way, not two"
+    );
+
+    // The second return is not lost: once the first read is answered, another is made, and it
+    // sees what was cloned.
+    until(&shell, cx, "tools is found", |cx| {
+        section.read_with(cx, |s, _| {
+            s.repositories()
+                .is_some_and(|r| r.new.contains(&"tools".to_owned()))
+        })
+    });
+    assert_eq!(section.read_with(cx, |s, _| s.last_request()), first + 2);
+    settle(cx);
+    assert!(has("found-repository-tools", cx));
+}
