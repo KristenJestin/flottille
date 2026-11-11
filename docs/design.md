@@ -1125,7 +1125,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   Remove…. **Instructions** holds its **Rules** ("What this project's agents are told, after your
   rules for every project."): **Rules for every project** above, read-only and folded, with Edit in
   Settings; a switch, "Use only this project's rules"; the project's editor, Reset to default, and
-  Save once it changed, a toast saying a change reaches the agents created from now on; its
+  Save once it changed, the toast "Rules saved · Agents started from now on follow them."; its
   **Commands** (a count; added from a list of the templates and a blank one with New command,
   edited, removed); its **Skills** (a count; a path picked in the project folder, or a text; New
   skill, edited, removed); its **Commit and pull request checks** and its **Pull request template**
