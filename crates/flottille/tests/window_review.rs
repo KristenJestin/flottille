@@ -152,6 +152,15 @@ fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
     })
 }
 
+/// The value an element says (how far something is), `None` while it is not drawn.
+fn value(cx: &mut VisualTestContext, id: &str) -> Option<f32> {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .and_then(|found| found.value().and_then(|value| value.parse().ok()))
+    })
+}
+
 /// The height the review's agents take in the rail once a frame is drawn; `None` when they are
 /// not drawn at all.
 fn behind(pilot: &str, cx: &mut VisualTestContext) -> Option<f32> {
@@ -520,6 +529,8 @@ fn review_s_page_shows_what_it_checks_as_one_card(cx: &mut TestAppContext) {
         "{sentence}"
     );
     assert!(bounds(cx, "review-guidance-title").top() > card.bottom());
+    assert!(present(cx, "review-guidance-text"), "the shared editor");
+    assert!(!present(cx, "review-guidance-save"), "no Save at rest");
     // No word of how it is built.
     for id in [
         "review-switch-hint",
@@ -627,7 +638,7 @@ fn instructions_for_this_check_fold_under_each_check(cx: &mut TestAppContext) {
             "{key}"
         );
         until(&shell, cx, "the instructions are read", |cx| {
-            label(cx, &format!("{fold}-preview")).as_deref() == Some("none")
+            label(cx, &format!("{fold}-summary")).as_deref() == Some("none")
         });
         assert!(
             bounds(cx, &fold).top() > bounds(cx, &format!("review-check-{key}-switch")).bottom(),
@@ -641,9 +652,13 @@ fn instructions_for_this_check_fold_under_each_check(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.click("review-check-bugs-instructions", cx));
     one_frame(cx);
     assert!(present(cx, "review-bugs-guidance-text"), "drawn at once");
-    let first = bounds(cx, "review-check-bugs-fold").size.height;
+    let first = bounds(cx, "review-check-bugs-instructions-body")
+        .size
+        .height;
     settle(cx);
-    let open = bounds(cx, "review-check-bugs-fold").size.height;
+    let open = bounds(cx, "review-check-bugs-instructions-body")
+        .size
+        .height;
     assert!(first < open, "it unfolds: {first} then {open}");
     assert!(!present(cx, "review-bugs-guidance-save"), "no Save at rest");
     let editor = shell
@@ -675,7 +690,7 @@ fn instructions_for_this_check_fold_under_each_check(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.click("review-check-bugs-instructions", cx));
     settle(cx);
     assert!(!present(cx, "review-bugs-guidance-text"));
-    let preview = label(cx, "review-check-bugs-instructions-preview").unwrap();
+    let preview = label(cx, "review-check-bugs-instructions-summary").unwrap();
     assert!(preview.starts_with("Look at the retries"), "{preview}");
     at_rest(cx);
 }
@@ -850,4 +865,278 @@ fn the_findings_are_on_the_spec_s_page(cx: &mut TestAppContext) {
     assert!(said.contains("C1"), "{said}");
     assert!(said.contains("the link signs in twice"), "{said}");
     assert!(said.contains("· open:"), "{said}");
+}
+
+#[gpui_kit::test]
+fn an_off_check_s_model_select_is_disabled_and_fades(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx) = review_page(&user, true, cx);
+    let enabled = |cx: &mut VisualTestContext, key: &str| {
+        value(cx, &format!("review-setting-{key}_model-model-root"))
+    };
+    // Security is off by default: its select is faded from the first frame, the others are not.
+    assert_eq!(enabled(cx, "security"), Some(0.0));
+    assert_eq!(enabled(cx, "bugs"), Some(1.0));
+
+    // Turning a check off fades its select, it does not jump.
+    cx.update(|window, cx| window.click("review-check-bugs-switch", cx));
+    until(&shell, cx, "bugs is off", |_| {
+        review_listed(&user)["settings"][0]["value"] == json!(["spec", "standards"])
+    });
+    // The window reads the list again a moment after the event; the select then starts to fade.
+    until(&shell, cx, "the select starts to fade", |cx| {
+        one_frame(cx);
+        enabled(cx, "bugs").is_some_and(|enabled| enabled < 1.0)
+    });
+    let part = enabled(cx, "bugs").unwrap();
+    assert!(0.0 < part && part < 1.0, "part way: {part}");
+    settle(cx);
+    assert_eq!(enabled(cx, "bugs"), Some(0.0));
+    assert_eq!(enabled(cx, "standards"), Some(1.0), "only that check");
+
+    // It takes no click: no list opens.
+    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+    settle(cx);
+    assert!(!present(cx, "review-setting-bugs_model-model-menu"));
+    // And it comes back with its switch.
+    cx.update(|window, cx| window.click("review-check-bugs-switch", cx));
+    until(&shell, cx, "bugs is on", |_| {
+        review_listed(&user)["settings"][0]["value"] == json!(["spec", "bugs", "standards"])
+    });
+    until(&shell, cx, "the select is enabled again", |cx| {
+        settle(cx);
+        enabled(cx, "bugs") == Some(1.0)
+    });
+    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+    settle(cx);
+    assert!(present(cx, "review-setting-bugs_model-model-menu"));
+    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_check_s_instructions_chevron_turns_and_its_summary_gives_way(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx) = review_page(&user, true, cx);
+    until(&shell, cx, "the instructions are read", |cx| {
+        label(cx, "review-check-bugs-instructions-summary").as_deref() == Some("none")
+    });
+    settle(cx);
+    assert_eq!(
+        value(cx, "review-check-bugs-instructions-chevron"),
+        Some(1.0)
+    );
+    assert_eq!(
+        value(cx, "review-check-bugs-instructions-summary"),
+        Some(1.0)
+    );
+
+    cx.update(|window, cx| window.click("review-check-bugs-instructions", cx));
+    one_frame(cx);
+    one_frame(cx);
+    let turned = value(cx, "review-check-bugs-instructions-chevron").unwrap();
+    assert!(0.0 < turned && turned < 1.0, "turning: {turned}");
+    let shown = value(cx, "review-check-bugs-instructions-summary").unwrap();
+    assert!(0.0 < shown && shown < 1.0, "giving way: {shown}");
+    settle(cx);
+    assert_eq!(
+        value(cx, "review-check-bugs-instructions-chevron"),
+        Some(0.0)
+    );
+    assert_eq!(
+        value(cx, "review-check-bugs-instructions-summary"),
+        Some(0.0)
+    );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_projects_line_unfolds_and_fades_in_when_a_project_does_otherwise(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx) = review_page(&user, true, cx);
+    assert!(!present(cx, "review-projects"));
+    let folder = user.path("work/acme-shop");
+    user.git_init(&folder);
+    user.call(
+        "project.add",
+        json!({"folder": folder, "name": "acme-shop"}),
+    )
+    .unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "review", "project": "acme-shop",
+            "settings": {"passes": ["spec", "bugs", "standards", "security"]}}),
+    )
+    .unwrap();
+    until(&shell, cx, "the line starts to unfold", |cx| {
+        one_frame(cx);
+        present(cx, "review-projects-block")
+    });
+    let first = bounds(cx, "review-projects-block").size.height;
+    settle(cx);
+    let full = bounds(cx, "review-projects-block").size.height;
+    assert!(first < full, "it unfolds: {first:?} then {full:?}");
+    assert_eq!(
+        label(cx, "review-projects").as_deref(),
+        Some("acme-shop runs Security too")
+    );
+    at_rest(cx);
+}
+
+/// A project `app` with Review on, its page open, and the project running every check but
+/// Security as Settings does.
+fn project_page<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    user.call("extension.set", json!({"name": "review", "enabled": true}))
+        .unwrap();
+    // The project chooses the model of Bugs itself.
+    user.call(
+        "extension.set",
+        json!({"name": "review", "project": "app",
+            "settings": {"bugs_model": {"provider": "claude"}}}),
+    )
+    .unwrap();
+    let (shell, cx) = window(user, cx);
+    cx.simulate_resize(size(px(1280.), px(3200.)));
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open_project_settings_at(
+            "app",
+            flottille_window::project_settings::Reveal::Feature("review".into()),
+            window,
+            cx,
+        )
+    });
+    until(&shell, cx, "the project's page of Review", |cx| {
+        present(cx, "project-review-checks")
+    });
+    until(&shell, cx, "the dot of Bugs' model", |cx| {
+        settle(cx);
+        present(cx, "project-review-setting-bugs_model-set")
+    });
+    (shell, cx)
+}
+
+fn project_bugs_model(user: &User) -> Option<Value> {
+    review_listed(user)["projects"][0]["settings"]
+        .get("bugs_model")
+        .filter(|model| !model.is_null())
+        .cloned()
+}
+
+#[gpui_kit::test]
+fn choosing_as_in_settings_for_a_check_s_model_stores_null(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx) = project_page(&user, cx);
+    assert!(project_bugs_model(&user).is_some());
+    cx.update(|window, cx| window.click("project-review-setting-bugs_model-model", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("project-review-setting-bugs_model-model-first", cx));
+    until(&shell, cx, "the project's model is Settings'", |_| {
+        project_bugs_model(&user).is_none()
+    });
+    until(&shell, cx, "the dot goes", |cx| {
+        settle(cx);
+        !present(cx, "project-review-setting-bugs_model-set")
+    });
+}
+
+#[gpui_kit::test]
+fn the_dot_and_the_way_back_of_a_model_still_work_while_its_check_is_off(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx) = project_page(&user, cx);
+    // The project turns Bugs off: its select fades, its dot and way back stay.
+    cx.update(|window, cx| window.click("project-review-check-bugs-switch", cx));
+    until(&shell, cx, "the project skips Bugs", |_| {
+        review_listed(&user)["projects"][0]["settings"]["passes"] == json!(["spec", "standards"])
+    });
+    until(&shell, cx, "the select fades", |cx| {
+        settle(cx);
+        value(cx, "project-review-setting-bugs_model-model-root") == Some(0.0)
+    });
+    assert!(present(cx, "project-review-setting-bugs_model-set"));
+    cx.update(|window, cx| window.click("project-review-setting-bugs_model-reset", cx));
+    until(&shell, cx, "the project's model is Settings'", |_| {
+        project_bugs_model(&user).is_none()
+    });
+}
+
+#[gpui_kit::test]
+fn a_check_s_unreadable_instructions_say_the_check_and_the_file_only(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/review-standards.md"),
+        b"a text \xff\xfe that is not UTF-8",
+    )
+    .unwrap();
+    std::fs::write(
+        user.path("config/flottille/review.md"),
+        b"a text \xff\xfe that is not UTF-8",
+    )
+    .unwrap();
+    let (shell, cx) = review_page(&user, true, cx);
+    cx.update(|window, cx| window.click("review-check-standards-instructions", cx));
+    let said = |cx: &mut VisualTestContext, id: &str| {
+        until(&shell, cx, "the error is said", |cx| {
+            settle(cx);
+            label(cx, id).is_some()
+        });
+        label(cx, id).unwrap()
+    };
+    let check = said(cx, "review-standards-guidance-error");
+    assert_eq!(
+        check,
+        "Project rules does not run until this is fixed: review-standards.md is not UTF-8 text: \
+         write it again, or reset it."
+    );
+    let shared = said(cx, "review-guidance-error");
+    assert!(shared.contains("review.md"), "{shared}");
+    for said in [&check, &shared] {
+        assert!(!said.contains(&user.path("config").to_string_lossy().into_owned()));
+        assert!(!said.contains("guidance for"), "{said}");
+    }
+}
+
+#[gpui_kit::test]
+fn a_part_set_from_the_command_line_is_not_stale_in_an_open_window(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx) = review_page(&user, true, cx);
+    until(&shell, cx, "the instructions are read", |cx| {
+        label(cx, "review-check-security-instructions-summary").as_deref() == Some("none")
+    });
+    // `flottille review set`, with a part, while the window is open: review.changed {part}.
+    user.call(
+        "review.set",
+        json!({"part": "security", "text": "Look at the tokens first."}),
+    )
+    .unwrap();
+    until(&shell, cx, "the part is read again", |cx| {
+        one_frame(cx);
+        label(cx, "review-check-security-instructions-summary")
+            .is_some_and(|said| said.starts_with("Look at the tokens"))
+    });
+    // The shared guidance, set without a part, is read again too.
+    user.call("review.set", json!({"text": "Be brief."}))
+        .unwrap();
+    let editor = shell
+        .read_with(cx, |s, cx| {
+            s.extensions().read(cx).guidance("review").cloned()
+        })
+        .unwrap();
+    until(&shell, cx, "the shared guidance is read again", |cx| {
+        one_frame(cx);
+        editor.read_with(cx, |e, _| {
+            e.shown().is_some_and(|shown| shown.text == "Be brief.")
+        })
+    });
 }

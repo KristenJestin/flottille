@@ -596,11 +596,18 @@ fn control(
     providers: &crate::providers::Providers,
 ) -> Option<AnyElement> {
     worded_control(
-        registry, name, project, setting, own, default, id, providers, true,
+        registry, name, project, setting, own, default, id, providers, None,
     )
 }
 
-/// `control`, a model slot's words drawn by it when `words`, else by the line it is on.
+/// A model slot on a line whose switch already names it: the slot draws no words of its own,
+/// and is disabled while that switch is off.
+struct OnLine {
+    name: String,
+    disabled: bool,
+}
+
+/// `control`, a model slot's words drawn by it unless it is `on_line`.
 #[allow(clippy::too_many_arguments)]
 fn worded_control(
     registry: &Entity<Registry>,
@@ -611,11 +618,11 @@ fn worded_control(
     default: Value,
     id: &str,
     providers: &crate::providers::Providers,
-    words: bool,
+    on_line: Option<&OnLine>,
 ) -> Option<AnyElement> {
     let is_set = own.is_some();
     let bare = bare_control(
-        registry, name, project, setting, own, default, id, providers, words,
+        registry, name, project, setting, own, default, id, providers, on_line,
     )?;
     let Some(project) = project else {
         return Some(bare);
@@ -659,7 +666,7 @@ fn bare_control(
     default: Value,
     id: &str,
     providers: &crate::providers::Providers,
-    words: bool,
+    on_line: Option<&OnLine>,
 ) -> Option<AnyElement> {
     let (rule, gives) = setting.default_said(providers);
     let (registry, name, project_name, setting_of) = (
@@ -757,17 +764,15 @@ fn bare_control(
                 },
                 None => Chosen::First,
             };
-            let label = if words {
-                setting.label.clone()
-            } else {
-                String::new()
-            };
-            let choice =
-                ModelChoice::new(SharedString::from(id.to_owned()), label, chosen).compact();
-            let choice = if words {
-                choice.hint(setting.hint.clone())
-            } else {
-                choice
+            let choice = ModelChoice::new(
+                SharedString::from(id.to_owned()),
+                setting.label.clone(),
+                chosen,
+            )
+            .compact();
+            let choice = match on_line {
+                None => choice.hint(setting.hint.clone()),
+                Some(line) => choice.unlabelled(line.name.clone()).disabled(line.disabled),
             };
             let choice = choice.models(providers.model_entries()).effort(
                 own.as_ref()

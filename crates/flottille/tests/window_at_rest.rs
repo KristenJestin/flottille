@@ -615,7 +615,7 @@ fn the_window_draws_no_frame_at_rest_on_review_s_page_with_a_check_s_instruction
     until(&shell, cx, "the check's instructions are read", |cx| {
         cx.update(|window, _| {
             window
-                .try_find("review-check-bugs-instructions-preview")
+                .try_find("review-check-bugs-instructions-summary")
                 .and_then(|found| found.label().map(str::to_owned))
                 .is_some_and(|said| said.starts_with("Look at"))
         })

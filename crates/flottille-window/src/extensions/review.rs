@@ -6,20 +6,14 @@
 
 use std::rc::Rc;
 
-use gpui_design_system::color::mix;
-use gpui_design_system::motion::HOVER;
-use gpui_design_system::{
-    Icon, SetHere, Switch, Toast, enter, fade, hoverable, icon, palette, presence, space, toast,
-    turning,
-};
+use gpui_design_system::{Card, Disclosure, SetHere, Switch, Toast, enter, palette, space, toast};
 use gpui_kit::{
-    AnyElement, App, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, Transformation,
-    WeakEntity, Window, div, px, radians,
+    AnyElement, App, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use serde_json::{Value, json};
 
-use super::{Listed, Registry, Setting};
+use super::{Listed, OnLine, Registry, Setting};
 use crate::actions::Command;
 use crate::shell::Shell;
 
@@ -217,7 +211,7 @@ pub fn checks(
         })
     };
     // The model of a line: its own value, and Settings' as the one it inherits.
-    let model = |setting: &Setting, words_drawn: bool, rule: Option<&str>| {
+    let model = |setting: &Setting, on_line: Option<&OnLine>, rule: Option<&str>| {
         let global = setting.value.clone();
         let own = match side {
             None => setting.set.then(|| global.clone()),
@@ -236,7 +230,7 @@ pub fn checks(
             global,
             &format!("{prefix}-setting-{}", setting.key),
             &providers,
-            words_drawn,
+            on_line,
         )
     };
     let mut lines: Vec<AnyElement> = Vec::new();
@@ -294,11 +288,12 @@ pub fn checks(
             }
         };
         let rule = project.is_none().then_some(DEFAULT);
-        let select = model(setting, false, rule).map(|select| Faded {
-            id: SharedString::from(format!("{id}-model")),
-            on,
-            child: select,
-        });
+        // The switch names the model; it fades with the switch, and is out of reach while off.
+        let on_line = OnLine {
+            name: format!("{} model", setting.label),
+            disabled: !on,
+        };
+        let select = model(setting, Some(&on_line), rule);
         let line = div()
             .flex()
             .items_start()
@@ -314,22 +309,20 @@ pub fn checks(
                 .map(|editor| {
                     let open = read.is_unfolded(&listed.name, check);
                     let preview = editor.read(cx).shown().map(|shown| shown.text.clone());
-                    let toggle = Toggle {
-                        id: SharedString::from(format!("{id}-instructions")),
+                    let (registry, name, part) =
+                        (registry.downgrade(), listed.name.clone(), check.clone());
+                    Disclosure::new(
+                        SharedString::from(format!("{id}-instructions")),
+                        INSTRUCTIONS,
                         open,
-                        preview: preview_of(preview.as_deref()),
-                        registry: registry.downgrade(),
-                        name: listed.name.clone(),
-                        part: check.clone(),
-                    };
-                    div().flex().flex_col().child(toggle).child(
-                        presence(
-                            SharedString::from(format!("{id}-fold")),
-                            open,
-                            div().pt(space::SM).child(editor),
-                        )
-                        .gap(space::XS),
                     )
+                    .summary(preview_of(preview.as_deref()))
+                    .body(editor)
+                    .on_toggle(move |_, _, cx| {
+                        registry
+                            .update(cx, |registry, cx| registry.toggle_part(&name, &part, cx))
+                            .ok();
+                    })
                 }),
         };
         lines.push(
@@ -346,7 +339,7 @@ pub fn checks(
     }
     // The last line checks the findings: it always runs, so it has no switch.
     if let Some(setting) = listed.settings.iter().find(|s| s.key == VERIFIER)
-        && let Some(select) = model(setting, true, None)
+        && let Some(select) = model(setting, None, None)
     {
         lines.push(
             div()
@@ -366,22 +359,19 @@ pub fn checks(
             .child(said)
             .test_support()
     };
-    let card = div()
-        .id(SharedString::from(id.clone()))
-        .p(space::LG)
-        .flex()
-        .flex_col()
-        .gap(space::MD)
-        .rounded(px(12.))
-        .border_1()
-        .border_color(p.line)
-        .children(
-            lines
-                .into_iter()
-                .enumerate()
-                .map(|(at, line)| enter(SharedString::from(format!("{id}-line-{at}")), at, line)),
-        )
-        .test_support();
+    let card =
+        Card::new().child(
+            div()
+                .id(SharedString::from(id.clone()))
+                .p(space::LG)
+                .flex()
+                .flex_col()
+                .gap(space::MD)
+                .children(lines.into_iter().enumerate().map(|(at, line)| {
+                    enter(SharedString::from(format!("{id}-line-{at}")), at, line)
+                }))
+                .test_support(),
+        );
     div()
         .flex()
         .flex_col()
@@ -406,93 +396,5 @@ fn preview_of(text: Option<&str>) -> SharedString {
             format!("{}…", start.trim_end()).into()
         }
         Some(line) => line.to_owned().into(),
-    }
-}
-
-/// A check's model, faded to disabled while the check is off; a click does nothing then.
-#[derive(IntoElement)]
-struct Faded {
-    id: SharedString,
-    on: bool,
-    child: AnyElement,
-}
-
-impl RenderOnce for Faded {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let t = fade(ElementId::Name(self.id.clone()), self.on, HOVER, window, cx);
-        div()
-            .id(ElementId::Name(self.id))
-            .relative()
-            .flex_none()
-            .opacity(0.35 + 0.65 * t)
-            .child(self.child)
-            // Off, the select under it is out of reach.
-            .children((!self.on).then(|| div().absolute().size_full().top_0().left_0().occlude()))
-    }
-}
-
-/// The quiet line that unfolds a check's own instructions: its chevron turns, and what they
-/// start with fades away while they are open.
-#[derive(IntoElement)]
-struct Toggle {
-    id: SharedString,
-    open: bool,
-    preview: SharedString,
-    registry: WeakEntity<Registry>,
-    name: String,
-    part: String,
-}
-
-impl RenderOnce for Toggle {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let p = palette(cx);
-        let turned = turning(
-            ElementId::Name(format!("{}-chevron", self.id).into()),
-            self.open,
-            window,
-            cx,
-        );
-        let shown = fade(
-            ElementId::Name(format!("{}-preview", self.id).into()),
-            !self.open,
-            HOVER,
-            window,
-            cx,
-        );
-        let (registry, name, part) = (self.registry, self.name, self.part);
-        hoverable(
-            div()
-                .id(ElementId::Name(self.id.clone()))
-                .aria_label(INSTRUCTIONS)
-                .aria_expanded(self.open)
-                .flex()
-                .items_center()
-                .gap(space::XS)
-                .cursor_pointer()
-                .text_size(px(12.))
-                .child(icon(Icon::Chevron).size(px(12.)).with_transformation(
-                    Transformation::rotate(radians(-std::f32::consts::FRAC_PI_2 * turned)),
-                ))
-                .child(INSTRUCTIONS)
-                .child(
-                    div()
-                        .id(ElementId::Name(format!("{}-preview", self.id).into()))
-                        .aria_label(self.preview.clone())
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_color(p.faint)
-                        .opacity(shown)
-                        .child(self.preview)
-                        .test_support(),
-                )
-                .on_click(move |_, _, cx| {
-                    registry
-                        .update(cx, |registry, cx| registry.toggle_part(&name, &part, cx))
-                        .ok();
-                }),
-            move |d, t| d.text_color(mix(p.mute, p.text, t)),
-        )
     }
 }
