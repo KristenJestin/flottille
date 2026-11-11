@@ -822,9 +822,7 @@ impl Render for RulesEditor {
                         .and_then(|shown| shown.error.clone())
                         .map(|error| {
                             SharedString::from(if let Some((_, title)) = &self.part {
-                                format!(
-                                    "The {title} check does not run until this is fixed: {error}."
-                                )
+                                format!("{title} does not run until this is fixed: {error}.")
                             } else if compaction {
                                 format!("Every compaction fails until this is fixed: {error}.")
                             } else {
