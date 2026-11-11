@@ -672,10 +672,18 @@ fn instructions_for_this_check_fold_under_each_check(cx: &mut TestAppContext) {
     assert!(step(cx) > 0, "Save unfolds");
     settle(cx);
     cx.update(|window, cx| window.click("review-bugs-guidance-save", cx));
-    until(&shell, cx, "the check's instructions are kept", |_| {
-        user.call("review.show", json!({"part": "bugs"})).unwrap()["text"]
-            == "Look at the retries of the login first."
+    // The window's editor takes the daemon's answer on a later poll than the write: the fold's
+    // summary reads it from there, so it is the editor that is waited for, not the daemon.
+    until(&shell, cx, "the check's instructions are kept", |cx| {
+        editor.read_with(cx, |e, _| {
+            e.shown()
+                .is_some_and(|shown| shown.text == "Look at the retries of the login first.")
+        })
     });
+    assert_eq!(
+        user.call("review.show", json!({"part": "bugs"})).unwrap()["text"],
+        "Look at the retries of the login first."
+    );
     assert_eq!(
         user.call("review.show", json!({})).unwrap()["source"],
         "default",
