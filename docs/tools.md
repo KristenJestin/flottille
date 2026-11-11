@@ -876,7 +876,7 @@ reasons.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, parent?, board?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, parent?, board?, milestone?, remove_milestone?, due?, description?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 - **`list {state?, label?, assignee?, updated_within?}`**: every ticket of a state, in one call, a
   line each (`- #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default),
@@ -891,7 +891,7 @@ reasons.
   stored, saying its age (`(as of 3 min ago)`; [`tickets.md`](tickets.md), "The agent's tool
   `tickets`"); otherwise, on GitHub, `gh issue list -R github.com/<owner/name> --state … --limit
   200 [--label] [--assignee] [--search "<words> in:title,body,comments updated:>=<time>"] --json
-  number,title,state,labels,assignees,url`; on Jira, `acli jira workitem search --jql <JQL>
+  number,title,state,labels,assignees,milestone,url`; on Jira, `acli jira workitem search --jql <JQL>
   --fields key,summary,status,assignee,labels --json --limit 200`, the JQL being the tracker's
   projects, the state as a status category (`statusCategory != Done`), each filter quoted, the
   words as `text ~`, `in_comments` as `comment ~`, `updated_within` as `updated >= "-<n>d"`, and the
@@ -996,6 +996,32 @@ reasons.
   is never tried again without it. Nothing is assigned unless the agent asks (a tracker may assign
   a new work item by default). On GitHub, `assignees` (edit), `"me"` sent as `@me`. The request
   says it in words (`It assigns it to you`, `It removes the assignee`).
+- **Milestones on GitHub**: the tracker repository's milestones, through the user's own `gh`, in
+  the repository the project's tracker declares (never one the agent names; a title is an argument
+  of `gh`, never text of a shell). **`milestones {state?}`** (a read, never held) lists them, a line
+  each: title, state, due day if any, open and closed issues, link (`- v0.1 open, due 2026-12-01,
+  2 open / 1 closed issues  <link>`); `state` is `open` (the default), `closed` or `all`;
+  `gh api repos/<owner>/<name>/milestones?state=<s>&per_page=100 --hostname github.com --paginate`.
+  **`milestone_create {title, description?, due?}`** makes one (`gh api … --method POST -f
+  title=… [-f description=…] [-f due_on=<due>T00:00:00Z]`; `due` is a day, `YYYY-MM-DD`); a title
+  the repository has, closed or open, is refused naming it. **`milestone_edit {milestone, title?,
+  description?, due?, state?}`** changes one (`--method PATCH` of `milestones/<number>`), `state`
+  `open` or `closed` to reopen or close it; it needs one of them. A milestone is named by its
+  **title, else its number**, found in the repository's list first. **A ticket's milestone**:
+  `create` and `edit` take `milestone` (`gh issue create|edit --milestone <title>`, the title the
+  list gave, whichever the agent said) and `edit` takes `remove_milestone: true`
+  (`--remove-milestone`; with `milestone` it is refused); `list` and `search` take `milestone`
+  (`gh issue list --milestone <title>`, asked of the tracker, not answered from the stored list;
+  the header says it), a list line ends with its `milestone: v0.1`, and `show` says `Milestone:
+  v0.1`. **A milestone that does not exist is refused**, listing those that do, before the user is
+  asked (the request says the one it puts the ticket in, `It puts it in the milestone "v0.1", due
+  2026-12-01`, or the one it changes); nothing is created implicitly. The writes are held as the
+  other `tickets` writes are (`it creates a milestone on the tracker`, `it changes a milestone of
+  the tracker`), the reads are not. **On Jira** the actions and the arguments are refused, naming
+  what a work item has instead (`a work item goes in a sprint: sprints lists them, create takes
+  sprint`); versions are not supported. `milestone` is for `list`, `search`, `create`, `edit` and
+  `milestone_edit`, `remove_milestone` for `edit`, `due` and `description` for the two milestone
+  writes alone ([`tickets.md`](tickets.md), "Milestones").
 - **Parents and sprints on Jira**: `create` takes `parent` (a key of the tracker, the epic or the
   sub-task's parent: `--parent`) and `sprint` (an open sprint, by its name or its id, with a
   `type`); `sprints {project?, board?}` (a read, never held) lists the active and future sprints

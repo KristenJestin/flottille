@@ -366,6 +366,13 @@ pub async fn prepared(
                 .await
                 .map_err(Outcome::Refused)?,
         );
+        // The milestone as the tracker names it; one that does not exist, or a title it has, is
+        // refused here.
+        says.extend(
+            crate::tickets::milestone_says(&project, args)
+                .await
+                .map_err(Outcome::Refused)?,
+        );
         return Ok(says);
     }
     if tool == "forge" {
@@ -630,13 +637,23 @@ pub async fn approved_losses(
 fn posted_says(args: &Value) -> Vec<String> {
     if matches!(
         args["action"].as_str(),
-        Some("list" | "search" | "show" | "types" | "link_types" | "sprints" | "time_spent") | None
+        Some(
+            "list"
+                | "search"
+                | "show"
+                | "types"
+                | "link_types"
+                | "sprints"
+                | "milestones"
+                | "time_spent"
+        ) | None
     ) {
         return Vec::new();
     }
     let mut says: Vec<String> = [
         ("title", "Its title"),
         ("body", "Its body"),
+        ("description", "Its description"),
         ("message", "Its message"),
     ]
     .into_iter()

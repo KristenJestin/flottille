@@ -786,9 +786,9 @@ const FORGE_ONLY: [(&str, &[&str]); 12] = [
 pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, review, edit, merge, checks, close, \
      reopen, pipelines, runs, run_view, run_logs, run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
-pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, sprints, subscribe, unsubscribe, create, comment, \
-     edit, close, reopen, status, link, unlink, comment_edit, comment_delete, log_time and \
-     time_spent";
+pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, sprints, milestones, subscribe, unsubscribe, \
+     create, comment, edit, close, reopen, status, link, unlink, comment_edit, comment_delete, \
+     milestone_create, milestone_edit, log_time and time_spent";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
@@ -809,8 +809,8 @@ fn tickets(call: &Call) -> Verdict {
     // What the agent wrote, as the card shows it: masked.
     let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
-        "list" | "search" | "show" | "types" | "link_types" | "sprints" | "subscribe"
-        | "unsubscribe" | "time_spent" => {
+        "list" | "search" | "show" | "types" | "link_types" | "sprints" | "milestones"
+        | "subscribe" | "unsubscribe" | "time_spent" => {
             return Verdict::Allow;
         }
         "log_time" => format!(
@@ -848,10 +848,15 @@ fn tickets(call: &Call) -> Verdict {
             shown("ticket")
         ),
         "create" => "it opens a ticket on the tracker".into(),
+        "milestone_create" => "it creates a milestone on the tracker".into(),
+        "milestone_edit" => {
+            "it changes a milestone of the tracker (its title, description, due date or state)"
+                .into()
+        }
         "comment" => "it comments on a ticket on the tracker".into(),
         "edit" => {
-            "it changes the title, the description, the labels or the assignees of a ticket on \
-             the tracker"
+            "it changes the title, the description, the labels, the assignees or the milestone of \
+             a ticket on the tracker"
                 .into()
         }
         "close" => "it closes a ticket on the tracker".into(),
@@ -866,6 +871,8 @@ fn tickets(call: &Call) -> Verdict {
     let none: &[&str] = match action {
         "comment" | "comment_edit" | "log_time" => &["title"],
         "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" => &["title", "body"],
+        // A milestone's text is its description.
+        "milestone_create" | "milestone_edit" => &["body"],
         _ => &[],
     };
     if let Err(refused) = untexted("tickets", action, call.args, none) {
@@ -899,7 +906,7 @@ fn tickets(call: &Call) -> Verdict {
     if let Err(refused) = texts(
         call.grant,
         call.args,
-        &["title", "body", "status", "kind"],
+        &["title", "body", "description", "status", "kind"],
         &mut found,
     ) {
         return refused;
@@ -4833,6 +4840,50 @@ mod tests {
             json!({"action": "delete"}),
             Some(&fixture.never)
         )));
+    }
+
+    #[test]
+    fn milestones_is_harmless_and_its_writes_are_judged_as_the_other_ticket_writes() {
+        let fixture = Fixture::main();
+        assert_eq!(
+            fixture.judge(
+                "tickets",
+                json!({"action": "milestones"}),
+                Some(&fixture.never)
+            ),
+            Verdict::Allow
+        );
+        for (action, extra) in [
+            (
+                "milestone_create",
+                json!({"title": "v1", "due": "2026-12-31"}),
+            ),
+            (
+                "milestone_edit",
+                json!({"milestone": "v1", "state": "closed"}),
+            ),
+            ("edit", json!({"ticket": "#1", "milestone": "v1"})),
+        ] {
+            let mut args = json!({"action": action});
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let verdict = fixture.judge("tickets", args, Some(&fixture.never));
+            assert!(to_judge(&verdict), "{action}: {verdict:?}");
+        }
+        // A milestone's text is its description: a body is refused, a secret in it is flagged.
+        assert!(denied(&fixture.judge(
+            "tickets",
+            json!({"action": "milestone_create", "title": "v1", "body": "x"}),
+            Some(&fixture.never)
+        )));
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let secret = fixture.judge(
+            "tickets",
+            json!({"action": "milestone_create", "title": "v1", "description": token}),
+            Some(&fixture.never),
+        );
+        assert!(base_class(&secret), "{secret:?}");
     }
 
     #[test]

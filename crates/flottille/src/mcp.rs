@@ -399,18 +399,19 @@ const SERVED: [Definition; 32] = [
             with the id of yours; Jira images and files are named, not shown; \
             types: a Jira project's work item types (never guess); link_types. \
             Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
-            reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit and \
-            comment_delete (yours only); log_time (Jira: ticket, duration, started?, body?; \
+            reopen, status, link and unlink, comment_edit and \
+            comment_delete (yours only); log_time (Jira), \
             time_spent: this session's work time, to propose). \
             Assign only when asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (sprints lists them). \
+            GitHub milestones: milestones, milestone_create, milestone_edit. \
             subscribe: a ticket's events wake you until it is closed; unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "sprints", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "log_time", "time_spent"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "sprints", "milestones", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes)."},
                 "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out."},
@@ -419,7 +420,7 @@ const SERVED: [Definition; 32] = [
                 "updated_within": {"type": "integer", "minimum": 1, "maximum": 365, "description": "list, search: updated in the last that many days."},
                 "in_comments": {"type": "string", "description": "search on Jira: words of the comments (not by author). Not for list."},
                 "jql": {"type": "string", "description": "search on Jira: a JQL query, answered only within the tracker's projects (what it may refer to is not checked); ORDER BY allowed. Not for list."},
-                "state": {"type": "string", "enum": ["open", "closed", "all"]},
+                "state": {"type": "string", "enum": ["open", "closed", "all"], "description": "list, search, milestones; milestone_edit: open or closed."},
                 "label": {"type": "string"},
                 "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign: \"me\" is the user you work for (\"assign it to me\", \"to the user\"), else an email or an account id, not a display name; edit: null removes the assignee."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
@@ -437,6 +438,10 @@ const SERVED: [Definition; 32] = [
                 "comment": {"type": "string", "description": "comment_edit, comment_delete: the id show (detail full) gives a comment an agent posted; no one else's."},
                 "sprint": {"type": "string", "description": "create on Jira (with type): an open sprint, by the name or id sprints gives. An existing item's sprint cannot be changed (acli)."},
                 "parent": {"type": "string", "description": "create on Jira: the work item it goes under (an epic, or a sub-task's parent). An existing item's parent cannot be changed (acli)."},
+                "milestone": {"type": "string", "description": "GitHub: a milestone's title or number (milestones lists them): list, search filter by it; create, edit put the ticket in it; milestone_edit: the one to change."},
+                "remove_milestone": {"type": "boolean", "description": "edit (GitHub): take the ticket out of its milestone."},
+                "due": {"type": "string", "description": "milestone_create, milestone_edit: due date, YYYY-MM-DD."},
+                "description": {"type": "string", "description": "milestone_create, milestone_edit: its description."},
                 "board": {"type": "string", "description": "sprints: one board of the project, by name or id; all of them otherwise."},
                 "project": {"type": "string", "description": "create, types, sprints on Jira: the tracker's project; status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},

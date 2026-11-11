@@ -35,11 +35,13 @@ use crate::reads::{self, Reads};
 
 mod events;
 mod links;
+mod milestones;
 mod sprints;
 mod worklog;
 
 pub use events::{EVENTS, offer, reference_of, target_named};
 pub use links::checked as checked_links;
+pub use milestones::says as milestone_says;
 pub use worklog::says as worklog_says;
 pub use worklog::unset as worklog_unset;
 
@@ -52,7 +54,7 @@ pub(crate) const COMMENTS: usize = 30;
 /// How many attachments `show` lists by name; the rest are counted.
 const ATTACHMENTS: usize = 30;
 /// What `gh issue view` is asked for.
-const GH_FIELDS: &str = "number,title,state,body,comments,url";
+const GH_FIELDS: &str = "number,title,state,body,comments,url,milestone";
 /// What `acli jira workitem view` is asked for.
 /// `*navigable` brings the site's Sprint field, whose id is the site's own (`sprints`).
 const ACLI_FIELDS: &str =
@@ -89,6 +91,8 @@ pub struct Ticket {
     pub assignee: Option<String>,
     pub parent: Option<String>,
     pub sprint: Option<String>,
+    /// A GitHub issue's milestone, by its title; none for Jira and for an issue in none.
+    pub milestone: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -157,6 +161,7 @@ impl Ticket {
             "assignee": self.assignee,
             "parent": self.parent,
             "sprint": self.sprint,
+            "milestone": self.milestone,
             "attachments": self.attachments.iter()
                 .map(|a| json!({"name": a.name, "type": a.mime, "bytes": a.bytes,
                     "author": a.author, "at": a.at}))
@@ -197,6 +202,7 @@ impl Ticket {
             ("Assignee", &self.assignee),
             ("Parent", &self.parent),
             ("Sprint", &self.sprint),
+            ("Milestone", &self.milestone),
         ] {
             if let Some(value) = value {
                 text.push_str(&format!("  {said}: {value}\n"));
@@ -436,6 +442,7 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         assignee: None,
         parent: None,
         sprint: None,
+        milestone: Some(said(&issue["milestone"]["title"])).filter(|m| !m.is_empty()),
     })
 }
 
@@ -605,6 +612,7 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
             }
         }),
         sprint: sprints::said_in(fields),
+        milestone: None,
     }
 }
 
@@ -894,6 +902,15 @@ struct TicketsCall {
     parent: Option<String>,
     /// `sprints`: the board whose sprints are listed, by its name or its id.
     board: Option<String>,
+    /// GitHub: a milestone, by its title or its number. `list`, `search` keep its tickets,
+    /// `create`, `edit` put the ticket in it, `milestone_edit` changes it; `remove_milestone`
+    /// takes a ticket out of its own.
+    milestone: Option<String>,
+    #[serde(default)]
+    remove_milestone: bool,
+    /// `milestone_create`, `milestone_edit`: its due day and its description.
+    due: Option<String>,
+    description: Option<String>,
     /// `log_time`: the time spent, in Jira's form (`2h 30m`), and when it started (RFC 3339 with
     /// its offset; the duration before now when left out).
     duration: Option<String>,
@@ -924,6 +941,14 @@ impl TicketsCall {
     /// The assignee named, none for `null`.
     fn assigned_to(&self) -> Option<&str> {
         self.assignment().flatten()
+    }
+
+    /// The milestone named, none when left out or blank.
+    fn milestone_named(&self) -> Option<&str> {
+        self.milestone
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
     }
 }
 
@@ -980,7 +1005,7 @@ fn assignable(who: &str) -> bool {
 }
 
 /// The writes of `tickets`.
-const WRITES: [&str; 11] = [
+const WRITES: [&str; 13] = [
     "log_time",
     "create",
     "comment",
@@ -992,6 +1017,8 @@ const WRITES: [&str; 11] = [
     "unlink",
     "comment_edit",
     "comment_delete",
+    "milestone_create",
+    "milestone_edit",
 ];
 
 /// Why a write of `tickets` cannot be done on the project's tracker, before anyone is asked: a
@@ -1002,6 +1029,9 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
         return Some(format!(
             "refused: tickets {action} takes no board: board is for sprints"
         ));
+    }
+    if let Some(why) = milestones::unusable(project, action, args) {
+        return Some(why);
     }
     if !WRITES.contains(&action) {
         return None;
@@ -1315,6 +1345,17 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         "types" => types(&project, &asked).await,
         "link_types" => links::types(&project).await,
         "sprints" => sprints::listed(&project, &asked).await,
+        "milestones" => milestones::listed(&project, &asked).await,
+        "milestone_create" | "milestone_edit" => {
+            let written = match asked.action.as_str() {
+                "milestone_create" => milestones::create(&project, &asked).await,
+                _ => milestones::edit(&project, &asked).await,
+            };
+            // A ticket's milestone, and what a list says of it, may be changed too.
+            daemon.kept_tickets.drop_all();
+            daemon.kept_searches.drop_all();
+            written
+        }
         "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,
         "unsubscribe" => events::unsubscribe(daemon, agent, &project, &asked),
         "time_spent" => worklog::time_spent(daemon, agent),
@@ -1361,6 +1402,8 @@ struct Listed {
     title: String,
     labels: Vec<String>,
     assignees: Vec<String>,
+    /// The title of its milestone, on GitHub.
+    milestone: Option<String>,
     url: Option<String>,
 }
 
@@ -1451,6 +1494,20 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
             }
         }
     }
+    // The milestone as the tracker names it: its title, whatever the agent gave.
+    let milestone = match (asked.milestone_named(), tracker) {
+        (Some(named), ProjectTracker::Github { repository }) => {
+            let found = match github_of(project, repository).await {
+                Ok(forge) => milestones::resolved(&forge, named).await,
+                Err(why) => Err(why),
+            };
+            match found {
+                Ok(title) => Some(title),
+                Err(why) => return Outcome::Refused(format!("refused: {why}")),
+            }
+        }
+        _ => None,
+    };
     let filters = Filters {
         state,
         label: asked.label.as_deref(),
@@ -1459,6 +1516,7 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         updated_within: asked.updated_within,
         in_comments,
         jql: jql_asked,
+        milestone: milestone.as_deref(),
     };
     // What the items' rounds keep, once one read the tracker; the tracker itself before. A search
     // looks in the descriptions and comments, and a time in the tracker's dates, which the rounds
@@ -1468,7 +1526,7 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         .unwrap_or_default()
         .into_iter()
         .find(|c| c.kind == "ticket" && c.cursor.is_some())
-        .filter(|_| !search && filters.updated_within.is_none());
+        .filter(|_| !search && filters.updated_within.is_none() && filters.milestone.is_none());
     let found = match &cursor {
         Some(_) => Ok(Found(stored_tickets(daemon, project, &filters), 0, 0)),
         None if search => searched_again(daemon, project, tracker, &filters).await,
@@ -1491,6 +1549,9 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     }
     if let Some(assignee) = filters.assignee {
         header.push_str(&format!(", assigned to {assignee}"));
+    }
+    if let Some(milestone) = filters.milestone {
+        header.push_str(&format!(", in milestone {milestone}"));
     }
     if let Some(days) = filters.updated_within {
         header.push_str(&format!(", updated in the last {days} days"));
@@ -1531,6 +1592,9 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         }
         if !ticket.assignees.is_empty() {
             line.push_str(&format!(" ({})", ticket.assignees.join(", ")));
+        }
+        if let Some(milestone) = &ticket.milestone {
+            line.push_str(&format!(" milestone: {milestone}"));
         }
         if let Some(url) = &ticket.url {
             line.push_str(&format!("  {url}"));
@@ -1588,6 +1652,7 @@ fn stored_tickets(daemon: &Daemon, project: &Project, filters: &Filters<'_>) -> 
             title: item.title,
             labels: item.labels,
             assignees: item.assignees,
+            milestone: item.details["milestone"].as_str().map(str::to_owned),
             url: item.url,
         })
         .collect()
@@ -1620,6 +1685,8 @@ struct Filters<'a> {
     updated_within: Option<u64>,
     in_comments: Option<&'a str>,
     jql: Option<Confined>,
+    /// GitHub: the title of the milestone whose tickets are kept.
+    milestone: Option<&'a str>,
 }
 
 /// What a list found on the tracker: its tickets, how many were answered from another site, and
@@ -1662,6 +1729,7 @@ async fn searched_again(
         filters.updated_within,
         filters.in_comments,
         filters.jql.as_ref().map(|jql| (&jql.clause, &jql.order)),
+        filters.milestone,
     ])
     .to_string();
     if let Some((found, _)) = daemon.kept_searches.get(&kept) {
@@ -1809,7 +1877,13 @@ async fn list_issues(forge: &Forge, filters: &Filters<'_>) -> Result<(Vec<Listed
             args.extend([flag, value]);
         }
     }
-    args.extend(["--json", "number,title,state,labels,assignees,url"]);
+    if let Some(milestone) = filters.milestone {
+        args.extend(["--milestone", milestone]);
+    }
+    args.extend([
+        "--json",
+        "number,title,state,labels,assignees,milestone,url",
+    ]);
     let issues = forge::gh_json(&args).await?;
     let names = |list: &Value, key: &str| -> Vec<String> {
         list.as_array()
@@ -1836,6 +1910,7 @@ async fn list_issues(forge: &Forge, filters: &Filters<'_>) -> Result<(Vec<Listed
                 title: said(&issue["title"]),
                 labels: names(&issue["labels"], "name"),
                 assignees: names(&issue["assignees"], "login"),
+                milestone: Some(said(&issue["milestone"]["title"])).filter(|m| !m.is_empty()),
                 url: issue["url"].as_str().map(masked),
             })
         })
@@ -1960,6 +2035,7 @@ async fn list_work_items(
                 .filter(|name| !name.is_empty())
                 .into_iter()
                 .collect(),
+            milestone: None,
             url: Some(format!("https://{site}/browse/{}", masked(key))),
         });
     }
@@ -2070,6 +2146,10 @@ async fn create(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     if let Err(problem) = forge::signed_in().await {
         return Outcome::Failed(problem);
     }
+    let milestone = match milestones::chosen(&forge, asked.milestone_named()).await {
+        Ok(milestone) => milestone,
+        Err(refusal) => return refusal,
+    };
     let repo = forge.gh_repository();
     let body = asked.body.as_deref().unwrap_or_default();
     let mut args = vec![
@@ -2078,6 +2158,9 @@ async fn create(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     let labels = named(&asked.labels);
     for label in &labels {
         args.extend(["--label", label.as_str()]);
+    }
+    if let Some(milestone) = &milestone {
+        args.extend(["--milestone", milestone.as_str()]);
     }
     match forge::gh_text(&args).await {
         Ok(said) => {
@@ -2128,11 +2211,15 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
         }
         ("edit", None, None)
             if flagged.iter().all(|(_, names)| names.is_empty())
+                && asked.milestone_named().is_none()
+                && !asked.remove_milestone
                 // `null` takes a Jira assignee away; GitHub's are `assignees`.
                 && !(matches!(key, Key::Jira(_)) && asked.assignment().is_some()) =>
         {
             return Outcome::Refused(
-                "refused: tickets edit needs title, body, labels or assignees: what changes".into(),
+                "refused: tickets edit needs title, body, labels, assignees or milestone: what \
+                 changes"
+                    .into(),
             );
         }
         _ => {}
@@ -2156,6 +2243,10 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
     if let Err(problem) = forge::signed_in().await {
         return Outcome::Failed(problem);
     }
+    let milestone = match milestones::chosen(&forge, asked.milestone_named()).await {
+        Ok(milestone) => milestone,
+        Err(refusal) => return refusal,
+    };
     let repo = forge.gh_repository();
     let number = number.to_string();
     let mut args = vec!["issue", action, &number, "-R", &repo];
@@ -2171,6 +2262,12 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
             for name in names {
                 args.extend([*flag, name.as_str()]);
             }
+        }
+        if let Some(milestone) = &milestone {
+            args.extend(["--milestone", milestone.as_str()]);
+        }
+        if asked.remove_milestone {
+            args.push("--remove-milestone");
         }
     }
     let reason = asked.reason.as_deref().filter(|_| action == "close");
@@ -3105,7 +3202,8 @@ async fn status(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &K
 
 /// What `gh issue list` is asked of each issue a round of the items lists: the cheap fields
 /// alone; the comments are read one issue at a time (`Tickets::detail`).
-const LIST_FIELDS: &str = "number,title,state,author,assignees,labels,url,updatedAt,createdAt";
+const LIST_FIELDS: &str =
+    "number,title,state,author,assignees,labels,milestone,url,updatedAt,createdAt";
 /// What a round of the items asks Jira of each work item. `acli` refuses `updated` and `created`
 /// in `--fields` (`docs/tickets.md`): a date is read when its output holds one, never asked for.
 const ITEM_JIRA_FIELDS: &str = "key,summary,status,assignee,reporter,labels,issuetype,priority";
@@ -3334,7 +3432,10 @@ fn listed_issue(repo: &str, repository: &str, issue: &Value) -> Option<crate::it
             updated_at: issue["updatedAt"].as_str().map(masked),
             seen_at: 0,
             mine: false,
-            details: json!({}),
+            details: match said(&issue["milestone"]["title"]).as_str() {
+                "" => json!({}),
+                milestone => json!({"milestone": milestone}),
+            },
             checks: Vec::new(),
         },
         comments: Vec::new(),
