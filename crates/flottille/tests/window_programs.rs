@@ -744,6 +744,130 @@ fn a_forge_whose_program_is_not_ready_has_no_check_mark(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+fn focus_taken_back_while_a_read_runs_starts_no_second_read(cx: &mut TestAppContext) {
+    let user = user_with(&["gh"]);
+    desk(&user, Some(GITHUB), None);
+    user.gh_script(json!({"signed_in": false}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (page, checks) = open_settings(&shell, "desk", cx);
+    let repositories = page.read_with(cx, |page, _| page.repositories().clone());
+    until(&shell, cx, "the repositories are read", |cx| {
+        repositories.read_with(cx, |section, _| !section.is_reading())
+    });
+    let counted = |cx: &mut VisualTestContext| {
+        (
+            checks.read_with(cx, |checks, _| checks.last_request()),
+            repositories.read_with(cx, |section, _| section.last_request()),
+        )
+    };
+    let (programs, listed) = counted(cx);
+
+    // The window comes and goes five times while the answers are on their way (the shell is not
+    // polled: none came): one read of each was asked, not five.
+    for _ in 0..5 {
+        leave_and_come_back(cx);
+    }
+    assert_eq!(counted(cx), (programs + 1, listed + 1));
+
+    // Once they are answered, the next return asks again.
+    until(&shell, cx, "the reads are answered", |cx| {
+        checks.read_with(cx, |checks, _| !checks.is_checking())
+            && repositories.read_with(cx, |section, _| !section.is_reading())
+    });
+    leave_and_come_back(cx);
+    assert_eq!(counted(cx), (programs + 2, listed + 2));
+}
+
+#[gpui_kit::test]
+fn a_first_program_read_that_fails_offers_check_again(cx: &mut TestAppContext) {
+    let user = user_with(&["gh"]);
+    desk(&user, Some(GITHUB), None);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("desk".into()), window, cx)
+    });
+    settle(cx);
+    let page = shell
+        .read_with(cx, |s, cx| {
+            s.main().read(cx).project_settings_page().cloned()
+        })
+        .expect("the settings are open");
+    let (checks, repositories) = page.read_with(cx, |page, _| {
+        (page.programs().clone(), page.repositories().clone())
+    });
+    // The answers are given by hand, the programs' one a failure, before the daemon's reach the
+    // window (the shell is not polled): the first read of the programs never succeeded.
+    page.update_in(cx, |page, window, cx| {
+        let settings = json!({
+            "folder": user.path("work/desk").display().to_string(),
+            "repositories": [{"path": "api", "remote": "origin", "base": ["main"],
+                "forge": {"kind": "github", "repository": "acme/api"}}],
+        });
+        page.answered(Ok(settings), false, window, cx)
+    });
+    let serial = repositories.read_with(cx, |section, _| section.last_request());
+    repositories.update_in(cx, |section, window, cx| {
+        let read = json!({"new": [], "repositories": [{"path": "api", "found": true,
+            "remote": "origin", "base": ["main"], "branches": ["main"],
+            "forge": {"kind": "github", "repository": "acme/api"}}]});
+        section.answered(serial, Ok(read), window, cx)
+    });
+    let serial = checks.read_with(cx, |checks, _| checks.last_request());
+    checks.update(cx, |checks, cx| {
+        checks.answered(serial, Err("the daemon did not answer".into()), cx)
+    });
+    settle(cx);
+
+    // Silent is not invisible: the program is said not known, with Check again, and no toast.
+    assert_eq!(
+        label_of("repository-program-api-state", cx).as_deref(),
+        Some("could not tell if gh is signed in")
+    );
+    assert!(has("repository-program-api-check-again", cx));
+    assert_eq!(toasts_shown(&shell, cx), 0);
+
+    // Asked again, it reads; the daemon's answers reach the window and the line goes.
+    cx.update(|window, cx| window.click("repository-program-api-check-again", cx));
+    until(&shell, cx, "the program is read", |cx| {
+        checks.read_with(cx, |checks, _| {
+            checks.repository("api").is_some_and(|s| s.is_ready())
+        })
+    });
+    settle(cx);
+    assert!(!has("repository-program-api-state", cx));
+    assert!(!has("repository-program-api-check-again", cx));
+}
+
+#[gpui_kit::test]
+fn check_again_beside_the_text_leaves_it_its_room_when_the_line_changes(cx: &mut TestAppContext) {
+    // `acli` is not found, then found and signed out: the sentence changes and Check again stays.
+    // The text column keeps its width through the change: nothing jumps. (When a program stops
+    // being ready, the line and its button come in together from nothing, the text faded out at
+    // that first frame, so no text moves then either.)
+    let user = user_with(&[]);
+    desk(&user, None, Some(JIRA));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (page, checks) = open_settings(&shell, "desk", cx);
+    show_tracker(&page, cx);
+    let width = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| f32::from(window.find("tracker-program-state").bounds().size.width))
+    };
+    let missing = width(cx);
+
+    install(&user, "acli");
+    user.acli_script(json!({"signed_in": false}));
+    cx.update(|window, cx| window.click("tracker-program-check-again", cx));
+    until(&shell, cx, "the program is found", |cx| {
+        checks.read_with(cx, |checks, _| checks.tracker().is_some_and(|s| s.found))
+    });
+    settle(cx);
+    assert_eq!(width(cx), missing);
+}
+
+#[gpui_kit::test]
 fn bkt_signed_out_gives_both_sign_in_commands_with_a_copy_button_each(cx: &mut TestAppContext) {
     let user = user_with(&["bkt"]);
     desk(&user, Some(BITBUCKET), None);

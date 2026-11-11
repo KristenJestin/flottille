@@ -256,6 +256,18 @@ fn the_project_s_settings_list_its_repositories_and_add_remove_and_detect_them(
         paths(&section, cx).contains(&"docs".to_owned())
     });
     settle(cx);
+    // The toast says what happens in the window's words: no worktree.
+    let said = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .find(|toast| toast.title().contains("added"))
+            .map(|toast| toast.second_line().unwrap_or_default().to_owned())
+    });
+    assert_eq!(
+        said.as_deref(),
+        Some("Each new workspace gets its own copy of it.")
+    );
     assert!(has("repository-docs", cx));
     assert!(!has("found-repository-docs", cx), "it folded away");
     let text = std::fs::read_to_string(user.project_file("trio")).unwrap();
@@ -273,12 +285,28 @@ fn the_project_s_settings_list_its_repositories_and_add_remove_and_detect_them(
             .is_some_and(|note| note.contains("repository itself is not touched")),
         "{note:?}"
     );
+    assert!(
+        !note.as_deref().unwrap_or_default().contains("worktree"),
+        "the dialog says worktree: {note:?}"
+    );
     assert!(paths(&section, cx).contains(&"lib".to_owned()));
     cx.update(|window, cx| window.click("repository-removal-action", cx));
     until(&shell, cx, "lib is forgotten", |cx| {
         !paths(&section, cx).contains(&"lib".to_owned())
     });
     settle(cx);
+    let said = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .find(|toast| toast.title().contains("removed"))
+            .map(|toast| toast.second_line().unwrap_or_default().to_owned())
+    });
+    assert!(
+        said.as_deref()
+            .is_some_and(|said| !said.contains("worktree")),
+        "{said:?}"
+    );
     assert!(folder.join("lib/.git").is_dir(), "its folder is kept");
     assert!(has("found-repository-lib", cx), "found again in the folder");
     let text = std::fs::read_to_string(user.project_file("trio")).unwrap();

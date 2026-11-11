@@ -77,6 +77,15 @@ impl ProgramState {
         }
     }
 
+    /// What stands for a program whose state was never read: not known, so not ready.
+    pub fn unread(program: &str) -> Self {
+        Self {
+            program: program.to_owned(),
+            found: true,
+            ..Self::default()
+        }
+    }
+
     /// What is left to do about it, in one line: `gh is not signed in to github.com`. Nothing
     /// when it is ready.
     pub fn lacks(&self) -> Option<String> {
@@ -185,6 +194,8 @@ pub struct ProgramChecks {
     waiting: Option<u64>,
     /// Whether the user asked for the read on its way (Check again): only then is a failure said.
     asked: bool,
+    /// The last read failed.
+    failed: bool,
 }
 
 /// What the page shows of a failed Check again (a toast, as for the other reads that fail).
@@ -201,6 +212,7 @@ impl ProgramChecks {
             requests: 0,
             waiting: None,
             asked: false,
+            failed: false,
         }
     }
 
@@ -226,6 +238,12 @@ impl ProgramChecks {
         self.waiting.is_some()
     }
 
+    /// Whether the programs were never read: the last read failed and nothing was known before.
+    /// The page then says it on the line of each program it needs, with Check again.
+    pub fn is_unread(&self) -> bool {
+        self.failed && self.read.is_none()
+    }
+
     /// Whether a read the user asked for is on its way.
     pub fn is_asked(&self) -> bool {
         self.waiting.is_some() && self.asked
@@ -241,7 +259,17 @@ impl ProgramChecks {
 
     /// Reads the programs' state anew, in silence: when the tab opens, after a change of forge or
     /// tracker and when the window takes the focus back. A read that fails changes nothing.
+    /// Nothing while a read is on its way: a window that comes and goes asks for one read, not
+    /// one for each time.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.waiting.is_none() {
+            self.read(false, cx);
+        }
+    }
+
+    /// The same, made even when one is on its way: what a read began before a change of forge or
+    /// tracker says is not about the new one.
+    pub fn reread(&mut self, cx: &mut Context<Self>) {
         self.read(false, cx);
     }
 
@@ -271,9 +299,16 @@ impl ProgramChecks {
         }
         self.waiting = None;
         match read {
-            Ok(value) => self.read = Some(ProjectPrograms::of(&value)),
-            Err(why) if self.asked => toast(refused_toast(&why), cx),
-            Err(_) => {}
+            Ok(value) => {
+                self.read = Some(ProjectPrograms::of(&value));
+                self.failed = false;
+            }
+            Err(why) => {
+                self.failed = true;
+                if self.asked {
+                    toast(refused_toast(&why), cx);
+                }
+            }
         }
         self.asked = false;
         cx.notify();

@@ -125,6 +125,8 @@ pub struct ProjectRepositories {
     /// The repository the confirmation names, kept while it fades away.
     asked: String,
     busy: Option<Busy>,
+    /// A read of the window's own is on its way: another is not asked meanwhile.
+    reading: bool,
     /// How many requests were made: an answer to an older one never replaces a newer one's.
     requests: u64,
     problem: Option<SharedString>,
@@ -139,6 +141,7 @@ impl ProjectRepositories {
             confirming: None,
             asked: String::new(),
             busy: None,
+            reading: false,
             requests: 0,
             problem: None,
         }
@@ -154,6 +157,11 @@ impl ProjectRepositories {
 
     pub fn is_busy(&self) -> bool {
         self.busy.is_some()
+    }
+
+    /// Whether a read of the window's own is on its way.
+    pub fn is_reading(&self) -> bool {
+        self.reading
     }
 
     /// Whether the user's request is this one.
@@ -188,13 +196,14 @@ impl ProjectRepositories {
     }
 
     /// Asks the daemon for the repositories as their checkouts stand, in silence: when the tab
-    /// opens and when the window takes the focus back. Not while a request of the
-    /// user's is on its way: its answer is the list, and a newer read would make it the older one,
-    /// so that its refusal would never be said.
+    /// opens and when the window takes the focus back. Not while one is on its way, nor while a
+    /// request of the user's is: its answer is the list, and a newer read would make it the older
+    /// one, so that its refusal would never be said.
     pub fn read(&mut self, cx: &mut App) {
-        if self.busy.is_some() {
+        if self.busy.is_some() || self.reading {
             return;
         }
+        self.reading = true;
         let params = json!({"name": self.project});
         self.send("project.repositories", params, cx);
     }
@@ -248,6 +257,7 @@ impl ProjectRepositories {
             return;
         }
         let busy = self.busy.take();
+        self.reading = false;
         let project = self.project.clone();
         let label = |path: &str| repository_label(&project, path);
         match read {

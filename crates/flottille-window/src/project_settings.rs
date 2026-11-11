@@ -35,7 +35,7 @@ use crate::actions::Command;
 use crate::commands::{CommandsSection, boxed, menu_of, problem_line};
 use crate::conventions::{Convention, Kind};
 use crate::message_checks::MessageChecks;
-use crate::programs::{ProgramChecks, ProgramValue, program_block};
+use crate::programs::{ProgramChecks, ProgramState, ProgramValue, program_block};
 use crate::project::{only_at_root, repository_label};
 use crate::project_removal::ProjectRemoval;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
@@ -778,7 +778,7 @@ impl ProjectSettingsPage {
             wrote_prefix = saving == Some(Saving::BranchPrefix);
             // A new forge or tracker may need another program: read them anew.
             if saving.is_some() && read.is_ok() {
-                self.programs.update(cx, |checks, cx| checks.refresh(cx));
+                self.programs.update(cx, |checks, cx| checks.reread(cx));
             }
             match &read {
                 Ok(_) => {
@@ -1421,6 +1421,10 @@ impl ProjectSettingsPage {
             Some(url) => format!("{} · {}", info.remote, short_remote(url, &self.folder)),
             None => "local only".to_owned(),
         };
+        // The form holds what was saved last; the repository's reading may be older.
+        let declared = form
+            .and_then(|form| form.declared.as_ref())
+            .or(info.forge.as_ref());
         let forge: gpui_kit::AnyElement = match form {
             Some(form) if form.proposed() => {
                 let proposal = form.proposal.clone().expect("proposed");
@@ -1502,10 +1506,6 @@ impl ProjectSettingsPage {
                 )
                 .into_any_element(),
             _ => {
-                // The form holds what was saved last; the repository's reading may be older.
-                let declared = form
-                    .and_then(|form| form.declared.as_ref())
-                    .or(info.forge.as_ref());
                 match declared {
                     None => value(
                         id("forge"),
@@ -1542,9 +1542,14 @@ impl ProjectSettingsPage {
             }
         };
         let programs = self.programs.read(cx);
+        // A read that never succeeded is said on the line of each program the page needs.
+        let state = programs.repository(&path).cloned().or_else(|| {
+            let program = ForgeKind::of(declared?).program()?;
+            programs.is_unread().then(|| ProgramState::unread(program))
+        });
         let block = program_block(
             &format!("repository-program-{path}"),
-            programs.repository(&path),
+            state.as_ref(),
             &self.shell,
             &self.programs,
             cx,
@@ -1821,9 +1826,13 @@ impl ProjectSettingsPage {
             }
         };
         let programs = self.programs.read(cx);
+        let state = programs.tracker().cloned().or_else(|| {
+            let program = kind.program()?;
+            programs.is_unread().then(|| ProgramState::unread(program))
+        });
         let block = program_block(
             "tracker-program",
-            programs.tracker(),
+            state.as_ref(),
             &self.shell,
             &self.programs,
             cx,
