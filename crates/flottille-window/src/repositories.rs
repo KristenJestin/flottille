@@ -1,7 +1,8 @@
 //! A project's repositories as the daemon reads their checkouts (`docs/projects.md`): each with
 //! the branch its checkout is on, its base rule, where its remote leads (or "local only") and its
-//! forge, and the ones the folder holds that the project does not name, detected again. The
-//! project settings list them (Add, Detect again, Remove…); the project page reads them. Remove
+//! forge, and the ones the folder holds that the project does not name. The project settings list
+//! them (Add, Remove…) and read them again when the tab opens and each time the window takes the
+//! focus back, in silence; the project page reads them. Remove
 //! only forgets a repository: its folder, its branches and the worktrees of the workspaces that
 //! took it stay. The window writes nothing itself: the daemon writes the project's file, its
 //! comments kept (`project.repositories`, `project.add_repository`,
@@ -111,7 +112,6 @@ impl Repositories {
 /// What the daemon is doing for the section.
 #[derive(Clone, Debug, PartialEq)]
 enum Busy {
-    Detecting,
     Adding(String),
     Removing(String),
 }
@@ -125,6 +125,10 @@ pub struct ProjectRepositories {
     /// The repository the confirmation names, kept while it fades away.
     asked: String,
     busy: Option<Busy>,
+    /// A read of the window's own is on its way: another is not asked meanwhile.
+    reading: bool,
+    /// A read was asked meanwhile: made once the one on its way is answered.
+    queued: bool,
     /// How many requests were made: an answer to an older one never replaces a newer one's.
     requests: u64,
     problem: Option<SharedString>,
@@ -139,6 +143,8 @@ impl ProjectRepositories {
             confirming: None,
             asked: String::new(),
             busy: None,
+            reading: false,
+            queued: false,
             requests: 0,
             problem: None,
         }
@@ -154,6 +160,11 @@ impl ProjectRepositories {
 
     pub fn is_busy(&self) -> bool {
         self.busy.is_some()
+    }
+
+    /// Whether a read of the window's own is on its way.
+    pub fn is_reading(&self) -> bool {
+        self.reading
     }
 
     /// Whether the user's request is this one.
@@ -187,22 +198,19 @@ impl ProjectRepositories {
         perform_later(&self.shell, command, cx);
     }
 
-    /// Asks the daemon for the repositories as their checkouts stand. Not while a request of the
-    /// user's is on its way: its answer is the list, and a newer read would make it the older one,
-    /// so that its refusal would never be said.
+    /// Asks the daemon for the repositories as their checkouts stand, in silence: when the tab
+    /// opens and when the window takes the focus back. Not while one is on its way, nor while a
+    /// request of the user's is: its answer is the list, and a newer read would make it the older
+    /// one, so that its refusal would never be said. It is remembered then, once, and made when
+    /// the answer comes: what changed after the one on its way began is still read.
     pub fn read(&mut self, cx: &mut App) {
-        if self.busy.is_some() {
+        if self.busy.is_some() || self.reading {
+            self.queued = true;
             return;
         }
+        self.reading = true;
         let params = json!({"name": self.project});
         self.send("project.repositories", params, cx);
-    }
-
-    /// Detect again: the same read, said on its button while it runs.
-    pub fn detect(&mut self, cx: &mut Context<Self>) {
-        let params = json!({"name": self.project});
-        self.ask("project.repositories", params, Some(Busy::Detecting), cx);
-        cx.notify();
     }
 
     /// Adds the repository at `path` of the project's folder.
@@ -254,6 +262,7 @@ impl ProjectRepositories {
             return;
         }
         let busy = self.busy.take();
+        self.reading = false;
         let project = self.project.clone();
         let label = |path: &str| repository_label(&project, path);
         match read {
@@ -264,24 +273,12 @@ impl ProjectRepositories {
                     None => None,
                     Some(Busy::Adding(path)) => Some(
                         Toast::success(format!("{} added to {project}", label(path)))
-                            .detail("New workspaces work on their own copy of it."),
+                            .detail("Each new workspace gets its own copy of it."),
                     ),
                     Some(Busy::Removing(path)) => Some(
                         Toast::success(format!("{} removed from {project}", label(path)))
-                            .detail("Checking again finds it."),
+                            .detail("It shows again as found in the folder, and Add puts it back."),
                     ),
-                    Some(Busy::Detecting) => Some(Toast::success("Detected again").detail(
-                        match read.new.as_slice() {
-                            [] => format!(
-                                "The folder holds the project's {} repositories, and no other.",
-                                read.listed.len()
-                            ),
-                            new => format!(
-                                "Found in the folder, not in the project: {}.",
-                                new.join(", ")
-                            ),
-                        },
-                    )),
                 };
                 if let Some(said) = said {
                     toast(said, cx);
@@ -298,12 +295,12 @@ impl ProjectRepositories {
                     Toast::failure(format!("{} was not removed", label(path))).detail(why),
                     cx,
                 ),
-                Some(Busy::Detecting) => {
-                    toast(Toast::failure("Not detected again").detail(why), cx)
-                }
             },
         }
         cx.notify();
+        if std::mem::take(&mut self.queued) {
+            self.read(cx);
+        }
     }
 
     /// The confirmation of forgetting a repository.
@@ -317,7 +314,8 @@ impl ProjectRepositories {
         )
         .sentence(
             "New workspaces no longer take it. The repository itself is not touched, nor the \
-             workspaces that took it; checking again finds it.",
+             workspaces that took it. The folder still holds it: it shows as found there, and \
+             Add puts it back.",
         )
         .action("Remove repository")
         .open(self.confirming.is_some())

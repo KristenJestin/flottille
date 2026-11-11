@@ -35,7 +35,7 @@ use crate::actions::Command;
 use crate::commands::{CommandsSection, boxed, menu_of, problem_line};
 use crate::conventions::{Convention, Kind};
 use crate::message_checks::MessageChecks;
-use crate::programs::{ProgramChecks, program_block};
+use crate::programs::{ProgramChecks, ProgramState, ProgramValue, program_block};
 use crate::project::{only_at_root, repository_label};
 use crate::project_removal::ProjectRemoval;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
@@ -128,10 +128,19 @@ impl ForgeKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            ForgeKind::None => "No forge",
+            ForgeKind::None => "None",
             ForgeKind::Github => "GitHub",
             ForgeKind::BitbucketCloud => "Bitbucket Cloud",
             ForgeKind::BitbucketDataCenter => "Bitbucket Data Center",
+        }
+    }
+
+    /// The command line its pull requests are read and written with.
+    fn program(self) -> Option<&'static str> {
+        match self {
+            ForgeKind::None => None,
+            ForgeKind::Github => Some("gh"),
+            ForgeKind::BitbucketCloud | ForgeKind::BitbucketDataCenter => Some("bkt"),
         }
     }
 
@@ -178,6 +187,15 @@ impl TrackerKind {
             TrackerKind::None => "Nowhere",
             TrackerKind::Github => "GitHub issues",
             TrackerKind::Jira => "Jira",
+        }
+    }
+
+    /// The command line its tickets are read with.
+    fn program(self) -> Option<&'static str> {
+        match self {
+            TrackerKind::None => None,
+            TrackerKind::Github => Some("gh"),
+            TrackerKind::Jira => Some("acli"),
         }
     }
 
@@ -442,7 +460,7 @@ impl ProjectSettingsPage {
     pub fn new(
         shell: WeakEntity<Shell>,
         name: String,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let rules = {
@@ -472,7 +490,7 @@ impl ProjectSettingsPage {
         );
         let checking = programs.clone();
         cx.defer(move |cx| {
-            checking.update(cx, |checks, cx| checks.check(cx));
+            checking.update(cx, |checks, cx| checks.refresh(cx));
             listing.update(cx, |section, cx| section.read(cx));
             skilling.update(cx, |section, cx| section.read(cx));
             tasking.update(cx, |section, cx| section.read(cx));
@@ -493,6 +511,14 @@ impl ProjectSettingsPage {
         // A count in the tabs follows its list.
         let observed = cx.observe(&repositories, |_, _, cx| cx.notify());
         let checked = cx.observe(&programs, |_, _, cx| cx.notify());
+        // The window taking the focus back while the Repositories tab is shown: the programs and
+        // the repositories are read again, in silence. GPUI says it on activation and on
+        // deactivation alike.
+        let focused = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.read_again(cx);
+            }
+        });
         let counted = [
             cx.observe(&skills, |_, _, cx| cx.notify()),
             cx.observe(&commands, |_, _, cx| cx.notify()),
@@ -548,7 +574,10 @@ impl ProjectSettingsPage {
             workspaces,
             branch_prefix: None,
             prefix_field: None,
-            _subscriptions: [observed, checked].into_iter().chain(counted).collect(),
+            _subscriptions: [observed, checked, focused]
+                .into_iter()
+                .chain(counted)
+                .collect(),
         }
     }
 
@@ -749,7 +778,7 @@ impl ProjectSettingsPage {
             wrote_prefix = saving == Some(Saving::BranchPrefix);
             // A new forge or tracker may need another program: read them anew.
             if saving.is_some() && read.is_ok() {
-                self.programs.update(cx, |checks, cx| checks.check(cx));
+                self.programs.update(cx, |checks, cx| checks.reread(cx));
             }
             match &read {
                 Ok(_) => {
@@ -1353,36 +1382,49 @@ impl ProjectSettingsPage {
         )
     }
 
-    /// The labelled values of a repository's row: base branch, remote, forge.
+    /// The labelled values of a repository's row: where it starts from, its remote, its forge.
     fn values(&self, info: &RepositoryInfo, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let path = info.path.clone();
         let form = self.forms.iter().find(|form| form.path == path);
         let id = |part: &str| ElementId::Name(format!("repository-{part}-{path}").into());
-        let value = |id: ElementId, label: &'static str, text: String, width: f32| {
-            div()
-                .w(relative(width))
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(div().text_size(px(11.)).text_color(p.faint).child(label))
-                .child(
-                    div()
-                        .id(id)
-                        .aria_label(SharedString::from(text.clone()))
-                        .mono(12.)
-                        .text_color(p.mute)
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(SharedString::from(text))
-                        .test_support(),
-                )
-        };
+        let value =
+            |id: ElementId, label_id: ElementId, label: &'static str, text: String, width: f32| {
+                div()
+                    .w(relative(width))
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id(label_id)
+                            .aria_label(label)
+                            .text_size(px(11.))
+                            .text_color(p.faint)
+                            .child(label)
+                            .test_support(),
+                    )
+                    .child(
+                        div()
+                            .id(id)
+                            .aria_label(SharedString::from(text.clone()))
+                            .mono(12.)
+                            .text_color(p.mute)
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(SharedString::from(text))
+                            .test_support(),
+                    )
+            };
         let remote = match &info.url {
             Some(url) => format!("{} · {}", info.remote, short_remote(url, &self.folder)),
-            None => format!("{}: none, local only", info.remote),
+            None => "local only".to_owned(),
         };
+        // The form holds what was saved last; the repository's reading may be older.
+        let declared = form
+            .and_then(|form| form.declared.as_ref())
+            .or(info.forge.as_ref());
         let forge: gpui_kit::AnyElement = match form {
             Some(form) if form.proposed() => {
                 let proposal = form.proposal.clone().expect("proposed");
@@ -1463,22 +1505,53 @@ impl ProjectSettingsPage {
                         .test_support(),
                 )
                 .into_any_element(),
-            _ => value(
-                id("forge"),
-                "Forge",
-                // The form holds what was saved last; the repository's reading may be older.
-                form.and_then(|form| form.declared.as_ref())
-                    .or(info.forge.as_ref())
-                    .map_or_else(|| "None".to_owned(), forge_said),
-                0.41,
-            )
-            .into_any_element(),
+            _ => {
+                match declared {
+                    None => value(
+                        id("forge"),
+                        id("forge-label"),
+                        "Forge",
+                        "None".to_owned(),
+                        0.41,
+                    )
+                    .into_any_element(),
+                    Some(forge) => {
+                        // The repository on the forge is said only when the remote does not
+                        // lead to it already.
+                        let from_remote = form
+                            .and_then(|form| form.proposal.as_ref())
+                            .is_some_and(|proposal| proposal == forge);
+                        let head = if from_remote {
+                            ForgeKind::of(forge).label().to_owned()
+                        } else {
+                            forge_said(forge)
+                        };
+                        let kind = ForgeKind::of(forge);
+                        ProgramValue::new(
+                            id("forge"),
+                            id("forge-label"),
+                            "Forge",
+                            Some(head),
+                            kind.program().unwrap_or_default(),
+                            self.programs.read(cx).repository(&path),
+                        )
+                        .width(0.41)
+                        .into_any_element()
+                    }
+                }
+            }
         };
         let programs = self.programs.read(cx);
+        // A read that never succeeded is said on the line of each program the page needs.
+        let state = programs.repository(&path).cloned().or_else(|| {
+            let program = ForgeKind::of(declared?).program()?;
+            programs.is_unread().then(|| ProgramState::unread(program))
+        });
         let block = program_block(
             &format!("repository-program-{path}"),
-            programs.repository(&path),
+            state.as_ref(),
             &self.shell,
+            &self.programs,
             cx,
         );
         div()
@@ -1489,8 +1562,20 @@ impl ProjectSettingsPage {
                 div()
                     .flex()
                     .gap(space::LG)
-                    .child(value(id("base"), "Base branch", base_said(info), 0.22))
-                    .child(value(id("remote"), "Remote, from git", remote, 0.37))
+                    .child(value(
+                        id("base"),
+                        id("base-label"),
+                        "Starts from",
+                        base_said(info),
+                        0.22,
+                    ))
+                    .child(value(
+                        id("remote"),
+                        id("remote-label"),
+                        "Remote",
+                        remote,
+                        0.37,
+                    ))
                     .child(forge),
             )
             .child(block)
@@ -1542,11 +1627,11 @@ impl ProjectSettingsPage {
                 let (added, repositories) = (path.clone(), self.repositories.downgrade());
                 ListRow::new(
                     ElementId::Name(format!("found-repository-{label}").into()),
-                    SharedString::from(label.clone()),
+                    SharedString::from(format!("{label}/")),
                 )
                 .mono()
                 .leading(icon(Icon::Repository).size(px(15.)).text_color(p.line2))
-                .detail("found in the folder, not in the project")
+                .detail("found in the folder")
                 .trailing(
                     Button::secondary(
                         ElementId::Name(format!("add-repository-{label}").into()),
@@ -1596,17 +1681,11 @@ impl ProjectSettingsPage {
             );
         }
         let count = read.as_ref().map_or(0, |read| read.listed.len());
-        let detecting = self.repositories.read(cx).is_busy();
         let problem = self
             .repositories
             .read(cx)
             .problem()
             .map(|why| SharedString::from(why.to_owned()));
-        let repositories = self.repositories.downgrade();
-        let checks = self.programs.downgrade();
-        let checking = self.programs.read(cx).is_checking();
-        // From what the project declares, not from a read: one that failed is asked again.
-        let forges = self.forms.iter().any(|form| form.declared.is_some());
         // The folder is the only repository: the section does not read as a list of one.
         let alone = read.as_ref().is_some_and(|read| {
             let paths: Vec<_> = read.listed.iter().map(|info| info.path.clone()).collect();
@@ -1615,28 +1694,10 @@ impl ProjectSettingsPage {
         let section = Section::new("repositories", "Repositories")
             .when(!alone, |section| section.count(count.to_string()))
             .sentence(if alone {
-                "The project folder is a git repository. A workspace works on its own copy of it."
+                "The project folder is the repository."
             } else {
-                "The git repositories of the project folder. A workspace works on its own copy of each."
+                "The git repositories of the project. Each workspace gets its own copy of each."
             })
-            .action(
-                Button::quiet("check-forge-programs", "Check programs")
-                    .leading(Icon::Search)
-                    .disabled(!forges || checking)
-                    .on_click(move |_, _, cx| {
-                        checks.update(cx, |checks, cx| checks.check(cx)).ok();
-                    }),
-            )
-            .action(
-                Button::quiet("detect-repositories", "Detect again")
-                    .leading(Icon::Search)
-                    .disabled(detecting)
-                    .on_click(move |_, _, cx| {
-                        repositories
-                            .update(cx, |section, cx| section.detect(cx))
-                            .ok();
-                    }),
-            )
             .child(
                 presence(
                     "repository-list-block",
@@ -1653,8 +1714,8 @@ impl ProjectSettingsPage {
                     EmptyLine::new(
                         "no-repositories",
                         Icon::Repository,
-                        "No repository: the folder holds none one or two levels down. Detect \
-                         again once it does.",
+                        "No git repository in this folder yet. Flottille looks again when you \
+                         come back.",
                     ),
                 )
                 .gap(space::MD),
@@ -1765,24 +1826,42 @@ impl ProjectSettingsPage {
             }
         };
         let programs = self.programs.read(cx);
-        let (needed, checking) = (self.tracker.is_some(), programs.is_checking());
-        let block = program_block("tracker-program", programs.tracker(), &self.shell, cx);
+        let state = programs.tracker().cloned().or_else(|| {
+            let program = kind.program()?;
+            programs.is_unread().then(|| ProgramState::unread(program))
+        });
+        let block = program_block(
+            "tracker-program",
+            state.as_ref(),
+            &self.shell,
+            &self.programs,
+            cx,
+        );
+        // The program its tickets are read with, said as a repository's forge says it.
+        let reads_with = kind.program().map(|program| {
+            ProgramValue::new(
+                "tracker-program-value",
+                "tracker-program-value-label",
+                "Reads with",
+                None,
+                program,
+                programs.tracker(),
+            )
+        });
         let row = ListRow::new("tracker-row", kind.label())
             .leading(icon(glyphs::TICKET).size(px(15.)).text_color(p.faint))
             .detail(SharedString::from(detail))
-            .below(div().mt(px(6.)).child(block))
+            .below(
+                div()
+                    .mt(px(6.))
+                    .flex()
+                    .flex_col()
+                    .children(reads_with)
+                    .child(block),
+            )
             .on_click(cx.listener(|this, _, window, cx| this.open_tracker(window, cx)));
-        let checks = self.programs.downgrade();
         Section::new("tracker", "Tracker")
             .sentence("Where the project's tickets come from.")
-            .action(
-                Button::quiet("check-tracker-program", "Check again")
-                    .leading(Icon::Search)
-                    .disabled(!needed || checking)
-                    .on_click(move |_, _, cx| {
-                        checks.update(cx, |checks, cx| checks.check(cx)).ok();
-                    }),
-            )
             // A skeleton stands for the row until the project's file is read.
             .child(awaiting(
                 "tracker-waiting",
@@ -1924,10 +2003,7 @@ impl ProjectSettingsPage {
                     .child(add),
             );
         Field::new("base-field", "Base branches", control)
-            .hint(
-                "A workspace's branch starts from the first of these that the remote has: \
-                 develop, then main.",
-            )
+            .hint("A new workspace starts from the first of these branches the remote has.")
             .error(self.base_error.clone())
     }
 
@@ -1964,7 +2040,7 @@ impl ProjectSettingsPage {
         Switch::new(
             "delete-branch-on-merge",
             self.delete_branch,
-            "Delete the branch on merge",
+            "Delete the branch after merging",
         )
         .hint(
             "A merge by an agent deletes the pull request's branch on the forge, unless the \
@@ -1994,7 +2070,7 @@ impl ProjectSettingsPage {
                         remote,
                         ..
                     }) => format!(
-                        "; its remote {remote} is {}, read from git",
+                        "; its remote {remote} is {}",
                         short_remote(url, &self.folder)
                     ),
                     Some(form) => format!("; it has no remote {}", form.remote),
@@ -2295,9 +2371,24 @@ impl ProjectSettingsPage {
         self.revealed.as_ref()
     }
 
+    /// Reads what the Repositories tab shows again, in silence: the programs its forges and
+    /// tracker need and the repositories of the folder. Asked when the tab opens and each time
+    /// the window takes the focus back while it is shown; nothing while another tab is.
+    fn read_again(&mut self, cx: &mut Context<Self>) {
+        if SECTIONS[self.tab.min(SECTIONS.len() - 1)].0 != "repositories" {
+            return;
+        }
+        self.programs.update(cx, |checks, cx| checks.refresh(cx));
+        self.repositories.update(cx, |section, cx| section.read(cx));
+    }
+
     /// Opened at a repository, the tracker, the tasks or a feature: their tab is the one chosen.
     pub fn reveal(&mut self, at: Reveal, cx: &mut Context<Self>) {
+        let shown = self.tab;
         self.tab = at.entry();
+        if self.tab != shown {
+            self.read_again(cx);
+        }
         if let Reveal::Feature(name) = &at {
             self.feature = Some(name.clone());
         }
@@ -2348,6 +2439,7 @@ impl ProjectSettingsPage {
             self.tab = entry;
             // A tab starts at its top, not where the former one was scrolled to.
             self.scroll.set_offset(Point::default());
+            self.read_again(cx);
             cx.notify();
         }
     }

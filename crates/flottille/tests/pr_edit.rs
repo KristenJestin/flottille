@@ -659,7 +659,7 @@ fn merge_deletes_the_branch_when_asked_or_set() {
     assert!(
         card.contains(
             &"It deletes the source branch on the forge after the merge (the project's setting \
-              Delete the branch on merge)"
+              Delete the branch after merging)"
                 .to_owned()
         ),
         "{card:?}"
@@ -872,7 +872,7 @@ fn the_merge_card_names_the_deletion_in_the_workspace_s_only_repository() {
     let card = says(&user, held(&mcp.call("forge", json!({"action": "merge"}))));
     assert!(
         card.iter()
-            .any(|said| said.contains("Delete the branch on merge")),
+            .any(|said| said.contains("Delete the branch after merging")),
         "{card:?}"
     );
 

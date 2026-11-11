@@ -185,6 +185,10 @@ links are not looked into. A folder with no repository is refused. `project add`
 repository with the remote `origin` and the base rule `["main"]`; the user edits the file for the
 rest.
 
+The window reads them again (`project.repositories`) when the Repositories tab of the project's
+Settings opens and each time the window takes the focus back while it is shown, in silence: a
+repository cloned meanwhile is a row `web/ found in the folder`, with Add. There is no button for it.
+
 ## The file
 
 ```toml
@@ -206,7 +210,7 @@ remote = "origin"                     # default
 base = ["develop", "main"]            # the first that exists on the remote wins; default ["main"]
 depends_on = ["lib-core"]             # paths of repositories of the project, leaves first; no cycle
 forge = { kind = "github", repository = "acme/app" }   # its forge (docs/forges.md); none when left out
-delete_branch_on_merge = false        # "Delete the branch on merge": a merge by `forge` deletes the source branch on the forge; default false
+delete_branch_on_merge = false        # "Delete the branch after merging": a merge by `forge` deletes the source branch on the forge; default false
 
 [variables]                           # name -> templated value, for every command run in a workspace
 STORE = "{workspace.path}/.store"
@@ -260,7 +264,7 @@ enabled = false                       # off in this project; on when left out, o
 language = "fr"                       # its own value of a setting a project may set
 ```
 
-**Delete the branch on merge** is a switch of each repository, in the project's Settings page and in
+**Delete the branch after merging** is a switch of each repository, in the project's Settings page and in
 its file, off by default. On, a `forge` `merge` of that repository's pull request deletes its source
 branch on the forge once merged, unless the merge says `delete_branch: false` (`docs/tools.md`, "The
 forge"). It never deletes a branch that existed before its workspace was made (the workspace

@@ -62,8 +62,10 @@ hyphen (`git-example-com-proj`), so that the commands can be run as they are. A 
 site: the check reads the `Site:` line of `acli jira auth status`, as the tickets do
 (`docs/tickets.md`), and says when it is signed in to another site than the tracker's, with the
 switch command. The programs are checked together, each with its own time (the version 5 s, a
-sign-in check 30 s): one that hangs costs its own time, not the sum of them. The state is read when the project's Settings open, again after a forge
-or the tracker is saved, and whenever the user asks (Check again); never in a loop. See
+sign-in check 30 s): one that hangs costs its own time, not the sum of them. The state is read when the
+Repositories tab of the project's Settings opens, again after a forge or the tracker is saved and each
+time the window takes the focus back while the tab is shown, in silence, and whenever the user asks
+on the line of a program that is not ready (Check again); never in a loop and never on a timer. See
 `project.programs` (`docs/protocol.md`), the window below, and `flottille doctor`
 (`docs/cli.md`), which names the programs of the registered projects only, a missing one a warning
 and never a failure.
@@ -262,7 +264,8 @@ opens, after a change of forge or tracker, and each time the window takes the fo
 is shown (`design.md` §10). Each line unfolds and fades in as it comes and folds away as it goes. When the state itself
 changes (not found, signed out, signed in to another site, ready), the old line folds away and
 fades out while the new one unfolds and fades in, and the ink moves from red to green with them. A
-read that fails is a toast and leaves what was known; Check again stays enabled to ask again.
+read that fails leaves what was known and says nothing, unless the user asked (Check again): then it
+is a toast, and Check again stays there to ask again.
 
 ## Bitbucket
 
