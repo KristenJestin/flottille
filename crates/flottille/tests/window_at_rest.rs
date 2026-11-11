@@ -89,12 +89,27 @@ fn until(
     }
 }
 
-/// Lets the page's entrance, every motion and every read it started end: two seconds of the
-/// window, in real time too, so that what the daemon answers late has come.
+/// Lets the page's entrance, every motion and every read it started end: the window runs until it
+/// has asked for no animation frame over a second of its own clock and over two seconds of real
+/// time, so that what the daemon answers late has come, and starts again from zero when a frame
+/// is asked. How much of its clock a real second holds is the machine's (a loaded one draws
+/// fewer frames in it), so the wait is for the quiet, not for a number of steps.
 fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    const STEP: Duration = Duration::from_millis(16);
     let began = Instant::now();
-    while began.elapsed() < Duration::from_secs(2) {
-        step(shell, Duration::from_millis(16), cx);
+    let mut last_asked = began;
+    let mut quiet = Duration::ZERO;
+    while quiet < Duration::from_secs(1) || last_asked.elapsed() < Duration::from_secs(2) {
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "the window never stopped asking for animation frames"
+        );
+        if step(shell, STEP, cx) == 0 {
+            quiet += STEP;
+        } else {
+            quiet = Duration::ZERO;
+            last_asked = Instant::now();
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
 }

@@ -161,6 +161,33 @@ fn until(
     }
 }
 
+/// [`until`] for a wait that has no length of its own, only the end of what it is made while:
+/// `going` is asked once a second, and a wait that comes to its end fails there, not on a clock
+/// that a loaded machine overruns with nothing wrong.
+fn until_while(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    what: &str,
+    going: impl Fn() -> bool,
+    check: impl Fn(&mut VisualTestContext) -> bool,
+) {
+    let mut asked = Instant::now();
+    loop {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        if check(cx) {
+            return;
+        }
+        if asked.elapsed() >= Duration::from_secs(1) {
+            assert!(going(), "{what} never happened: what it waited in is over");
+            asked = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// [`until`] for what the window reads on a timer of its own (the page's runs, each second): the
 /// test clock does not follow real time while the window is drawn, so the time that passes in
 /// each wait passes on it too, as it would in a real window.
@@ -3345,6 +3372,54 @@ fn a_session_whose_workspace_is_removed_keeps_its_page_without_its_facts_and_rea
     );
 }
 
+#[test]
+fn a_daemon_that_answers_after_the_read_timeout_is_waited_for() {
+    use std::io::Write;
+    let (client, mut daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let answering = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        // The line comes in two parts, the second after another timeout.
+        daemon.write_all(b"{\"id\":\"1\",").unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        daemon.write_all(b"\"result\":{}}\n").unwrap();
+    });
+
+    assert_eq!(
+        common::read_line_patiently(client),
+        "{\"id\":\"1\",\"result\":{}}\n"
+    );
+    answering.join().unwrap();
+}
+
+#[test]
+fn a_daemon_that_is_gone_ends_the_wait_at_once() {
+    let (client, daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    drop(daemon);
+
+    assert_eq!(common::read_line_patiently(client), "");
+}
+
+#[gpui_kit::test]
+#[should_panic(expected = "what it waited in is over")]
+fn a_wait_made_while_a_stream_goes_fails_when_the_stream_ends(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let began = Instant::now();
+    until_while(
+        &shell,
+        cx,
+        "a card that never comes",
+        || began.elapsed() < Duration::from_millis(1500),
+        |_| false,
+    );
+}
+
 #[gpui_kit::test]
 fn a_card_appears_while_another_session_streams_without_pause(cx: &mut TestAppContext) {
     let user = team_user();
@@ -3377,15 +3452,16 @@ fn a_card_appears_while_another_session_streams_without_pause(cx: &mut TestAppCo
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
 
     let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
-    until(&shell, cx, "the card is shown", |cx| {
+    // The stream is thirty seconds of pieces at the least, and the card must come before its end:
+    // it does not wait for a pause. No time is asked of the card: how long it takes is the
+    // machine's, so the wait ends with the stream, not on a clock.
+    let streams = || {
+        user.call("agent.show", json!({"agent": streamer})).unwrap()["agent"]["state"] == "working"
+    };
+    until_while(&shell, cx, "the card is shown", streams, |cx| {
         cx.update(|window, _| window.try_find(format!("allow-{number}")).is_some())
     });
-
-    // The stream is thirty seconds of pieces at the least, and the card came before its end: it
-    // did not wait for a pause. No time is asked of the card: how long it takes is the machine's.
-    let state =
-        user.call("agent.show", json!({"agent": streamer})).unwrap()["agent"]["state"].clone();
-    assert_eq!(state, "working", "the other session still streams");
+    assert!(streams(), "the other session still streams");
 }
 
 /// Events of the shown agent made up for the page, numbered from `seq`.
