@@ -554,18 +554,24 @@ impl Render for RulesEditor {
             .flex()
             .items_center()
             .gap(space::SM)
-            .child(match self.footer() {
-                Some(line) => div()
-                    .id(id("reach"))
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(12.))
-                    .text_color(p.faint)
-                    .child(line)
-                    .test_support()
-                    .into_any_element(),
-                None => div().flex_1().into_any_element(),
-            })
+            // The line comes and goes with the project's own rules: it folds and fades, never pops.
+            .child(
+                div().flex_1().min_w_0().child(
+                    presence_of(id("reach-block"), self.footer().map(SharedString::from), {
+                        let reach = id("reach");
+                        move |line| {
+                            div()
+                                .id(reach)
+                                .text_size(px(12.))
+                                .text_color(p.faint)
+                                .child(line)
+                                .test_support()
+                                .into_any_element()
+                        }
+                    })
+                    .gap(space::XS),
+                ),
+            )
             .child(
                 Button::quiet(id("reset"), "Reset to default")
                     .disabled(!self.is_own() || self.waiting)

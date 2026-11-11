@@ -10496,6 +10496,58 @@ fn a_project_s_settings_have_a_rules_section_that_adds_to_the_global_rules_and_r
 }
 
 #[gpui_kit::test]
+fn a_project_s_rules_line_folds_away_with_its_own_rules_and_comes_back_with_the_reset(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    user.call("rules.set", json!({"text": "Answer in French."}))
+        .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("rules", cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+    let line = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .try_find("rules-reach-atlas")
+                .map(|found| found.visible())
+        })
+    };
+    assert_eq!(line(cx), Some(true), "the rules to write say how");
+
+    type_rules(&editor, "Name branches feat/<n>.", cx);
+    settle(cx);
+    cx.update(|window, cx| window.click("rules-save-atlas", cx));
+    until(&shell, cx, "the project's rules are saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_own())
+    });
+    // The line folds and fades: it is still there, a frame is asked, and then it is gone.
+    assert_eq!(line(cx), Some(true), "still folding");
+    assert!(pending_frames(cx) > 0, "its fold is animated");
+    settle(cx);
+    assert_ne!(line(cx), Some(true), "folded away");
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+
+    cx.update(|window, cx| window.click("rules-reset-atlas", cx));
+    until(
+        &shell,
+        cx,
+        "the project follows the global rules again",
+        |cx| editor.read_with(cx, |e, _| !e.is_own()),
+    );
+    assert!(pending_frames(cx) > 0, "its unfolding is animated");
+    settle(cx);
+    assert_eq!(line(cx), Some(true), "it comes back");
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
 fn a_project_s_settings_show_the_global_rules_folded_above_its_editor(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
