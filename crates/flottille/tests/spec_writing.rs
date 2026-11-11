@@ -761,7 +761,7 @@ fn a_root_starts_the_spec_of_a_ticket_in_the_default_mode() {
     let text = done(lead.call("spec", json!({"action": "new", "ticket": "ABC-7"})));
     let spec = started_spec(&text);
     let shown = show(&user, spec);
-    // Internal until a project has its own default mode for specs from a ticket (#687).
+    // Internal, the default, while no setting says another.
     assert_eq!(shown["mode"], "internal");
     assert_eq!(shown["status"], "draft");
     assert_eq!(shown["tickets"], json!(["ABC-7"]));
@@ -781,6 +781,107 @@ fn a_root_starts_the_spec_of_a_ticket_in_the_default_mode() {
     // No new session: the root writes it.
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(user.received_requests("session/new").len(), sessions);
+}
+
+/// The default mode for specs written from a ticket (#687): `value` in Specs' settings, global or
+/// the project's own.
+fn default_mode(user: &User, project: Option<&str>, value: &str) {
+    user.call(
+        "extension.set",
+        json!({"name": "specs", "project": project, "settings": {"mode": value}}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_spec_from_a_ticket_takes_the_project_s_default_mode() {
+    let user = with_specs(User::with_fake_agent().with_fake_acli());
+    tracker_with_ticket(&user);
+    default_mode(&user, Some("app"), "ticket");
+
+    let answer = user
+        .call(
+            "spec.from_ticket",
+            json!({"project": "app", "ticket": "ABC-7"}),
+        )
+        .unwrap();
+    assert_eq!(answer["spec"]["mode"], "ticket");
+}
+
+#[test]
+fn a_root_starts_the_spec_of_a_ticket_in_the_project_s_default_mode() {
+    let user = with_specs(User::with_fake_agent().with_fake_acli());
+    tracker_with_ticket(&user);
+    default_mode(&user, Some("app"), "ticket");
+    let (_, lead) = root(&user);
+
+    let spec = started_spec(&done(
+        lead.call("spec", json!({"action": "new", "ticket": "ABC-7"})),
+    ));
+    assert_eq!(show(&user, spec)["mode"], "ticket");
+}
+
+#[test]
+fn a_project_overrides_the_global_default_mode() {
+    let user = with_specs(User::with_fake_agent().with_fake_acli());
+    tracker_with_ticket(&user);
+    default_mode(&user, None, "ticket");
+    default_mode(&user, Some("app"), "internal");
+
+    let answer = user
+        .call(
+            "spec.from_ticket",
+            json!({"project": "app", "ticket": "ABC-7"}),
+        )
+        .unwrap();
+    assert_eq!(answer["spec"]["mode"], "internal");
+}
+
+#[test]
+fn spec_new_without_mode_takes_the_default() {
+    let user = with_specs(User::with_fake_agent().with_fake_acli());
+    tracker_with_ticket(&user);
+    default_mode(&user, None, "ticket");
+
+    let from_a_ticket = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Magic link", "tickets": ["ABC-7"]}),
+        )
+        .unwrap();
+    assert_eq!(from_a_ticket["mode"], "ticket");
+    // With no ticket it stays Alone, whatever the default.
+    let alone = user
+        .call("spec.new", json!({"project": "app", "title": "Idea"}))
+        .unwrap();
+    assert_eq!(alone["mode"], "alone");
+}
+
+#[test]
+fn a_mode_asked_for_wins_over_the_default() {
+    let user = with_specs(User::with_fake_agent().with_fake_acli());
+    tracker_with_ticket(&user);
+    default_mode(&user, None, "ticket");
+
+    let answer = user
+        .call(
+            "spec.from_ticket",
+            json!({"project": "app", "ticket": "ABC-7", "mode": "internal"}),
+        )
+        .unwrap();
+    assert_eq!(answer["spec"]["mode"], "internal");
+}
+
+#[test]
+fn a_default_mode_that_is_neither_internal_nor_the_ticket_is_refused() {
+    let user = with_specs(User::with_fake_agent());
+    let refused = user
+        .call(
+            "extension.set",
+            json!({"name": "specs", "settings": {"mode": "alone"}}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("alone is not one of"), "{refused:?}");
 }
 
 #[test]

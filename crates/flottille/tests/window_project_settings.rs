@@ -542,6 +542,61 @@ fn a_value_set_in_the_project_says_set_here_and_can_go_back(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn a_project_overrides_the_default_mode_and_goes_back_to_settings(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    turn(&user, "specs", true, None);
+    let (shell, cx) = window(&user, cx);
+    open_features(&user, &shell, cx);
+    until(&shell, cx, "Specs is a row", |cx| {
+        visible(cx, "project-features-specs")
+    });
+    click(cx, "project-features-specs");
+    until(&shell, cx, "its radios are in", |cx| {
+        visible(cx, "project-specs-setting-mode-default")
+    });
+    settle(cx);
+
+    // As in Settings is the first radio, and says what Settings gives.
+    assert_eq!(
+        label(cx, "project-specs-setting-mode-default").as_deref(),
+        Some("As in Settings (Kept in Flottille)")
+    );
+    let chosen = |cx: &mut VisualTestContext, id: &str| {
+        cx.update(|window, _| window.find(id.to_owned()).selected() == Some(true))
+    };
+    assert!(chosen(cx, "project-specs-setting-mode-default"));
+    assert!(!present(cx, "project-specs-setting-mode-set"));
+
+    click(cx, "project-specs-setting-mode-ticket");
+    until(&shell, cx, "the project has its own default", |_| {
+        listed(&user, "specs")["projects"][0]["settings"]["mode"] == "ticket"
+    });
+    until(&shell, cx, "the dot is shown", |cx| {
+        settle(cx);
+        visible(cx, "project-specs-setting-mode-set")
+    });
+    assert!(chosen(cx, "project-specs-setting-mode-ticket"));
+
+    click(cx, "project-specs-setting-mode-reset");
+    until(&shell, cx, "the project goes back to Settings", |_| {
+        listed(&user, "specs")["projects"][0]["settings"]
+            .get("mode")
+            .is_none_or(Value::is_null)
+    });
+    until(
+        &shell,
+        cx,
+        "the dot goes and the first radio is chosen",
+        |cx| {
+            settle(cx);
+            !present(cx, "project-specs-setting-mode-set")
+                && chosen(cx, "project-specs-setting-mode-default")
+        },
+    );
+}
+
+#[gpui_kit::test]
 fn a_feature_off_globally_is_a_faded_row_with_a_link(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "app");

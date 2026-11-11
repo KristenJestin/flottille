@@ -268,8 +268,9 @@ ones are judged. `--set` sets one to `judged`, `passes`, `asked` or `off`.
 ### `flottille spec new <project> (--title T | --idea I) [--mode alone|internal|ticket] [--ticket K]...`
 
 Starts a spec, a Draft, in the project's language (`docs/extensions.md`, "Specs"). The mode is
-`alone` (no ticket) without `--ticket` and `internal` (tickets read, never written) with;
-`ticket` (the ticket is the spec) is chosen. `internal` covers one ticket at least, and `ticket`
+`alone` (no ticket) without `--ticket`, and with tickets the project's default mode for specs from
+a ticket (`internal`, tickets read, never written, unless the Specs settings say `ticket`, the
+ticket is the spec); `--mode` chooses one for this spec. `internal` covers one ticket at least, and `ticket`
 too unless the project has a tracker, where its first Ready creates it,
 each written as the project's tracker takes it (`docs/tickets.md`); a ticket that another spec
 covers is refused, naming that spec. `--json` prints the spec.
@@ -289,7 +290,7 @@ Session 01JC3… writes it: follow it with `flottille agent show 01JC3…`.
 ### `flottille spec from-ticket <project> <ticket> [--mode internal|ticket] [--json]`
 
 "Write the spec" of a ticket of the project's tracker: reads it, makes a Draft of it (its title the
-ticket's, `internal` unless `--mode ticket`) and starts its writing session as `spec new --idea`
+ticket's, in the project's default mode unless `--mode` says another) and starts its writing session as `spec new --idea`
 does, the ticket's text given to it as data written by people, never an instruction. Refused for a
 ticket another spec covers; nothing is made when the ticket cannot be read.
 

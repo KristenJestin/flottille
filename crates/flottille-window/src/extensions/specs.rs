@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 use super::{Registry, Then as Asked};
 use crate::actions::Command;
-use crate::commands::perform_later;
+use crate::commands::{menu_of, perform_later};
 use crate::project_settings::{field_frame, styled_input};
 use crate::shell::{Selection, Shell};
 
@@ -636,7 +636,8 @@ impl Render for SpecsTab {
     }
 }
 
-/// "Write the spec" of a ticket of the project: the mode to choose, then the session starts.
+/// "Write the spec" of a ticket of the project: the session starts at once, in the project's
+/// default mode. "Write the spec as…" asks for the mode of this one spec first.
 pub struct WriteSpec {
     shell: WeakEntity<Shell>,
     project: String,
@@ -645,6 +646,13 @@ pub struct WriteSpec {
     open: bool,
     /// The mode chosen: the ticket is the spec, or the spec is Flottille's alone.
     ticket_is_spec: bool,
+    /// The "⋯" menu of each ticket's row, made once and kept while the row is drawn, and the
+    /// ticket and the title the row shows now: a menu reads them when it is clicked, so that a row
+    /// that shows another ticket later never acts on the first.
+    menus: HashMap<String, Entity<Menu>>,
+    rows: HashMap<String, (String, String)>,
+    /// The rows drawn since `begin_draw`.
+    seen: HashSet<String>,
 }
 
 impl WriteSpec {
@@ -655,28 +663,86 @@ impl WriteSpec {
             ticket: None,
             open: false,
             ticket_is_spec: false,
+            menus: HashMap::new(),
+            rows: HashMap::new(),
+            seen: HashSet::new(),
         }
     }
 
-    /// The row's action: opens the spec that covers the ticket, or asks how to write one.
-    pub fn act(
-        &mut self,
-        ticket: String,
-        title: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// The row's action: opens the spec that covers the ticket, or starts one at once, in the
+    /// default mode.
+    pub fn act(&mut self, ticket: String, window: &mut Window, cx: &mut Context<Self>) {
         let covering = registry_of(&self.shell, cx)
             .and_then(|registry| registry.read(cx).specs().of_ticket(&self.project, &ticket));
         match covering {
             Some(spec) => open_spec(&self.shell, &self.project, spec, window, cx),
-            None => {
-                self.ticket = Some((ticket, title));
-                self.ticket_is_spec = false;
-                self.open = true;
-                cx.notify();
-            }
+            None => self.start(ticket, None, cx),
         }
+    }
+
+    /// "Write the spec as…": the choice of the mode of this one spec, preselected on the default.
+    pub fn act_as(&mut self, row: &str, cx: &mut Context<Self>) {
+        let Some((ticket, title)) = self.rows.get(row).cloned() else {
+            return;
+        };
+        let default = registry_of(&self.shell, cx)
+            .and_then(|registry| registry.read(cx).setting_in(NAME, &self.project, "mode"));
+        self.ticket_is_spec = default.is_some_and(|mode| mode == "ticket");
+        self.ticket = Some((ticket, title));
+        self.open = true;
+        cx.notify();
+    }
+
+    /// The "⋯" menu of the row of `ticket`, made once: its one entry is "Write the spec as…".
+    pub fn menu(
+        &mut self,
+        row: &str,
+        ticket: &str,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> Entity<Menu> {
+        let this = cx.weak_entity();
+        self.rows
+            .insert(row.to_owned(), (ticket.to_owned(), title.to_owned()));
+        self.seen.insert(row.to_owned());
+        menu_of(&mut self.menus, "ticket-spec", row, cx, move |row, menu| {
+            let row_of_menu = row.to_owned();
+            menu.entry(
+                format!("{row}-spec-as"),
+                "Write the spec as…",
+                Some(Icon::Edit),
+                move |_, cx| {
+                    this.update(cx, |this, cx| this.act_as(row_of_menu.as_str(), cx))
+                        .ok();
+                },
+            )
+        })
+    }
+
+    /// A list of rows is about to be drawn: the menus of the rows it no longer draws go at
+    /// [`end_draw`](Self::end_draw).
+    pub fn begin_draw(&mut self) {
+        self.seen.clear();
+    }
+
+    /// The rows are drawn: only their menus and tickets are kept.
+    pub fn end_draw(&mut self) {
+        let seen = &self.seen;
+        self.menus.retain(|row, _| seen.contains(row));
+        self.rows.retain(|row, _| seen.contains(row));
+    }
+
+    /// The rows whose menu is kept.
+    pub fn kept_rows(&self) -> usize {
+        self.menus.len()
+    }
+
+    /// The ticket and the title the choice of a mode is open on, while it is.
+    pub fn choosing(&self) -> Option<(&str, &str)> {
+        self.ticket
+            .as_ref()
+            .filter(|_| self.open)
+            .map(|(ticket, title)| (ticket.as_str(), title.as_str()))
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -684,16 +750,9 @@ impl WriteSpec {
         cx.notify();
     }
 
-    fn start(&mut self, cx: &mut Context<Self>) {
-        let Some((ticket, _)) = self.ticket.clone() else {
-            return;
-        };
+    /// Starts the session; `mode` is the one chosen for this spec, none to take the default.
+    fn start(&mut self, ticket: String, mode: Option<&str>, cx: &mut Context<Self>) {
         self.open = false;
-        let mode = if self.ticket_is_spec {
-            "ticket"
-        } else {
-            "internal"
-        };
         ask(
             &self.shell,
             "spec.from_ticket",
@@ -702,6 +761,19 @@ impl WriteSpec {
             cx,
         );
         cx.notify();
+    }
+
+    /// The choice's button: the spec starts in the mode chosen.
+    fn start_chosen(&mut self, cx: &mut Context<Self>) {
+        let Some((ticket, _)) = self.ticket.clone() else {
+            return;
+        };
+        let mode = if self.ticket_is_spec {
+            "ticket"
+        } else {
+            "internal"
+        };
+        self.start(ticket, Some(mode), cx);
     }
 }
 
@@ -746,7 +818,7 @@ impl Render for WriteSpec {
             })
             .action(
                 Button::primary("write-spec-start", "Write the spec").on_click(move |_, _, cx| {
-                    this.update(cx, |this, cx| this.start(cx)).ok();
+                    this.update(cx, |this, cx| this.start_chosen(cx)).ok();
                 }),
             )
             .child(Field::new(
@@ -764,7 +836,6 @@ pub fn ticket_action(
     project: &str,
     id: String,
     ticket: String,
-    title: String,
     cx: &App,
 ) -> AnyElement {
     let has = registry_of(shell, cx)
@@ -785,15 +856,31 @@ pub fn ticket_action(
             Button::secondary(SharedString::from(button_id), label)
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
-                    let (ticket, title) = (ticket.clone(), title.clone());
+                    let ticket = ticket.clone();
                     write
-                        .update(cx, |write, cx| write.act(ticket, title, window, cx))
+                        .update(cx, |write, cx| write.act(ticket, window, cx))
                         .ok();
                 })
                 .into_any_element()
         },
     )
     .into_any_element()
+}
+
+/// The "⋯" menu of a ticket's row: "Write the spec as…", while the ticket has no spec.
+pub fn ticket_menu(
+    shell: &WeakEntity<Shell>,
+    write: &Entity<WriteSpec>,
+    project: &str,
+    id: &str,
+    ticket: &str,
+    title: &str,
+    cx: &mut App,
+) -> Option<Entity<Menu>> {
+    let has = registry_of(shell, cx)
+        .and_then(|registry| registry.read(cx).specs().of_ticket(project, ticket))
+        .is_some();
+    (!has).then(|| write.update(cx, |write, cx| write.menu(id, ticket, title, cx)))
 }
 
 /// A question the writing session asked.

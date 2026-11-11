@@ -343,7 +343,7 @@ fn turning_specs_on_unfolds_its_settings(cx: &mut TestAppContext) {
     settle(cx);
     click(cx, "specs-setting-language-select-fr");
     until(&shell, cx, "the language is kept", |_| {
-        listed(&user)["settings"][0]["value"] == "fr"
+        listed(&user)["settings"][1]["value"] == "fr"
     });
 
     // Off again, its settings fold away and the switch and its line stay.
@@ -598,11 +598,6 @@ fn write_the_spec_on_a_ticket_becomes_open_the_spec_once_it_has_one(cx: &mut Tes
     );
 
     click(cx, &format!("{five}-spec"));
-    settle(cx);
-    assert!(found(cx, "write-spec-mode"));
-    click(cx, "write-spec-mode-ticket");
-    settle(cx);
-    click(cx, "write-spec-start");
     until(&shell, cx, "the daemon wrote a spec of the ticket", |_| {
         user.call("spec.list", json!({"project": "app"})).unwrap()["specs"]
             .as_array()
@@ -610,7 +605,7 @@ fn write_the_spec_on_a_ticket_becomes_open_the_spec_once_it_has_one(cx: &mut Tes
     });
     let spec = &user.call("spec.list", json!({"project": "app"})).unwrap()["specs"][0];
     assert_eq!(spec["tickets"], json!(["#5"]));
-    assert_eq!(spec["mode"], "ticket");
+    assert_eq!(spec["mode"], "internal");
     let id = spec["spec"].as_u64().unwrap();
 
     until(&shell, cx, "the row offers to open it", |cx| {
@@ -626,6 +621,92 @@ fn write_the_spec_on_a_ticket_becomes_open_the_spec_once_it_has_one(cx: &mut Tes
     until(&shell, cx, "the spec's page shows", |cx| {
         spec_page(&shell, cx).is_some_and(|page| page.read_with(cx, |p, _| p.spec() == id))
     });
+}
+
+/// Specs' default mode for specs from a ticket, in the project's own settings.
+fn project_default_mode(user: &User, mode: &str) {
+    user.call(
+        "extension.set",
+        json!({"name": "specs", "project": "app", "settings": {"mode": mode}}),
+    )
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn write_the_spec_starts_without_asking(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    project_default_mode(&user, "ticket");
+    let (shell, cx) = window(&user, cx);
+    open_project(&shell, cx);
+    click(cx, "project-tabs-tickets");
+    let (five, _) = ticket_rows(&shell, cx);
+    at_rest(cx);
+
+    click(cx, &format!("{five}-spec"));
+    // No dialog opens: the spec starts at once, in the project's default mode.
+    until(&shell, cx, "the daemon wrote a spec of the ticket", |_| {
+        user.call("spec.list", json!({"project": "app"})).unwrap()["specs"]
+            .as_array()
+            .is_some_and(|specs| specs.len() == 1)
+    });
+    settle(cx);
+    assert!(!found(cx, "write-spec-mode"));
+    let spec = &user.call("spec.list", json!({"project": "app"})).unwrap()["specs"][0];
+    assert_eq!(spec["mode"], "ticket");
+}
+
+#[gpui_kit::test]
+fn write_the_spec_as_opens_the_choice_preselected_on_the_default(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    project_default_mode(&user, "ticket");
+    let (shell, cx) = window(&user, cx);
+    open_project(&shell, cx);
+    click(cx, "project-tabs-tickets");
+    let (five, _) = ticket_rows(&shell, cx);
+    at_rest(cx);
+
+    click(cx, &format!("ticket-spec-more-{five}"));
+    let entry = format!("{five}-spec-as");
+    until(&shell, cx, "the menu opens", |cx| found(cx, &entry));
+    click(cx, &entry);
+    until(&shell, cx, "the choice opens", |cx| {
+        found(cx, "write-spec-mode")
+    });
+    settle(cx);
+    // Nothing started yet, and the default is the one chosen.
+    assert!(
+        user.call("spec.list", json!({"project": "app"})).unwrap()["specs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let chosen = |cx: &mut VisualTestContext, id: &str| {
+        cx.update(|window, _| window.find(id.to_owned()).selected() == Some(true))
+    };
+    assert!(chosen(cx, "write-spec-mode-ticket"));
+    assert!(!chosen(cx, "write-spec-mode-internal"));
+
+    // The exception: this one spec is kept in Flottille.
+    click(cx, "write-spec-mode-internal");
+    settle(cx);
+    click(cx, "write-spec-start");
+    until(&shell, cx, "the daemon wrote a spec of the ticket", |_| {
+        user.call("spec.list", json!({"project": "app"})).unwrap()["specs"]
+            .as_array()
+            .is_some_and(|specs| specs.len() == 1)
+    });
+    let spec = &user.call("spec.list", json!({"project": "app"})).unwrap()["specs"][0];
+    assert_eq!(spec["mode"], "internal");
+    // The default itself did not move.
+    assert_eq!(
+        listed(&user)["projects"][0]["settings"]["mode"],
+        "ticket",
+        "a single spec in another mode leaves the default alone"
+    );
 }
 
 #[gpui_kit::test]

@@ -712,7 +712,8 @@ impl User {
         self.call_within(method, params, Duration::from_secs(10))
     }
 
-    /// `call`, for a method that may take longer than its 10 seconds to answer.
+    /// `call`, for a method that may take longer than its 10 seconds to answer: each wait on the
+    /// socket lasts `within`, and a daemon that is still working is waited for again.
     pub fn call_within(
         &self,
         method: &str,
@@ -724,8 +725,7 @@ impl User {
         stream.set_read_timeout(Some(within)).unwrap();
         let request = serde_json::json!({"id": "1", "method": method, "params": params});
         writeln!(stream, "{request}").unwrap();
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).unwrap();
+        let line = read_line_patiently(stream);
         let answer: Value = serde_json::from_str(&line).unwrap();
         match answer.get("error") {
             Some(error) => Err((
@@ -813,6 +813,27 @@ impl User {
 
 /// The records of a fake agent, one per line. A line it is still writing is left for the next
 /// read.
+/// One line from `stream`, whose read timeout only says how often to look again: a daemon busy
+/// with a loaded machine answers late, and one that is gone closes the socket, which ends the
+/// read at once.
+pub fn read_line_patiently(stream: UnixStream) -> String {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        match reader.read_line(&mut line) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            read => {
+                read.unwrap();
+                return line;
+            }
+        }
+    }
+}
+
 fn records(file: &Path) -> Vec<Value> {
     match std::fs::read_to_string(file) {
         Ok(text) => text

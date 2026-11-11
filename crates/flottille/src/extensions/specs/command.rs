@@ -25,7 +25,8 @@ pub enum SpecAction {
         #[arg(long)]
         idea: Option<String>,
         /// alone (no ticket), internal (tickets read, never written) or ticket (the ticket is
-        /// the spec); alone without --ticket, internal with
+        /// the spec); alone without --ticket, the project's default mode (internal unless its
+        /// Specs settings say another) with
         #[arg(long, value_parser = ["alone", "internal", "ticket"])]
         mode: Option<String>,
         /// A ticket of the project's tracker the spec covers; again for each
@@ -39,8 +40,8 @@ pub enum SpecAction {
     FromTicket {
         project: String,
         ticket: String,
-        /// internal (the ticket read, never written) or ticket (the ticket is the spec); internal
-        /// by default
+        /// internal (the ticket read, never written) or ticket (the ticket is the spec); the
+        /// project's default mode when not given (internal unless its Specs settings say another)
         #[arg(long, value_parser = ["internal", "ticket"])]
         mode: Option<String>,
         #[arg(long)]
