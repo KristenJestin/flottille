@@ -447,6 +447,50 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_repositories_and_tracker(
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_once_the_repositories_were_read_again_on_focus(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("app".into()), window, cx)
+    });
+    let page = |cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).project_settings_page().cloned()
+        })
+    };
+    until(&shell, cx, "the tracker is shown", |cx| {
+        cx.update(|window, _| window.try_find("tracker-row").is_some())
+    });
+    settle(&shell, cx);
+    let checks = page(cx)
+        .unwrap()
+        .read_with(cx, |page, _| page.programs().clone());
+    let before = checks.read_with(cx, |checks, _| checks.last_request());
+
+    // The window goes away and comes back: both reads are made, and nothing keeps moving.
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    until(&shell, cx, "the programs are read again", |cx| {
+        checks.read_with(cx, |checks, _| {
+            checks.last_request() > before && !checks.is_checking()
+        })
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_project_s_features(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     idle_session(&user);

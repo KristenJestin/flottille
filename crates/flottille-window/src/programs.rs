@@ -5,14 +5,15 @@
 //! (`project.programs`, `docs/protocol.md`); the window reads when the page opens, after a change of
 //! forge or tracker and when the user asks (Check again), never in a loop.
 
-use gpui_design_system::motion::PANEL;
+use gpui_design_system::motion::{HOVER, PANEL};
 use gpui_design_system::{
-    Button, Icon, Palette, Toast, Type, hoverable, icon, palette, presence_of, space, tint, toast,
+    Button, Icon, Palette, Toast, Type, fade, hoverable, icon, palette, presence, presence_of,
+    space, tint, tipped, toast,
 };
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Context, ElementId, InteractiveElement, IntoElement,
+    AnyElement, App, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    TestSupportExt as _, WeakEntity, Window, div, px, relative,
 };
 use serde_json::Value;
 
@@ -76,7 +77,37 @@ impl ProgramState {
         }
     }
 
-    /// The state in one line: `gh 2.60.0 · signed in to github.com`.
+    /// What stands for a program whose state was never read: not known, so not ready.
+    pub fn unread(program: &str) -> Self {
+        Self {
+            program: program.to_owned(),
+            found: true,
+            ..Self::default()
+        }
+    }
+
+    /// What is left to do about it, in one line: `gh is not signed in to github.com`. Nothing
+    /// when it is ready.
+    pub fn lacks(&self) -> Option<String> {
+        let program = &self.program;
+        Some(match self.phase() {
+            Phase::Ready => return None,
+            Phase::Missing => format!("{program} not found"),
+            Phase::SignedOut => format!("{program} is not signed in to {}", self.host),
+            Phase::Elsewhere => format!(
+                "{program} is signed in to {}, not to {}",
+                self.signed_in_to.as_deref().unwrap_or_default(),
+                self.host
+            ),
+            Phase::Unknown => match &self.problem {
+                Some(why) => format!("could not tell if {program} is signed in: {why}"),
+                None => format!("could not tell if {program} is signed in"),
+            },
+        })
+    }
+
+    /// The state in one line, what the value's tooltip says: `gh 2.60.0 · signed in to
+    /// github.com`.
     pub fn said(&self) -> String {
         if !self.found {
             return format!("{} not found", self.program);
@@ -161,9 +192,15 @@ pub struct ProgramChecks {
     requests: u64,
     /// The number of the read on its way, if one is.
     waiting: Option<u64>,
+    /// Whether the user asked for the read on its way (Check again): only then is a failure said.
+    asked: bool,
+    /// The last read failed.
+    failed: bool,
+    /// A silent read was asked while one was on its way: made once that one is answered.
+    queued: bool,
 }
 
-/// What the page shows of a failed read (a toast, as for the other reads that fail).
+/// What the page shows of a failed Check again (a toast, as for the other reads that fail).
 pub fn refused_toast(why: &str) -> Toast {
     Toast::failure("The programs were not checked").detail(why.to_owned())
 }
@@ -176,6 +213,9 @@ impl ProgramChecks {
             read: None,
             requests: 0,
             waiting: None,
+            asked: false,
+            failed: false,
+            queued: false,
         }
     }
 
@@ -201,6 +241,17 @@ impl ProgramChecks {
         self.waiting.is_some()
     }
 
+    /// Whether the programs were never read: the last read failed and nothing was known before.
+    /// The page then says it on the line of each program it needs, with Check again.
+    pub fn is_unread(&self) -> bool {
+        self.failed && self.read.is_none()
+    }
+
+    /// Whether a read the user asked for is on its way.
+    pub fn is_asked(&self) -> bool {
+        self.waiting.is_some() && self.asked
+    }
+
     pub fn last_request(&self) -> u64 {
         self.requests
     }
@@ -209,10 +260,34 @@ impl ProgramChecks {
         serial == self.requests
     }
 
-    /// Reads the programs' state anew: when the page opens, after a change of forge or tracker,
-    /// and for Check again.
+    /// Reads the programs' state anew, in silence: when the tab opens, after a change of forge or
+    /// tracker and when the window takes the focus back. A read that fails changes nothing.
+    /// While a read is on its way, one more is remembered and made when it is answered, however
+    /// many are asked: a window that comes and goes asks for one read at a time, and what
+    /// changed after the one on its way began is still read.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.waiting.is_none() {
+            self.read(false, cx);
+        } else {
+            self.queued = true;
+        }
+    }
+
+    /// The same, made even when one is on its way: what a read began before a change of forge or
+    /// tracker says is not about the new one.
+    pub fn reread(&mut self, cx: &mut Context<Self>) {
+        self.read(false, cx);
+    }
+
+    /// Check again, asked by the user on the line of a program: a read that fails is said.
     pub fn check(&mut self, cx: &mut Context<Self>) {
+        self.read(true, cx);
+    }
+
+    fn read(&mut self, asked: bool, cx: &mut Context<Self>) {
         self.requests += 1;
+        // A silent read that overtakes the user's does not take their failure away.
+        self.asked = asked || self.is_asked();
         self.waiting = Some(self.requests);
         let command = Command::Programs {
             project: self.project.clone(),
@@ -230,10 +305,22 @@ impl ProgramChecks {
         }
         self.waiting = None;
         match read {
-            Ok(value) => self.read = Some(ProjectPrograms::of(&value)),
-            Err(why) => toast(refused_toast(&why), cx),
+            Ok(value) => {
+                self.read = Some(ProjectPrograms::of(&value));
+                self.failed = false;
+            }
+            Err(why) => {
+                self.failed = true;
+                if self.asked {
+                    toast(refused_toast(&why), cx);
+                }
+            }
         }
+        self.asked = false;
         cx.notify();
+        if std::mem::take(&mut self.queued) {
+            self.read(false, cx);
+        }
     }
 }
 
@@ -285,10 +372,12 @@ pub(crate) fn command_row(id: String, command: SharedString, p: Palette) -> AnyE
         .into_any_element()
 }
 
-/// The state line of a program: `✓ acli 1.3.2 · signed in to example.atlassian.net`. When the
-/// state changes from one sentence to another (not found, signed out, signed in elsewhere,
-/// ready), the old line folds away and fades out while the new one unfolds and fades in, and the
-/// ink moves from red to green with them (`tint`, as a step of a setup does).
+/// What a program that is not ready lacks, in one line: `acli not found`, `gh is not signed in
+/// to github.com`. When the state changes from one sentence to another (not found, signed out,
+/// signed in elsewhere), the old line folds away and fades out while the new one unfolds and fades
+/// in, and the ink moves from red to green when nothing is left to say: the line then folds away
+/// with its ink turned (`tint`, as a step of a setup does). A program that is ready has no line:
+/// its value says it (`ProgramValue`).
 #[derive(IntoElement)]
 struct StateLine {
     id: String,
@@ -299,50 +388,163 @@ impl RenderOnce for StateLine {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let phase = self.state.as_ref().map(ProgramState::phase);
-        let said = self.state.as_ref().map(ProgramState::said);
-        let ready = phase == Some(Phase::Ready);
-        let target = if ready { p.ok } else { p.fail };
+        let said = self.state.as_ref().and_then(ProgramState::lacks);
+        let target = if phase == Some(Phase::Ready) {
+            p.ok
+        } else {
+            p.fail
+        };
         let ink = tint(self.id.clone(), target, PANEL, window, cx);
-        div().flex().flex_col().children(Phase::ALL.map(|at| {
-            let line_id = self.id.clone();
-            // Each line keeps its own mark while it folds away.
-            let mark = if at == Phase::Ready {
-                Icon::Check
-            } else {
-                Icon::Close
-            };
-            let shown = said.clone().filter(|_| phase == Some(at));
-            presence_of(
-                format!("{}-{}", self.id, at.name()),
-                shown.map(SharedString::from),
-                move |said| {
-                    div()
-                        .id(ElementId::Name(line_id.into()))
-                        .aria_label(said.clone())
-                        .flex()
-                        .items_center()
-                        .gap(space::XS)
-                        .text_size(px(12.))
-                        .text_color(ink)
-                        .child(icon(mark).size(px(12.)).text_color(ink))
-                        .child(said)
-                        .test_support()
-                        .into_any_element()
-                },
-            )
-            .gap(space::XS)
-        }))
+        div().flex().flex_col().children(
+            Phase::ALL
+                .into_iter()
+                .filter(|at| *at != Phase::Ready)
+                .map(|at| {
+                    let line_id = self.id.clone();
+                    let shown = said.clone().filter(|_| phase == Some(at));
+                    presence_of(
+                        format!("{}-{}", self.id, at.name()),
+                        shown.map(SharedString::from),
+                        move |said| {
+                            div()
+                                .id(ElementId::Name(line_id.into()))
+                                .aria_label(said.clone())
+                                .text_size(px(12.))
+                                .text_color(ink)
+                                .child(said)
+                                .test_support()
+                                .into_any_element()
+                        },
+                    )
+                    .gap(space::XS)
+                }),
+        )
     }
 }
 
-/// The state line of a program, and under it the advice it needs: how to install it, or how to
-/// sign in. `id` names the block (`<id>-state`, `<id>-install`, `<id>-install-command`,
-/// `<id>-sign-in-0`, `-1`, each command's button `<id>-…-copy`). Every line unfolds and fades in
-/// when it comes and folds away when it goes.
+/// A labelled value that says a program's state in the one value: `GitHub · gh` and a check mark. The mark
+/// fades in when a read makes the program ready and out when it stops being; the version and the
+/// host the program is signed in to are the tooltip's. A program that is not ready has no mark:
+/// the line under it says what is missing.
+#[derive(IntoElement)]
+pub struct ProgramValue {
+    id: ElementId,
+    label_id: ElementId,
+    label: &'static str,
+    /// What comes before the program: the forge.
+    head: Option<String>,
+    program: String,
+    state: Option<ProgramState>,
+    width: f32,
+}
+
+impl ProgramValue {
+    /// `id` names the value and `label_id` its label. `program` is what the forge or the tracker
+    /// needs, known before the first read.
+    pub fn new(
+        id: impl Into<ElementId>,
+        label_id: impl Into<ElementId>,
+        label: &'static str,
+        head: Option<String>,
+        program: &str,
+        state: Option<&ProgramState>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label_id: label_id.into(),
+            label,
+            head,
+            program: program.to_owned(),
+            state: state.cloned(),
+            width: 1.,
+        }
+    }
+
+    /// Its share of the row's width.
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+}
+
+impl RenderOnce for ProgramValue {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let p = palette(cx);
+        let ready = self.state.as_ref().is_some_and(ProgramState::is_ready);
+        let mark = fade(
+            ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "ready".into()),
+            ready,
+            HOVER,
+            window,
+            cx,
+        );
+        let said = match &self.head {
+            Some(head) => format!("{head} · {}", self.program),
+            None => self.program.clone(),
+        };
+        // What the mark says to a screen reader and to a test; the icon is what is drawn.
+        let aria = if ready {
+            format!("{said}, ready")
+        } else {
+            said.clone()
+        };
+        let value = div()
+            .id(self.id)
+            .aria_label(SharedString::from(aria))
+            .flex()
+            .items_center()
+            .gap(space::XS)
+            .mono(12.)
+            .text_color(p.mute)
+            .child(
+                div()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(SharedString::from(said)),
+            )
+            .child(
+                div().flex_none().child(
+                    icon(Icon::Check)
+                        .size(px(12.))
+                        .text_color(p.ok.opacity(mark)),
+                ),
+            );
+        let value = match &self.state {
+            Some(state) => {
+                tipped(value, SharedString::from(state.said()), 18., window, cx).into_any_element()
+            }
+            None => value.test_support().into_any_element(),
+        };
+        div()
+            .w(relative(self.width))
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id(self.label_id)
+                    .aria_label(self.label)
+                    .text_size(px(11.))
+                    .text_color(p.faint)
+                    .child(self.label)
+                    .test_support(),
+            )
+            .child(value)
+    }
+}
+
+/// What a program that is not ready lacks, and under it the advice it needs: how to install it,
+/// or how to sign in, and a quiet Check again on that line only. `id` names the block
+/// (`<id>-state`, `<id>-install`, `<id>-install-command`, `<id>-sign-in-0`, `-1`, each command's
+/// button `<id>-…-copy`, and `<id>-check-again`). Every line unfolds and fades in when it comes
+/// and folds away when it goes; a program that is ready has none.
 pub fn program_block(
     id: &str,
     state: Option<&ProgramState>,
     shell: &WeakEntity<Shell>,
+    checks: &Entity<ProgramChecks>,
     cx: &App,
 ) -> impl IntoElement + use<> {
     let p = palette(cx);
@@ -390,13 +592,37 @@ pub fn program_block(
             })
         })
         .collect();
+    let waiting = checks.read(cx).is_asked();
+    let again = {
+        let checks = checks.downgrade();
+        presence(
+            format!("{id}-check-block"),
+            state.is_some_and(|state| !state.is_ready()),
+            Button::quiet(format!("{id}-check-again"), "Check again")
+                .disabled(waiting)
+                .on_click(move |_: &ClickEvent, _, cx| {
+                    // The row under it opens its dialog on a click: not this one.
+                    cx.stop_propagation();
+                    checks.update(cx, |checks, cx| checks.check(cx)).ok();
+                }),
+        )
+    };
     div()
         .flex()
-        .flex_col()
-        .child(state_line)
-        .child(install_page)
-        .child(install_command)
-        .children(sign_in)
+        .items_start()
+        .gap(space::SM)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(state_line)
+                .child(install_page)
+                .child(install_command)
+                .children(sign_in),
+        )
+        .child(div().flex_none().child(again))
 }
 
 #[cfg(test)]
