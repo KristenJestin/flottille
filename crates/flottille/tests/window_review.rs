@@ -152,13 +152,9 @@ fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
     })
 }
 
-/// The value an element says (how far something is), `None` while it is not drawn.
-fn value(cx: &mut VisualTestContext, id: &str) -> Option<f32> {
-    cx.update(|window, _| {
-        window
-            .try_find(id.to_owned())
-            .and_then(|found| found.value().and_then(|value| value.parse().ok()))
-    })
+/// How far something of a kit component was drawn (0 to 1), `None` while it never was.
+fn value(_: &mut VisualTestContext, id: &str) -> Option<f32> {
+    gpui_design_system::seen::seen(id.to_owned())
 }
 
 /// The height the review's agents take in the rail once a frame is drawn; `None` when they are
