@@ -1092,8 +1092,8 @@ fn a_check_s_unreadable_instructions_say_the_check_and_the_file_only(cx: &mut Te
     let check = said(cx, "review-standards-guidance-error");
     assert_eq!(
         check,
-        "Project rules does not run until this is fixed: review-standards.md is not UTF-8 text: \
-         write it again, or reset it."
+        "The Project rules check does not run until this is fixed: review-standards.md is not \
+         UTF-8 text: write it again, or reset it."
     );
     let shared = said(cx, "review-guidance-error");
     assert!(shared.contains("review.md"), "{shared}");

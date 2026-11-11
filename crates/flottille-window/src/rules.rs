@@ -621,7 +621,7 @@ impl Render for RulesEditor {
             }
         };
         // A check's instructions are the field and its buttons alone, under the check's line.
-        if self.check.is_some() {
+        if let Some((_, _, title)) = &self.check {
             return div()
                 .flex()
                 .flex_col()
@@ -634,9 +634,8 @@ impl Render for RulesEditor {
                             .as_ref()
                             .and_then(|shown| shown.error.clone())
                             .map(|error| {
-                                let title = self.check.as_ref().map_or("", |(_, _, title)| title);
                                 SharedString::from(format!(
-                                    "{title} does not run until this is fixed: {error}."
+                                    "The {title} check does not run until this is fixed: {error}."
                                 ))
                             }),
                         line(id("error")),
@@ -823,7 +822,9 @@ impl Render for RulesEditor {
                         .and_then(|shown| shown.error.clone())
                         .map(|error| {
                             SharedString::from(if let Some((_, title)) = &self.part {
-                                format!("{title} does not run until this is fixed: {error}.")
+                                format!(
+                                    "The {title} check does not run until this is fixed: {error}."
+                                )
                             } else if compaction {
                                 format!("Every compaction fails until this is fixed: {error}.")
                             } else {
