@@ -282,7 +282,7 @@ fn says_no_ready(name: Option<&str>) -> Outcome {
     Outcome::Refused(match name {
         Some(name) => format!(
             "refused: task {name} says no ready (a line it prints, an address that answers or a \
-             command that passes), so Flottille cannot tell when it is ready; it tells you when \
+             command that succeeds), so Flottille cannot tell when it is ready; it tells you when \
              the run ends, without notify"
         ),
         None => "refused: a line says no ready: only a task that says when it is ready can \
@@ -1338,7 +1338,7 @@ fn state_text(end: Option<End>, by_user: bool) -> String {
         Some(End {
             state: RunState::Interrupted,
             ..
-        }) => "was interrupted: the daemon that ran it stopped".to_owned(),
+        }) => "was interrupted: Flottille stopped while it ran".to_owned(),
         Some(End {
             state: RunState::Running,
             ..

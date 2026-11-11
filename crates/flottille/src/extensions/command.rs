@@ -50,7 +50,7 @@ fn review(paths: &Paths, session: &str, json: bool) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     println!(
-        "Started the review of session {session}, round {}: its pilot is agent {}, its passes {}. \
+        "Started the review of session {session}, round {}: its lead is agent {}, its checks {}. \
          The findings are delivered to the session; `flottille agent show {session}` follows it.",
         answer["round"],
         answer["pilot"].as_str().unwrap_or_default(),

@@ -413,7 +413,7 @@ review of the session runs, when its workspace has no change from its base, and 
 
 ```
 $ flottille review a1b2c3d4e5f6
-Started the review of session a1b2c3d4e5f6, round 1: its pilot is agent 0f1e2d3c4b5a, its passes bugs, standards. The findings are delivered to the session; `flottille agent show a1b2c3d4e5f6` follows it.
+Started the review of session a1b2c3d4e5f6, round 1: its lead is agent 0f1e2d3c4b5a, its checks bugs, standards. The findings are delivered to the session; `flottille agent show a1b2c3d4e5f6` follows it.
 ```
 
 ## Projects
@@ -697,7 +697,7 @@ why, and the others kept; a remote branch never is.
 
 ```
 $ flottille workspace remove shop login
-Removed workspace login of shop: its worktrees and its folder. Its branch shop/login was deleted in web: its pull request #12 is merged. It is kept in api: its pull request #13 is open, not merged.
+Removed workspace login of shop: its copies of the repositories and its folder. Its branch shop/login was deleted in web: its pull request #12 is merged. It is kept in api: its pull request #13 is open, not merged.
 ```
 
 ## Commands

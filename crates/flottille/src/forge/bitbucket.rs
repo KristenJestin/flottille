@@ -68,7 +68,7 @@ pub(super) async fn json(args: &[&str]) -> Result<Value, String> {
 }
 
 fn missing() -> String {
-    "bkt, Bitbucket's command line, is not on the daemon's PATH: install it \
+    "Flottille cannot find bkt, Bitbucket's command line: install it \
      (https://github.com/avivsinai/bitbucket-cli) and sign in with `bkt auth login <url>` to see \
      the pull requests; the rest of Flottille works without it"
         .into()

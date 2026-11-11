@@ -1407,7 +1407,7 @@ fn run_flottille_project_list_is_refused_by_the_gate() {
     for line in ["flottille project list", "env flottille daemon stop"] {
         let text = refused(mcp.call("run", json!({"line": line})));
         assert!(
-            text.starts_with("refused: flottille drives the daemon"),
+            text.starts_with("refused: the flottille command drives Flottille"),
             "{line}: {text}"
         );
     }

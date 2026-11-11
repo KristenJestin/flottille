@@ -1093,7 +1093,7 @@ pub fn doing(daemon: &Daemon, agent: &Agent) -> String {
             "waiting for its parent's answer".into()
         }
         _ if agent.waiting_on_answer && waits_on_pilot(daemon, agent) => {
-            "waiting for its pilot's answer".into()
+            "waiting for its lead's answer".into()
         }
         _ if agent.waiting_on_answer => "waiting for the user's answer".into(),
         _ => match crate::subscriptions::waiting_for(daemon, &agent.id) {

@@ -613,13 +613,13 @@ fn a_missing_or_signed_out_cli_is_said_with_what_to_do_and_nothing_else_breaks()
 
     let said = github["problem"].as_str().expect("a problem is said");
     assert!(
-        said.contains("gh, GitHub's command line, is not on"),
+        said.contains("Flottille cannot find gh, GitHub's command line"),
         "{said}"
     );
     assert!(said.contains("gh auth login"), "{said}");
     let said = jira["problem"].as_str().expect("a problem is said");
     assert!(
-        said.contains("acli, Atlassian's command line, is not on"),
+        said.contains("Flottille cannot find acli, Atlassian's command line"),
         "{said}"
     );
     assert!(said.contains("acli jira auth login"), "{said}");
@@ -629,7 +629,7 @@ fn a_missing_or_signed_out_cli_is_said_with_what_to_do_and_nothing_else_breaks()
     assert!(output.status.success());
     let shown = String::from_utf8_lossy(&output.stdout);
     assert!(
-        shown.contains("Ticket ABC-1: it could not be read: acli"),
+        shown.contains("Ticket ABC-1: it could not be read: Flottille cannot find acli"),
         "{shown}"
     );
     assert!(shown.contains("Steps:"), "{shown}");

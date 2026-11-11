@@ -265,7 +265,7 @@ preparation. Then nothing is touched unless:
   deleted, each counted as kept in the other. A commit made after, a pull request not merged, a forge that
   cannot be read or none declared still refuse; uncommitted files refuse, integrated or not;
 - outside the worktrees made, the workspace folder holds nothing but the links Flottille made and
-  folders holding nothing else (`<path> is in no worktree`): no `git status` sees a file written in
+  folders holding nothing else (`<path> is in no repository`): no `git status` sees a file written in
   the folder of a workspace that does not take the root repository, nor in a repository folder
   whose `.git` is gone, and removing the folder would take it.
 

@@ -562,7 +562,7 @@ pub fn end_session() -> Verdict {
 
 /// Why `agent_stop` of a session the caller leads is to judge: it is the caller's own job, ended
 /// as a call of its tree is, in its mode.
-pub const END_LED: &str = "it ends a session this agent started as led and pilots, with its \
+pub const END_LED: &str = "it ends a session this agent started as led and leads, with its \
     tree, its runs and what was queued for it; its workspace stays";
 
 /// `agent_stop` of a session the caller leads: judged as any call of its tree, never held
@@ -1451,7 +1451,7 @@ fn refusal(layer: &[String]) -> Option<String> {
     }
     match program {
         "flottille" => Some(
-            "refused: flottille drives the daemon, and agents act only through their tools: \
+            "refused: the flottille command drives Flottille, and agents act only through their tools: \
              ask the user to run it"
                 .into(),
         ),

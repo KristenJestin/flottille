@@ -576,7 +576,7 @@ async fn run_one(at: &Where<'_>, line: &str, file: &Path, checked: Checked) -> R
     let not_run = |why: String| {
         format!(
             "refused: the message check `{shown}` could not run ({why}); a check that does not \
-             run never passes: {}",
+             run never succeeds: {}",
             checked.nothing()
         )
     };

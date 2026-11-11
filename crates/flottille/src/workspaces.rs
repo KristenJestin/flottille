@@ -2527,7 +2527,7 @@ async fn remove_held(
             .await
             .map_err(|error| {
                 Failure::refused(format!(
-                    "cannot remove the worktree of {}: {error}",
+                    "cannot remove the copy of {}: {error}",
                     worktree.path
                 ))
             })?;
@@ -2567,7 +2567,7 @@ async fn remove_held(
             .any(|line| line.strip_prefix("worktree ") == Some(&*dir.to_string_lossy()))
         {
             return Err(Failure::refused(format!(
-                "git still lists the worktree {} of {}",
+                "git still lists the copy {} of {}",
                 dir.display(),
                 worktree.path
             )));
@@ -3028,7 +3028,7 @@ pub async fn workspace_remove(
         }
     };
     let mut said = format!(
-        "Workspace {} of project {} is removed: its worktrees and its folder are gone.",
+        "Workspace {} of project {} is removed: its copies of the repositories and its folder are gone.",
         workspace.name, workspace.project
     );
     if approved.is_some() {
@@ -3048,7 +3048,7 @@ pub async fn workspace_remove(
 
 fn cannot_check(repository: &str, error: &str) -> Failure {
     Failure::refused(format!(
-        "cannot check the worktree of {repository}, nothing was touched: {error}"
+        "cannot check the copy of {repository}, nothing was touched: {error}"
     ))
 }
 
@@ -3090,7 +3090,7 @@ fn outside_worktrees(workspace: &Workspace, made: &[PathBuf]) -> Result<Vec<Stri
         .iter()
         .map(|path| {
             let shown = path.strip_prefix(&workspace.folder).unwrap_or(path);
-            format!("{} is in no worktree", shown.display())
+            format!("{} is in no repository", shown.display())
         })
         .collect())
 }

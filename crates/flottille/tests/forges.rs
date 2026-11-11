@@ -332,7 +332,7 @@ fn gh_missing_is_said_once_and_nothing_else_breaks() {
 
     let problem = first["problem"].as_str().expect("a problem is said");
     assert!(
-        problem.contains("gh, GitHub's command line, is not on"),
+        problem.contains("Flottille cannot find gh, GitHub's command line"),
         "{problem}"
     );
     assert!(problem.contains("gh auth login"), "what to do: {problem}");
@@ -350,11 +350,7 @@ fn gh_missing_is_said_once_and_nothing_else_breaks() {
     let said = stored(&user, "workspace.forge");
     assert_eq!(said.len(), 1, "said once: {said:?}");
     let log = std::fs::read_to_string(user.path("state/flottille/daemon.log")).unwrap();
-    assert_eq!(
-        log.matches("is not on the daemon's PATH").count(),
-        1,
-        "{log}"
-    );
+    assert_eq!(log.matches("Flottille cannot find").count(), 1, "{log}");
     // The rest works: the workspace is shown, by the daemon and by the command line.
     assert_eq!(
         user.call("workspace.show", json!({"project": "app", "name": "login"}))
@@ -365,7 +361,7 @@ fn gh_missing_is_said_once_and_nothing_else_breaks() {
     assert!(output.status.success());
     let shown = String::from_utf8_lossy(&output.stdout);
     assert!(
-        shown.contains("Pull requests:\n  gh, GitHub's command line"),
+        shown.contains("Pull requests:\n  Flottille cannot find gh, GitHub's command line"),
         "{shown}"
     );
 }
@@ -1477,7 +1473,7 @@ fn bkt_missing_is_said_once_for_bitbucket_and_github_is_still_read() {
 
     let problem = forge["problem"].as_str().expect("a problem is said");
     assert!(
-        problem.contains("bkt, Bitbucket's command line, is not on"),
+        problem.contains("Flottille cannot find bkt, Bitbucket's command line"),
         "{problem}"
     );
     assert!(problem.contains("bkt auth login"), "what to do: {problem}");

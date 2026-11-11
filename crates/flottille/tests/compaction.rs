@@ -437,7 +437,7 @@ fn none_leaves_each_cli_to_compact_on_its_own() {
     let refused = user
         .call("agent.compact", json!({"agent": agent}))
         .unwrap_err();
-    assert!(refused.1.contains("no compactor"), "{refused:?}");
+    assert!(refused.1.contains("no compaction model"), "{refused:?}");
     let shown = user.call("compaction.show", json!({})).unwrap();
     assert_eq!(shown["compactor"], Value::Null, "{shown}");
 }
@@ -819,7 +819,7 @@ fn handoff_script(handoff: Value) -> Value {
         {"when": "RUSH", "times": 1, "do": [{"say": "Working on it."},
             {"usage": {"used": 160_000, "size": 200_000}}, {"hold": "release"}]},
         {"when": "your_handoff", "do": [{"say": "Picking up."}, {"usage": {"used": 9_000, "size": 200_000}}]},
-        {"when": "handoff is missing", "do": [{"say": "Starting again."}, {"usage": {"used": 9_000, "size": 200_000}}]}
+        {"when": "summary is missing", "do": [{"say": "Starting again."}, {"usage": {"used": 9_000, "size": 200_000}}]}
     ]})
 }
 
@@ -1010,11 +1010,11 @@ fn a_failed_handoff_starts_from_the_store_and_says_the_summary_is_missing() {
     eventually("the new session", || {
         prompts(&user)
             .iter()
-            .any(|p| p.contains("handoff is missing"))
+            .any(|p| p.contains("summary is missing"))
     });
     let first = prompts(&user)
         .into_iter()
-        .find(|p| p.contains("handoff is missing"))
+        .find(|p| p.contains("summary is missing"))
         .unwrap();
     assert!(first.contains("<flottille_state>"), "{first}");
     assert!(
