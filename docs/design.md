@@ -1160,7 +1160,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   §5.7); under it a switch, "Resume when the quota resets" ("A session stopped by its quota goes
   on at the reset. Each session can change it in its composer."), off by default, §5.9.
   **Approvals** holds the **Auto judge**, drawn as a feature's page (`reference/gpui.md`, rule
-  14): its switch, "Let a model decide in Auto" ("The rules pass what is known to be harmless;
+  14): its switch, "Let a model decide in Auto" ("The rules let through what is known to be harmless;
   the model allows the rest or asks you. It never denies."), its usage line ("Used by sessions in
   **Auto**, chosen in each session's composer. Base calls always come to you."), then its model
   (`ModelChoice`, rule 15) and the line "Each decision is a turn of this model, on your own

@@ -270,7 +270,7 @@ fn a_compactor_flottille_picked_is_said_once_in_a_notice_that_opens_settings(
     settle(cx);
     let said = label(cx, "compaction-notice-text").unwrap();
     assert!(
-        said.contains("Flottille chose Claude haiku as your compactor"),
+        said.contains("Flottille chose Claude haiku as your compaction model"),
         "{said}"
     );
 

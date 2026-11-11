@@ -264,11 +264,11 @@ impl ProjectRepositories {
                     None => None,
                     Some(Busy::Adding(path)) => Some(
                         Toast::success(format!("{} added to {project}", label(path)))
-                            .detail("New workspaces take a worktree of it."),
+                            .detail("New workspaces work on their own copy of it."),
                     ),
                     Some(Busy::Removing(path)) => Some(
                         Toast::success(format!("{} removed from {project}", label(path)))
-                            .detail("Detect again finds it."),
+                            .detail("Checking again finds it."),
                     ),
                     Some(Busy::Detecting) => Some(Toast::success("Detected again").detail(
                         match read.new.as_slice() {
@@ -317,7 +317,7 @@ impl ProjectRepositories {
         )
         .sentence(
             "New workspaces no longer take it. The repository itself is not touched, nor the \
-             worktrees of the workspaces that took it; Detect again finds it.",
+             workspaces that took it; checking again finds it.",
         )
         .action("Remove repository")
         .open(self.confirming.is_some())
