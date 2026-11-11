@@ -346,6 +346,84 @@ fn a_feature_off_shows_its_switch_sentence_and_usage_line_only(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
+fn the_usage_line_says_how_to_choose_another_mode(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, cx);
+    tab(&shell, cx, "features");
+    until(&shell, cx, "the features are listed", |cx| {
+        present(cx, "features-specs")
+    });
+    click(cx, "features-specs");
+    until(&shell, cx, "its page is in", |cx| {
+        visible(cx, "specs-usage")
+    });
+
+    assert_eq!(
+        label(cx, "specs-usage").as_deref(),
+        Some(
+            "Write the spec on a ticket starts it at once, in the mode below. New spec on a \
+             project's Specs tab starts one with no ticket. For a single spec in another mode: \
+             Write the spec as… in the ticket's ⋯ menu."
+        )
+    );
+}
+
+#[gpui_kit::test]
+fn from_a_ticket_offers_two_radios_and_keeps_the_spec_in_flottille_by_default(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    user.call("extension.set", json!({"name": "specs", "enabled": true}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, cx);
+    tab(&shell, cx, "features");
+    until(&shell, cx, "the features are listed", |cx| {
+        present(cx, "features-specs")
+    });
+    click(cx, "features-specs");
+    until(&shell, cx, "its setting is in", |cx| {
+        present(cx, "specs-setting-mode-label")
+    });
+    settle(cx);
+
+    assert_eq!(
+        label(cx, "specs-setting-mode-label").as_deref(),
+        Some("From a ticket")
+    );
+    assert_eq!(
+        label(cx, "specs-setting-mode-internal").as_deref(),
+        Some("Kept in Flottille")
+    );
+    assert_eq!(
+        label(cx, "specs-setting-mode-ticket").as_deref(),
+        Some("Written to the ticket")
+    );
+    // Alone is no choice, and the words of the store are not shown.
+    assert!(!present(cx, "specs-setting-mode-alone"));
+    let chosen = |cx: &mut VisualTestContext, id: &str| {
+        cx.update(|window, _| window.find(id.to_owned()).selected() == Some(true))
+    };
+    assert!(chosen(cx, "specs-setting-mode-internal"));
+
+    click(cx, "specs-setting-mode-ticket");
+    until(&shell, cx, "the daemon has the default", |_| {
+        let listed = user.call("extension.list", json!({})).unwrap();
+        listed["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "specs")
+            .is_some_and(|specs| specs["settings"][0]["value"] == "ticket")
+    });
+    until(&shell, cx, "the choice moves", |cx| {
+        settle(cx);
+        chosen(cx, "specs-setting-mode-ticket")
+    });
+}
+
+#[gpui_kit::test]
 fn the_compaction_s_rare_settings_are_under_more_settings(cx: &mut TestAppContext) {
     let user = user().with_compactor(json!([{"say": "A summary."}]), "");
     let (shell, cx) = window(&user, cx);

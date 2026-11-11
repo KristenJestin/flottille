@@ -1023,22 +1023,36 @@ impl ProjectItems {
             .test_support();
         let this = cx.weak_entity();
         let clicked = row.clone();
-        let action = (row.kind == "ticket" && self.specs_on(cx)).then(|| {
+        let writes = row.kind == "ticket" && self.specs_on(cx);
+        let action = writes.then(|| {
             specs::ticket_action(
                 &self.shell,
                 &self.write_spec,
                 &self.project,
                 id.clone(),
                 row.label(),
-                row.title.clone(),
                 cx,
             )
         });
+        let menu = writes
+            .then(|| {
+                specs::ticket_menu(
+                    &self.shell,
+                    &self.write_spec,
+                    &self.project,
+                    &id,
+                    &row.label(),
+                    &row.title,
+                    cx,
+                )
+            })
+            .flatten();
         let found = self.found(row).filter(|_| !self.query.trim().is_empty());
         ListRow::new(ElementId::Name(id.into()), row.title.clone())
             .leading(leading)
             .below(below)
             .when_some(action, |r, action| r.trailing(action))
+            .when_some(menu, |r, menu| r.more(menu))
             .when_some(found, |r, found| r.pieces(found.pieces(&row.title)))
             .on_click(move |_, _, cx| {
                 this.update(cx, |this, cx| this.open_detail(clicked.clone(), cx))
