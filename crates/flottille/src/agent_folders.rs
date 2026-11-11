@@ -143,6 +143,9 @@ pub struct Snapshot {
     whole: BTreeSet<PathBuf>,
     /// The content of each file, when it is not too large to keep.
     contents: BTreeMap<PathBuf, Vec<u8>>,
+    /// The files written between the walk that noted them and the read of their content: none
+    /// is kept.
+    changed: BTreeSet<PathBuf>,
     /// The repositories whose folder is outside the place, reached through a link or not: their
     /// agent folders are not looked at, and the result says so.
     unreached: Vec<PathBuf>,
@@ -157,6 +160,9 @@ pub struct Restored {
     /// Changed, but too large to have been kept, below a folder that is no longer a real one, or
     /// the disk refused to put it back.
     pub left: Vec<String>,
+    /// Of `left`, those written while the agent folders were noted, before the run: how they
+    /// were before it is not known, and they are moved to `kept`.
+    pub changed: Vec<String>,
     /// Where what was removed or overwritten was moved, when there was any.
     pub kept: Option<PathBuf>,
     /// The place has more entries than are looked at: what is past them was not checked.
@@ -167,6 +173,26 @@ pub struct Restored {
     /// The agent folders could not be noted before the run (the snapshot failed): nothing it
     /// changed there is known, nor put back.
     pub missing: bool,
+}
+
+impl Restored {
+    /// Adds what the put-back of the place `at`, inside this one, did: its entries relative to
+    /// this place, and the folder it kept them in, `at` left out.
+    fn take_in(&mut self, at: &Path, inner: Restored) {
+        let shown = |path: String| at.join(path).display().to_string();
+        self.put_back.extend(inner.put_back.into_iter().map(shown));
+        self.left.extend(inner.left.into_iter().map(shown));
+        self.changed.extend(inner.changed.into_iter().map(shown));
+        let kept = inner.kept.and_then(|kept| {
+            kept.ancestors()
+                .nth(at.components().count())
+                .map(Path::to_owned)
+        });
+        self.kept = self.kept.take().or(kept);
+        self.unchecked |= inner.unchecked;
+        self.unreached.extend(inner.unreached);
+        self.missing |= inner.missing;
+    }
 }
 
 impl Snapshot {
@@ -216,8 +242,12 @@ impl Snapshot {
             &skipped,
             Some(&mut contents),
         );
-        let (mut entries, mut complete, mut whole) =
-            (walked.entries, walked.complete, walked.whole);
+        let (mut entries, mut complete, mut whole, mut changed) = (
+            walked.entries,
+            walked.complete,
+            walked.whole,
+            walked.changed,
+        );
         let mut tops = own_tops;
         for (at, snapshot) in inside {
             tops.extend(snapshot.tops.iter().map(|top| at.join(top)));
@@ -234,6 +264,7 @@ impl Snapshot {
                     .iter()
                     .map(|(path, content)| (at.join(path), content.clone())),
             );
+            changed.extend(snapshot.changed.iter().map(|path| at.join(path)));
             complete &= snapshot.complete;
             unreached.extend(snapshot.unreached.iter().cloned());
         }
@@ -246,6 +277,7 @@ impl Snapshot {
             tops,
             whole,
             contents,
+            changed,
             unreached,
             missing: false,
         }
@@ -254,7 +286,7 @@ impl Snapshot {
     /// Puts back what changed in the agent folders since the snapshot: what was added is
     /// removed, what was changed or removed is written again. What is removed or overwritten is
     /// moved first to the folder `run` of the snapshot's `kept`, never lost.
-    pub fn restore(&self, run: &str) -> Restored {
+    pub fn restore(&self, run: impl AsRef<Path>) -> Restored {
         held(&self.root.join(".put-back"));
         let kept = &self.kept.join(run);
         let walked = walk(
@@ -337,15 +369,20 @@ impl Snapshot {
                 }
                 _ => {}
             }
-            let put = match now {
+            let moved = match now {
                 Some(Kind::Folder) => remove_folder(top, path),
                 Some(_) => keep(top, path, kept, &mut restored.kept),
                 None => Ok(()),
-            }
-            .and_then(|()| self.write(top, path, kind));
-            match put {
+            };
+            let kept_aside = moved.is_ok() && now.is_some_and(|now| *now != Kind::Folder);
+            match moved.and_then(|()| self.write(top, path, kind)) {
                 Ok(()) => restored.put_back.push(shown(path)),
-                Err(_) => restored.left.push(shown(path)),
+                Err(_) => {
+                    if kept_aside && self.changed.contains(path) {
+                        restored.changed.push(shown(path));
+                    }
+                    restored.left.push(shown(path));
+                }
             }
         }
         restored
@@ -520,7 +557,7 @@ fn read_open(file: &std::fs::File) -> std::io::Result<Vec<u8>> {
 
 /// `read_file`, when the file read is still the one `noted`: the same inode, size and times,
 /// looked at once it is read, so that a write before or while it was read is seen.
-fn read_noted(folder: BorrowedFd, name: &OsStr, noted: &Kind) -> std::io::Result<Vec<u8>> {
+fn read_noted(folder: BorrowedFd, name: &OsStr, noted: &Kind) -> std::io::Result<Option<Vec<u8>>> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | crate::nofollow::READ;
     let file = std::fs::File::from(rustix::fs::openat(folder, name, flags, Mode::empty())?);
     let content = read_open(&file)?;
@@ -539,9 +576,9 @@ fn read_noted(folder: BorrowedFd, name: &OsStr, noted: &Kind) -> std::io::Result
         || (stat.st_mtime as i64, stat.st_mtime_nsec as i64) != *modified
         || (stat.st_ctime as i64, stat.st_ctime_nsec as i64) != *changed
     {
-        return Err(std::io::Error::other("written since it was noted"));
+        return Ok(None);
     }
-    Ok(content)
+    Ok(Some(content))
 }
 
 /// Copies the file `name` of `folder` to `to`, where it is not yet, a piece at a time: never
@@ -584,6 +621,8 @@ struct Walked {
     complete: bool,
     /// The tops whose agent folders were all looked at, whatever the rest of the place.
     whole: BTreeSet<PathBuf>,
+    /// The files written between the walk and the read of their content.
+    changed: BTreeSet<PathBuf>,
 }
 
 /// A walk of the place, its folders opened below it without going through a link, and what is
@@ -600,6 +639,8 @@ struct Walk<'a> {
     held: u64,
     /// The files not too large to keep and their size, read once all are found.
     wanted: Vec<(PathBuf, u64)>,
+    /// The files of `wanted` written since they were noted.
+    changed: BTreeSet<PathBuf>,
     entries: BTreeMap<PathBuf, Kind>,
 }
 
@@ -621,6 +662,7 @@ fn walk(
         entries: BTreeMap::new(),
         complete: true,
         whole: BTreeSet::new(),
+        changed: BTreeSet::new(),
     };
     let Ok(top) = open_root(root) else {
         return walked;
@@ -635,6 +677,7 @@ fn walk(
         contents,
         held: 0,
         wanted: Vec::new(),
+        changed: BTreeSet::new(),
         entries: BTreeMap::new(),
     };
     let mut seen = 0;
@@ -648,6 +691,7 @@ fn walk(
         && walked.whole.len() == tops.len();
     walk.read_wanted();
     walked.entries = walk.entries;
+    walked.changed = walk.changed;
     walked
 }
 
@@ -734,11 +778,15 @@ impl Walk<'_> {
             };
             // Written since it was noted, its content is not the one before the run: none is
             // kept, and a change is said, not put back.
-            if let Ok(content) = read_noted(folder.as_fd(), name, &self.entries[&path])
-                && self.held + content.len() as u64 <= KEPT_TOTAL
-            {
-                self.held += content.len() as u64;
-                contents.insert(path, content);
+            match read_noted(folder.as_fd(), name, &self.entries[&path]) {
+                Ok(Some(content)) if self.held + content.len() as u64 <= KEPT_TOTAL => {
+                    self.held += content.len() as u64;
+                    contents.insert(path, content);
+                }
+                Ok(None) => {
+                    self.changed.insert(path);
+                }
+                _ => {}
             }
         }
     }
@@ -790,7 +838,14 @@ fn top_of(path: &Path) -> Option<PathBuf> {
 /// What the run's result says of the agent folders it changed, once put back.
 pub fn said(restored: &Restored) -> Option<String> {
     let mut text = String::new();
-    if !restored.put_back.is_empty() || !restored.left.is_empty() {
+    // Those written while the agent folders were noted are not the run's writes: said apart.
+    let left: Vec<&String> = restored
+        .left
+        .iter()
+        .filter(|path| !restored.changed.contains(path))
+        .collect();
+    let wrote = !restored.put_back.is_empty() || !left.is_empty();
+    if wrote {
         text = format!(
             "\nflottille: refused: this run wrote in a repository's agent folder ({}): its \
              settings and hooks run programs the next time the user opens that repository with \
@@ -799,7 +854,7 @@ pub fn said(restored: &Restored) -> Option<String> {
             restored
                 .put_back
                 .iter()
-                .chain(&restored.left)
+                .chain(left.iter().copied())
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -810,10 +865,13 @@ pub fn said(restored: &Restored) -> Option<String> {
                 restored.put_back.join(", ")
             ));
         }
-        if !restored.left.is_empty() {
+        if !left.is_empty() {
             text.push_str(&format!(
                 "; Flottille could not put back: {}, tell the user",
-                restored.left.join(", ")
+                left.iter()
+                    .map(|path| path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if let Some(kept) = &restored.kept {
@@ -822,6 +880,26 @@ pub fn said(restored: &Restored) -> Option<String> {
                 kept.display()
             ));
         }
+    }
+    if !restored.changed.is_empty() {
+        let kept = restored
+            .kept
+            .as_deref()
+            .map_or("Flottille's state folder".into(), |kept| {
+                kept.display().to_string()
+            });
+        text.push_str(&format!(
+            "{}{} changed while Flottille noted the agent folders of this place at the run's \
+             start, so how they were before it is not known: they are not put back but moved to \
+             {}, tell the user",
+            if text.is_empty() {
+                "\nflottille: "
+            } else {
+                "; "
+            },
+            restored.changed.join(", "),
+            kept
+        ));
     }
     if restored.unchecked {
         text.push_str(&format!(
@@ -837,13 +915,20 @@ pub fn said(restored: &Restored) -> Option<String> {
         ));
     }
     if restored.missing {
+        // Those of places inside it may have been noted, and put back.
+        let noted = !restored.put_back.is_empty() || !restored.left.is_empty();
         text.push_str(&format!(
-            "{}the agent folders of this place could not be noted before the run: what it \
-             changed there is neither known nor put back, tell the user",
+            "{}{} could not be noted before the run: what it changed there is neither known \
+             nor put back, tell the user",
             if text.is_empty() {
                 "\nflottille: refused: "
             } else {
                 "; "
+            },
+            if noted {
+                "the rest of the agent folders of this place"
+            } else {
+                "the agent folders of this place"
             }
         ));
     }
@@ -863,7 +948,7 @@ pub fn said(restored: &Restored) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    if !restored.put_back.is_empty() || !restored.left.is_empty() {
+    if wrote {
         text.push_str("; ask the user to make the change");
     }
     text.push('\n');
@@ -904,6 +989,9 @@ struct Group {
     /// The file that says the place is guarded until it is put back: one left at the daemon's
     /// start was not (`interrupted`).
     marker: PathBuf,
+    /// The groups it took in, relative to it, with their snapshots and markers, when its own
+    /// snapshot failed once its runs had all ended: its put-back puts them back.
+    taken_in: Vec<(PathBuf, Taken, PathBuf)>,
 }
 
 /// A group's snapshot, once taken.
@@ -1115,10 +1203,13 @@ impl Guards {
                             .map(|group| {
                                 let (closed, closing) = watch::channel(false);
                                 group.closing = Some(closing);
-                                (group.snapshot.clone(), closed, group.marker.clone())
+                                let (snapshot, marker) =
+                                    (group.snapshot.clone(), group.marker.clone());
+                                (snapshot, closed, marker, group.root.clone())
                             });
-                        if let Some((snapshot, closed, marker)) = dead {
-                            put_back_again(self.groups.clone(), snapshot, closed, marker).await;
+                        if let Some((snapshot, closed, marker, root)) = dead {
+                            put_back_again(self.groups.clone(), snapshot, closed, marker, root)
+                                .await;
                         }
                     }
                 }
@@ -1168,6 +1259,7 @@ impl Guards {
             snapshot: snapshot.clone(),
             closing: None,
             marker: marker.clone(),
+            taken_in: Vec::new(),
         });
         let (home, kept, at) = (home.map(Path::to_owned), kept.to_owned(), root.to_owned());
         let (tops, groups) = (tops.to_vec(), self.groups.clone());
@@ -1212,7 +1304,8 @@ impl Guards {
 
 /// The group whose snapshot `taken` could not be taken gives back the groups it took in, their
 /// own snapshots kept for the runs still going on there: refused, it strands none of them. One
-/// whose runs all ended meanwhile is put back now.
+/// whose runs all ended meanwhile is put back now; when the group's own runs all ended too, by
+/// its put-back, waiting for the snapshot, which tells it to the last of them.
 async fn split(
     groups: &Arc<std::sync::Mutex<Vec<Group>>>,
     taken: &watch::Sender<Option<Taken>>,
@@ -1223,29 +1316,48 @@ async fn split(
     let mut ended = Vec::new();
     {
         let mut groups = locked(groups);
-        // Its runs all ended while it was taken: its put-back waits for it and says it missing.
         let Some(at) = groups
             .iter()
-            .position(|group| group.snapshot.same_channel(&this) && group.closing.is_none())
+            .position(|group| group.snapshot.same_channel(&this))
         else {
             return;
         };
-        let outer = groups.remove(at);
+        // Its runs all ended while it was taken: its put-back, waiting for it, puts back the
+        // groups it took in, and removes it and its marker.
+        if groups[at].closing.is_some() {
+            let outer = &mut groups[at];
+            for group in inside {
+                let relative = group
+                    .root
+                    .strip_prefix(&outer.root)
+                    .map(Path::to_owned)
+                    .unwrap_or_default();
+                let snapshot = group.snapshot.borrow().clone().flatten();
+                outer.taken_in.push((relative, snapshot, group.marker));
+            }
+            return;
+        }
         let _ = std::fs::remove_file(marker);
+        let runs = groups.remove(at).runs;
         for mut group in inside {
-            group.runs.retain(|run| outer.runs.contains(run));
+            group.runs.retain(|run| runs.contains(run));
             if !group.runs.is_empty() {
                 groups.push(group);
                 continue;
             }
             let (closed, closing) = watch::channel(false);
             group.closing = Some(closing);
-            ended.push((group.snapshot.clone(), closed, group.marker.clone()));
+            ended.push((
+                group.snapshot.clone(),
+                closed,
+                group.marker.clone(),
+                group.root.clone(),
+            ));
             groups.push(group);
         }
     }
-    for (snapshot, closed, marker) in ended {
-        put_back_again(groups.clone(), snapshot, closed, marker).await;
+    for (snapshot, closed, marker, root) in ended {
+        put_back_again(groups.clone(), snapshot, closed, marker, root).await;
     }
 }
 
@@ -1325,18 +1437,47 @@ async fn put_back(
         Err(_) => None,
     };
     // Not taken, nothing is known of what the runs changed: said, never passed over.
-    let missing = Restored {
+    let missing = || Restored {
         missing: true,
         ..Restored::default()
     };
+    let this = closed.subscribe();
     let restored = match taken {
-        Some(taken) => tokio::task::spawn_blocking(move || taken.restore(&run))
+        Some(taken) => tokio::task::spawn_blocking(move || taken.restore(Path::new(&run)))
             .await
-            .unwrap_or(missing),
-        None => missing,
+            .unwrap_or_else(|_| missing()),
+        None => {
+            // The groups it took in were noted: they are put back, each kept apart.
+            let taken_in = locked(&groups)
+                .iter_mut()
+                .find(|group| {
+                    group
+                        .closing
+                        .as_ref()
+                        .is_some_and(|closing| closing.same_channel(&this))
+                })
+                .map(|group| std::mem::take(&mut group.taken_in))
+                .unwrap_or_default();
+            let markers: Vec<PathBuf> =
+                taken_in.iter().map(|(.., marker)| marker.clone()).collect();
+            let restored = tokio::task::spawn_blocking(move || {
+                let mut restored = missing();
+                for (at, snapshot, _) in taken_in {
+                    if let Some(snapshot) = snapshot {
+                        restored.take_in(&at, snapshot.restore(Path::new(&run).join(&at)));
+                    }
+                }
+                restored
+            })
+            .await
+            .unwrap_or_else(|_| missing());
+            for marker in markers {
+                let _ = std::fs::remove_file(marker);
+            }
+            restored
+        }
     };
     let _ = std::fs::remove_file(&marker);
-    let this = closed.subscribe();
     locked(&groups).retain(|group| {
         !group
             .closing
@@ -1354,6 +1495,7 @@ async fn put_back_again(
     snapshot: watch::Receiver<Option<Taken>>,
     closed: watch::Sender<bool>,
     marker: PathBuf,
+    root: PathBuf,
 ) {
     let run = marker
         .file_stem()
@@ -1362,9 +1504,45 @@ async fn put_back_again(
     let restored = tokio::spawn(put_back(groups, snapshot, closed, marker, run.clone()))
         .await
         .ok();
-    if let Some(text) = restored.as_ref().and_then(said) {
-        eprintln!("flottille: the agent folders guarded by the run {run}:{text}");
+    if let Some(line) = restored.and_then(|restored| logged(&run, &root, &restored)) {
+        eprintln!("{line}");
     }
+}
+
+/// The daemon's log line of a put-back of `root` done again, the run `run` having started
+/// guarding it: no agent reads it.
+fn logged(run: &str, root: &Path, restored: &Restored) -> Option<String> {
+    let mut said = Vec::new();
+    if !restored.put_back.is_empty() {
+        said.push(format!("put back {}", restored.put_back.join(", ")));
+    }
+    if !restored.left.is_empty() {
+        said.push(format!("could not put back {}", restored.left.join(", ")));
+    }
+    if let Some(kept) = &restored.kept {
+        said.push(format!(
+            "kept what it removed or replaced in {}",
+            kept.display()
+        ));
+    }
+    if restored.missing {
+        said.push("had no snapshot to put back from".into());
+    }
+    if restored.unchecked {
+        said.push("could not check all its agent folders".into());
+    }
+    if !restored.unreached.is_empty() {
+        said.push(format!("did not check {}", restored.unreached.join(", ")));
+    }
+    if said.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "flottille daemon: the put-back of the agent folders of {}, guarded since the run {run} \
+         and left undone, was done again: it {}",
+        root.display(),
+        said.join("; ")
+    ))
 }
 
 #[cfg(test)]
@@ -2144,6 +2322,7 @@ mod tests {
             snapshot: watch::channel(None).1,
             closing: Some(closing),
             marker: kept.join(MARKERS).join("dead.json"),
+            taken_in: Vec::new(),
         });
         drop(closed);
 
@@ -2217,6 +2396,61 @@ mod tests {
     }
 
     #[test]
+    fn a_file_changed_while_it_was_noted_is_said_changed_and_where_it_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("place");
+        let settings = root.join(".claude/settings.json");
+        made(&settings, "{}\n");
+        let planted = settings.clone();
+        racing(".claude/settings.json", move || {
+            made(&planted, "{\"model\": \"m\"}\n")
+        });
+        let kept = dir.path().join("kept");
+        let snapshot = Snapshot::take(&root, None, &kept);
+
+        let restored = snapshot.restore("run");
+
+        assert_eq!(restored.changed, [".claude/settings.json"]);
+        assert!(kept.join("run/.claude/settings.json").exists());
+        let text = said(&restored).unwrap();
+        // Not a write of the run's: what it is, and where the user finds it.
+        assert!(!text.contains("this run wrote"), "{text}");
+        assert!(!text.contains("make the change"), "{text}");
+        assert!(
+            text.contains(".claude/settings.json changed while"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&kept.join("run").display().to_string()),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_redone_put_back_is_logged_in_the_daemon_s_own_words() {
+        let restored = Restored {
+            put_back: vec![".claude/settings.json".into()],
+            kept: Some(PathBuf::from("/kept/dead")),
+            ..Restored::default()
+        };
+
+        let line = logged("dead", Path::new("/place"), &restored).unwrap();
+
+        // Told to no agent: it never speaks to one.
+        assert!(!line.contains("this run"), "{line}");
+        assert!(!line.contains("tell the user"), "{line}");
+        assert!(line.starts_with("flottille daemon: "), "{line}");
+        assert!(line.contains("/place"), "{line}");
+        assert!(line.contains("dead"), "{line}");
+        assert!(line.contains(".claude/settings.json"), "{line}");
+        assert!(line.contains("/kept/dead"), "{line}");
+        assert_eq!(
+            logged("dead", Path::new("/place"), &Restored::default()),
+            None
+        );
+    }
+
+    #[test]
     fn hook_scripts_are_kept_first_past_the_total_bound() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("place");
@@ -2275,6 +2509,7 @@ mod tests {
             snapshot,
             closing: Some(closing),
             marker,
+            taken_in: Vec::new(),
         });
         drop(closed);
     }
@@ -2353,6 +2588,62 @@ mod tests {
         assert!(!restored.missing, "{restored:?}");
         assert_eq!(restored.put_back, [".claude/settings.json"]);
         assert!(!planted.exists());
+        assert!(guards.groups.lock().unwrap().is_empty());
+        assert!(interrupted(&kept).is_empty());
+    }
+
+    /// Lets the other tasks go on until `done` holds of the groups.
+    async fn until(guards: &Guards, done: impl Fn(&[Group]) -> bool) {
+        while !done(&guards.groups.lock().unwrap()) {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_outer_run_whose_group_is_already_closing_puts_back_the_inner_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("p");
+        let inner = outer.join("svc");
+        made(&inner.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let planted = inner.join(".claude/settings.json");
+        let guards = Arc::new(Guards::default());
+        let a = guards.enter(&inner, &[], None, &kept, "a").await.unwrap();
+        made(&planted, "{\"hooks\": {}}\n");
+
+        // A run in the outer place takes in the inner one's group; its start is given up while
+        // its snapshot is taken.
+        let release = hold(real(&outer));
+        let o = entering(&guards, &outer, &kept, "o");
+        until(&guards, |groups| {
+            groups.iter().any(|g| g.runs.contains(&"o".into()))
+        })
+        .await;
+        o.abort();
+        assert!(o.await.is_err_and(|error| error.is_cancelled()));
+        until(&guards, |groups| groups.iter().all(|g| g.runs == ["a"])).await;
+
+        // The inner run ends before the outer snapshot fails: the outer group is closing.
+        let leaving = tokio::spawn(a.leave());
+        until(&guards, |groups| groups.iter().all(|g| g.closing.is_some())).await;
+        drop(release);
+        let restored = leaving.await.unwrap().unwrap();
+
+        // The outer place was never noted, but the inner one was: what was planted there goes,
+        // and the run that waited for it is told so.
+        assert!(restored.missing, "{restored:?}");
+        assert_eq!(restored.put_back, ["svc/.claude/settings.json"]);
+        assert!(!planted.exists());
+        assert!(kept.join("a/svc/.claude/settings.json").exists());
+        let text = said(&restored).unwrap();
+        assert!(
+            text.contains("put back as they were: svc/.claude/settings.json"),
+            "{text}"
+        );
+        assert!(
+            text.contains("the rest of the agent folders of this place could not be noted"),
+            "{text}"
+        );
         assert!(guards.groups.lock().unwrap().is_empty());
         assert!(interrupted(&kept).is_empty());
     }
