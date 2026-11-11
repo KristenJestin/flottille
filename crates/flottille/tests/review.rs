@@ -1428,6 +1428,24 @@ fn an_unreadable_check_guidance_fails_that_check_only() {
 }
 
 #[test]
+fn a_guidance_error_names_the_file_and_never_its_folder() {
+    let user = user();
+    let folder = config(&user, "");
+    let folder = folder.to_string_lossy().into_owned();
+    for (file, params) in [
+        ("review-bugs.md", json!({"part": "bugs"})),
+        ("review.md", json!({})),
+    ] {
+        std::fs::write(config(&user, file), b"a text \xff\xfe that is not UTF-8").unwrap();
+        let shown = user.call("review.show", params).unwrap();
+        let error = shown["error"].as_str().unwrap();
+        assert!(error.contains(file), "{error}");
+        assert!(!error.contains(&folder), "no path: {error}");
+        assert!(!error.contains("guidance for"), "no key: {error}");
+    }
+}
+
+#[test]
 fn review_show_set_reset_take_a_part() {
     let user = user();
     let watch = user.watch(&["--after", "0"]);

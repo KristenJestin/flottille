@@ -37,17 +37,19 @@ fn own(
     use std::os::unix::fs::OpenOptionsExt;
 
     let file = file(daemon, extension, part);
+    // The file's name alone: the folder is the machine's, and a check's key is not its name (the
+    // window says that one, above the editor).
+    let shown = file
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let named = match part {
-        Some(part) => format!("{} for {part}", guidance.named),
-        None => guidance.named.to_owned(),
+        Some(_) => shown,
+        None => format!("{} ({shown})", guidance.named),
     };
     let limit = guidance.limit;
-    let cannot = |error: std::io::Error| {
-        (
-            String::new(),
-            format!("{named} ({}) cannot be read: {error}", file.display()),
-        )
-    };
+    let cannot =
+        |error: std::io::Error| (String::new(), format!("{named} cannot be read: {error}"));
     // A pipe would hold the use until someone writes to it: opened without waiting.
     let opened = std::fs::OpenOptions::new()
         .read(true)
@@ -61,10 +63,7 @@ fn own(
     if !opened.metadata().map_err(cannot)?.is_file() {
         return Err((
             String::new(),
-            format!(
-                "{named} ({}) cannot be read: it is not a regular file; remove it, or reset it",
-                file.display()
-            ),
+            format!("{named} cannot be read: it is not a regular file; remove it, or reset it"),
         ));
     }
     let most = (limit as u64 + 1) * 4;
@@ -73,10 +72,7 @@ fn own(
     let text = String::from_utf8(bytes).map_err(|error| {
         (
             String::from_utf8_lossy(error.as_bytes()).into_owned(),
-            format!(
-                "{named} ({}) is not UTF-8 text: write it again, or reset it",
-                file.display()
-            ),
+            format!("{named} is not UTF-8 text: write it again, or reset it"),
         )
     })?;
     let count = text.chars().count();
@@ -84,9 +80,7 @@ fn own(
         return Err((
             text,
             format!(
-                "{named} ({}) is {count} characters long and may hold {limit}: shorten it, or \
-                 reset it",
-                file.display()
+                "{named} is {count} characters long and may hold {limit}: shorten it, or reset it"
             ),
         ));
     }
