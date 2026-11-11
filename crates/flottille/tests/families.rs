@@ -1044,7 +1044,7 @@ fn tickets_list_returns_every_open_ticket_in_one_call() {
         issue_lists(&user),
         [
             "issue list -R github.com/acme/app --state open --limit 200 --json \
-          number,title,state,labels,assignees,url"
+          number,title,state,labels,assignees,milestone,url"
         ]
     );
 }
@@ -1551,11 +1551,11 @@ fn tickets_edit_that_changes_nothing_is_refused_once_allowed_and_asks_nothing_of
     for (args, refusal) in [
         (
             json!({"action": "edit", "ticket": "#1"}),
-            "refused: tickets edit needs title, body, labels or assignees: what changes",
+            "refused: tickets edit needs title, body, labels, assignees or milestone: what changes",
         ),
         (
             json!({"action": "edit", "ticket": "#1", "labels": [" "]}),
-            "refused: tickets edit needs title, body, labels or assignees: what changes",
+            "refused: tickets edit needs title, body, labels, assignees or milestone: what changes",
         ),
     ] {
         let user = user();

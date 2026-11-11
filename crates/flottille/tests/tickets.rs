@@ -483,7 +483,7 @@ fn a_github_issue_is_read_with_its_title_state_description_and_comments() {
         asked,
         [
             "auth status --hostname github.com",
-            "issue view 12 -R github.com/acme/api --json number,title,state,body,comments,url"
+            "issue view 12 -R github.com/acme/api --json number,title,state,body,comments,url,milestone"
         ],
         "one read, for the link and the page both"
     );
@@ -1021,6 +1021,43 @@ fn tickets_list_answers_from_the_store_with_its_age_and_show_reads_live() {
         )
         .unwrap();
     assert_eq!(item["title"], "Renamed on GitHub", "{item}");
+}
+
+#[test]
+fn a_list_answered_from_the_store_shows_each_ticket_s_milestone() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    fixture(&user);
+    track(&user, github_issues());
+    let mut planned = listed_issue(5, "Users cannot sign in", "2026-10-01T10:00:00Z");
+    planned["milestone"] = json!({"number": 1, "title": "v0.1"});
+    issues(
+        &user,
+        json!({"5": planned, "6": listed_issue(6, "Dark mode", "2026-10-01T09:00:00Z")}),
+    );
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let mcp = agent_in(&user, None);
+    let before = calls(user.gh_received()).len();
+
+    let listed = mcp.call("tickets", json!({"action": "list"}));
+
+    assert!(!listed.error, "{}", listed.text);
+    assert!(
+        listed
+            .text
+            .contains("- #5 open: Users cannot sign in [auth] (alice) milestone: v0.1"),
+        "{}",
+        listed.text
+    );
+    let line = listed.text.lines().find(|l| l.contains("#6")).unwrap();
+    assert!(!line.contains("milestone"), "{line}");
+    assert_eq!(
+        calls(user.gh_received()).len(),
+        before,
+        "the store answered"
+    );
 }
 
 #[test]

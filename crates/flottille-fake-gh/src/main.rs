@@ -105,6 +105,13 @@
 //! `issue comment`, `edit`, `close` and `reopen` need an issue the script holds and print its
 //! URL (`issue comment`: the comment's, `…#issuecomment-<commented>`); `issue close --reason` takes `completed` or `not planned` only.
 //!
+//! The milestones (#758, `docs/tickets.md`, "Milestones"): `milestones` gives, by repository, what
+//! `gh api repos/<owner>/<name>/milestones` lists (`{"acme/api": [{"number": 1, "title": "v0.1",
+//! "state": "open", "due_on": null, "open_issues": 2, "closed_issues": 1, "html_url": "…"}]}`); the
+//! calls that make and change one are described at `milestones`. An issue of the script holds its
+//! `milestone` (`{"number": 1, "title": "v0.1"}`) for `issue view --json milestone` and `issue list
+//! --milestone`; `issue create` and `edit` refuse a `--milestone` the repository does not list.
+//!
 //! The boards of GitHub Projects: an issue of the script holds `projectItems` (`gh issue view
 //! --json projectItems`: `[{"id": "PVTI_1", "project": {"id": "PVT_a", "title": "Roadmap"},
 //! "status": {"optionId": "o1", "name": "Todo"}}]`); `projects` gives, by owner, what `gh project
@@ -196,6 +203,97 @@ fn updated_since(object: &Value, search: Option<&str>) -> bool {
 fn wait(script: &Value) {
     if let Some(ms) = script["delay_ms"].as_u64() {
         std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+/// The milestones of a repository (#758): `api repos/<owner>/<name>/milestones?state=<s>` prints
+/// the script's, those of the state asked (`all` keeps every one); `--method POST` makes one,
+/// numbered after the last and open, as GitHub does, and refuses a title the repository has;
+/// `milestones/<n> --method PATCH` changes one the script holds and prints it. Each `-f key=value`
+/// is a field of what is made or changed; the test reads them in the record.
+fn milestones(script: &Value, path: &str, rest: &[&str]) -> i32 {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    let parts: Vec<&str> = path.split('/').collect();
+    let (owner, name) = match parts[..] {
+        ["repos", owner, name, "milestones", ..] => (owner, name),
+        _ => {
+            eprintln!("fake gh: api {path} is not a call Flottille makes");
+            return 2;
+        }
+    };
+    let repository = format!("{owner}/{name}");
+    if let Some(failure) = script["fail"][&repository].as_str() {
+        eprintln!("{failure}");
+        return 1;
+    }
+    let held: Vec<Value> = script["milestones"][&repository]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut fields = Map::new();
+    for pair in rest.windows(2).filter(|pair| pair[0] == "-f") {
+        let (key, value) = pair[1].split_once('=').unwrap_or_default();
+        fields.insert(key.to_owned(), Value::from(value));
+    }
+    let method = rest
+        .windows(2)
+        .find(|pair| pair[0] == "--method")
+        .map_or("GET", |pair| pair[1]);
+    match (method, parts.get(4)) {
+        ("GET", None) => {
+            let state = query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("state="))
+                .unwrap_or("open");
+            let kept: Vec<&Value> = held
+                .iter()
+                .filter(|m| state == "all" || m["state"] == state)
+                .collect();
+            println!("{}", json!(kept));
+            0
+        }
+        ("POST", None) => {
+            let title = fields.get("title").and_then(Value::as_str).unwrap_or("");
+            if held.iter().any(|m| m["title"] == title) {
+                eprintln!(
+                    "gh: Validation Failed: {{\"resource\":\"Milestone\",\"code\":\"already_exists\",\
+                     \"field\":\"title\"}} (HTTP 422)"
+                );
+                return 1;
+            }
+            let number = held.iter().filter_map(|m| m["number"].as_u64()).max();
+            let number = number.unwrap_or(0) + 1;
+            println!(
+                "{}",
+                json!({"number": number, "title": title, "state": "open",
+                    "description": fields.get("description"), "due_on": fields.get("due_on"),
+                    "open_issues": 0, "closed_issues": 0,
+                    "html_url": format!("https://github.com/{repository}/milestone/{number}")})
+            );
+            0
+        }
+        ("PATCH", Some(number)) => match held.iter().find(|m| {
+            number
+                .parse::<u64>()
+                .is_ok_and(|n| m["number"].as_u64() == Some(n))
+        }) {
+            Some(milestone) => {
+                let mut changed = milestone.clone();
+                for (key, value) in &fields {
+                    changed[key] = value.clone();
+                }
+                println!("{changed}");
+                0
+            }
+            None => {
+                eprintln!("gh: Not Found (HTTP 404)");
+                1
+            }
+        },
+        _ => {
+            eprintln!("fake gh: api {path} {method} is not a call Flottille makes");
+            2
+        }
     }
 }
 
@@ -302,6 +400,9 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             println!("{}", json!({"id": 1, "state": "COMMENTED"}));
             0
+        }
+        ["api", path, rest @ ..] if path.starts_with("repos/") && path.contains("/milestones") => {
+            milestones(script, path, rest)
         }
         ["api", path, rest @ ..]
             if path.starts_with("repos/")
@@ -468,6 +569,13 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 .filter(|issue| {
                     option("--assignee").is_none_or(|a| named(&issue["assignees"], "login", a))
                 })
+                .filter(|issue| {
+                    option("--milestone").is_none_or(|m| {
+                        issue["milestone"]["title"] == m
+                            || m.parse::<u64>()
+                                .is_ok_and(|n| issue["milestone"]["number"].as_u64() == Some(n))
+                    })
+                })
                 .filter(|issue| !unlisted(script, repository, issue))
                 .filter(|issue| updated_since(issue, option("--search")))
                 .filter(|issue| {
@@ -519,6 +627,17 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             };
             if let Some(failure) = script["fail"][repository].as_str() {
                 eprintln!("{failure}");
+                return 1;
+            }
+            // As `gh` does: a milestone the repository does not have is an error, never made.
+            if let Some(asked) = option("--milestone")
+                && !script["milestones"][repository]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|m| m["title"] == asked)
+            {
+                eprintln!("could not add to milestone '{asked}': '{asked}' not found");
                 return 1;
             }
             if words[1] == "close"
