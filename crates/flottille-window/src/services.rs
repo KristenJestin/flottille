@@ -381,7 +381,7 @@ impl Render for ServiceForm {
             self.shown.ask_before_running,
             "Ask before each start",
         )
-        .hint("Held for you (or the judge) every time an agent starts it.")
+        .hint("Each start by an agent waits for you, or for the judge in Auto.")
         .on_click(cx.listener(|this, _, _, cx| this.toggle_ask(cx)));
         let body = div()
             .id("service-form")
@@ -435,11 +435,7 @@ impl Render for ServiceForm {
         modal.child(body).action(
             Button::primary(
                 "save-service",
-                if original.is_some() {
-                    "Save"
-                } else {
-                    "Add service"
-                },
+                if original.is_some() { "Save" } else { "Add" },
             )
             .disabled(self.saving)
             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),

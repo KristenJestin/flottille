@@ -2349,11 +2349,11 @@ impl ProjectSettingsPage {
                 div().flex().child(hoverable(
                     div()
                         .id("tracker-worklog-add")
-                        .aria_label("Add one in the vault")
+                        .aria_label("New entry in the vault")
                         .text_size(px(12.))
                         .text_color(p.run)
                         .cursor_pointer()
-                        .child("Add one in the vault")
+                        .child("New entry in the vault")
                         .on_click(move |_: &ClickEvent, window, cx| {
                             shell
                                 .update(cx, |shell, cx| {

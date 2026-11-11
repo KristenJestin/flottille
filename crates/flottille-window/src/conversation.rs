@@ -330,7 +330,7 @@ pub fn compacted_text(data: &Value) -> String {
     let summary = match data["summary"].as_str() {
         Some(summary) => summary.trim(),
         None if data["missing"] == true => {
-            "The agent's handoff is missing: it went on from what Flottille holds of it and your \
+            "The agent's summary is missing: it went on from what Flottille holds of it and your \
              last message."
         }
         None => "",
@@ -2070,7 +2070,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_whose_handoff_failed_gets_one_mark_that_says_the_handoff_is_missing() {
+    fn an_agent_whose_handoff_failed_gets_one_mark_that_says_the_summary_is_missing() {
         let mut c = Conversation::new("lead".into(), None);
         c.apply(&event(1, "agent.compacting", json!({"source": "agent"})));
         assert!(
@@ -2089,7 +2089,7 @@ mod tests {
         ));
         assert_eq!(c.blocks().len(), 1);
         assert!(matches!(&c.blocks()[0], Block::Notice { kind, text }
-                if kind == COMPACTED_KIND && text.contains("handoff is missing")));
+                if kind == COMPACTED_KIND && text.contains("summary is missing")));
     }
 
     #[test]

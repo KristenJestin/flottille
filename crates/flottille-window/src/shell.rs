@@ -2469,7 +2469,7 @@ impl Shell {
             .model_said(name, model.as_deref())
             .map_or_else(String::new, |model| format!(" {model}"));
         Some(format!(
-            "Flottille chose {title}{model} as your compactor: when an agent's context fills up, it \
+            "Flottille chose {title}{model} as your compaction model: when an agent's context fills up, it \
              summarises the conversation and the agent goes on from the summary, on your quota. \
              Change it, or choose none, in Settings."
         ))
@@ -2562,7 +2562,7 @@ impl Shell {
                     .title(if judge {
                         "Auto judge chosen"
                     } else {
-                        "Compactor chosen"
+                        "Compaction model chosen"
                     })
                     .child(body),
             ))
@@ -2589,7 +2589,7 @@ impl Shell {
         }
     }
 
-    /// A project's Tracker `Add one in the vault`: Settings, Vault, on a new entry. Closed, it
+    /// A project's Tracker `New entry in the vault`: Settings, Vault, on a new entry. Closed, it
     /// goes back to the project's Tracker.
     pub fn add_vault_entry_for(
         &mut self,

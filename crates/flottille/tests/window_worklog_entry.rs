@@ -187,7 +187,7 @@ fn the_jira_tracker_shows_the_worklog_entry_and_saves_it(cx: &mut TestAppContext
     );
     assert_eq!(
         label("tracker-worklog-add", cx).as_deref(),
-        Some("Add one in the vault")
+        Some("New entry in the vault")
     );
     assert!(
         page.read_with(cx, |page, _| page.worklog_choice())

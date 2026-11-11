@@ -716,11 +716,7 @@ impl CommandsSection {
                     .action(
                         Button::primary(
                             "save-command",
-                            if original.is_some() {
-                                "Save"
-                            } else {
-                                "Add command"
-                            },
+                            if original.is_some() { "Save" } else { "Add" },
                         )
                         .disabled(self.saving)
                         .on_click(cx.listener(|this, _, _, cx| this.save(cx))),

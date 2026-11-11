@@ -627,7 +627,7 @@ fn head(
 
 /// What a card of a led session's question says under its title: who answers it, and that the
 /// user may too.
-pub const ASKED_NOTE: &str = "Its pilot answers at the end of its turn; you can answer here too.";
+pub const ASKED_NOTE: &str = "Its lead answers at the end of its turn; you can answer here too.";
 
 /// A card's title, named for who reads it.
 pub(crate) fn heading(at: usize, part: &str, said: String) -> impl IntoElement {

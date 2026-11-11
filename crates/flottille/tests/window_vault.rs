@@ -244,3 +244,54 @@ fn the_vault_page_adds_replaces_and_removes_an_entry_and_never_shows_its_secret(
         "nothing is redrawn at rest"
     );
 }
+
+fn label_of(id: &str, cx: &mut VisualTestContext) -> Option<String> {
+    let id = id.to_owned();
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .and_then(|found| found.label().map(str::to_owned))
+    })
+}
+
+#[gpui_kit::test]
+fn the_vault_creates_with_new_entry_and_saves_with_add(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = window(&user, cx);
+    open_vault(&shell, cx);
+
+    assert_eq!(
+        label_of("add-vault-entry", cx).as_deref(),
+        Some("New entry")
+    );
+    assert_eq!(
+        label_of("vault-sentence", cx).as_deref(),
+        Some(
+            "Secrets agents use without seeing them. Your keyring keeps them; agents see only \
+             their names and what they are for."
+        )
+    );
+    assert_eq!(
+        label_of("vault-usage", cx).as_deref(),
+        Some(
+            "An agent names an entry; Flottille puts the secret where it goes. A project's \
+             tracker and a connection pick theirs here."
+        )
+    );
+
+    click("add-vault-entry", cx);
+    settle(cx);
+    assert_eq!(
+        label_of("vault-name-field-hint", cx).as_deref(),
+        Some("How agents ask for it.")
+    );
+    assert_eq!(
+        label_of("vault-project-field-label", cx).as_deref(),
+        Some("Seen by agents of")
+    );
+    assert_eq!(
+        label_of("save-vault-entry", cx).as_deref(),
+        Some("Add"),
+        "the dialog's title says it is new: its button only says Add"
+    );
+}

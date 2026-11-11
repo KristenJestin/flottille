@@ -6206,10 +6206,10 @@ impl Row {
         let title = gpui_design_system::quoted_title(&self.title(cx));
         let said = match self.pilot(cx) {
             Some(pilot) => format!(
-                "{title} asks its pilot {}",
+                "{title} asks its lead {}",
                 gpui_design_system::quoted_title(&pilot)
             ),
-            None => format!("{title} asks its pilot"),
+            None => format!("{title} asks its lead"),
         };
         let card = Card::new()
             .title(crate::question_card::heading(self.at, "asked-title", said))

@@ -1376,7 +1376,7 @@ fn ask(
 }
 
 fn connected(connect: &Connect) -> Result<Conn, String> {
-    let stream = connect().map_err(|e| format!("cannot reach the daemon: {e}"))?;
+    let stream = connect().map_err(|e| format!("cannot reach Flottille: {e}"))?;
     Conn::new(stream).map_err(|e| e.to_string())
 }
 
@@ -1421,7 +1421,7 @@ fn run_answer(
             ),
             // Nothing to follow and nothing that waits: said like a refusal.
             None => (
-                Some("the daemon answered without the new run".to_owned()),
+                Some("Flottille answered without the new run".to_owned()),
                 None,
                 None,
             ),
@@ -2787,7 +2787,7 @@ fn started_outcome(project: &str, started: &Value) -> Outcome {
         },
         None => Outcome::NotStarted {
             project: project.to_owned(),
-            why: "the daemon did not say which agent it started".into(),
+            why: "Flottille did not say which agent it started".into(),
         },
     }
 }
@@ -3069,7 +3069,7 @@ mod tests {
             panic!("no answer of the window's own");
         };
         assert_eq!(project, "atlas");
-        assert_eq!(why, "the daemon did not answer agent.start within 200 ms");
+        assert_eq!(why, "Flottille did not answer agent.start within 200 ms");
     }
 
     #[test]

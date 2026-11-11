@@ -652,7 +652,7 @@ impl SkillsSection {
         let this = cx.entity().downgrade();
         let title = match &self.editing {
             Some(name) => format!("Skill {name}"),
-            None => "Add a skill".to_owned(),
+            None => "New skill".to_owned(),
         };
         let modal = Modal::new("skill-modal", title)
             .sentence(
@@ -855,7 +855,7 @@ impl SkillsSection {
                     if self.editing.is_some() {
                         "Save"
                     } else {
-                        "Add skill"
+                        "Add"
                     },
                 )
                 .disabled(self.saving)
