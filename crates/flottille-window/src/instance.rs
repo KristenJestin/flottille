@@ -8,7 +8,6 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use flottille_core::paths::{Paths, ensure_private_dir};
@@ -33,7 +32,17 @@ pub struct Instance {
     listener: UnixListener,
 }
 
+/// How many times the place is tried, and its window asked, before giving up; and the wait
+/// between two.
+const TRIES: usize = 20;
+const PAUSE: Duration = Duration::from_millis(100);
+
 /// Takes the place of the one window, or asks the window that has it to come to the front.
+///
+/// A place that looks held is not always a window: a child process between its `fork` and its
+/// `exec` holds a copy of the lock for an instant, after the window that took it is gone. So
+/// the lock is tried again after each refused connection, and a window that is opening (it holds
+/// the place and has not bound its socket yet) is waited for just the same.
 pub fn acquire(paths: &Paths) -> io::Result<Start> {
     ensure_private_dir(&paths.runtime).map_err(io::Error::other)?;
     let lock = OpenOptions::new()
@@ -42,39 +51,35 @@ pub fn acquire(paths: &Paths) -> io::Result<Start> {
         .truncate(false)
         .mode(0o600)
         .open(paths.window_lock())?;
-    match lock.try_lock() {
-        Ok(()) => {
-            // The socket file of a window that died, or of one that closed.
-            match std::fs::remove_file(paths.window_socket()) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-                _ => {}
-            }
-            let listener = UnixListener::bind(paths.window_socket())?;
-            Ok(Start::First(Instance {
-                _lock: lock,
-                listener,
-            }))
-        }
-        Err(TryLockError::WouldBlock) => {
-            raise(&paths.window_socket())?;
-            Ok(Start::Raised)
-        }
-        Err(TryLockError::Error(error)) => Err(error),
-    }
-}
-
-/// Says "raise" to the window that holds the place. It may not listen yet, between holding the
-/// place and binding the socket: a moment is waited for.
-fn raise(socket: &Path) -> io::Result<()> {
     let mut last = None;
-    for _ in 0..20 {
-        match UnixStream::connect(socket) {
-            Ok(mut stream) => return writeln!(stream, "{RAISE}"),
-            Err(error) => last = Some(error),
+    for _ in 0..TRIES {
+        match lock.try_lock() {
+            Ok(()) => return first(paths, lock),
+            Err(TryLockError::WouldBlock) => match UnixStream::connect(paths.window_socket()) {
+                Ok(mut stream) => {
+                    writeln!(stream, "{RAISE}")?;
+                    return Ok(Start::Raised);
+                }
+                Err(error) => last = Some(error),
+            },
+            Err(TryLockError::Error(error)) => return Err(error),
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(PAUSE);
     }
     Err(last.unwrap_or_else(|| io::Error::other("no window answers")))
+}
+
+/// This process is the window: its socket replaces the one a window that died, or closed, left.
+fn first(paths: &Paths, lock: File) -> io::Result<Start> {
+    match std::fs::remove_file(paths.window_socket()) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let listener = UnixListener::bind(paths.window_socket())?;
+    Ok(Start::First(Instance {
+        _lock: lock,
+        listener,
+    }))
 }
 
 impl Instance {

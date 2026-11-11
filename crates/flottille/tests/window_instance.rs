@@ -79,6 +79,41 @@ fn a_window_command_while_one_is_open_does_not_become_the_first() {
 }
 
 #[test]
+fn a_lock_held_for_an_instant_by_a_forked_child_does_not_stop_the_next_window() {
+    use std::fs::File;
+
+    let user = User::new();
+    let paths = paths(&user);
+    // What a window that closed leaves: its socket file, nobody listening. And its lock, still
+    // held by a child between its fork and its exec: a second open file description.
+    drop(first(&paths));
+    let child = File::open(paths.window_lock()).unwrap();
+    child.try_lock().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(child);
+    });
+
+    assert!(matches!(
+        instance::acquire(&paths).unwrap(),
+        Start::First(_)
+    ));
+    release.join().unwrap();
+}
+
+#[test]
+fn a_window_that_is_open_is_still_raised() {
+    let user = User::new();
+    let raises = serving(&paths(&user));
+
+    assert!(matches!(
+        instance::acquire(&paths(&user)).unwrap(),
+        Start::Raised
+    ));
+    assert!(raised(&raises));
+}
+
+#[test]
 fn once_the_first_window_is_closed_the_next_command_opens_its_own() {
     let user = User::new();
     let paths = paths(&user);
