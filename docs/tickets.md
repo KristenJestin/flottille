@@ -640,7 +640,7 @@ tickets becomes a release with its progress bar. What `gh` can do decides what F
   naming the milestone that has the title (case ignored, closed or open: GitHub's own rule).
 - **`due` is a day** (`YYYY-MM-DD`, a calendar day: `2026-02-30` is refused), sent at midnight UTC.
   `milestone_edit` needs `milestone` and one of `title`, `description`, `due`, `state`; `state` is
-  `open` or `closed`. A `due` or a `description` of a ticket's action, a `remove_milestone` off an
+  `open` or `closed`; `milestone_create` takes no `state` (a new milestone is open). A `due` or a `description` of a ticket's action, a `remove_milestone` off an
   `edit`, a `milestone` off `list`, `search`, `create`, `edit` and `milestone_edit` is refused,
   naming the actions that take it. `milestone` with `remove_milestone` is refused: a ticket is in a
   milestone or in none.

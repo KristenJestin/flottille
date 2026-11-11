@@ -169,6 +169,11 @@ pub(super) fn unusable(project: &Project, action: &str, args: &Value) -> Option<
         ));
     }
     match action {
+        "milestone_create" if !args["state"].is_null() => Some(
+            "refused: tickets milestone_create takes no state: a new milestone is open, \
+             milestone_edit closes it"
+                .into(),
+        ),
         "milestone_create" if given(args, "title").is_none() => {
             Some("refused: tickets milestone_create needs title, the milestone's name".into())
         }

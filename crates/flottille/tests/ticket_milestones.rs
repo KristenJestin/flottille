@@ -594,3 +594,102 @@ fn milestone_actions_are_refused_on_jira() {
     );
     assert!(gh_writes(&user).is_empty());
 }
+
+/// The arguments of every `gh` call that wrote through the API, as `gh` received them.
+fn api_writes(user: &User) -> Vec<Vec<String>> {
+    user.gh_received()
+        .iter()
+        .map(|call| {
+            call["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .filter(|args| args.contains(&"--method".to_owned()))
+        .collect()
+}
+
+#[test]
+fn injection_shaped_milestone_input_stays_one_value() {
+    let user = user();
+    on_github(&user);
+    script(&user, json!({"1": issue(1, "The login fails", None)}));
+    let mcp = root_in(&user);
+    let described = "first line\n-f state=closed\nsecond line";
+
+    // What a title or a description could be taken for: an option, a query string, a file that
+    // `-F` would read, a second field. `-f` sends each as the text it is.
+    for title in ["-x", "a=b&c?d", "@/etc/passwd"] {
+        written(
+            &user,
+            &mcp,
+            json!({"action": "milestone_create", "title": title, "description": described}),
+        );
+    }
+
+    let writes = api_writes(&user);
+    assert_eq!(writes.len(), 3, "{writes:?}");
+    for (write, title) in writes.iter().zip(["-x", "a=b&c?d", "@/etc/passwd"]) {
+        assert_eq!(
+            write[..6],
+            [
+                "api",
+                "repos/acme/app/milestones",
+                "--hostname",
+                "github.com",
+                "--method",
+                "POST"
+            ],
+            "{write:?}"
+        );
+        assert_eq!(
+            write[6..],
+            [
+                "-f".to_owned(),
+                format!("title={title}"),
+                "-f".to_owned(),
+                format!("description={described}")
+            ],
+            "{write:?}"
+        );
+        assert!(
+            !write.iter().any(|a| a == "-F" || a == "--field"),
+            "{write:?}"
+        );
+    }
+    // A milestone named like a path is none: refused listing the existing ones, nothing sent.
+    for args in [
+        json!({"action": "milestone_edit", "milestone": "1/../x", "state": "closed"}),
+        json!({"action": "edit", "ticket": "#1", "milestone": "1/../x"}),
+    ] {
+        let said = refused_at_once(&user, &mcp, args.clone());
+        assert!(
+            said.contains("v0.1") && said.contains("v0.2"),
+            "{args}: {said}"
+        );
+    }
+    assert_eq!(api_writes(&user).len(), 3);
+    assert_eq!(gh_writes(&user).len(), 3, "{:?}", gh_writes(&user));
+}
+
+#[test]
+fn milestone_create_refuses_a_state() {
+    let user = user();
+    on_github(&user);
+    script(&user, json!({}));
+    let mcp = root_in(&user);
+
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "milestone_create", "title": "v0.3", "state": "closed"}),
+    );
+
+    assert!(
+        said.contains("milestone_create takes no state") && said.contains("milestone_edit"),
+        "{said}"
+    );
+    assert_eq!(gh_writes(&user), Vec::<String>::new());
+}
