@@ -426,13 +426,16 @@ pending requests.
   `spring.datasource.password=` with no space, not code's `self.password = …`), or as
   `key=value` with no space after a URL's `?` or `&`, a connection string's `;`
   (`Server=db;Password=…;`) or a `docker run -e` (`--env`); to the end of its line or a quote, as
-  `key=value` to a whitespace, a `;` or a `&` (a URL's `#` too), or each line of a YAML block
-  (`password: |`, a comment after its mark, its first line blank or not), unless, unquoted, it is
-  code or prose: it holds a space or ends in `;` or `,` (`- Password: 8 chars minimum`,
-  `dbPassword: string;`, `secret: Secret,`), it calls or names a type (`read()`,
-  `Optional[str]`), or, for a key other than a password's, it is a single word or a number
-  (`token: str`, `max_token: 100`); and the password of a MySQL or MariaDB command line's
-  `-p<password>` (`mysql -uapp -p…`; not a shell's `pwd`), but a
+  `key=value` to a whitespace (and a `;` or a `&` in a URL's query, which a `#` ends too, a
+  connection string or after `-e`), or each line of a YAML block (`password: |`, a comment after
+  its mark, its first line blank or not, in a diff too), unless, unquoted, it is code or prose:
+  it holds a space or ends in `;` (`- Password: 8 chars minimum`, `dbPassword: string;`), it is
+  an expression set with spaces around its `=` (`token = self.token`, `os.getenv(…)`,
+  `read()`), it passes its key's name on (`password=password,`), or, for a key other than a
+  password's, it ends in `,`, calls or names a type of no argument or a name (`secret: Secret,`,
+  `Optional[str]`), or is a single word or a number (`token: str`, `max_token: 100`); and the
+  password of each `-p<password>` of a MySQL or MariaDB command, up to a `|` or a `;`
+  (`mysql -uapp -p…`; not a shell's `pwd`), but a
   tokenizer's special tokens (`pad_token`, `bos_token`, `eos_token`, `unk_token`, `sep_token`,
   `cls_token`, `mask_token`), wherever it is shown: a diff of a staged one, its value on the next line
   after a `+` or `-`, a word diff's `[-"…"-]{+"…"+}` (`flottille_core::secrets`). It is not a
