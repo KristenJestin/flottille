@@ -13,8 +13,6 @@
 use flottille_core::declared::ProjectTracker;
 use flottille_core::project::Project;
 use serde_json::Value;
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex, PoisonError};
 
 use super::{NO_TRACKER, TicketsCall, acli_run, and_listed, created_in, jira_site, viewed};
 use crate::forge::masked;
@@ -219,55 +217,6 @@ pub(super) async fn resolved(
     Ok((version.name.clone(), only))
 }
 
-/// The version the user was shown for a call (its site, project and what the agent called it),
-/// as the id and the name it had: what a creation then matches, so that a version renamed, or
-/// another named like it, while the request waited is never picked by its name.
-type Pin = (String, String);
-/// What a call is known by: its site, its project, what the agent called the version.
-type Called = (String, String, String);
-static SHOWN: LazyLock<Mutex<HashMap<Called, Pin>>> = LazyLock::new(Mutex::default);
-
-fn pinned_by(site: &str, project: &str, named: &str) -> Called {
-    (
-        site.to_owned(),
-        project.to_owned(),
-        named.trim().to_lowercase(),
-    )
-}
-
-/// The version a creation writes, once the user allowed it: the one the request showed, by its
-/// id, refused when that id is no longer one of the project's or no longer has the name that was
-/// shown. A call that was not shown one (none such is written without) is found by its name.
-pub(super) async fn settled(site: &str, project: &str, named: &str) -> Result<Version, String> {
-    let shown = SHOWN
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .remove(&pinned_by(site, project, named));
-    let all = of(site, &[project], "written").await?;
-    match shown {
-        Some(shown) => as_shown(&all, project, &shown),
-        None => find(&all, &[project], named).cloned(),
-    }
-}
-
-/// The version of `all` that has the id the request showed, with the name it showed.
-fn as_shown(all: &[Version], project: &str, (id, name): &Pin) -> Result<Version, String> {
-    match all.iter().find(|version| &version.id == id) {
-        None => Err(format!(
-            "the version {:?} (id {id}) the request showed is no longer one of {project}'s \
-             versions",
-            masked(name)
-        )),
-        Some(version) if &version.name != name => Err(format!(
-            "the version {:?} (id {id}) the request showed is now named {:?} in {project}: ask \
-             again",
-            masked(name),
-            version.shown()
-        )),
-        Some(version) => Ok(version.clone()),
-    }
-}
-
 /// What the card of a `create` says of the version it puts the work item in, found before the user
 /// is asked; refused when there is none such. Nothing for another call.
 pub async fn says(project: &Project, args: &Value) -> Result<Vec<String>, String> {
@@ -286,10 +235,6 @@ pub async fn says(project: &Project, args: &Value) -> Result<Vec<String>, String
     let version = chosen(site, in_project, named)
         .await
         .map_err(|why| format!("refused: {why}; nothing was written"))?;
-    SHOWN.lock().unwrap_or_else(PoisonError::into_inner).insert(
-        pinned_by(site, in_project, named),
-        (version.id.clone(), version.name.clone()),
-    );
     let mut says = format!(
         "It sets its fix version to {:?} (id {}, {}, {}",
         version.shown(),
@@ -327,39 +272,4 @@ pub(super) fn said_in(fields: &Value) -> Option<String> {
         .filter_map(|version| version["name"].as_str().map(masked))
         .collect();
     (!names.is_empty()).then(|| names.join(", "))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn version(id: &str, name: &str) -> Version {
-        Version {
-            project: "ABC".into(),
-            id: id.into(),
-            name: name.into(),
-            released: false,
-            date: None,
-            archived: false,
-        }
-    }
-
-    #[test]
-    fn a_version_is_written_by_the_id_the_request_showed() {
-        let shown = ("10001".to_owned(), "1.1".to_owned());
-        // Another version has since taken the name: the one shown is still the one.
-        let all = [version("10001", "1.1"), version("10009", "1.1")];
-        assert_eq!(as_shown(&all, "ABC", &shown).unwrap().id, "10001");
-        // Renamed meanwhile: not written, and the new name is said.
-        let renamed = [version("10001", "1.2"), version("10009", "1.1")];
-        let why = as_shown(&renamed, "ABC", &shown).err().unwrap();
-        assert!(why.contains("now named \"1.2\""), "{why}");
-        // Gone: not written either, whatever else is named like it.
-        let gone = [version("10009", "1.1")];
-        let why = as_shown(&gone, "ABC", &shown).err().unwrap();
-        assert!(
-            why.contains("no longer one of ABC") && why.contains("10001"),
-            "{why}"
-        );
-    }
 }

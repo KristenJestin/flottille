@@ -2549,7 +2549,7 @@ async fn create_work_item(
         None => None,
     };
     let version = match asked.milestone_named() {
-        Some(named) => match versions::settled(site, project, named).await {
+        Some(named) => match versions::chosen(site, project, named).await {
             Ok(version) => Some(version),
             Err(why) => return Outcome::Refused(format!("refused: {why}; nothing was written")),
         },
@@ -2702,12 +2702,9 @@ async fn create_work_item(
                     .to_owned();
             }
             Err(why) => {
-                version_said = format!(
-                    ", and its fix version \"{shown}\" was asked but could not be confirmed"
-                );
                 unset = format!(
-                    "; the work item could not be read back ({why}): look at its fix version \
-                     in Jira"
+                    "; its fix version \"{shown}\" was asked but could not be confirmed: the \
+                     work item could not be read back ({why}): look at its fix version in Jira"
                 );
             }
         }

@@ -657,6 +657,11 @@ fn a_fix_version_jira_ignores_is_said_and_never_claimed() {
         done.contains("ABC-13") && done.contains("could not be confirmed"),
         "{done}"
     );
+    // The link is the work item's, never read as what could not be confirmed.
+    assert!(
+        done.contains("/browse/ABC-13; its fix version \"1.1\" was asked"),
+        "{done}"
+    );
     assert!(!done.contains("in the version"), "{done}");
 }
 
@@ -852,7 +857,8 @@ fn a_version_changed_while_the_request_waits_is_not_written() {
         .unwrap()
         .body;
     assert!(
-        said.contains("is now named \"1.2\" in ABC") && said.contains("nothing was written"),
+        said.contains("what it does changed since the user allowed it")
+            && said.contains("\"1.1\" (id 20000"),
         "{said}"
     );
     let said = store(&user)
@@ -861,7 +867,83 @@ fn a_version_changed_while_the_request_waits_is_not_written() {
         .unwrap()
         .body;
     assert!(
-        said.contains("no longer one of ABC's versions") && said.contains("10003"),
+        said.contains("there is no milestone \"2.0\" among the versions of ABC")
+            && said.contains("nothing was written"),
         "{said}"
     );
+}
+
+/// The versions of ABC once 1.1 (id 10001) was renamed 1.2 and another version took its name.
+fn renamed_and_replaced() -> Value {
+    json!({"created": "ABC-9", "versions": {"ABC": [
+        {"id": "10000", "name": "1.0", "released": true, "releaseDate": "2026-10-01"},
+        {"id": "10001", "name": "1.2", "releaseDate": "2026-12-01"},
+        {"id": "10009", "name": "1.1", "releaseDate": "2027-01-01"}
+    ]}})
+}
+
+#[test]
+fn each_request_writes_the_version_its_own_card_showed() {
+    let user = user();
+    on_jira(&user);
+    user.acli_script(json!({"versions": versions(), "created": "ABC-9"}));
+    let mcp = root_in(&user);
+
+    let first = held(&mcp.call(
+        "tickets",
+        json!({"action": "create", "title": "Sign in", "type": "Task", "milestone": "1.1"}),
+    ));
+    // Between the two cards, 1.1 (id 10001) is renamed and another version takes its name: the
+    // second card shows that one, which the first request was never shown.
+    user.acli_script(renamed_and_replaced());
+    let second = held(&mcp.call(
+        "tickets",
+        json!({"action": "create", "title": "Sign out", "type": "Task", "milestone": "1.1"}),
+    ));
+    let cards: Vec<String> = requests(&user).iter().map(Value::to_string).collect();
+    assert!(cards[0].contains("(id 10001"), "{}", cards[0]);
+    assert!(cards[1].contains("(id 10009"), "{}", cards[1]);
+
+    let said = allow(&user, first);
+    assert!(
+        said.contains("what it does changed since the user allowed it")
+            && said.contains("(id 10009")
+            && !said.contains("and Flottille has now done it"),
+        "{said}"
+    );
+    assert!(acli_writes(&user).is_empty(), "{:?}", acli_writes(&user));
+
+    let said = allow(&user, second);
+    assert!(said.contains("and Flottille has now done it"), "{said}");
+    let writes = acli_writes(&user);
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    let made = std::fs::read_to_string(user.path("acli/created.json")).unwrap();
+    assert!(
+        made.contains("Sign out") && !made.contains("Sign in"),
+        "{made}"
+    );
+}
+
+#[test]
+fn a_creation_allowed_after_a_restart_is_checked_against_its_card() {
+    let user = user();
+    on_jira(&user);
+    user.acli_script(json!({"versions": versions(), "created": "ABC-9"}));
+    let mcp = root_in(&user);
+
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "create", "title": "Sign in", "type": "Task", "milestone": "1.1"}),
+    ));
+    // The request outlives the daemon; what it was shown is in the store, nowhere else.
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    user.acli_script(renamed_and_replaced());
+
+    let said = allow(&user, number);
+    assert!(
+        said.contains("what it does changed since the user allowed it")
+            && said.contains("(id 10009"),
+        "{said}"
+    );
+    assert!(acli_writes(&user).is_empty(), "{:?}", acli_writes(&user));
 }
