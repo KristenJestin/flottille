@@ -426,19 +426,22 @@ pending requests.
   `spring.datasource.password=` with no space, not code's `self.password = …`), or as
   `key=value` with no space after a URL's `?` or `&`, a connection string's `;`
   (`Server=db;Password=…;`) or a `docker run -e` (`--env`); to the end of its line or a quote, as
-  `key=value` to a whitespace (a password's at a line's start to the line's end, a comment
-  after it left out: `PASSWORD=correct horse battery`; and a `;` or a `&` in a URL's query,
-  which a `#` ends too, a connection string or after `-e`), or each line of a YAML block
-  (`password: |`, a comment after its mark, its first line blank or not, in a diff too, its key
-  line changed or not), unless, unquoted, it is code or prose: it holds a space or ends in `;`
-  (`- Password: 8 chars minimum`, `dbPassword: string;`), it is an expression set with spaces
-  around its `=` (`token = self.token`, `os.getenv(…)`; for a password only a lowercase name, a
-  member of `self`, `this` or named like a password, or a call of a lowercase name with names or
-  nothing as arguments: `password = pw`, `cfg.password`, `hash(pw)`, so that an ini file's
-  `password = Welcome1.x` is masked), it passes its key's name on (`password=password,`), or,
-  for a key other than a password's, it ends in `,`, calls or names a type of no argument or a
-  name (`secret: Secret,`, `Optional[str]`), or is a single word or a number (`token: str`,
-  `max_token: 100`); and the
+  `key=value` to a whitespace (a password's at a line's start to the line's end, with spaces
+  or a colon too, a comment after it left out: `PASSWORD=correct horse battery`,
+  `password = s3cret # db`; and a `;` or a `&` in a URL's query, which a `#` ends too, a
+  connection string or after `-e`), or each line of a YAML block (`password: |`, a comment after
+  its mark, its first line blank or not, in a diff too, its key line changed or not), unless,
+  unquoted, it is code or prose. A password's is code only plainly: with spaces around its `=`,
+  a lowercase name, a member of `self`, `this` or named like a password, or a call of a
+  lowercase name with names or nothing as arguments (`password = pw`, `cfg.password`,
+  `hash(pw)`, so that an ini file's `password = Welcome1.x` is masked), and such a name ended by
+  `;` after a colon too (`dbPassword: string;`); it is prose only as a list's requirement
+  (`- Password: 8 chars minimum`: `- `, a capitalised key, a number and words). Another key's holds
+  a space or ends in `;` or `,` (`Token: paste it here`, `token: string;`, `secret: Secret,`),
+  is an expression set with spaces around its `=` (`token = self.token`, `os.getenv(…)`,
+  `config[…]`), calls or names a type of no argument or a name (`Optional[str]`), or is a
+  single word or a number (`token: str`, `max_token: 100`). Any key's passes its name on
+  (`password=password,`). And the
   password of each `-p<password>` of a MySQL or MariaDB command, up to a `|` or a `;`
   (`mysql -uapp -p…`; not a shell's `pwd`), but a
   tokenizer's special tokens (`pad_token`, `bos_token`, `eos_token`, `unk_token`, `sep_token`,
