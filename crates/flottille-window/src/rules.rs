@@ -634,8 +634,9 @@ impl Render for RulesEditor {
                             .as_ref()
                             .and_then(|shown| shown.error.clone())
                             .map(|error| {
+                                let title = self.check.as_ref().map_or("", |(_, _, title)| title);
                                 SharedString::from(format!(
-                                    "This check does not run until this is fixed: {error}."
+                                    "{title} does not run until this is fixed: {error}."
                                 ))
                             }),
                         line(id("error")),
@@ -821,7 +822,9 @@ impl Render for RulesEditor {
                         .as_ref()
                         .and_then(|shown| shown.error.clone())
                         .map(|error| {
-                            SharedString::from(if compaction {
+                            SharedString::from(if let Some((_, title)) = &self.part {
+                                format!("{title} does not run until this is fixed: {error}.")
+                            } else if compaction {
                                 format!("Every compaction fails until this is fixed: {error}.")
                             } else {
                                 format!(
