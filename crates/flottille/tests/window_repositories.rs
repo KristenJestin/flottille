@@ -188,6 +188,15 @@ fn has(id: &str, cx: &mut VisualTestContext) -> bool {
     cx.update(|window, _| window.try_find(id).is_some_and(|found| found.visible()))
 }
 
+/// The window loses the focus and takes it back.
+fn leave_and_come_back(cx: &mut VisualTestContext) {
+    // A window the test platform opens has the focus once it is asked for.
+    cx.update(|window, _| window.activate_window());
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+}
+
 fn paths(section: &Entity<ProjectRepositories>, cx: &mut VisualTestContext) -> Vec<String> {
     section.read_with(cx, |section, _| {
         section
@@ -224,7 +233,16 @@ fn the_project_s_settings_list_its_repositories_and_add_remove_and_detect_them(
     );
     assert_eq!(
         label_of("repository-remote-lib", cx).as_deref(),
-        Some("origin: none, local only")
+        Some("local only")
+    );
+    // The labels say what the values are, in the words of the page.
+    assert_eq!(
+        label_of("repository-base-label-api", cx).as_deref(),
+        Some("Starts from")
+    );
+    assert_eq!(
+        label_of("repository-remote-label-api", cx).as_deref(),
+        Some("Remote")
     );
     assert!(
         has("found-repository-docs", cx),
@@ -266,9 +284,9 @@ fn the_project_s_settings_list_its_repositories_and_add_remove_and_detect_them(
     let text = std::fs::read_to_string(user.project_file("trio")).unwrap();
     assert!(!text.contains("path = \"lib\""), "{text}");
 
-    // Detect again: a repository made since shows up.
+    // The window taking the focus back: a repository made since shows up.
     user.git_init(&folder.join("tools"));
-    cx.update(|window, cx| window.click("detect-repositories", cx));
+    leave_and_come_back(cx);
     until(&shell, cx, "tools is found", |cx| {
         section.read_with(cx, |s, _| {
             s.repositories()
@@ -300,9 +318,9 @@ fn an_older_answer_never_replaces_a_newer_one_and_busy_waits_for_the_last_answer
             .collect::<Vec<_>>()})
     };
     let first = section.read_with(cx, |s, _| s.last_request());
-    // Detect again, while the answer to an earlier request is still on its way. The answers are
-    // given here by hand, in the wrong order, before the window reads any of the real ones.
-    section.update(cx, |s, cx| s.detect(cx));
+    // Add, while the answer to an earlier request is still on its way. The answers are given
+    // here by hand, in the wrong order, before the window reads any of the real ones.
+    section.update(cx, |s, cx| s.add("docs", cx));
     assert!(section.read_with(cx, |s, _| s.is_busy()));
     // A read asked for meanwhile (the file was edited) is not made: it would outdate the answer
     // of the user's request, a refusal included.
@@ -1356,12 +1374,116 @@ fn the_repositories_of_a_project_that_is_its_only_repository_do_not_read_as_a_li
             !alone,
             "{project}: the count of a list"
         );
-        let sentence = label_of("repositories-sentence", cx).unwrap();
         assert_eq!(
-            sentence.starts_with("The project folder is a git repository"),
-            alone,
-            "{project}: {sentence}"
+            label_of("repositories-sentence", cx).as_deref(),
+            Some(if alone {
+                "The project folder is the repository."
+            } else {
+                "The git repositories of the project. Each workspace gets its own copy of each."
+            }),
+            "{project}"
         );
         assert_eq!(pending_frames(cx), 0, "{project}: nothing moves at rest");
     }
+}
+
+#[gpui_kit::test]
+fn a_repository_cloned_meanwhile_shows_as_found_with_add(cx: &mut TestAppContext) {
+    let user = user();
+    let folder = trio(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let section = open_settings(&shell, "trio", cx);
+    until(&shell, cx, "the repositories are read", |cx| {
+        section.read_with(cx, |s, _| s.repositories().is_some())
+    });
+    settle(cx);
+    assert!(!has("found-repository-tools", cx));
+
+    // Cloned while the window was away, in the folder: no button was pressed.
+    user.git_init(&folder.join("tools"));
+    leave_and_come_back(cx);
+    until(&shell, cx, "tools is found", |cx| {
+        section.read_with(cx, |s, _| {
+            s.repositories()
+                .is_some_and(|r| r.new.contains(&"tools".to_owned()))
+        })
+    });
+    // It unfolds, and comes to rest.
+    assert!(pending_frames(cx) > 0, "the row jumped in");
+    settle(cx);
+    assert!(has("found-repository-tools", cx));
+    assert_eq!(pending_frames(cx), 0);
+    assert_eq!(
+        label_of("found-repository-tools", cx).as_deref(),
+        Some("tools/")
+    );
+    assert!(has("add-repository-tools", cx));
+    let shown = shell.read_with(cx, |s, cx| s.toasts().read(cx).toasts().count());
+    assert_eq!(shown, 0, "found in silence");
+
+    // Added, it is a repository of the project; gone from the folder, its row folds away.
+    cx.update(|window, cx| window.click("add-repository-tools", cx));
+    until(&shell, cx, "tools is added", |cx| {
+        paths(&section, cx).contains(&"tools".to_owned())
+    });
+    settle(cx);
+    assert!(!has("found-repository-tools", cx));
+    assert!(has("repository-tools", cx));
+}
+
+#[gpui_kit::test]
+fn a_folder_with_no_repository_says_it_looks_again_when_you_come_back(cx: &mut TestAppContext) {
+    // The daemon refuses a project with no repository at all, so its answers are given here by
+    // hand: the folder holds none, then a repository is cloned in it.
+    let user = user();
+    trio(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let section = open_settings(&shell, "trio", cx);
+    until(&shell, cx, "the repositories are read", |cx| {
+        section.read_with(cx, |s, _| s.repositories().is_some())
+    });
+    settle(cx);
+    let answer = |value: serde_json::Value, cx: &mut VisualTestContext| {
+        let serial = section.read_with(cx, |s, _| s.last_request());
+        section.update_in(cx, |s, window, cx| {
+            s.answered(serial, Ok(value), window, cx)
+        });
+        settle(cx);
+    };
+    answer(json!({"new": [], "repositories": []}), cx);
+    assert_eq!(
+        label_of("no-repositories", cx).as_deref(),
+        Some("No git repository in this folder yet. Flottille looks again when you come back.")
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+
+    answer(json!({"new": ["web"], "repositories": []}), cx);
+    assert!(has("found-repository-web", cx));
+    assert!(!has("no-repositories", cx), "the line folded away");
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
+
+#[gpui_kit::test]
+fn the_repository_dialog_says_none_for_no_forge_and_deletes_the_branch_after_merging(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (_shell, cx, _page) = open_dialog(&user, "api", cx);
+
+    assert_eq!(
+        label_of("forge-kind", cx).as_deref(),
+        Some("None"),
+        "the forge select"
+    );
+    assert_eq!(
+        label_of("delete-branch-on-merge", cx).as_deref(),
+        Some("Delete the branch after merging")
+    );
+    let help = label_of("base-field-hint", cx).unwrap();
+    assert!(
+        !help.contains("develop"),
+        "an example is not a help: {help}"
+    );
+    let sentence = label_of("settings-modal-sentence", cx).unwrap();
+    assert!(!sentence.contains("read from git"), "{sentence}");
 }

@@ -1,7 +1,8 @@
 //! A project's repositories as the daemon reads their checkouts (`docs/projects.md`): each with
 //! the branch its checkout is on, its base rule, where its remote leads (or "local only") and its
-//! forge, and the ones the folder holds that the project does not name, detected again. The
-//! project settings list them (Add, Detect again, Remove…); the project page reads them. Remove
+//! forge, and the ones the folder holds that the project does not name. The project settings list
+//! them (Add, Remove…) and read them again when the tab opens and each time the window takes the
+//! focus back, in silence; the project page reads them. Remove
 //! only forgets a repository: its folder, its branches and the worktrees of the workspaces that
 //! took it stay. The window writes nothing itself: the daemon writes the project's file, its
 //! comments kept (`project.repositories`, `project.add_repository`,
@@ -111,7 +112,6 @@ impl Repositories {
 /// What the daemon is doing for the section.
 #[derive(Clone, Debug, PartialEq)]
 enum Busy {
-    Detecting,
     Adding(String),
     Removing(String),
 }
@@ -187,7 +187,8 @@ impl ProjectRepositories {
         perform_later(&self.shell, command, cx);
     }
 
-    /// Asks the daemon for the repositories as their checkouts stand. Not while a request of the
+    /// Asks the daemon for the repositories as their checkouts stand, in silence: when the tab
+    /// opens and when the window takes the focus back. Not while a request of the
     /// user's is on its way: its answer is the list, and a newer read would make it the older one,
     /// so that its refusal would never be said.
     pub fn read(&mut self, cx: &mut App) {
@@ -196,13 +197,6 @@ impl ProjectRepositories {
         }
         let params = json!({"name": self.project});
         self.send("project.repositories", params, cx);
-    }
-
-    /// Detect again: the same read, said on its button while it runs.
-    pub fn detect(&mut self, cx: &mut Context<Self>) {
-        let params = json!({"name": self.project});
-        self.ask("project.repositories", params, Some(Busy::Detecting), cx);
-        cx.notify();
     }
 
     /// Adds the repository at `path` of the project's folder.
@@ -264,24 +258,12 @@ impl ProjectRepositories {
                     None => None,
                     Some(Busy::Adding(path)) => Some(
                         Toast::success(format!("{} added to {project}", label(path)))
-                            .detail("New workspaces take a worktree of it."),
+                            .detail("Each new workspace gets its own copy of it."),
                     ),
                     Some(Busy::Removing(path)) => Some(
                         Toast::success(format!("{} removed from {project}", label(path)))
-                            .detail("Detect again finds it."),
+                            .detail("It shows again as found in the folder, and Add puts it back."),
                     ),
-                    Some(Busy::Detecting) => Some(Toast::success("Detected again").detail(
-                        match read.new.as_slice() {
-                            [] => format!(
-                                "The folder holds the project's {} repositories, and no other.",
-                                read.listed.len()
-                            ),
-                            new => format!(
-                                "Found in the folder, not in the project: {}.",
-                                new.join(", ")
-                            ),
-                        },
-                    )),
                 };
                 if let Some(said) = said {
                     toast(said, cx);
@@ -298,9 +280,6 @@ impl ProjectRepositories {
                     Toast::failure(format!("{} was not removed", label(path))).detail(why),
                     cx,
                 ),
-                Some(Busy::Detecting) => {
-                    toast(Toast::failure("Not detected again").detail(why), cx)
-                }
             },
         }
         cx.notify();
@@ -317,7 +296,8 @@ impl ProjectRepositories {
         )
         .sentence(
             "New workspaces no longer take it. The repository itself is not touched, nor the \
-             worktrees of the workspaces that took it; Detect again finds it.",
+             workspaces that took it. The folder still holds it: it shows as found there, and \
+             Add puts it back.",
         )
         .action("Remove repository")
         .open(self.confirming.is_some())

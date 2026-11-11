@@ -629,7 +629,7 @@ pending requests.
   (GitHub `gh pr merge --delete-branch`, run with `-R` so that no local branch of a checkout is
   touched; Bitbucket `bkt pr merge --close-source=true`, else `=false` as before). Left out, it
   follows the pull request's `delete_branch_on_merge`, else the repository's project setting
-  "Delete the branch on merge" (`docs/projects.md`), else the branch is kept; `delete_branch:
+  "Delete the branch after merging" (`docs/projects.md`), else the branch is kept; `delete_branch:
   false` keeps it whatever they say. It never deletes a branch the workspace resumed (it existed
   before, so it was the user's: `its branch app/login was left: it existed before the workspace`)
   nor one another workspace of the project is on; the answer says the branch was deleted or left,
@@ -736,7 +736,7 @@ pending requests.
 
 `list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view` and `run_logs` go
 through the gate like every call, which allows them in every mode; `create`, `comment`, `edit`,
-`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, a merge that waives the checks base, and so is a `review` with the verdict `approve` or `request_changes`, in Full too (`review` with `comment` is to judge). **What a write asks is on the card**: besides its title and body, its reviewers (`Its reviewers, besides the project's: …`), labels, `It adds the reviewers: …`, `It removes the labels: …`, `It moves it onto the base release`, `It marks it ready for review`, `It makes it a draft`, `It deletes the branch when the pull request is merged`, and for a merge `It deletes the source branch on the forge after the merge` (with `(the project's setting Delete the branch on merge)` when that is why). A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
+`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, a merge that waives the checks base, and so is a `review` with the verdict `approve` or `request_changes`, in Full too (`review` with `comment` is to judge). **What a write asks is on the card**: besides its title and body, its reviewers (`Its reviewers, besides the project's: …`), labels, `It adds the reviewers: …`, `It removes the labels: …`, `It moves it onto the base release`, `It marks it ready for review`, `It makes it a draft`, `It deletes the branch when the pull request is merged`, and for a merge `It deletes the source branch on the forge after the merge` (with `(the project's setting Delete the branch after merging)` when that is why). A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …`, `Its body: …` and `Its message: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
 body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is

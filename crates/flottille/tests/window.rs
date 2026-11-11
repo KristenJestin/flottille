@@ -8928,10 +8928,10 @@ fn the_forge_is_suggested_from_a_github_remote_and_filled_by_use(cx: &mut TestAp
     );
     toast_said(&shell, "Forge of atlas saved", cx);
     settle(cx);
-    assert_eq!(
-        text_of("repository-forge-.", cx).as_deref(),
-        Some("GitHub · acme/atlas")
-    );
+    // The forge and its program are one value; the remote already leads to acme/atlas, so the
+    // value does not say it again. Whether `gh` is ready is the machine's PATH's to say.
+    let said = text_of("repository-forge-.", cx).unwrap();
+    assert!(said.starts_with("GitHub · gh"), "{said}");
     assert!(cx.update(|window, _| window.try_find("repository-use-.").is_none()));
 }
 
@@ -9419,7 +9419,6 @@ fn every_setting_of_a_project_is_edited_in_its_settings_and_the_project_page_has
     // The project page shows and runs: none of the settings' editors is on it.
     cx.update(|window, _| {
         for id in [
-            "detect-repositories",
             "repository-list",
             "tracker-row",
             "add-skill",
@@ -9450,7 +9449,7 @@ fn every_setting_of_a_project_is_edited_in_its_settings_and_the_project_page_has
             assert!(window.find(tab_title(key)).visible(), "the page has {key}");
             // What each tab edits: its editors are all there.
             let editors: &[&str] = match key {
-                "repositories" => &["detect-repositories", "tracker-row"],
+                "repositories" => &["repository-list", "tracker-row"],
                 "workspaces" => &["add-setup"],
                 "tasks" => &["add-task"],
                 "instructions" => &["add-skill", "add-command", "message-checks-text-atlas"],
@@ -9696,10 +9695,6 @@ fn a_project_is_added_from_the_window_detected_again_and_removed(cx: &mut TestAp
     });
     settle(cx);
 
-    cx.update(|window, cx| window.click("detect-repositories", cx));
-    toast_said(&shell, "Detected again", cx);
-
-    settle(cx);
     cx.update(|window, cx| window.click("project-more", cx));
     settle(cx);
     cx.update(|window, cx| window.click("remove-project", cx));

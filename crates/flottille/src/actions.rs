@@ -760,7 +760,7 @@ fn merge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Option<String> {
         Some(false) => return None,
         None if repository.delete_branch_on_merge => (
             "It deletes the source branch on the forge after the merge (the project's setting \
-             Delete the branch on merge)",
+             Delete the branch after merging)",
             false,
         ),
         None if asked_at_create() => (

@@ -78,6 +78,14 @@ fn desk(user: &User, forge: Option<&str>, tracker: Option<&str>) {
     );
 }
 
+/// The remote of `api`, an address on GitHub nothing is ever sent to.
+fn remote_of_api(user: &User) {
+    user.git(
+        &user.path("work/desk/api"),
+        &["remote", "add", "origin", "https://github.com/acme/api.git"],
+    );
+}
+
 const BITBUCKET: &str = "{ kind = \"bitbucket-cloud\", repository = \"acme/api\" }";
 const BKT_PAGE: &str = "https://github.com/avivsinai/bitbucket-cli";
 const GITHUB: &str = "{ kind = \"github\", repository = \"acme/api\" }";
@@ -252,7 +260,7 @@ fn a_forge_whose_program_is_signed_out_gives_the_sign_in_command(cx: &mut TestAp
     assert!(state.found && state.signed_in == Some(false), "{state:?}");
     assert_eq!(
         label_of("repository-program-api-state", cx).as_deref(),
-        Some("gh 2.60.0 · not signed in to github.com")
+        Some("gh is not signed in to github.com")
     );
     assert_eq!(
         label_of("repository-program-api-sign-in-0", cx).as_deref(),
@@ -313,14 +321,14 @@ fn check_again_reads_the_program_s_state_anew(cx: &mut TestAppContext) {
     );
     assert!(user.acli_received().is_empty());
 
-    cx.update(|window, cx| window.click("check-tracker-program", cx));
+    cx.update(|window, cx| window.click("tracker-program-check-again", cx));
     until(&shell, cx, "the program is found", |cx| {
         checks.read_with(cx, |checks, _| checks.tracker().is_some_and(|s| s.found))
     });
     settle(cx);
     assert_eq!(
         label_of("tracker-program-state", cx).as_deref(),
-        Some("acli 1.3.2-stable · not signed in to example.atlassian.net")
+        Some("acli is not signed in to example.atlassian.net")
     );
     assert_eq!(
         label_of("tracker-program-sign-in-0", cx).as_deref(),
@@ -331,20 +339,18 @@ fn check_again_reads_the_program_s_state_anew(cx: &mut TestAppContext) {
         "the advice folded away"
     );
 
-    // Signed in, then asked again.
+    // Signed in, then asked again: nothing is left to say, and the line is gone.
     user.acli_script(json!({}));
-    cx.update(|window, cx| window.click("check-tracker-program", cx));
+    cx.update(|window, cx| window.click("tracker-program-check-again", cx));
     until(&shell, cx, "the program is signed in", |cx| {
         checks.read_with(cx, |checks, _| {
             checks.tracker().is_some_and(|s| s.is_ready())
         })
     });
     settle(cx);
-    assert_eq!(
-        label_of("tracker-program-state", cx).as_deref(),
-        Some("acli 1.3.2-stable · signed in to example.atlassian.net")
-    );
+    assert!(!has("tracker-program-state", cx), "the green line is gone");
     assert!(!has("tracker-program-sign-in-0", cx));
+    assert!(!has("tracker-program-check-again", cx));
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
 }
 
@@ -385,7 +391,7 @@ fn a_changed_state_line_moves_and_comes_to_rest(cx: &mut TestAppContext) {
 
     install(&user, "acli");
     user.acli_script(json!({"signed_in": false}));
-    cx.update(|window, cx| window.click("check-tracker-program", cx));
+    cx.update(|window, cx| window.click("tracker-program-check-again", cx));
     until(&shell, cx, "the program is found", |cx| {
         checks.read_with(cx, |checks, _| checks.tracker().is_some_and(|s| s.found))
     });
@@ -396,11 +402,11 @@ fn a_changed_state_line_moves_and_comes_to_rest(cx: &mut TestAppContext) {
     assert_eq!(pending_frames(cx), 0, "and it comes to rest");
     assert_eq!(
         label_of("tracker-program-state", cx).as_deref(),
-        Some("acli 1.3.2-stable · not signed in to example.atlassian.net")
+        Some("acli is not signed in to example.atlassian.net")
     );
 
     user.acli_script(json!({}));
-    cx.update(|window, cx| window.click("check-tracker-program", cx));
+    cx.update(|window, cx| window.click("tracker-program-check-again", cx));
     until(&shell, cx, "the program is signed in", |cx| {
         checks.read_with(cx, |checks, _| {
             checks.tracker().is_some_and(|s| s.is_ready())
@@ -412,16 +418,14 @@ fn a_changed_state_line_moves_and_comes_to_rest(cx: &mut TestAppContext) {
     );
     settle(cx);
     assert_eq!(pending_frames(cx), 0);
-    assert_eq!(
-        label_of("tracker-program-state", cx).as_deref(),
-        Some("acli 1.3.2-stable · signed in to example.atlassian.net")
-    );
+    assert!(!has("tracker-program-state", cx), "nothing is left to say");
 }
 
 #[gpui_kit::test]
-fn a_failed_read_of_the_programs_is_said_and_can_be_asked_again(cx: &mut TestAppContext) {
+fn a_failed_check_again_is_said_and_can_be_asked_again(cx: &mut TestAppContext) {
     let user = user_with(&["gh"]);
     desk(&user, Some(GITHUB), None);
+    user.gh_script(json!({"signed_in": false}));
     let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
     let (_, checks) = open_settings(&shell, "desk", cx);
     let first = checks.read_with(cx, |checks, _| checks.last_request());
@@ -429,7 +433,7 @@ fn a_failed_read_of_the_programs_is_said_and_can_be_asked_again(cx: &mut TestApp
 
     // The project's file turns unreadable: the daemon refuses the read.
     std::fs::write(user.project_file("desk"), "not [ toml").unwrap();
-    cx.update(|window, cx| window.click("check-forge-programs", cx));
+    cx.update(|window, cx| window.click("repository-program-api-check-again", cx));
     until(
         &shell,
         cx,
@@ -448,7 +452,7 @@ fn a_failed_read_of_the_programs_is_said_and_can_be_asked_again(cx: &mut TestApp
     // What was known stays, and the button asks again.
     assert!(checks.read_with(cx, |checks, _| checks.repository("api").is_some()));
     std::fs::write(user.project_file("desk"), good).unwrap();
-    cx.update(|window, cx| window.click("check-forge-programs", cx));
+    cx.update(|window, cx| window.click("repository-program-api-check-again", cx));
     until(&shell, cx, "the programs are read again", |cx| {
         checks.read_with(cx, |checks, _| {
             checks.last_request() == first + 2 && !checks.is_checking()
@@ -498,21 +502,65 @@ fn the_copy_button_says_copied_in_a_toast(cx: &mut TestAppContext) {
     assert_eq!(copied(cx).as_deref(), Some("gh auth login"));
 }
 
+/// The window loses the focus and takes it back.
+fn leave_and_come_back(cx: &mut VisualTestContext) {
+    // A window the test platform opens has the focus once it is asked for.
+    cx.update(|window, _| window.activate_window());
+    cx.deactivate_window();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+}
+
+fn toasts_shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> usize {
+    shell.read_with(cx, |s, cx| s.toasts().read(cx).toasts().count())
+}
+
 #[gpui_kit::test]
-fn check_programs_on_repositories_reads_the_forges_programs_anew(cx: &mut TestAppContext) {
-    // `gh` is signed out; it is signed in while the page stays open; the button reads it.
+fn repositories_has_no_check_or_detect_button(cx: &mut TestAppContext) {
+    // A repository with a forge and a tracker whose programs are both missing or signed out:
+    // everything a button could be for is there, and none is.
+    let user = user_with(&["gh"]);
+    desk(&user, Some(GITHUB), Some(JIRA));
+    user.gh_script(json!({"signed_in": false}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    open_settings(&shell, "desk", cx);
+
+    for id in [
+        "check-forge-programs",
+        "detect-repositories",
+        "check-tracker-program",
+    ] {
+        assert!(!has(id, cx), "{id} is gone");
+    }
+    // The only way to ask again is on the line of a program that is not ready.
+    assert!(has("repository-program-api-check-again", cx));
+    assert!(has("tracker-program-check-again", cx));
+}
+
+#[gpui_kit::test]
+fn the_window_regaining_focus_reads_the_programs_again(cx: &mut TestAppContext) {
+    // `gh` is signed out; it is signed in while the page stays open and the window is away.
     let user = user_with(&["gh"]);
     desk(&user, Some(GITHUB), None);
+    remote_of_api(&user);
     user.gh_script(json!({"signed_in": false}));
     let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
     let (_, checks) = open_settings(&shell, "desk", cx);
     assert_eq!(
         label_of("repository-program-api-state", cx).as_deref(),
-        Some("gh 2.60.0 · not signed in to github.com")
+        Some("gh is not signed in to github.com")
     );
-
+    let first = checks.read_with(cx, |checks, _| checks.last_request());
     user.gh_script(json!({}));
-    cx.update(|window, cx| window.click("check-forge-programs", cx));
+
+    // Losing the focus reads nothing; taking it back does.
+    cx.deactivate_window();
+    cx.run_until_parked();
+    assert_eq!(
+        checks.read_with(cx, |checks, _| checks.last_request()),
+        first
+    );
+    cx.update(|window, _| window.activate_window());
     until(&shell, cx, "the program is signed in", |cx| {
         checks.read_with(cx, |checks, _| {
             checks.repository("api").is_some_and(|s| s.is_ready())
@@ -520,12 +568,179 @@ fn check_programs_on_repositories_reads_the_forges_programs_anew(cx: &mut TestAp
     });
     settle(cx);
 
+    assert!(checks.read_with(cx, |checks, _| checks.last_request()) > first);
     assert_eq!(
-        label_of("repository-program-api-state", cx).as_deref(),
-        Some("gh 2.60.0 · signed in to github.com")
+        label_of("repository-forge-api", cx).as_deref(),
+        Some("GitHub · gh, ready")
     );
-    assert!(!has("repository-program-api-sign-in-0", cx));
+    assert!(!has("repository-program-api-state", cx));
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
+
+#[gpui_kit::test]
+fn the_focus_taken_back_on_another_tab_reads_nothing_until_the_repositories_show(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with(&["gh"]);
+    desk(&user, Some(GITHUB), None);
+    user.gh_script(json!({"signed_in": false}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (page, checks) = open_settings(&shell, "desk", cx);
+    let repositories = page.read_with(cx, |page, _| page.repositories().clone());
+    page.update(cx, |page, cx| page.choose(1, cx));
+    settle(cx);
+    let (first, listed) = (
+        checks.read_with(cx, |checks, _| checks.last_request()),
+        repositories.read_with(cx, |section, _| section.last_request()),
+    );
+    user.gh_script(json!({}));
+
+    leave_and_come_back(cx);
+    settle(cx);
+    assert_eq!(
+        checks.read_with(cx, |checks, _| checks.last_request()),
+        first
+    );
+    assert_eq!(
+        repositories.read_with(cx, |section, _| section.last_request()),
+        listed
+    );
+
+    // The tab shown again reads both.
+    page.update(cx, |page, cx| page.choose(0, cx));
+    until(&shell, cx, "the program is signed in", |cx| {
+        checks.read_with(cx, |checks, _| {
+            checks.repository("api").is_some_and(|s| s.is_ready())
+        })
+    });
+    assert!(repositories.read_with(cx, |section, _| section.last_request()) > listed);
+}
+
+#[gpui_kit::test]
+fn a_read_on_focus_shows_no_toast(cx: &mut TestAppContext) {
+    let user = user_with(&["gh"]);
+    desk(&user, Some(GITHUB), None);
+    user.gh_script(json!({"signed_in": false}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (_, checks) = open_settings(&shell, "desk", cx);
+    assert_eq!(toasts_shown(&shell, cx), 0);
+
+    // A read that finds something new says nothing in a toast: the line moves.
+    user.gh_script(json!({}));
+    leave_and_come_back(cx);
+    until(&shell, cx, "the program is signed in", |cx| {
+        checks.read_with(cx, |checks, _| {
+            checks.repository("api").is_some_and(|s| s.is_ready())
+        })
+    });
+    settle(cx);
+    assert_eq!(toasts_shown(&shell, cx), 0);
+
+    // Nor one that fails: what was known stays.
+    let before = checks.read_with(cx, |checks, _| checks.last_request());
+    std::fs::write(user.project_file("desk"), "not [ toml").unwrap();
+    leave_and_come_back(cx);
+    until(&shell, cx, "the read ended", |cx| {
+        checks.read_with(cx, |checks, _| {
+            checks.last_request() > before && !checks.is_checking()
+        })
+    });
+    settle(cx);
+    assert_eq!(toasts_shown(&shell, cx), 0);
+    assert!(checks.read_with(cx, |checks, _| checks.repository("api").is_some()));
+}
+
+#[gpui_kit::test]
+fn check_again_is_only_on_a_program_not_ready(cx: &mut TestAppContext) {
+    // `gh` signed out for the repository, `acli` ready for the tracker.
+    let user = user_with(&["gh", "acli"]);
+    desk(&user, Some(GITHUB), Some(JIRA));
+    user.gh_script(json!({"signed_in": false}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (_, checks) = open_settings(&shell, "desk", cx);
+
+    assert!(has("repository-program-api-check-again", cx));
+    assert!(
+        !has("tracker-program-check-again", cx),
+        "the tracker is ready"
+    );
+
+    // Asked on its line, once `gh` is signed in, the line and its button go.
+    user.gh_script(json!({}));
+    cx.update(|window, cx| window.click("repository-program-api-check-again", cx));
+    until(&shell, cx, "the program is signed in", |cx| {
+        checks.read_with(cx, |checks, _| {
+            checks.repository("api").is_some_and(|s| s.is_ready())
+        })
+    });
+    settle(cx);
+    assert!(!has("repository-program-api-check-again", cx));
+    assert!(!has("tracker-program-check-again", cx));
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
+
+#[gpui_kit::test]
+fn the_forge_and_its_program_are_one_value(cx: &mut TestAppContext) {
+    let user = user_with(&["gh", "acli"]);
+    desk(&user, Some(GITHUB), Some(JIRA));
+    // The remote leads to the forge: the repository on it is not said twice.
+    remote_of_api(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (_, _) = open_settings(&shell, "desk", cx);
+
+    // One value: the forge, its program, and the program's state; no line of its own.
+    assert_eq!(
+        label_of("repository-forge-api", cx).as_deref(),
+        Some("GitHub · gh, ready")
+    );
+    assert!(
+        !has("repository-program-api-state", cx),
+        "the green line is gone"
+    );
+    // The tracker says it the same way.
+    assert_eq!(
+        label_of("tracker-program-value", cx).as_deref(),
+        Some("acli, ready")
+    );
+    assert!(!has("tracker-program-state", cx));
+    // The version and the host it is signed in to are in the tooltip.
+    cx.update(|window, cx| window.hover("repository-forge-api", cx));
+    settle(cx);
+    let tip = label_of("repository-forge-api-tooltip", cx).unwrap();
+    assert!(
+        tip.contains("gh 2.60.0") && tip.contains("github.com"),
+        "{tip}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_forge_whose_program_is_not_ready_has_no_check_mark(cx: &mut TestAppContext) {
+    let user = user_with(&["gh"]);
+    desk(&user, Some(GITHUB), None);
+    remote_of_api(&user);
+    user.gh_script(json!({"signed_in": false}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (_, checks) = open_settings(&shell, "desk", cx);
+    assert_eq!(
+        label_of("repository-forge-api", cx).as_deref(),
+        Some("GitHub · gh")
+    );
+
+    // Signed in: the mark comes in, moving, and comes to rest.
+    user.gh_script(json!({}));
+    cx.update(|window, cx| window.click("repository-program-api-check-again", cx));
+    until(&shell, cx, "the program is signed in", |cx| {
+        checks.read_with(cx, |checks, _| {
+            checks.repository("api").is_some_and(|s| s.is_ready())
+        })
+    });
+    assert!(pending_frames(cx) > 0, "the mark jumped in");
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0);
+    assert_eq!(
+        label_of("repository-forge-api", cx).as_deref(),
+        Some("GitHub · gh, ready")
+    );
 }
 
 #[gpui_kit::test]
@@ -566,7 +781,7 @@ fn acli_signed_in_to_another_site_says_so_with_the_switch_command(cx: &mut TestA
 
     assert_eq!(
         label_of("tracker-program-state", cx).as_deref(),
-        Some("acli 1.3.2-stable · signed in to other.atlassian.net, not to example.atlassian.net")
+        Some("acli is signed in to other.atlassian.net, not to example.atlassian.net")
     );
     assert_eq!(
         label_of("tracker-program-sign-in-0", cx).as_deref(),
