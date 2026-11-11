@@ -419,11 +419,20 @@ pending requests.
   `aws_secret_access_key`, `private_key`; an HTTP header's `Authorization`), and the value of an
   `Authorization`, `X-Api-Key` or `Cookie` header whose key is not quoted (`Authorization: Bearer
   …` of a header, YAML or `curl -v`, `Proxy-Authorization`, `Set-Cookie`), an `Authorization`'s
-  scheme kept, or of a key ending in `password` that starts its line (`password:` or
-  `POSTGRES_PASSWORD=` of YAML, a list's `- ` or `- "`, `export `, `spring.datasource.password=`
-  with no space, not code's `self.password = …`), to the end of its line or a quote, or the next
-  line of a YAML block (`password: |`), unless, unquoted, it holds a space or ends in `;` (prose
-  and code: `- Password: 8 chars minimum`, `dbPassword: string;`), but a
+  scheme kept, or of an unquoted key whose name ends as a quoted one's does (`password`,
+  `passwd`, `secret`, `token`, `api_key`, `client_secret`…) where a setting is written: at the
+  start of its line (`password:` or `POSTGRES_PASSWORD=` of YAML, a list's `- ` or `- "`,
+  `export `, a Dockerfile's `ENV `, cmd's `set `, PowerShell's `$env:PASSWORD = "…"`,
+  `spring.datasource.password=` with no space, not code's `self.password = …`), or as
+  `key=value` with no space after a URL's `?` or `&`, a connection string's `;`
+  (`Server=db;Password=…;`) or a `docker run -e` (`--env`); to the end of its line or a quote, as
+  `key=value` to a whitespace, a `;` or a `&` (a URL's `#` too), or each line of a YAML block
+  (`password: |`, a comment after its mark, its first line blank or not), unless, unquoted, it is
+  code or prose: it holds a space or ends in `;` or `,` (`- Password: 8 chars minimum`,
+  `dbPassword: string;`, `secret: Secret,`), it calls or names a type (`read()`,
+  `Optional[str]`), or, for a key other than a password's, it is a single word or a number
+  (`token: str`, `max_token: 100`); and the password of a MySQL or MariaDB command line's
+  `-p<password>` (`mysql -uapp -p…`; not a shell's `pwd`), but a
   tokenizer's special tokens (`pad_token`, `bos_token`, `eos_token`, `unk_token`, `sep_token`,
   `cls_token`, `mask_token`), wherever it is shown: a diff of a staged one, its value on the next line
   after a `+` or `-`, a word diff's `[-"…"-]{+"…"+}` (`flottille_core::secrets`). It is not a
