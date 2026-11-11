@@ -15,7 +15,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Extension, Kind, Methods, Place, Scope, Setting, To, Tool};
+use super::{Extension, Kind, Methods, Pick, Place, Scope, Setting, To, Tool};
 use crate::daemon::Daemon;
 use crate::mcp::{Definition, Grant, Outcome};
 use crate::projects::Failure;
@@ -29,19 +29,46 @@ pub const EXTENSION: Extension = Extension {
     scope: Scope::Project,
     on_by_default: false,
     switch: "Write specs before building",
-    usage: "Used from a ticket's **Write the spec**, and from **Specs** in a project's page.",
+    usage: "**Write the spec** on a ticket starts it at once, in the mode below. **New spec** on a \
+            project's Specs tab starts one with no ticket. For a single spec in another mode: \
+            **Write the spec as…** in the ticket's ⋯ menu.",
     place: Place::Row {
         icon: "file-text",
         line: "A spec of each task, written with you before an agent builds it.",
         order: 2,
     },
-    settings: &[Setting {
-        key: "language",
-        label: "Written in",
-        hint: "The language specs are written in; yours by default",
-        kind: Kind::Language,
-        per_project: true,
-    }],
+    settings: &[
+        Setting {
+            key: "mode",
+            label: "From a ticket",
+            hint: "Where the spec of a ticket lives",
+            kind: Kind::Choice {
+                of: &[
+                    Pick {
+                        value: "internal",
+                        label: "Kept in Flottille",
+                        line: "The ticket is read, never written. At the end, a draft comment \
+                               lists where the spec departs from it; you post it or not.",
+                    },
+                    Pick {
+                        value: "ticket",
+                        label: "Written to the ticket",
+                        line: "Each Ready writes the spec as the ticket's description, after \
+                               reading it again.",
+                    },
+                ],
+                default: "internal",
+            },
+            per_project: true,
+        },
+        Setting {
+            key: "language",
+            label: "Written in",
+            hint: "The language specs are written in; yours by default",
+            kind: Kind::Language,
+            per_project: true,
+        },
+    ],
     migrations: &[
         "
     -- A spec: its sections as JSON (`Content`), and the last C and D numbers given, so that
@@ -1673,9 +1700,9 @@ fn developer(daemon: &Daemon, id: u64) -> Option<String> {
     running(daemon, &developments)
 }
 
-/// `spec.new`: a Draft in the project's language, alone without tickets and internal with them
-/// unless the mode is given. From an idea ("New spec"), a session is started to write it, and the
-/// title is the idea's first line unless one is given.
+/// `spec.new`: a Draft in the project's language, alone without tickets and in the default mode
+/// for a ticket with them, unless the mode is given. From an idea ("New spec"), a session is
+/// started to write it, and the title is the idea's first line unless one is given.
 fn new(daemon: &Arc<Daemon>, asked: New) -> std::result::Result<Value, Failure> {
     let project = super::active(daemon, &EXTENSION, &asked.project)?;
     let idea = asked
@@ -1697,11 +1724,11 @@ fn new(daemon: &Arc<Daemon>, asked: New) -> std::result::Result<Value, Failure> 
         .iter()
         .map(|ticket| ticket_of(&project, ticket))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mode = asked.mode.unwrap_or(if tickets.is_empty() {
-        Mode::Alone
-    } else {
-        Mode::Internal
-    });
+    let mode = match asked.mode {
+        Some(mode) => mode,
+        None if tickets.is_empty() => Mode::Alone,
+        None => from_ticket_mode(daemon, &project)?,
+    };
     match mode {
         Mode::Alone if !tickets.is_empty() => {
             return Err(Failure::refused(
@@ -1791,10 +1818,14 @@ fn create(
     Ok(spec)
 }
 
-/// The mode of a spec written from a ticket when none is asked.
-// Internal until a project chooses its own (#687).
-fn from_ticket_mode(_project: &Project) -> Mode {
-    Mode::Internal
+/// The mode of a spec written from a ticket when none is asked: the project's own default, else
+/// Settings', else Internal. The setting only offers Internal and The ticket is the spec.
+fn from_ticket_mode(daemon: &Daemon, project: &Project) -> std::result::Result<Mode, Failure> {
+    let chosen = super::value(daemon, &EXTENSION, project, "mode")?;
+    Ok(match chosen.as_str() {
+        Some("ticket") => Mode::Ticket,
+        _ => Mode::Internal,
+    })
 }
 
 /// "Write the spec": a spec of the ticket, in the project's mode for it unless one is given, and
@@ -1804,7 +1835,10 @@ async fn from_ticket(
     asked: FromTicket,
 ) -> std::result::Result<Value, Failure> {
     let project = super::active(&daemon, &EXTENSION, &asked.project)?;
-    let mode = asked.mode.unwrap_or_else(|| from_ticket_mode(&project));
+    let mode = match asked.mode {
+        Some(mode) => mode,
+        None => from_ticket_mode(&daemon, &project)?,
+    };
     let (spec, message) =
         of_ticket(&daemon, &project, &asked.ticket, mode, Writer::Started).await?;
     start_writing(&daemon, &project, &spec, &message, Writer::Started)
@@ -2892,7 +2926,7 @@ async fn tool_new(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
         let writer = Writer::Caller(&grant.agent);
         let (spec, message) = match (asked.ticket, asked.idea) {
             (Some(ticket), _) => {
-                let mode = from_ticket_mode(&project);
+                let mode = from_ticket_mode(daemon, &project)?;
                 of_ticket(daemon, &project, &ticket, mode, writer).await?
             }
             (None, Some(idea)) => {
