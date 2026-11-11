@@ -1032,7 +1032,8 @@ reasons.
   where the name is looked for) and a line says it;
   **`show`** says `Milestone: 1.1`. A version that does not exist is refused, listing those that
   do, before the user is asked, and a `create` is read back: it says so when Jira did not set the
-  version. What is written is the version the request showed, by its id. **Refused, saying what to do instead** (the user's, in Jira, on the
+  version. Once allowed, a `create` in a milestone has its card made again and compared with
+  the one the user read: a version renamed or replaced meanwhile is not written. **Refused, saying what to do instead** (the user's, in Jira, on the
   project's Releases page; nothing run): `milestone_create`, `milestone_edit`, and `edit` with
   `milestone` or `remove_milestone`, since `acli` has no command that makes or releases a version
   and its `workitem edit` takes no fix version; Flottille calls no Jira REST API for it (as for a

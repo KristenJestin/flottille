@@ -706,10 +706,12 @@ What Flottille does with it:
 - **`create {…, milestone}`** puts the work item in a version of the project it is made in (`project`,
   as for any creation), by its name (any case) or its id, found **before the user is asked**
   (`It sets its fix version to "1.1" (id 10001, ABC, unreleased, 2026-12-01)`). **What is written
-  is that version, by its id**: a version renamed, or another named like it, while the request
-  waited, is never picked by its name; one that is gone or has another name since is refused (`the
-  version "1.1" (id 10001) the request showed is no longer one of ABC's versions`), nothing
-  written. The name is kept as Jira holds it for the lookup, the JQL and the JSON, and masked only
+  is the version that card named**: when the user allows the request, its card is made again and
+  compared with the one they read, as an action's is, so a version renamed, or another that took
+  its name, while the request waited is not written (`what it does changed since the user allowed
+  it; it would now: … (id 10009, …)`), nor one that is gone. The card is the request's own, kept
+  in the store: it holds after a restart of the daemon, and two requests in the same name are
+  each checked against theirs. The name is kept as Jira holds it for the lookup, the JQL and the JSON, and masked only
   in what is shown. A version `acli` has no flag for is set from the JSON definition (`create
   --from-json`: `projectKey`, `summary`, `type`, `description` as ADF, `labels`, `parentIssueId`, and
   `additionalAttributes: {"fixVersions": [{"name": "1.1"}]}`, **assumed**: Jira's REST shape of the
@@ -721,7 +723,7 @@ What Flottille does with it:
   item is read again (`acli jira workitem view <KEY> --json --fields fixVersions`), and the
   answer says what it holds: `The ticket ABC-12 was opened in ABC, in the version "1.1"`, or `…,
   but Jira did not set its fix version "1.1"` (with what the user does: set it in Jira), or, when
-  the read fails, that the version was asked and could not be confirmed. It is never said to be in
+  the read fails, after the link, that the version was asked and could not be confirmed. It is never said to be in
   the version on `acli`'s word alone.
 - **`list` and `search` with `milestone`** add `fixVersion = "<name>"` to the JQL (still
   confined to the tracker's projects: `project in (…) AND fixVersion = "1.1"`, the name quoted
