@@ -29,9 +29,9 @@ pub const EXTENSION: Extension = Extension {
     scope: Scope::Project,
     on_by_default: false,
     switch: "Write specs before building",
-    usage: "**Write the spec** on a ticket starts it at once, in the mode below. **New spec** on a \
-            project's Specs tab starts one with no ticket. For a single spec in another mode: \
-            **Write the spec as…** in the ticket's ⋯ menu.",
+    usage: "**Write the spec** on a ticket starts it at once; **Write the spec as…** in the ticket's \
+            ⋯ menu chooses where one spec lives, and **New spec** on a project's Specs tab starts \
+            one with no ticket.",
     place: Place::Row {
         icon: "file-text",
         line: "A spec of each task, written with you before an agent builds it.",

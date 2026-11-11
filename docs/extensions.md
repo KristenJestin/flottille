@@ -603,12 +603,13 @@ departures <spec> --post` offer them, and only the user posts them.
 
 **Its page** (Settings, Features, Specs; `design.md` §10): the switch "Write specs before
 building" ("What an agent needs to build a task without guessing, written with your answers. It
-runs no model on its own."); the usage line "**Write the spec** on a ticket starts it at once, in
-the mode below. **New spec** on a project's Specs tab starts one with no ticket. For a single spec
-in another mode: **Write the spec as…** in the ticket's ⋯ menu."; **From a ticket**, radios,
-**Kept in Flottille** ("The ticket is read, never written. At the end, a draft comment lists where
-the spec departs from it; you post it or not.", the default) and **Written to the ticket** ("Each
-Ready writes the spec as the ticket's description, after reading it again."), the words
+runs no model on its own."); the usage line "**Write the spec** on a ticket starts it at once;
+**Write the spec as…** in the ticket's ⋯ menu chooses where one spec lives, and **New spec** on a
+project's Specs tab starts one with no ticket." (one line, true with the radios hidden too, and it
+never says which mode is chosen: the radios do); **From a ticket**, radios, **Kept in Flottille**
+("The ticket is read, never written. At the end, a draft comment lists where the spec departs from
+it; you post it or not.", the default) and **Written to the ticket** ("Each Ready writes the spec
+as the ticket's description, after reading it again."), the words
 "Internal" and "mode" never shown; **Written in**, a select whose first option is `Your language
 (French)`. A project's page offers `As in Settings` first for both.
 

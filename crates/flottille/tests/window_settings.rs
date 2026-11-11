@@ -362,11 +362,16 @@ fn the_usage_line_says_how_to_choose_another_mode(cx: &mut TestAppContext) {
     assert_eq!(
         label(cx, "specs-usage").as_deref(),
         Some(
-            "Write the spec on a ticket starts it at once, in the mode below. New spec on a \
-             project's Specs tab starts one with no ticket. For a single spec in another mode: \
-             Write the spec as… in the ticket's ⋯ menu."
+            "Write the spec on a ticket starts it at once; Write the spec as… in the ticket's ⋯ \
+             menu chooses where one spec lives, and New spec on a project's Specs tab starts one \
+             with no ticket."
         )
     );
+    // It holds with no radios under it: nothing points below, and it names no chosen mode.
+    assert!(!present(cx, "specs-setting-mode-label"));
+    let usage = label(cx, "specs-usage").unwrap();
+    assert!(!usage.contains("below"), "{usage}");
+    assert!(!usage.contains("Kept in Flottille"), "{usage}");
 }
 
 #[gpui_kit::test]
