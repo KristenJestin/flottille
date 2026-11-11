@@ -646,9 +646,13 @@ pub struct WriteSpec {
     open: bool,
     /// The mode chosen: the ticket is the spec, or the spec is Flottille's alone.
     ticket_is_spec: bool,
-    /// The "⋯" menu of each ticket's row, made once and kept, and the titles the rows show.
+    /// The "⋯" menu of each ticket's row, made once and kept while the row is drawn, and the
+    /// ticket and the title the row shows now: a menu reads them when it is clicked, so that a row
+    /// that shows another ticket later never acts on the first.
     menus: HashMap<String, Entity<Menu>>,
-    titles: HashMap<String, String>,
+    rows: HashMap<String, (String, String)>,
+    /// The rows drawn since `begin_draw`.
+    seen: HashSet<String>,
 }
 
 impl WriteSpec {
@@ -660,7 +664,8 @@ impl WriteSpec {
             open: false,
             ticket_is_spec: false,
             menus: HashMap::new(),
-            titles: HashMap::new(),
+            rows: HashMap::new(),
+            seen: HashSet::new(),
         }
     }
 
@@ -676,11 +681,13 @@ impl WriteSpec {
     }
 
     /// "Write the spec as…": the choice of the mode of this one spec, preselected on the default.
-    pub fn act_as(&mut self, ticket: String, cx: &mut Context<Self>) {
+    pub fn act_as(&mut self, row: &str, cx: &mut Context<Self>) {
+        let Some((ticket, title)) = self.rows.get(row).cloned() else {
+            return;
+        };
         let default = registry_of(&self.shell, cx)
             .and_then(|registry| registry.read(cx).setting_in(NAME, &self.project, "mode"));
         self.ticket_is_spec = default.is_some_and(|mode| mode == "ticket");
-        let title = self.titles.get(&ticket).cloned().unwrap_or_default();
         self.ticket = Some((ticket, title));
         self.open = true;
         cx.notify();
@@ -695,19 +702,47 @@ impl WriteSpec {
         cx: &mut Context<Self>,
     ) -> Entity<Menu> {
         let this = cx.weak_entity();
-        let ticket_of_row = ticket.to_owned();
-        self.titles.insert(ticket.to_owned(), title.to_owned());
+        self.rows
+            .insert(row.to_owned(), (ticket.to_owned(), title.to_owned()));
+        self.seen.insert(row.to_owned());
         menu_of(&mut self.menus, "ticket-spec", row, cx, move |row, menu| {
+            let row_of_menu = row.to_owned();
             menu.entry(
                 format!("{row}-spec-as"),
                 "Write the spec as…",
                 Some(Icon::Edit),
                 move |_, cx| {
-                    let ticket = ticket_of_row.clone();
-                    this.update(cx, |this, cx| this.act_as(ticket, cx)).ok();
+                    this.update(cx, |this, cx| this.act_as(row_of_menu.as_str(), cx))
+                        .ok();
                 },
             )
         })
+    }
+
+    /// A list of rows is about to be drawn: the menus of the rows it no longer draws go at
+    /// [`end_draw`](Self::end_draw).
+    pub fn begin_draw(&mut self) {
+        self.seen.clear();
+    }
+
+    /// The rows are drawn: only their menus and tickets are kept.
+    pub fn end_draw(&mut self) {
+        let seen = &self.seen;
+        self.menus.retain(|row, _| seen.contains(row));
+        self.rows.retain(|row, _| seen.contains(row));
+    }
+
+    /// The rows whose menu is kept.
+    pub fn kept_rows(&self) -> usize {
+        self.menus.len()
+    }
+
+    /// The ticket and the title the choice of a mode is open on, while it is.
+    pub fn choosing(&self) -> Option<(&str, &str)> {
+        self.ticket
+            .as_ref()
+            .filter(|_| self.open)
+            .map(|(ticket, title)| (ticket.as_str(), title.as_str()))
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {

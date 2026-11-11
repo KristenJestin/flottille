@@ -1553,6 +1553,7 @@ impl Render for ProjectItems {
             "{tab:?}-{:?}-{}-{:?}",
             self.shown, self.mine, self.repository
         );
+        self.write_spec.update(cx, |write, _| write.begin_draw());
         let card = listed.into_iter().fold(
             ListCard::new("project-items-list").scrolling(&self.scroll, LIST_HEIGHT),
             |card, (key, row, placement)| {
@@ -1564,6 +1565,7 @@ impl Render for ProjectItems {
                 )
             },
         );
+        self.write_spec.update(cx, |write, _| write.end_draw());
         // Specs' tab, while Specs is on in the project.
         let specs_shown = self.specs_shown(cx);
         let not_set = {
