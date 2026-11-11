@@ -205,7 +205,7 @@ fn the_review_s_agents_are_one_folded_line_of_the_tree(cx: &mut TestAppContext) 
     assert!(!present(cx, &format!("rail-row-{pilot_id}")));
     assert_eq!(
         label(cx, &format!("rail-review-{pilot_id}")).as_deref(),
-        Some("Review · 0/2 passes")
+        Some("Review · 0/2 checks")
     );
     assert_eq!(behind(&pilot_id, cx), None, "folded, nothing is drawn");
 
@@ -250,6 +250,33 @@ fn the_review_s_agents_are_one_folded_line_of_the_tree(cx: &mut TestAppContext) 
     settle(cx);
     assert!(!present(cx, &format!("rail-row-{pilot_id}")));
     at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_tree_says_checks_not_passes(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let session = session(&user);
+    let started = user
+        .call("review.start", json!({"agent": session}))
+        .unwrap();
+    let pilot_id = started["pilot"].as_str().unwrap().to_owned();
+    let ran = pilot(&user).call("review", json!({"action": "run_pass", "pass": "standards"}));
+    assert!(!ran.error, "{}", ran.text);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&session)).is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&session), cx));
+    let line = format!("rail-review-{pilot_id}");
+    until(&shell, cx, "the rail holds the review's line", |cx| {
+        present(cx, &line)
+    });
+    settle(cx);
+
+    let said = label(cx, &line).unwrap();
+    assert_eq!(said, "Review · 0/2 checks");
+    assert!(!said.contains("pass"), "{said}");
 }
 
 fn at_rest(cx: &mut VisualTestContext) {
@@ -323,14 +350,22 @@ fn step(cx: &mut VisualTestContext) -> usize {
     drawn
 }
 
-#[gpui_kit::test]
-fn review_s_tab_has_its_switch_its_passes_its_slots_and_its_guidance(cx: &mut TestAppContext) {
-    let user = User::with_fake_agent();
+/// The window on Review's page of Settings, Review switched as `on` says, in a window tall
+/// enough for the whole page.
+fn review_page<'a>(
+    user: &User,
+    on: bool,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
-    let (shell, cx) = window(&user, cx);
-    cx.simulate_resize(size(px(1280.), px(2400.)));
+    if on {
+        user.call("extension.set", json!({"name": "review", "enabled": true}))
+            .unwrap();
+    }
+    let (shell, cx) = window(user, cx);
+    cx.simulate_resize(size(px(1280.), px(3200.)));
     shell.update_in(cx, |s, window, cx| s.open(Selection::Settings, window, cx));
-    until(&shell, cx, "Review is listed", |cx| {
+    until(&shell, cx, "the features tab", |cx| {
         present(cx, "settings-tabs-features")
     });
     cx.update(|window, cx| window.click("settings-tabs-features", cx));
@@ -339,71 +374,197 @@ fn review_s_tab_has_its_switch_its_passes_its_slots_and_its_guidance(cx: &mut Te
     });
     settle(cx);
     cx.update(|window, cx| window.click("features-review", cx));
+    until(&shell, cx, "Review's page", |cx| {
+        present(cx, "review-switch")
+    });
+    if on {
+        until(&shell, cx, "the checks are shown", |cx| {
+            present(cx, "review-checks")
+        });
+    }
     settle(cx);
-    // Off: the switch and its one line.
+    (shell, cx)
+}
+
+fn bounds(cx: &mut VisualTestContext, id: &str) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    cx.update(|window, _| window.find(id.to_owned()).bounds())
+}
+
+/// The checks of the card, in their order: the key of each, its name and its line.
+const CHECKS: [(&str, &str, &str); 4] = [
+    (
+        "spec",
+        "The spec",
+        "Each expected behaviour met, nothing out of scope. Only for a session that builds a spec.",
+    ),
+    (
+        "bugs",
+        "Bugs",
+        "Wrong results, lost data, crashes the change brings.",
+    ),
+    (
+        "standards",
+        "Project rules",
+        "The project's AGENTS.md, read from the base branch.",
+    ),
+    (
+        "security",
+        "Security",
+        "Secrets, injections, access. Off by default.",
+    ),
+];
+
+#[gpui_kit::test]
+fn the_usage_line_shows_while_review_is_off(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx) = review_page(&user, false, cx);
+
     assert_eq!(
         label(cx, "review-switch-label").as_deref(),
         Some("Review changes")
     );
-    assert!(!present(cx, "review-setting-passes-label"));
+    assert_eq!(
+        label(cx, "review-switch-hint").as_deref(),
+        Some(
+            "Agents read a session's change with fresh eyes and send it what is wrong. Nothing is blocked."
+        )
+    );
+    let usage = label(cx, "review-usage").unwrap();
+    assert!(usage.contains("/review"), "{usage}");
+    assert!(usage.contains("pull request opens"), "{usage}");
+    assert!(usage.contains("flottille review <session>"), "{usage}");
+    // Off, the page is that block alone.
+    assert!(!present(cx, "review-checks"));
     assert!(!present(cx, "review-guidance-text"));
 
+    // On, the rest unfolds under it, and the usage line stays.
     cx.update(|window, cx| window.click("review-switch", cx));
     until(&shell, cx, "the daemon has it on", |_| {
         review_listed(&user)["enabled"] == true
     });
-    until(&shell, cx, "the settings unfold", |cx| {
-        present(cx, "review-setting-passes-label")
+    until(&shell, cx, "the checks unfold", |cx| {
+        present(cx, "review-checks")
     });
     assert!(step(cx) + step(cx) > 0, "they unfold");
     settle(cx);
-    for id in [
-        "review-setting-passes-spec",
-        "review-setting-passes-bugs",
-        "review-setting-passes-standards",
-        "review-setting-passes-security",
-        "review-setting-bugs_model-model",
-        "review-setting-verifier_model-model",
-        "review-guidance-text",
-    ] {
-        assert!(present(cx, id), "{id}");
-    }
-    assert!(!present(cx, "review-guidance-save"), "no Save at rest");
-
-    // A pass switched on is the daemon's, in the declaration's order.
-    cx.update(|window, cx| window.click("review-setting-passes-security", cx));
-    until(&shell, cx, "the passes are kept", |_| {
-        review_listed(&user)["settings"][0]["value"]
-            == json!(["spec", "bugs", "standards", "security"])
-    });
-
-    // The guidance is the daemon's to keep, as the judge's is.
-    let editor = shell
-        .read_with(cx, |s, cx| {
-            s.extensions().read(cx).guidance("review").cloned()
-        })
-        .unwrap();
-    until(&shell, cx, "the guidance is read", |cx| {
-        editor.read_with(cx, |e, _| e.shown().is_some())
-    });
-    let field = editor.read_with(cx, |e, _| e.field().cloned()).unwrap();
-    field.update_in(cx, |field, window, cx| {
-        field.set_value("Look at the migrations first.", window, cx)
-    });
-    settle(cx);
-    cx.update(|window, cx| window.click("review-guidance-save", cx));
-    until(&shell, cx, "the guidance is kept", |_| {
-        user.call("review.show", json!({})).unwrap()["text"] == "Look at the migrations first."
-    });
+    assert!(present(cx, "review-usage"));
     at_rest(cx);
 }
 
 #[gpui_kit::test]
-fn review_s_checks_are_one_card_with_a_model_per_line(cx: &mut TestAppContext) {
+fn review_s_page_shows_what_it_checks_as_one_card(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx) = review_page(&user, true, cx);
+
+    // A line per check, inside the one card: its switch, its name, its line, its model on the
+    // right.
+    let card = bounds(cx, "review-checks");
+    let mut above = card.top();
+    for (key, name, line) in CHECKS {
+        let switch = format!("review-check-{key}-switch");
+        assert_eq!(label(cx, &format!("{switch}-label")).as_deref(), Some(name));
+        assert_eq!(label(cx, &format!("{switch}-hint")).as_deref(), Some(line));
+        let (words, select) = (
+            bounds(cx, &format!("{switch}-label")),
+            bounds(cx, &format!("review-setting-{key}_model-model")),
+        );
+        assert!(
+            card.top() <= words.top() && select.bottom() <= card.bottom(),
+            "{key} in the card"
+        );
+        assert!(words.top() >= above, "{key} comes after the line above");
+        assert!(
+            select.left() > words.right(),
+            "{key}: the model on the right"
+        );
+        assert!(select.size.width < card.size.width / 2., "{key}: compact");
+        above = words.bottom();
+    }
+    // The last line checks the findings, with no switch.
+    assert_eq!(
+        label(cx, "review-setting-verifier_model-label").as_deref(),
+        Some("Checking the findings")
+    );
+    assert!(bounds(cx, "review-setting-verifier_model-label").top() >= above);
+    assert!(!present(cx, "review-check-verifier-switch"));
+    // Spec, bugs and project rules by default; Security off.
+    for (key, on) in [
+        ("spec", true),
+        ("bugs", true),
+        ("standards", true),
+        ("security", false),
+    ] {
+        let knob = bounds(cx, &format!("review-check-{key}-switch-knob"));
+        let track = bounds(cx, &format!("review-check-{key}-switch-track"));
+        let right = knob.left() - track.left() > track.size.width / 3.;
+        assert_eq!(right, on, "{key}");
+    }
+
+    // A check switched on is the daemon's, the keys as they were; its switch slides.
+    cx.update(|window, cx| window.click("review-check-security-switch", cx));
+    until(&shell, cx, "the checks are kept", |_| {
+        review_listed(&user)["settings"][0]["value"]
+            == json!(["spec", "bugs", "standards", "security"])
+    });
+    assert!(step(cx) > 0, "the switch moves");
+    settle(cx);
+
+    // The guidance every reviewer is told, under the card.
+    assert_eq!(
+        label(cx, "review-guidance-title").as_deref(),
+        Some("What every reviewer is told")
+    );
+    let sentence = label(cx, "review-guidance-sentence").unwrap();
+    assert!(
+        sentence.contains("A check's own instructions come after it."),
+        "{sentence}"
+    );
+    assert!(bounds(cx, "review-guidance-title").top() > card.bottom());
+    // No word of how it is built.
+    for id in [
+        "review-switch-hint",
+        "review-usage",
+        "review-guidance-sentence",
+    ] {
+        let said = label(cx, id).unwrap().to_lowercase();
+        for word in ["pilot", "pass", "verifier"] {
+            assert!(!said.contains(word), "{id} says {word}: {said}");
+        }
+    }
+
+    // A project that does otherwise is named under it, fading in.
+    let folder = user.path("work/acme-shop");
+    user.git_init(&folder);
+    user.call(
+        "project.add",
+        json!({"folder": folder, "name": "acme-shop"}),
+    )
+    .unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "review", "settings": {"passes": ["spec", "bugs", "standards"]}}),
+    )
+    .unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "review", "project": "acme-shop",
+            "settings": {"passes": ["spec", "bugs", "standards", "security"]}}),
+    )
+    .unwrap();
+    until(&shell, cx, "the project is named", |cx| {
+        one_frame(cx);
+        label(cx, "review-projects").is_some_and(|said| said == "acme-shop runs Security too")
+    });
+    settle(cx);
+    assert!(present(cx, "review-projects-acme-shop"), "a link");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_default_model_is_said_once_under_the_card(cx: &mut TestAppContext) {
     // The daemon is asked for the models of the provider, which offers the one it picks.
     let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_LIST_MODELS", "1");
     user.fake_script(json!({"models": ["opus", "sonnet"]}));
-    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user.call("extension.set", json!({"name": "review", "enabled": true}))
         .unwrap();
     eventually("the models the daemon picks", || {
@@ -413,76 +574,187 @@ fn review_s_checks_are_one_card_with_a_model_per_line(cx: &mut TestAppContext) {
             .iter()
             .any(|s| s["key"] == "bugs_model" && s["default"]["gives"]["claude"] == "opus")
     });
-    let (shell, cx) = window(&user, cx);
-    cx.simulate_resize(size(px(1280.), px(2400.)));
-    shell.update_in(cx, |s, window, cx| s.open(Selection::Settings, window, cx));
-    until(&shell, cx, "Review is listed", |cx| {
-        present(cx, "settings-tabs-features")
-    });
-    cx.update(|window, cx| window.click("settings-tabs-features", cx));
-    until(&shell, cx, "the Review row is offered", |cx| {
-        present(cx, "features-review")
-    });
-    settle(cx);
-    cx.update(|window, cx| window.click("features-review", cx));
-    until(&shell, cx, "the checks are shown", |cx| {
-        present(cx, "review-models")
-    });
-    settle(cx);
-    let lines = [
-        ("spec_model", "The spec"),
-        ("bugs_model", "Bugs"),
-        ("standards_model", "Project rules"),
-        ("security_model", "Security"),
-        ("verifier_model", "Checking the findings"),
-    ];
-    let card = cx.update(|window, _| window.find("review-models").bounds());
-    let mut above = card.top();
-    for (key, name) in lines {
-        let id = format!("review-setting-{key}");
-        assert_eq!(label(cx, &format!("{id}-label")).as_deref(), Some(name));
-        let (line, select) = cx.update(|window, _| {
-            (
-                window.find(format!("{id}-label")).bounds(),
-                window.find(format!("{id}-model")).bounds(),
-            )
-        });
-        // A line each, inside the one card, the compact select on the right of its name.
-        assert!(
-            card.top() <= line.top() && line.bottom() <= card.bottom(),
+    let (_shell, cx) = review_page(&user, true, cx);
+
+    // Each check's select says its default in a word, the rule under the card, once.
+    for (key, _, _) in CHECKS {
+        assert_eq!(
+            label(cx, &format!("review-setting-{key}_model-model")).as_deref(),
+            Some("Default"),
             "{key}"
         );
-        assert!(line.top() >= above, "{key} comes after the line above");
-        assert!(
-            select.left() > line.right(),
-            "{key}: the select is on the right"
-        );
-        assert!(
-            select.size.width < card.size.width / 2.,
-            "{key}: a compact select"
-        );
-        above = line.bottom();
     }
-    // The default said once, as its rule with what it gives today; the cost once, under the card.
-    assert_eq!(
-        label(cx, "review-setting-bugs_model-model").as_deref(),
-        Some("Strongest of the session's provider")
-    );
     assert_eq!(
         label(cx, "review-setting-verifier_model-model").as_deref(),
         Some("One size smaller")
     );
-    let under = label(cx, "review-models-cost").unwrap();
-    assert!(under.contains("on your own quota"), "{under}");
-    assert!(
-        cx.update(|window, _| window.find("review-models-cost").bounds().top()) >= card.bottom()
+    let card = bounds(cx, "review-checks");
+    let models = label(cx, "review-checks-models").unwrap();
+    assert_eq!(
+        models,
+        "Models: the strongest of the session's provider unless you choose one. Each check is a \
+         turn on your own quota."
     );
+    assert_eq!(
+        label(cx, "review-checks-rounds").as_deref(),
+        Some("After fixes, one more review of what changed; two at most.")
+    );
+    assert!(bounds(cx, "review-checks-models").top() >= card.bottom());
+    assert!(
+        bounds(cx, "review-checks-rounds").top() >= bounds(cx, "review-checks-models").bottom()
+    );
+    // Opened, the first option says what it gives today.
     cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
     settle(cx);
     assert_eq!(
         label(cx, "review-setting-bugs_model-model-first-line").as_deref(),
         Some("opus for Claude")
     );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn instructions_for_this_check_fold_under_each_check(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx) = review_page(&user, true, cx);
+
+    // Folded under each check, saying there are none; none under the last line.
+    for (key, _, _) in CHECKS {
+        let fold = format!("review-check-{key}-instructions");
+        assert_eq!(
+            label(cx, &fold).as_deref(),
+            Some("Instructions for this check"),
+            "{key}"
+        );
+        until(&shell, cx, "the instructions are read", |cx| {
+            label(cx, &format!("{fold}-preview")).as_deref() == Some("none")
+        });
+        assert!(
+            bounds(cx, &fold).top() > bounds(cx, &format!("review-check-{key}-switch")).bottom(),
+            "{key}: under its line"
+        );
+        assert!(!present(cx, &format!("review-{key}-guidance-text")));
+    }
+    assert!(!present(cx, "review-check-verifier-instructions"));
+
+    // A click unfolds an editor, its chevron turning; Save unfolds once it changed.
+    cx.update(|window, cx| window.click("review-check-bugs-instructions", cx));
+    one_frame(cx);
+    assert!(present(cx, "review-bugs-guidance-text"), "drawn at once");
+    let first = bounds(cx, "review-check-bugs-fold").size.height;
+    settle(cx);
+    let open = bounds(cx, "review-check-bugs-fold").size.height;
+    assert!(first < open, "it unfolds: {first} then {open}");
+    assert!(!present(cx, "review-bugs-guidance-save"), "no Save at rest");
+    let editor = shell
+        .read_with(cx, |s, cx| {
+            s.extensions()
+                .read(cx)
+                .check_guidance("review", "bugs")
+                .cloned()
+        })
+        .unwrap();
+    let field = editor.read_with(cx, |e, _| e.field().cloned()).unwrap();
+    field.update_in(cx, |field, window, cx| {
+        field.set_value("Look at the retries of the login first.", window, cx)
+    });
+    assert!(step(cx) > 0, "Save unfolds");
+    settle(cx);
+    cx.update(|window, cx| window.click("review-bugs-guidance-save", cx));
+    until(&shell, cx, "the check's instructions are kept", |_| {
+        user.call("review.show", json!({"part": "bugs"})).unwrap()["text"]
+            == "Look at the retries of the login first."
+    });
+    assert_eq!(
+        user.call("review.show", json!({})).unwrap()["source"],
+        "default",
+        "the shared guidance is untouched"
+    );
+
+    // Folded again, it shows the start of its text.
+    cx.update(|window, cx| window.click("review-check-bugs-instructions", cx));
+    settle(cx);
+    assert!(!present(cx, "review-bugs-guidance-text"));
+    let preview = label(cx, "review-check-bugs-instructions-preview").unwrap();
+    assert!(preview.starts_with("Look at the retries"), "{preview}");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_project_s_review_page_has_the_same_card(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    user.call("extension.set", json!({"name": "review", "enabled": true}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(1280.), px(3200.)));
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open_project_settings_at(
+            "app",
+            flottille_window::project_settings::Reveal::Feature("review".into()),
+            window,
+            cx,
+        )
+    });
+    until(&shell, cx, "the project's page of Review", |cx| {
+        present(cx, "project-review-checks")
+    });
+    settle(cx);
+
+    for (key, name, _) in CHECKS {
+        assert_eq!(
+            label(cx, &format!("project-review-check-{key}-switch-label")).as_deref(),
+            Some(name)
+        );
+        assert!(!present(cx, &format!("project-review-check-{key}-set")));
+    }
+    // Instructions are Settings' alone.
+    assert!(!present(cx, "project-review-check-bugs-instructions"));
+    cx.update(|window, cx| window.click("project-review-setting-bugs_model-model", cx));
+    settle(cx);
+    assert_eq!(
+        label(cx, "project-review-setting-bugs_model-model-first").as_deref(),
+        Some("As in Settings")
+    );
+    cx.update(|window, cx| window.click("project-review-setting-bugs_model-model", cx));
+    settle(cx);
+
+    // A check turned on here carries the dot, and goes back to Settings' value.
+    cx.update(|window, cx| window.click("project-review-check-security-switch", cx));
+    until(&shell, cx, "the project runs Security", |_| {
+        review_listed(&user)["projects"][0]["settings"]["passes"]
+            == json!(["spec", "bugs", "standards", "security"])
+    });
+    until(&shell, cx, "the dot is shown", |cx| {
+        settle(cx);
+        present(cx, "project-review-check-security-set")
+    });
+    assert!(
+        !present(cx, "project-review-check-bugs-set"),
+        "only that check"
+    );
+    cx.update(|window, cx| window.click("project-review-check-security-reset", cx));
+    until(
+        &shell,
+        cx,
+        "the project goes back to Settings' value",
+        |_| {
+            review_listed(&user)["projects"][0]["settings"]
+                .get("passes")
+                .is_none_or(Value::is_null)
+        },
+    );
+    until(&shell, cx, "the dot goes", |cx| {
+        settle(cx);
+        !present(cx, "project-review-check-security-set")
+    });
     at_rest(cx);
 }
 

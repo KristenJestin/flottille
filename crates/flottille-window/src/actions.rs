@@ -203,13 +203,16 @@ pub enum Command {
     JudgeWrite {
         text: Option<String>,
     },
-    /// The guidance of a part of Flottille the user can turn off (`<name>.show`).
+    /// The guidance of a part of Flottille the user can turn off (`<name>.show`), or one of its
+    /// parts (a check's instructions).
     GuidanceRead {
         name: String,
+        part: Option<String>,
     },
     /// Saves it (`<name>.set`), or with none resets it (`<name>.reset`).
     GuidanceWrite {
         name: String,
+        part: Option<String>,
         text: Option<String>,
     },
     CreateWorkspace {
@@ -985,9 +988,11 @@ pub enum Outcome {
         written: bool,
         shown: Result<Shown, String>,
     },
-    /// The guidance of the part `name` as the daemon says it, after a read or a save or a reset.
+    /// The guidance of the part `name` (or of its part `part`) as the daemon says it, after a
+    /// read or a save or a reset.
     Guidance {
         name: String,
+        part: Option<String>,
         written: bool,
         shown: Result<Shown, String>,
     },
@@ -1375,6 +1380,14 @@ fn connected(connect: &Connect) -> Result<Conn, String> {
     Conn::new(stream).map_err(|e| e.to_string())
 }
 
+/// The parameters of a guidance's method, given its part when it has one.
+fn of_part(part: &Option<String>, mut params: Value) -> Value {
+    if let Some(part) = part {
+        params["part"] = json!(part);
+    }
+    params
+}
+
 /// One request on a connection of its own.
 fn ask_alone(
     connect: &Connect,
@@ -1512,26 +1525,38 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 shown: answer(ask_alone(connect, method, params, bounds.quick)),
             }
         }
-        Command::GuidanceRead { name } => {
-            let shown = ask_alone(connect, &format!("{name}.show"), json!({}), bounds.quick);
+        Command::GuidanceRead { name, part } => {
+            let shown = ask_alone(
+                connect,
+                &format!("{name}.show"),
+                of_part(&part, json!({})),
+                bounds.quick,
+            );
             Outcome::Guidance {
                 name,
+                part,
                 shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
                 written: false,
             }
         }
-        Command::GuidanceWrite { name, text } => {
+        Command::GuidanceWrite { name, part, text } => {
             let shown = match &text {
                 Some(text) => ask_alone(
                     connect,
                     &format!("{name}.set"),
-                    json!({"text": text}),
+                    of_part(&part, json!({"text": text})),
                     bounds.quick,
                 ),
-                None => ask_alone(connect, &format!("{name}.reset"), json!({}), bounds.quick),
+                None => ask_alone(
+                    connect,
+                    &format!("{name}.reset"),
+                    of_part(&part, json!({})),
+                    bounds.quick,
+                ),
             };
             Outcome::Guidance {
                 name,
+                part,
                 shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
                 written: true,
             }

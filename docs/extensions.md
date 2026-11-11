@@ -756,7 +756,7 @@ As built (#338):
 
 The tree's folded line says `Review · 3/4 checks · 2 findings`.
 
-**Each check's guidance** (the maintainer's decision of 2026-11-10, not built). Beside the shared
+**Each check's guidance** (the maintainer's decision of 2026-11-10, built in #706). Beside the shared
 guidance, each pass may have instructions of its own, **empty by default**:
 
 - A guidance of the frame may have **parts**: the extension names them (Review: its four passes);

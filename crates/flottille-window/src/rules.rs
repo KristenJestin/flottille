@@ -7,7 +7,9 @@
 //! after it only: the editor says so.
 //!
 //! The same editor holds the Auto judge's guidance in Settings (`judge.show`, `judge.set`,
-//! `judge.reset`), read at each judgement: a change reaches the next one.
+//! `judge.reset`), read at each judgement: a change reaches the next one; a part's guidance
+//! (Review's, `review.show`…) with its title; and a check's own instructions (`review.show
+//! {part}`), drawn bare, the field and its buttons, under the check's line.
 
 use gpui_design_system::{
     Button, Icon, Section, Switch, Toast, follow_theme, hoverable, icon, palette, presence,
@@ -108,6 +110,11 @@ pub struct RulesEditor {
     /// It edits the guidance of the part of Flottille of that name (Review's), not the rules:
     /// its title, as the window says it.
     part: Option<(String, String)>,
+    /// The title and the sentence of a part's guidance section, when the part words them.
+    heading: Option<(String, String)>,
+    /// It edits the guidance of one part of that guidance (Review's check `bugs`): the part of
+    /// Flottille, the part of its guidance and the check's name.
+    check: Option<(String, String, String)>,
     /// Made when first drawn, since a text field needs a window.
     field: Option<Entity<TextareaState>>,
     shown: Option<Shown>,
@@ -129,6 +136,8 @@ impl RulesEditor {
             judge: false,
             compaction: false,
             part: None,
+            heading: None,
+            check: None,
             field: None,
             shown: None,
             waiting: false,
@@ -163,9 +172,24 @@ impl RulesEditor {
         }
     }
 
-    /// A guidance, the judge's, the compactor's or a part's, rather than rules.
+    /// The section of the guidance titled `title`, its sentence `sentence`.
+    pub fn headed(mut self, title: &str, sentence: &str) -> Self {
+        self.heading = Some((title.to_owned(), sentence.to_owned()));
+        self
+    }
+
+    /// The editor of the instructions of the check `part` of the part `name` of Flottille, the
+    /// check named `title`.
+    pub fn check(shell: WeakEntity<Shell>, name: &str, part: &str, title: &str) -> Self {
+        Self {
+            check: Some((name.to_owned(), part.to_owned(), title.to_owned())),
+            ..Self::new(shell, None)
+        }
+    }
+
+    /// A guidance, the judge's, the compactor's, a part's or a check's, rather than rules.
     fn is_guidance(&self) -> bool {
-        self.judge || self.compaction || self.part.is_some()
+        self.judge || self.compaction || self.part.is_some() || self.check.is_some()
     }
 
     pub fn is_judge(&self) -> bool {
@@ -183,8 +207,16 @@ impl RulesEditor {
     /// Asks the daemon for the rules.
     pub fn read(&self, cx: &mut Context<Self>) {
         let project = self.project.clone();
-        let command = if let Some((name, _)) = &self.part {
-            Command::GuidanceRead { name: name.clone() }
+        let command = if let Some((name, part, _)) = &self.check {
+            Command::GuidanceRead {
+                name: name.clone(),
+                part: Some(part.clone()),
+            }
+        } else if let Some((name, _)) = &self.part {
+            Command::GuidanceRead {
+                name: name.clone(),
+                part: None,
+            }
         } else if self.judge {
             Command::JudgeRead
         } else if self.compaction {
@@ -198,9 +230,16 @@ impl RulesEditor {
     /// Saves `text`, or with none resets to the default.
     fn write(&self, text: Option<String>, cx: &mut Context<Self>) {
         let project = self.project.clone();
-        let command = if let Some((name, _)) = &self.part {
+        let command = if let Some((name, part, _)) = &self.check {
             Command::GuidanceWrite {
                 name: name.clone(),
+                part: Some(part.clone()),
+                text,
+            }
+        } else if let Some((name, _)) = &self.part {
+            Command::GuidanceWrite {
+                name: name.clone(),
+                part: None,
                 text,
             }
         } else if self.judge {
@@ -307,7 +346,9 @@ impl RulesEditor {
     }
 
     fn make_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextareaState> {
-        let example = if self.part.is_some() {
+        let example = if self.check.is_some() {
+            "what this check should look for"
+        } else if self.part.is_some() {
             "what its agents should look for"
         } else if self.judge {
             "how the judge should weigh a call"
@@ -349,7 +390,9 @@ impl RulesEditor {
         cx: &mut Context<Self>,
     ) {
         self.waiting = false;
-        let what = if let Some((_, title)) = &self.part {
+        let what = if let Some((_, _, title)) = &self.check {
+            format!("Instructions for {title}")
+        } else if let Some((_, title)) = &self.part {
             format!("{title} guidance")
         } else if self.judge {
             "Judge guidance".to_owned()
@@ -365,7 +408,9 @@ impl RulesEditor {
                 Ok(_) => Toast::success(format!("{what} saved")),
                 Err(why) => Toast::failure(format!("{what} not saved")).detail(why.clone()),
             };
-            let reach = if self.part.is_some() {
+            let reach = if self.check.is_some() {
+                "They reach the checks started from now on."
+            } else if self.part.is_some() {
                 "It reaches the agents started from now on."
             } else if self.judge {
                 "They reach the next judgement."
@@ -468,7 +513,7 @@ impl RulesEditor {
         if self.compaction {
             return COMPACTION_REACH;
         }
-        if self.part.is_some() {
+        if self.part.is_some() || self.check.is_some() {
             return PART_REACH;
         }
         match (self.judge, &self.project, self.is_own()) {
@@ -491,7 +536,10 @@ impl Render for RulesEditor {
         let scope = self.project.clone().unwrap_or_default();
         let judge = self.judge;
         let compaction = self.compaction;
-        let named = self.part.as_ref().map(|(name, _)| name.clone());
+        let named = match &self.check {
+            Some((name, part, _)) => Some(format!("{name}-{part}")),
+            None => self.part.as_ref().map(|(name, _)| name.clone()),
+        };
         let id = |part: &str| {
             ElementId::Name(
                 if let Some(name) = &named {
@@ -537,9 +585,9 @@ impl Render for RulesEditor {
                     presence(
                         id("save-block"),
                         self.save_shown(cx),
-                        match self.project {
-                            None => Button::primary(id("save"), "Save"),
-                            Some(_) => Button::secondary(id("save"), "Save"),
+                        match (&self.project, &self.check) {
+                            (None, None) => Button::primary(id("save"), "Save"),
+                            _ => Button::secondary(id("save"), "Save"),
                         }
                         .disabled(self.waiting)
                         .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
@@ -572,38 +620,78 @@ impl Render for RulesEditor {
                     .into_any_element()
             }
         };
-        let (title, sentence, section): (String, &str, String) = match (judge, &self.project) {
+        // A check's instructions are the field and its buttons alone, under the check's line.
+        if self.check.is_some() {
+            return div()
+                .flex()
+                .flex_col()
+                .gap(space::SM)
+                .child(text)
+                .child(
+                    presence_of(
+                        id("error-block"),
+                        self.shown
+                            .as_ref()
+                            .and_then(|shown| shown.error.clone())
+                            .map(|error| {
+                                SharedString::from(format!(
+                                    "This check does not run until this is fixed: {error}."
+                                ))
+                            }),
+                        line(id("error")),
+                    )
+                    .gap(space::SM),
+                )
+                .child(
+                    presence_of(
+                        id("problem-block"),
+                        self.problem.clone(),
+                        line(id("problem")),
+                    )
+                    .gap(space::SM),
+                )
+                .child(footer)
+                .into_any_element();
+        }
+        let (title, sentence, section): (String, String, String) = match (judge, &self.project) {
             _ if self.part.is_some() => {
                 let (name, title) = self.part.clone().expect("a part");
-                (
-                    format!("{title} guidance"),
-                    "What its agents are told to look for. It sits inside Flottille's fixed text \
-                     for each of them, which says they modify nothing.",
-                    format!("{name}-guidance"),
-                )
+                let (title, sentence) = self.heading.clone().unwrap_or_else(|| {
+                    (
+                        format!("{title} guidance"),
+                        "What its agents are told to look for. It sits inside Flottille's fixed \
+                         text for each of them, which says they modify nothing."
+                            .into(),
+                    )
+                });
+                (title, sentence, format!("{name}-guidance"))
             }
             _ if compaction => (
                 "What a summary keeps".into(),
                 "What a summary must keep. It sits inside Flottille's fixed text, which says the \
-                 summary is data and smaller than what it replaces.",
+                 summary is data and smaller than what it replaces."
+                    .into(),
                 "compaction-guidance".into(),
             ),
             (true, _) => (
                 "What the judge is told".into(),
                 "Added to Flottille's own instructions, which always ask before anything \
-                 destructive.",
+                 destructive."
+                    .into(),
                 "guidance".into(),
             ),
             (false, Some(_)) => (
                 "Rules".into(),
                 "How the project's agents work, after your rules for every project. A change \
-                 reaches the agents created from now on.",
+                 reaches the agents created from now on."
+                    .into(),
                 "rules".into(),
             ),
             (false, None) => (
                 "Rules for every project".into(),
                 "What every agent is told, in every project. A project adds its own, or uses only \
-                 its own.",
+                 its own."
+                    .into(),
                 "rules".into(),
             ),
         };
@@ -755,5 +843,6 @@ impl Render for RulesEditor {
                 .gap(space::MD),
             )
             .child(footer)
+            .into_any_element()
     }
 }

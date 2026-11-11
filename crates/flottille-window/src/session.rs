@@ -6698,12 +6698,12 @@ fn rail_tie(
         }))
 }
 
-/// What a review's line says of it, from its pilot's facts: `Review · 3/4 passes · 2 findings`,
+/// What a review's line says of it, from its pilot's facts: `Review · 3/4 checks · 2 findings`,
 /// and how it ended once it did.
 pub fn review_said(facts: &serde_json::Value) -> String {
     let review = &facts["review"];
     let mut said = format!(
-        "Review · {}/{} passes",
+        "Review · {}/{} checks",
         review["passes"]["done"].as_u64().unwrap_or(0),
         review["passes"]["total"].as_u64().unwrap_or(0)
     );
@@ -10238,13 +10238,13 @@ mod tests {
     }
 
     #[test]
-    fn a_review_s_line_says_its_passes_and_its_findings() {
+    fn a_review_s_line_says_its_checks_and_its_findings() {
         let running = serde_json::json!({"review": {"state": "running",
             "passes": {"done": 1, "total": 2}, "findings": 0, "changed": null}});
-        assert_eq!(review_said(&running), "Review · 1/2 passes");
+        assert_eq!(review_said(&running), "Review · 1/2 checks");
         let done = serde_json::json!({"review": {"state": "done",
             "passes": {"done": 3, "total": 4}, "findings": 2, "changed": null}});
-        assert_eq!(review_said(&done), "Review · 3/4 passes · 2 findings");
+        assert_eq!(review_said(&done), "Review · 3/4 checks · 2 findings");
     }
 
     #[test]
