@@ -1028,9 +1028,11 @@ reasons.
   released) from `acli jira project view --key <P> --json`; **`create`** takes `milestone`, a
   version of its project by its name or its id (with `type`: `acli` sets it from a JSON
   definition, `additionalAttributes.fixVersions`); **`list`** and **`search`** take `milestone`
-  (JQL `fixVersion = "<name>"`, `project` saying where the name is looked for) and a line says it;
+  (JQL `fixVersion = "<name>"`, and `AND project = "<P>"` when `project` is given, which also says
+  where the name is looked for) and a line says it;
   **`show`** says `Milestone: 1.1`. A version that does not exist is refused, listing those that
-  do, before the user is asked. **Refused, saying what to do instead** (the user's, in Jira, on the
+  do, before the user is asked, and a `create` is read back: it says so when Jira did not set the
+  version. What is written is the version the request showed, by its id. **Refused, saying what to do instead** (the user's, in Jira, on the
   project's Releases page; nothing run): `milestone_create`, `milestone_edit`, and `edit` with
   `milestone` or `remove_milestone`, since `acli` has no command that makes or releases a version
   and its `workitem edit` takes no fix version; Flottille calls no Jira REST API for it (as for a

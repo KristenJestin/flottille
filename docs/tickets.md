@@ -705,22 +705,34 @@ What Flottille does with it:
   none for the project: the versions are read there and nowhere else.
 - **`create {…, milestone}`** puts the work item in a version of the project it is made in (`project`,
   as for any creation), by its name (any case) or its id, found **before the user is asked**
-  (`It sets its fix version to "1.1" (ABC, unreleased, 2026-12-01)`) and again when it is written.
-  A version `acli` has no flag for is set from the JSON definition (`create --from-json`: `projectKey`,
-  `summary`, `type`, `description` as ADF, `labels`, `parentIssueId`, and
+  (`It sets its fix version to "1.1" (id 10001, ABC, unreleased, 2026-12-01)`). **What is written
+  is that version, by its id**: a version renamed, or another named like it, while the request
+  waited, is never picked by its name; one that is gone or has another name since is refused (`the
+  version "1.1" (id 10001) the request showed is no longer one of ABC's versions`), nothing
+  written. The name is kept as Jira holds it for the lookup, the JQL and the JSON, and masked only
+  in what is shown. A version `acli` has no flag for is set from the JSON definition (`create
+  --from-json`: `projectKey`, `summary`, `type`, `description` as ADF, `labels`, `parentIssueId`, and
   `additionalAttributes: {"fixVersions": [{"name": "1.1"}]}`, **assumed**: Jira's REST shape of the
   field, passed as `acli` passes the Sprint field), the same path as a creation in a sprint, so the
   same consequences: **`type` is required** (the JSON has no default type), a creation that has
   an assignee sets it right after with `edit --assignee`, and an answer without the new key says
   what was not done. A sprint and a version can be given together.
+- **A creation is read back**: `acli` may end it with 0 and Jira keep no fix version, so the work
+  item is read again (`acli jira workitem view <KEY> --json --fields fixVersions`), and the
+  answer says what it holds: `The ticket ABC-12 was opened in ABC, in the version "1.1"`, or `…,
+  but Jira did not set its fix version "1.1"` (with what the user does: set it in Jira), or, when
+  the read fails, that the version was asked and could not be confirmed. It is never said to be in
+  the version on `acli`'s word alone.
 - **`list` and `search` with `milestone`** add `fixVersion = "<name>"` to the JQL (still
-  confined to the tracker's projects). The name is looked for in the project `project` names, else
-  in every project of the tracker, and the filter is on the name: the same name in two projects
-  lists both. The stored list of the rounds is not used for it. A line says `milestone: 1.1`; the
-  search asks no `fixVersions` field (which fields `search` allows is not documented: `updated`
-  and `created` were refused), so a line says the version that was asked for, since every item
-  found holds it. **`show`** reads `fixVersions` with the work item and says `Milestone: 1.1, 2.0`
-  (all of its fix versions) when it has some.
+  confined to the tracker's projects: `project in (…) AND fixVersion = "1.1"`, the name quoted
+  with its `"` and `\` escaped). The name is looked for in the project `project` names, else in
+  every project of the tracker; with `project` the JQL adds `AND project = "<P>"`, so another
+  project's version of the same name is not listed, and without it the filter is on the name alone
+  (the same name in two projects lists both). The stored list of the rounds is not used for it. A
+  line says `milestone: 1.1`; the search asks no `fixVersions` field (which fields `search` allows
+  is not documented: `updated` and `created` were refused), so a line says the version that was
+  asked for, since every item found holds it. **`show`** reads `fixVersions` with the work item and
+  says `Milestone: 1.1, 2.0` (all of its fix versions) when it has some.
 - **A version that does not exist is refused, listing those that do** (`there is no milestone
   "9.9" among the versions of ABC (its versions are 1.0 (id 10000, closed), 1.1 (id 10001, open));
   nothing is created implicitly, and acli makes no version: …`), before the user is asked where it
