@@ -67,8 +67,9 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
   --limit 200`, `workitem link type --json` and `workitem view <KEY> --json --fields issuelinks` (the link types and an item's links; the JQL of a `list` or a `search` is in `docs/tools.md`); its writes (`workitem create`, `comment create`, `comment update`, `comment delete`, `edit`, `transition`, `link create`, `link delete`, below) run
   only for a `tickets` call the gate let through, and the tests look at every call the fake
   received. Of `gh`, the reads are `gh issue view <n> -R github.com/owner/name --json
-  number,title,state,body,comments,url` and `gh issue list` (`docs/tools.md`, "The tickets"); its
-  writes (`issue create`, `comment`, `edit`, `close`, `reopen`, for a status `project list`,
+  number,title,state,body,comments,url,milestone` and `gh issue list` (`docs/tools.md`, "The tickets");
+  `gh api repos/<owner>/<name>/milestones` lists a repository's milestones ("Milestones" below); its
+  writes (`issue create`, `comment`, `edit`, `close`, `reopen`, for milestones `gh api` with `--method POST` and `PATCH`, for a status `project list`,
   `field-list` and `item-edit`, and for links and comments `gh api` on the issue's `sub_issues`,
   `dependencies/blocked_by` and `issues/comments/<id>`, read first with `gh api` on the issue for its id) run only for a `tickets` call the gate let through. A key is parsed first, so it is a number or `ABC-123`, and a JQL filter is
   quoted, never spliced. A text written is passed as one argument, never through a shell.
@@ -309,7 +310,7 @@ leaves it out.
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
 (by label, assignee and `updated_within`), `search` with words, `in_comments` or `jql`, `show` the workspace's ticket or another of the
-project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards; `create` (on Jira also under a parent and in a sprint), `comment`, `log_time` (Jira, "Logging time" below) and `time_spent`, `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
+project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards, `milestones` the milestones of a GitHub repository; `create` (on Jira also under a parent and in a sprint; on GitHub in a milestone), `milestone_create` and `milestone_edit` (GitHub, "Milestones" below), `comment`, `log_time` (Jira, "Logging time" below) and `time_spent`, `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
 GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
 Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
 tracker does not take, or a creation in a Jira project that is not one of the tracker's, is
@@ -611,6 +612,57 @@ does (#362):
   maintainer checks them on a site with sprints: `tickets sprints`, then a `create` with
   `sprint`.
 
+### Milestones
+
+Seen in use: an agent asked to group tickets into two milestones could not (#758): the tool
+created and edited an issue and knew nothing of milestones, so it offered labels `v0.1` and
+`v0.2`, or asked the user to make them in the browser. On GitHub a milestone is how a set of
+tickets becomes a release with its progress bar. What `gh` can do decides what Flottille does:
+
+- **`gh issue` names a milestone by its title and makes none**, so the milestones themselves are
+  `gh api` calls on the tracker's repository (`repos/<owner>/<name>`, from the tracker the project
+  declares, never from the agent's arguments), with `--hostname github.com` as every call is made
+  against the host the declaration was checked against. `milestones {state?}` reads `…/milestones?
+  state=<open|closed|all>&per_page=100 --paginate` (a page after another: the answer is read as
+  the stream of lists `gh` prints, whichever form it takes), `milestone_create` is `--method POST
+  -f title=… [-f description=…] [-f due_on=<day>T00:00:00Z]`, `milestone_edit` is `--method PATCH`
+  of `…/milestones/<number>` with the `-f` fields it changes. Each `-f` is one argument: no text of
+  an agent is spliced into anything.
+- **A milestone is named by its title, else its number**, and found in the repository's list of
+  every state first (a closed one takes a ticket too). The title found is what `gh issue create`,
+  `edit` and `list` are given (`--milestone`), which is why a number the agent gave works where
+  `gh` takes names only. A title written otherwise than the milestone's is found too, the exact one first.
+- **One that does not exist is refused, listing those that do** (`there is no milestone "v9" in
+  acme/app (its milestones are v0.1 (#1, open), v0.2 (#2, open)); nothing is created implicitly:
+  milestone_create makes one`), **before the user is asked** where it is a write (`prepared`, as a
+  Jira sprint is), and again when the write is done, the list being read again then.
+- **A title is used once**: `milestone_create`, and a `milestone_edit` that renames, are refused
+  naming the milestone that has the title (case ignored, closed or open: GitHub's own rule).
+- **`due` is a day** (`YYYY-MM-DD`, a calendar day: `2026-02-30` is refused), sent at midnight UTC.
+  `milestone_edit` needs `milestone` and one of `title`, `description`, `due`, `state`; `state` is
+  `open` or `closed`. A `due` or a `description` of a ticket's action, a `remove_milestone` off an
+  `edit`, a `milestone` off `list`, `search`, `create`, `edit` and `milestone_edit` is refused,
+  naming the actions that take it. `milestone` with `remove_milestone` is refused: a ticket is in a
+  milestone or in none.
+- **The request** says the milestone as the repository names it (`It puts it in the milestone
+  "v0.1", due 2026-12-01`, `It changes the milestone v0.1 (#1, open)`, `It closes it`, `It takes
+  it out of its milestone`, `Its due date: 2026-12-31`), beside the title and the description as
+  the other writes show them; a milestone's description is read by the gate as a body is (a secret
+  in it is base).
+- **`list` and `search` with `milestone`** ask the tracker (`--milestone`): the rounds keep each
+  ticket's milestone (`gh issue list --json …,milestone`, the title in the item's details), so a
+  `list` answered from them shows it on each line (`- #5 open: … milestone: v0.1`), but the filter
+  is `gh`'s own. A `search`'s kept answer is keyed by it. `show` reads it with the issue
+  (`--json …,milestone`) and says `Milestone: v0.1` when there is one.
+- **On Jira**: `milestones`, `milestone_create`, `milestone_edit`, `milestone`, `remove_milestone`,
+  `due` and `description` are refused, before anything is asked and nothing run, naming a sprint
+  (`a work item goes in a sprint: sprints lists them, create takes sprint`). Jira's versions
+  (fix versions) are a different field, out of scope here.
+- **Not measured against a real repository**: the shape of the API's answers (`number`, `title`,
+  `state`, `due_on`, `open_issues`, `closed_issues`, `html_url`, the REST API's documented fields)
+  and that `gh issue edit --milestone` takes a title. The maintainer checks them with `tickets
+  milestones`, then a `milestone_create` and an `edit` in a throwaway repository.
+
 ### What `acli jira workitem search` prints is assumed too
 
 Its page (<https://developer.atlassian.com/cloud/acli/reference/commands/jira-workitem-search/>)
@@ -689,8 +741,8 @@ written against.
 ## Tests
 
 Tests never call GitHub or Jira nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`,
-which answers `issue view`, `issue list`, the issue writes, the `gh project` calls of a status and the
-missing `project` scope too) and a fake `acli`
+which answers `issue view`, `issue list`, the issue writes, the `gh project` calls of a status, the
+missing `project` scope and the milestones of a repository, `crates/flottille/tests/ticket_milestones.rs`, too) and a fake `acli`
 (`crates/flottille-fake-acli`, `workitem view`, `workitem search` and the writes; it reads the
 files of `--description-file` and `--body-file` and ends with 1 on a document that is not valid
 ADF, so that a test catches one; without a scripted `search`, a search finds the work items its
