@@ -60,12 +60,14 @@ fn named(
 pub const EXTENSION: Extension = Extension {
     name: "review",
     title: "Review",
-    sentence: "Reads a session's change with fresh eyes and delivers what is wrong to it: a pilot, \
-               its passes and a verifier, each a model run on your own quota.",
+    sentence: "Agents read a session's change with fresh eyes and send it what is wrong. Nothing \
+               is blocked.",
     scope: Scope::Project,
     on_by_default: false,
     switch: "Review changes",
-    usage: "Used by **/review** in a session's composer.",
+    usage: "A review starts when a session's pull request opens, when you type **/review** in its \
+            composer, or when its agent asks for one. From a terminal: \
+            **flottille review <session>**.",
     place: Place::Row {
         icon: "scan-search",
         line: "Fresh eyes on a session's change before you merge it.",
@@ -74,8 +76,8 @@ pub const EXTENSION: Extension = Extension {
     settings: &[
         Setting {
             key: "passes",
-            label: "Passes",
-            hint: "What a review reads; the spec pass only for a session that develops a spec",
+            label: "What it checks",
+            hint: "The spec only for a session that builds a spec",
             kind: Kind::Subset {
                 of: PASSES,
                 default: &["spec", "bugs", "standards"],
@@ -202,6 +204,7 @@ pub const EXTENSION: Extension = Extension {
         default: include_str!("guidance.md"),
         limit: 4_000,
         named: "your review's guidance",
+        parts: PASSES,
     }),
     declared: None,
     dynamic: None,
@@ -865,8 +868,9 @@ fn slot(
     })
 }
 
-/// An agent's instructions: Review's fixed text, the guidance, and for the standards pass the
-/// project's rules read from the base branch.
+/// An agent's instructions: Review's fixed text, the shared guidance, a pass's own instructions,
+/// and for the standards pass the project's rules read from the base branch. The pilot and the
+/// verifier read the shared guidance only.
 fn instructions_of(
     daemon: &Daemon,
     what: &str,
@@ -892,6 +896,15 @@ fn instructions_of(
         "\n\n## The user's guidance for reviews\n\n{}",
         guidance.trim_end()
     ));
+    if PASSES.contains(&what)
+        && let Some(own) =
+            super::guidance::part_text(daemon, &EXTENSION, what).map_err(Failure::refused)?
+    {
+        text.push_str(&format!(
+            "\n\n## The user's instructions for this check\n\n{}",
+            own.trim_end()
+        ));
+    }
     if let Some(rules) = rules {
         text.push_str(&format!(
             "\n\n## The project's rules, read from the base branch\n\n{}",
@@ -1409,8 +1422,9 @@ async fn run_pass(
         "standards" => Some(base_rules(&review).await),
         _ => None,
     };
-    let instructions =
-        instructions_of(daemon, &pass, rules.as_deref()).map_err(|failure| failure.message)?;
+    // An instruction that cannot be read fails this pass alone: the pilot says it did not run.
+    let instructions = instructions_of(daemon, &pass, rules.as_deref())
+        .map_err(|failure| format!("the {pass} pass did not run: {}", failure.message))?;
     let mut text = diff_said(&review.diffs, &review.files);
     if let Some(spec) = review
         .spec

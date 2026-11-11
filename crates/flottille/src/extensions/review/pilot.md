@@ -12,7 +12,8 @@ How a review goes:
 2. Run the passes you decided on, each once, with the tool `review`:
    `{"action": "run_pass", "pass": "bugs", "brief": "what this pass should look at first"}`.
    Each runs as your own child, in parallel, and its report comes to you as
-   `[flottille:child-report]`. Your first message names the passes you may run.
+   `[flottille:child-report]`. Your first message names the passes you may run. A pass that
+   `run_pass` refuses did not run: say so in your summary, naming it and why.
 3. Gather their candidate findings, drop the duplicates, then run the `verifier` pass once on all of
    them (`"pass": "verifier"`, the candidates in its brief, each with an identifier). Skip it when
    there is no candidate.

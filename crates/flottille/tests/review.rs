@@ -1288,3 +1288,213 @@ fn two_reports_at_once_keep_the_findings_once() {
     assert_eq!(review["state"], "done");
     assert_eq!(review["findings"].as_array().unwrap().len(), 1, "{review}");
 }
+
+// Each check's guidance (`docs/extensions.md`, "Each check's guidance").
+
+/// A file of Flottille's configuration folder.
+fn config(user: &User, file: &str) -> PathBuf {
+    user.path(&format!("config/flottille/{file}"))
+}
+
+/// The instructions of the pass of a review whose heading says `heading`.
+fn told(user: &User, heading: &str) -> String {
+    instructions(&opened(user, |prompt| prompt.contains(heading)))
+}
+
+#[test]
+fn a_check_s_own_instructions_come_after_the_shared_guidance() {
+    let user = user();
+    let (session, _) = changed_session(&user);
+    user.call(
+        "review.set",
+        json!({"text": "Shared: read the migrations first."}),
+    )
+    .unwrap();
+    user.call(
+        "review.set",
+        json!({"part": "bugs", "text": "Bugs only: look at the login retries."}),
+    )
+    .unwrap();
+    start(&user, &session);
+    ok(pilot(&user).call("review", json!({"action": "run_pass", "pass": "bugs"})));
+
+    let bugs = told(&user, "You are the bugs pass of a review");
+    let fixed = bugs.find("You are the bugs pass of a review").unwrap();
+    let shared = bugs
+        .find("Shared: read the migrations first.")
+        .expect("the shared guidance");
+    let heading = bugs
+        .find("## The user's instructions for this check")
+        .expect("a block of its own");
+    let own = bugs
+        .find("Bugs only: look at the login retries.")
+        .expect("its own instructions");
+    assert!(fixed < shared, "{bugs}");
+    assert!(shared < heading && heading < own, "{bugs}");
+}
+
+#[test]
+fn the_pilot_and_the_verifier_read_only_the_shared_guidance() {
+    let user = user();
+    let (session, _) = changed_session(&user);
+    user.call("review.set", json!({"text": "Shared: be brief."}))
+        .unwrap();
+    for part in ["spec", "bugs", "standards", "security"] {
+        user.call(
+            "review.set",
+            json!({"part": part, "text": format!("Only for {part}.")}),
+        )
+        .unwrap();
+    }
+    start(&user, &session);
+    let pilot = pilot(&user);
+    ok(pilot.call("review", json!({"action": "run_pass", "pass": "standards"})));
+    ok(pilot.call(
+        "review",
+        json!({"action": "run_pass", "pass": "verifier", "brief": "C1: login twice"}),
+    ));
+
+    let standards = told(&user, "You are the standards pass of a review");
+    assert!(standards.contains("Only for standards."), "{standards}");
+    for (who, text) in [
+        ("pilot", told(&user, "You are the pilot of a review")),
+        ("verifier", told(&user, "You are the verifier of a review")),
+        ("standards", standards),
+    ] {
+        assert!(text.contains("Shared: be brief."), "{who}: {text}");
+        for part in ["spec", "bugs", "security"] {
+            assert!(
+                !text.contains(&format!("Only for {part}.")),
+                "{who} reads {part}'s: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_empty_check_guidance_writes_no_file() {
+    let user = user();
+    let file = config(&user, "review-bugs.md");
+    let shown = user.call("review.show", json!({"part": "bugs"})).unwrap();
+    assert_eq!(shown["text"], "", "no default text: {shown}");
+    assert_eq!(shown["default"], "", "{shown}");
+    assert!(!file.exists());
+
+    user.call("review.set", json!({"part": "bugs", "text": "Retries."}))
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "Retries.");
+
+    let emptied = user
+        .call("review.set", json!({"part": "bugs", "text": "  \n"}))
+        .unwrap();
+    assert_eq!(emptied["text"], "", "{emptied}");
+    assert!(!file.exists(), "saving an empty text removes the file");
+}
+
+#[test]
+fn an_unreadable_check_guidance_fails_that_check_only() {
+    let user = user();
+    let (session, _) = changed_session(&user);
+    // Not UTF-8: it cannot be read whole.
+    std::fs::write(
+        config(&user, "review-bugs.md"),
+        b"PRIVATE-NOTE \xff\xfe of the user",
+    )
+    .unwrap();
+    start(&user, &session);
+    let pilot = pilot(&user);
+
+    let refusal = refused(pilot.call("review", json!({"action": "run_pass", "pass": "bugs"})));
+    assert!(refusal.contains("did not run"), "{refusal}");
+    assert!(refusal.contains("review-bugs.md"), "{refusal}");
+    assert!(!refusal.contains("PRIVATE-NOTE"), "{refusal}");
+    // Another check runs, and the review goes on.
+    ok(pilot.call("review", json!({"action": "run_pass", "pass": "standards"})));
+    let review = &reviews(&user, &session)[0];
+    assert_eq!(review["state"], "running", "{review}");
+    let passes: Vec<&Value> = review["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|agent| &agent["pass"])
+        .collect();
+    assert!(passes.contains(&&json!("standards")), "{passes:?}");
+    assert!(!passes.contains(&&json!("bugs")), "{passes:?}");
+    // The pilot is told to say so in its report.
+    assert!(
+        told(&user, "You are the pilot of a review").contains("did not run"),
+        "the pilot is not told what a check that did not run means"
+    );
+}
+
+#[test]
+fn a_guidance_error_names_the_file_and_never_its_folder() {
+    let user = user();
+    let folder = config(&user, "");
+    let folder = folder.to_string_lossy().into_owned();
+    for (file, params) in [
+        ("review-bugs.md", json!({"part": "bugs"})),
+        ("review.md", json!({})),
+    ] {
+        std::fs::write(config(&user, file), b"a text \xff\xfe that is not UTF-8").unwrap();
+        let shown = user.call("review.show", params).unwrap();
+        let error = shown["error"].as_str().unwrap();
+        assert!(error.contains(file), "{error}");
+        assert!(!error.contains(&folder), "no path: {error}");
+        assert!(!error.contains("guidance for"), "no key: {error}");
+    }
+}
+
+#[test]
+fn review_show_set_reset_take_a_part() {
+    let user = user();
+    let watch = user.watch(&["--after", "0"]);
+
+    let set = user
+        .call(
+            "review.set",
+            json!({"part": "security", "text": "Look at the tokens."}),
+        )
+        .unwrap();
+    assert_eq!(set["text"], "Look at the tokens.", "{set}");
+    assert_eq!(set["source"], "global", "{set}");
+    assert_eq!(
+        std::fs::read_to_string(config(&user, "review-security.md")).unwrap(),
+        "Look at the tokens."
+    );
+    let seen = watch.until(|e| e["name"] == "review.changed");
+    assert_eq!(seen.last().unwrap()["data"]["part"], "security");
+
+    // Without a part, the shared guidance, as before.
+    let shared = user.call("review.show", json!({})).unwrap();
+    assert_eq!(shared["source"], "default", "{shared}");
+    assert!(!shared["text"].as_str().unwrap().is_empty(), "{shared}");
+    assert_eq!(
+        user.call("review.show", json!({"part": "security"}))
+            .unwrap()["text"],
+        "Look at the tokens."
+    );
+    assert!(!config(&user, "review.md").exists());
+
+    let reset = user
+        .call("review.reset", json!({"part": "security"}))
+        .unwrap();
+    assert_eq!(reset["text"], "", "{reset}");
+    assert_eq!(reset["source"], "default", "{reset}");
+    assert!(!config(&user, "review-security.md").exists());
+    let seen = watch.until(|e| e["name"] == "review.changed");
+    assert_eq!(seen.last().unwrap()["data"]["part"], "security");
+
+    // A part Review does not name, and a text over the limit, are refused.
+    let (_, message) = user
+        .call("review.show", json!({"part": "style"}))
+        .unwrap_err();
+    assert!(message.contains("bugs"), "names the parts: {message}");
+    let (_, message) = user
+        .call(
+            "review.set",
+            json!({"part": "bugs", "text": "x".repeat(4_001)}),
+        )
+        .unwrap_err();
+    assert!(message.contains("4000"), "{message}");
+}

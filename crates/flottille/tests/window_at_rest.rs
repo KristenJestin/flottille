@@ -636,7 +636,7 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_settings_and_a_feature_s_pag
     cx.update(|window, cx| window.click("settings-tabs-features", cx));
     settle(&shell, cx);
     for (row, shown) in [
-        ("review", "review-models"),
+        ("review", "review-checks"),
         ("specs", "specs-setting-mode-internal"),
         ("compaction", "compaction-switch"),
     ] {
@@ -649,6 +649,47 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_settings_and_a_feature_s_pag
         cx.update(|window, cx| window.click("features-back", cx));
         settle(&shell, cx);
     }
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_review_s_page_with_a_check_s_instructions_open(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    user.call("extension.set", json!({"name": "review", "enabled": true}))
+        .unwrap();
+    user.call(
+        "review.set",
+        json!({"part": "bugs", "text": "Look at the retries first."}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(1280.), px(3200.)));
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the settings page is shown", |cx| {
+        cx.update(|window, _| window.try_find("settings-tabs-features").is_some())
+    });
+    cx.update(|window, cx| window.click("settings-tabs-features", cx));
+    until(&shell, cx, "Review is a row", |cx| {
+        cx.update(|window, _| window.try_find("features-review").is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("features-review", cx));
+    until(&shell, cx, "the check's instructions are read", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find("review-check-bugs-instructions-summary")
+                .and_then(|found| found.label().map(str::to_owned))
+                .is_some_and(|said| said.starts_with("Look at"))
+        })
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "folded");
+
+    cx.update(|window, cx| window.click("review-check-bugs-instructions", cx));
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "unfolded");
 }
 
 #[gpui_kit::test]

@@ -1512,10 +1512,16 @@ impl Shell {
             }
             Outcome::Guidance {
                 name,
+                part,
                 written,
                 shown,
             } => {
-                let editor = self.extensions.read(cx).guidance(&name).cloned();
+                let registry = self.extensions.read(cx);
+                let editor = match &part {
+                    Some(part) => registry.check_guidance(&name, part),
+                    None => registry.guidance(&name),
+                }
+                .cloned();
                 if let Some(editor) = editor {
                     editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
                 }
