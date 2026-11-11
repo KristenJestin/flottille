@@ -167,6 +167,9 @@ pub struct Guidance {
     pub limit: usize,
     /// How a refusal names it: "your review's guidance".
     pub named: &'static str,
+    /// Its parts, each a guidance of its own read after it by the agents the extension says
+    /// (Review: its passes), `<name>-<part>.md`, with no default.
+    pub parts: &'static [&'static str],
 }
 
 /// What hears an event of the core: its data, as `flottille watch` prints it.
@@ -1186,6 +1189,7 @@ fn list(daemon: &Daemon) -> Value {
                 "error": error,
                 "settings": settings,
                 "guidance": extension.guidance.is_some(),
+                "guidance_parts": extension.guidance.as_ref().map_or(&[][..], |g| g.parts),
                 "commands": extension.commands.iter().map(|(word, _)| word).collect::<Vec<_>>(),
                 "projects": projects,
             })

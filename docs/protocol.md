@@ -457,13 +457,14 @@ is off globally, the projects' switches kept.
 
 - `extension.list` answers `{"extensions", "errors"}`: for each extension `{"name", "title",
   "sentence", "switch", "usage", "scope", "on_by_default", "place", "enabled", "error",
-  "settings", "projects", "guidance", "commands"}`, `switch` the label of its switch (what it does:
-  `Review changes`), `usage` the line that says where and how it acts (`**` around the words found
-  elsewhere in the window), `place` `{"icon", "line", "order"}` of its row of Settings' Features
+  "settings", "projects", "guidance", "guidance_parts", "commands"}`, `switch` the label of its
+  switch (what it does: `Review changes`), `usage` the line that says where and how it acts
+  (`**` around the words found elsewhere in the window), `place` `{"icon", "line", "order"}` of its row of Settings' Features
   (a Lucide icon by its file name, the line that says what it is for, its place among the rows),
   `enabled` being the global switch, `error` why `extensions.toml`
   cannot be used (`null` when it can; the extension is then off), `guidance` whether it has one
-  (`<name>.show`, below), `commands` the words of its composer commands (`["review"]`),
+  (`<name>.show`, below), `guidance_parts` the parts of that guidance (Review's
+  `["spec", "bugs", "standards", "security"]`, `[]` for none), `commands` the words of its composer commands (`["review"]`),
   `settings` each `{"key", "label", "hint", "kind", "per_project", "value", "set", "default"}` with its
   global value (its default when not `set`), `kind` being `"language"`, `"model"` (a slot,
   `{"provider", "model"?, "effort"?}`, `null` for the extension's own choice) or `{"subset": [...]}`
@@ -489,11 +490,15 @@ is off globally, the projects' switches kept.
   for Specs `new`, `from_ticket`, `answer`, `ready`, `draft`, `ticket`, `departures`, `develop`,
   `amendment`.
 
-- `<name>.show`, `<name>.set {text}`, `<name>.reset`: the guidance of an extension that has one
-  (Review's: `review.show`…), `$XDG_CONFIG_HOME/flottille/<name>.md`, absent while Flottille's
-  default holds. Each answers `{"text", "source", "error", "default"}` as `judge.show` does, and
-  `set` and `reset` emit `<name>.changed`; `set` with an empty text resets it, and refuses a text
-  over the extension's limit (Review: 4,000 characters).
+- `<name>.show {part?}`, `<name>.set {part?, text}`, `<name>.reset {part?}`: the guidance of an
+  extension that has one (Review's: `review.show`…), `$XDG_CONFIG_HOME/flottille/<name>.md`,
+  absent while Flottille's default holds. Each answers `{"text", "source", "error", "default"}` as
+  `judge.show` does, and `set` and `reset` emit `<name>.changed {part?}`; `set` with an empty text
+  resets it, and refuses a text over the extension's limit (Review: 4,000 characters). With
+  `part`, one of the parts the extension names (`guidance_parts`; Review's checks), the same for
+  `$XDG_CONFIG_HOME/flottille/<name>-<part>.md` (`review-bugs.md`): no default (`text` and
+  `default` empty, `source` `default`, while it has none), absent while empty, the same limit; a
+  part it does not name is refused, naming those it does.
 
 `extension.set` emits `extension.changed`; turning an extension on or off globally gives each
 running session of every project the tools its role has now, before the answer (`docs/tools.md`,
@@ -685,7 +690,11 @@ and the findings it delivers are told to the session (`docs/tools.md`, "Review")
   is off: its data stays for when it is on again.
 - `review.finding {session, finding, status}`: the user marks a finding `open`, `fixed`,
   `dismissed` or `settle` (to settle with them); emits `review.finding_changed`.
-- `review.show`, `review.set {text}`, `review.reset`: its guidance (above).
+- `review.show {part?}`, `review.set {part?, text}`, `review.reset {part?}`: its guidance (above),
+  shared by every agent of a review; with `part` (`spec`, `bugs`, `standards`, `security`), a
+  check's own instructions, which that check's agent reads after the shared guidance, in a block of
+  its own. A check's instructions that cannot be read whole fail that check alone: `run_pass`
+  refuses it, saying it did not run and naming the file, never its content.
 
 ### The appearance methods
 

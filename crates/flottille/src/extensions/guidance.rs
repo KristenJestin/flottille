@@ -2,6 +2,9 @@
 //! folder, absent while the default holds, read at each use, edited and reset by the user through
 //! `<name>.show`, `<name>.set {text}` and `<name>.reset`. Written from the judge's (`judge.rs`),
 //! which keeps its own until it moves into the frame.
+//!
+//! A guidance may have parts the extension names (Review's checks): `<name>-<part>.md`, with no
+//! default, absent while empty, the same methods given `part`.
 
 use std::sync::Mutex;
 
@@ -14,8 +17,12 @@ use crate::projects::Failure;
 /// Held while a guidance is written or removed: two edits at once leave one of them whole.
 static WRITING: Mutex<()> = Mutex::new(());
 
-fn file(daemon: &Daemon, extension: &Extension) -> std::path::PathBuf {
-    daemon.paths.config.join(format!("{}.md", extension.name))
+fn file(daemon: &Daemon, extension: &Extension, part: Option<&str>) -> std::path::PathBuf {
+    let name = match part {
+        Some(part) => format!("{}-{part}.md", extension.name),
+        None => format!("{}.md", extension.name),
+    };
+    daemon.paths.config.join(name)
 }
 
 /// The user's guidance: none while the default holds; `Err((what could be read, why))` when it
@@ -24,12 +31,16 @@ fn own(
     daemon: &Daemon,
     extension: &Extension,
     guidance: &Guidance,
+    part: Option<&str>,
 ) -> Result<Option<String>, (String, String)> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
 
-    let file = file(daemon, extension);
-    let named = guidance.named;
+    let file = file(daemon, extension, part);
+    let named = match part {
+        Some(part) => format!("{} for {part}", guidance.named),
+        None => guidance.named.to_owned(),
+    };
     let limit = guidance.limit;
     let cannot = |error: std::io::Error| {
         (
@@ -88,9 +99,22 @@ pub fn text(daemon: &Daemon, extension: &Extension) -> Result<String, String> {
     let Some(guidance) = &extension.guidance else {
         return Ok(String::new());
     };
-    Ok(own(daemon, extension, guidance)
+    Ok(own(daemon, extension, guidance, None)
         .map_err(|(_, why)| why)?
         .unwrap_or_else(|| guidance.default.to_owned()))
+}
+
+/// The user's text of the part `part` the next use follows, none while it is empty; why not when
+/// it cannot be followed as written.
+pub fn part_text(
+    daemon: &Daemon,
+    extension: &Extension,
+    part: &str,
+) -> Result<Option<String>, String> {
+    let Some(guidance) = &extension.guidance else {
+        return Ok(None);
+    };
+    own(daemon, extension, guidance, Some(part)).map_err(|(_, why)| why)
 }
 
 /// Whether the method is a guidance's of an extension that has one.
@@ -105,11 +129,19 @@ pub fn answers(extension: &Extension, method: &str) -> bool {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Set {
+    part: Option<String>,
     text: String,
 }
 
-/// `<name>.show`, `<name>.set {text}` (an empty text resets it) and `<name>.reset`: each answers
-/// `{"text", "source", "error", "default"}`, the shape of `judge.show`.
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct Of {
+    part: Option<String>,
+}
+
+/// `<name>.show {part?}`, `<name>.set {part?, text}` (an empty text resets it) and
+/// `<name>.reset {part?}`: each answers `{"text", "source", "error", "default"}`, the shape of
+/// `judge.show`; a part's default is empty.
 pub fn call(
     daemon: &Daemon,
     extension: &Extension,
@@ -118,10 +150,27 @@ pub fn call(
 ) -> Result<Value, Failure> {
     let guidance = extension.guidance.as_ref().expect("a guidance");
     let verb = &method[extension.name.len() + 1..];
+    let (part, text) = match verb {
+        "set" => {
+            let Set { part, text } = serde_json::from_value(params)?;
+            (part, Some(text))
+        }
+        _ if params.is_null() => (None, None),
+        _ => (serde_json::from_value::<Of>(params)?.part, None),
+    };
+    if let Some(part) = &part
+        && !guidance.parts.contains(&part.as_str())
+    {
+        return Err(Failure::refused(format!(
+            "{} has no part {part}: its parts are {}",
+            guidance.named,
+            guidance.parts.join(", ")
+        )));
+    }
+    let part = part.as_deref();
     if verb != "show" {
-        let text = match verb {
-            "set" => {
-                let Set { text } = serde_json::from_value(params)?;
+        let text = match text {
+            Some(text) => {
                 let count = text.chars().count();
                 if count > guidance.limit {
                     return Err(Failure::refused(format!(
@@ -131,12 +180,15 @@ pub fn call(
                 }
                 Some(text).filter(|text| !text.trim().is_empty())
             }
-            _ => None,
+            None => None,
         };
         let _writing = WRITING.lock().unwrap();
-        let path = file(daemon, extension);
-        let unavailable =
-            |e: std::io::Error| Failure::new("unavailable", format!("{}.md: {e}", extension.name));
+        let path = file(daemon, extension, part);
+        let shown = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let unavailable = |e: std::io::Error| Failure::new("unavailable", format!("{shown}: {e}"));
         match text {
             Some(text) => {
                 std::fs::create_dir_all(&daemon.paths.config).map_err(unavailable)?;
@@ -147,14 +199,23 @@ pub fn call(
                 _ => {}
             },
         }
+        let data = match part {
+            Some(part) => json!({"part": part}),
+            None => json!({}),
+        };
         daemon
-            .emit(&format!("{}.changed", extension.name), json!({}))
+            .emit(&format!("{}.changed", extension.name), data)
             .map_err(|error| Failure::new("unavailable", error.to_string()))?;
     }
-    let (text, source, error) = match own(daemon, extension, guidance) {
+    // A part has no default text: empty while the user wrote none.
+    let default = match part {
+        Some(_) => "",
+        None => guidance.default,
+    };
+    let (text, source, error) = match own(daemon, extension, guidance, part) {
         Ok(Some(text)) => (text, "global", None),
-        Ok(None) => (guidance.default.to_owned(), "default", None),
+        Ok(None) => (default.to_owned(), "default", None),
         Err((text, why)) => (text, "global", Some(why)),
     };
-    Ok(json!({"text": text, "source": source, "error": error, "default": guidance.default}))
+    Ok(json!({"text": text, "source": source, "error": error, "default": default}))
 }
