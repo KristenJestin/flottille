@@ -173,6 +173,9 @@ pub struct Restored {
     /// The agent folders could not be noted before the run (the snapshot failed): nothing it
     /// changed there is known, nor put back.
     pub missing: bool,
+    /// Of a place `missing`, some agent folders were noted, and put back, changed or not: those
+    /// of places inside it, or all but theirs.
+    pub partly: bool,
 }
 
 impl Restored {
@@ -192,6 +195,7 @@ impl Restored {
         self.unchecked |= inner.unchecked;
         self.unreached.extend(inner.unreached);
         self.missing |= inner.missing;
+        self.partly = true;
     }
 }
 
@@ -306,6 +310,7 @@ impl Snapshot {
                 .map(|top| top.display().to_string())
                 .collect(),
             missing: self.missing,
+            partly: self.missing,
             ..Restored::default()
         };
         let Ok(top) = open_root(&self.root) else {
@@ -916,7 +921,7 @@ pub fn said(restored: &Restored) -> Option<String> {
     }
     if restored.missing {
         // Those of places inside it may have been noted, and put back.
-        let noted = !restored.put_back.is_empty() || !restored.left.is_empty();
+        let noted = restored.partly || !restored.put_back.is_empty() || !restored.left.is_empty();
         text.push_str(&format!(
             "{}{} could not be noted before the run: what it changed there is neither known \
              nor put back, tell the user",
@@ -2729,10 +2734,15 @@ mod tests {
         let restored = leaving.await.unwrap().unwrap();
 
         // Both places were put back with the outer one: none is said interrupted at the next
-        // start.
+        // start, and the outer place's own folders were noted.
         assert!(restored.missing, "{restored:?}");
         assert!(guards.groups.lock().unwrap().is_empty());
         assert_eq!(interrupted(&kept), []);
+        let text = said(&restored).unwrap();
+        assert!(
+            text.contains("the rest of the agent folders of this place could not be noted"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
@@ -2768,6 +2778,30 @@ mod tests {
                 root: real(&first),
                 run: "a".into(),
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn inner_groups_put_back_unchanged_say_the_rest_of_the_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("p");
+        let inner = outer.join("svc");
+        made(&inner.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let guards = Arc::new(Guards::default());
+        let a = guards.enter(&inner, &[], None, &kept, "a").await.unwrap();
+
+        let (release, leaving) = closing_around(&guards, &outer, &kept, vec![a]).await;
+        drop(release);
+        let restored = leaving.await.unwrap().unwrap();
+
+        // Nothing changed in the inner place, which was noted and put back all the same.
+        assert!(restored.missing, "{restored:?}");
+        assert!(restored.put_back.is_empty(), "{restored:?}");
+        let text = said(&restored).unwrap();
+        assert!(
+            text.contains("the rest of the agent folders of this place could not be noted"),
+            "{text}"
         );
     }
 
