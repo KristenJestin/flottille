@@ -8,7 +8,7 @@
 pub mod review;
 pub mod specs;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use gpui_design_system::color::mix;
@@ -136,6 +136,8 @@ pub struct Listed {
     pub projects: Vec<InProject>,
     /// It has a guidance its agents follow, edited in its tab.
     pub guidance: bool,
+    /// The parts of its guidance, each edited on its own (Review's checks).
+    pub guidance_parts: Vec<String>,
 }
 
 impl Listed {
@@ -211,6 +213,12 @@ impl Listed {
                 })
                 .collect(),
             guidance: value["guidance"] == true,
+            guidance_parts: value["guidance_parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(text)
+                .collect(),
         }
     }
 
@@ -267,6 +275,10 @@ pub struct Registry {
     specs: specs::Specs,
     /// The editor of each one's guidance, by its name, made once it is listed with one.
     guidance: HashMap<String, Entity<RulesEditor>>,
+    /// The editor of each part of a guidance, by the name and the part.
+    parts: HashMap<(String, String), Entity<RulesEditor>>,
+    /// The parts whose editor is unfolded.
+    unfolded: HashSet<(String, String)>,
     quiet: Option<Task<()>>,
 }
 
@@ -282,6 +294,8 @@ impl Registry {
             pending: HashMap::new(),
             specs: specs::Specs::default(),
             guidance: HashMap::new(),
+            parts: HashMap::new(),
+            unfolded: HashSet::new(),
             quiet: None,
         }
     }
@@ -382,8 +396,27 @@ impl Registry {
         self.guidance.get(name)
     }
 
-    /// Each part listed with a guidance has its editor, which reads it again: what is typed in
-    /// it stays.
+    /// The editor of the part `part` of `name`'s guidance (a check's instructions).
+    pub fn check_guidance(&self, name: &str, part: &str) -> Option<&Entity<RulesEditor>> {
+        self.parts.get(&(name.to_owned(), part.to_owned()))
+    }
+
+    /// Whether the editor of the part `part` of `name`'s guidance is unfolded.
+    pub fn is_unfolded(&self, name: &str, part: &str) -> bool {
+        self.unfolded.contains(&(name.to_owned(), part.to_owned()))
+    }
+
+    /// Unfolds the editor of a part of a guidance, or folds it.
+    pub fn toggle_part(&mut self, name: &str, part: &str, cx: &mut Context<Self>) {
+        let key = (name.to_owned(), part.to_owned());
+        if !self.unfolded.remove(&key) {
+            self.unfolded.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// Each part listed with a guidance has its editor, and one for each part of it, which reads
+    /// it again: what is typed in it stays.
     fn read_guidance(&mut self, cx: &mut Context<Self>) {
         for listed in self.list.iter().filter(|listed| listed.guidance) {
             let shell = self.shell.clone();
@@ -391,10 +424,34 @@ impl Registry {
                 .guidance
                 .entry(listed.name.clone())
                 .or_insert_with(|| {
-                    cx.new(|_| RulesEditor::part(shell, &listed.name, &listed.title))
+                    cx.new(|_| {
+                        let editor = RulesEditor::part(shell, &listed.name, &listed.title);
+                        match listed.name.as_str() {
+                            review::NAME => {
+                                editor.headed(review::GUIDANCE_TITLE, review::GUIDANCE_SENTENCE)
+                            }
+                            _ => editor,
+                        }
+                    })
                 })
                 .clone();
             editor.update(cx, |editor, cx| editor.read(cx));
+            for part in &listed.guidance_parts {
+                let title = listed
+                    .settings
+                    .iter()
+                    .find(|setting| setting.key == format!("{part}_model"))
+                    .map_or_else(|| capitalized(part), |setting| setting.label.clone());
+                let shell = self.shell.clone();
+                let editor = self
+                    .parts
+                    .entry((listed.name.clone(), part.clone()))
+                    .or_insert_with(|| {
+                        cx.new(|_| RulesEditor::check(shell, &listed.name, part, &title))
+                    })
+                    .clone();
+                editor.update(cx, |editor, cx| editor.read(cx));
+            }
         }
     }
 
@@ -578,9 +635,34 @@ fn control(
     id: &str,
     providers: &crate::providers::Providers,
 ) -> Option<AnyElement> {
+    worded_control(
+        registry, name, project, setting, own, default, id, providers, None,
+    )
+}
+
+/// A model slot on a line whose switch already names it: the slot draws no words of its own,
+/// and is disabled while that switch is off.
+struct OnLine {
+    name: String,
+    disabled: bool,
+}
+
+/// `control`, a model slot's words drawn by it unless it is `on_line`.
+#[allow(clippy::too_many_arguments)]
+fn worded_control(
+    registry: &Entity<Registry>,
+    name: &str,
+    project: Option<&str>,
+    setting: &Setting,
+    own: Option<Value>,
+    default: Value,
+    id: &str,
+    providers: &crate::providers::Providers,
+    on_line: Option<&OnLine>,
+) -> Option<AnyElement> {
     let is_set = own.is_some();
     let bare = bare_control(
-        registry, name, project, setting, own, default, id, providers,
+        registry, name, project, setting, own, default, id, providers, on_line,
     )?;
     let Some(project) = project else {
         return Some(bare);
@@ -624,6 +706,7 @@ fn bare_control(
     default: Value,
     id: &str,
     providers: &crate::providers::Providers,
+    on_line: Option<&OnLine>,
 ) -> Option<AnyElement> {
     let (rule, gives) = setting.default_said(providers);
     let (registry, name, project_name, setting_of) = (
@@ -774,10 +857,12 @@ fn bare_control(
                 setting.label.clone(),
                 chosen,
             )
-            .compact()
-            .hint(setting.hint.clone())
-            .models(providers.model_entries())
-            .effort(
+            .compact();
+            let choice = match on_line {
+                None => choice.hint(setting.hint.clone()),
+                Some(line) => choice.unlabelled(line.name.clone()).disabled(line.disabled),
+            };
+            let choice = choice.models(providers.model_entries()).effort(
                 own.as_ref()
                     .and_then(|own| text(own, "effort"))
                     .map(Into::into),
@@ -820,11 +905,6 @@ fn bare_control(
         }
         _ => None,
     }
-}
-
-/// The line said once under the card of a feature's models.
-fn models_line(name: &str) -> Option<&'static str> {
-    (name == review::NAME).then_some(review::MODELS_LINE)
 }
 
 /// A value as a switch's label says it: `bugs` is "Bugs".
@@ -874,32 +954,19 @@ fn fields<'a>(
             )
         });
         let id = format!("{prefix}-models");
-        div()
-            .flex()
-            .flex_col()
-            .gap(space::SM)
-            .child(
-                div()
-                    .id(SharedString::from(id.clone()))
-                    .p(space::LG)
-                    .flex()
-                    .flex_col()
-                    .gap(space::MD)
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(p.line)
-                    .children(lines)
-                    .test_support(),
-            )
-            .children(models_line(&listed.name).map(|line| {
-                div()
-                    .id(SharedString::from(format!("{id}-cost")))
-                    .aria_label(line)
-                    .text_size(px(12.))
-                    .text_color(p.faint)
-                    .child(line)
-                    .test_support()
-            }))
+        div().flex().flex_col().gap(space::SM).child(
+            div()
+                .id(SharedString::from(id.clone()))
+                .p(space::LG)
+                .flex()
+                .flex_col()
+                .gap(space::MD)
+                .rounded(px(12.))
+                .border_1()
+                .border_color(p.line)
+                .children(lines)
+                .test_support(),
+        )
     });
     div()
         .flex()
@@ -1052,7 +1119,10 @@ pub fn feature_page(registry: &Entity<Registry>, name: &str, cx: &App) -> Option
     .hint(listed.sentence.clone())
     .disabled(pending)
     .on_click(flip);
-    let settings = fields(registry, &listed, None, listed.settings.iter(), name, cx);
+    let settings = match name {
+        review::NAME => review::checks(registry, &listed, None, name, cx),
+        _ => fields(registry, &listed, None, listed.settings.iter(), name, cx),
+    };
     let usage = usage_line(format!("{name}-usage"), &listed.usage, cx).into_any_element();
     let card = card(
         name,
@@ -1094,28 +1164,43 @@ pub fn feature_page(registry: &Entity<Registry>, name: &str, cx: &App) -> Option
 fn projects_line(registry: &Entity<Registry>, name: &str, on: bool, cx: &App) -> impl IntoElement {
     let p = palette(cx);
     let read = registry.read(cx);
-    let off = if on {
+    // Each project that turns it off, and those that set its checks otherwise (Review).
+    let mut others: Vec<(String, String)> = if on {
         read.turned_off_in(name)
+            .into_iter()
+            .map(|project| (project, "turns it off".to_owned()))
+            .collect()
     } else {
         Vec::new()
     };
+    if on
+        && name == review::NAME
+        && let Some(listed) = read.listed(name)
+    {
+        let more: Vec<(String, String)> = review::otherwise(listed)
+            .into_iter()
+            .filter(|(project, _)| !others.iter().any(|(off, _)| off == project))
+            .collect();
+        others.extend(more);
+    }
     let shell = read.shell.clone();
     let id = format!("{name}-projects");
     let links_id = id.clone();
-    let said = off
+    let said = others
         .iter()
-        .map(|project| format!("{project} turns it off"))
+        .map(|(project, does)| format!("{project} {does}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let links = off.into_iter().map(|project| {
+    let links = others.into_iter().map(|(project, does)| {
         let (shell, feature) = (shell.clone(), name.to_owned());
         let target = project.clone();
+        let words = format!("{project} {does}");
         hoverable(
             div()
                 .id(SharedString::from(format!("{links_id}-{project}")))
-                .aria_label(SharedString::from(format!("{project} turns it off")))
+                .aria_label(SharedString::from(words.clone()))
                 .cursor_pointer()
-                .child(SharedString::from(format!("{project} turns it off")))
+                .child(SharedString::from(words))
                 .on_click(move |_, window, cx| {
                     let at = crate::project_settings::Reveal::Feature(feature.clone());
                     shell
@@ -1189,14 +1274,17 @@ pub fn project_page(
     .hint(PROJECT_HINT)
     .disabled(pending)
     .on_click(flip);
-    let settings = fields(
-        registry,
-        &listed,
-        Some(project),
-        listed.settings.iter().filter(|setting| setting.per_project),
-        &prefix,
-        cx,
-    );
+    let settings = match name {
+        review::NAME => review::checks(registry, &listed, Some(project), &prefix, cx),
+        _ => fields(
+            registry,
+            &listed,
+            Some(project),
+            listed.settings.iter().filter(|setting| setting.per_project),
+            &prefix,
+            cx,
+        ),
+    };
     let usage = usage_line(format!("{prefix}-usage"), &listed.usage, cx).into_any_element();
     let error = listed
         .in_project(project)
