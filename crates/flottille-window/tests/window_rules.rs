@@ -423,6 +423,77 @@ fn the_composer_s_toggles_are_never_filled_with_the_accent() {
     );
 }
 
+// ── A Save beside a field is a secondary button ────────────────────────────────────────────────
+
+/// The `Save` of a section's own field (`id("save")`) that is a primary button: a primary is the
+/// one action of a view, and a tab of the project's settings holds several sections that each
+/// save apart, so they are secondary (rule 1). The rules editor is both the global one, whose
+/// Save may be primary, and a project's, drawn by the `Some(_)` arm of its match: only that arm
+/// is held.
+fn primary_saves(source: &str) -> Vec<(usize, String)> {
+    let lines: Vec<(usize, &str)> = code(source).collect();
+    // The `Some(_)` arm that follows each `match self.project {`: eight lines of it.
+    let project_arms: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, line))| line.contains("match self.project {"))
+        .filter_map(|(at, _)| {
+            (at + 1..lines.len()).find(|next| lines[*next].1.starts_with("Some(_) =>"))
+        })
+        .collect();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(at, (_, line))| {
+            line.contains("Button::primary(id(\"save\")")
+                && (!source.contains("fn save_shown")
+                    || project_arms.iter().any(|arm| (*arm..arm + 8).contains(at)))
+        })
+        .map(|(_, (at, line))| (*at, (*line).to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_primary_save_beside_a_field_is_found() {
+    assert_eq!(
+        primary_saves("let save = Button::primary(id(\"save\"), \"Save\")").len(),
+        1
+    );
+    assert!(primary_saves("Button::secondary(id(\"save\"), \"Save\")").is_empty());
+}
+
+#[test]
+fn a_primary_save_in_a_project_s_rules_editor_is_found_and_the_global_one_is_not() {
+    let editor = "fn save_shown() {}\nmatch self.project {\n    None => Button::primary(id(\"save\"), \"Save\"),\n    Some(_) => Button::primary(id(\"save\"), \"Save\"),\n}";
+    assert_eq!(primary_saves(editor).len(), 1);
+    assert_eq!(primary_saves(editor)[0].0, 4);
+    let right = editor.replace("Some(_) => Button::primary", "Some(_) => Button::secondary");
+    assert!(primary_saves(&right).is_empty());
+}
+
+#[test]
+fn the_saves_of_a_project_s_settings_are_secondary() {
+    let sections = [
+        "conventions.rs",
+        "message_checks.rs",
+        "project_settings.rs",
+        "rules.rs",
+        "workspaces_folder.rs",
+    ];
+    let found = offenders_in(
+        window()
+            .into_iter()
+            .filter(|(file, _)| sections.iter().any(|name| file.ends_with(name)))
+            .collect(),
+        primary_saves,
+    );
+    assert!(
+        found.is_empty(),
+        "a Save beside a field is `Button::secondary`:\n{}",
+        found.join("\n")
+    );
+}
+
 // ── The kit's rules, held on the window's sources ──────────────────────────────────────────────
 
 /// The lines that draw a black of their own: a shadow is a role of the palette

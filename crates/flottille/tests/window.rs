@@ -9007,7 +9007,7 @@ fn the_tracker_select_unfolds_jira_s_fields(cx: &mut TestAppContext) {
     let (shell, cx, page) = atlas_on_github(&user, cx);
     choose_tab("tracker", cx);
 
-    assert_eq!(text_of("tracker-row", cx).as_deref(), Some("None"));
+    assert_eq!(text_of("tracker-row", cx).as_deref(), Some("Nowhere"));
     cx.update(|window, cx| window.click("tracker-row", cx));
     settle(cx);
     assert_eq!(
@@ -9447,27 +9447,45 @@ fn every_setting_of_a_project_is_edited_in_its_settings_and_the_project_page_has
         });
         choose_tab(key, cx);
         cx.update(|window, _| {
-            assert!(
-                window.find(format!("{key}-title")).visible(),
-                "the page has {key}"
-            );
-            let editor = match key {
-                "repositories" => "detect-repositories",
-                "tracker" => "tracker-row",
-                "skills" => "add-skill",
-                "commands" => "add-command",
-                "tasks" => "add-task",
-                "setup" => "add-setup",
-                "rules" => "rules-save-atlas",
+            assert!(window.find(tab_title(key)).visible(), "the page has {key}");
+            // What each tab edits: its editors are all there.
+            let editors: &[&str] = match key {
+                "repositories" => &["detect-repositories", "tracker-row"],
+                "workspaces" => &["add-setup"],
+                "tasks" => &["add-task"],
+                "instructions" => &["add-skill", "add-command", "message-checks-text-atlas"],
+                "features" => &["project-features-list"],
                 other => panic!("no editor known for {other}"),
             };
-            assert!(window.find(editor).visible(), "{editor}");
+            for editor in editors {
+                assert!(window.find(*editor).visible(), "{editor} in {key}");
+            }
         });
+    }
+}
+
+/// The title of the first section of a tab: what says the tab is shown.
+fn tab_title(tab: &str) -> &'static str {
+    match tab {
+        "repositories" => "repositories-title",
+        "workspaces" => "workspaces-section-atlas-title",
+        "tasks" => "tasks-title",
+        "instructions" => "rules-title",
+        "features" => "project-features-list",
+        other => panic!("no tab {other}"),
     }
 }
 
 /// Clicks the tab of the section `key` and lets its section arrive.
 fn choose_tab(key: &str, cx: &mut VisualTestContext) {
+    // A section is named by the tab that holds it: Tracker is in Repositories, Setup in
+    // Workspaces, and Rules, Commands and Skills in Instructions.
+    let key = match key {
+        "tracker" => "repositories",
+        "setup" => "workspaces",
+        "rules" | "commands" | "skills" => "instructions",
+        tab => tab,
+    };
     let id = format!("project-settings-tabs-{key}");
     cx.update(|window, cx| window.click(id, cx));
     settle(cx);
@@ -9479,7 +9497,7 @@ fn the_section_shown(cx: &mut VisualTestContext) -> Vec<&'static str> {
             .iter()
             .filter(|(key, _)| {
                 window
-                    .try_find(format!("{key}-title"))
+                    .try_find(tab_title(key))
                     .is_some_and(|found| found.visible())
             })
             .map(|(key, _)| *key)
@@ -9506,7 +9524,7 @@ fn opening_the_project_settings_shows_the_repositories_alone(cx: &mut TestAppCon
             "the first tab is the chosen one"
         );
         assert_eq!(
-            window.find("project-settings-tabs-tracker").selected(),
+            window.find("project-settings-tabs-workspaces").selected(),
             Some(false)
         );
     });
@@ -9602,15 +9620,10 @@ fn the_tabs_say_the_count_of_their_lists_and_switching_moves_the_marker_and_fade
         })
     };
     assert_eq!(count("repositories", cx).as_deref(), Some("1"));
-    assert_eq!(count("skills", cx).as_deref(), Some("0"));
-    assert_eq!(count("commands", cx).as_deref(), Some("0"));
     assert_eq!(count("tasks", cx).as_deref(), Some("1"));
-    assert_eq!(
-        count("tracker", cx),
-        None,
-        "a section with no list has no count"
-    );
-    assert_eq!(count("rules", cx), None);
+    for key in ["workspaces", "instructions", "features"] {
+        assert_eq!(count(key, cx), None, "{key} holds several lists: no count");
+    }
 
     let before = cx.update(|window, _| window.find("project-settings-tabs-marker").bounds());
     cx.update(|window, cx| window.click("project-settings-tabs-tasks", cx));
@@ -10329,6 +10342,8 @@ fn a_project_s_settings_have_a_rules_section_that_adds_to_the_global_rules_and_r
     });
 
     type_rules(&editor, "Name branches feat/<n>.", cx);
+    // Save unfolds beside the change before it is clicked.
+    settle(cx);
     cx.update(|window, cx| window.click("rules-save-atlas", cx));
     until(&shell, cx, "the project's rules are saved", |cx| {
         editor.read_with(cx, |e, _| e.is_own())
@@ -10545,6 +10560,8 @@ fn a_project_s_settings_say_when_its_rules_repeat_the_global_ones(cx: &mut TestA
 
     // Removing the copy ends the note.
     type_rules(&editor, "Name branches feat/<n>.", cx);
+    // Save unfolds beside the change before it is clicked.
+    settle(cx);
     cx.update(|window, cx| window.click("rules-save-atlas", cx));
     until(&shell, cx, "the note goes", |cx| {
         let repeats = user
@@ -10655,7 +10672,7 @@ fn the_project_s_settings_show_skills_commands_tasks_and_setup_each_in_its_tab(
         });
     }
     choose_tab("rules", cx);
-    cx.update(|window, _| assert!(window.find("rules-save-atlas").visible()));
+    cx.update(|window, _| assert!(window.find("rules-text-atlas").visible()));
 }
 
 #[gpui_kit::test]
@@ -10976,11 +10993,14 @@ fn setup_steps_are_added_reordered_and_removed_in_the_setup_section(cx: &mut Tes
     settle(cx);
     cx.update(|window, cx| window.click("setup-kind-run", cx));
     settle(cx);
-    let limit = section.read_with(cx, |s, _| s.limit_field().unwrap().clone());
     cx.update(|window, cx| {
         value.update(cx, |f, cx| f.set_value("npm ci && npm test", window, cx));
-        limit.update(cx, |f, cx| f.set_value("120", window, cx));
     });
+    cx.update(|window, cx| window.click("setup-limit", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("setup-limit-120", cx));
+    settle(cx);
+    assert_eq!(section.read_with(cx, |s, _| s.limit()), Some(120));
     cx.update(|window, cx| window.click("save-setup", cx));
     until(&shell, cx, "the refusal is shown", |cx| {
         section.read_with(cx, |s, _| s.form_error().is_some())
@@ -11001,7 +11021,7 @@ fn setup_steps_are_added_reordered_and_removed_in_the_setup_section(cx: &mut Tes
     assert_eq!(text_of("setup-step-2", cx).as_deref(), Some("Run npm ci"));
     assert_eq!(
         text_of("setup-step-2-line", cx).as_deref(),
-        Some("in the workspace folder · stopped after 120 s")
+        Some("in the project folder · stops after 2 min")
     );
 
     // Move up, in the row's "⋯", moves the run first, in the file too.
@@ -12493,11 +12513,11 @@ fn the_branch_prefix_and_format_are_in_one_section(cx: &mut TestAppContext) {
     );
     assert_eq!(
         text_of("branch-prefix-field-atlas-label", cx),
-        Some("Branch prefix".to_owned())
+        Some("Prefix".to_owned())
     );
     assert_eq!(
         text_of("branch-format-field-atlas-label", cx),
-        Some("Branch format".to_owned())
+        Some("Allowed names".to_owned())
     );
     cx.update(|window, _| {
         for gone in [
@@ -12623,7 +12643,8 @@ fn the_branch_format_and_the_pull_request_template_are_saved_from_the_project_s_
     assert!(text.contains("branch_format = "), "{text}");
     assert!(!format.read_with(cx, |s, cx| s.savable(cx)));
 
-    // The template, beside the message checks.
+    // The template, under the message checks: the Instructions tab is tall.
+    cx.simulate_resize(size(px(1280.), px(3200.)));
     choose_tab("rules", cx);
     let template = page.read_with(cx, |page, _| {
         page.convention("pull_request_template").clone()

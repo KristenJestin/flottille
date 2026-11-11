@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_window::Shell;
 use flottille_window::items::{ItemRow, Kind, ProjectItems, Read};
+use flottille_window::project_settings::Reveal;
 use flottille_window::shell::Selection;
 use flottille_window::state::AgentState;
 use gpui_design_system::omarchy::Environment;
@@ -567,13 +568,20 @@ fn a_project_with_no_forge_set_shows_the_not_set_state_with_its_settings_link(
 
     click(cx, "project-items-settings");
     settle(cx);
-    let tab = shell.read_with(cx, |s, cx| {
-        s.main()
-            .read(cx)
-            .project_settings_page()
-            .map(|page| page.read(cx).tab())
-    });
-    assert_eq!(tab, Some(1), "the settings open on the tracker's section");
+    let (tab, revealed) = shell
+        .read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_settings_page()
+                .map(|page| (page.read(cx).tab(), page.read(cx).revealed().cloned()))
+        })
+        .expect("the project's settings are open");
+    assert_eq!(tab, 0, "the settings open on the Repositories tab");
+    assert_eq!(
+        revealed,
+        Some(Reveal::Tracker),
+        "and reveal the tracker's section there"
+    );
 }
 
 #[gpui_kit::test]

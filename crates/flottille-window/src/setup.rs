@@ -1,7 +1,7 @@
 //! A project's setup in its Settings (`docs/projects.md`, "The setup"): the steps that prepare
 //! each new workspace, in order. The "Setup" section lists them by number; each moves up or down,
 //! is edited or removed, and the modal makes one: its kind (copy, link, root entries, run, task),
-//! where it is done (the workspace folder, each repository, or one), and a time limit for a run
+//! where it is done (the project folder, each repository, or one), and a time limit for a run
 //! or a task. The window writes nothing itself: every change is the daemon's (`setup.*`), which
 //! checks the step as the file is checked, and the section shows the list the daemon gives next.
 
@@ -51,11 +51,11 @@ pub fn said(step: &SetupStep) -> String {
         (Some(repository), _, _) => format!(" · in {repository}"),
         (None, true, _) => " · in each repository, leaves first".to_owned(),
         (None, false, Kind::Task) => " · where the task says".to_owned(),
-        (None, false, _) => " · in the workspace folder".to_owned(),
+        (None, false, _) => " · in the project folder".to_owned(),
     };
-    let limit = step
-        .time_limit
-        .map_or_else(String::new, |limit| format!(" · stopped after {limit} s"));
+    let limit = step.time_limit.map_or_else(String::new, |limit| {
+        format!(" · stops after {}", duration_said(limit))
+    });
     format!("{what}{place}{limit}")
 }
 
@@ -71,20 +71,32 @@ pub fn what(step: &SetupStep) -> String {
     }
 }
 
+/// A duration of seconds in words, as a step's time limit says it: `30 s`, `10 min`, `1 h`.
+pub fn duration_said(seconds: u64) -> String {
+    match seconds {
+        s if s != 0 && s.is_multiple_of(3600) => format!("{} h", s / 3600),
+        s if s != 0 && s.is_multiple_of(60) => format!("{} min", s / 60),
+        s => format!("{s} s"),
+    }
+}
+
+/// The time limits the form offers, in seconds.
+const LIMITS: [u64; 7] = [30, 60, 120, 300, 600, 1800, 3600];
+
 /// Where a step is done and its time limit, in words: the row's line.
 pub fn where_said(step: &SetupStep) -> String {
     let Some(kind) = kind_of(step) else {
         return "Edit the project's file to change it.".to_owned();
     };
     let mut parts = vec![match (&step.repository, step.for_each_repository, kind) {
-        (_, _, Kind::RootEntries) => "in the workspace folder".to_owned(),
+        (_, _, Kind::RootEntries) => "in the project folder".to_owned(),
         (Some(repository), _, _) => format!("in {repository}"),
         (None, true, _) => "in each repository, leaves first".to_owned(),
         (None, false, Kind::Task) => "where the task says".to_owned(),
-        (None, false, _) => "in the workspace folder".to_owned(),
+        (None, false, _) => "in the project folder".to_owned(),
     }];
     if let Some(limit) = step.time_limit {
-        parts.push(format!("stopped after {limit} s"));
+        parts.push(format!("stops after {}", duration_said(limit)));
     }
     parts.join(" · ")
 }
@@ -225,7 +237,12 @@ impl Where {
 }
 
 /// The step the form says, from its kind, its field, where and its time limit.
-pub fn step_from(kind: Kind, value: &str, place: &Where, limit: &str) -> Result<SetupStep, String> {
+pub fn step_from(
+    kind: Kind,
+    value: &str,
+    place: &Where,
+    limit: Option<u64>,
+) -> Result<SetupStep, String> {
     let value = value.trim();
     let mut step = SetupStep::default();
     match kind {
@@ -250,20 +267,14 @@ pub fn step_from(kind: Kind, value: &str, place: &Where, limit: &str) -> Result<
             Where::Repository(path) => step.repository = Some(path.clone()),
         }
     }
-    let limit = limit.trim();
-    if kind.runs() && !limit.is_empty() {
-        step.time_limit = Some(
-            limit
-                .parse()
-                .map_err(|_| format!("the time limit is a number of seconds, not \"{limit}\""))?,
-        );
+    if kind.runs() {
+        step.time_limit = limit;
     }
     Ok(step)
 }
 
 struct Fields {
     value: Entity<InputState>,
-    limit: Entity<InputState>,
 }
 
 /// The form: a new step (`number` none), or the step of that number.
@@ -272,6 +283,8 @@ struct Form {
     number: Option<usize>,
     kind: Kind,
     place: Where,
+    /// The time limit in seconds, none for the project's own.
+    limit: Option<u64>,
 }
 
 pub struct SetupSection {
@@ -339,8 +352,16 @@ impl SetupSection {
         self.fields.as_ref().map(|f| &f.value)
     }
 
-    pub fn limit_field(&self) -> Option<&Entity<InputState>> {
-        self.fields.as_ref().map(|f| &f.limit)
+    /// The time limit the form chooses, in seconds.
+    pub fn limit(&self) -> Option<u64> {
+        self.form.as_ref().and_then(|form| form.limit)
+    }
+
+    pub fn choose_limit(&mut self, limit: Option<u64>, cx: &mut Context<Self>) {
+        if let Some(form) = &mut self.form {
+            form.limit = limit;
+        }
+        cx.notify();
     }
 
     pub fn is_confirming(&self) -> bool {
@@ -383,16 +404,13 @@ impl SetupSection {
     fn fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> &Fields {
         if self.fields.is_none() {
             let value = line_field("", window, cx);
-            let limit = line_field("1800", window, cx);
-            for input in [&value, &limit] {
-                self._subscriptions
-                    .push(cx.subscribe(input, |this, _, event, cx| {
-                        if matches!(event, InputEvent::Change) && this.form_error.take().is_some() {
-                            cx.notify();
-                        }
-                    }));
-            }
-            self.fields = Some(Fields { value, limit });
+            self._subscriptions
+                .push(cx.subscribe(&value, |this, _, event, cx| {
+                    if matches!(event, InputEvent::Change) && this.form_error.take().is_some() {
+                        cx.notify();
+                    }
+                }));
+            self.fields = Some(Fields { value });
         }
         self.fields.as_ref().expect("made above")
     }
@@ -413,18 +431,17 @@ impl SetupSection {
             Kind::Run => step.run.clone().unwrap_or_default(),
             Kind::Task => step.task.clone().unwrap_or_default(),
         };
-        let limit = step.time_limit.map(|l| l.to_string()).unwrap_or_default();
         let fields = self.fields(window, cx);
-        let (value_field, limit_field) = (fields.value.clone(), fields.limit.clone());
+        let value_field = fields.value.clone();
         value_field.update(cx, |f, cx| {
             f.set_placeholder(kind.placeholder(), window, cx);
             f.set_value(value, window, cx);
         });
-        limit_field.update(cx, |f, cx| f.set_value(limit, window, cx));
         self.form = Some(Form {
             number,
             kind,
             place: Where::of(&step),
+            limit: step.time_limit,
         });
         self.form_error = None;
         self.saving = false;
@@ -486,8 +503,7 @@ impl SetupSection {
             return;
         };
         let value = fields.value.read(cx).value().to_string();
-        let limit = fields.limit.read(cx).value().to_string();
-        let step = match step_from(form.kind, &value, &form.place, &limit) {
+        let step = match step_from(form.kind, &value, &form.place, form.limit) {
             Ok(step) => step,
             Err(why) => {
                 self.form_error = Some(why.into());
@@ -713,7 +729,7 @@ impl SetupSection {
                 "workspace",
                 match form.kind {
                     Kind::Task => "Where the task says",
-                    _ => "The workspace folder",
+                    _ => "The project folder",
                 },
             ),
             SelectOption::new("each", "Each repository").line("Leaves first"),
@@ -755,6 +771,33 @@ impl SetupSection {
         .on_choose(move |index, _, cx| {
             let place = Where::Repository(repositories[index].clone());
             this.update(cx, |this, cx| this.choose_place(place, cx))
+                .ok();
+        });
+        // The limits in words, the project's own first; one the file holds that is not offered
+        // stays an option, so that an edit never changes it.
+        let mut limits: Vec<u64> = LIMITS.to_vec();
+        if let Some(own) = form.limit.filter(|own| !limits.contains(own)) {
+            limits.push(own);
+            limits.sort_unstable();
+        }
+        let chosen_limit = form
+            .limit
+            .and_then(|own| limits.iter().position(|l| *l == own))
+            .map_or(0, |at| at + 1);
+        let this = cx.entity().downgrade();
+        let choices = limits.clone();
+        let limit = Select::new(
+            "setup-limit",
+            std::iter::once(SelectOption::new("default", "The project's limit")).chain(
+                limits
+                    .iter()
+                    .map(|l| SelectOption::new(l.to_string(), duration_said(*l))),
+            ),
+            chosen_limit,
+        )
+        .on_choose(move |index, _, cx| {
+            let limit = index.checked_sub(1).map(|at| choices[at]);
+            this.update(cx, |this, cx| this.choose_limit(limit, cx))
                 .ok();
         });
         let (label, _, hint) = form.kind.field();
@@ -814,13 +857,9 @@ impl SetupSection {
                 presence(
                     "setup-limit-block",
                     form.kind.runs(),
-                    Field::new(
-                        "setup-limit-field",
-                        "Time limit, in seconds",
-                        boxed("setup-limit", Input::new(&fields.limit), cx),
-                    )
-                    .optional()
-                    .hint("The project's limit when empty."),
+                    Field::new("setup-limit-field", "Time limit", limit)
+                        .optional()
+                        .hint("The project's limit when none is chosen."),
                 )
                 .gap(space::LG),
             )
@@ -881,10 +920,7 @@ impl Render for SetupSection {
         let modal = self.modal(cx);
         let section = Section::new("setup", "Setup")
             .count(count.to_string())
-            .sentence(
-                "Done in order for each new workspace. Drag a step to move it. A workspace keeps \
-                 the setup it was made with.",
-            )
+            .sentence("Done in order when a workspace is made. Drag to reorder.")
             .action(
                 Button::secondary("add-setup", "New step")
                     .leading(Icon::Plus)
@@ -925,10 +961,16 @@ mod tests {
     #[test]
     fn the_form_makes_each_kind_of_step_where_it_is_done() {
         let each = Where::EachRepository;
-        let copy = step_from(Kind::Copy, ".env, .env.*", &each, "").unwrap();
+        let copy = step_from(Kind::Copy, ".env, .env.*", &each, None).unwrap();
         assert_eq!(copy.copy, Some(vec![".env".into(), ".env.*".into()]));
         assert!(copy.for_each_repository);
-        let run = step_from(Kind::Run, "npm ci", &Where::Repository("web".into()), "60").unwrap();
+        let run = step_from(
+            Kind::Run,
+            "npm ci",
+            &Where::Repository("web".into()),
+            Some(60),
+        )
+        .unwrap();
         assert_eq!(
             (
                 run.run.as_deref(),
@@ -937,12 +979,11 @@ mod tests {
             ),
             (Some("npm ci"), Some("web"), Some(60))
         );
-        let root = step_from(Kind::RootEntries, "", &each, "5").unwrap();
+        let root = step_from(Kind::RootEntries, "", &each, Some(5)).unwrap();
         assert_eq!(root.root_entries, Some(true));
         assert!(!root.for_each_repository && root.time_limit.is_none());
-        let link = step_from(Kind::Link, "node_modules", &Where::Workspace, "9").unwrap();
+        let link = step_from(Kind::Link, "node_modules", &Where::Workspace, Some(9)).unwrap();
         assert_eq!(link.time_limit, None, "a link takes no time limit");
-        assert!(step_from(Kind::Task, "build", &Where::Workspace, "soon").is_err());
     }
 
     #[test]
@@ -953,7 +994,16 @@ mod tests {
         let task = step_of(&json!({"number": 1, "task": "build", "time_limit": 30})).unwrap();
         assert_eq!(
             said(&task),
-            "Run the task build · where the task says · stopped after 30 s"
+            "Run the task build · where the task says · stops after 30 s"
         );
+    }
+
+    #[test]
+    fn a_time_limit_is_said_as_a_duration() {
+        assert_eq!(duration_said(30), "30 s");
+        assert_eq!(duration_said(90), "90 s");
+        assert_eq!(duration_said(600), "10 min");
+        assert_eq!(duration_said(3600), "1 h");
+        assert_eq!(duration_said(7200), "2 h");
     }
 }

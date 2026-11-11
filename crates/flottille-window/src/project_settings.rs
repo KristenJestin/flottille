@@ -12,20 +12,22 @@
 
 use crate::glyphs;
 use std::collections::HashMap;
+use std::time::Instant;
 
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_core::project::{branch_matches, cycle_sentence};
+use gpui_design_system::motion::{ENTER, MAX_STAGGER, STAGGER};
 use gpui_design_system::{
     Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, Section,
-    Select, SelectOption, Switch, Tabs, Toast, Type, changing, enter, follow_theme, hoverable,
-    icon, palette, presence, presence_of, space, toast,
+    Select, SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type, awaiting, changing, enter,
+    follow_theme, hoverable, icon, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    TestSupportExt as _, WeakEntity, Window, div, px, relative,
+    ParentElement, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, TestSupportExt as _, WeakEntity, Window, div, px, relative,
 };
 use serde_json::{Value, json};
 
@@ -79,15 +81,16 @@ pub fn field_frame(
 }
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 7] = [
+pub const SECTIONS: [(&str, &str); 5] = [
     ("repositories", "Repositories"),
-    ("tracker", "Tracker"),
-    ("skills", "Skills"),
-    ("commands", "Commands"),
+    ("workspaces", "Workspaces"),
     ("tasks", "Tasks"),
-    ("setup", "Setup"),
-    ("rules", "Rules"),
+    ("instructions", "Instructions"),
+    ("features", "Features"),
 ];
+
+/// The sections of the Repositories tab, in order: the page's children, which a link scrolls to.
+const REPOSITORIES_SECTIONS: [&str; 2] = ["repositories", "tracker"];
 
 /// Which forge a repository is on, as the form chooses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,7 +175,7 @@ impl TrackerKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            TrackerKind::None => "None",
+            TrackerKind::None => "Nowhere",
             TrackerKind::Github => "GitHub issues",
             TrackerKind::Jira => "Jira",
         }
@@ -334,22 +337,24 @@ enum RepositoryRow {
     Found(String),
 }
 
-/// Where the settings were opened at, from the project page: a repository's row (its chip), the
-/// tracker (the tickets' "Open Settings") or the tasks ("Edit in Settings").
+/// Where the settings were opened at, from the project page or a link: a repository's row (its
+/// chip), the tracker (the tickets' "Open Settings"), the tasks ("Edit in Settings") or the page
+/// of a feature, by its name, in the Features tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reveal {
     Repository(String),
     Tracker,
     Tasks,
+    Feature(String),
 }
 
 impl Reveal {
     /// The index entry of its section.
     fn entry(&self) -> usize {
         let key = match self {
-            Reveal::Repository(_) => "repositories",
-            Reveal::Tracker => "tracker",
+            Reveal::Repository(_) | Reveal::Tracker => "repositories",
             Reveal::Tasks => "tasks",
+            Reveal::Feature(_) => "features",
         };
         SECTIONS
             .iter()
@@ -364,9 +369,16 @@ pub struct ProjectSettingsPage {
     revealed: Option<Reveal>,
     /// The tab chosen: the index of its section in [`SECTIONS`]. Kept while the page is open.
     tab: usize,
-    /// The section of a part of Flottille the user can turn off (Specs), by its name, when it is
-    /// the tab chosen instead.
-    own_tab: Option<String>,
+    /// The row of Features whose page is open, by its name: kept while another tab is shown.
+    feature: Option<String>,
+    /// The scroll of the tab shown, to bring a section in view from a link.
+    scroll: ScrollHandle,
+    /// The section a link scrolls to (its place in the tab) and until when it is held there: the
+    /// rows of a tab that was not shown enter one after the other above it, and the section keeps
+    /// its place at the top meanwhile.
+    scroll_to: Option<(usize, Instant)>,
+    /// The views of the pages of Features, made once.
+    feature_pages: HashMap<String, Entity<FeaturePage>>,
     name: String,
     folder: String,
     /// The daemon answered once.
@@ -493,7 +505,10 @@ impl ProjectSettingsPage {
             shell,
             revealed: None,
             tab: 0,
-            own_tab: None,
+            feature: None,
+            scroll: ScrollHandle::new(),
+            scroll_to: None,
+            feature_pages: HashMap::new(),
             name,
             folder: String::new(),
             loaded: false,
@@ -1681,24 +1696,31 @@ impl ProjectSettingsPage {
             }
         };
         let id = |part: &str| ElementId::Name(format!("branch-prefix-{part}-{}", self.name).into());
-        let save = Button::primary(id("save"), "Save")
-            .disabled(!self.branch_prefix_savable(cx))
-            .on_click(cx.listener(|this, _, _, cx| this.save_branch_prefix(cx)));
+        // Save unfolds beside the field once the prefix differs from the kept one (rule 4).
+        let save = div().flex_none().child(
+            presence(
+                id("save-block"),
+                self.branch_prefix_savable(cx),
+                Button::secondary(id("save"), "Save")
+                    .on_click(cx.listener(|this, _, _, cx| this.save_branch_prefix(cx))),
+            )
+            .gap(space::SM),
+        );
+        let said = match self.branch_prefix_typed(cx).trim() {
+            "" => "New workspaces get <name>.".to_owned(),
+            prefix => format!("New workspaces get {prefix}/<name>."),
+        };
         let warning = self.prefix_refused(cx).map(|prefix| {
             SharedString::from(format!(
                 "New workspaces get {prefix}/…, which the branch format refuses."
             ))
         });
         Section::new(format!("branches-section-{}", self.name), "Branches")
-            .sentence(
-                "How a new workspace's branch is named: its prefix, then the format every branch \
-                 a workspace starts, renames to or pushes must match. A branch a workspace \
-                 resumed is never refused for its name.",
-            )
+            .sentence("How new workspaces name their branch.")
             .child(
                 Field::new(
                     id("field"),
-                    "Branch prefix",
+                    "Prefix",
                     div()
                         .flex()
                         .items_center()
@@ -1711,11 +1733,7 @@ impl ProjectSettingsPage {
                         )
                         .child(save),
                 )
-                .hint(
-                    "A new workspace is on the branch <prefix>/<name> unless one is given. Leave \
-                     it empty for the workspace's name alone, as a repository that names its \
-                     branches after tickets wants. Workspaces that exist keep their branch.",
-                )
+                .hint(said)
                 .warning(warning),
             )
             .child(self.branch_format.clone())
@@ -1756,7 +1774,7 @@ impl ProjectSettingsPage {
             .on_click(cx.listener(|this, _, window, cx| this.open_tracker(window, cx)));
         let checks = self.programs.downgrade();
         Section::new("tracker", "Tracker")
-            .sentence("Where the project's tickets are. A workspace can be linked to one.")
+            .sentence("Where the project's tickets come from.")
             .action(
                 Button::quiet("check-tracker-program", "Check again")
                     .leading(Icon::Search)
@@ -1765,7 +1783,17 @@ impl ProjectSettingsPage {
                         checks.update(cx, |checks, cx| checks.check(cx)).ok();
                     }),
             )
-            .child(ListCard::new("tracker-list").row(row))
+            // A skeleton stands for the row until the project's file is read.
+            .child(awaiting(
+                "tracker-waiting",
+                !self.loaded && self.error.is_none(),
+                Skeleton::new("tracker-skeleton").h(px(56.)),
+                Field::new(
+                    "tracker-tickets-from",
+                    "Tickets from",
+                    ListCard::new("tracker-list").row(row),
+                ),
+            ))
     }
 
     /// The base branches of the repository's dialog: a list of branches in order of preference
@@ -2267,27 +2295,41 @@ impl ProjectSettingsPage {
         self.revealed.as_ref()
     }
 
-    /// Opened at a repository or at the tasks: their tab is the one chosen.
+    /// Opened at a repository, the tracker, the tasks or a feature: their tab is the one chosen.
     pub fn reveal(&mut self, at: Reveal, cx: &mut Context<Self>) {
         self.tab = at.entry();
-        self.own_tab = None;
+        if let Reveal::Feature(name) = &at {
+            self.feature = Some(name.clone());
+        }
+        // The tab may already be shown, scrolled: the link says where it starts, or the section
+        // it is about.
+        match &at {
+            Reveal::Tracker => {
+                let at = REPOSITORIES_SECTIONS
+                    .iter()
+                    .position(|part| *part == "tracker")
+                    .expect("a section of the tab");
+                self.scroll_to = Some((
+                    at,
+                    cx.background_executor().now() + STAGGER * MAX_STAGGER as u32 + ENTER,
+                ));
+            }
+            _ => self.scroll.set_offset(Point::default()),
+        }
         self.revealed = Some(at);
         cx.notify();
     }
 
-    /// What each tab counts, once its list is read: the repositories, the skills, the commands,
-    /// the tasks and the setup steps.
-    fn counts(&self, cx: &App) -> [Option<usize>; 7] {
+    /// What each tab counts, once its list is read: the repositories and the tasks.
+    fn counts(&self, cx: &App) -> [Option<usize>; 5] {
         [
             self.repositories
                 .read(cx)
                 .repositories()
                 .map(|read| read.listed.len()),
             None,
-            self.skills.read(cx).skills().map(<[_]>::len),
-            self.commands.read(cx).commands().map(<[_]>::len),
             self.tasks.read(cx).tasks().map(<[_]>::len),
-            self.setup.read(cx).steps().map(<[_]>::len),
+            None,
             None,
         ]
     }
@@ -2299,20 +2341,144 @@ impl ProjectSettingsPage {
 
     /// Chooses the tab of that section: it shows alone.
     pub fn choose(&mut self, entry: usize, cx: &mut Context<Self>) {
+        // The section a link held is not the one of another tab.
+        self.scroll_to = None;
         let entry = entry.min(SECTIONS.len() - 1);
-        if self.tab != entry || self.own_tab.is_some() {
+        if self.tab != entry {
             self.tab = entry;
-            self.own_tab = None;
+            // A tab starts at its top, not where the former one was scrolled to.
+            self.scroll.set_offset(Point::default());
             cx.notify();
         }
     }
 
-    /// Chooses the section of the part of Flottille named `name` (Specs).
-    pub fn choose_own(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.own_tab.as_deref() != Some(name) {
-            self.own_tab = Some(name.to_owned());
+    /// The row of Features whose page is open.
+    pub fn open_feature(&self) -> Option<&str> {
+        self.feature.as_deref()
+    }
+
+    /// Opens the page of a row of Features, or goes back to the list.
+    pub fn set_feature(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+        if self.feature != key {
+            self.feature = key;
             cx.notify();
         }
+    }
+
+    /// The Features tab: the parts that touch a project, each a row that opens its page in place
+    /// of the list (`Subpage`); one that is off in Settings is a faded row in its place, its line
+    /// a link to where it is turned on.
+    fn features_tab(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let registry = self
+            .shell
+            .upgrade()
+            .map(|shell| shell.read(cx).extensions().clone());
+        let known = registry
+            .as_ref()
+            .is_none_or(|registry| registry.read(cx).is_known());
+        let project = self.name.clone();
+        let mut rows = Vec::new();
+        if let Some(registry) = &registry {
+            let registry = registry.read(cx);
+            for listed in registry.project_rows() {
+                rows.push((
+                    listed.name.clone(),
+                    crate::extensions::icon_named(&listed.icon),
+                    listed.title.clone(),
+                    if registry.switch_on(&listed.name, Some(&project)) {
+                        "On"
+                    } else {
+                        "Off"
+                    },
+                    listed.line.clone(),
+                    listed.enabled,
+                ));
+            }
+        }
+        let open = self
+            .feature
+            .clone()
+            .filter(|key| rows.iter().any(|row| &row.0 == key && row.5));
+        let this = cx.entity().downgrade();
+        let shell = self.shell.clone();
+        let mut subpage = Subpage::new("project-features", "Features")
+            .open(open.as_deref())
+            .on_open(move |key, _, cx| {
+                this.update(cx, |this, cx| {
+                    this.set_feature(key.map(|key| key.to_string()), cx)
+                })
+                .ok();
+            })
+            // A feature that is off in Settings is turned on there.
+            .on_link(move |key, window, cx| {
+                let at = crate::settings::Reveal::Feature(key.to_string());
+                shell
+                    .update(cx, |shell, cx| shell.open_settings_at(at, window, cx))
+                    .ok();
+            });
+        for (key, icon, title, tag, line, enabled) in rows {
+            subpage = subpage.entry(key.clone(), icon, title, tag, line);
+            if !enabled {
+                subpage = subpage.faded(key, "Off in Settings");
+            }
+        }
+        if let Some(key) = open.clone() {
+            subpage = subpage.page(self.feature_page(key, cx));
+        }
+        awaiting(
+            "project-features-waiting",
+            !known,
+            Skeleton::new("project-features-skeleton").h(px(120.)),
+            subpage,
+        )
+        .into_any_element()
+    }
+
+    /// The view of the page of a feature, made once; it observes this page and the registry.
+    fn feature_page(&mut self, name: String, cx: &mut Context<Self>) -> Entity<FeaturePage> {
+        if let Some(view) = self.feature_pages.get(&name) {
+            return view.clone();
+        }
+        let page = cx.entity();
+        let registry = self
+            .shell
+            .upgrade()
+            .map(|shell| shell.read(cx).extensions().clone());
+        let view = cx.new({
+            let (weak, name) = (page.downgrade(), name.clone());
+            move |cx| {
+                cx.observe(&page, |_, _, cx| cx.notify()).detach();
+                if let Some(registry) = &registry {
+                    cx.observe(registry, |_, _, cx| cx.notify()).detach();
+                }
+                FeaturePage { page: weak, name }
+            }
+        });
+        self.feature_pages.insert(name, view.clone());
+        view
+    }
+}
+
+/// A view that draws the page of a feature in this project, for the `Subpage` that holds it.
+pub struct FeaturePage {
+    page: WeakEntity<ProjectSettingsPage>,
+    name: String,
+}
+
+impl Render for FeaturePage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(page) = self.page.upgrade() else {
+            return div().into_any_element();
+        };
+        let project = page.read(cx).name.clone();
+        page.read(cx)
+            .shell
+            .upgrade()
+            .map(|shell| shell.read(cx).extensions().clone())
+            .and_then(|registry| {
+                crate::extensions::project_page(&registry, &self.name, &project, cx)
+            })
+            .unwrap_or_else(|| div().into_any_element())
     }
 }
 
@@ -2369,19 +2535,24 @@ impl Render for ProjectSettingsPage {
                     .path(SharedString::from(shown_folder(&self.folder)))
                     .more(self.more.clone()),
             )
-            .children(self.obsolete.iter().map(|obsolete| {
-                div()
-                    .text_size(px(12.5))
-                    .text_color(p.wait)
-                    .child(SharedString::from(format!("Not read: {obsolete}")))
-            }))
-            .child(presence(
-                "asking-the-daemon",
-                !self.loaded && self.error.is_none(),
-                div()
-                    .text_size(px(12.5))
-                    .text_color(p.faint)
-                    .child("Asking the daemon…"),
+            .child(presence_of(
+                "project-settings-unread-block",
+                (!self.obsolete.is_empty()).then(|| {
+                    SharedString::from(format!(
+                        "Some settings were not read: {}",
+                        self.obsolete.join(", ")
+                    ))
+                }),
+                move |line| {
+                    div()
+                        .id("project-settings-unread")
+                        .aria_label(line.clone())
+                        .text_size(px(12.5))
+                        .text_color(p.wait)
+                        .child(line)
+                        .test_support()
+                        .into_any_element()
+                },
             ))
             .child(presence_of(
                 "project-settings-error-block",
@@ -2396,80 +2567,58 @@ impl Render for ProjectSettingsPage {
                         .into_any_element()
                 },
             ));
-        // Every section is built on each frame, so what it keeps (its rows' places) stays up to
-        // date while it is not the one shown.
+        if let Some((at, until)) = self.scroll_to {
+            self.scroll.scroll_to_top_of_item(at);
+            if cx.background_executor().now() < until {
+                window.request_animation_frame();
+            } else {
+                self.scroll_to = None;
+            }
+        }
         let counts = self.counts(cx);
-        let mut sections: Vec<gpui_kit::AnyElement> = vec![
-            self.repositories_section(cx).into_any_element(),
-            self.tracker_section(cx).into_any_element(),
-            self.skills.clone().into_any_element(),
-            self.commands.clone().into_any_element(),
-            self.tasks.clone().into_any_element(),
-            // Where the workspaces go belongs with how they are prepared.
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::XXL)
-                .child(self.workspaces.clone())
-                .child(self.branches_section(window, cx))
-                .child(self.setup.clone())
-                .into_any_element(),
-            // What checks the agents' messages belongs with how they are told to work.
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::XXL)
-                .child(self.rules.clone())
-                .child(self.message_checks.clone())
-                .child(self.pull_request_template.clone())
-                .into_any_element(),
-        ];
-        // After the core's, a section for each part of Flottille the user can turn off that
-        // touches a project, while it is on globally; drawn from what it declares.
-        let registry = self
-            .shell
-            .upgrade()
-            .map(|shell| shell.read(cx).extensions().clone());
-        let own: Vec<(String, String)> = registry
-            .as_ref()
-            .map(|registry| registry.read(cx).project_tabs())
-            .unwrap_or_default();
-        let own_shown = self.own_tab.as_ref().and_then(|name| {
-            let drawn =
-                crate::extensions::project_section(registry.as_ref()?, name, &self.name, cx)?;
-            let at = own.iter().position(|(n, _)| n == name)?;
-            Some((name.clone(), at, drawn))
-        });
-        let core = self.tab.min(sections.len() - 1);
-        let (chosen, shown_key, shown) = match own_shown {
-            Some((name, at, drawn)) => (SECTIONS.len() + at, name, drawn),
-            None => (
-                core,
-                SECTIONS[core].0.to_owned(),
-                sections.swap_remove(core),
-            ),
+        // Only the tab shown is built: what it holds enters again as it is shown, and what a
+        // section keeps (its rows' places) is kept by its own view.
+        let core = self.tab.min(SECTIONS.len() - 1);
+        let blocks: Vec<(&str, gpui_kit::AnyElement)> = match SECTIONS[core].0 {
+            "repositories" => vec![
+                (
+                    "repositories",
+                    self.repositories_section(cx).into_any_element(),
+                ),
+                ("tracker", self.tracker_section(cx).into_any_element()),
+            ],
+            "workspaces" => vec![
+                ("workspaces", self.workspaces.clone().into_any_element()),
+                (
+                    "branches",
+                    self.branches_section(window, cx).into_any_element(),
+                ),
+                ("setup", self.setup.clone().into_any_element()),
+            ],
+            "tasks" => vec![("tasks", self.tasks.clone().into_any_element())],
+            "instructions" => vec![
+                ("rules", self.rules.clone().into_any_element()),
+                ("commands", self.commands.clone().into_any_element()),
+                ("skills", self.skills.clone().into_any_element()),
+                ("checks", self.message_checks.clone().into_any_element()),
+                (
+                    "template",
+                    self.pull_request_template.clone().into_any_element(),
+                ),
+            ],
+            _ => vec![("features", self.features_tab(cx))],
         };
         let this = cx.entity().downgrade();
-        let names: Vec<String> = own.iter().map(|(name, _)| name.clone()).collect();
         let tabs = SECTIONS.iter().zip(counts).fold(
-            Tabs::new("project-settings-tabs", "Sections", chosen),
+            Tabs::new("project-settings-tabs", "Sections", core),
             |tabs, ((key, label), count)| match count {
                 Some(count) => tabs.counted(*key, *label, count.to_string()),
                 None => tabs.tab(*key, *label),
             },
         );
-        let tabs = own
-            .iter()
-            .fold(tabs, |tabs, (name, title)| {
-                tabs.tab(SharedString::from(name.clone()), title.clone())
-            })
-            .on_choose(move |entry, _, cx| {
-                this.update(cx, |this, cx| match entry.checked_sub(SECTIONS.len()) {
-                    Some(at) => this.choose_own(&names[at], cx),
-                    None => this.choose(entry, cx),
-                })
-                .ok();
-            });
+        let tabs = tabs.on_choose(move |entry, _, cx| {
+            this.update(cx, |this, cx| this.choose(entry, cx)).ok();
+        });
         let project = self.name.clone();
         let key = |part: &str| ElementId::Name(format!("enter-settings-{project}-{part}").into());
         let column = |element: gpui_kit::AnyElement| {
@@ -2494,10 +2643,13 @@ impl Render for ProjectSettingsPage {
                 enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
             ))
             .child(column(enter(key("tabs"), 1, tabs).into_any_element()));
-        // Each section enters as it is shown (its state is dropped while it is not drawn, so it
-        // plays again), after the tabs.
+        // Each section of the tab enters as it is shown (its state is dropped while it is not
+        // drawn, so it plays again), one after the other, after the tabs.
         let page = div()
             .id("project-settings-page")
+            .track_scroll(&self.scroll)
+            // The user's own scroll ends the hold on a section: the page stays where they put it.
+            .on_scroll_wheel(cx.listener(|this, _, _, _| this.scroll_to = None))
             .w_full()
             .flex_1()
             .min_h_0()
@@ -2508,7 +2660,11 @@ impl Render for ProjectSettingsPage {
             .px(pad)
             .pt(space::XL)
             .pb(space::XXXL)
-            .child(column(enter(key(&shown_key), 2, shown).into_any_element()));
+            .children(blocks.into_iter().enumerate().map(|(n, (part, section))| {
+                column(enter(key(part), 2 + n, section).into_any_element())
+                    .when(n > 0, |d| d.mt(space::XXL))
+            }))
+            .test_support();
         div()
             .size_full()
             .flex()

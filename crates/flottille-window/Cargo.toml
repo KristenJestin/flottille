@@ -16,7 +16,7 @@ base64 = "0.22.1"
 flottille-core = { version = "0.1.0", path = "../flottille-core" }
 # The components, tokens and motion of the window, shared with other GPUI applications; on GPUI
 # Fast, with Omarchy as a desktop theme source (its default `omarchy` feature).
-gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.2.0-beta.2" }
+gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.2.0-beta.3" }
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
 # Already built for GPUI, which takes the window icon as one of its images; only the PNG decoder.
 image = { version = "0.25.10", default-features = false, features = ["png"] }

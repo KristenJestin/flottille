@@ -4,7 +4,8 @@
 //! (`project.set_message_checks`), and the field shows what the daemon says next.
 
 use gpui_design_system::{
-    Button, Field, Section, Toast, Type as _, follow_theme, growing, palette, space, toast,
+    Button, Field, Section, Toast, Type as _, follow_theme, growing, palette, presence, space,
+    toast,
 };
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
@@ -197,18 +198,25 @@ impl Render for MessageChecks {
         // The field grows by a line as a check is added, and its height eases there.
         let text = growing(id("text-height"), text);
         let save = div().flex().justify_end().child(
-            Button::primary(id("save"), "Save")
-                .disabled(!self.savable(cx))
-                .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-        );
-        Section::new(format!("message-checks-{project}"), "Message checks")
-            .sentence(SENTENCE)
-            .child(
-                Field::new(id("field"), "Checks, one command line each", text)
-                    .optional()
-                    .hint("None by default. A check that cannot run refuses too.")
-                    .error(self.problem.clone()),
+            presence(
+                id("save-block"),
+                self.savable(cx),
+                Button::secondary(id("save"), "Save")
+                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
             )
-            .child(save)
+            .gap(space::SM),
+        );
+        Section::new(
+            format!("message-checks-{project}"),
+            "Commit and pull request checks",
+        )
+        .sentence(SENTENCE)
+        .child(
+            Field::new(id("field"), "One command line per line", text)
+                .optional()
+                .hint("None by default. A check that cannot run refuses too.")
+                .error(self.problem.clone()),
+        )
+        .child(save)
     }
 }

@@ -527,29 +527,26 @@ impl Render for RulesEditor {
                     .on_click(cx.listener(|this, _, _, cx| this.reset(cx))),
             )
             // Save is not drawn at rest: it unfolds beside the field once it differs from what is
-            // saved, and folds away after it is saved or set back (rule 4). A project's editor
-            // keeps its disabled button until the project's settings are redone.
-            .child(match self.project {
+            // saved, and folds away after it is saved or set back (rule 4). The global editor's is
+            // the view's one primary; a project's sits among the Instructions tab's own Saves, so
+            // it is secondary.
+            .child(
                 // A presence is as wide as its parent: the button keeps its own width beside the
                 // line.
-                None => div()
-                    .flex_none()
-                    .child(
-                        presence(
-                            id("save-block"),
-                            self.save_shown(cx),
-                            Button::primary(id("save"), "Save")
-                                .disabled(self.waiting)
-                                .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                        )
-                        .gap(space::SM),
+                div().flex_none().child(
+                    presence(
+                        id("save-block"),
+                        self.save_shown(cx),
+                        match self.project {
+                            None => Button::primary(id("save"), "Save"),
+                            Some(_) => Button::secondary(id("save"), "Save"),
+                        }
+                        .disabled(self.waiting)
+                        .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                     )
-                    .into_any_element(),
-                Some(_) => Button::primary(id("save"), "Save")
-                    .disabled(!self.savable(cx) || self.waiting)
-                    .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
-                    .into_any_element(),
-            });
+                    .gap(space::SM),
+                ),
+            );
         let text = div()
             .id(id("text"))
             .min_h(px(150.))
@@ -614,11 +611,8 @@ impl Render for RulesEditor {
             let shown = self.shown.clone();
             let alone = shown.as_ref().is_some_and(|shown| shown.alone);
             let global = shown.as_ref().map(|shown| {
-                let name = match shown.global_source {
-                    Source::Global => "Your rules for every project",
-                    _ => "Flottille's default rules",
-                };
-                (name, shown.global.clone())
+                // The same thing, the same name, whoever wrote what it says.
+                ("Rules for every project", shown.global.clone())
             });
             let open = self.global_open;
             let turned = turning(id("global-chevron"), open, window, cx);
@@ -666,7 +660,7 @@ impl Render for RulesEditor {
                         .test_support(),
                 )
                 .child(div().flex().child(
-                    Button::quiet(id("global-edit"), "Edit them in Settings").on_click(
+                    Button::quiet(id("global-edit"), "Edit in Settings").on_click(
                         move |_, window, cx| {
                             shell
                                 .update(cx, |shell, cx| {

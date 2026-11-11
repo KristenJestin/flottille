@@ -11,9 +11,10 @@ pub mod specs;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use gpui_design_system::color::mix;
 use gpui_design_system::{
-    Chosen, Field, Icon, ModelChoice, Section, Select, SelectOption, Switch, Toast, enter, palette,
-    presence, presence_of, space, toast,
+    Chosen, Field, Icon, ModelChoice, Select, SelectOption, SetHere, Switch, Toast, enter,
+    hoverable, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, HighlightStyle,
@@ -313,17 +314,24 @@ impl Registry {
         rows
     }
 
-    /// The sections a project's settings have: those that touch a project and are on globally.
-    pub fn project_tabs(&self) -> Vec<(String, String)> {
-        let mut tabs: Vec<&Listed> = self
-            .list
-            .iter()
-            .filter(|listed| listed.per_project && listed.enabled)
-            .collect();
-        tabs.sort_by_key(|listed| listed.order);
-        tabs.into_iter()
-            .map(|listed| (listed.name.clone(), listed.title.clone()))
-            .collect()
+    /// The parts that touch a project, in their order: a row of its Features tab.
+    pub fn project_rows(&self) -> Vec<&Listed> {
+        self.rows().into_iter().filter(|l| l.per_project).collect()
+    }
+
+    /// The projects that turn `name` off while it is on globally.
+    pub fn turned_off_in(&self, name: &str) -> Vec<String> {
+        self.listed(name)
+            .filter(|listed| listed.enabled)
+            .map(|listed| {
+                listed
+                    .projects
+                    .iter()
+                    .filter(|side| side.switch == Some(false))
+                    .map(|side| side.project.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn specs(&self) -> &specs::Specs {
@@ -530,6 +538,53 @@ fn control(
     id: &str,
     providers: &crate::providers::Providers,
 ) -> Option<AnyElement> {
+    let is_set = own.is_some();
+    let bare = bare_control(
+        registry, name, project, setting, own, default, id, providers,
+    )?;
+    let Some(project) = project else {
+        return Some(bare);
+    };
+    // A value set in the project carries a mark, `set here`, and a way back to Settings' value.
+    let reset = {
+        let (registry, name, project, setting) = (
+            registry.downgrade(),
+            name.to_owned(),
+            project.to_owned(),
+            setting.clone(),
+        );
+        move |_: &mut gpui_kit::Window, cx: &mut App| {
+            registry
+                .update(cx, |registry, cx| {
+                    registry.set(&name, Some(&project), &setting, None, cx)
+                })
+                .ok();
+        }
+    };
+    Some(
+        SetHere::new(
+            SharedString::from(id.to_owned()),
+            bare,
+            "set here",
+            "Use Settings' value",
+        )
+        .set(is_set)
+        .on_reset(reset)
+        .into_any_element(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bare_control(
+    registry: &Entity<Registry>,
+    name: &str,
+    project: Option<&str>,
+    setting: &Setting,
+    own: Option<Value>,
+    default: Value,
+    id: &str,
+    providers: &crate::providers::Providers,
+) -> Option<AnyElement> {
     let (rule, gives) = setting.default_said(providers);
     let (registry, name, project_name, setting_of) = (
         registry.downgrade(),
@@ -555,10 +610,15 @@ fn control(
                 tags.push(own.clone());
             }
             let first = match project {
-                None => format!("Yours ({})", language_said(&default)),
-                Some(_) => format!("As in Settings ({})", language_said(&default)),
+                None => {
+                    SelectOption::new("default", format!("Yours ({})", language_said(&default)))
+                }
+                // What Settings gives is on its second line.
+                Some(_) => {
+                    SelectOption::new("default", "As in Settings").line(language_said(&default))
+                }
             };
-            let options = std::iter::once(SelectOption::new("default", first)).chain(
+            let options = std::iter::once(first).chain(
                 tags.iter()
                     .map(|tag| SelectOption::new(tag.clone(), language_said(tag))),
             );
@@ -925,6 +985,7 @@ pub fn feature_page(registry: &Entity<Registry>, name: &str, cx: &App) -> Option
         )
         .gap(space::XXL)
     });
+    let others = projects_line(registry, name, on, cx);
     Some(
         div()
             .flex()
@@ -934,9 +995,65 @@ pub fn feature_page(registry: &Entity<Registry>, name: &str, cx: &App) -> Option
                 0,
                 card,
             ))
+            .child(others)
             .children(guidance)
             .into_any_element(),
     )
+}
+
+/// The line under the global page that names the projects that do otherwise, each a link to its
+/// own page of the feature (`notes-app turns it off`); only while there is one.
+fn projects_line(registry: &Entity<Registry>, name: &str, on: bool, cx: &App) -> impl IntoElement {
+    let p = palette(cx);
+    let read = registry.read(cx);
+    let off = if on {
+        read.turned_off_in(name)
+    } else {
+        Vec::new()
+    };
+    let shell = read.shell.clone();
+    let id = format!("{name}-projects");
+    let links_id = id.clone();
+    let said = off
+        .iter()
+        .map(|project| format!("{project} turns it off"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let links = off.into_iter().map(|project| {
+        let (shell, feature) = (shell.clone(), name.to_owned());
+        let target = project.clone();
+        hoverable(
+            div()
+                .id(SharedString::from(format!("{links_id}-{project}")))
+                .aria_label(SharedString::from(format!("{project} turns it off")))
+                .cursor_pointer()
+                .child(SharedString::from(format!("{project} turns it off")))
+                .on_click(move |_, window, cx| {
+                    let at = crate::project_settings::Reveal::Feature(feature.clone());
+                    shell
+                        .update(cx, |shell, cx| {
+                            shell.open_project_settings_at(&target, at.clone(), window, cx)
+                        })
+                        .ok();
+                }),
+            move |link, t| link.text_color(mix(p.mute, p.text, t)),
+        )
+    });
+    presence(
+        SharedString::from(format!("{id}-block")),
+        !said.is_empty(),
+        div()
+            .id(SharedString::from(id))
+            .aria_label(SharedString::from(said))
+            .flex()
+            .flex_wrap()
+            .gap(space::MD)
+            .text_size(px(12.5))
+            .text_color(p.mute)
+            .children(links)
+            .test_support(),
+    )
+    .gap(space::MD)
 }
 
 /// The icon a declaration names (a Lucide file name): those the window embeds, else a generic one.
@@ -950,9 +1067,12 @@ pub fn icon_named(name: &str) -> Icon {
     }
 }
 
-/// The section of a project's settings of `name`: the project's switch and, while it is on, the
-/// values a project may set. Only while `name` is on globally.
-pub fn project_section(
+/// The page of the feature `name` in the settings of `project` (rule 14): the project's switch, with
+/// the global switch's label and the hint that says it is on everywhere until turned off here, the
+/// same usage line, and, while it is on there, the values a project may set, each offering As in
+/// Settings first. Only while `name` is on globally: a feature off in Settings is a faded row
+/// of the list, with no page.
+pub fn project_page(
     registry: &Entity<Registry>,
     name: &str,
     project: &str,
@@ -976,9 +1096,9 @@ pub fn project_section(
     let switch = Switch::new(
         SharedString::from(format!("{prefix}-switch")),
         on,
-        "On in this project",
+        listed.switch.clone(),
     )
-    .hint(listed.sentence.clone())
+    .hint(PROJECT_HINT)
     .disabled(pending)
     .on_click(flip);
     let settings = fields(
@@ -989,16 +1109,16 @@ pub fn project_section(
         &prefix,
         cx,
     );
+    let usage = usage_line(format!("{prefix}-usage"), &listed.usage, cx).into_any_element();
     let error = listed
         .in_project(project)
         .and_then(|side| side.error.clone());
-    let card = card(&prefix, switch, None, on, settings, error, cx);
-    Some(
-        Section::new(SharedString::from(name.to_owned()), listed.title.clone())
-            .child(card)
-            .into_any_element(),
-    )
+    let card = card(&prefix, switch, Some(usage), on, settings, error, cx);
+    Some(enter(SharedString::from(format!("{prefix}-page-enter")), 0, card).into_any_element())
 }
+
+/// What a project's switch says under its label.
+pub const PROJECT_HINT: &str = "On in every project unless you turn it off here.";
 
 #[cfg(test)]
 mod tests {
