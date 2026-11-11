@@ -1506,6 +1506,7 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         }
     }
     // The milestone as the tracker names it: its title, whatever the agent gave.
+    let mut version_in = None;
     let milestone = match (asked.milestone_named(), tracker) {
         (Some(named), ProjectTracker::Github { repository }) => {
             let found = match github_of(project, repository).await {
@@ -1521,7 +1522,10 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         // tracker's.
         (Some(named), ProjectTracker::Jira { .. }) => {
             match versions::resolved(project, named, asked.project.as_deref()).await {
-                Ok(name) => Some(name),
+                Ok((name, only)) => {
+                    version_in = only;
+                    Some(name)
+                }
                 Err(why) => return Outcome::Refused(format!("refused: {why}")),
             }
         }
@@ -1536,6 +1540,7 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         in_comments,
         jql: jql_asked,
         milestone: milestone.as_deref(),
+        version_in: version_in.as_deref(),
     };
     // What the items' rounds keep, once one read the tracker; the tracker itself before. A search
     // looks in the descriptions and comments, and a time in the tracker's dates, which the rounds
@@ -1570,7 +1575,7 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         header.push_str(&format!(", assigned to {assignee}"));
     }
     if let Some(milestone) = filters.milestone {
-        header.push_str(&format!(", in milestone {milestone}"));
+        header.push_str(&format!(", in milestone {}", masked(milestone)));
     }
     if let Some(days) = filters.updated_within {
         header.push_str(&format!(", updated in the last {days} days"));
@@ -1706,6 +1711,9 @@ struct Filters<'a> {
     jql: Option<Confined>,
     /// The title of the GitHub milestone, or the name of the Jira version, whose tickets are kept.
     milestone: Option<&'a str>,
+    /// Jira: the project whose version it is, when the call named one: another project's version
+    /// of the same name is not kept.
+    version_in: Option<&'a str>,
 }
 
 /// What a list found on the tracker: its tickets, how many were answered from another site, and
@@ -1749,6 +1757,7 @@ async fn searched_again(
         filters.in_comments,
         filters.jql.as_ref().map(|jql| (&jql.clause, &jql.order)),
         filters.milestone,
+        filters.version_in,
     ])
     .to_string();
     if let Some((found, _)) = daemon.kept_searches.get(&kept) {
@@ -1957,6 +1966,9 @@ fn jql(projects: &[String], filters: &Filters<'_>) -> String {
     }
     if let Some(version) = filters.milestone {
         clauses.push(format!("fixVersion = {}", jql_quoted(version)));
+        if let Some(project) = filters.version_in {
+            clauses.push(format!("project = {}", jql_quoted(project)));
+        }
     }
     if let Some(assignee) = filters.assignee {
         clauses.push(format!("assignee = {}", jql_quoted(assignee)));
@@ -2059,7 +2071,7 @@ async fn list_work_items(
                 .collect(),
             // The search asks no `fixVersions` (which fields it allows is not documented): what
             // the filter says is what every item found holds.
-            milestone: versions::said_in(fields).or_else(|| filters.milestone.map(str::to_owned)),
+            milestone: versions::said_in(fields).or_else(|| filters.milestone.map(masked)),
             url: Some(format!("https://{site}/browse/{}", masked(key))),
         });
     }
@@ -2537,7 +2549,7 @@ async fn create_work_item(
         None => None,
     };
     let version = match asked.milestone_named() {
-        Some(named) => match versions::chosen(site, project, named).await {
+        Some(named) => match versions::settled(site, project, named).await {
             Ok(version) => Some(version),
             Err(why) => return Outcome::Refused(format!("refused: {why}; nothing was written")),
         },
@@ -2671,11 +2683,34 @@ async fn create_work_item(
         crate::posts::record_body(daemon, (name, "jira", "", key.as_str()), &posted);
     }
     let mut placed = String::new();
+    let mut version_said = String::new();
+    let mut unset = String::new();
     if let Some(sprint) = &sprint {
         placed.push_str(&format!(", in sprint \"{}\"", sprint.name));
     }
+    // Jira may end the creation well and ignore the field: the work item is read back, and what
+    // it holds is what is said.
     if let Some(version) = &version {
-        placed.push_str(&format!(", in the version \"{}\"", version.name));
+        let shown = version.shown();
+        match versions::holds(site, &key, version).await {
+            Ok(true) => version_said = format!(", in the version \"{shown}\""),
+            Ok(false) => {
+                version_said = format!(", but Jira did not set its fix version \"{shown}\"");
+                unset = "; acli answered the creation, and the work item read back holds no \
+                         such fix version: acli's workitem edit cannot set it, so the user sets \
+                         it in Jira (the work item's Fix versions field)"
+                    .to_owned();
+            }
+            Err(why) => {
+                version_said = format!(
+                    ", and its fix version \"{shown}\" was asked but could not be confirmed"
+                );
+                unset = format!(
+                    "; the work item could not be read back ({why}): look at its fix version \
+                     in Jira"
+                );
+            }
+        }
     }
     if let Some(parent) = &parent {
         placed.push_str(&format!(", under {}", masked(parent)));
@@ -2716,8 +2751,9 @@ async fn create_work_item(
         (Some(who), false) => placed.push_str(&format!(", assigned to {}", assignee_said(who))),
         (None, _) => {}
     }
+    placed.push_str(&version_said);
     Outcome::Done(format!(
-        "The ticket {key} was opened in {project}{placed}: https://{site}/browse/{key}{after}"
+        "The ticket {key} was opened in {project}{placed}: https://{site}/browse/{key}{unset}{after}"
     ))
 }
 

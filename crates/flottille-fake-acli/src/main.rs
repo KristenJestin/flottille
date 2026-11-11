@@ -68,9 +68,14 @@
 //! "released": false}]}`), an empty list for a project with none, and no `versions` at all with
 //! the script's `no_versions_field: true` (what a real `acli` may print, its page giving no
 //! output). A project the script gives versions and no types is viewed too. A JQL
-//! `fixVersion = "name"` finds the work items whose `fields.fixVersions` hold it. A `workitem
+//! `fixVersion = "name"` finds the work items whose `fields.fixVersions` hold it, and an `AND
+//! project = "P"` those of that project. A `workitem
 //! create --from-json` whose `additionalAttributes.fixVersions` names a version the script does
 //! not give the project ends with 1, `✗ Error: Version name '…' is not valid`, as Jira refuses it.
+//! What such a creation set is kept in `created.json` (`{key: fixVersions}`), and a `view` of its
+//! key (one `items` does not give) prints it: `summary` and `fixVersions`, with a `self` on the
+//! script's site. The script's `drops_fix_versions: true` makes Jira ignore the field silently,
+//! as a site may: the creation ends with 0 and the view shows none.
 //!
 //! The writes change nothing but the status a transition moves and the comments a `comment
 //! create` adds: the test reads them in the record. One more script key, `links_lose_their_url:
@@ -230,6 +235,14 @@ fn found_by(jql: &str, item: &Value) -> bool {
     {
         return false;
     }
+    if let Some(project) = quoted_after(jql, "AND project = ")
+        && item["key"]
+            .as_str()
+            .and_then(|key| key.split('-').next())
+            .is_none_or(|of| of != project)
+    {
+        return false;
+    }
     if let Some(version) = quoted_after(jql, "fixVersion = ")
         && !fields["fixVersions"]
             .as_array()
@@ -363,7 +376,14 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 eprintln!("Error: work item {key} could not be fetched");
                 return 1;
             }
-            match script["items"].get(*key) {
+            let made = created(dir);
+            let site = script["site"].as_str().unwrap_or("example.atlassian.net");
+            let made_item = made.get(*key).map(|made| {
+                json!({"key": key, "id": "10099",
+                    "self": format!("https://{site}/rest/api/3/issue/10099"),
+                    "fields": {"summary": made["summary"], "fixVersions": made["fixVersions"]}})
+            });
+            match script["items"].get(*key).or(made_item.as_ref()) {
                 Some(item) => {
                     let mut item = item.clone();
                     if let Some(status) = moved.get(*key) {
@@ -488,6 +508,17 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             let key = script["created"]
                 .as_str()
                 .map_or_else(|| format!("{project}-1"), str::to_owned);
+            let held = match script["drops_fix_versions"] == true {
+                true => json!([]),
+                false => item["additionalAttributes"]["fixVersions"].clone(),
+            };
+            let mut made = created(dir);
+            made.insert(
+                key.clone(),
+                json!({"summary": item["summary"], "fixVersions": held}),
+            );
+            std::fs::write(dir.join("created.json"), Value::from(made).to_string())
+                .expect("the created work items");
             print_created(script, &key);
             0
         }
@@ -936,6 +967,14 @@ fn text_node(node: &Value) -> Result<(), String> {
 }
 
 /// Where the transitions that took left the work items: `moved.json`, written by the fake.
+/// The work items a creation from a JSON definition made: each key's `summary` and `fixVersions`.
+fn created(dir: &Path) -> Map<String, Value> {
+    std::fs::read_to_string(dir.join("created.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
 fn moved(dir: &Path) -> Map<String, Value> {
     std::fs::read_to_string(dir.join("moved.json"))
         .ok()

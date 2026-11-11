@@ -314,7 +314,7 @@ fn milestones_say_what_acli_printed_when_it_prints_no_versions() {
 }
 
 #[test]
-fn create_and_edit_set_a_work_item_s_fix_version_and_remove_it() {
+fn create_sets_a_work_item_s_fix_version_and_edit_and_removal_are_refused() {
     let user = user();
     on_jira(&user);
     user.acli_script(json!({"versions": versions(), "created": "ABC-7",
@@ -346,6 +346,13 @@ fn create_and_edit_set_a_work_item_s_fix_version_and_remove_it() {
         item["additionalAttributes"],
         json!({"fixVersions": [{"name": "1.1"}]})
     );
+    // Jira is asked what the work item holds before it is said to be in the version.
+    assert!(
+        acli_calls(&user)
+            .contains(&"jira workitem view ABC-7 --json --fields fixVersions".to_owned()),
+        "{:?}",
+        acli_calls(&user)
+    );
 
     // The name is the version's, whatever the agent gave: its name, or its id.
     for named in ["1.1", "10001"] {
@@ -357,7 +364,10 @@ fn create_and_edit_set_a_work_item_s_fix_version_and_remove_it() {
         assert!(done.contains("\"1.1\""), "{named}: {done}");
     }
     let again = user.acli_received();
-    let last = again.last().unwrap();
+    let last = again
+        .iter()
+        .rfind(|call| call["files"][0]["json"].is_object())
+        .unwrap();
     assert_eq!(
         last["files"][0]["json"]["additionalAttributes"]["fixVersions"],
         json!([{"name": "1.1"}])
@@ -552,7 +562,8 @@ fn version_writes_go_through_the_gate_as_other_ticket_writes() {
     assert_eq!(cards.len(), 2);
     assert!(cards[0].contains("opens a ticket"), "{}", cards[0]);
     assert!(
-        cards[0].contains("fix version to \\\"1.1\\\"") && cards[0].contains("2026-12-01"),
+        cards[0].contains("fix version to \\\"1.1\\\" (id 10001")
+            && cards[0].contains("2026-12-01"),
         "{}",
         cards[0]
     );
@@ -609,4 +620,248 @@ fn a_version_is_found_in_the_tracker_s_project_only() {
         .find(|c| c.contains("workitem search"))
         .unwrap();
     assert!(search.contains("project in (\"ABC\", \"DEF\")"), "{search}");
+}
+
+#[test]
+fn a_fix_version_jira_ignores_is_said_and_never_claimed() {
+    let user = user();
+    on_jira(&user);
+    user.acli_script(json!({"versions": versions(), "created": "ABC-12",
+        "drops_fix_versions": true}));
+    let mcp = root_in(&user);
+
+    // acli ends the creation with 0 and Jira keeps no fix version: the work item is read back.
+    let done = written(
+        &user,
+        &mcp,
+        json!({"action": "create", "title": "Sign in", "type": "Task", "milestone": "1.1"}),
+    );
+    assert!(
+        done.contains(
+            "The ticket ABC-12 was opened in ABC, but Jira did not set its fix version \"1.1\""
+        ),
+        "{done}"
+    );
+    assert!(!done.contains("in the version"), "{done}");
+    assert!(done.contains("the user sets it in Jira"), "{done}");
+
+    // A work item that cannot be read back is not said to be in the version either.
+    user.acli_script(json!({"versions": versions(), "created": "ABC-13",
+        "fail": {"ABC-13": "Error: the work item could not be fetched"}}));
+    let done = written(
+        &user,
+        &mcp,
+        json!({"action": "create", "title": "Sign out", "type": "Task", "milestone": "1.1"}),
+    );
+    assert!(
+        done.contains("ABC-13") && done.contains("could not be confirmed"),
+        "{done}"
+    );
+    assert!(!done.contains("in the version"), "{done}");
+}
+
+#[test]
+fn a_version_name_the_masking_would_change_is_used_as_it_is_and_shown_masked() {
+    let token = "ghp_fakefakefakefakefakefakefake0079";
+    let name = format!("rc-{token}");
+    let user = user().with_env("GH_TOKEN", token);
+    on_jira(&user);
+    user.acli_script(
+        json!({"versions": {"ABC": [{"name": name}]}, "created": "ABC-5",
+        "items": {"ABC-1": work_item("ABC-1", "Sign in", &[&name])}}),
+    );
+    let mcp = root_in(&user);
+
+    // What is shown is masked, and what Jira is given is not.
+    let listed = read(&user, &mcp, json!({"action": "milestones"}));
+    assert!(
+        listed.contains("rc-[masked]") && !listed.contains(token),
+        "{listed}"
+    );
+    let held = held(&mcp.call(
+        "tickets",
+        json!({"action": "create", "title": "Sign in", "type": "Task", "milestone": &name}),
+    ));
+    let card = requests(&user)[0].to_string();
+    assert!(
+        card.contains("rc-[masked]") && !card.contains(token),
+        "{card}"
+    );
+    let done = allow(&user, held);
+    assert!(
+        done.contains("in the version") && !done.contains(token),
+        "{done}"
+    );
+    let created: Vec<Value> = user
+        .acli_received()
+        .into_iter()
+        .filter(|call| call["files"][0]["json"]["additionalAttributes"].is_object())
+        .collect();
+    assert_eq!(created.len(), 1, "{:?}", acli_calls(&user));
+    assert_eq!(
+        created[0]["files"][0]["json"]["additionalAttributes"]["fixVersions"],
+        json!([{"name": name}])
+    );
+    // The filter finds it by the real name, and says it masked.
+    let listed = read(
+        &user,
+        &mcp,
+        json!({"action": "list", "milestone": &name, "state": "all"}),
+    );
+    assert!(
+        listed.contains("ABC-1") && listed.contains("rc-[masked]"),
+        "{listed}"
+    );
+    assert!(!listed.contains(token), "{listed}");
+    let calls = acli_calls(&user);
+    let search = calls
+        .iter()
+        .find(|c| c.contains("workitem search"))
+        .unwrap();
+    assert!(
+        search.contains(&format!("fixVersion = \"{name}\"")),
+        "{search}"
+    );
+}
+
+#[test]
+fn a_version_whose_name_holds_a_quote_and_a_backslash_is_quoted_in_the_jql() {
+    let user = user();
+    on_jira(&user);
+    let name = r#"a"b\c"#;
+    user.acli_script(json!({"versions": {"ABC": [{"name": name}]}, "items": {
+        "ABC-1": work_item("ABC-1", "Sign in", &[name]),
+        "ABC-2": work_item("ABC-2", "Sign out", &[])
+    }}));
+    let mcp = root_in(&user);
+
+    let listed = read(
+        &user,
+        &mcp,
+        json!({"action": "list", "milestone": name, "state": "all"}),
+    );
+    assert!(
+        listed.contains("ABC-1") && !listed.contains("ABC-2"),
+        "{listed}"
+    );
+    let calls = acli_calls(&user);
+    let search = calls
+        .iter()
+        .find(|c| c.contains("workitem search"))
+        .unwrap();
+    // The JQL, word for word: the name quoted with its quote and its backslash escaped.
+    assert!(
+        search.contains(
+            r#"--jql project in ("ABC") AND fixVersion = "a\"b\\c" ORDER BY created DESC --fields"#
+        ),
+        "{search}"
+    );
+}
+
+#[test]
+fn project_and_milestone_list_the_items_of_that_project_only() {
+    let user = user();
+    on_projects(&user, &["ABC", "DEF"]);
+    user.acli_script(
+        json!({"versions": {"ABC": [{"name": "1.0"}], "DEF": [{"name": "1.0"}]},
+        "items": {
+            "ABC-1": work_item("ABC-1", "Sign in", &["1.0"]),
+            "DEF-1": work_item("DEF-1", "Sign in elsewhere", &["1.0"])
+        }}),
+    );
+    let mcp = root_in(&user);
+
+    let both = read(
+        &user,
+        &mcp,
+        json!({"action": "list", "milestone": "1.0", "state": "all"}),
+    );
+    assert!(both.contains("ABC-1") && both.contains("DEF-1"), "{both}");
+    let one = read(
+        &user,
+        &mcp,
+        json!({"action": "list", "milestone": "1.0", "state": "all", "project": "def"}),
+    );
+    assert!(one.contains("DEF-1") && !one.contains("ABC-1"), "{one}");
+    let searched = read(
+        &user,
+        &mcp,
+        json!({"action": "search", "query": "sign", "milestone": "1.0", "state": "all",
+            "project": "ABC"}),
+    );
+    assert!(
+        searched.contains("ABC-1") && !searched.contains("DEF-1"),
+        "{searched}"
+    );
+    let calls = acli_calls(&user);
+    let searches: Vec<&String> = calls
+        .iter()
+        .filter(|c| c.contains("workitem search"))
+        .collect();
+    assert_eq!(searches.len(), 3, "{calls:?}");
+    // Confined to the tracker's projects still, and to the project the call names.
+    assert!(
+        searches[0].contains(r#"project in ("ABC", "DEF") AND fixVersion = "1.0" ORDER"#),
+        "{}",
+        searches[0]
+    );
+    assert!(
+        searches[1].contains(
+            r#"project in ("ABC", "DEF") AND fixVersion = "1.0" AND project = "DEF" ORDER"#
+        ),
+        "{}",
+        searches[1]
+    );
+    assert!(
+        searches[2].contains(r#"AND project = "ABC""#),
+        "{}",
+        searches[2]
+    );
+}
+
+#[test]
+fn a_version_changed_while_the_request_waits_is_not_written() {
+    let user = user();
+    on_jira(&user);
+    user.acli_script(json!({"versions": versions(), "created": "ABC-9"}));
+    let mcp = root_in(&user);
+
+    let renamed = held(&mcp.call(
+        "tickets",
+        json!({"action": "create", "title": "Sign in", "type": "Task", "milestone": "1.1"}),
+    ));
+    let gone = held(&mcp.call(
+        "tickets",
+        json!({"action": "create", "title": "Sign out", "type": "Task", "milestone": "2.0"}),
+    ));
+    // The user is slow: Jira's 1.1 (id 10001) is renamed and another version takes its name, and
+    // 2.0 is deleted. Nothing may be written to what merely has the name now.
+    user.acli_script(json!({"created": "ABC-9", "versions": {"ABC": [
+        {"id": "10000", "name": "1.0", "released": true, "releaseDate": "2026-10-01"},
+        {"id": "10001", "name": "1.2", "releaseDate": "2026-12-01"},
+        {"id": "20000", "name": "1.1", "releaseDate": "2027-01-01"}
+    ]}}));
+    for number in [renamed, gone] {
+        let said = allow(&user, number);
+        assert!(!said.contains("and Flottille has now done it"), "{said}");
+    }
+    assert!(acli_writes(&user).is_empty(), "{:?}", acli_writes(&user));
+    let said = store(&user)
+        .delivery(&format!("approval-{renamed}"))
+        .unwrap()
+        .unwrap()
+        .body;
+    assert!(
+        said.contains("is now named \"1.2\" in ABC") && said.contains("nothing was written"),
+        "{said}"
+    );
+    let said = store(&user)
+        .delivery(&format!("approval-{gone}"))
+        .unwrap()
+        .unwrap()
+        .body;
+    assert!(
+        said.contains("no longer one of ABC's versions") && said.contains("10003"),
+        "{said}"
+    );
 }
