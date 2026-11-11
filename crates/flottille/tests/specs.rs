@@ -146,7 +146,8 @@ fn the_declaration_says_its_row_its_switch_and_its_usage_line() {
         "the words found elsewhere in the window are in bold: {}",
         specs["usage"]
     );
-    assert_eq!(specs["settings"][0]["label"], "Written in");
+    assert_eq!(specs["settings"][0]["label"], "From a ticket");
+    assert_eq!(specs["settings"][1]["label"], "Written in");
     // Every part says what a row and a page need, and a switch never reads like its state.
     for extension in listed["extensions"].as_array().unwrap() {
         for key in ["switch", "usage"] {

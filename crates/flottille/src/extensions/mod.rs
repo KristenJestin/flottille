@@ -234,11 +234,25 @@ pub struct Setting {
     pub per_project: bool,
 }
 
+/// A value of a [`Kind::Choice`], and the words that say it: its title and the line that says what
+/// it means, so that no client holds a table of them.
+#[derive(Clone, Copy, Debug)]
+pub struct Pick {
+    pub value: &'static str,
+    pub label: &'static str,
+    pub line: &'static str,
+}
+
 /// The kinds of a setting's value: each comes with its first need.
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
     /// A language tag (`en`, `fr-FR`); by default the user's, the locale of the daemon.
     Language,
+    /// One of the values `of`, said in the words a client shows; `default` when none is set.
+    Choice {
+        of: &'static [Pick],
+        default: &'static str,
+    },
     /// Some of the values `of`, in their order; `default` when none is set.
     Subset {
         of: &'static [&'static str],
@@ -334,6 +348,14 @@ fn checked(kind: Kind, value: &Value) -> Result<Value, String> {
                 "must be a language tag such as en or fr-FR, not {value}"
             )),
         },
+        Kind::Choice { of, .. } => {
+            let values: Vec<&str> = of.iter().map(|choice| choice.value).collect();
+            match value.as_str() {
+                Some(word) if values.contains(&word) => Ok(json!(word)),
+                Some(word) => Err(format!("{word} is not one of {}", values.join(", "))),
+                None => Err(format!("must be one of {}, not {value}", values.join(", "))),
+            }
+        }
         Kind::Subset { of, .. } => {
             let given: Vec<&str> = value
                 .as_array()
@@ -397,6 +419,7 @@ fn user_language() -> String {
 fn default_of(kind: Kind) -> Value {
     match kind {
         Kind::Language => json!(user_language()),
+        Kind::Choice { default, .. } => json!(default),
         Kind::Subset { default, .. } => json!(default),
         Kind::Model { .. } => Value::Null,
     }
@@ -418,6 +441,11 @@ fn default_says(daemon: &Daemon, ready: &[&'static Provider], kind: Kind) -> Val
 fn kind_word(kind: Kind) -> Value {
     match kind {
         Kind::Language => json!("language"),
+        Kind::Choice { of, .. } => json!({"choice": of.iter().map(|choice| json!({
+            "value": choice.value,
+            "label": choice.label,
+            "line": choice.line,
+        })).collect::<Vec<_>>()}),
         Kind::Subset { of, .. } => json!({"subset": of}),
         Kind::Model { .. } => json!("model"),
     }
@@ -1325,7 +1353,7 @@ mod tests {
         );
         assert_eq!(
             parse("[specs]\nenable = true\n").unwrap_err(),
-            "extensions.toml: specs.enable: unknown key: the keys are enabled, language"
+            "extensions.toml: specs.enable: unknown key: the keys are enabled, mode, language"
         );
         assert_eq!(
             parse("[specs]\nenabled = \"yes\"\n").unwrap_err(),

@@ -173,6 +173,9 @@ pub struct Restored {
     /// The agent folders could not be noted before the run (the snapshot failed): nothing it
     /// changed there is known, nor put back.
     pub missing: bool,
+    /// Of a place `missing`, some agent folders were noted, and put back, changed or not: those
+    /// of places inside it, or all but theirs.
+    pub partly: bool,
 }
 
 impl Restored {
@@ -192,6 +195,7 @@ impl Restored {
         self.unchecked |= inner.unchecked;
         self.unreached.extend(inner.unreached);
         self.missing |= inner.missing;
+        self.partly = true;
     }
 }
 
@@ -306,6 +310,7 @@ impl Snapshot {
                 .map(|top| top.display().to_string())
                 .collect(),
             missing: self.missing,
+            partly: self.missing,
             ..Restored::default()
         };
         let Ok(top) = open_root(&self.root) else {
@@ -916,7 +921,7 @@ pub fn said(restored: &Restored) -> Option<String> {
     }
     if restored.missing {
         // Those of places inside it may have been noted, and put back.
-        let noted = !restored.put_back.is_empty() || !restored.left.is_empty();
+        let noted = restored.partly || !restored.put_back.is_empty() || !restored.left.is_empty();
         text.push_str(&format!(
             "{}{} could not be noted before the run: what it changed there is neither known \
              nor put back, tell the user",
@@ -1442,36 +1447,44 @@ async fn put_back(
         ..Restored::default()
     };
     let this = closed.subscribe();
+    // The groups it took in once its runs had all ended: their markers go once their places
+    // are put back, and stay when that fails, for the next start to say it.
+    let taken_in = locked(&groups)
+        .iter_mut()
+        .find(|group| {
+            group
+                .closing
+                .as_ref()
+                .is_some_and(|closing| closing.same_channel(&this))
+        })
+        .map(|group| std::mem::take(&mut group.taken_in))
+        .unwrap_or_default();
     let restored = match taken {
-        Some(taken) => tokio::task::spawn_blocking(move || taken.restore(Path::new(&run)))
-            .await
-            .unwrap_or_else(|_| missing()),
+        // Incomplete, it still holds the snapshots of the groups it took in: they are put back
+        // with it.
+        Some(taken) => {
+            match tokio::task::spawn_blocking(move || taken.restore(Path::new(&run))).await {
+                Ok(restored) => {
+                    for (.., marker) in taken_in {
+                        let _ = std::fs::remove_file(marker);
+                    }
+                    restored
+                }
+                Err(_) => missing(),
+            }
+        }
         None => {
-            // The groups it took in were noted: they are put back, each kept apart.
-            let taken_in = locked(&groups)
-                .iter_mut()
-                .find(|group| {
-                    group
-                        .closing
-                        .as_ref()
-                        .is_some_and(|closing| closing.same_channel(&this))
-                })
-                .map(|group| std::mem::take(&mut group.taken_in))
-                .unwrap_or_default();
-            let markers: Vec<PathBuf> =
-                taken_in.iter().map(|(.., marker)| marker.clone()).collect();
-            let restored = tokio::task::spawn_blocking(move || {
-                let mut restored = missing();
-                for (at, snapshot, _) in taken_in {
-                    if let Some(snapshot) = snapshot {
-                        restored.take_in(&at, snapshot.restore(Path::new(&run).join(&at)));
+            // The groups it took in were noted: they are put back, each kept apart and on its
+            // own, so that one that fails does not keep the others from it.
+            let mut restored = missing();
+            for (at, snapshot, marker) in taken_in {
+                if let Some(snapshot) = snapshot {
+                    let run = Path::new(&run).join(&at);
+                    match tokio::task::spawn_blocking(move || snapshot.restore(run)).await {
+                        Ok(inner) => restored.take_in(&at, inner),
+                        Err(_) => continue,
                     }
                 }
-                restored
-            })
-            .await
-            .unwrap_or_else(|_| missing());
-            for marker in markers {
                 let _ = std::fs::remove_file(marker);
             }
             restored
@@ -2646,5 +2659,182 @@ mod tests {
         );
         assert!(guards.groups.lock().unwrap().is_empty());
         assert!(interrupted(&kept).is_empty());
+    }
+
+    /// A run in `outer`, given up while its snapshot is held, takes in the groups of `inside`,
+    /// whose runs then all end: the outer group is closing. Its snapshot goes on once the sender
+    /// is used, and fails when it is dropped; the handle is the last run's put-back.
+    async fn closing_around(
+        guards: &Arc<Guards>,
+        outer: &Path,
+        kept: &Path,
+        mut inside: Vec<Guard>,
+    ) -> (
+        std::sync::mpsc::Sender<()>,
+        tokio::task::JoinHandle<Option<Restored>>,
+    ) {
+        let release = hold(real(outer));
+        let o = entering(guards, outer, kept, "o");
+        until(guards, |groups| {
+            groups.iter().any(|g| g.runs.contains(&"o".into()))
+        })
+        .await;
+        o.abort();
+        assert!(o.await.is_err_and(|error| error.is_cancelled()));
+        until(guards, |groups| {
+            groups.iter().all(|g| !g.runs.contains(&"o".into()))
+        })
+        .await;
+        let last = inside.pop().unwrap();
+        for guard in inside {
+            assert_eq!(guard.leave().await, None);
+        }
+        let leaving = tokio::spawn(last.leave());
+        until(guards, |groups| groups.iter().all(|g| g.closing.is_some())).await;
+        (release, leaving)
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_outer_snapshot_removes_the_markers_of_the_groups_it_took_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("p");
+        let (first, second) = (outer.join("svc"), outer.join("web"));
+        made(&first.join("README.md"), "\n");
+        made(&second.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let guards = Arc::new(Guards::default());
+        let a = guards.enter(&first, &[], None, &kept, "a").await.unwrap();
+
+        // The second inner group is taken when a run in the outer place takes both in.
+        let failing = hold(real(&second));
+        let b = {
+            let (guards, second, kept) = (guards.clone(), second.clone(), kept.clone());
+            tokio::spawn(async move { guards.enter(&second, &[], None, &kept, "b").await })
+        };
+        until(&guards, |groups| {
+            groups.iter().any(|g| g.runs.contains(&"b".into()))
+        })
+        .await;
+        let release = hold(real(&outer));
+        let o = entering(&guards, &outer, &kept, "o");
+        until(&guards, |groups| {
+            groups.iter().any(|g| g.runs.contains(&"o".into()))
+        })
+        .await;
+
+        // Its snapshot fails: the outer snapshot is taken, but incomplete.
+        drop(failing);
+        assert!(b.await.unwrap().is_err());
+        o.abort();
+        assert!(o.await.is_err_and(|error| error.is_cancelled()));
+        until(&guards, |groups| groups.iter().all(|g| g.runs == ["a"])).await;
+        let leaving = tokio::spawn(a.leave());
+        until(&guards, |groups| groups.iter().all(|g| g.closing.is_some())).await;
+        release.send(()).unwrap();
+        let restored = leaving.await.unwrap().unwrap();
+
+        // Both places were put back with the outer one: none is said interrupted at the next
+        // start, and the outer place's own folders were noted.
+        assert!(restored.missing, "{restored:?}");
+        assert!(guards.groups.lock().unwrap().is_empty());
+        assert_eq!(interrupted(&kept), []);
+        let text = said(&restored).unwrap();
+        assert!(
+            text.contains("the rest of the agent folders of this place could not be noted"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_inner_put_back_leaves_its_marker_and_puts_back_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("p");
+        let (first, second) = (outer.join("svc"), outer.join("web"));
+        made(&first.join("README.md"), "\n");
+        made(&second.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let guards = Arc::new(Guards::default());
+        let a = guards.enter(&first, &[], None, &kept, "a").await.unwrap();
+        let b = guards.enter(&second, &[], None, &kept, "b").await.unwrap();
+        made(&first.join(".claude/settings.json"), "{\"hooks\": {}}\n");
+        let planted = second.join(".claude/settings.json");
+        made(&planted, "{\"hooks\": {}}\n");
+
+        // The put-back of the first inner place fails; the outer snapshot fails too.
+        drop(hold(real(&first).join(".put-back")));
+        let (release, leaving) = closing_around(&guards, &outer, &kept, vec![a, b]).await;
+        drop(release);
+        let restored = leaving.await.unwrap().unwrap();
+
+        // The second place is put back all the same, and its marker goes; the first one's is
+        // left, for the next start to say it.
+        assert!(restored.missing, "{restored:?}");
+        assert_eq!(restored.put_back, ["web/.claude/settings.json"]);
+        assert!(!planted.exists());
+        assert!(guards.groups.lock().unwrap().is_empty());
+        assert_eq!(
+            interrupted(&kept),
+            [Interrupted {
+                root: real(&first),
+                run: "a".into(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn inner_groups_put_back_unchanged_say_the_rest_of_the_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("p");
+        let inner = outer.join("svc");
+        made(&inner.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let guards = Arc::new(Guards::default());
+        let a = guards.enter(&inner, &[], None, &kept, "a").await.unwrap();
+
+        let (release, leaving) = closing_around(&guards, &outer, &kept, vec![a]).await;
+        drop(release);
+        let restored = leaving.await.unwrap().unwrap();
+
+        // Nothing changed in the inner place, which was noted and put back all the same.
+        assert!(restored.missing, "{restored:?}");
+        assert!(restored.put_back.is_empty(), "{restored:?}");
+        let text = said(&restored).unwrap();
+        assert!(
+            text.contains("the rest of the agent folders of this place could not be noted"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_inner_groups_taken_in_are_both_put_back_and_their_markers_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("p");
+        let (first, second) = (outer.join("svc"), outer.join("web"));
+        made(&first.join("README.md"), "\n");
+        made(&second.join("README.md"), "\n");
+        let kept = dir.path().join("kept");
+        let guards = Arc::new(Guards::default());
+        let a = guards.enter(&first, &[], None, &kept, "a").await.unwrap();
+        let b = guards.enter(&second, &[], None, &kept, "b").await.unwrap();
+        let planted = [
+            first.join(".claude/settings.json"),
+            second.join(".claude/settings.json"),
+        ];
+        for path in &planted {
+            made(path, "{\"hooks\": {}}\n");
+        }
+
+        let (release, leaving) = closing_around(&guards, &outer, &kept, vec![a, b]).await;
+        drop(release);
+        let mut restored = leaving.await.unwrap().unwrap();
+
+        restored.put_back.sort();
+        assert_eq!(
+            restored.put_back,
+            ["svc/.claude/settings.json", "web/.claude/settings.json"]
+        );
+        assert!(planted.iter().all(|path| !path.exists()));
+        assert!(guards.groups.lock().unwrap().is_empty());
+        assert_eq!(interrupted(&kept), []);
     }
 }

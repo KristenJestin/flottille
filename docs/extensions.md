@@ -142,8 +142,8 @@ for an extension that is not being built.
 
 The extension gives a schema: each setting's key, label, one line of hint, kind, default, and
 whether a project may set its own value. The kinds come with their first need: a choice among
-values and a language (Specs), a switch, a percentage, a number of tokens, a duration (the
-compaction).
+values (one, with the words that say each, or a subset) and a language (Specs), a switch, a
+percentage, a number of tokens, a duration (the compaction).
 
 The core provides:
 
@@ -556,8 +556,7 @@ agent as a delivery, since no tool call waits for a human. The user can also tal
 freely: it is a session like the others.
 
 A root also starts a spec itself when the user asks for one in its conversation (#691): `spec`
-`new`, of a ticket of the project's tracker (in the project's mode for specs from a ticket, Internal
-until a project chooses its own) or, without one, of an idea in one sentence (Alone). It is the
+`new`, of a ticket of the project's tracker (in the project's default mode for specs from a ticket) or, without one, of an idea in one sentence (Alone). It is the
 same creation as "Write the spec" and "New spec", minus the new session: the calling session is
 recorded as the spec's writer, the tool's answer carries the method (and the ticket, framed as
 data), and its later questions and sections go to that spec. Refused, with a sentence: a ticket
@@ -604,12 +603,13 @@ departures <spec> --post` offer them, and only the user posts them.
 
 **Its page** (Settings, Features, Specs; `design.md` §10): the switch "Write specs before
 building" ("What an agent needs to build a task without guessing, written with your answers. It
-runs no model on its own."); the usage line "**Write the spec** on a ticket starts it at once, in
-the mode below. **New spec** on a project's Specs tab starts one with no ticket. For a single spec
-in another mode: **Write the spec as…** in the ticket's ⋯ menu."; **From a ticket**, radios,
-**Kept in Flottille** ("The ticket is read, never written. At the end, a draft comment lists where
-the spec departs from it; you post it or not.", the default) and **Written to the ticket** ("Each
-Ready writes the spec as the ticket's description, after reading it again."), the words
+runs no model on its own."); the usage line "**Write the spec** on a ticket starts it at once;
+**Write the spec as…** in the ticket's ⋯ menu chooses where one spec lives, and **New spec** on a
+project's Specs tab starts one with no ticket." (one line, true with the radios hidden too, and it
+never says which mode is chosen: the radios do); **From a ticket**, radios, **Kept in Flottille**
+("The ticket is read, never written. At the end, a draft comment lists where the spec departs from
+it; you post it or not.", the default) and **Written to the ticket** ("Each Ready writes the spec
+as the ticket's description, after reading it again."), the words
 "Internal" and "mode" never shown; **Written in**, a select whose first option is `Your language
 (French)`. A project's page offers `As in Settings` first for both.
 
