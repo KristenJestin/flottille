@@ -37,6 +37,7 @@ mod events;
 mod links;
 mod milestones;
 mod sprints;
+mod versions;
 mod worklog;
 
 pub use events::{EVENTS, offer, reference_of, target_named};
@@ -91,7 +92,8 @@ pub struct Ticket {
     pub assignee: Option<String>,
     pub parent: Option<String>,
     pub sprint: Option<String>,
-    /// A GitHub issue's milestone, by its title; none for Jira and for an issue in none.
+    /// A GitHub issue's milestone, by its title, or a Jira work item's fix versions, by their
+    /// names; none for an item in none.
     pub milestone: Option<String>,
 }
 
@@ -612,7 +614,7 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
             }
         }),
         sprint: sprints::said_in(fields),
-        milestone: None,
+        milestone: versions::said_in(fields),
     }
 }
 
@@ -1150,10 +1152,19 @@ fn unplannable(
                 return Some(format!("refused: parent: {why}"));
             }
             let typed = given("type").is_some();
-            (sprint.is_some() && !typed).then(|| {
-                "refused: tickets create with sprint needs type: acli creates a work item in a \
-                 sprint from a JSON definition, which takes no default type; types lists them"
-                    .to_owned()
+            // A GitHub issue's milestone is a flag of `gh`, with no type to give.
+            let placed = match (sprint.is_some(), jira && given("milestone").is_some()) {
+                (true, true) => "sprint and milestone",
+                (true, false) => "sprint",
+                (false, true) => "milestone",
+                (false, false) => return None,
+            };
+            (!typed).then(|| {
+                format!(
+                    "refused: tickets create with {placed} needs type: acli creates a work item \
+                     in a sprint or a version from a JSON definition, which takes no default \
+                     type; types lists them"
+                )
             })
         }
         (_, parent, sprint) => [("parent", parent), ("sprint", sprint)]
@@ -1506,6 +1517,14 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
                 Err(why) => return Outcome::Refused(format!("refused: {why}")),
             }
         }
+        // A Jira version, by its name: looked for in the project the call names, else in the
+        // tracker's.
+        (Some(named), ProjectTracker::Jira { .. }) => {
+            match versions::resolved(project, named, asked.project.as_deref()).await {
+                Ok(name) => Some(name),
+                Err(why) => return Outcome::Refused(format!("refused: {why}")),
+            }
+        }
         _ => None,
     };
     let filters = Filters {
@@ -1685,7 +1704,7 @@ struct Filters<'a> {
     updated_within: Option<u64>,
     in_comments: Option<&'a str>,
     jql: Option<Confined>,
-    /// GitHub: the title of the milestone whose tickets are kept.
+    /// The title of the GitHub milestone, or the name of the Jira version, whose tickets are kept.
     milestone: Option<&'a str>,
 }
 
@@ -1936,6 +1955,9 @@ fn jql(projects: &[String], filters: &Filters<'_>) -> String {
     if let Some(label) = filters.label {
         clauses.push(format!("labels = {}", jql_quoted(label)));
     }
+    if let Some(version) = filters.milestone {
+        clauses.push(format!("fixVersion = {}", jql_quoted(version)));
+    }
     if let Some(assignee) = filters.assignee {
         clauses.push(format!("assignee = {}", jql_quoted(assignee)));
     }
@@ -2035,7 +2057,9 @@ async fn list_work_items(
                 .filter(|name| !name.is_empty())
                 .into_iter()
                 .collect(),
-            milestone: None,
+            // The search asks no `fixVersions` (which fields it allows is not documented): what
+            // the filter says is what every item found holds.
+            milestone: versions::said_in(fields).or_else(|| filters.milestone.map(str::to_owned)),
             url: Some(format!("https://{site}/browse/{}", masked(key))),
         });
     }
@@ -2512,18 +2536,36 @@ async fn create_work_item(
         },
         None => None,
     };
+    let version = match asked.milestone_named() {
+        Some(named) => match versions::chosen(site, project, named).await {
+            Ok(version) => Some(version),
+            Err(why) => return Outcome::Refused(format!("refused: {why}; nothing was written")),
+        },
+        None => None,
+    };
     let mut args = vec!["jira", "workitem", "create"];
     let description;
     let definition;
     let joined;
-    match &sprint {
-        Some(sprint) => {
-            let field = match sprints::field_of(site, projects).await {
-                Ok(field) => field,
-                Err(why) => return Outcome::Refused(format!("refused: {why}")),
-            };
+    // A sprint and a version are fields `acli` sets only from a JSON definition, which takes no
+    // assignee of `@me`: it is set right after.
+    let from_json = sprint.is_some() || version.is_some();
+    match from_json {
+        true => {
+            let mut attributes = serde_json::Map::new();
+            if let Some(sprint) = &sprint {
+                let field = match sprints::field_of(site, projects).await {
+                    Ok(field) => field,
+                    Err(why) => return Outcome::Refused(format!("refused: {why}")),
+                };
+                attributes.insert(field, sprint.id.into());
+            }
+            if let Some(version) = &version {
+                // A version is named by its name, as Jira's REST API takes it.
+                attributes.insert("fixVersions".into(), json!([{"name": version.name}]));
+            }
             let mut item = json!({"projectKey": project, "summary": title, "type": kind,
-                "additionalAttributes": {field: sprint.id}});
+                "additionalAttributes": attributes});
             if let Some(body) = body {
                 item["description"] = crate::adf::from_markdown(body);
             }
@@ -2540,7 +2582,7 @@ async fn create_work_item(
             };
             args.extend(["--from-json", definition.path()]);
         }
-        None => {
+        false => {
             args.extend(["--project", project]);
             description = match body.map(|body| AdfFile::of(daemon, body)).transpose() {
                 Ok(file) => file,
@@ -2571,10 +2613,10 @@ async fn create_work_item(
                 Some(kind) => refused_for_its_type(site, project, kind, why.clone()).await,
                 None => why.clone(),
             };
-            return Outcome::Failed(match (assignee, explained == why, &sprint) {
+            return Outcome::Failed(match (assignee, explained == why, from_json) {
                 // Its assignee is one reason acli may refuse it: said, and never left out to try
                 // again, which is the user's to decide.
-                (Some(who), true, None) => format!(
+                (Some(who), true, false) => format!(
                     "acli refused the creation assigned to {}: {why}; nothing was created; the \
                      assignee is me, an email or an account id the site knows: ask the user \
                      before creating it without one",
@@ -2593,16 +2635,19 @@ async fn create_work_item(
         if let Some(sprint) = &sprint {
             unsure.push(format!("its sprint \"{}\"", sprint.name));
         }
+        if let Some(version) = &version {
+            unsure.push(format!("its fix version \"{}\"", version.name));
+        }
         if let Some(parent) = &parent {
             unsure.push(format!("its parent {}", masked(parent)));
         }
         let mut not_done = String::new();
-        match (assignee, &sprint) {
-            // In a sprint, the assignee is set by an edit of the key acli did not say.
-            (Some(who), Some(_)) => {
+        match (assignee, from_json) {
+            // From a JSON definition, the assignee is set by an edit of the key acli did not say.
+            (Some(who), true) => {
                 not_done = format!("; it was not assigned to {}", assignee_said(who));
             }
-            (Some(who), None) => unsure.push(format!("its assignee {}", assignee_said(who))),
+            (Some(who), false) => unsure.push(format!("its assignee {}", assignee_said(who))),
             (None, _) => {}
         }
         let unsure = match unsure.is_empty() {
@@ -2629,12 +2674,15 @@ async fn create_work_item(
     if let Some(sprint) = &sprint {
         placed.push_str(&format!(", in sprint \"{}\"", sprint.name));
     }
+    if let Some(version) = &version {
+        placed.push_str(&format!(", in the version \"{}\"", version.name));
+    }
     if let Some(parent) = &parent {
         placed.push_str(&format!(", under {}", masked(parent)));
     }
     let mut after = String::new();
-    match (assignee, &sprint) {
-        (Some(who), Some(_)) => {
+    match (assignee, from_json) {
+        (Some(who), true) => {
             let assigned = acli_run(&[
                 "jira",
                 "workitem",
@@ -2665,7 +2713,7 @@ async fn create_work_item(
                 }
             }
         }
-        (Some(who), None) => placed.push_str(&format!(", assigned to {}", assignee_said(who))),
+        (Some(who), false) => placed.push_str(&format!(", assigned to {}", assignee_said(who))),
         (None, _) => {}
     }
     Outcome::Done(format!(

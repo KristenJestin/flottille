@@ -62,6 +62,16 @@
 //! with none ends with 1. With a `types` for the project, a `workitem create --type T` of a type
 //! it does not hold ends with 1, as Jira refuses it.
 //!
+//! The versions (#764, `docs/tickets.md`, "Versions"): `project view` prints, beside `issueTypes`,
+//! the project's `versions` as Jira's REST project holds them (`{"id", "name", "released",
+//! "releaseDate", "archived"}`), from the script's `versions` (`{"ABC": [{"name": "1.0",
+//! "released": false}]}`), an empty list for a project with none, and no `versions` at all with
+//! the script's `no_versions_field: true` (what a real `acli` may print, its page giving no
+//! output). A project the script gives versions and no types is viewed too. A JQL
+//! `fixVersion = "name"` finds the work items whose `fields.fixVersions` hold it. A `workitem
+//! create --from-json` whose `additionalAttributes.fixVersions` names a version the script does
+//! not give the project ends with 1, `✗ Error: Version name '…' is not valid`, as Jira refuses it.
+//!
 //! The writes change nothing but the status a transition moves and the comments a `comment
 //! create` adds: the test reads them in the record. One more script key, `links_lose_their_url:
 //! true`, makes an `edit --description` change what the next views show, as Jira's document format
@@ -217,6 +227,15 @@ fn found_by(jql: &str, item: &Value) -> bool {
             .into_iter()
             .flatten()
             .any(|(_, value)| value[0]["boardId"].is_number())
+    {
+        return false;
+    }
+    if let Some(version) = quoted_after(jql, "fixVersion = ")
+        && !fields["fixVersions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|held| held["name"] == version.as_str())
     {
         return false;
     }
@@ -451,10 +470,24 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 eprintln!("{refused}");
                 return 1;
             }
-            let key = script["created"].as_str().map_or_else(
-                || format!("{}-1", item["projectKey"].as_str().unwrap_or("X")),
-                str::to_owned,
-            );
+            let project = item["projectKey"].as_str().unwrap_or("X");
+            for held in item["additionalAttributes"]["fixVersions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let name = held["name"].as_str().unwrap_or_default();
+                if !versions_of(script, project)
+                    .iter()
+                    .any(|version| version["name"] == name)
+                {
+                    eprintln!("✗ Error: Version name '{name}' is not valid");
+                    return 1;
+                }
+            }
+            let key = script["created"]
+                .as_str()
+                .map_or_else(|| format!("{project}-1"), str::to_owned);
             print_created(script, &key);
             0
         }
@@ -488,17 +521,23 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             let Some(project) = value(rest, "--key") else {
                 return not_run(&words);
             };
-            let Some(types) = types_of(script, project) else {
+            let types = types_of(script, project);
+            if types.is_none() && script["versions"][project].is_null() {
                 eprintln!(
                     "✗ Error: project {project} does not exist or you do not have permission to see it"
                 );
                 return 1;
-            };
+            }
             let types: Vec<Value> = types
                 .into_iter()
+                .flatten()
                 .map(|(name, subtask)| json!({"name": name, "subtask": subtask}))
                 .collect();
-            println!("{}", json!({"key": project, "issueTypes": types}));
+            let mut view = json!({"key": project, "issueTypes": types});
+            if script["no_versions_field"] != true {
+                view["versions"] = Value::from(versions_of(script, project));
+            }
+            println!("{view}");
             0
         }
         ["jira", "workitem", "link", "type", rest @ ..] if rest.contains(&"--json") => {
@@ -737,6 +776,25 @@ fn types_of(script: &Value, project: &str) -> Option<Vec<(String, bool)>> {
             })
             .collect(),
     )
+}
+
+/// The versions the script gives `project`, as Jira's REST project holds them: an `id`, the
+/// `name`, `released`, `archived` and, when it has one, the `releaseDate`.
+fn versions_of(script: &Value, project: &str) -> Vec<Value> {
+    script["versions"][project]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(at, version)| {
+            let mut held = json!({"id": (10_000 + at).to_string(), "released": false,
+                "archived": false});
+            if let (Value::Object(held), Value::Object(version)) = (&mut held, version) {
+                held.extend(version.clone());
+            }
+            held
+        })
+        .collect()
 }
 
 /// The texts the call passes in files, as the record holds them (see the top of this file).
