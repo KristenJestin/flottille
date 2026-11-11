@@ -787,7 +787,11 @@ fn settings(text: &str) -> Vec<LoginField> {
             found.push(field);
             break;
         }
-        let quoted = matches!(bytes[start], b'"' | b'\'');
+        let password = key_ends(key, "password") || key_ends(key, "passwd");
+        // A token's value between angle brackets ends at its `>`, as at a quote
+        // (`token=<…>dir=<…>`); a password's may hold them.
+        let angled = !password && bytes[start] == b'<';
+        let quoted = angled || matches!(bytes[start], b'"' | b'\'');
         if quoted {
             start += 1;
         } else if bytes[sign] == b':'
@@ -803,8 +807,8 @@ fn settings(text: &str) -> Vec<LoginField> {
             }
             continue;
         }
-        let password = key_ends(key, "password") || key_ends(key, "passwd");
         let ends: &[u8] = match (quoted, tight, &place) {
+            _ if angled => b"\r\n>",
             (false, false, _) if password => b"\r\n",
             (true, ..) | (false, false, _) => b"\r\n\"'",
             (false, true, Place::Query) => b"\"'&#",
@@ -846,23 +850,24 @@ fn settings(text: &str) -> Vec<LoginField> {
         // secret's is prose with several words, and code ends in `;` or `,` (`token: string;`,
         // `secret: Secret,`), is an expression set with spaces around its `=`
         // (`token = self.token`), calls or names a type (`Optional[str]`), or is a word or a
-        // number (`token: str`, `max_token: 100`).
-        let clear = !quoted
-            && (value.strip_suffix(',') == Some(key)
-                || if password {
-                    let statement = value.strip_suffix(';');
-                    !tight
-                        && ((bytes[sign] == b'=' && plain_code(statement.unwrap_or(value)))
-                            || statement.is_some_and(plain_code)
-                            || requirement(&text[from..key_start], key, bytes[sign], value))
-                } else {
-                    (!tight && (value.contains([' ', '\t']) || value.ends_with(';')))
-                        || (bytes[sign] == b'=' && !tight && expression(value))
-                        || value.ends_with(',')
-                        || code(value)
-                        || value.chars().all(|c| c.is_alphabetic())
-                        || value.chars().all(|c| c.is_ascii_digit())
-                });
+        // number (`token: str`, `max_token: 100`). Punctuation alone is no secret (`token=<>`).
+        let clear = !value.contains(char::is_alphanumeric)
+            || (!quoted
+                && (value.strip_suffix(',') == Some(key)
+                    || if password {
+                        let statement = value.strip_suffix(';');
+                        !tight
+                            && ((bytes[sign] == b'=' && plain_code(statement.unwrap_or(value)))
+                                || statement.is_some_and(plain_code)
+                                || requirement(&text[from..key_start], key, bytes[sign], value))
+                    } else {
+                        (!tight && (value.contains([' ', '\t']) || value.ends_with(';')))
+                            || (bytes[sign] == b'=' && !tight && expression(value))
+                            || value.ends_with(',')
+                            || code(value)
+                            || value.chars().all(|c| c.is_alphabetic())
+                            || value.chars().all(|c| c.is_ascii_digit())
+                    }));
         let Some(stop) = stop else {
             // Cut short, it may still change.
             if !clear && end > start {
@@ -2021,6 +2026,38 @@ mod tests {
     fn an_index_into_a_setting_is_code() {
         let text = "api_key = config[\"api_key\"]\ntoken = settings[key]\n";
         assert_eq!(masked_at_each_cut(text), text);
+    }
+
+    #[test]
+    fn a_value_of_punctuation_alone_is_not_a_secret() {
+        for text in [
+            "token=<>",
+            "token=<>\n",
+            "token=<",
+            "token=\"\"\n",
+            "token=",
+            "token=\n",
+            "password: ***\n",
+            "secret = <>\n",
+        ] {
+            assert_eq!(masked_at_each_cut(text), text);
+        }
+        // A placeholder holding a word may be one: the safe side.
+        assert_eq!(masked_at_each_cut("token=<none>\n"), "token=<[masked]>\n");
+    }
+
+    #[test]
+    fn a_token_between_angle_brackets_ends_at_its_bracket() {
+        assert_eq!(masked_at_each_cut("token=<>dir=<>"), "token=<>dir=<>");
+        assert_eq!(
+            masked_at_each_cut("token=<s3cr3t-0123>dir=<x>\n"),
+            "token=<[masked]>dir=<x>\n"
+        );
+        // A password's runs to its line's end.
+        assert_eq!(
+            masked_at_each_cut("PASSWORD=<a>b c\n"),
+            "PASSWORD=[masked]\n"
+        );
     }
 
     #[test]
