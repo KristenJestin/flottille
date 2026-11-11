@@ -77,7 +77,7 @@ pub struct Extension {
     /// The label of its switch: what turning it on does (`Review changes`), never its state.
     pub switch: &'static str,
     /// Where and how it acts, shown on its page even while it is off; the words found elsewhere
-    /// in the window are between `**` (`Used by **/review** in a session's composer.`).
+    /// in the window are between `**` (`A recap starts when you type **/recap** in a composer.`).
     pub usage: &'static str,
     /// Where its settings appear in the window.
     pub place: Place,
