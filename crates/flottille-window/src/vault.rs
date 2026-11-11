@@ -24,10 +24,12 @@ use crate::project_settings::Reveal as ProjectReveal;
 use crate::shell::Shell;
 
 /// What the section says the vault is for.
-pub const SENTENCE: &str = "Secrets agents use without seeing them: a tracker's token, a test \
-                            account's login. Your keyring keeps them; agents see the names and \
-                            what they are for, and a tool of Flottille's puts the secret where it \
-                            goes.";
+pub const SENTENCE: &str = "Secrets agents use without seeing them. Your keyring keeps them; \
+                            agents see only their names and what they are for.";
+
+/// How an entry is used, said once under the sentence (rule 14).
+pub const USAGE: &str = "An agent names an entry; Flottille puts the secret where it goes. A \
+                         project's tracker and a connection pick theirs here.";
 
 /// What the dialog says of the secret, under its field.
 pub const SECRET_HINT: &str = "Kept by your keyring and never shown again, here or anywhere. \
@@ -219,7 +221,7 @@ impl VaultSection {
         self.fill(None, window, cx);
     }
 
-    /// "Add one in the vault" of a project's Tracker: the dialog, empty, and back to that
+    /// "New entry in the vault" of a project's Tracker: the dialog, empty, and back to that
     /// project's Tracker once it is closed.
     pub fn add_for(&mut self, project: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.fill(None, window, cx);
@@ -589,10 +591,7 @@ impl VaultSection {
             .flex()
             .flex_col()
             .gap(space::LG)
-            .child(
-                Field::new("vault-name-field", "Name", name)
-                    .hint("What agents give a tool that needs the secret."),
-            )
+            .child(Field::new("vault-name-field", "Name", name).hint("How agents ask for it."))
             .child(
                 Field::new(
                     "vault-secret-field",
@@ -625,7 +624,11 @@ impl VaultSection {
                 )
                 .optional(),
             )
-            .child(Field::new("vault-project-field", "Seen by", select))
+            .child(Field::new(
+                "vault-project-field",
+                "Seen by agents of",
+                select,
+            ))
             .test_support();
         modal
             .sentence(
@@ -636,11 +639,7 @@ impl VaultSection {
             .action(
                 Button::primary(
                     "save-vault-entry",
-                    if original.is_some() {
-                        "Replace"
-                    } else {
-                        "Add entry"
-                    },
+                    if original.is_some() { "Replace" } else { "Add" },
                 )
                 .disabled(self.saving)
                 .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
@@ -677,6 +676,7 @@ impl Render for VaultSection {
         let section = Section::new("vault", "Vault")
             .count(count.to_string())
             .sentence(SENTENCE)
+            .child(crate::extensions::usage_line("vault-usage", USAGE, cx))
             .action(
                 Button::secondary("add-vault-entry", "New entry")
                     .leading(Icon::Plus)

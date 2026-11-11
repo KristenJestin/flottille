@@ -1615,9 +1615,9 @@ impl ProjectSettingsPage {
         let section = Section::new("repositories", "Repositories")
             .when(!alone, |section| section.count(count.to_string()))
             .sentence(if alone {
-                "The project folder is a git repository. A workspace takes a worktree of it."
+                "The project folder is a git repository. A workspace works on its own copy of it."
             } else {
-                "The git repositories of the project folder. A workspace takes a worktree of each."
+                "The git repositories of the project folder. A workspace works on its own copy of each."
             })
             .action(
                 Button::quiet("check-forge-programs", "Check programs")
@@ -2273,11 +2273,11 @@ impl ProjectSettingsPage {
                 div().flex().child(hoverable(
                     div()
                         .id("tracker-worklog-add")
-                        .aria_label("Add one in the vault")
+                        .aria_label("New entry in the vault")
                         .text_size(px(12.))
                         .text_color(p.run)
                         .cursor_pointer()
-                        .child("Add one in the vault")
+                        .child("New entry in the vault")
                         .on_click(move |_: &ClickEvent, window, cx| {
                             shell
                                 .update(cx, |shell, cx| {

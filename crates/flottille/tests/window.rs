@@ -9378,6 +9378,42 @@ fn every_switch_of_the_task_dialog_draws_its_label_and_its_hint(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn a_task_s_kinds_read_as_what_they_are(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+
+    cx.update(|window, cx| window.click("add-task", cx));
+    settle(cx);
+    for (id, said) in [
+        ("task-flag-read_only", "Changes nothing"),
+        ("task-flag-check", "A check (tests, lint)"),
+        ("task-flag-serve", "A server"),
+    ] {
+        assert_eq!(
+            text_of(&format!("{id}-label"), cx).as_deref(),
+            Some(said),
+            "{id}"
+        );
+    }
+    // Asking before each run is not a kind of task: it is its own switch, with its own help.
+    assert_eq!(
+        text_of("task-flag-ask_before_running-label", cx).as_deref(),
+        Some("Ask before each run")
+    );
+    assert_eq!(
+        text_of("task-flag-ask_before_running-hint", cx).as_deref(),
+        Some("Each run by an agent waits for you, or for the judge in Auto.")
+    );
+    assert_eq!(
+        text_of("save-task", cx).as_deref(),
+        Some("Add"),
+        "the dialog's title says it is new: its button only says Add"
+    );
+}
+
+#[gpui_kit::test]
 fn a_removal_goes_through_a_confirmation_and_says_it_in_a_toast(cx: &mut TestAppContext) {
     let user = user_with_commands();
     user.call(
@@ -10340,8 +10376,10 @@ fn the_rules_page_edits_the_rules_of_every_project_saves_them_and_resets_them_to
     });
     cx.update(|window, _| {
         assert!(window.find("rules-text-").visible());
-        assert!(window.find("rules-reach-").visible());
-        assert!(flottille_window::rules::REACH.contains("reaches the agents created from now on"));
+        assert!(
+            window.try_find("rules-reach-").is_none(),
+            "the toast says when the rules reach the agents, no line under the editor does"
+        );
         assert!(
             window.try_find("rules-save-").is_none(),
             "Save shows once there is a change"
@@ -10361,6 +10399,18 @@ fn the_rules_page_edits_the_rules_of_every_project_saves_them_and_resets_them_to
         "Answer in French."
     );
     assert!(!editor.read_with(cx, |e, cx| e.is_edited(cx)));
+    let said = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .find(|toast| toast.title() == "Rules saved")
+            .map(|toast| toast.second_line().map(str::to_owned))
+    });
+    assert_eq!(
+        said,
+        Some(Some("Agents started from now on follow them.".to_owned())),
+        "Rules saved · Agents started from now on follow them"
+    );
 
     // A new session gets them.
     let agent = start(&user, "atlas", None, "hello");

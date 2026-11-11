@@ -710,6 +710,41 @@ fn write_the_spec_as_opens_the_choice_preselected_on_the_default(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+fn the_choice_of_where_a_spec_lives_says_kept_in_flottille_or_written_to_the_ticket(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    let (shell, cx) = window(&user, cx);
+    open_project(&shell, cx);
+    click(cx, "project-tabs-tickets");
+    let (five, _) = ticket_rows(&shell, cx);
+    at_rest(cx);
+
+    click(cx, &format!("ticket-spec-more-{five}"));
+    let entry = format!("{five}-spec-as");
+    until(&shell, cx, "the menu opens", |cx| found(cx, &entry));
+    click(cx, &entry);
+    until(&shell, cx, "the choice opens", |cx| {
+        found(cx, "write-spec-mode")
+    });
+    settle(cx);
+    assert_eq!(
+        label(cx, "write-spec-mode-internal").as_deref(),
+        Some("Kept in Flottille")
+    );
+    assert_eq!(
+        label(cx, "write-spec-mode-ticket").as_deref(),
+        Some("Written to the ticket")
+    );
+    assert_eq!(
+        label(cx, "write-spec-mode-field-label").as_deref(),
+        Some("Where the spec lives")
+    );
+}
+
+#[gpui_kit::test]
 fn no_specs_screen_is_shown_where_specs_is_off(cx: &mut TestAppContext) {
     let user = user();
     project(&user);

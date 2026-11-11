@@ -49,7 +49,7 @@ An entry made for one precise feature is that feature's alone. `for` names it:
   another use's entry is refused when it is declared, and its server does not start; the
   worklog's `Log time with` does not offer it, and `tickets log_time` refuses it before any card.
 - **Made from a feature, bound to it from the start**: the entry set from a request's card (the
-  worklog's need), from a project's Settings, Tracker, "Add one in the vault", or from a feature's
+  worklog's need), from a project's Settings, Tracker, "New entry in the vault", or from a feature's
   own screen, which says `for`. An entry set from Settings, Vault (or `flottille vault set`)
   without `for` is unbound; set again without `for`, an entry keeps its use, and another use for
   a bound entry is refused, naming the one it has: it is removed first. Settings, Vault shows the

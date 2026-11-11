@@ -873,11 +873,7 @@ impl SetupSection {
         modal.child(body).action(
             Button::primary(
                 "save-setup",
-                if form.number.is_some() {
-                    "Save"
-                } else {
-                    "Add step"
-                },
+                if form.number.is_some() { "Save" } else { "Add" },
             )
             .disabled(self.saving)
             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
@@ -934,7 +930,7 @@ impl Render for SetupSection {
                     EmptyLine::new(
                         "no-setup",
                         Icon::Folder,
-                        "No step yet: a new workspace is its worktrees alone. Copy the .env \
+                        "No step yet: a new workspace is a copy of the repositories alone. Copy the .env \
                          files, link what is shared, run the install.",
                     ),
                 )

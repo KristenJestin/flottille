@@ -506,7 +506,6 @@ fn save_appears_only_after_a_change(cx: &mut TestAppContext) {
         let id = id.to_owned();
         cx.update(|window, _| f32::from(window.find(id).bounds().size.width))
     };
-    assert!(width(cx, "rules-reach-") > 100.0, "the line keeps its room");
     assert!(width(cx, "rules-save-") < 160.0, "Save is a button's width");
 
     // Set back to what is saved, it folds away.
