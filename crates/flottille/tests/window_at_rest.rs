@@ -488,7 +488,8 @@ fn the_window_draws_no_frame_at_rest_on_a_project_feature_s_page_with_a_value_se
         .unwrap();
     user.call(
         "extension.set",
-        json!({"name": "specs", "project": "app", "settings": {"language": "fr"}}),
+        json!({"name": "specs", "project": "app",
+            "settings": {"language": "fr", "mode": "ticket"}}),
     )
     .unwrap();
     let (shell, cx) = window(&user, cx);
@@ -511,11 +512,12 @@ fn the_window_draws_no_frame_at_rest_on_a_project_feature_s_page_with_a_value_se
         cx.update(|window, _| window.try_find("project-features-specs").is_some())
     });
     cx.update(|window, cx| window.click("project-features-specs", cx));
-    until(&shell, cx, "the value says it is set here", |cx| {
+    until(&shell, cx, "the values say they are set here", |cx| {
         cx.update(|window, _| {
             window
                 .try_find("project-specs-setting-language-set")
                 .is_some()
+                && window.try_find("project-specs-setting-mode-set").is_some()
         })
     });
     settle(&shell, cx);
@@ -558,6 +560,8 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_settings_and_a_feature_s_pag
         .unwrap();
     user.call("extension.set", json!({"name": "review", "enabled": true}))
         .unwrap();
+    user.call("extension.set", json!({"name": "specs", "enabled": true}))
+        .unwrap();
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "the project is known", |cx| {
         shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
@@ -589,6 +593,7 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_settings_and_a_feature_s_pag
     settle(&shell, cx);
     for (row, shown) in [
         ("review", "review-models"),
+        ("specs", "specs-setting-mode-internal"),
         ("compaction", "compaction-switch"),
     ] {
         cx.update(|window, cx| window.click(format!("features-{row}"), cx));

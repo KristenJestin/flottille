@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use gpui_design_system::color::mix;
 use gpui_design_system::{
-    Chosen, Field, Icon, ModelChoice, Select, SelectOption, SetHere, Switch, Toast, enter,
-    hoverable, palette, presence, presence_of, space, toast,
+    Chosen, Field, Icon, ModelChoice, RadioChoices, Select, SelectOption, SetHere, Switch, Toast,
+    enter, hoverable, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FontWeight, HighlightStyle,
@@ -34,11 +34,13 @@ pub struct Setting {
     pub key: String,
     pub label: String,
     pub hint: String,
-    /// `language`, `subset` (some of `options`) or `model` (a slot): the kinds come with their
-    /// first need.
+    /// `language`, `choice` (one of `choices`), `subset` (some of `options`) or `model` (a slot):
+    /// the kinds come with their first need.
     pub kind: String,
     /// The values a `subset` takes some of, in their order.
     pub options: Vec<String>,
+    /// The values a `choice` takes one of, in their order, as the daemon says them.
+    pub choices: Vec<Pick>,
     /// A project may set its own value.
     pub per_project: bool,
     /// Its global value: its default when not `set`.
@@ -46,6 +48,14 @@ pub struct Setting {
     pub set: bool,
     /// For a `model` slot, what it gives left unset, as the daemon says it.
     pub default: Option<SlotDefault>,
+}
+
+/// One value of a `choice` setting, and the words that say it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pick {
+    pub value: String,
+    pub label: String,
+    pub line: String,
 }
 
 /// What a model slot left on its default does: the daemon's rule in words, and the model it runs
@@ -153,6 +163,7 @@ impl Listed {
                     hint: text(&setting["hint"]),
                     kind: match &setting["kind"] {
                         Value::Object(kind) if kind.contains_key("subset") => "subset".into(),
+                        Value::Object(kind) if kind.contains_key("choice") => "choice".into(),
                         kind => text(kind),
                     },
                     options: setting["kind"]["subset"]
@@ -160,6 +171,16 @@ impl Listed {
                         .into_iter()
                         .flatten()
                         .map(text)
+                        .collect(),
+                    choices: setting["kind"]["choice"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|pick| Pick {
+                            value: text(&pick["value"]),
+                            label: text(&pick["label"]),
+                            line: text(&pick["line"]),
+                        })
                         .collect(),
                     per_project: setting["per_project"] == true,
                     value: setting["value"].clone(),
@@ -299,6 +320,24 @@ impl Registry {
 
     pub fn listed(&self, name: &str) -> Option<&Listed> {
         self.list.iter().find(|listed| listed.name == name)
+    }
+
+    /// What the setting `key` of `name` is in `project`: the project's own value, else Settings'
+    /// (its default while none is set).
+    pub fn setting_in(&self, name: &str, project: &str, key: &str) -> Option<Value> {
+        let listed = self.listed(name)?;
+        listed
+            .in_project(project)
+            .and_then(|side| side.settings.get(key))
+            .filter(|own| !own.is_null())
+            .or_else(|| {
+                listed
+                    .settings
+                    .iter()
+                    .find(|setting| setting.key == key)
+                    .map(|setting| &setting.value)
+            })
+            .cloned()
     }
 
     /// Whether `name` is on in `project`: its screens show there.
@@ -524,7 +563,8 @@ fn language_said(tag: &str) -> String {
 }
 
 /// The control of one setting, chosen by its kind (rule 4 of `docs/reference/gpui.md`): a language
-/// is a select, the first option the value it has when none is set here (`default`); a subset is a
+/// is a select, the first option the value it has when none is set here (`default`); a choice is
+/// radios, the first one Settings' value in a project; a subset is a
 /// switch for each of its values; a model slot is a select of the models the providers offer, the
 /// first option the default.
 #[allow(clippy::too_many_arguments)]
@@ -631,6 +671,54 @@ fn bare_control(
                     set(at.checked_sub(1).map(|at| json!(tags[at])), cx);
                 });
             Some(select.into_any_element())
+        }
+        "choice" => {
+            let word = |value: &Value| value.as_str().map(str::to_owned);
+            let said = |value: &str| {
+                setting
+                    .choices
+                    .iter()
+                    .find(|pick| pick.value == value)
+                    .map(|pick| (pick.label.clone(), pick.line.clone()))
+                    .unwrap_or_default()
+            };
+            let mut radios = RadioChoices::new(SharedString::from(id.to_owned()), &*setting.label);
+            // In a project, the first radio is Settings' value, said with what it is today.
+            let inherits = project.is_some();
+            if inherits {
+                let (label, line) = said(default.as_str().unwrap_or_default());
+                radios = radios.choice("default", format!("As in Settings ({label})"), line);
+            }
+            for pick in &setting.choices {
+                radios = radios.choice(pick.value.clone(), pick.label.clone(), pick.line.clone());
+            }
+            let values: Vec<String> = setting.choices.iter().map(|p| p.value.clone()).collect();
+            let chosen = match inherits {
+                true => own
+                    .as_ref()
+                    .and_then(word)
+                    .and_then(|own| values.iter().position(|value| *value == own))
+                    .map_or(0, |at| at + 1),
+                false => own
+                    .as_ref()
+                    .or(Some(&default))
+                    .and_then(word)
+                    .and_then(|own| values.iter().position(|value| *value == own))
+                    .unwrap_or(0),
+            };
+            Some(
+                radios
+                    .chosen(chosen)
+                    .on_choose(move |at, _, cx| {
+                        let at = if inherits {
+                            at.checked_sub(1)
+                        } else {
+                            Some(at)
+                        };
+                        set(at.map(|at| json!(values[at])), cx);
+                    })
+                    .into_any_element(),
+            )
         }
         "subset" => {
             let words = |value: &Value| -> Vec<String> {
