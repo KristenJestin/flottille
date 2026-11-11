@@ -142,8 +142,8 @@ for an extension that is not being built.
 
 The extension gives a schema: each setting's key, label, one line of hint, kind, default, and
 whether a project may set its own value. The kinds come with their first need: a choice among
-values and a language (Specs), a switch, a percentage, a number of tokens, a duration (the
-compaction).
+values (one, with the words that say each, or a subset) and a language (Specs), a switch, a
+percentage, a number of tokens, a duration (the compaction).
 
 The core provides:
 
@@ -556,8 +556,7 @@ agent as a delivery, since no tool call waits for a human. The user can also tal
 freely: it is a session like the others.
 
 A root also starts a spec itself when the user asks for one in its conversation (#691): `spec`
-`new`, of a ticket of the project's tracker (in the project's mode for specs from a ticket, Internal
-until a project chooses its own) or, without one, of an idea in one sentence (Alone). It is the
+`new`, of a ticket of the project's tracker (in the project's default mode for specs from a ticket) or, without one, of an idea in one sentence (Alone). It is the
 same creation as "Write the spec" and "New spec", minus the new session: the calling session is
 recorded as the spec's writer, the tool's answer carries the method (and the ticket, framed as
 data), and its later questions and sections go to that spec. Refused, with a sentence: a ticket

@@ -466,8 +466,9 @@ is off globally, the projects' switches kept.
   (`<name>.show`, below), `commands` the words of its composer commands (`["review"]`),
   `settings` each `{"key", "label", "hint", "kind", "per_project", "value", "set", "default"}` with its
   global value (its default when not `set`), `kind` being `"language"`, `"model"` (a slot,
-  `{"provider", "model"?, "effort"?}`, `null` for the extension's own choice) or `{"subset": [...]}`
-  (some of those values, in their order); `default` is `null` except for a `"model"` slot, where it
+  `{"provider", "model"?, "effort"?}`, `null` for the extension's own choice), `{"subset": [...]}`
+  (some of those values, in their order) or `{"choice": [{"value", "label", "line"}, ...]}` (one of
+  those values, each with the words that say it, in their order); `default` is `null` except for a `"model"` slot, where it
   says what the slot gives left unset, `{"rule", "gives"}`: `rule` the extension's rule in words
   (`"One size smaller"`) and `gives` each provider enabled and ready now (`{"claude": "sonnet"}`)
   with the model the extension runs on for it, `null` when the provider has not said what it
