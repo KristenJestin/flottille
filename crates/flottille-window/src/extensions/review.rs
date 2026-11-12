@@ -15,7 +15,10 @@ use serde_json::{Value, json};
 
 use super::{Listed, OnLine, Registry, Setting};
 use crate::actions::Command;
+use crate::session::state_of;
+use crate::session_link::TreeAgent;
 use crate::shell::Shell;
+use crate::state::AgentState;
 
 /// Its name in `extension.list`.
 pub const NAME: &str = "review";
@@ -397,4 +400,35 @@ fn preview_of(text: Option<&str>) -> SharedString {
         }
         Some(line) => line.to_owned().into(),
     }
+}
+
+/// What a review waits for, said on its conversation: `Waiting for 3 checks: bugs, standards,
+/// security`. `None` when `agent` is not a review's, or when every check it started ended.
+pub fn waiting_for(tree: &[TreeAgent], agent: &str) -> Option<String> {
+    let review = tree.iter().find(|a| a.id == agent)?;
+    if review.extensions["review"]["kind"] != "pilot" {
+        return None;
+    }
+    // The last line's own agent is no check of the user's.
+    let running: Vec<&str> = tree
+        .iter()
+        .filter(|a| a.parent.as_deref() == Some(agent))
+        .filter(|a| a.extensions["review"]["kind"] == "pass")
+        .filter(|a| {
+            !matches!(
+                state_of(a),
+                AgentState::Completed | AgentState::Stopped | AgentState::Failed
+            )
+        })
+        .filter_map(|a| a.extensions["review"]["pass"].as_str())
+        .filter(|pass| *pass != "verifier")
+        .collect();
+    (!running.is_empty()).then(|| {
+        format!(
+            "Waiting for {} check{}: {}",
+            running.len(),
+            if running.len() == 1 { "" } else { "s" },
+            running.join(", ")
+        )
+    })
 }

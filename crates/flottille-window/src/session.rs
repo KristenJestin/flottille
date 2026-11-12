@@ -2092,6 +2092,28 @@ impl Render for SessionPage {
             .flex_col()
             .child(header)
             .child(div().flex_1().min_h_0().child(self.conversation.clone()))
+            // A review says what it waits for under its steps, and the line folds away with it.
+            .child(presence_of(
+                "session-waiting-checks-line",
+                crate::extensions::review::waiting_for(&self.tree, &self.shown)
+                    .map(SharedString::from),
+                move |said| {
+                    div()
+                        .id("session-waiting-checks")
+                        .flex_none()
+                        .w_full()
+                        .max_w(px(780.))
+                        .mx_auto()
+                        .px(if narrow { space::LG } else { space::XXL })
+                        .pb(space::SM)
+                        .text_size(px(12.5))
+                        .text_color(p.faint)
+                        .aria_label(said.clone())
+                        .child(said)
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
             .child(dock);
         div()
             .id("session-page")
@@ -3758,13 +3780,18 @@ impl Render for ConversationView {
                 .size_full()
                 .child(
                     div()
+                        .id(SharedString::from(format!(
+                            "conversation-empty-{}",
+                            self.id
+                        )))
                         .max_w(px(780.))
                         .w_full()
                         .mx_auto()
                         .px(if narrow { space::LG } else { space::XXL })
                         .pt(if narrow { space::XL } else { space::XXL })
                         .text_color(p.faint)
-                        .child("Nothing said yet."),
+                        .child("Nothing said yet.")
+                        .test_support(),
                 )
                 .into_any_element();
         }

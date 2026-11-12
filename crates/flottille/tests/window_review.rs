@@ -34,6 +34,11 @@ fn session(user: &User) -> String {
         {"when": "of the change of workspace", "do": [{"hang": true}]},
         {"when": "The change, in each repository", "do": [{"hang": true}]}
     ]}));
+    session_with_script(user)
+}
+
+/// [`session`] for a user whose fake agent's script is already set.
+fn session_with_script(user: &User) -> String {
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -282,6 +287,60 @@ fn the_tree_says_checks_not_passes(cx: &mut TestAppContext) {
     let said = label(cx, &line).unwrap();
     assert_eq!(said, "Review · 0/2 checks");
     assert!(!said.contains("pass"), "{said}");
+}
+
+#[gpui_kit::test]
+fn a_review_s_conversation_shows_its_steps_and_what_it_waits_for(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    // The pilot reads, starts a check and waits for it, as the real one does.
+    user.fake_script(json!({"turns": [
+        {"when": "of the change of workspace", "do": [
+            {"mcp": {"tool": "review", "arguments": {"action": "run_pass", "pass": "bugs"}}},
+            {"hang": true}
+        ]},
+        {"when": "The change, in each repository", "do": [{"hang": true}]}
+    ]}));
+    let session = session_with_script(&user);
+    let started = user
+        .call("review.start", json!({"agent": session}))
+        .unwrap();
+    let pilot_id = started["pilot"].as_str().unwrap().to_owned();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&session)).is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&session), cx));
+    let line = format!("rail-review-{pilot_id}");
+    until(&shell, cx, "the rail holds the review's row", |cx| {
+        present(cx, &line)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(line, cx));
+    let row = format!("rail-row-{pilot_id}");
+    until(&shell, cx, "the review's own row", |cx| present(cx, &row));
+    settle(cx);
+
+    // Its row opens its conversation.
+    cx.update(|window, cx| window.click(row, cx));
+    let page = page(&shell, cx);
+    until(&shell, cx, "the review's steps", |cx| {
+        page.read_with(cx, |p, cx| {
+            p.shown() == pilot_id && !p.conversation().read(cx).blocks().is_empty()
+        })
+    });
+    settle(cx);
+    assert!(
+        !present(cx, &format!("conversation-empty-{pilot_id}")),
+        "an agent that made calls never says nothing was said"
+    );
+    until(&shell, cx, "the line that says what it waits for", |cx| {
+        present(cx, "session-waiting-checks")
+    });
+    assert_eq!(
+        label(cx, "session-waiting-checks").as_deref(),
+        Some("Waiting for 1 check: bugs")
+    );
 }
 
 fn at_rest(cx: &mut VisualTestContext) {
