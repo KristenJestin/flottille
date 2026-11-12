@@ -1158,15 +1158,12 @@ fn a_review_check_chooses_its_effort(cx: &mut TestAppContext) {
     // The model proposes `low`: choosing `high` stores it.
     assert_eq!(said, "low · recommended");
     cx.update(|window, cx| window.click("review-setting-bugs_model-effort-high", cx));
-    until(&shell, cx, "the effort is stored", |_| {
+    until(&shell, cx, "the effort is stored and shown", |cx| {
         slot(&user, "bugs_model")
             == json!({"provider": "claude", "model": "opus", "effort": "high"})
+            && label(cx, "review-setting-bugs_model-effort").as_deref() == Some("high")
     });
     settle(cx);
-    assert_eq!(
-        label(cx, "review-setting-bugs_model-effort").as_deref(),
-        Some("high")
-    );
     // The other checks are untouched.
     assert_eq!(slot(&user, "spec_model"), Value::Null);
     at_rest(cx);

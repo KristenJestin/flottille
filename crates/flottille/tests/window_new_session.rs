@@ -191,11 +191,11 @@ fn choosing_the_recommended_model_back_clears_the_choice(cx: &mut TestAppContext
     until(&shell, cx, "the choice is stored", |_| {
         chosen(&user) == json!({"provider": "opencode"})
     });
+    until(&shell, cx, "the model is shown", |cx| {
+        label(cx, "new-sessions-on-model").as_deref() == Some("OpenCode · open/small · recommended")
+            && present(cx, "new-sessions-on-effort")
+    });
     settle(cx);
-    assert_eq!(
-        label(cx, "new-sessions-on-model").as_deref(),
-        Some("OpenCode · open/small · recommended")
-    );
     click(cx, "new-sessions-on-effort");
     click(cx, "new-sessions-on-effort-high");
     until(&shell, cx, "the effort is stored", |_| {
