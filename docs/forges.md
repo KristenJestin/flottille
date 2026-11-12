@@ -871,7 +871,7 @@ that was stopped or timed out):
 | It ended… | The line says |
 |---|---|
 | in the code (a step or a job failed; Bitbucket `FAILED`, GitHub `failure`, anything not below) | its error line, as before |
-| in the CI itself (Bitbucket `ERROR` or a step in `ERROR`, a pipeline that ended outside any step; GitHub `startup_failure`, `action_required`) | `the CI failed, not the code: <what the forge says>`, then `; run it again (<the call>)` when there is a call the tool accepts |
+| in the CI itself (Bitbucket `ERROR` or a step in `ERROR`, a pipeline that ended outside any step; GitHub `startup_failure`, `action_required`) | `the CI failed, not the code: <what the forge says>`, then `; run it again (<the call>)` when there is a call the tool accepts (on Bitbucket, `, the whole pipeline: Bitbucket cannot run one step again` follows) |
 | stopped (Bitbucket `STOPPED` or `CANCELLED`, GitHub `cancelled`) | `stopped, not failed`, then `, by <who>` when the forge says who |
 | out of time (GitHub `timed_out`) | `timed out after <duration>` (`timed out` when the forge gave no times) |
 
@@ -884,9 +884,18 @@ that was stopped or timed out):
   **assumed** from Bitbucket's API, the maintainer checks it on his Bitbucket). The head counts
   the first listed jobs by what the build said, the others by their status.
 - **`run it again` names a call only when the tool accepts it, and nothing otherwise** (never an
-  action the tool refuses). On **Bitbucket Cloud** it is `forge {"action": "checks", "repository":
-  "api"}`, named when the build's own state says it failed (`FAILED` or `ERROR`: `checks` refuses a
-  pipeline that did not fail); `forge` `step` is refused there ("The CI family"). On **GitHub** it is
+  action the tool refuses). Bitbucket runs a whole pipeline, never one step (`bkt` has no rerun, and the page's
+  "Rerun failed steps" is not in the public API), so both its calls say `the whole pipeline:
+  Bitbucket cannot run one step again`. On **Bitbucket Cloud** the call fits the pipeline that
+  failed, read from the build's own `target`, and is named only when its state says it failed
+  (`FAILED` or `ERROR`: `checks` refuses a pipeline that did not): a **pull request's** pipeline
+  (`pipeline_pullrequest_target`, or the `pull-requests` selector) is `forge {"action": "checks",
+  "repository": "api"}`; a **branch's or a custom** pipeline is `forge {"action": "run",
+  "repository": "api", "pipeline": "<its selector as `forge pipelines` names it: default, custom:
+  <name>, branches: <pattern>>", "branch": "<its ref_name>"}`, `checks` being the wrong call for it
+  (it runs the pull request's definition). A **tag's** pipeline, or one whose selector `run`
+  refuses, gets none: `bkt pipeline run` starts a branch run. `forge` `step` is refused there
+  ("The CI family"). On **GitHub** it is
   `forge {"action": "step", "repository": "api", "run": 900, "step": "2", "do": "rerun"}`, named when
   the check's link names a run and a job and `gh run view` says the run holds that job (a job that
   never started has none, and `step` refuses it): one more read for each such job. **Bitbucket
