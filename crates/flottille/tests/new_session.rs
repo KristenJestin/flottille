@@ -216,10 +216,18 @@ fn an_agent_launch_without_model_or_effort_follows_the_new_session_setting() {
     started(&user, json!({}));
     set(&user, "claude", Some("fake-large"), Some("high"));
 
-    let lead = started(&user, json!({"message": "LEAD go"}))["id"]
+    // The lead runs on another model and effort than the setting's: the child's can only come
+    // from the setting.
+    let lead = started(
+        &user,
+        json!({"message": "LEAD go", "model": "fake-small", "effort": "low"}),
+    )["id"]
         .as_str()
         .unwrap()
         .to_owned();
+    let shown = agent(&user, &lead);
+    assert_eq!(shown["chosen"]["model"], "fake-small");
+    assert_eq!(shown["chosen"]["effort"], "low");
     let mut child = None;
     eventually("the child", || {
         child = user.call("agent.list", Value::Null).unwrap()["agents"]
