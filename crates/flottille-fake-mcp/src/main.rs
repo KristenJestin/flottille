@@ -19,7 +19,9 @@
 //! `register`, `authorize` with PKCE `S256`, which redirects at once with a code, its `state` and
 //! its `iss`, and `token`). `oauth` takes `expires_in` (the tokens' life, 3600 seconds by
 //! default), `refresh: "refused"` (every refresh answers `invalid_grant`), `registration: false`
-//! (no dynamic registration), and `tokens_file`, where every token it issues is written, so that a
+//! (no dynamic registration), `authorize_at`, `token_at` and `register_at: "elsewhere"` (that
+//! endpoint named on `localhost`, another origin than the issuer's `127.0.0.1`), `iss: false`
+//! (no `iss` in the authorization response, and none promised), and `tokens_file`, where every token it issues is written, so that a
 //! test looks for them where they must not be. Its log never holds a token: `bearer` is the number
 //! of the one a request carried, and `register`, `authorize` and `token` say what was asked.
 //!
@@ -490,13 +492,20 @@ impl Issuer {
                     "authorization_servers": [issuer], "scopes_supported": ["notes:read"]})),
             ),
             ("GET", "/.well-known/oauth-authorization-server/as") => {
+                // `localhost` is this server too, and another origin than `127.0.0.1`.
+                let elsewhere = issuer.replace("127.0.0.1", "localhost");
+                let at = |key: &str| match oauth[key] == "elsewhere" {
+                    true => elsewhere.clone(),
+                    false => issuer.clone(),
+                };
                 let mut metadata = json!({"issuer": issuer,
-                    "authorization_endpoint": format!("{issuer}/authorize"),
-                    "token_endpoint": format!("{issuer}/token"),
+                    "authorization_endpoint": format!("{}/authorize", at("authorize_at")),
+                    "token_endpoint": format!("{}/token", at("token_at")),
                     "code_challenge_methods_supported": ["S256"],
-                    "authorization_response_iss_parameter_supported": true});
+                    "authorization_response_iss_parameter_supported": oauth["iss"] != false});
                 if oauth["registration"] != false {
-                    metadata["registration_endpoint"] = json!(format!("{issuer}/register"));
+                    metadata["registration_endpoint"] =
+                        json!(format!("{}/register", at("register_at")));
                 }
                 reply("200 OK", Some(metadata))
             }
@@ -523,11 +532,14 @@ impl Issuer {
                         field("resource"),
                     ),
                 );
+                let iss = match oauth["iss"] == false {
+                    true => String::new(),
+                    false => format!("&iss={}", encoded(&issuer)),
+                };
                 let location = format!(
-                    "{}?code={code}&state={}&iss={}",
+                    "{}?code={code}&state={}{iss}",
                     field("redirect_uri"),
                     encoded(&field("state")),
-                    encoded(&issuer)
                 );
                 format!(
                     "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\

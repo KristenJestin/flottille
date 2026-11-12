@@ -2622,3 +2622,85 @@ fn a_declared_client_id_is_used_where_the_server_registers_none() {
         "flottille-desk"
     );
 }
+
+/// `notes` declared on `url`, Connections on, and the sign-in begun: the answer of `login`.
+fn begun(user: &User, url: &str) -> Result<Value, (String, String)> {
+    turn_on(user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url}),
+    )
+    .unwrap();
+    user.call_within(
+        "connection.login",
+        json!({"name": "notes"}),
+        Duration::from_secs(40),
+    )
+}
+
+#[test]
+fn a_token_endpoint_on_another_host_than_the_issuer_is_refused() {
+    let user = user();
+    let (server, url) = protected_server(&user, json!({"token_at": "elsewhere"}));
+    let refused = begun(&user, &url).unwrap_err().1;
+    stopped(server);
+    assert!(refused.contains("token_endpoint"), "{refused}");
+    assert!(
+        grants(&user, "authorization_code").is_empty(),
+        "a code was sent to a token endpoint of another origin"
+    );
+}
+
+#[test]
+fn a_registration_endpoint_on_another_host_than_the_issuer_is_refused() {
+    let user = user();
+    let (server, url) = protected_server(&user, json!({"register_at": "elsewhere"}));
+    let refused = begun(&user, &url).unwrap_err().1;
+    stopped(server);
+    assert!(refused.contains("registration_endpoint"), "{refused}");
+    assert!(logged(&user, "notes", "register").is_empty());
+}
+
+#[test]
+fn an_authorization_endpoint_on_another_host_without_iss_is_refused() {
+    let user = user();
+    let (server, url) = protected_server(
+        &user,
+        json!({"authorize_at": "elsewhere", "iss": false}),
+    );
+    let watch = user.watch(&[]);
+    let login = begun(&user, &url).unwrap();
+    let (status, _, page) = browse(&redirect_of(login["url"].as_str().unwrap()));
+    assert_eq!(status, 400, "{page}");
+    let seen = watch.until(|event| {
+        matches!(
+            event["name"].as_str(),
+            Some("connection.signed_in" | "connection.sign_in_failed")
+        )
+    });
+    stopped(server);
+    assert_eq!(
+        seen.last().unwrap()["name"],
+        "connection.sign_in_failed",
+        "{seen:?}"
+    );
+    assert!(
+        grants(&user, "authorization_code").is_empty(),
+        "a code from an authorization endpoint of another origin was exchanged"
+    );
+}
+
+#[test]
+fn an_authorization_endpoint_on_another_host_with_iss_is_accepted() {
+    let user = user();
+    let (server, url) = protected_server(&user, json!({"authorize_at": "elsewhere"}));
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url}),
+    )
+    .unwrap();
+    sign_in(&user);
+    stopped(server);
+    assert_eq!(grants(&user, "authorization_code").len(), 1);
+}

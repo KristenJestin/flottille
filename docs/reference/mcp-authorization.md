@@ -54,6 +54,15 @@ this machine (the same rule as a connection's URL): a token never crosses a netw
 protected resource metadata's `resource` must be the server's own origin and a prefix of its URL;
 it is the `resource` Flottille asks tokens for.
 
+**The endpoints are on the issuer's origin.** The authorization server's metadata is chosen by the
+MCP server, which may be hostile: it could name a real provider as the issuer and its own host as
+the token endpoint, and the code and its PKCE verifier would go to it. So the `token_endpoint` and
+the `registration_endpoint` must be of the same origin (scheme, host and port) as the issuer, or
+the sign-in is refused. An `authorization_endpoint` on another origin is allowed only when the
+authorization response carries an `iss` equal to the issuer (RFC 9207, below), whatever the
+metadata says of it: the page the user signs in on may be a sibling host, but only the issuer
+itself vouches for what comes back.
+
 ## 2. Client registration
 
 **The specification**, in this order of preference: a client id known in advance
@@ -100,7 +109,8 @@ fails that check is not acted on nor shown.
   sign-in alone. A request with another `state`, or without one, is answered as refused and left
   aside, its code never exchanged: a stray page cannot end the user's sign-in nor slip a code in.
   The first redirect with the right `state` ends it, the listener is closed.
-- `iss` checked as the table above says.
+- `iss` checked as the paragraph above says, and required too when the authorization endpoint is
+  not on the issuer's origin.
 - The browser page that receives the redirect says only whether the sign-in was done, never a
   code or a token.
 - The authorization URL is opened by the client the user asked from, in their default browser

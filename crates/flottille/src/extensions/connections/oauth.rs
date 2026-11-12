@@ -428,6 +428,14 @@ async fn resource_metadata(
     Err("the server publishes no resource metadata (RFC 9728)".into())
 }
 
+/// Whether two URLs are of one origin (scheme, host and port).
+fn same_origin(one: &str, other: &str) -> bool {
+    match (url::Url::parse(one), url::Url::parse(other)) {
+        (Ok(one), Ok(other)) => one.origin() == other.origin(),
+        _ => false,
+    }
+}
+
 /// The authorization server's metadata, its `issuer` the one asked for, PKCE `S256` among what
 /// it supports.
 async fn authorization_metadata(issuer: &str) -> Result<Value, String> {
@@ -472,8 +480,19 @@ async fn authorization_metadata(issuer: &str) -> Result<Value, String> {
                 .ok_or_else(|| format!("the authorization server has no {endpoint}"))?;
             reachable(named, endpoint)?;
         }
-        if let Some(named) = metadata["registration_endpoint"].as_str() {
-            reachable(named, "registration_endpoint")?;
+        // The code and its verifier go to the token endpoint, and a client's registration to
+        // the registration endpoint: a server's metadata, which an MCP server's own metadata
+        // chose, never sends them to another origin than the issuer's.
+        for endpoint in ["token_endpoint", "registration_endpoint"] {
+            if let Some(named) = metadata[endpoint].as_str() {
+                reachable(named, endpoint)?;
+                if !same_origin(named, issuer) {
+                    return Err(format!(
+                        "the authorization server's {endpoint} ({named}) is not on its issuer's \
+                         origin ({issuer}): it is refused"
+                    ));
+                }
+            }
         }
         return Ok(metadata);
     }
@@ -549,7 +568,9 @@ struct Pending {
     verifier: String,
     redirect: String,
     issuer: String,
-    /// The metadata says the authorization response carries `iss` (RFC 9207).
+    /// The authorization response must carry `iss` (RFC 9207): the metadata says it does, or the
+    /// authorization endpoint is on another origin than the issuer's, which only an `iss` that
+    /// is the issuer's vouches for.
     says_iss: bool,
     base: Tokens,
 }
@@ -607,7 +628,11 @@ pub async fn begin(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<St
         verifier,
         redirect,
         issuer: issuer.clone(),
-        says_iss: metadata["authorization_response_iss_parameter_supported"] == true,
+        says_iss: metadata["authorization_response_iss_parameter_supported"] == true
+            || !same_origin(
+                metadata["authorization_endpoint"].as_str().expect("checked"),
+                &issuer,
+            ),
         base: Tokens {
             url: url.clone(),
             resource,
