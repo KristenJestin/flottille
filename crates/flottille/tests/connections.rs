@@ -2079,3 +2079,510 @@ fn an_unreadable_extensions_file_refuses_removing_a_bound_entry() {
     )
     .unwrap();
 }
+
+// ── Signing in with OAuth ────────────────────────────────────────────────────────────────────
+
+/// A protected server `notes` on loopback, its own authorization server (the fake's `oauth`):
+/// the process and the server's URL. `oauth` is what the fake's authorization server does.
+fn protected_server(user: &User, oauth: Value) -> (std::process::Child, String) {
+    let mut script = almanac();
+    script["oauth"] = oauth;
+    script["oauth"]["tokens_file"] = json!(user.path("notes-tokens"));
+    write_script(user, "notes", &script);
+    let (server, port) = http_server(user, "notes");
+    (server, format!("http://127.0.0.1:{port}/mcp"))
+}
+
+/// The fake's script again, its `oauth` changed by `change`.
+fn change_oauth(user: &User, change: impl FnOnce(&mut Value)) {
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(script_file(user, "notes")).unwrap())
+            .unwrap();
+    change(&mut script["oauth"]);
+    write_script(user, "notes", &script);
+}
+
+/// Every token the fake's authorization server issued.
+fn issued(user: &User) -> Vec<String> {
+    std::fs::read_to_string(user.path("notes-tokens"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<String>(line).ok())
+        .collect()
+}
+
+/// A GET as the browser makes it, following nothing: its status, its `Location` and its body.
+fn browse(address: &str) -> (u16, Option<String>, String) {
+    use std::io::{Read, Write};
+    let url = url::Url::parse(address).unwrap();
+    let mut stream = std::net::TcpStream::connect((
+        url.host_str().unwrap(),
+        url.port_or_known_default().unwrap(),
+    ))
+    .unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let target = match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_owned(),
+    };
+    write!(
+        stream,
+        "GET {target} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        url.host_str().unwrap()
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap_or((&answer, ""));
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let location = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("location")
+                .then(|| value.trim().to_owned())
+        });
+    (status, location, body.to_owned())
+}
+
+/// Where the authorization server sends the browser back, for the sign-in that `url` began.
+fn redirect_of(url: &str) -> String {
+    let (status, location, body) = browse(url);
+    assert_eq!(status, 302, "{body}");
+    location.unwrap()
+}
+
+/// The same redirect with its `state` replaced, or removed with `None`.
+fn with_state(redirect: &str, state: Option<&str>) -> String {
+    let mut url = url::Url::parse(redirect).unwrap();
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "state")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let mut pairs = url.query_pairs_mut();
+    pairs.clear();
+    for (key, value) in &kept {
+        pairs.append_pair(key, value);
+    }
+    if let Some(state) = state {
+        pairs.append_pair("state", state);
+    }
+    drop(pairs);
+    url.to_string()
+}
+
+/// `notes` declared on `url` with Connections on, and signed in through the browser.
+fn signed_in(user: &User, url: &str) {
+    turn_on(user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url}),
+    )
+    .unwrap();
+    sign_in(user);
+}
+
+fn sign_in(user: &User) {
+    let watch = user.watch(&[]);
+    let login = user
+        .call_within(
+            "connection.login",
+            json!({"name": "notes"}),
+            Duration::from_secs(40),
+        )
+        .unwrap();
+    let (status, _, body) = browse(&redirect_of(login["url"].as_str().unwrap()));
+    assert_eq!(status, 200, "{body}");
+    let seen = watch.until(|event| {
+        matches!(
+            event["name"].as_str(),
+            Some("connection.signed_in" | "connection.sign_in_failed")
+        )
+    });
+    assert_eq!(
+        seen.last().unwrap()["name"],
+        "connection.signed_in",
+        "{seen:?}"
+    );
+}
+
+/// The connection reviewed and accepted, `search` passing: an agent of `app` calls it.
+fn reviewed(user: &User) {
+    let review = user
+        .call_within(
+            "connection.review",
+            json!({"name": "notes"}),
+            Duration::from_secs(40),
+        )
+        .unwrap();
+    assert_eq!(review["actions"].as_array().unwrap().len(), 3, "{review}");
+    user.call(
+        "connection.accept",
+        json!({"name": "notes", "actions": {"search": "passes"}}),
+    )
+    .unwrap();
+}
+
+/// The token requests the fake's authorization server answered, of one grant.
+fn grants(user: &User, grant: &str) -> Vec<Value> {
+    logged(user, "notes", "token")
+        .into_iter()
+        .filter(|token| token["grant"] == grant)
+        .collect()
+}
+
+/// The number of the token the server's last call carried.
+fn call_bearer(user: &User) -> u64 {
+    logged(user, "notes", "http")
+        .iter()
+        .rev()
+        .find(|request| request["rpc"] == "tools/call")
+        .and_then(|request| request["bearer"].as_u64())
+        .expect("a call with a token")
+}
+
+fn stopped(mut server: std::process::Child) {
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[test]
+fn a_connection_signs_in_with_oauth_and_keeps_its_tokens_in_the_vault() {
+    let user = user();
+    project(&user, "app");
+    let (server, url) = protected_server(&user, json!({}));
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url}),
+    )
+    .unwrap();
+    // Not signed in, the server refuses the review, which says how to sign in.
+    let refused = user
+        .call_within(
+            "connection.review",
+            json!({"name": "notes"}),
+            Duration::from_secs(40),
+        )
+        .unwrap_err()
+        .1;
+    assert!(
+        refused.contains("flottille connection login notes"),
+        "{refused}"
+    );
+    let watch = user.watch(&[]);
+    let login = user
+        .call_within(
+            "connection.login",
+            json!({"name": "notes"}),
+            Duration::from_secs(40),
+        )
+        .unwrap();
+    let address = url::Url::parse(login["url"].as_str().unwrap()).unwrap();
+    let asked: std::collections::HashMap<String, String> =
+        address.query_pairs().into_owned().collect();
+    assert_eq!(
+        address.path(),
+        "/as/authorize",
+        "the authorization endpoint"
+    );
+    assert_eq!(asked["code_challenge_method"], "S256");
+    assert_eq!(asked["resource"], url);
+    assert_eq!(asked["scope"], "notes:read", "the challenge's scope");
+    assert!(!asked["state"].is_empty());
+    assert!(
+        asked["redirect_uri"].starts_with("http://127.0.0.1:"),
+        "{asked:?}"
+    );
+    let (status, _, page) = browse(&redirect_of(address.as_str()));
+    assert_eq!(status, 200, "{page}");
+    let seen = watch.until(|event| event["name"] == "connection.signed_in");
+    assert_eq!(seen.last().unwrap()["data"]["name"], "notes");
+
+    // Registered as a native public client, the code exchanged with its verifier and resource.
+    let register = &logged(&user, "notes", "register")[0]["asked"];
+    assert_eq!(register["application_type"], "native", "{register}");
+    assert_eq!(register["token_endpoint_auth_method"], "none", "{register}");
+    let exchanged = grants(&user, "authorization_code");
+    assert_eq!(exchanged.len(), 1, "{exchanged:?}");
+    assert_eq!(exchanged[0]["ok"], true, "{exchanged:?}");
+    assert_eq!(exchanged[0]["resource"], url);
+
+    // The tokens are one vault entry bound to the connection, every project's.
+    let entries = user.call("vault.list", json!({})).unwrap()["entries"].clone();
+    let entry = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "notes.oauth")
+        .unwrap_or_else(|| panic!("no entry for the tokens: {entries}"))
+        .clone();
+    assert_eq!(entry["for"], "connection:notes", "{entry}");
+    assert!(entry["project"].is_null(), "{entry}");
+
+    // The server is reached with the token from then on.
+    reviewed(&user);
+    let (_, mcp) = session(&user, "app");
+    let text = done(mcp.call(
+        "conn_notes",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    stopped(server);
+    assert!(text.contains("found: the login decision"), "{text}");
+    assert_eq!(call_bearer(&user), 1);
+}
+
+#[test]
+fn an_expired_token_is_refreshed_before_a_call() {
+    let user = user();
+    project(&user, "app");
+    // A token that lives 30 seconds is within the minute before its expiry from the start.
+    let (server, url) = protected_server(&user, json!({"expires_in": 30}));
+    signed_in(&user, &url);
+    reviewed(&user);
+    let refreshed = grants(&user, "refresh_token").len();
+    assert!(refreshed >= 1, "the review's start refreshed it first");
+    let (_, mcp) = session(&user, "app");
+    let text = done(mcp.call(
+        "conn_notes",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    stopped(server);
+    assert!(text.contains("found: the login decision"), "{text}");
+    let refreshes = grants(&user, "refresh_token");
+    assert!(
+        refreshes.len() > refreshed,
+        "the call did not refresh a token about to expire: {refreshes:?}"
+    );
+    let last = refreshes.last().unwrap();
+    assert_eq!(last["ok"], true, "{last}");
+    assert_eq!(last["resource"], url, "a refresh names the resource");
+    assert_eq!(
+        Some(call_bearer(&user)),
+        last["serial"].as_u64(),
+        "the call carried another token than the refreshed one"
+    );
+}
+
+#[test]
+fn a_refused_refresh_asks_the_user_to_sign_in_again() {
+    let user = user();
+    project(&user, "app");
+    let (server, url) = protected_server(&user, json!({"expires_in": 30}));
+    signed_in(&user, &url);
+    reviewed(&user);
+    let (_, mcp) = session(&user, "app");
+    assert!(has(&mcp, "conn_notes"));
+    change_oauth(&user, |oauth| oauth["refresh"] = json!("refused"));
+    let failed = refused(mcp.call(
+        "conn_notes",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    assert!(failed.contains("sign in again"), "{failed}");
+    let listed = connection(&user, "notes");
+    assert_eq!(listed["state"], "signed out", "{listed}");
+    eventually("the tool leaves the session", || !has(&mcp, "conn_notes"));
+    let entries = user.call("vault.list", json!({})).unwrap().to_string();
+    assert!(
+        !entries.contains("notes.oauth"),
+        "the refused tokens are kept: {entries}"
+    );
+    let inbox = user.call("inbox.list", json!({})).unwrap()["entries"].clone();
+    let said = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "connections")
+        .unwrap_or_else(|| panic!("the inbox does not say it: {inbox}"))["text"]
+        .clone();
+    assert!(
+        said.as_str()
+            .unwrap()
+            .contains("flottille connection login notes"),
+        "{said}"
+    );
+    let list = user.run(&["connection", "list"]);
+    let list = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        list.contains("flottille connection login notes"),
+        "{list}"
+    );
+
+    // Signed in again from the command line, the connection is ready as the user accepted it.
+    change_oauth(&user, |oauth| oauth["refresh"] = json!("ok"));
+    let mut login = user
+        .command(&["connection", "login", "notes", "--no-browser"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = std::io::BufRead::lines(std::io::BufReader::new(login.stdout.take().unwrap()));
+    let first = lines.next().unwrap().unwrap();
+    let address = first
+        .split_whitespace()
+        .find(|word| word.starts_with("http://"))
+        .unwrap_or_else(|| panic!("no address to open: {first}"))
+        .to_owned();
+    let (status, _, page) = browse(&redirect_of(&address));
+    assert_eq!(status, 200, "{page}");
+    let rest: Vec<String> = lines.map_while(Result::ok).collect();
+    let ended = login.wait().unwrap();
+    assert!(ended.success(), "{first} {rest:?}");
+    assert!(rest.join("\n").contains("Signed in"), "{rest:?}");
+    assert_eq!(connection(&user, "notes")["state"], "ready");
+    eventually("the tool comes back", || has(&mcp, "conn_notes"));
+    let text = done(mcp.call(
+        "conn_notes",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    stopped(server);
+    assert!(text.contains("found: the login decision"), "{text}");
+}
+
+#[test]
+fn the_state_of_a_redirect_is_checked() {
+    let user = user();
+    let (server, url) = protected_server(&user, json!({}));
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url}),
+    )
+    .unwrap();
+    let watch = user.watch(&[]);
+    let login = user
+        .call_within(
+            "connection.login",
+            json!({"name": "notes"}),
+            Duration::from_secs(40),
+        )
+        .unwrap();
+    let redirect = redirect_of(login["url"].as_str().unwrap());
+    for forged in [
+        with_state(&redirect, Some("forged")),
+        with_state(&redirect, None),
+    ] {
+        let (status, _, page) = browse(&forged);
+        assert_eq!(status, 400, "{forged}: {page}");
+    }
+    assert!(
+        grants(&user, "authorization_code").is_empty(),
+        "a code came in with another state and was exchanged"
+    );
+    // The sign-in is still the user's: the right redirect ends it.
+    let (status, _, page) = browse(&redirect);
+    stopped(server);
+    assert_eq!(status, 200, "{page}");
+    let seen = watch.until(|event| {
+        matches!(
+            event["name"].as_str(),
+            Some("connection.signed_in" | "connection.sign_in_failed")
+        )
+    });
+    assert_eq!(
+        seen.last().unwrap()["name"],
+        "connection.signed_in",
+        "{seen:?}"
+    );
+    assert_eq!(grants(&user, "authorization_code").len(), 1);
+}
+
+/// Every file under `dir`, whole.
+fn files_under(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_under(&path));
+        } else if let Ok(bytes) = std::fs::read(&path) {
+            found.push((path, bytes));
+        }
+    }
+    found
+}
+
+#[test]
+fn no_token_reaches_an_agent_or_a_log() {
+    let user = user();
+    project(&user, "app");
+    let (server, url) = protected_server(&user, json!({"expires_in": 30}));
+    signed_in(&user, &url);
+    reviewed(&user);
+    // A server that says a token it was given: the agent reads it masked.
+    let access = issued(&user)
+        .into_iter()
+        .rfind(|token| token.starts_with("fake-access-"))
+        .unwrap();
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(script_file(&user, "notes")).unwrap())
+            .unwrap();
+    script["answers"]["search"] = json!({"text": format!("your token is {access}")});
+    write_script(&user, "notes", &script);
+    let (_, mcp) = session(&user, "app");
+    let text = done(mcp.call(
+        "conn_notes",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    // A refused refresh, said in an event, the inbox and the agent's answer.
+    change_oauth(&user, |oauth| oauth["refresh"] = json!("refused"));
+    let failed = refused(mcp.call(
+        "conn_notes",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    stopped(server);
+    let tokens = issued(&user);
+    assert!(tokens.len() >= 4, "{} tokens issued", tokens.len());
+    let events: Vec<String> = user
+        .watch(&["--after", "0"])
+        .within(Duration::from_secs(2))
+        .iter()
+        .map(Value::to_string)
+        .collect();
+    let mut said = vec![
+        ("the agent's answer".to_owned(), text),
+        ("the refused call".to_owned(), failed),
+        ("the events".to_owned(), events.join("\n")),
+        (
+            "connection.list".to_owned(),
+            user.call("connection.list", json!({})).unwrap().to_string(),
+        ),
+        (
+            "vault.list".to_owned(),
+            user.call("vault.list", json!({})).unwrap().to_string(),
+        ),
+        (
+            "inbox.list".to_owned(),
+            user.call("inbox.list", json!({})).unwrap().to_string(),
+        ),
+        (
+            "the agent's tools".to_owned(),
+            format!("{:?}", mcp.tools()),
+        ),
+    ];
+    // The daemon's log, its store and every file of its own.
+    for folder in ["state", "config", "data", "runtime"] {
+        for (path, bytes) in files_under(&user.path(folder)) {
+            said.push((
+                path.display().to_string(),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            ));
+        }
+    }
+    for token in &tokens {
+        for (where_, text) in &said {
+            assert!(
+                !text.contains(token.as_str()),
+                "a token of the fake's ({}…) is in {where_}",
+                &token[..14]
+            );
+        }
+    }
+    assert!(said[0].1.contains("[masked]"), "{}", said[0].1);
+}
