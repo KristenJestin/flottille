@@ -1212,17 +1212,21 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   on the composer, not a part of it), and the conversation keeps at least half of the page's
   height, the dock scrolling inside itself past that. The card shows **one question at a time**:
   above it, Previous, `2 of 4` and a dot per question (filled once it has a choice or words, the
-  one shown longer), and Next; `←` and `→` move too while the focus is on the card and not in a
-  field. Picking an option of a single-choice question moves to the next question still
-  unanswered; a several-choice question moves on with Next. "Something else…", "+ Add a note",
-  Answer and `Ctrl+Enter` are as the card always had them, Answer once every question has a
-  choice or words. At its place in the conversation, one short line, `Asked you 4 questions ·
+  one shown longer), and Next, which stay in sight above the part that scrolls; `←` and `→` move
+  too while the focus is on the card and not in a field. Picking an option of a single-choice
+  question moves to the next question still unanswered; a several-choice question moves on with
+  Next. So "+ Add a note" is offered under the options before a choice too (a note alone is no
+  answer, and stays when the choice is let go), and Previous brings a question back with its
+  choice and its note. "Something else…", Answer and `Ctrl+Enter` are as the card always had
+  them, Answer once every question has a choice or words. The asks are the root's: the dock is
+  the session's, not its page's, so what the user chose and wrote stays while a sub-agent's
+  conversation is shown (the dock still shows) and when the page is left and opened again. At its place in the conversation, one short line, `Asked you 4 questions ·
   answer below`, a link that brings the focus to the card, whose ring lights once. Once the agent
   took the answers, the dock folds away and the line becomes the card folded to the answers (each
   question and what was chosen). Several asks waiting, the dock shows the oldest, `1 of 2 asks`
   above it, the next sliding in once it is answered; a page opened while an ask waits (the
-  sidebar's "needs you") gives the card the focus, and one asked later never takes it from the
-  composer. The dock unfolds and fades in, folds away once answered; a question slides in from
+  sidebar's "needs you") gives the card the focus, one asked later never takes it from the
+  composer, and once a card that held the focus is answered the next one takes it. The dock unfolds and fades in, folds away once answered; a question slides in from
   the side of the move over `PANEL`; the dots' changes fade; the line unfolds. A message the user
   sent while the root works stays under the
   conversation, above the composer, drawn as waiting (quieter, with its pictures as small
