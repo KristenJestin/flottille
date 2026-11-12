@@ -42,9 +42,6 @@ pub const GUIDANCE_SENTENCE: &str = "Added to Flottille's own instructions, whic
 /// The fold of a check's own instructions.
 pub const INSTRUCTIONS: &str = "Instructions for this check";
 
-/// How a check's select says its default: the rule is said once, under the card.
-const DEFAULT: &str = "Default";
-
 /// The two switches of when a review starts besides the user's own doors, in their order; and what
 /// the usage line adds for each one that is on.
 const DOORS: [(&str, &str); 2] = [
@@ -250,21 +247,17 @@ pub fn checks(
         })
     };
     // The model of a line: its own value, and Settings' as the one it inherits.
-    let model = |setting: &Setting, on_line: Option<&OnLine>, rule: Option<&str>| {
+    let model = |setting: &Setting, on_line: Option<&OnLine>| {
         let global = setting.value.clone();
         let own = match side {
             None => setting.set.then(|| global.clone()),
             Some(side) => side.settings.get(&setting.key).cloned(),
         };
-        let mut setting = setting.clone();
-        if let (Some(rule), Some(default)) = (rule, setting.default.as_mut()) {
-            default.rule = rule.to_owned();
-        }
         super::worded_control(
             registry,
             &listed.name,
             project,
-            &setting,
+            setting,
             own,
             global,
             &format!("{prefix}-setting-{}", setting.key),
@@ -327,13 +320,12 @@ pub fn checks(
                 .into_any_element()
             }
         };
-        let rule = project.is_none().then_some(DEFAULT);
         // The switch names the model; it fades with the switch, and is out of reach while off.
         let on_line = OnLine {
             name: format!("{} model", setting.label),
             disabled: !on,
         };
-        let select = model(setting, Some(&on_line), rule);
+        let select = model(setting, Some(&on_line));
         let line = div()
             .flex()
             .items_start()
@@ -379,7 +371,7 @@ pub fn checks(
     }
     // The last line checks the findings: it always runs, so it has no switch.
     if let Some(setting) = listed.settings.iter().find(|s| s.key == VERIFIER)
-        && let Some(select) = model(setting, None, None)
+        && let Some(select) = model(setting, None)
     {
         lines.push(
             div()

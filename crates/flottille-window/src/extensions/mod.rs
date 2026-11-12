@@ -709,7 +709,7 @@ fn bare_control(
     providers: &crate::providers::Providers,
     on_line: Option<&OnLine>,
 ) -> Option<AnyElement> {
-    let (rule, gives) = setting.default_said(providers);
+    let (rule, _) = setting.default_said(providers);
     let (registry, name, project_name, setting_of) = (
         registry.downgrade(),
         name.to_owned(),
@@ -863,13 +863,21 @@ fn bare_control(
                 None => choice.hint(setting.hint.clone()),
                 Some(line) => choice.unlabelled(line.name.clone()).disabled(line.disabled),
             };
-            let choice = choice.models(providers.model_entries()).effort(
-                own.as_ref()
-                    .and_then(|own| text(own, "effort"))
-                    .map(Into::into),
-            );
+            // What the slot runs on left unset, per provider: the models marked recommended.
+            let gives = setting
+                .default
+                .as_ref()
+                .map(|default| default.gives.clone())
+                .unwrap_or_default();
+            let choice = choice
+                .models(providers.model_entries_giving(&gives))
+                .effort(
+                    own.as_ref()
+                        .and_then(|own| text(own, "effort"))
+                        .map(Into::into),
+                );
             let choice = match project {
-                None => choice.default(rule, gives),
+                None => choice.follows(),
                 // In a project, the first option is Settings' value: the model set there, else
                 // the default's rule.
                 Some(_) => choice.inherited(match text(&default, "provider") {
@@ -879,7 +887,8 @@ fn bare_control(
                             .map_or(provider.clone(), |p| p.title.clone());
                         format!(
                             "{title} · {}",
-                            text(&default, "model").unwrap_or_else(|| "its default".into())
+                            text(&default, "model")
+                                .unwrap_or_else(|| "the provider's model".into())
                         )
                     }
                     None => rule.to_owned(),
@@ -888,6 +897,14 @@ fn bare_control(
             let choice = choice.on_choose(move |chosen, effort, _, cx| {
                 let slot = match chosen {
                     Chosen::Model(provider, model) => {
+                        // The recommended model of a provider is the one the slot runs on
+                        // left unset: chosen, it is named, not left to the provider's own.
+                        let model = model.or_else(|| {
+                            gives
+                                .iter()
+                                .find(|(name, _)| *name == provider.as_ref())
+                                .and_then(|(_, model)| model.clone().map(Into::into))
+                        });
                         let mut slot = Map::new();
                         slot.insert("provider".into(), json!(provider));
                         if let Some(model) = model {

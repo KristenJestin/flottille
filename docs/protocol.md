@@ -1937,7 +1937,7 @@ none is enabled, its `model` `null` when the project names none. `judge` is the 
 chose (`provider.set_judge`) or Flottille picked, its `model` `null` for the provider's default,
 `"picked": true` while the user has not seen the notice of a judge Flottille picked, or `null` when
 there is none. `new_session` is what the user chose for new sessions to start on
-(`provider.set_new_session`), `{"provider", "model", "effort"}` with `model` and `effort` `null` for
+(`provider.set_new_session`), `{"provider", "model"?, "effort"?}`, `model` and `effort` left out for
 the provider's to propose, or `null` when none is chosen. `not-found` when the project
 does not exist; `invalid-config` when `providers.toml` cannot be read (the sentence names the key
 at fault).

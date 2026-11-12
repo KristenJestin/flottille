@@ -295,8 +295,8 @@ slot, the judge's own code left as it is until it moves:
 - **Per project** (Review): a slot a project may override, on its page in the project's
   Features.
 - **In the window**, every slot is the one model choice of `reference/gpui.md` (rule 15,
-  `ModelChoice`): one select of `<provider> · <model>`, the effort beside it, the default first and
-  said with what it gives today. A slot is never set to none from it: an extension is turned off by
+  `ModelChoice`): one select of `<provider> · <model>`, the effort beside it, opening on the model
+  the slot runs on left unset, selected and marked `recommended`; choosing it back clears the slot. A slot is never set to none from it: an extension is turned off by
   its switch.
 - **Using it:** a provider no longer enabled or ready makes each use of the slot fail, and a use
   that fails falls back as its extension says (the compaction changes nothing; a review pass is
@@ -760,9 +760,10 @@ As built (#338):
   results, lost data, crashes the change brings."), **Project rules**, the standards pass ("The
   project's AGENTS.md, read from the base branch."), **Security** ("Secrets, injections, access.
   Off by default."). The last line, **Checking the findings**, is the verifier, with no switch
-  since it always runs ("Each finding confirmed before it reaches the session."), its first option
-  `One size smaller` (`Sonnet for Claude`). The default is said once under the card: "Models: the
-  strongest of the session's provider unless you choose one. Each check is a turn on your own
+  since it always runs ("Each finding confirmed before it reaches the session."), opening on the
+  model one size smaller (`Sonnet · recommended`). Each check opens on the strongest model of the
+  first provider, marked `recommended`, with its effort beside it. The rule is said once under the
+  card: "Models: the strongest of the session's provider unless you choose one. Each check is a turn on your own
   quota.", then "After fixes, one more review of what changed; two at most."
 - Under each check's line, a quiet fold, **Instructions for this check** (below), its folded line
   `none` or the start of its text.

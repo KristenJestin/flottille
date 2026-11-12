@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 
 use crate::actions::{Command, SessionsSetting};
 use crate::extensions::Registry;
-use crate::providers::{Provider, Providers};
+use crate::providers::{NewSession, Provider, Providers};
 use crate::rules::RulesEditor;
 use crate::shell::Shell;
 use crate::vault::VaultSection;
@@ -48,7 +48,13 @@ pub const SECTIONS: [(&str, &str); 5] = [
 
 /// The blocks of the Agents tab, top to bottom: each one is a section of the page, entering on its
 /// own.
-const AGENTS_BLOCKS: [&str; 4] = ["providers", "rules", "tool-results", "sessions"];
+const AGENTS_BLOCKS: [&str; 5] = [
+    "providers",
+    "new-sessions",
+    "rules",
+    "tool-results",
+    "sessions",
+];
 
 /// The blocks of the Approvals tab: the Auto judge, then what it is told.
 const APPROVALS_BLOCKS: [&str; 2] = ["judge", "guidance"];
@@ -157,6 +163,10 @@ const COMPACTION_USAGE: &str = "Automatic past the threshold below, or **Compact
 pub const COMPACTION_HINT: &str = "When an agent's context fills up, its conversation is \
      summarised and it goes on from the summary. Off, each program compacts on its own.";
 
+/// What the section of the new sessions says under its title.
+pub const NEW_SESSIONS_SENTENCE: &str = "What a session starts on when its project says nothing \
+     and you pick nothing: left alone, the provider's own recommendation.";
+
 /// What the page says of the summary's cost, under the model that writes it.
 pub const COMPACTOR_COST: &str = "Each summary is a turn of this model, on your own quota.";
 
@@ -261,6 +271,8 @@ pub struct SettingsPage {
     judge_turning: Option<bool>,
     /// The daemon's refusal of the last judge chosen.
     judge_refused: Option<String>,
+    /// What new sessions start on, chosen, until the daemon lists it.
+    new_session_pending: bool,
     /// The developer mode, once the daemon said it.
     developer: Option<Developer>,
     /// The developer mode's switch flipped, until the daemon answers: what it was asked to become.
@@ -360,6 +372,7 @@ impl SettingsPage {
             judge_pending: false,
             judge_turning: None,
             judge_refused: None,
+            new_session_pending: false,
             developer: None,
             developer_pending: None,
             tool_results: None,
@@ -1055,6 +1068,84 @@ impl SettingsPage {
         cx.notify();
     }
 
+    /// Asks the daemon for what new sessions start on: the provider, and its model and effort,
+    /// or `None` for what each provider proposes.
+    pub fn choose_new_session(&mut self, chosen: Option<NewSession>, cx: &mut Context<Self>) {
+        if self.new_session_pending || chosen == self.providers.new_session {
+            cx.notify();
+            return;
+        }
+        self.new_session_pending = true;
+        let (provider, model, effort) = match chosen {
+            Some((provider, model, effort)) => (Some(provider), model, effort),
+            None => (None, None, None),
+        };
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::SetNewSession {
+                    provider,
+                    model,
+                    effort,
+                })
+            })
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon's answer to what new sessions start on: a toast says it.
+    pub fn new_session_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        self.new_session_pending = false;
+        match refused {
+            Some(why) => toast(
+                Toast::failure("New sessions were not changed").detail(why),
+                cx,
+            ),
+            None => toast(
+                Toast::success("New sessions saved").detail("They apply to the next session."),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// What the page says once when what new sessions start on is no longer offered by its
+    /// provider: they start on what the provider proposes instead.
+    pub fn new_session_fallback(&self) -> Option<String> {
+        let (name, model, effort) = self.providers.new_session.as_ref()?;
+        let provider = self.providers.get(name)?;
+        let offers_model = model
+            .as_ref()
+            .is_none_or(|model| provider.models.is_none() || provider.model(model).is_some());
+        let gone = if !offers_model {
+            model.clone()?
+        } else {
+            let effort = effort.as_ref()?;
+            let efforts = crate::composer::efforts_of(provider, model.as_deref())?;
+            if efforts.contains(effort) {
+                return None;
+            }
+            effort.clone()
+        };
+        Some(format!(
+            "{} no longer offers {gone}: new sessions start on what it proposes.",
+            provider.title
+        ))
+    }
+
+    /// What new sessions start on as the pickers show it: what the daemon holds, less a model or
+    /// an effort its provider no longer offers, which is what a session starts without.
+    fn new_session_shown(&self) -> Option<NewSession> {
+        let (name, model, effort) = self.providers.new_session.clone()?;
+        let provider = self.providers.get(&name)?;
+        let model =
+            model.filter(|model| provider.models.is_none() || provider.model(model).is_some());
+        let effort = effort.filter(|effort| {
+            crate::composer::efforts_of(provider, model.as_deref())
+                .is_none_or(|efforts| efforts.contains(effort))
+        });
+        Some((name, model, effort))
+    }
+
     /// The developer mode as the daemon last said it.
     pub fn developer(&self) -> Option<&Developer> {
         self.developer.as_ref()
@@ -1652,6 +1743,75 @@ impl SettingsPage {
         ))
     }
 
+    /// "New sessions": the provider, model and effort a session starts on, from the same model
+    /// choice as everywhere. Left alone, each is what the provider proposes, selected and marked.
+    fn new_sessions_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let shown = self.new_session_shown();
+        let chosen = match &shown {
+            Some((provider, model, _)) => self.providers.chosen(provider, model.as_deref()),
+            None => Chosen::First,
+        };
+        let this = cx.entity().downgrade();
+        let choice = ModelChoice::new("new-sessions-on", "Start on", chosen)
+            .follows()
+            .models(self.providers.model_entries())
+            .effort(
+                shown
+                    .as_ref()
+                    .and_then(|(_, _, effort)| effort.clone().map(Into::into)),
+            )
+            .disabled(self.new_session_pending)
+            .on_choose(move |chosen, effort, _, cx| {
+                let chosen = match chosen {
+                    Chosen::Model(provider, model) => Some((
+                        provider.to_string(),
+                        model.map(|m| m.to_string()),
+                        effort.map(|e| e.to_string()),
+                    )),
+                    _ => None,
+                };
+                this.update(cx, |this, cx| this.choose_new_session(chosen, cx))
+                    .ok();
+            });
+        let notice = presence_of(
+            "new-sessions-fallback-line",
+            self.new_session_fallback().map(SharedString::from),
+            move |said| {
+                div()
+                    .id("new-sessions-fallback")
+                    .aria_label(said.clone())
+                    .pt(space::SM)
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(said)
+                    .test_support()
+                    .into_any_element()
+            },
+        );
+        let card = div()
+            .id("new-sessions")
+            .p(space::LG)
+            .flex()
+            .flex_col()
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(choice)
+            .child(notice)
+            .test_support();
+        // Its models are the providers': the card crossfades in from a skeleton once they are known.
+        Section::new("new-sessions", "New sessions")
+            .sentence(NEW_SESSIONS_SENTENCE)
+            .child(awaiting(
+                "new-sessions-waiting",
+                !self.providers.known,
+                Skeleton::new("new-sessions-skeleton").h(px(96.)),
+                card,
+            ))
+    }
+
     /// A provider's row: its switch carries its name, its version is a tag (its program's path in
     /// the tooltip) and one line says its state, once.
     fn provider_row(
@@ -1992,6 +2152,10 @@ impl Render for SettingsPage {
         let blocks: Vec<(&str, AnyElement)> = match SECTIONS[tab].0 {
             "agents" => vec![
                 ("providers", self.providers_section(window, cx)),
+                (
+                    "new-sessions",
+                    self.new_sessions_section(cx).into_any_element(),
+                ),
                 ("rules", self.rules.clone().into_any_element()),
                 (
                     "tool-results",

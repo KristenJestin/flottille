@@ -109,7 +109,7 @@ The user chose what a new session starts on, or no choice, through the daemon
 
 | Field | |
 |---|---|
-| `new_session` | `{"provider", "model", "effort"}`, `model` and `effort` `null` for the provider's to propose; `null` when none is chosen. |
+| `new_session` | `{"provider", "model"?, "effort"?}`, `model` and `effort` left out for the provider's to propose; `null` when none is chosen. |
 
 ### `provider.judge_changed`
 

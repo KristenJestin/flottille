@@ -139,6 +139,13 @@ pub enum Command {
     /// Turns the Auto judge on: the daemon picks one as for a user who never chose
     /// (`provider.set_judge {pick}`).
     PickJudge,
+    /// Chooses what a new session starts on in `providers.toml`, or none
+    /// (`provider.set_new_session`).
+    SetNewSession {
+        provider: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+    },
     /// Reads the providers again: `providers.toml` is the user's to edit by hand too.
     ReadProviders,
     /// The developer mode (`developer.show`).
@@ -909,6 +916,10 @@ pub enum Outcome {
     JudgeSet {
         refused: Option<String>,
     },
+    /// What a new session starts on was chosen, or the daemon refused with why.
+    NewSessionSet {
+        refused: Option<String>,
+    },
     ProviderSet {
         name: String,
         refused: Option<String>,
@@ -1494,6 +1505,19 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::JudgeSet { refused }
+        }
+        Command::SetNewSession {
+            provider,
+            model,
+            effort,
+        } => {
+            let params = json!({"provider": provider, "model": model, "effort": effort});
+            let refused = match ask_alone(connect, "provider.set_new_session", params, bounds.quick)
+            {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::NewSessionSet { refused }
         }
         Command::JudgeNoticed => {
             // Shown or not, the notice goes once it was seen: the providers say it.

@@ -2598,7 +2598,7 @@ fn the_auto_judge_is_chosen_in_settings_which_say_it_uses_the_quota(cx: &mut Tes
     // One select of the models, the cost said once under it.
     assert_eq!(
         text_of("judge-model", cx).as_deref(),
-        Some("OpenCode · open/small")
+        Some("OpenCode · open/small · recommended")
     );
     assert_eq!(
         text_of("judge-cost", cx).as_deref(),
@@ -2910,10 +2910,10 @@ fn the_judge_s_model_picker_names_the_provider_s_default_model_once_it_is_known(
         },
     );
     settle(cx);
-    // The default model's entry is the chosen one, never a second "default" entry.
+    // The recommended model's entry is the chosen one, marked, never a second entry of the provider's own.
     assert_eq!(
         text_of("judge-model", cx).as_deref(),
-        Some("OpenCode · open/small")
+        Some("OpenCode · open/small · recommended")
     );
     cx.update(|window, cx| window.click("judge-model", cx));
     settle(cx);
@@ -5077,7 +5077,7 @@ fn no_default_wording(composer: &Entity<Composer>, cx: &mut VisualTestContext) {
 }
 
 #[gpui_kit::test]
-fn a_provider_s_default_alias_shows_as_the_model_it_stands_for_selected_with_a_default_note(
+fn a_provider_s_default_alias_shows_as_the_model_it_stands_for_selected_with_a_recommended_note(
     cx: &mut TestAppContext,
 ) {
     let user = User::with_fake_claude();
@@ -5101,7 +5101,7 @@ fn a_provider_s_default_alias_shows_as_the_model_it_stands_for_selected_with_a_d
     assert_eq!(menu_labels(&composer, Menu::Model, cx), ["Fable", "Haiku"]);
     let fable = composer.read_with(cx, |c, _| c.entries(Menu::Model)[0].clone());
     assert!(fable.on, "the default model's row is the selected one");
-    assert_eq!(fable.note.as_deref(), Some("default"));
+    assert_eq!(fable.note.as_deref(), Some("recommended"));
     no_default_wording(&composer, cx);
 
     // Another model, then the default's row again: that is picking none.
@@ -5195,7 +5195,7 @@ fn the_project_s_model_still_wins_and_is_marked(cx: &mut TestAppContext) {
     assert_eq!(haiku.note.as_deref(), Some("the project's · no effort"));
     let fable = rows.iter().find(|e| e.id == "model-choice-fable").unwrap();
     assert!(!fable.on);
-    assert_eq!(fable.note.as_deref(), Some("default"));
+    assert_eq!(fable.note.as_deref(), Some("recommended"));
 
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
@@ -5330,12 +5330,12 @@ fn the_effort_shown_is_the_one_the_model_runs_with(cx: &mut TestAppContext) {
     );
     let high = composer.read_with(cx, |c, _| c.entries(Menu::Effort)[2].clone());
     assert!(high.on);
-    assert_eq!(high.note.as_deref(), Some("default"));
+    assert_eq!(high.note.as_deref(), Some("recommended"));
     no_default_wording(&composer, cx);
 }
 
 #[gpui_kit::test]
-fn the_effort_a_model_runs_with_is_shown_selected_with_a_default_note(cx: &mut TestAppContext) {
+fn the_effort_a_model_runs_with_is_shown_selected_with_a_recommended_note(cx: &mut TestAppContext) {
     let user = providers_user();
     project(&user, "atlas");
     learn_models(&user, "atlas", "claude", "fake-small");
@@ -5351,7 +5351,7 @@ fn the_effort_a_model_runs_with_is_shown_selected_with_a_default_note(cx: &mut T
     assert_eq!(menu_labels(&composer, Menu::Effort, cx), ["low", "high"]);
     let low = composer.read_with(cx, |c, _| c.entries(Menu::Effort)[0].clone());
     assert!(low.on);
-    assert_eq!(low.note.as_deref(), Some("default"));
+    assert_eq!(low.note.as_deref(), Some("recommended"));
     no_default_wording(&composer, cx);
 
     cx.update(|window, cx| window.click("effort-picker", cx));

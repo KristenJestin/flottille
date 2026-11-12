@@ -1157,14 +1157,23 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   opens on Agents; a link to a section opens its tab with the section in view; Usage will be the
   sixth tab and the last. No part of Flottille adds a tab of its own: what the user turns on or
   off is a row of Features.
-  **Agents** holds four sections. **Providers** (a count; "The agent programs Flottille can
+  **Agents** holds five sections. **Providers** (a count; "The agent programs Flottille can
   start. Each signs in with its own login."): one row per provider, its switch labelled with its
   name (`Claude`), its version as a tag (the path of its program in the version's tooltip), and
   one line saying its state once: `Ready · signed in` (or `signed in with an API key`), `Not
   signed in: run claude login` (the command in a block to copy), `Not found on this machine` with
   a link to how to install it, `Off: sessions that run keep running`; a warning is one faint line
   with its icon; Check again, secondary, in the section's header. It names no file of the
-  configuration, no path of a login file, no environment variable. **Rules for every project**
+  configuration, no path of a login file, no environment variable. **New sessions** ("What a
+  session starts on when its project says nothing and you pick nothing: left alone, the provider's
+  own recommendation."): one `ModelChoice` (rule 15), the provider and its model in one select and
+  the effort beside it, opening on the provider's recommended model and effort, selected and
+  marked `recommended` (`Claude · Opus 5.5 · recommended`, `high · recommended`), never a row
+  named "default". Choosing the recommended model of the first provider back clears the choice
+  (`provider.set_new_session`, `docs/agents.md`, "Providers": the project's file first, then this choice, then the last
+  pick in the composer, then what the provider proposes); a model or an effort its provider no
+  longer offers falls back to what it proposes, and one line under the select says so, once. It
+  enters with the page's other sections and its fold of the line fades in and out. **Rules for every project**
   ("What every agent is told, in every project. A project adds its own, or uses only its own."):
   its editor, Reset to default and Save once it changed; saving says in a toast that the agents
   started from now on follow them. **Long tool results** ("A longer result reaches the agent as

@@ -692,11 +692,10 @@ fn a_project_s_two_switches_carry_the_dot_and_go_back_to_settings(cx: &mut TestA
     at_rest(cx);
 }
 
-#[gpui_kit::test]
-fn the_default_model_is_said_once_under_the_card(cx: &mut TestAppContext) {
-    // The daemon is asked for the models of the provider, which offers the one it picks.
+/// A user whose provider offers `opus` and `sonnet`, the daemon having listed them, with Review on.
+fn user_with_models() -> User {
     let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_LIST_MODELS", "1");
-    user.fake_script(json!({"models": ["opus", "sonnet"]}));
+    user.fake_script(json!({"models": ["opus", "sonnet"], "efforts": ["low", "high"]}));
     user.call("extension.set", json!({"name": "review", "enabled": true}))
         .unwrap();
     eventually("the models the daemon picks", || {
@@ -706,19 +705,43 @@ fn the_default_model_is_said_once_under_the_card(cx: &mut TestAppContext) {
             .iter()
             .any(|s| s["key"] == "bugs_model" && s["default"]["gives"]["claude"] == "opus")
     });
+    user
+}
+
+/// What a check's model slot holds, `null` while unset.
+fn slot(user: &User, key: &str) -> Value {
+    let listed = review_listed(user);
+    let setting = listed["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == key)
+        .unwrap();
+    if setting["set"] == true {
+        setting["value"].clone()
+    } else {
+        Value::Null
+    }
+}
+
+#[gpui_kit::test]
+fn a_check_s_select_opens_on_the_recommended_model_selected(cx: &mut TestAppContext) {
+    let user = user_with_models();
     let (_shell, cx) = review_page(&user, true, cx);
 
-    // Each check's select says its default in a word, the rule under the card, once.
+    // Each check's select opens on the model it runs on, chosen as if the user had, marked
+    // recommended; never a row named Default.
     for (key, _, _) in CHECKS {
         assert_eq!(
             label(cx, &format!("review-setting-{key}_model-model")).as_deref(),
-            Some("Default"),
+            Some("Claude · opus · recommended"),
             "{key}"
         );
     }
+    // The last check runs one size smaller: its recommended model is that one.
     assert_eq!(
         label(cx, "review-setting-verifier_model-model").as_deref(),
-        Some("One size smaller")
+        Some("Claude · sonnet · recommended")
     );
     let card = bounds(cx, "review-checks");
     let models = label(cx, "review-checks-models").unwrap();
@@ -735,13 +758,76 @@ fn the_default_model_is_said_once_under_the_card(cx: &mut TestAppContext) {
     assert!(
         bounds(cx, "review-checks-rounds").top() >= bounds(cx, "review-checks-models").bottom()
     );
-    // Opened, the first option says what it gives today.
+    // Opened, no row is the rule: the models, the recommended one marked.
     cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
     settle(cx);
+    assert!(!present(cx, "review-setting-bugs_model-model-first"));
     assert_eq!(
-        label(cx, "review-setting-bugs_model-model-first-line").as_deref(),
-        Some("opus for Claude")
+        label(cx, "review-setting-bugs_model-model-claude-sonnet").as_deref(),
+        Some("Claude · sonnet")
     );
+    assert_eq!(
+        slot(&user, "bugs_model"),
+        Value::Null,
+        "nothing was chosen by looking"
+    );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn choosing_the_recommended_model_back_clears_the_choice(cx: &mut TestAppContext) {
+    let user = user_with_models();
+    let (shell, cx) = review_page(&user, true, cx);
+
+    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("review-setting-bugs_model-model-claude-sonnet", cx));
+    until(&shell, cx, "the choice is stored", |cx| {
+        slot(&user, "bugs_model") == json!({"provider": "claude", "model": "sonnet"})
+            && label(cx, "review-setting-bugs_model-model").as_deref() == Some("Claude · sonnet")
+    });
+    settle(cx);
+
+    // Back on the recommended one: it keeps following the rule, nothing is stored.
+    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("review-setting-bugs_model-model-claude-opus", cx));
+    until(&shell, cx, "the choice is cleared", |cx| {
+        slot(&user, "bugs_model") == Value::Null
+            && label(cx, "review-setting-bugs_model-model").as_deref()
+                == Some("Claude · opus · recommended")
+    });
+    settle(cx);
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_review_check_chooses_its_effort(cx: &mut TestAppContext) {
+    let user = user_with_models();
+    let (shell, cx) = review_page(&user, true, cx);
+
+    // The effort select is beside the check's model, as the compactor's is: the model's
+    // recommended effort selected and marked.
+    assert!(present(cx, "review-setting-bugs_model-effort"));
+    let said = label(cx, "review-setting-bugs_model-effort").unwrap();
+    assert!(said.ends_with(" · recommended"), "{said}");
+    assert!(!said.to_lowercase().contains("default"), "{said}");
+    cx.update(|window, cx| window.click("review-setting-bugs_model-effort", cx));
+    settle(cx);
+    // The model proposes `low`: choosing `high` stores it.
+    assert_eq!(said, "low · recommended");
+    cx.update(|window, cx| window.click("review-setting-bugs_model-effort-high", cx));
+    until(&shell, cx, "the effort is stored", |_| {
+        slot(&user, "bugs_model")
+            == json!({"provider": "claude", "model": "opus", "effort": "high"})
+    });
+    settle(cx);
+    assert_eq!(
+        label(cx, "review-setting-bugs_model-effort").as_deref(),
+        Some("high")
+    );
+    // The other checks are untouched.
+    assert_eq!(slot(&user, "spec_model"), Value::Null);
     at_rest(cx);
 }
 

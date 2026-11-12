@@ -87,7 +87,13 @@ pub struct Providers {
     pub judge: Option<(String, Option<String>)>,
     /// Flottille picked the judge, and the user has not seen the notice that says so yet.
     pub judge_picked: bool,
+    /// What the user chose a new session starts on: its provider, and its model and effort (the
+    /// provider's to propose when none); `None` while nothing is chosen.
+    pub new_session: Option<NewSession>,
 }
+
+/// The provider, the model and the effort a new session starts on, as the user chose them.
+pub type NewSession = (String, Option<String>, Option<String>);
 
 fn text(value: &Value) -> Option<String> {
     value.as_str().map(str::to_owned)
@@ -310,6 +316,13 @@ impl Providers {
                 judge: text(&answer["judge"]["provider"])
                     .map(|provider| (provider, text(&answer["judge"]["model"]))),
                 judge_picked: answer["judge"]["picked"] == true,
+                new_session: text(&answer["new_session"]["provider"]).map(|provider| {
+                    (
+                        provider,
+                        text(&answer["new_session"]["model"]),
+                        text(&answer["new_session"]["effort"]),
+                    )
+                }),
             },
             Err(error) => Providers {
                 list: Vec::new(),
@@ -317,6 +330,7 @@ impl Providers {
                 known: true,
                 judge: None,
                 judge_picked: false,
+                new_session: None,
             },
         }
     }
@@ -331,15 +345,32 @@ impl Providers {
     }
 
     /// What a `ModelChoice` offers: the models of the providers enabled and ready, as the daemon
-    /// knows them; a provider whose models no session said yet, by its default.
+    /// knows them, each provider's recommended one (the model it takes when none is named)
+    /// marked; a provider whose models no session said yet, by its name.
     pub fn model_entries(&self) -> Vec<ModelEntry> {
+        self.entries(&[])
+    }
+
+    /// The same, the recommended model of a provider being the one `gives` names for it (a
+    /// feature's own rule), its own when `gives` says none.
+    pub fn model_entries_giving(&self, gives: &[(String, Option<String>)]) -> Vec<ModelEntry> {
+        self.entries(gives)
+    }
+
+    fn entries(&self, gives: &[(String, Option<String>)]) -> Vec<ModelEntry> {
         let mut entries = Vec::new();
         for provider in self.offered() {
+            let recommended = gives
+                .iter()
+                .find(|(name, _)| *name == provider.name)
+                .and_then(|(_, model)| provider.model(model.as_deref()?))
+                .or_else(|| provider.default_model())
+                .map(|m| m.id.as_str());
             let listed: Vec<&Model> = provider
                 .models
                 .iter()
                 .flatten()
-                .filter(|m| m.id != crate::composer::DEFAULT)
+                .filter(|m| m.id != crate::composer::DEFAULT || recommended == Some(m.id.as_str()))
                 .collect();
             if listed.is_empty() {
                 entries.push(ModelEntry::new(
@@ -350,36 +381,41 @@ impl Providers {
                 ));
             }
             for model in listed {
-                entries.push(
-                    ModelEntry::new(
-                        provider.name.clone(),
-                        provider.title.clone(),
-                        Some(model.id.clone().into()),
-                        model.label(),
-                    )
-                    .efforts(
-                        crate::composer::levels(model.efforts.as_deref().unwrap_or_default())
-                            .cloned(),
-                    ),
-                );
+                let levels: Vec<&String> =
+                    crate::composer::levels(model.efforts.as_deref().unwrap_or_default()).collect();
+                let mut entry = ModelEntry::new(
+                    provider.name.clone(),
+                    provider.title.clone(),
+                    Some(model.id.clone().into()),
+                    model.label(),
+                )
+                .efforts(levels.iter().copied().cloned());
+                // The effort it runs with when none is chosen: what its provider said, else the
+                // middle one, as the daemon applies it.
+                if let Some(effort) = model
+                    .default_effort
+                    .as_ref()
+                    .filter(|e| levels.contains(e))
+                    .or_else(|| provider::middle_effort(&levels).copied())
+                {
+                    entry = entry.proposes(effort.clone());
+                }
+                if recommended == Some(model.id.as_str()) {
+                    entry = entry.recommended();
+                }
+                entries.push(entry);
             }
         }
         entries
     }
 
-    /// A model chosen as a `ModelChoice` shows it: the provider's default (no model, or its own
-    /// `default`) is its default model's entry, once a session said it.
+    /// A model chosen as a `ModelChoice` shows it: `None` is the provider's recommended one, which
+    /// the choice selects and marks; the provider's own `default` is the same.
     pub fn chosen(&self, provider: &str, model: Option<&str>) -> Chosen {
         let model = model
             .filter(|m| *m != crate::composer::DEFAULT)
-            .map(str::to_owned)
-            .or_else(|| {
-                self.get(provider)
-                    .filter(|p| p.offered())
-                    .and_then(|p| p.default_model())
-                    .map(|m| m.id.clone())
-            });
-        Chosen::Model(provider.to_owned().into(), model.map(Into::into))
+            .map(|m| m.to_owned().into());
+        Chosen::Model(provider.to_owned().into(), model)
     }
 
     /// Why no session can start, one sentence per provider; empty when one can, or while the
@@ -602,7 +638,11 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("Opus 5.5 (1M context)".into(), true, Some("default".into())),
+                (
+                    "Opus 5.5 (1M context)".into(),
+                    true,
+                    Some("recommended".into())
+                ),
                 ("Claude Opus 5.5".into(), false, None)
             ]
         );
