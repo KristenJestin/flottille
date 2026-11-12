@@ -357,7 +357,10 @@ impl Providers {
                         Some(model.id.clone().into()),
                         model.label(),
                     )
-                    .efforts(model.efforts.clone().unwrap_or_default()),
+                    .efforts(
+                        crate::composer::levels(model.efforts.as_deref().unwrap_or_default())
+                            .cloned(),
+                    ),
                 );
             }
         }
