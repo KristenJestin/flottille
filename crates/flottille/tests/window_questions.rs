@@ -5,6 +5,7 @@
 //! with a throwaway user. No window opens on a screen.
 
 mod common;
+mod guard;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -735,6 +736,50 @@ fn a_long_option_wraps_and_stays_in_the_card(cx: &mut TestAppContext) {
     });
     assert!(line.right() <= card.right(), "{line:?} in {card:?}");
     assert!(line.size.height > px(36.), "on several lines: {line:?}");
+}
+
+/// The three questions answered in long words: a choice with a long unbroken note, a long
+/// spaced answer, and the choices of the third left as they were.
+fn answer_three_at_length(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
+    click(format!("row-{at}-question-0-option-0"), cx);
+    settle(cx);
+    click(format!("row-{at}-note-0-add"), cx);
+    settle(cx);
+    note(page, at, 0, guard::UNBROKEN, cx);
+    write(page, at, 1, guard::SPACED, cx);
+    click(format!("row-{at}-question-2-option-0"), cx);
+    click(format!("row-{at}-question-2-option-2"), cx);
+    settle(cx);
+    click(format!("row-{at}-answer-send"), cx);
+}
+
+#[gpui_kit::test]
+fn a_long_answer_stays_inside_its_answered_card(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
+    guard::narrow(cx);
+    answer_three_at_length(&page, at, cx);
+    until(&shell, cx, "the card folds to its answers", |cx| {
+        settle(cx);
+        !has(format!("row-{at}-question-text"), cx)
+            && has(format!("row-{at}-answered-2-answer"), cx)
+    });
+    settle(cx);
+    guard::assert_stays_inside(cx, format!("row-{at}-question"));
+    // The words are the user's own: they wrap, whole.
+    let (note, spaced) = cx.update(|window, _| {
+        (
+            window.find(format!("row-{at}-answered-0-note")).bounds(),
+            window
+                .find(format!("row-{at}-answered-1-headline"))
+                .bounds(),
+        )
+    });
+    assert!(spaced.size.height > px(36.), "wrapped on lines: {spaced:?}");
+    assert!(
+        note.size.height > px(36.),
+        "the long word wraps too: {note:?}"
+    );
 }
 
 #[gpui_kit::test]
