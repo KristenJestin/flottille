@@ -1075,14 +1075,14 @@ fn a_check_s_select_opens_on_the_recommended_model_selected(cx: &mut TestAppCont
     for (key, _, _) in CHECKS {
         assert_eq!(
             label(cx, &format!("review-setting-{key}_model-model")).as_deref(),
-            Some("Claude · opus · recommended"),
+            Some("Claude · opus · recommended for Claude sessions"),
             "{key}"
         );
     }
     // The last check runs one size smaller: its recommended model is that one.
     assert_eq!(
         label(cx, "review-setting-verifier_model-model").as_deref(),
-        Some("Claude · sonnet · recommended")
+        Some("Claude · sonnet · recommended for Claude sessions")
     );
     let card = bounds(cx, "review-checks");
     let models = label(cx, "review-checks-models").unwrap();
@@ -1136,7 +1136,7 @@ fn choosing_the_recommended_model_back_clears_the_choice(cx: &mut TestAppContext
     until(&shell, cx, "the choice is cleared", |cx| {
         slot(&user, "bugs_model") == Value::Null
             && label(cx, "review-setting-bugs_model-model").as_deref()
-                == Some("Claude · opus · recommended")
+                == Some("Claude · opus · recommended for Claude sessions")
     });
     settle(cx);
     at_rest(cx);
@@ -1166,6 +1166,103 @@ fn a_review_check_chooses_its_effort(cx: &mut TestAppContext) {
     settle(cx);
     // The other checks are untouched.
     assert_eq!(slot(&user, "spec_model"), Value::Null);
+    at_rest(cx);
+}
+
+/// A user with two providers whose models the daemon listed, Claude first, with Review on.
+fn user_with_two_providers() -> User {
+    let user = User::with_fake_providers().with_env("FLOTTILLE_TEST_LIST_MODELS", "1");
+    user.provider_script(
+        "claude",
+        json!({"models": ["opus", "sonnet"], "efforts": ["low", "high"]}),
+    );
+    user.provider_script(
+        "opencode",
+        json!({"models": ["open/small", "open/medium"], "efforts": ["low", "high"]}),
+    );
+    user.call("extension.set", json!({"name": "review", "enabled": true}))
+        .unwrap();
+    eventually("the models the daemon picks", || {
+        review_listed(&user)["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["key"] == "bugs_model" && s["default"]["gives"]["claude"] == "opus")
+    });
+    user
+}
+
+#[gpui_kit::test]
+fn a_review_slot_with_no_choice_opens_on_the_first_provider_s_strongest(cx: &mut TestAppContext) {
+    let user = user_with_two_providers();
+    let (shell, cx) = review_page(&user, true, cx);
+    until(&shell, cx, "OpenCode's models are shown", |cx| {
+        settle(cx);
+        cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+        settle(cx);
+        let shown = present(cx, "review-setting-bugs_model-model-opencode-open-small");
+        cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+        settle(cx);
+        shown
+    });
+    // Each provider's strongest is marked for its own sessions; nothing chosen, the first's is
+    // selected.
+    assert_eq!(
+        label(cx, "review-setting-bugs_model-model").as_deref(),
+        Some("Claude · opus · recommended for Claude sessions")
+    );
+    assert_eq!(
+        label(cx, "review-setting-verifier_model-model").as_deref(),
+        Some("Claude · sonnet · recommended for Claude sessions")
+    );
+    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+    settle(cx);
+    assert_eq!(
+        label(cx, "review-setting-bugs_model-model-opencode-open-small").as_deref(),
+        Some("OpenCode · open/small · recommended for OpenCode sessions")
+    );
+    assert_eq!(
+        label(cx, "review-setting-bugs_model-model-claude-sonnet").as_deref(),
+        Some("Claude · sonnet")
+    );
+    assert_eq!(slot(&user, "bugs_model"), Value::Null);
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn choosing_any_provider_s_recommended_model_clears_a_review_slot(cx: &mut TestAppContext) {
+    let user = user_with_two_providers();
+    let (shell, cx) = review_page(&user, true, cx);
+    let pick = |key: &str, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+        settle(cx);
+        let row = format!("review-setting-bugs_model-model-{key}");
+        cx.update(|window, cx| window.click(row, cx));
+    };
+    until(&shell, cx, "OpenCode's models are shown", |cx| {
+        settle(cx);
+        cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+        settle(cx);
+        let shown = present(cx, "review-setting-bugs_model-model-opencode-open-small");
+        cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
+        settle(cx);
+        shown
+    });
+
+    // Pinned: a model that is not recommended.
+    pick("opencode-open-medium", cx);
+    until(&shell, cx, "the slot is pinned", |_| {
+        slot(&user, "bugs_model") == json!({"provider": "opencode", "model": "open/medium"})
+    });
+    settle(cx);
+    // OpenCode's recommended model, not the first provider's: the slot follows the rule again.
+    pick("opencode-open-small", cx);
+    until(&shell, cx, "the slot is cleared", |cx| {
+        slot(&user, "bugs_model") == Value::Null
+            && label(cx, "review-setting-bugs_model-model").as_deref()
+                == Some("Claude · opus · recommended for Claude sessions")
+    });
+    settle(cx);
     at_rest(cx);
 }
 

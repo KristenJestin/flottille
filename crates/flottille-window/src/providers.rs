@@ -350,13 +350,25 @@ impl Providers {
     /// knows them, each provider's recommended one (the model it takes when none is named)
     /// marked; a provider whose models no session said yet, by its name.
     pub fn model_entries(&self) -> Vec<ModelEntry> {
-        self.entries(&[])
+        self.entries(&[], None)
     }
 
     /// The same, the recommended model of a provider being the one `gives` names for it (a
     /// feature's own rule), its own when `gives` says none.
     pub fn model_entries_giving(&self, gives: &[(String, Option<String>)]) -> Vec<ModelEntry> {
-        self.entries(gives)
+        self.entries(gives, None)
+    }
+
+    /// The same where the rule depends on the session's provider (Review's checks): each
+    /// provider's recommended model is marked for its own sessions.
+    pub fn model_entries_per_provider(
+        &self,
+        gives: &[(String, Option<String>)],
+    ) -> Vec<ModelEntry> {
+        self.entries(
+            gives,
+            Some(&|provider: &Provider| format!("recommended for {} sessions", provider.title)),
+        )
     }
 
     /// What Flottille's judge and compactor run on, by provider: the smallest model where
@@ -387,7 +399,11 @@ impl Providers {
         self.chosen(provider, model)
     }
 
-    fn entries(&self, gives: &[(String, Option<String>)]) -> Vec<ModelEntry> {
+    fn entries(
+        &self,
+        gives: &[(String, Option<String>)],
+        mark: Option<&dyn Fn(&Provider) -> String>,
+    ) -> Vec<ModelEntry> {
         let mut entries = Vec::new();
         for provider in self.offered() {
             let recommended = recommended_of(provider, gives).map(|m| m.id.as_str());
@@ -431,7 +447,10 @@ impl Providers {
                     entry = entry.proposes(effort.clone());
                 }
                 if recommended == Some(model.id.as_str()) {
-                    entry = entry.recommended();
+                    entry = match mark {
+                        Some(mark) => entry.recommended_as(mark(provider)),
+                        None => entry.recommended(),
+                    };
                 }
                 entries.push(entry);
             }

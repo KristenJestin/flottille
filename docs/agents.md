@@ -125,10 +125,12 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   `agent_launch` (a child, a led or a handed session) starts by the same order, on its own
   provider (a child's is its parent's unless it names another).
 - **Its model** is the one asked, else the project's (`model` in its file, for the project's own
-  provider only), else the new-session setting's (for its provider), else the provider's default: the model a new session has before any is set,
-  marked `"default": true` among the models once a session said it. Its effort is the one asked,
-  else the new-session setting's (with its model), else the model's default. A provider's own choice (a value `default`) is never left to it: a new
-  session set on nothing is set to what it stands for, by its name ("The options", below).
+  provider only), else the new-session setting's (for its provider), else the provider's
+  default: the model a new session has before any is set, marked `"default": true` among the
+  models once a session said it. Its effort is the one asked, else the new-session setting's (with
+  its model), else the model's default. A provider's own choice (a value `default`) is never left
+  to it: a new session set on nothing is set to what it stands for, by its name ("The options",
+  below).
 - **The models**: what a session of the provider's agent offers in its config options (the
   `model` option's values and their names, and the `thought_level` option's for the model the
   session has, and the efforts each value says for itself in its `_meta.flottille.efforts`, as
