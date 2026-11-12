@@ -6648,6 +6648,9 @@ fn rail_rows(nodes: &[Node], open: &HashSet<String>) -> Vec<RailRow> {
 /// The height of a child's row in the rail, which the lines that tie it to its parent run over.
 const RAIL_ROW: f32 = 44.;
 
+/// The column of a row's context gauge, the same on every row so that the gauges line up.
+const GAUGE: Pixels = px(64.);
+
 /// The lines the rail draws on a row to tie the children to their parent: a child turns right
 /// into its row from the line that comes down from its parent, and that line goes on below the
 /// turn while the parent has another child under this one, past every row between them.
@@ -7546,6 +7549,7 @@ impl Render for SessionRail {
                     // The share (or the tokens used) and its bar on one line, the share before it.
                     div()
                         .id(ElementId::Name(format!("rail-context-{}", agent.id).into()))
+                        .w(GAUGE)
                         .flex()
                         .items_center()
                         .justify_end()
@@ -7647,7 +7651,9 @@ impl Render for SessionRail {
                                     cx,
                                 ))
                                 .children(runs_chip)
-                                .child(div().flex_none().flex().justify_end().child(gauge)),
+                                .child(
+                                    div().w(GAUGE).flex_none().flex().justify_end().child(gauge),
+                                ),
                         )
                         .children(said.map(|said| {
                             let said = SharedString::from(said);
