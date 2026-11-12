@@ -1236,14 +1236,17 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   choice and its note. "Something else…", Answer and `Ctrl+Enter` are as the card always had
   them, Answer once every question has a choice or words. The asks are the root's: the dock is
   the session's, not its page's, so what the user chose and wrote stays while a sub-agent's
-  conversation is shown (the dock still shows) and when the page is left and opened again. At its place in the conversation, one short line, `Asked you 4 questions ·
-  answer below`, a link that brings the focus to the card, whose ring lights once. Once the agent
-  took the answers, the dock folds away and the line becomes the card folded to the answers (each
-  question and what was chosen). Several asks waiting, the dock shows the oldest, `1 of 2 asks`
-  above it, the next sliding in once it is answered; a page opened while an ask waits (the
-  sidebar's "needs you") gives the card the focus, one asked later never takes it from the
-  composer, and once a card that held the focus is answered the next one takes it. The dock unfolds and fades in, folds away once answered; a question slides in from
-  the side of the move over `PANEL`; the dots' changes fade; the line unfolds. A message the user
+  conversation is shown (the dock still shows) and when the page is left and opened again. At its
+  place in the conversation, one short line, `Asked you 4 questions · answer below`, a link that
+  brings the focus to the card, whose ring lights once. Once the agent took the answers, the dock
+  folds away and the line becomes the card folded to the answers (each question and what was
+  chosen). Several asks waiting, the dock shows the oldest, `1 of 2 asks` above it, the next
+  sliding in once it is answered; a page opened while an ask waits (the sidebar's "needs you")
+  gives the card the focus unless the user has begun to write in the composer meanwhile, one asked
+  later never takes it from the composer, and once a card that held the focus is answered the
+  next one takes it. The dock unfolds and fades in, folds away once answered; a question, and
+  the steps above it, slide in from the side of the move over `PANEL`; the dots' changes fade;
+  the line unfolds. A message the user
   sent while the root works stays under the
   conversation, above the composer, drawn as waiting (quieter, with its pictures as small
   thumbnails, and one short line, "Queued · after this step", whose tooltip says "Sent when the
