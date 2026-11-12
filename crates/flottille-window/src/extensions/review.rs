@@ -45,12 +45,25 @@ pub const INSTRUCTIONS: &str = "Instructions for this check";
 /// How a check's select says its default: the rule is said once, under the card.
 const DEFAULT: &str = "Default";
 
+/// The two switches of when a review starts besides the user's own doors, in their order; and what
+/// the usage line adds for each one that is on.
+const DOORS: [(&str, &str); 2] = [
+    (
+        "auto_on_pull_request",
+        "It also starts when a session's pull request opens.",
+    ),
+    ("agents_start", "A session's agent may ask for one too."),
+];
+
 /// The key of the setting of the checks a review runs, and of the last line's model.
 const CHECKS: &str = "passes";
 const VERIFIER: &str = "verifier_model";
 
 /// What sets the checks a review runs.
 type SetChecks = Rc<dyn Fn(Vec<String>, &mut App)>;
+
+/// What sets a switch of when a review starts: its value, or `None` for Settings' in a project.
+type SetDoor = Rc<dyn Fn(Option<Value>, &mut App)>;
 
 /// How many characters of a check's instructions its folded line shows.
 const PREVIEW: usize = 60;
@@ -122,6 +135,32 @@ fn named(listed: &Listed, check: &str) -> String {
             || super::capitalized(check),
             |setting| setting.label.clone(),
         )
+}
+
+/// Whether the switch `key` is on in `project`, or in Settings: the project's own value, else
+/// Settings'.
+fn door_on(listed: &Listed, project: Option<&str>, key: &str) -> bool {
+    let Some(setting) = listed.settings.iter().find(|setting| setting.key == key) else {
+        return false;
+    };
+    project
+        .and_then(|project| listed.in_project(project))
+        .and_then(|side| side.settings.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| setting.value.as_bool().unwrap_or(false))
+}
+
+/// The usage line of Review's page, in Settings or in `project`: what the daemon says, and a
+/// sentence for each switch that is on there.
+pub fn usage(listed: &Listed, project: Option<&str>) -> String {
+    let mut said = listed.usage.clone();
+    for (key, adds) in DOORS {
+        if door_on(listed, project, key) {
+            said.push(' ');
+            said.push_str(adds);
+        }
+    }
+    said
 }
 
 /// What each project that sets its own checks does otherwise (`runs Security too`,
@@ -233,6 +272,7 @@ pub fn checks(
             on_line,
         )
     };
+    let doors = doors(registry, listed, project, prefix);
     let mut lines: Vec<AnyElement> = Vec::new();
     for check in &options {
         let Some(setting) = listed
@@ -375,10 +415,101 @@ pub fn checks(
     div()
         .flex()
         .flex_col()
-        .gap(space::SM)
-        .child(card)
-        .child(under("models", MODELS_LINE))
-        .child(under("rounds", ROUNDS_LINE))
+        .gap(space::LG)
+        .child(enter(
+            SharedString::from(format!("{prefix}-doors-enter")),
+            0,
+            doors,
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::SM)
+                .child(card)
+                .child(under("models", MODELS_LINE))
+                .child(under("rounds", ROUNDS_LINE)),
+        )
+        .into_any_element()
+}
+
+/// The two switches of when a review starts besides the user's own doors, one card, a line each
+/// with its label and its help line. In `project`, each is the project's, Settings' value when it
+/// sets none, and one it sets carries the dot and goes back.
+fn doors(
+    registry: &Entity<Registry>,
+    listed: &Listed,
+    project: Option<&str>,
+    prefix: &str,
+) -> AnyElement {
+    let lines: Vec<AnyElement> = DOORS
+        .iter()
+        .filter_map(|(key, _)| {
+            let setting = listed.settings.iter().find(|setting| setting.key == *key)?;
+            let global = setting.value.as_bool().unwrap_or(false);
+            let own = project
+                .and_then(|project| listed.in_project(project))
+                .and_then(|side| side.settings.get(*key))
+                .and_then(Value::as_bool);
+            let on = own.unwrap_or(global);
+            let id = format!("{prefix}-door-{key}");
+            let set: SetDoor = {
+                let (registry, name, project, setting) = (
+                    registry.downgrade(),
+                    listed.name.clone(),
+                    project.map(str::to_owned),
+                    setting.clone(),
+                );
+                Rc::new(move |value, cx| {
+                    registry
+                        .update(cx, |registry, cx| {
+                            registry.set(&name, project.as_deref(), &setting, value, cx)
+                        })
+                        .ok();
+                })
+            };
+            let switch = Switch::new(
+                SharedString::from(format!("{id}-switch")),
+                on,
+                setting.label.clone(),
+            )
+            .hint(setting.hint.clone())
+            .on_click({
+                let (set, in_project) = (set.clone(), project.is_some());
+                move |_, _, cx| {
+                    // In a project, Settings' value is no value of its own.
+                    let value = (!in_project || !on != global).then(|| json!(!on));
+                    set(value, cx)
+                }
+            });
+            Some(match project {
+                None => switch.into_any_element(),
+                Some(_) => SetHere::new(
+                    SharedString::from(id),
+                    switch,
+                    "set here",
+                    "Use Settings' value",
+                )
+                .set(own.is_some_and(|own| own != global))
+                .on_reset(move |_: &mut Window, cx: &mut App| set(None, cx))
+                .into_any_element(),
+            })
+        })
+        .collect();
+    let id = format!("{prefix}-doors");
+    Card::new()
+        .child(
+            div()
+                .id(SharedString::from(id.clone()))
+                .p(space::LG)
+                .flex()
+                .flex_col()
+                .gap(space::MD)
+                .children(lines.into_iter().enumerate().map(|(at, line)| {
+                    enter(SharedString::from(format!("{id}-line-{at}")), at, line)
+                }))
+                .test_support(),
+        )
         .into_any_element()
 }
 
