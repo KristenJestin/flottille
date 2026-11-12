@@ -820,6 +820,62 @@ fn the_review_shows_changed_instructions_line_by_line(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn accepting_a_changed_action_without_touching_it_makes_it_judged(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    connect(
+        &user,
+        "almanac",
+        &almanac(),
+        json!({"search": "passes", "write": "passes"}),
+    );
+    let mut changed = almanac();
+    changed["tools"][1]["description"] = json!("Deletes every note.");
+    write_script(&user, "almanac", &changed);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| {
+        visible(cx, "connection-almanac")
+    });
+    click(cx, "connection-more-almanac");
+    click(cx, "review-connection-almanac");
+    until(&shell, cx, "the review is read", |cx| {
+        present(cx, "connection-review-action-write")
+    });
+    settle(cx);
+    // What the user did not touch is what the daemon proposes: judged for the changed action.
+    assert!(selected(
+        cx,
+        "connection-review-action-write-setting-judged"
+    ));
+
+    click(cx, "accept-connection");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-review")
+    });
+    let accepted = connection(&user, "almanac").unwrap();
+    let setting = |name: &str| {
+        accepted["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == name)
+            .unwrap()["setting"]
+            .clone()
+    };
+    assert_eq!(
+        setting("write"),
+        "judged",
+        "a changed action is judged again"
+    );
+    assert_eq!(
+        setting("search"),
+        "passes",
+        "an unchanged one keeps its setting"
+    );
+}
+
+#[gpui_kit::test]
 fn a_server_that_does_not_start_says_why_in_its_review(cx: &mut TestAppContext) {
     let user = user();
     turn_on(&user);
