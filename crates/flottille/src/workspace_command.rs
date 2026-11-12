@@ -196,7 +196,7 @@ pub fn run(paths: &Paths, action: WorkspaceAction) -> Result<ExitCode> {
         } => {
             let removed = ask("workspace.remove", named(project, name)?)?;
             let text = format!(
-                "Removed workspace {} of {}: its worktrees and its folder.{}\n",
+                "Removed workspace {} of {}: its copies of the repositories and its folder.{}\n",
                 text(&removed, "removed"),
                 text(&removed, "project"),
                 crate::workspaces::branches_said(text(&removed, "branch"), &removed["branches"])
@@ -249,7 +249,7 @@ fn created_text(workspace: &Value) -> String {
         Some("ready") => shown.push_str("Ready.\n"),
         Some("failed") => shown.push_str(&failure_text(workspace)),
         _ => shown.push_str(&format!(
-            "The worktrees are made; the setup goes on in the background: follow it with \
+            "The copies of the repositories are made; the setup goes on in the background: follow it with \
              `flottille workspace show {} {}`.\n",
             text(workspace, "project"),
             text(workspace, "name")

@@ -303,7 +303,7 @@ slot, the judge's own code left as it is until it moves:
 ### Guidance (the compaction)
 
 The extension gives its fixed text (with the place of the guidance in it), its default guidance,
-its limit in characters, and the words that name it in a refusal ("your compactor's guidance").
+its limit in characters, and the words that name it in a refusal ("your compaction model's guidance").
 
 The core provides what `judge.rs` does today for `judge.md`, written again for any extension:
 

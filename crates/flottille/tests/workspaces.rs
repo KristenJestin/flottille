@@ -1557,7 +1557,10 @@ fn removal_refuses_a_file_outside_every_repository() {
     let (code, message) = fixture.remove("login").unwrap_err();
 
     assert_eq!(code, "refused");
-    assert!(message.contains("notes.txt is in no worktree"), "{message}");
+    assert!(
+        message.contains("notes.txt is in no repository"),
+        "{message}"
+    );
     assert!(notes.exists());
     assert!(fixture.workspace("login").join("api/.git").exists());
     assert!(fixture.show("login").is_ok());
@@ -1577,7 +1580,7 @@ fn removal_refuses_a_repository_folder_whose_git_is_gone() {
 
     assert_eq!(code, "refused");
     assert!(
-        message.contains("api/draft.txt is in no worktree"),
+        message.contains("api/draft.txt is in no repository"),
         "{message}"
     );
     assert!(api.join("draft.txt").exists());
@@ -1888,7 +1891,7 @@ fn the_command_line_says_which_branches_it_deleted_and_which_it_kept() {
     assert!(output.status.success(), "{text}");
     assert_eq!(
         text,
-        "Removed workspace login of app: its worktrees and its folder. Its branch app/login was \
+        "Removed workspace login of app: its copies of the repositories and its folder. Its branch app/login was \
          deleted in web, api: it has no commit of its own. It is kept in lib: its pull request \
          #12 is open, not merged.\n"
     );

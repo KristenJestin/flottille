@@ -474,7 +474,7 @@ async fn jira_site(site: &str, nothing: &str) -> Result<(), String> {
     let status = match acli(&["jira", "auth", "status"]).await {
         Err(Gh::Missing) => {
             return Err(
-                "acli, Atlassian's command line, is not on the daemon's PATH: install it \
+                "Flottille cannot find acli, Atlassian's command line: install it \
                  (https://developer.atlassian.com/cloud/acli/) and sign in with `acli jira auth \
                  login` to read Jira tickets; the rest of Flottille works without it"
                     .into(),
@@ -526,7 +526,7 @@ async fn viewed(key: &str, site: &str, fields: &str) -> Result<Value, String> {
     .await
     {
         Ok(output) => output,
-        Err(Gh::Missing) => return Err("acli is not on the daemon's PATH".into()),
+        Err(Gh::Missing) => return Err("Flottille cannot find acli".into()),
         Err(Gh::Failed(why)) => return Err(format!("acli jira workitem view: {why}")),
     };
     if !ok {
@@ -2018,7 +2018,7 @@ async fn list_work_items(
     .await
     {
         Ok(output) => output,
-        Err(Gh::Missing) => return Err("acli is not on the daemon's PATH".into()),
+        Err(Gh::Missing) => return Err("Flottille cannot find acli".into()),
         Err(Gh::Failed(why)) => return Err(format!("acli jira workitem search: {why}")),
     };
     if !ok {
@@ -2430,7 +2430,7 @@ async fn acli_run(args: &[&str]) -> Result<String, String> {
                 masked(&said.chars().take(300).collect::<String>())
             ))
         }
-        Err(Gh::Missing) => Err("acli is not on the daemon's PATH".into()),
+        Err(Gh::Missing) => Err("Flottille cannot find acli".into()),
         Err(Gh::Failed(why)) => Err(format!("{what}: {why}")),
     }
 }
@@ -3056,7 +3056,7 @@ async fn transition(site: &str, key: &str, asked: &TicketsCall) -> Outcome {
                 .unwrap_or("");
             Some(masked(&said.chars().take(300).collect::<String>()))
         }
-        Err(Gh::Missing) => return Outcome::Failed("acli is not on the daemon's PATH".into()),
+        Err(Gh::Missing) => return Outcome::Failed("Flottille cannot find acli".into()),
         Err(Gh::Failed(why)) => {
             // Cut or killed: whether Jira took it is not known; the status says.
             return match status_now(site, key).await {
@@ -3648,7 +3648,7 @@ async fn jira_search(query: &str, fields: &str) -> Result<(Vec<Value>, usize), S
     .await
     {
         Ok(output) => output,
-        Err(Gh::Missing) => return Err("acli is not on the daemon's PATH".into()),
+        Err(Gh::Missing) => return Err("Flottille cannot find acli".into()),
         Err(Gh::Failed(why)) => return Err(format!("acli jira workitem search: {why}")),
     };
     if !ok {

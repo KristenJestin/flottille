@@ -177,7 +177,7 @@ impl Ready {
         match self {
             Ready::Line(text) => format!("ready once a line says “{text}”"),
             Ready::Url(url) => format!("ready once {url} answers"),
-            Ready::Command(line) => format!("ready once `{line}` passes"),
+            Ready::Command(line) => format!("ready once `{line}` succeeds"),
         }
     }
 
@@ -2727,5 +2727,13 @@ line = \"serve\"
             let message = refusal(&format!("{MINIMAL}\n{twice}"));
             assert!(message.contains(key), "{message}");
         }
+    }
+
+    #[test]
+    fn a_ready_command_is_said_with_what_the_user_sees() {
+        assert_eq!(
+            Ready::Command("db ping".into()).said(),
+            "ready once `db ping` succeeds"
+        );
     }
 }

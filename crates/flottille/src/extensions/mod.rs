@@ -374,7 +374,7 @@ fn checked(kind: Kind, value: &Value) -> Result<Value, String> {
         Kind::Model { .. } => {
             let refuse = || {
                 format!(
-                    "must be a model slot such as {{provider = \"claude\", model = \"opus\", \
+                    "must be a model such as {{provider = \"claude\", model = \"opus\", \
                      effort = \"high\"}}, the model and the effort optional, not {value}"
                 )
             };

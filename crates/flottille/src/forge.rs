@@ -217,7 +217,7 @@ async fn ssh_host(host: &str) -> Result<String, String> {
             .chars()
             .take(200)
             .collect())),
-        Err(Gh::Missing) => Err(not("ssh is not on the daemon's PATH".into())),
+        Err(Gh::Missing) => Err(not("Flottille cannot find ssh".into())),
         Err(Gh::Failed(why)) => Err(not(why)),
     }
 }
@@ -654,12 +654,10 @@ pub(crate) async fn has_bitbucket_context(host: &str) -> Result<bool, String> {
 /// Whether `gh` is there and signed in: its exit code, nothing it prints.
 pub(crate) async fn signed_in() -> Result<(), String> {
     match gh(&["auth", "status", "--hostname", "github.com"]).await {
-        Err(Gh::Missing) => Err(
-            "gh, GitHub's command line, is not on the daemon's PATH: install \
+        Err(Gh::Missing) => Err("Flottille cannot find gh, GitHub's command line: install \
              it (https://cli.github.com) and sign in with `gh auth login` to see the pull \
              requests; the rest of Flottille works without it"
-                .into(),
-        ),
+            .into()),
         Err(Gh::Failed(why)) => Err(format!("gh cannot run: {why}")),
         Ok((false, _, _)) => Err(
             "gh is not signed in to github.com: run `gh auth login` to see \
@@ -775,7 +773,7 @@ pub(crate) async fn gh_json(args: &[&str]) -> Result<Value, String> {
                 masked(&said.chars().take(300).collect::<String>())
             ))
         }
-        Err(Gh::Missing) => Err("gh is not on the daemon's PATH".into()),
+        Err(Gh::Missing) => Err("Flottille cannot find gh".into()),
         Err(Gh::Failed(why)) => Err(format!("gh {shown}: {why}")),
     }
 }
@@ -3132,7 +3130,7 @@ pub(crate) async fn gh_text(args: &[&str]) -> Result<String, String> {
                 masked(&said.chars().take(300).collect::<String>())
             ))
         }
-        Err(Gh::Missing) => Err("gh is not on the daemon's PATH".into()),
+        Err(Gh::Missing) => Err("Flottille cannot find gh".into()),
         Err(Gh::Failed(why)) => Err(format!("gh {shown}: {why}")),
     }
 }
