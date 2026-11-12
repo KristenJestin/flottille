@@ -60,6 +60,12 @@ pub fn default_model<'a>(
         .or_else(|| offered.iter().copied().find(|v| *v != OWN_CHOICE))
 }
 
+/// The smallest model of each provider, in the form its agent takes it: what Flottille picks as
+/// the Auto judge and the compactor for a user who never chose one (`docs/design.md` §7.1), and
+/// what the window marks recommended for them. A provider not listed gets nothing picked: its
+/// smallest model is not known for sure.
+pub const SMALLEST: [(&str, &str); 1] = [("claude", "haiku")];
+
 /// The effort a model runs with when its provider does not say one: the middle of the levels it
 /// offers (the upper one of the two middles), `default` aside.
 pub fn middle_effort<S: AsRef<str>>(levels: &[S]) -> Option<&S> {
@@ -78,6 +84,21 @@ pub struct Settings {
     /// Whether the file says anything of the judge, a judge or `judge = "none"`: Flottille picks
     /// one only while it does not, so that a user who chose none never gets one.
     pub judge_set: bool,
+    /// What a new session starts on (`[new_session]`), when the user chose: none follows what the
+    /// provider proposes.
+    pub new_session: Option<NewSession>,
+}
+
+/// The provider, model and effort a new session starts on, as `[new_session]` holds them. The
+/// model and the effort left out are the provider's to propose.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewSession {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// What `judge = "none"` says: the user chose no judge, and Auto asks like Ask.
@@ -123,6 +144,7 @@ impl Default for Settings {
             unqualified: Vec::new(),
             judge: None,
             judge_set: false,
+            new_session: None,
         }
     }
 }
@@ -155,6 +177,7 @@ impl Settings {
             .parse()
             .map_err(|e: toml::de::Error| refuse(e.message().into()))?;
         let judge = table.remove("judge");
+        let new_session = table.remove("new_session");
         let entries: BTreeMap<String, Entry> = serde_path_to_error::deserialize(table)
             .map_err(|error| refuse(format!("{}: {}", error.path(), error.inner().message())))?;
         let mut settings = Settings {
@@ -177,6 +200,24 @@ impl Settings {
                 )));
             }
             settings.judge = Some(judge);
+        }
+        if let Some(new_session) = new_session {
+            let chosen: NewSession =
+                serde_path_to_error::deserialize(new_session).map_err(|error| {
+                    refuse(format!(
+                        "new_session.{}: {}",
+                        error.path(),
+                        error.inner().message()
+                    ))
+                })?;
+            if !known(&chosen.provider) {
+                return Err(refuse(format!(
+                    "new_session.provider: unknown provider {}: the providers are {}",
+                    chosen.provider,
+                    NAMES.join(", ")
+                )));
+            }
+            settings.new_session = Some(chosen);
         }
         for (name, entry) in entries {
             let known = NAMES.iter().find(|known| **known == name).ok_or_else(|| {
@@ -279,6 +320,32 @@ mod tests {
         );
         let key = Settings::parse("[judge]\nprovider = \"claude\"\nwho = 1\n").unwrap_err();
         assert!(key.contains("judge"), "{key}");
+    }
+
+    #[test]
+    fn what_a_new_session_starts_on_is_read_from_its_table_and_follows_the_provider_by_default() {
+        assert_eq!(Settings::default().new_session, None);
+        let settings = Settings::parse(
+            "[new_session]\nprovider = \"claude\"\nmodel = \"opus\"\neffort = \"high\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            settings.new_session,
+            Some(NewSession {
+                provider: "claude".into(),
+                model: Some("opus".into()),
+                effort: Some("high".into()),
+            })
+        );
+        let bare = Settings::parse("[new_session]\nprovider = \"codex\"\n").unwrap();
+        assert_eq!(bare.new_session.unwrap().model, None);
+        let unknown = Settings::parse("[new_session]\nprovider = \"gemini\"\n").unwrap_err();
+        assert!(
+            unknown.starts_with("providers.toml: new_session.provider"),
+            "{unknown}"
+        );
+        let key = Settings::parse("[new_session]\nprovider = \"claude\"\nwho = 1\n").unwrap_err();
+        assert!(key.contains("new_session"), "{key}");
     }
 
     #[test]

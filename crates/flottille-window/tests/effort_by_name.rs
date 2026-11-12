@@ -84,6 +84,9 @@ fn no_effort_label_in_the_window_reads_default() {
     let entry = ModelEntry::new("claude", "Claude", Some("opus".into()), "Claude Opus 5.5");
     assert_eq!(
         providers.model_entries(),
-        [entry.efforts(["low", "medium", "high", "xhigh"])]
+        [entry
+            .efforts(["low", "medium", "high", "xhigh"])
+            .recommended()
+            .proposes("high")]
     );
 }
