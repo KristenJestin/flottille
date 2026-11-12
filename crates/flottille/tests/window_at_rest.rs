@@ -1058,12 +1058,14 @@ fn the_window_draws_no_frame_at_rest_on_a_question_card_open_with_three_question
 ) {
     let (_user, id, shell, cx) = asked_three(cx);
     cx.update(|window, cx| window.click(session_id(&id), cx));
+    // Docked above the composer, one question at a time (#777).
     until(&shell, cx, "the card of the questions is there", |cx| {
         cx.update(|window, _| {
             (0..12).any(|at| {
                 window
-                    .try_find(format!("row-{at}-question-2-option-2"))
+                    .try_find(format!("row-{at}-question-0-option-1"))
                     .is_some()
+                    && window.try_find(format!("row-{at}-question-dots")).is_some()
             })
         })
     });
@@ -1095,12 +1097,14 @@ fn the_window_draws_no_frame_at_rest_on_a_question_card_folded_to_its_answers(
 ) {
     let (user, id, shell, cx) = asked_three(cx);
     cx.update(|window, cx| window.click(session_id(&id), cx));
+    // Docked above the composer, one question at a time (#777).
     until(&shell, cx, "the card of the questions is there", |cx| {
         cx.update(|window, _| {
             (0..12).any(|at| {
                 window
-                    .try_find(format!("row-{at}-question-2-option-2"))
+                    .try_find(format!("row-{at}-question-0-option-1"))
                     .is_some()
+                    && window.try_find(format!("row-{at}-question-dots")).is_some()
             })
         })
     });

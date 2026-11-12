@@ -67,7 +67,6 @@ use crate::picture_viewer::PictureViewer;
 use crate::project::removal_refused;
 use crate::project_settings::Reveal as ProjectReveal;
 use crate::providers::Providers;
-use crate::question_card::QuestionCard;
 use crate::queued::QueuedMessages;
 use crate::runs::{self, CommandList, CommandPanel, EndedFold, ended_row, rail_label};
 use crate::session_link::{
@@ -292,6 +291,8 @@ pub struct SessionPage {
     rail: Entity<SessionRail>,
     drawer: Entity<Drawer>,
     reply: Entity<Reply>,
+    /// The asks that wait for the user, docked above the composer.
+    ask_dock: Entity<crate::ask_dock::AskDock>,
     /// What the user wrote to the root while it worked, waiting under the conversation.
     queued: Entity<QueuedMessages>,
     /// The detail of one run, which follows its output.
@@ -400,6 +401,7 @@ impl SessionPage {
         });
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         let shown = opened.id.clone();
+        let ask_dock = cx.new(|_| crate::ask_dock::AskDock::new(page.clone()));
         let conversation =
             cx.new(|cx| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None, cx));
         let _status = cx.observe(&status, |this, status, cx| {
@@ -427,6 +429,7 @@ impl SessionPage {
             rail,
             drawer,
             reply,
+            ask_dock,
             queued: cx.new(|_| QueuedMessages::new(shell, opened.id.clone())),
             command_panel,
             run_drawer,
@@ -927,6 +930,7 @@ impl SessionPage {
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
         if self.opened.title != title {
             self.opened.title = title.to_owned();
+            self.ask_dock.update(cx, |_, cx| cx.notify());
             cx.notify();
         }
     }
@@ -1281,6 +1285,8 @@ impl SessionPage {
             SessionUpdate::History { events, earlier } => {
                 self.histories += 1;
                 self.read = true;
+                // The dock learns that what waits now waited at the opening.
+                self.ask_dock.update(cx, |_, cx| cx.notify());
                 for event in &events {
                     self.note_decision(event);
                 }
@@ -1656,6 +1662,53 @@ impl SessionPage {
         } else if asked_changed {
             self.refresh_conversation(cx);
         }
+        if asked_changed {
+            self.ask_dock.update(cx, |_, cx| cx.notify());
+        }
+    }
+
+    /// The asks of the root that wait for the user, oldest first, as the dock draws them: none
+    /// while a sub-agent's conversation is read.
+    pub(crate) fn asks(&self, cx: &App) -> crate::ask_dock::Asks {
+        let mut waiting = Vec::new();
+        if self.shown == self.opened.id {
+            let view = self.conversation.read(cx);
+            for &at in &view.specials {
+                if let Block::Question {
+                    seq,
+                    questions,
+                    answers,
+                    ..
+                } = &view.model.blocks()[at]
+                    && self.asking(*seq)
+                {
+                    waiting.push(crate::ask_dock::Waiting {
+                        at,
+                        seq: *seq,
+                        questions: questions.clone(),
+                        when: SharedString::from(view.model.at(at).map(clock).unwrap_or_default()),
+                        answered: answers.is_some(),
+                    });
+                }
+            }
+        }
+        waiting.sort_by_key(|w| w.at);
+        crate::ask_dock::Asks {
+            waiting,
+            title: self.opened.title.clone(),
+            read: self.read,
+        }
+    }
+
+    /// The dock of the asks that wait.
+    pub fn ask_dock(&self) -> &Entity<crate::ask_dock::AskDock> {
+        &self.ask_dock
+    }
+
+    /// The line of an ask in the conversation: the focus goes to its card in the dock.
+    pub fn summon_ask(&mut self, seq: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.ask_dock
+            .update(cx, |dock, cx| dock.summon(seq, window, cx));
     }
 
     /// The user answers the ask of `seq` from its card, one answer per question: the daemon
@@ -1684,13 +1737,7 @@ impl SessionPage {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let rows = self.conversation.read(cx).rows.clone();
-        let answer = rows.iter().find_map(|row| {
-            let row = row.read(cx);
-            matches!(*row.block, Block::Question { seq: s, .. } if s == seq)
-                .then(|| row.answer.clone())
-                .flatten()
-        });
+        let answer = self.ask_dock.read(cx).card(seq, cx).cloned();
         if let Some(answer) = answer {
             answer.update(cx, |answer, cx| answer.answered(refused, cx));
         }
@@ -1776,6 +1823,7 @@ impl SessionPage {
                     if row.read(cx).asking != asking {
                         row.update(cx, |row, cx| row.set_asking(asking, cx));
                         view.card_changed(at, cx);
+                        self.ask_dock.update(cx, |_, cx| cx.notify());
                     }
                     continue;
                 }
@@ -2085,14 +2133,36 @@ impl Render for SessionPage {
                 (false, _) => d.child(self.read_only(cx)),
             });
         let column = div()
+            .id("session-column")
             .flex_1()
             .min_w_0()
             .h_full()
             .flex()
             .flex_col()
             .child(header)
-            .child(div().flex_1().min_h_0().child(self.conversation.clone()))
-            .child(dock);
+            // The conversation keeps half the page: past that, the dock of the asks scrolls.
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(gpui_kit::relative(0.5))
+                    .child(self.conversation.clone()),
+            )
+            .child(
+                // Narrower than the composer by a step on each side: it stands on it, apart.
+                div()
+                    .id("ask-dock-frame")
+                    .flex_shrink(1.)
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .w_full()
+                    .max_w(px(780.))
+                    .mx_auto()
+                    .px(if narrow { space::XL } else { space::XXXL })
+                    .child(self.ask_dock.clone())
+                    .test_support(),
+            )
+            .child(dock)
+            .test_support();
         div()
             .id("session-page")
             .size_full()
@@ -3230,6 +3300,9 @@ impl ConversationView {
         ) {
             self.specials.push(at);
         }
+        if matches!(block, Block::Question { .. }) {
+            page.ask_dock.update(cx, |_, cx| cx.notify());
+        }
         let me = self.model.me().to_owned();
         let root = self.id == page.id();
         let when = self.model.at(at);
@@ -3890,8 +3963,6 @@ pub struct Row {
     pills: HashMap<String, Entity<Pill>>,
     /// Its question waits for the user's answer, as the daemon says: its card shows.
     asking: bool,
-    /// The blocks that answer its ask, made when the card first shows.
-    answer: Option<Entity<QuestionCard>>,
     /// The fields of its request for a vault entry, made when the card first shows.
     vault_ask: Option<Entity<crate::vault_ask::VaultAskBox>>,
     /// It is a message the user sent from the composer: being sent, refused, or recorded since.
@@ -3969,7 +4040,6 @@ impl Row {
                 icons: HashMap::new(),
                 pills: HashMap::new(),
                 asking,
-                answer: None,
                 vault_ask: None,
                 sent: None,
                 links: LinksCard::default(),
@@ -4143,11 +4213,6 @@ impl Row {
 
     pub fn block(&self) -> &Block {
         &self.block
-    }
-
-    /// The blocks that answer its ask, once its card showed.
-    pub fn answer(&self) -> Option<&Entity<QuestionCard>> {
-        self.answer.as_ref()
     }
 
     /// Its question is open, or no longer: its card unfolds or folds away.
@@ -6071,7 +6136,7 @@ impl Render for Row {
                 questions,
                 answers,
                 ..
-            } => self.render_question(*seq, questions, answers.as_deref(), window, cx),
+            } => self.render_question(*seq, questions, answers.as_deref(), cx),
             Block::Asked { moved, .. } => self.render_asked(*moved, cx),
             Block::VaultAsk(ask) => self.render_vault_ask(ask.clone(), window, cx),
             Block::Answered { .. } => div().into_any_element(),
@@ -6277,46 +6342,62 @@ impl Row {
         self.vault_ask.as_ref()
     }
 
-    /// An ask of the agent to the user, each question with what answers it: it unfolds where
-    /// it was asked while the daemon says it waits, and once the agent took the answers given
-    /// from it, folds to them (an ask answered by a message of the user folds away).
+    /// An ask of the agent to the user: while it waits, one line where it was asked, its card
+    /// being docked above the composer (`ask_dock.rs`), a link that brings the focus there; once
+    /// the agent took the answers given from the card, the card folded to them (an ask answered
+    /// by a message of the user folds away).
     fn render_question(
         &mut self,
         seq: u64,
         questions: &[flottille_core::question::Question],
         answers: Option<&[flottille_core::question::Answer]>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let p = palette(cx);
         let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
         let title = self.title(cx);
         let when = SharedString::from(self.when.map(clock).unwrap_or_default());
-        let answer = match &self.answer {
-            Some(answer) => answer.clone(),
-            None => {
-                let page = self.page.clone();
-                let session = page
-                    .upgrade()
-                    .map(|page| page.read(cx).id().to_owned())
-                    .unwrap_or_default();
-                let (at, asked) = (self.at, questions.to_vec());
-                let answer =
-                    cx.new(|cx| QuestionCard::new(at, seq, session, asked, page, window, cx));
-                self.answer = Some(answer.clone());
-                answer
-            }
+        let asked = match questions.len() {
+            1 => "Asked you a question".to_owned(),
+            n => format!("Asked you {n} questions"),
         };
-        answer.update(cx, |card, cx| {
-            card.set_answered(answers.is_some());
-            card.set_header(&title, when.clone(), cx);
+        let said = SharedString::from(format!("{asked} · answer below"));
+        let page = self.page.clone();
+        let line = div()
+            .id(id("question-line"))
+            .h(px(34.))
+            .flex()
+            .items_center()
+            .gap(space::SM)
+            .px(space::MD)
+            .rounded(px(9.))
+            .border_1()
+            .cursor_pointer()
+            .text_size(px(13.))
+            .aria_label(said)
+            .child(div().flex_none().size(px(8.)).rounded_full().bg(p.wait))
+            .child(div().flex_none().child(SharedString::from(asked)))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(p.faint)
+                    .child("· answer below"),
+            )
+            .on_click(move |_, window, cx| {
+                page.update(cx, |page, cx| page.summon_ask(seq, window, cx))
+                    .ok();
+            });
+        let line = hoverable(line, move |d, t| {
+            d.bg(p.hover.opacity(t))
+                .border_color(mix(p.line, p.wait_line, t))
+                .text_color(mix(p.mute, p.text, t))
         });
-        let open = answer;
         let answered = answers.map(|answers| {
             crate::question_card::answered_card(self.at, &title, when, questions, answers, cx)
         });
         div()
             .id(id("question"))
-            .child(presence(id("question-open"), self.asking, open))
+            .child(presence(id("question-open"), self.asking, line))
             .when_some(answered, |d, answered| {
                 d.child(presence(id("question-answered"), !self.asking, answered))
             })
