@@ -266,6 +266,10 @@ fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> 
         "That session's tree is in {} mode.\n",
         crate::judge::mode(daemon, &session.id).as_str()
     ));
+    text.push_str(&format!(
+        "That session runs on {}.\n",
+        crate::providers::agent_runs_on(daemon, &session)
+    ));
     if !questions.is_empty() {
         text.push_str(
             "\nIts open questions, asked with ask, the oldest first: each waits for the answer \

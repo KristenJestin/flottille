@@ -398,6 +398,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     } else {
         brief(daemon, &child);
     }
+    let runs = providers::agent_runs_on(daemon, &child);
     let place = match (workspace, in_main) {
         (_, true) => "main, the project folder".to_owned(),
         (Some(w), _) => format!("workspace {w}"),
@@ -405,7 +406,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     };
     if led {
         return Ok(Outcome::Done(format!(
-            "Started a session led by you, {}, in {place}. It is a real session, not your child: \
+            "Started a session led by you, {}, on {runs}, in {place}. It is a real session, not your child: \
              the user sees it under you and may talk to it, and the agent_* tools do not reach \
              it. It asks you its questions: a delivery [flottille:session-turn-ended] wakes you \
              when it asks, reports or ends, with its last message. Answer with session_send, \
@@ -416,15 +417,15 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     }
     if session {
         return Ok(Outcome::Done(format!(
-            "Started a session for the user, {}, in {place}, handed over. It is the user's, not \
-             your child: the user follows it in the window and the agent_* tools do not reach \
+            "Started a session for the user, {}, on {runs}, in {place}, handed over. It is the \
+             user's, not your child: the user follows it in the window and the agent_* tools do not reach \
              it. You hear nothing more of it unless it writes to you; you can write to it with \
              session_send.",
             named(&child)
         )));
     }
     Ok(Outcome::Done(format!(
-        "Launched {} in {place}. It works on its own: you are told when it reports, asks, \
+        "Launched {} on {runs}, in {place}. It works on its own: you are told when it reports, asks, \
          fails, is stuck or goes idle, so do not poll it. Go on with your own work, or end your \
          turn.",
         named(&child)
@@ -732,7 +733,13 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         Vec::new(),
     );
     let options = if changed {
-        format!(" Its model and effort change between its turns, before its next prompt.{dropped}")
+        let runs = crate::agents::find(daemon, &child.id)
+            .map(|child| providers::agent_next_runs_on(daemon, &child))
+            .unwrap_or_default();
+        format!(
+            " Its model and effort change between its turns, before its next prompt: it runs on \
+             {runs} from its next turn.{dropped}"
+        )
     } else {
         String::new()
     };
@@ -1015,7 +1022,12 @@ fn states(daemon: &Daemon, caller: &Agent, id: Option<String>, full: bool) -> Do
 /// One line of what a child is and does, as `agent_status` and `children-status` give it.
 pub fn line(daemon: &Daemon, agent: &Agent) -> String {
     let now = now_ms();
-    let mut parts = vec![format!("{}, {}", named(agent), doing(daemon, agent))];
+    let mut parts = vec![format!(
+        "{}, on {}, {}",
+        named(agent),
+        providers::agent_runs_on(daemon, agent),
+        doing(daemon, agent)
+    )];
     if !agent.state.is_final() {
         let last = agent.active_at.unwrap_or(agent.created_at);
         parts.push(format!(

@@ -505,7 +505,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     }
 }
 
-fn find(daemon: &Daemon, id: &str) -> Result<Agent, Failure> {
+pub fn find(daemon: &Daemon, id: &str) -> Result<Agent, Failure> {
     let mut agent = daemon
         .read(|store| store.agent(id))?
         .ok_or_else(|| Failure::new("not-found", format!("there is no agent {id}")))?;
