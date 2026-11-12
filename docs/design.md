@@ -259,14 +259,16 @@ Flottille's own tools:
   `agent_send`; a led session's to its pilot, which is woken at the turn's end and answers with
   `session_send` (the session shows as waiting on its pilot); any other root's to the user. A
   question to the user is open at once, whatever the agent does next: in the inbox, as "needs you"
-  on its session's row, as a card at its place in the conversation named after the session, with
-  a block per question (its options as rows, "Something else…" last: once picked, it becomes
+  on its session's row, as a card named after the session, docked above the composer while it
+  waits (§10, the session page), with one question shown at a time (its options as rows, "Something else…" last: once picked, it becomes
   `Something else: [field]`, the field of several lines unfolding in the row itself, right of the
   mark, focused at once, and folding away when it is let go, its words kept; a question with no
-  options keeps its field under it) and one Answer (the call's
+  options keeps its field under it) and one Answer, and at its place in the conversation one line
+  that leads to the card (the call's
   own line says `asked you: <its first line>`), and in what `session_read` gives, until the agent
   takes the answer from that card (`agent.answer`: one message quoting each question with its
-  answer, which answers that ask alone, the card then folded to the answers) or a message of the
+  answer, which answers that ask alone, the card then folded to the answers in the conversation,
+  where it was asked) or a message of the
   user written after it (which answers every question open then), or its session is replaced or
   resumed. A parent or a pilot reads a several-question ask numbered, and answers it in words.
   `ask_user` and `ask_parent`, the names it replaced, are answered for one release, routed as
@@ -1204,7 +1206,25 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a hover on a message (the user's, the agent's, another session's) shows, under it, its date and
   time and a Copy icon button (a toast says it is copied); each step the Auto judge let through
   says "allowed by the judge" (a ticket or a pull request created included), and the folded line
-  of its steps says it too; a message the user sent while the root works stays under the
+  of its steps says it too; an ask of the root to the user (`ask`, §4.3), while it waits, is
+  **docked above the composer**, always in view, never scrolled away with the conversation: its
+  card stands a step narrower than the composer on each side (it reads as its own thing standing
+  on the composer, not a part of it), and the conversation keeps at least half of the page's
+  height, the dock scrolling inside itself past that. The card shows **one question at a time**:
+  above it, Previous, `2 of 4` and a dot per question (filled once it has a choice or words, the
+  one shown longer), and Next; `←` and `→` move too while the focus is on the card and not in a
+  field. Picking an option of a single-choice question moves to the next question still
+  unanswered; a several-choice question moves on with Next. "Something else…", "+ Add a note",
+  Answer and `Ctrl+Enter` are as the card always had them, Answer once every question has a
+  choice or words. At its place in the conversation, one short line, `Asked you 4 questions ·
+  answer below`, a link that brings the focus to the card, whose ring lights once. Once the agent
+  took the answers, the dock folds away and the line becomes the card folded to the answers (each
+  question and what was chosen). Several asks waiting, the dock shows the oldest, `1 of 2 asks`
+  above it, the next sliding in once it is answered; a page opened while an ask waits (the
+  sidebar's "needs you") gives the card the focus, and one asked later never takes it from the
+  composer. The dock unfolds and fades in, folds away once answered; a question slides in from
+  the side of the move over `PANEL`; the dots' changes fade; the line unfolds. A message the user
+  sent while the root works stays under the
   conversation, above the composer, drawn as waiting (quieter, with its pictures as small
   thumbnails, and one short line, "Queued · after this step", whose tooltip says "Sent when the
   agent finishes its step"), until the root reads it between its turns and it is a message like
