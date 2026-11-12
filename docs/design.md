@@ -1028,10 +1028,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   `#123` with its checks' mark (a check, a cross or a dot: shape as well as colour); it is cut
   with an ellipsis inside the row and the whole is in a tooltip. While the session waits, the line
   says, right after the place, what it waits for in a few words (`main · waits for checks of
-  #812`, `waits for <title of the session it leads>`, `wakes at 10:42`, `out of quota until
-  13:00`, the same facts as the mark's tooltip): cut with an ellipsis inside the row, the whole
-  in the line's tooltip, unfolding and fading in when the wait begins and folding away when it
-  ends, with the row's height unchanged. The pull request is the one the
+  #812`, `waits for <title of the session it leads>` (its title as it is now, renamed or not),
+  `wakes at 10:42`, `out of quota until 13:00`, `paused, resumes when you write` for a following
+  paused because the two sessions wrote to each other alone, the same facts as the mark's
+  tooltip): cut with an ellipsis inside the row, the whole in the line's tooltip, unfolding and
+  fading in when the wait begins, fading from the old words to the new when they change, and
+  folding away when it ends, with the row's height unchanged. The pull request is the one the
   project page last read for that workspace (`workspace.forge`): the sidebar asks the forge for
   none, so a workspace whose project page was never opened in this window shows its name alone,
   and the pull request fades in when it becomes known. The mark says its words under the pointer

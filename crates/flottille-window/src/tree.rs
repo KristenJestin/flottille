@@ -11,8 +11,8 @@ use gpui_design_system::color::mix;
 use gpui_design_system::motion::{ENTER, PANEL};
 use gpui_design_system::rows::TWO_LINES;
 use gpui_design_system::{
-    Button, Fold, Icon, Item, Listing, Menu, Modal, Tie, TreeRow, fade, hoverable, meta, palette,
-    presence, presence_of, section_label, space, tipped, tree_children, tree_tie,
+    Button, Fold, Icon, Item, Listing, Menu, Modal, Tie, TreeRow, changing, fade, hoverable, meta,
+    palette, presence, presence_of, section_label, space, tipped, tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -1512,18 +1512,24 @@ impl SessionRow {
                             .items_center()
                             .gap(space::SM)
                             .min_w_0()
+                            .h(px(LINE))
                             .overflow_hidden()
                             .max_w(px(WAITS_WIDTH * waiting))
                             .opacity(waiting)
                             .child(div().flex_none().child("·"))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(waits),
-                            )
+                            .child(changing(
+                                ElementId::Name(format!("session-waits-words-{}", self.id).into()),
+                                waits.clone(),
+                                move |waits| {
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(waits)
+                                        .into_any_element()
+                                },
+                            ))
                             .test_support()
                     })),
             )

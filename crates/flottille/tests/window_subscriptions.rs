@@ -706,6 +706,103 @@ fn the_waiting_line_folds_away_once_it_stops_waiting(cx: &mut TestAppContext) {
     );
 }
 
+/// The size of what is drawn at `id` in the last frame.
+fn size_of(cx: &mut VisualTestContext, id: &str) -> Option<gpui_kit::Size<gpui_kit::Pixels>> {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .map(|found| found.bounds().size)
+    })
+}
+
+#[gpui_kit::test]
+fn the_waiting_line_unfolds_when_a_wait_begins_and_the_row_keeps_its_height(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    script(&user, pull());
+    let (lead, mcp) = lead(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        present(cx, &format!("session-{lead}"))
+    });
+    settle(cx);
+    assert!(
+        !present(cx, &format!("session-waits-{lead}")),
+        "it waits for nothing"
+    );
+    let height = size_of(cx, &format!("session-{lead}")).unwrap().height;
+
+    subscribe(&mcp, json!(["checks"]));
+    until(&shell, cx, "the line begins to unfold", |cx| {
+        present(cx, &format!("session-waits-{lead}"))
+    });
+    let mut widths = Vec::new();
+    for _ in 0..30 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        widths.push(size_of(cx, &format!("session-waits-{lead}")).unwrap().width);
+        assert_eq!(
+            size_of(cx, &format!("session-{lead}")).unwrap().height,
+            height,
+            "the row is as high as before, all along"
+        );
+    }
+    let last = *widths.last().unwrap();
+    assert!(last > px(0.), "it ends drawn: {widths:?}");
+    assert!(
+        widths.iter().any(|&w| w > px(0.) && w < last),
+        "partway it is between nothing and its width: {widths:?}"
+    );
+    assert!(
+        widths.windows(2).all(|pair| pair[0] <= pair[1]),
+        "it only unfolds: {widths:?}"
+    );
+}
+
+/// How many frames in a row, 16 ms apart, the window asks for until it is at rest.
+fn frames_until_rest(cx: &mut VisualTestContext) -> usize {
+    let mut frames = 0;
+    for _ in 0..60 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+            break;
+        }
+        frames += 1;
+    }
+    frames
+}
+
+#[gpui_kit::test]
+fn the_waiting_words_fade_into_the_next_when_what_it_waits_for_changes(cx: &mut TestAppContext) {
+    let user = user();
+    script(&user, pull());
+    let (lead, mcp) = lead(&user);
+    subscribe(&mcp, json!(["checks"]));
+    let (shell, cx) = window(&user, cx);
+    let says = |cx: &mut VisualTestContext| label(cx, &format!("session-waits-{lead}"));
+    until(&shell, cx, "the row says what it waits for", |cx| {
+        says(cx).is_some()
+    });
+    let first = says(cx).unwrap();
+    // The first answers that follow, such as the pull request's, move things of their own.
+    frames_until_rest(cx);
+    until(&shell, cx, "the next answer", |cx| says(cx).is_some());
+    frames_until_rest(cx);
+    assert_eq!(frames_until_rest(cx), 0, "the words rest");
+
+    // Asking for another event replaces what it listens to: the words change under the row.
+    subscribe(&mcp, json!(["review"]));
+    until(&shell, cx, "the words change", |cx| {
+        says(cx).is_some_and(|now| now != first)
+    });
+    // They do not swap at once: they fade back in over a few frames, then rest.
+    let frames = frames_until_rest(cx);
+    assert!(frames >= 4, "the words fade over HOVER, {frames} frames");
+}
+
 #[gpui_kit::test]
 fn a_repository_that_is_the_project_folder_is_named_by_the_project_in_the_rail(
     cx: &mut TestAppContext,

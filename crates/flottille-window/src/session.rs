@@ -141,7 +141,7 @@ pub const AGENT_ENDED: &str = "the session ended before the agent read it";
 pub const NEVER_READ: &str = "the agent ended before it read it";
 pub const NOT_INTERRUPTED: &str = "The turn was not interrupted";
 /// The state an agent of the tree is drawn with, from what the daemon says of it: only a root can
-/// need the user; a child waiting on its parent is waiting, in grey.
+/// need the user; a child waiting on its parent is waiting, in the colour of what waits outside.
 pub fn state_of(agent: &TreeAgent) -> AgentState {
     match agent.state.as_str() {
         "failed" => AgentState::Failed,
