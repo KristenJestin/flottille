@@ -3802,6 +3802,7 @@ impl Render for ConversationView {
                         .px(if narrow { space::LG } else { space::XXL })
                         .pt(if narrow { space::XL } else { space::XXL })
                         .text_color(p.faint)
+                        .aria_label("Nothing said yet.")
                         .child("Nothing said yet.")
                         .test_support(),
                 )
