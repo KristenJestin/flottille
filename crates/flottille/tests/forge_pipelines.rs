@@ -1348,3 +1348,277 @@ fn the_event_of_a_run_carries_the_link_of_the_run() {
         assert_eq!(served.data["link"], link, "{}", served.data);
     }
 }
+
+/// An agent started in the project folder, not in a workspace, in Full mode: its id and session.
+fn agent_in_main(user: &User) -> (String, Mcp) {
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = server_of(user, opened);
+    set_mode(user, &id, "full");
+    (id, Mcp::initialize(&url, &authorization))
+}
+
+/// The project folder's repository `path`, on a branch `develop` that it has now.
+fn folder_on_develop(user: &User, path: &str) {
+    user.git(
+        &user.path("work/app").join(path),
+        &["checkout", "--quiet", "-b", "develop"],
+    );
+}
+
+/// The fake `bkt` with the run `triggered` (43) as the forge holds it once started, on `branch`;
+/// `steps` is what `bkt pipeline view` needs to read it back.
+fn bkt_run_on(user: &User, branch: &str) {
+    let mut script = bkt_script();
+    script["pipelines"]["acme/api"]
+        .as_array_mut()
+        .unwrap()
+        .insert(
+            0,
+            json!({"uuid": "{43}", "build_number": 43, "state": {"name": "PENDING"},
+            "trigger": {"name": "MANUAL"}, "created_on": "2026-11-01T11:00:00.000000+00:00",
+            "target": {"type": "pipeline_ref_target", "ref_type": "branch", "ref_name": branch,
+                "selector": {"type": "custom", "pattern": "nightly"}}}),
+        );
+    script["steps"]["acme/api"]["43"] = json!([]);
+    user.bkt_script(script);
+}
+
+/// The fake `gh` with the run `dispatched` (78) as GitHub holds it once started, on `branch`.
+fn gh_run_on(user: &User, branch: &str) {
+    let mut script = gh_script();
+    script["run_views"]["acme/web"]["78"] = json!({"databaseId": 78, "workflowName": "E2E",
+        "status": "in_progress", "conclusion": "", "headBranch": branch,
+        "url": "https://github.com/acme/web/actions/runs/78", "jobs": []});
+    user.gh_script(script);
+}
+
+/// A run of `repository`, in Full mode, which asks nothing of the user.
+fn run_now(mcp: &Mcp, repository: &str, pipeline: &str, more: Value) -> Answer {
+    let mut args = json!({"action": "run", "repository": repository, "pipeline": pipeline,
+        "follow": false});
+    for (key, value) in more.as_object().into_iter().flatten() {
+        args[key] = value.clone();
+    }
+    mcp.call("forge", args)
+}
+
+#[test]
+fn a_run_from_a_workspace_starts_on_the_workspace_s_branch_and_says_it() {
+    let (user, id, mcp) = setup();
+    set_mode(&user, &id, "full");
+    bkt_run_on(&user, "app/login");
+    gh_run_on(&user, "app/login");
+
+    let answer = run_now(&mcp, "api", "custom: nightly", json!({}));
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("on app/login, the branch your workspace is on"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        bkt_writes(&user)[0].contains("--ref app/login"),
+        "{:?}",
+        bkt_writes(&user)
+    );
+
+    let answer = run_now(&mcp, "web", "e2e.yml", json!({}));
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("on app/login, the branch your workspace is on"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn a_run_named_on_a_branch_starts_there_and_says_it() {
+    let (user, id, mcp) = setup();
+    set_mode(&user, &id, "full");
+    bkt_run_on(&user, "release/1");
+    gh_run_on(&user, "release/1");
+
+    let answer = run_now(
+        &mcp,
+        "api",
+        "custom: nightly",
+        json!({"branch": "release/1"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("on release/1, the branch you named"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        bkt_writes(&user)[0].contains("--ref release/1"),
+        "{:?}",
+        bkt_writes(&user)
+    );
+
+    let answer = run_now(&mcp, "web", "e2e.yml", json!({"branch": "release/1"}));
+    assert!(
+        answer.text.contains("on release/1, the branch you named"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn a_run_in_the_project_folder_says_it_runs_on_the_folder_s_branch() {
+    let user = User::with_fake_agent().with_fake_gh().with_fake_bkt();
+    fixture(&user);
+    folder_on_develop(&user, "api");
+    bkt_run_on(&user, "develop");
+    let (_, mcp) = agent_in_main(&user);
+
+    let answer = run_now(&mcp, "api", "custom: nightly", json!({}));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(
+            "on develop, the branch the project folder is on: name branch to run another"
+        ),
+        "{}",
+        answer.text
+    );
+    assert!(
+        bkt_writes(&user)[0].contains("--ref develop"),
+        "{:?}",
+        bkt_writes(&user)
+    );
+}
+
+#[test]
+fn a_run_in_the_project_folder_on_the_base_branch_with_a_pull_request_of_its_own_is_refused_naming_its_branch()
+ {
+    let user = User::with_fake_agent().with_fake_gh().with_fake_bkt();
+    fixture(&user);
+    folder_on_develop(&user, "api");
+    let mut script = bkt_script();
+    script["pulls"] = json!({"acme/api": [{
+        "id": 12, "title": "Add the login page", "state": "OPEN",
+        "source": {"branch": {"name": "fix/login"}, "commit": {"hash": "abc1234"},
+            "repository": {"slug": "", "full_name": "acme/api"}},
+        "destination": {"branch": {"name": "develop"},
+            "repository": {"slug": "", "full_name": "acme/api"}},
+        "links": {"html": {"href": "https://bitbucket.org/acme/api/pull-requests/12"}}}]});
+    script["api"] = json!({"/repositories/acme/api/pullrequests/12":
+        {"id": 12, "state": "OPEN", "participants": []},
+        "/repositories/acme/api/pullrequests/12/comments": {"values": []}});
+    user.bkt_script(script);
+    let (_, mcp) = agent_in_main(&user);
+    // Before it has a pull request of its own, nothing is refused: the folder's branch is said.
+    let before = run_now(&mcp, "api", "custom: nightly", json!({}));
+    assert!(!before.error, "{}", before.text);
+    let writes = bkt_writes(&user).len();
+    let subscribed = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "repository": "api", "number": 12, "events": ["merged"]}),
+    );
+    assert!(!subscribed.error, "{}", subscribed.text);
+
+    let answer = run_now(&mcp, "api", "custom: nightly", json!({}));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(
+            "you are in the project folder, on develop; your pull request #12 is on fix/login: \
+             name branch \"fix/login\""
+        ),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_writes(&user).len(), writes, "nothing was sent");
+    // Naming its branch, or the base on purpose, is what it was told to do.
+    let named = run_now(
+        &mcp,
+        "api",
+        "custom: nightly",
+        json!({"branch": "fix/login"}),
+    );
+    assert!(!named.error, "{}", named.text);
+    let base = run_now(&mcp, "api", "custom: nightly", json!({"branch": "develop"}));
+    assert!(!base.error, "{}", base.text);
+}
+
+#[test]
+fn a_run_the_forge_started_on_another_branch_is_stopped_and_said() {
+    let (user, id, mcp) = setup();
+    set_mode(&user, &id, "full");
+    // Bitbucket started the run on develop, not on the branch asked.
+    bkt_run_on(&user, "develop");
+
+    let answer = run_now(&mcp, "api", "custom: nightly", json!({}));
+
+    assert!(answer.error, "{}", answer.text);
+    for said in ["app/login", "develop", "#43", "asked to stop"] {
+        assert!(answer.text.contains(said), "{said:?} in {}", answer.text);
+    }
+    assert!(
+        bkt_writes(&user)
+            .iter()
+            .any(|call| call.contains("/pipelines/{43}/stopPipeline")),
+        "{:?}",
+        bkt_writes(&user)
+    );
+    // GitHub too; and a run that is not followed.
+    gh_run_on(&user, "main");
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "run", "repository": "web", "pipeline": "e2e.yml"}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    for said in ["app/login", "main", "78", "asked to stop"] {
+        assert!(answer.text.contains(said), "{said:?} in {}", answer.text);
+    }
+    assert!(
+        gh_calls(&user).contains(&"run cancel 78 -R github.com/acme/web".to_owned()),
+        "{:?}",
+        gh_calls(&user)
+    );
+    assert!(
+        user.call("subscription.list", json!({})).unwrap()["subscriptions"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "a run on another branch is not followed"
+    );
+}
+
+#[test]
+fn the_bkt_call_passes_the_branch_as_ref() {
+    let (user, id, mcp) = setup();
+    set_mode(&user, &id, "full");
+    bkt_run_on(&user, "release/1");
+
+    let answer = run_now(&mcp, "api", "default", json!({"branch": "release/1"}));
+    assert!(!answer.error, "{}", answer.text);
+    // With variables the call is the API's, whose body names the branch as `ref_name`.
+    let answer = run_now(
+        &mcp,
+        "api",
+        "custom: deploy-preview",
+        json!({"branch": "release/1", "variables": [{"key": "PREVIEW_SEED", "value": "7"}]}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+
+    let writes = bkt_writes(&user);
+    assert!(
+        writes[0].starts_with("pipeline run ") && writes[0].contains("--ref release/1"),
+        "{writes:?}"
+    );
+    assert!(
+        writes[1].contains("\"ref_name\":\"release/1\"")
+            && writes[1].contains("\"ref_type\":\"branch\""),
+        "{writes:?}"
+    );
+}
