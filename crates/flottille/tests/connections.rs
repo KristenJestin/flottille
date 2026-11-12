@@ -2141,13 +2141,11 @@ fn browse(address: &str) -> (u16, Option<String>, String) {
         .nth(1)
         .and_then(|code| code.parse().ok())
         .unwrap_or(0);
-    let location = head
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("location")
-                .then(|| value.trim().to_owned())
-        });
+    let location = head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("location")
+            .then(|| value.trim().to_owned())
+    });
     (status, location, body.to_owned())
 }
 
@@ -2410,10 +2408,7 @@ fn a_refused_refresh_asks_the_user_to_sign_in_again() {
     );
     let list = user.run(&["connection", "list"]);
     let list = String::from_utf8_lossy(&list.stdout);
-    assert!(
-        list.contains("flottille connection login notes"),
-        "{list}"
-    );
+    assert!(list.contains("flottille connection login notes"), "{list}");
 
     // Signed in again from the command line, the connection is ready as the user accepted it.
     change_oauth(&user, |oauth| oauth["refresh"] = json!("ok"));
@@ -2561,10 +2556,7 @@ fn no_token_reaches_an_agent_or_a_log() {
             "inbox.list".to_owned(),
             user.call("inbox.list", json!({})).unwrap().to_string(),
         ),
-        (
-            "the agent's tools".to_owned(),
-            format!("{:?}", mcp.tools()),
-        ),
+        ("the agent's tools".to_owned(), format!("{:?}", mcp.tools())),
     ];
     // The daemon's log, its store and every file of its own.
     for folder in ["state", "config", "data", "runtime"] {

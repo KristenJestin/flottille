@@ -364,8 +364,7 @@ fn http(script_path: &str, log: &Option<String>, port_file: &str) {
                 );
             }
             if path != "/mcp" {
-                let answer =
-                    issuer.answer(oauth, &base, &method, path, query, &body, log, &reply);
+                let answer = issuer.answer(oauth, &base, &method, path, query, &body, log, &reply);
                 let _ = stream.write_all(answer.as_bytes());
                 continue;
             }
@@ -540,15 +539,13 @@ impl Issuer {
                 let field = |key: &str| asked[key].as_str().unwrap_or_default().to_owned();
                 let grant = field("grant_type");
                 let ok = match grant.as_str() {
-                    "authorization_code" => {
-                        self.codes
-                            .remove(&field("code"))
-                            .is_some_and(|(challenge, redirect, resource)| {
-                                challenge == s256(&field("code_verifier"))
-                                    && redirect == field("redirect_uri")
-                                    && resource == field("resource")
-                            })
-                    }
+                    "authorization_code" => self.codes.remove(&field("code")).is_some_and(
+                        |(challenge, redirect, resource)| {
+                            challenge == s256(&field("code_verifier"))
+                                && redirect == field("redirect_uri")
+                                && resource == field("resource")
+                        },
+                    ),
                     "refresh_token" => {
                         oauth["refresh"] != "refused"
                             && self.refresh.remove(&field("refresh_token")).is_some()
