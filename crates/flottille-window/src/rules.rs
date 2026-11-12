@@ -699,19 +699,16 @@ impl Render for RulesEditor {
         let project_part = self.project.is_some().then(|| {
             let shown = self.shown.clone();
             let alone = shown.as_ref().is_some_and(|shown| shown.alone);
-            let global = shown.as_ref().map(|shown| {
-                // The same thing, the same name, whoever wrote what it says.
-                ("Rules for every project", shown.global.clone())
-            });
+            // The same thing, the same name, whoever wrote what it says and whether or not the
+            // daemon has sent it yet: the fold never says another name while it waits.
+            const GLOBAL: &str = "Rules for every project";
+            let global = shown.as_ref().map(|shown| shown.global.clone());
             let open = self.global_open;
             let turned = turning(id("global-chevron"), open, window, cx);
             let toggle = hoverable(
                 div()
                     .id(id("global-toggle"))
-                    .aria_label(match &global {
-                        Some((name, _)) => format!("{name}, read only"),
-                        None => "Global rules".to_owned(),
-                    })
+                    .aria_label(format!("{GLOBAL}, read only"))
                     .flex()
                     .items_center()
                     .gap(space::XS)
@@ -720,10 +717,7 @@ impl Render for RulesEditor {
                     .child(icon(Icon::Chevron).size(px(12.)).with_transformation(
                         Transformation::rotate(radians(-std::f32::consts::FRAC_PI_2 * turned)),
                     ))
-                    .child(match &global {
-                        Some((name, _)) => SharedString::from(*name),
-                        None => SharedString::from("Global rules"),
-                    })
+                    .child(SharedString::from(GLOBAL))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_global(cx))),
                 move |d, t| d.text_color(gpui_design_system::color::mix(p.faint, p.text, t)),
             );
@@ -745,7 +739,7 @@ impl Render for RulesEditor {
                         .text_size(px(12.5))
                         .line_height(px(19.))
                         .text_color(p.mute)
-                        .child(global.map(|(_, text)| text).unwrap_or_default())
+                        .child(global.unwrap_or_default())
                         .test_support(),
                 )
                 .child(div().flex().child(
