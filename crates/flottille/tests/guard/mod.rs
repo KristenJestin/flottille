@@ -8,7 +8,7 @@
 //! `.test_support()`, so that the guard sees it.
 #![allow(dead_code)]
 
-use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
 use gpui_kit::{ElementId, VisualTestContext, Window, px, size};
 
 /// The width of the window the guard's tests draw in.
@@ -58,7 +58,24 @@ pub fn escapes(window: &mut Window, id: impl Into<ElementId>) -> Vec<String> {
 pub fn assert_stays_inside(cx: &mut VisualTestContext, id: impl Into<ElementId>) {
     let id = id.into();
     let (found, escaped) = cx.update(|window, _| {
+        // Observed under a path of its own or only through its parts: say what is there.
+        let known: Vec<String> = window
+            .elements()
+            .iter()
+            .filter_map(|e| e.path().last().map(|id| format!("{id:?}")))
+            .filter(|name| !name.contains("glyph:") && !name.contains("enter-"))
+            .collect();
+        assert!(
+            known.iter().any(|name| *name == format!("{id:?}")),
+            "{id:?} is not drawn; the rows drawn are: {}",
+            known.join(" ")
+        );
         let found = window.within(id.clone()).elements().len();
+        if std::env::var_os("GUARD_DUMP").is_some() {
+            for below in window.within(id.clone()).elements() {
+                eprintln!("GUARD {:?} {:?}", below.path().last(), below.bounds());
+            }
+        }
         (found, escapes(window, id.clone()))
     });
     assert!(

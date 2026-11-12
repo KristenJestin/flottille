@@ -5884,12 +5884,14 @@ impl Render for Row {
                     .child(div().flex_none().child(SharedString::from(kind.clone())))
                     .child(
                         div()
+                            .id(id("notice-text"))
                             .min_w_0()
                             // A session's title is one line, cut; a failure's reason is whole.
                             .when(kind == STARTED_SESSION_KIND, |d| {
                                 d.overflow_hidden().whitespace_nowrap().text_ellipsis()
                             })
-                            .child(SharedString::from(text.clone())),
+                            .child(SharedString::from(text.clone()))
+                            .test_support(),
                     )
                     .test_support()
                     .into_any_element();

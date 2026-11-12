@@ -70,6 +70,15 @@ fn script() -> Value {
                     {"label": "One initial commit"}]}
             ]}}},
             {"say": "Asked."}]},
+        {"when": "long ask", "do": [
+            {"mcp": {"tool": "ask", "arguments": {"questions": [
+                {"question": format!("{} {}", guard::UNBROKEN, guard::SPACED), "options": [
+                    {"label": &guard::UNBROKEN[..58], "description": guard::SPACED},
+                    {"label": &guard::SPACED[..58]}]},
+                {"question": guard::SPACED, "multiple": true, "options": [
+                    {"label": "A"}, {"label": &guard::UNBROKEN[..58]}]}
+            ]}}},
+            {"say": "Asked."}]},
         {"when": "Drop it", "do": [{"say": "Dropped."}]},
         {"when": "Export orders", "do": [{"say": "Shipping."}]}
     ]})
@@ -780,6 +789,22 @@ fn a_long_answer_stays_inside_its_answered_card(cx: &mut TestAppContext) {
         note.size.height > px(36.),
         "the long word wraps too: {note:?}"
     );
+}
+
+#[gpui_kit::test]
+fn a_long_question_stays_inside_its_open_card(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "long ask");
+    let (shell, page, cx) = open_session(&user, &id, cx);
+    guard::narrow(cx);
+    until(&shell, cx, "the card", |cx| {
+        questions(&page, cx)
+            .first()
+            .is_some_and(|(at, _)| card_shows(*at, cx))
+    });
+    settle(cx);
+    let at = questions(&page, cx)[0].0;
+    guard::assert_stays_inside(cx, format!("row-{at}-question"));
 }
 
 #[gpui_kit::test]
