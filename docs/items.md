@@ -24,7 +24,7 @@ tracker.
 | Table | What |
 |---|---|
 | `items` | One row per pull request or ticket: `project`, `kind` (`pull`, `ticket`), `source` (`github`, `bitbucket`, `jira`), `repository` (the project's path of it; empty for Jira), `key` (its number, or its Jira key), `title`, `state`, `author`, `assignees`, `labels`, `url`, `updated_at` (when the forge says it last changed, kept in RFC 3339 UTC, `2026-11-01T10:00:00Z`, whatever form the source writes it in, so that the newest sorts first), `seen_at` (when Flottille last read it, in ms), `mine`, and `details` (JSON) |
-| `item_checks` | The checks of a pull request, in order: `name`, `state` (`passing`, `failing`, `pending`, `skipped`), `started_at`, `ended_at`, `link`. The CI moves without the pull request's `updated_at`, so it is kept beside it |
+| `item_checks` | The checks of a pull request, in order: `name`, `state` (`passing`, `failing`, `pending`, `skipped`), `started_at`, `ended_at`, `link`, `outcome` (how a failing check ended, in the forge's own word lowercased: `failure`, `error`, `startup_failure`, `cancelled`, `stopped`, `timed_out`…; none otherwise). The CI moves without the pull request's `updated_at`, so it is kept beside it |
 | `fetch_cursors` | Per project and source (`kind`, `target`: a repository's path, or `tracker`): `cursor` (when the last complete round started), `round_at` (when the last round started), `failures` (in a row), `problem` (why the last one failed), `first_at` (when its first round started) and `note` (what the last round could not read: a list cut at its cap, `mine` unknown) |
 
 - **`state`** is `open`, `draft`, `merged` or `closed` for a pull request, `open` or `closed` for

@@ -604,9 +604,9 @@ pending requests.
   those and that a run started on its branch outside them is followed by `run`, not by the
   subscription, and each run the agent already follows on that branch (`You already follow the
   run #43 of api (custom: nightly on app/login): its end wakes you on its own.`): a short
-  `default` pipeline that ends first no longer hides a long custom one. `checks` delivers how many passed and failed, with
+  `default` pipeline that ends first no longer hides a long custom one. `checks` delivers how many passed and failed (the CI's own failures and the stopped ones counted apart), with
   for each failed job (three at most, the others counted) its name, its duration and the line
-  that says why it failed, the end of its log being in `show` ([`forges.md`](forges.md), "A wake about failed checks is a summary"); `review` and `comment` their author, their
+  that says what kind of failure it was (the code's, the CI's, stopped, timed out) and why, the end of its log being in `show` ([`forges.md`](forges.md), "A wake about failed checks is a summary"); `review` and `comment` their author, their
   state and an excerpt (200 characters, on one line); `approved` who approved and the checks as they
   stand, in one line (`checks: 12 passed`, `checks still running`, `checks: 2 failed`), so that the
   agent knows whether it may merge without another read. The events are those of the daemon's rounds

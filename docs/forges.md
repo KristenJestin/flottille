@@ -854,9 +854,39 @@ The end of each failed job's log is in `forge` `show` of the pull request.
   (`... ok`, `0 failed`, `Compiling thiserror`), nor is the runner's `##[error]Process completed
   with exit code N`, which says nothing of why. The line is cut at 160 characters, and masked as
   every line of a log is. A job whose log cannot be read says `no log:` and why, whole.
+- **The line says first what kind of failure it was** ("What kind of failure it was" below), and
+  the first line counts them apart: `The checks ended: 3 passed, 1 failed, 1 CI failure, 1 stopped.`
+  (`failed` is the code's and the timeouts; the others are said only when there are some).
 - **The details are `forge` `show`**, which gives the end of every failed job's log as before.
   The wake gives, under each failed job whose log was read, the same call that reads the whole
   log (`Read the whole log with forge {"action": "run_logs", …}.`, "The whole log" above).
+
+### What kind of failure it was
+
+An agent woken by "failed" went to open the run to learn that the runner had failed, not its
+code. Each failed job's line says it, before any reason, in the same words for Bitbucket Cloud,
+Bitbucket Data Center and GitHub, in the wake and in `forge` `show` (which gives no log of a job
+that was stopped or timed out):
+
+| It ended… | The line says |
+|---|---|
+| in the code (a step or a job failed; Bitbucket `FAILED`, GitHub `failure`, anything not below) | its error line, as before |
+| in the CI itself (Bitbucket `ERROR` or a step in `ERROR`, a pipeline that ended outside any step; GitHub `startup_failure`, `action_required`) | `the CI failed, not the code: <what the forge says>; run it again (forge step … do: rerun)` |
+| stopped (Bitbucket `STOPPED` or `CANCELLED`, GitHub `cancelled`) | `stopped, not failed`, then `, by <who>` when the forge says who |
+| out of time (GitHub `timed_out`) | `timed out after <duration>` (`timed out` when the forge gave no times) |
+
+- **Read from the check's own status first** (`item_checks.outcome`, the forge's word lowercased),
+  which is all Bitbucket Data Center gives. **Bitbucket Cloud then refines it with the build**
+  the log is read from (`bkt pipeline view`): a failed status whose build has a step in `ERROR` is
+  the CI's (`the step test ended in error`); one whose build has no failed step is the CI's too
+  (`the pipeline #31 ended outside any step`), where it said `no log: the pipeline #31 has no
+  failed step`; a stopped one says who when the pipeline does (`state.result.terminator.display_name`,
+  **assumed** from Bitbucket's API, the maintainer checks it on his Bitbucket). The head counts
+  the first listed jobs by what the build said, the others by their status.
+- **`run it again`** is the words of the issue. `step … do: rerun` is refused on Bitbucket
+  ("The CI family"): `forge` `checks` is what re-runs a Bitbucket build there.
+- **Not the code, not read**: a GitHub job that was stopped, timed out or failed to start has no
+  failing command, so its log is not asked for.
 
 ## What Flottille posts is recorded
 
