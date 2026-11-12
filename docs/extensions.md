@@ -845,7 +845,7 @@ does not ask for a new review: the server is the same. A connection for one proj
 open question ("Open questions").
 
 **The user's door only**, as `extension.set` is: the window, `flottille connection …` and the
-methods `connection.list`, `.add`, `.edit`, `.remove`, `.review` and `.accept`. No tool of an agent
+methods `connection.list`, `.add`, `.edit`, `.remove`, `.review`, `.accept` and `.login`. No tool of an agent
 declares or edits a connection: a command is run with the
 user's rights, where no gate looks. The file is in Flottille's own folders, which no tool writes.
 A connection's name is lower-case letters, digits and `_`, 24 at most; the tool is `conn_<name>`,
@@ -999,6 +999,32 @@ action and the arguments of a call, never what the server then does with the mac
 not read the arguments for paths or addresses. A server that is wrong, compromised or just
 powerful can act as the user, and no mode changes that; this is Full mode's limit
 (`design.md` §7.1), and the reason the user installs only what they would run as a CLI.
+
+**Signing in with OAuth** (#674). A URL connection whose server answers `401` until it is given
+an access token (Atlassian's Rovo is one) signs in once in the user's browser, as the MCP
+specification's authorization says (`reference/mcp-authorization.md`, revision 2026-07-28, what
+is followed and what is left out): `flottille connection login <name>`, or the connection's
+**Sign in** in the window (#672). The daemon reads the server's challenge, its protected resource
+metadata (RFC 9728) and its authorization server's metadata (RFC 8414, OpenID Connect discovery);
+it uses the `client_id` the user declared, or registers itself (RFC 7591) when the authorization
+server lets it; the authorization code comes with PKCE `S256`, `state` and the `resource`
+(RFC 8707) to a one-shot loopback redirect on `127.0.0.1` and a port the system picks, which waits
+five minutes; a redirect with another `state` is refused and its code never exchanged. The
+browser is opened by the client the user asked from, with the system's default handler.
+
+- **The tokens are a vault entry bound to the connection** (`vault.md`, "Bound to one use"),
+  `<name>.oauth`: never in a file nor the store, never shown, each of them masked from the
+  moment it is received. The server is reached with `Authorization: Bearer` on every request.
+- **Refreshed before they expire**: an access token that expires within a minute is refreshed as
+  the server starts, and a running server whose token comes within that minute is started again,
+  with the refreshed one, before the next call.
+- **A refused refresh signs the connection out**: its tokens are removed, its tool leaves every
+  session as a cut-off's does (with the `tools` delivery), it is **signed out** in
+  `connection.list`, and an inbox item asks the user to sign in again
+  (`connection.signed_out`). Signing in gives the tool back as the user accepted it: the pin is
+  the server's, not the sign-in's, and no review is asked.
+- Not signed in, the server's `401` makes a review or a call fail saying to sign in.
+  `client_id` is not part of what trust is given to: changing it asks for no review.
 
 **As built (#560, the daemon).** The frame gained `Scope::Global` (no switch nor setting of a
 project: a project's `[extensions.connections]` is refused), `declared` (the extension's own

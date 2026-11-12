@@ -511,21 +511,33 @@ door alone reaches these methods: no tool of an agent does.
 
 Connections' own (`docs/extensions.md`, "Connections"), the user's door alone: no tool of an agent
 reaches them. A connection is answered as its declaration (`name`, `about`, `enabled`, `command`
-or `url`, `env`, `headers`, `only`, `except`) with `tool`, `state` (`off`, `awaiting review`, `cut
-off` or `ready`), `review_due`, `cut_off` (what changed, or `null`), `running`, `failing` (why its
+or `url`, `env`, `headers`, `only`, `except`, `client_id`) with `tool`, `state` (`off`, `awaiting
+review`, `cut off`, `signed out` or `ready`), `review_due`, `cut_off` (what changed, or `null`),
+`signed_out` (why it must sign in again, or `null`), `running`, `failing` (why its
 server did not start, or `null`), `server` (`{name, version}` as accepted) and `actions` (`[{name,
 setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
 
 - `connection.list` answers `{"enabled", "error", "connections"}`: Connections' switch, why
   `extensions.toml` cannot be used, and each connection.
-- `connection.add {name, about, command | url, env?, headers?, only?, except?, enabled?}` declares
+- `connection.add {name, about, command | url, env?, headers?, only?, except?, client_id?,
+  enabled?}` declares
   one under `[[connections.server]]` of `extensions.toml`, checked key by key as the file is; `env`
   and `headers` name vault entries (`{"TOKEN": {"vault": "<entry>"}}`), each of every project
   (an entry tied to one project is `refused`); a `url` is `https://`, or `http://` on this machine.
 - `connection.edit {name, …}` replaces the keys given (`null` removes one; a command drops the URL
   and the other way round). An edit of the command, the URL, `env`, `headers` or `only` asks for a
-  new review; `about`, `enabled` and `except` do not.
-- `connection.remove {name}` removes it, stops its server and forgets what was accepted.
+  new review; `about`, `enabled`, `except` and `client_id` do not.
+- `connection.remove {name}` removes it, stops its server and forgets what was accepted, and its
+  sign-in's tokens.
+- `connection.login {name}` begins the OAuth sign-in of a URL connection
+  (`docs/reference/mcp-authorization.md`): the daemon finds the server's authorization server,
+  registers itself with it unless `client_id` is declared, listens on a loopback redirect for five
+  minutes, and answers `{"name", "url"}` at once, `url` being the address the client opens in the
+  user's default browser (the daemon opens nothing). How the sign-in ends comes as
+  `connection.signed_in` or `connection.sign_in_failed`; signing in again begins anew and drops the
+  one that waited. `unavailable` when the server asks for no sign-in, publishes no metadata, or
+  its authorization server cannot be used (no PKCE `S256`, no way to get a client id); `refused`
+  for a command.
 - `connection.review {name}` starts its server as declared and answers what it announces against
   what was accepted: `{"name", "first", "declaration_changed", "cut_off", "changes", "server":
   {"pinned", "now"}, "instructions": {"pinned", "now"}, "actions": [{"name", "change" (added,

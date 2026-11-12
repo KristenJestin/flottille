@@ -10,7 +10,24 @@
 //!
 //! With `--http`, it serves Streamable HTTP on a free port of `127.0.0.1` instead of stdio,
 //! written to that file, each request answered with one JSON body (no stream, so no request of
-//! its own to the client), and logs each request's headers (`http`).
+//! its own to the client), and logs each request's headers (`http`). Over HTTP the script is read
+//! again at each request.
+//!
+//! With `oauth` in the script, the HTTP server is protected (MCP authorization): `/mcp` answers
+//! `401` with a `WWW-Authenticate` challenge until it is given an access token it issued, and it
+//! is its own authorization server too, at `/as` (its protected resource metadata, its metadata,
+//! `register`, `authorize` with PKCE `S256`, which redirects at once with a code, its `state` and
+//! its `iss`, and `token`). `oauth` takes `expires_in` (the tokens' life, 3600 seconds by
+//! default), `refresh: "refused"` (every refresh answers `invalid_grant`), `refresh_error`
+//! (every refresh answers that OAuth error instead, and keeps the refresh token valid),
+//! `no_expiry` (the tokens carry no `expires_in`), `revoked` (`/mcp` answers `401` to every token),
+//! `refresh_hold` (the path of a file: a refresh is answered once it exists, and logs `hold` as it
+//! waits), `registration: false`
+//! (no dynamic registration), `authorize_at`, `token_at` and `register_at: "elsewhere"` (that
+//! endpoint named on `localhost`, another origin than the issuer's `127.0.0.1`), `iss: false`
+//! (no `iss` in the authorization response, and none promised), and `tokens_file`, where every token it issues is written, so that a
+//! test looks for them where they must not be. Its log never holds a token: `bearer` is the number
+//! of the one a request carried, and `register`, `authorize` and `token` say what was asked.
 //!
 //! The script, read at the start and again when an answer says `reload`:
 //!
@@ -86,7 +103,7 @@ fn main() {
         std::process::exit(code as i32);
     }
     if let Some(port_file) = option("--http") {
-        return http(&script, &log, &port_file);
+        return http(&script_path, &log, &port_file);
     }
     if let Some(when) = script["notify"]["when"].as_str() {
         let (when, times) = (
@@ -279,102 +296,391 @@ fn call(
     json!({"content": content})
 }
 
-/// Streamable HTTP, one request a connection.
-fn http(script: &Value, log: &Option<String>, port_file: &str) {
-    use std::io::{BufRead, BufReader, Read};
+/// Streamable HTTP, one request a connection, each on its own thread: a request the script holds
+/// does not hold the others. The script is read again at each request.
+fn http(script_path: &str, log: &Option<String>, port_file: &str) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    std::fs::write(port_file, listener.local_addr().unwrap().port().to_string()).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::fs::write(port_file, port.to_string()).unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let issuer = std::sync::Arc::new(std::sync::Mutex::new(Issuer::default()));
     for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut first = String::new();
-        if reader.read_line(&mut first).is_err() {
-            continue;
+        let Ok(stream) = stream else { continue };
+        let (script_path, log, base, issuer) = (
+            script_path.to_owned(),
+            log.clone(),
+            base.clone(),
+            issuer.clone(),
+        );
+        std::thread::spawn(move || serve(stream, &script_path, &log, &base, &issuer));
+    }
+}
+
+fn serve(
+    mut stream: std::net::TcpStream,
+    script_path: &str,
+    log: &Option<String>,
+    base: &str,
+    issuer: &std::sync::Mutex<Issuer>,
+) {
+    use std::io::{BufRead, BufReader, Read};
+    let script = &read(script_path);
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut first = String::new();
+    if reader.read_line(&mut first).is_err() {
+        return;
+    }
+    let mut headers = serde_json::Map::new();
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+            break;
         }
-        let mut headers = serde_json::Map::new();
-        let mut length = 0;
+        if let Some((name, value)) = line.split_once(':') {
+            let (name, value) = (name.trim().to_lowercase(), value.trim().to_owned());
+            if name == "content-length" {
+                length = value.parse().unwrap_or(0);
+            }
+            headers.insert(name, json!(value));
+        }
+    }
+    let mut body = vec![0; length];
+    let _ = reader.read_exact(&mut body);
+    // reqwest sends a body of unknown length in chunks.
+    if headers.get("transfer-encoding").and_then(Value::as_str) == Some("chunked") {
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+            let mut size = String::new();
+            if reader.read_line(&mut size).unwrap_or(0) == 0 {
                 break;
             }
-            if let Some((name, value)) = line.split_once(':') {
-                let (name, value) = (name.trim().to_lowercase(), value.trim().to_owned());
-                if name == "content-length" {
-                    length = value.parse().unwrap_or(0);
-                }
-                headers.insert(name, json!(value));
+            let size = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+            let mut chunk = vec![0; size + 2];
+            if reader.read_exact(&mut chunk).is_err() || size == 0 {
+                break;
             }
+            body.extend_from_slice(&chunk[..size]);
         }
-        let mut body = vec![0; length];
-        let _ = reader.read_exact(&mut body);
-        // reqwest sends a body of unknown length in chunks.
-        if headers.get("transfer-encoding").and_then(Value::as_str) == Some("chunked") {
-            loop {
-                let mut size = String::new();
-                if reader.read_line(&mut size).unwrap_or(0) == 0 {
-                    break;
+    }
+    let mut words = first.split_whitespace();
+    let method = words.next().unwrap_or_default().to_owned();
+    let target = words.next().unwrap_or_default().to_owned();
+    let (path, query) = target.split_once('?').unwrap_or((&target, ""));
+    let reply = |status: &str, body: Option<Value>| {
+        let text = body.map(|body| body.to_string()).unwrap_or_default();
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nMcp-Session-Id: fake\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{text}",
+            text.len()
+        )
+    };
+    let oauth = &script["oauth"];
+    if oauth.is_object() {
+        // A token is never written to the log: which one it is, by its number.
+        let bearer = headers.remove("authorization").and_then(|value| {
+            let token = value.as_str()?.strip_prefix("Bearer ")?;
+            // A revoked token is one it issued and no longer knows.
+            let serial = issuer.lock().unwrap().serial_of(token);
+            serial.filter(|_| oauth["revoked"] != true)
+        });
+        if path != "/mcp" || method != "POST" || bearer.is_none() {
+            write_log(
+                log,
+                json!({"event": "http", "method": method, "path": path, "headers": headers,
+                    "bearer": bearer}),
+            );
+        }
+        if path != "/mcp" {
+            // A refresh the script holds is answered once its file exists, the others meanwhile.
+            let held = (path == "/as/token" && form(&body)["grant_type"] == "refresh_token")
+                .then(|| oauth["refresh_hold"].as_str())
+                .flatten();
+            let answer = issuer
+                .lock()
+                .unwrap()
+                .answer(oauth, base, &method, path, query, &body, log, &reply);
+            if let Some(file) = held {
+                write_log(log, json!({"event": "hold"}));
+                while !std::path::Path::new(file).exists() {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                let size = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
-                let mut chunk = vec![0; size + 2];
-                if reader.read_exact(&mut chunk).is_err() || size == 0 {
-                    break;
-                }
-                body.extend_from_slice(&chunk[..size]);
             }
+            let _ = stream.write_all(answer.as_bytes());
+            return;
         }
-        let method = first
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_owned();
+        if bearer.is_none() {
+            let challenge = format!(
+                "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\", \
+                 scope=\"notes:read\""
+            );
+            let text = r#"{"error":"invalid_token"}"#;
+            let answer = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\
+                 WWW-Authenticate: {challenge}\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{text}",
+                text.len()
+            );
+            let _ = stream.write_all(answer.as_bytes());
+            return;
+        }
+        let message: Value = serde_json::from_slice(&body).unwrap_or_default();
+        write_log(
+            log,
+            json!({"event": "http", "method": method, "path": path, "headers": headers,
+                "bearer": bearer, "rpc": message["method"]}),
+        );
+    } else {
         write_log(
             log,
             json!({"event": "http", "method": method, "headers": headers}),
         );
-        let reply = |status: &str, body: Option<Value>| {
-            let text = body.map(|body| body.to_string()).unwrap_or_default();
-            format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nMcp-Session-Id: fake\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{text}",
-                text.len()
-            )
-        };
-        let answer = match method.as_str() {
-            "POST" => {
-                let message: Value = serde_json::from_slice(&body).unwrap_or_default();
-                let id = message["id"].clone();
-                let params = &message["params"];
-                let result = match message["method"].as_str().unwrap_or_default() {
-                    "initialize" => Some(json!({
-                        "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-                        "capabilities": {"tools": {}}, "serverInfo": script["server"],
-                        "instructions": script["instructions"]})),
-                    "tools/list" => Some(json!({"tools": script["tools"]})),
-                    "tools/call" => {
-                        let tool = params["name"].as_str().unwrap_or_default();
-                        let answer = &script["answers"][tool];
-                        Some(call(
-                            answer,
-                            &params["arguments"],
-                            &mut std::iter::empty::<std::io::Result<String>>(),
-                            &mut 0,
-                        ))
-                    }
-                    _ if id.is_null() => None,
-                    _ => Some(json!({})),
+    }
+    let answer = match method.as_str() {
+        "POST" => {
+            let message: Value = serde_json::from_slice(&body).unwrap_or_default();
+            let id = message["id"].clone();
+            let params = &message["params"];
+            let result = match message["method"].as_str().unwrap_or_default() {
+                "initialize" => Some(json!({
+                    "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+                    "capabilities": {"tools": {}}, "serverInfo": script["server"],
+                    "instructions": script["instructions"]})),
+                "tools/list" => Some(json!({"tools": script["tools"]})),
+                "tools/call" => {
+                    let tool = params["name"].as_str().unwrap_or_default();
+                    let answer = &script["answers"][tool];
+                    Some(call(
+                        answer,
+                        &params["arguments"],
+                        &mut std::iter::empty::<std::io::Result<String>>(),
+                        &mut 0,
+                    ))
+                }
+                _ if id.is_null() => None,
+                _ => Some(json!({})),
+            };
+            match (result, id.is_null()) {
+                (Some(result), false) => reply(
+                    "200 OK",
+                    Some(json!({"jsonrpc": "2.0", "id": id, "result": result})),
+                ),
+                _ => reply("202 Accepted", None),
+            }
+        }
+        "DELETE" => reply("200 OK", None),
+        _ => reply("405 Method Not Allowed", None),
+    };
+    let _ = stream.write_all(answer.as_bytes());
+}
+
+/// The authorization server of a protected server (`oauth` in the script): its tokens, the codes
+/// it gave, and the clients it registered, in its memory.
+#[derive(Default)]
+struct Issuer {
+    issued: u64,
+    /// Access token → its number.
+    access: std::collections::HashMap<String, u64>,
+    /// Refresh token → the number of the access token it came with.
+    refresh: std::collections::HashMap<String, u64>,
+    /// Code → the request it answers: its challenge, its redirect, its resource.
+    codes: std::collections::HashMap<String, (String, String, String)>,
+}
+
+impl Issuer {
+    fn serial_of(&self, token: &str) -> Option<u64> {
+        self.access.get(token).copied()
+    }
+
+    /// A pair of tokens, written to the script's `tokens_file` for the test that looks for them
+    /// where they must not be.
+    fn issue(&mut self, oauth: &Value) -> Value {
+        self.issued += 1;
+        let n = self.issued;
+        let access = format!("fake-access-{n}-{}", random_hex());
+        let refresh = format!("fake-refresh-{n}-{}", random_hex());
+        if let Some(file) = oauth["tokens_file"].as_str() {
+            write_log(&Some(file.to_owned()), json!(access));
+            write_log(&Some(file.to_owned()), json!(refresh));
+        }
+        self.access.insert(access.clone(), n);
+        self.refresh.insert(refresh.clone(), n);
+        let mut tokens = json!({"access_token": access, "token_type": "Bearer",
+            "refresh_token": refresh});
+        if oauth["no_expiry"] != true {
+            tokens["expires_in"] = json!(oauth["expires_in"].as_u64().unwrap_or(3600));
+        }
+        tokens
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn answer(
+        &mut self,
+        oauth: &Value,
+        base: &str,
+        method: &str,
+        path: &str,
+        query: &str,
+        body: &[u8],
+        log: &Option<String>,
+        reply: &dyn Fn(&str, Option<Value>) -> String,
+    ) -> String {
+        let issuer = format!("{base}/as");
+        match (method, path) {
+            ("GET", "/.well-known/oauth-protected-resource/mcp") => reply(
+                "200 OK",
+                Some(json!({"resource": format!("{base}/mcp"),
+                    "authorization_servers": [issuer], "scopes_supported": ["notes:read"]})),
+            ),
+            ("GET", "/.well-known/oauth-authorization-server/as") => {
+                // `localhost` is this server too, and another origin than `127.0.0.1`.
+                let elsewhere = issuer.replace("127.0.0.1", "localhost");
+                let at = |key: &str| match oauth[key] == "elsewhere" {
+                    true => elsewhere.clone(),
+                    false => issuer.clone(),
                 };
-                match (result, id.is_null()) {
-                    (Some(result), false) => reply(
-                        "200 OK",
-                        Some(json!({"jsonrpc": "2.0", "id": id, "result": result})),
+                let mut metadata = json!({"issuer": issuer,
+                    "authorization_endpoint": format!("{}/authorize", at("authorize_at")),
+                    "token_endpoint": format!("{}/token", at("token_at")),
+                    "code_challenge_methods_supported": ["S256"],
+                    "authorization_response_iss_parameter_supported": oauth["iss"] != false});
+                if oauth["registration"] != false {
+                    metadata["registration_endpoint"] =
+                        json!(format!("{}/register", at("register_at")));
+                }
+                reply("200 OK", Some(metadata))
+            }
+            ("POST", "/as/register") => {
+                let asked: Value = serde_json::from_slice(body).unwrap_or_default();
+                write_log(log, json!({"event": "register", "asked": asked}));
+                let mut client = asked.clone();
+                client["client_id"] = json!(format!("fake-client-{}", random_hex()));
+                reply("201 Created", Some(client))
+            }
+            ("GET", "/as/authorize") => {
+                let asked = form(query.as_bytes());
+                write_log(log, json!({"event": "authorize", "asked": asked}));
+                let field = |key: &str| asked[key].as_str().unwrap_or_default().to_owned();
+                if field("response_type") != "code" || field("code_challenge_method") != "S256" {
+                    return reply("400 Bad Request", Some(json!({"error": "invalid_request"})));
+                }
+                let code = format!("code-{}", random_hex());
+                self.codes.insert(
+                    code.clone(),
+                    (
+                        field("code_challenge"),
+                        field("redirect_uri"),
+                        field("resource"),
                     ),
-                    _ => reply("202 Accepted", None),
+                );
+                let iss = match oauth["iss"] == false {
+                    true => String::new(),
+                    false => format!("&iss={}", encoded(&issuer)),
+                };
+                let location = format!(
+                    "{}?code={code}&state={}{iss}",
+                    field("redirect_uri"),
+                    encoded(&field("state")),
+                );
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\
+                     Connection: close\r\n\r\n"
+                )
+            }
+            ("POST", "/as/token") => {
+                let asked = form(body);
+                let field = |key: &str| asked[key].as_str().unwrap_or_default().to_owned();
+                let grant = field("grant_type");
+                let ok = match grant.as_str() {
+                    "authorization_code" => self.codes.remove(&field("code")).is_some_and(
+                        |(challenge, redirect, resource)| {
+                            challenge == s256(&field("code_verifier"))
+                                && redirect == field("redirect_uri")
+                                && resource == field("resource")
+                        },
+                    ),
+                    "refresh_token" => {
+                        oauth["refresh"] != "refused"
+                            && !oauth["refresh_error"].is_string()
+                            && self.refresh.remove(&field("refresh_token")).is_some()
+                    }
+                    _ => false,
+                };
+                let answer = ok.then(|| self.issue(oauth));
+                write_log(
+                    log,
+                    json!({"event": "token", "grant": grant, "resource": field("resource"),
+                        "client_id": field("client_id"), "ok": ok,
+                        "serial": ok.then_some(self.issued)}),
+                );
+                match answer {
+                    Some(tokens) => reply("200 OK", Some(tokens)),
+                    None => reply(
+                        "400 Bad Request",
+                        Some(json!({"error": oauth["refresh_error"].as_str()
+                                .filter(|_| grant == "refresh_token")
+                                .unwrap_or("invalid_grant"),
+                            "error_description": "the grant is not valid"})),
+                    ),
                 }
             }
-            "DELETE" => reply("200 OK", None),
-            _ => reply("405 Method Not Allowed", None),
-        };
-        let _ = stream.write_all(answer.as_bytes());
+            _ => reply("404 Not Found", None),
+        }
     }
+}
+
+fn random_hex() -> String {
+    use std::io::Read;
+    let mut bytes = [0u8; 8];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .unwrap();
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The PKCE challenge of a verifier, `S256`.
+fn s256(verifier: &str) -> String {
+    use base64::Engine;
+    use sha2::Digest;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier))
+}
+
+/// A form (or a query), decoded, as a JSON object.
+fn form(body: &[u8]) -> Value {
+    let text = String::from_utf8_lossy(body);
+    let mut fields = serde_json::Map::new();
+    for pair in text.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        fields.insert(decoded(key), json!(decoded(value)));
+    }
+    Value::Object(fields)
+}
+
+fn decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'+' => out.push(b' '),
+            b'%' if at + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[at + 1..at + 3]).unwrap_or("");
+                out.push(u8::from_str_radix(hex, 16).unwrap_or(b'?'));
+                at += 2;
+            }
+            byte => out.push(byte),
+        }
+        at += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn encoded(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            byte => format!("%{byte:02X}"),
+        })
+        .collect()
 }

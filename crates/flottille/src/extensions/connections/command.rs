@@ -56,6 +56,13 @@ pub enum ConnectionAction {
         #[arg(long)]
         json: bool,
     },
+    /// Sign a URL connection in with OAuth, in your default browser; its tokens go to the vault
+    Login {
+        name: String,
+        /// Print the address to open instead of opening the browser
+        #[arg(long)]
+        no_browser: bool,
+    },
     /// Accept what the last review showed, or set actions: judged, passes, asked or off
     Accept {
         name: String,
@@ -91,6 +98,9 @@ pub struct Given {
     /// A project whose agents do not get it; again for each
     #[arg(long = "except", value_name = "PROJECT")]
     except: Vec<String>,
+    /// The OAuth client id you registered with the server's authorization server, for a URL
+    #[arg(long = "client-id", value_name = "ID")]
+    client_id: Option<String>,
 }
 
 fn pairs(given: &[String], what: &str) -> Result<Vec<(String, String)>> {
@@ -139,10 +149,16 @@ fn declared(params: &mut Map<String, Value>, reach: Reach, given: Given) -> Resu
     if !given.except.is_empty() {
         params.insert("except".into(), json!(given.except));
     }
+    if let Some(id) = given.client_id {
+        params.insert("client_id".into(), json!(id));
+    }
     Ok(())
 }
 
 pub fn run(paths: &Paths, action: ConnectionAction) -> Result<ExitCode> {
+    if let ConnectionAction::Login { name, no_browser } = action {
+        return login(paths, &name, no_browser);
+    }
     let mut client = Client::connect_or_start(paths)?;
     let (answer, json) = match action {
         ConnectionAction::List { json } => {
@@ -212,6 +228,7 @@ pub fn run(paths: &Paths, action: ConnectionAction) -> Result<ExitCode> {
             }
             (answer, json)
         }
+        ConnectionAction::Login { .. } => unreachable!("signed in above"),
         ConnectionAction::Accept { name, set, json } => {
             let actions: Map<String, Value> = pairs(&set, "setting")?
                 .into_iter()
@@ -235,6 +252,50 @@ pub fn run(paths: &Paths, action: ConnectionAction) -> Result<ExitCode> {
         println!("{answer}");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// How long the command waits for the sign-in to end: the daemon's own wait, and a little more.
+const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(310);
+
+/// Begins the sign-in, opens its address in the default browser (or prints it), and waits for the
+/// daemon to say how it ended. The events are watched before it begins: none is missed.
+fn login(paths: &Paths, name: &str, no_browser: bool) -> Result<ExitCode> {
+    let mut watcher = Client::connect_or_start(paths)?;
+    watcher.request("events.watch", json!({}))?;
+    let mut client = Client::connect_or_start(paths)?;
+    let answer = client.request("connection.login", json!({"name": name}))?;
+    let url = answer["url"].as_str().ok_or("the daemon gave no address")?;
+    if no_browser {
+        println!("Open {url} in your browser to sign in to the connection {name}.");
+    } else {
+        println!("Opening {url} in your browser to sign in to the connection {name}.");
+        flottille_window::open::system()(std::path::Path::new(url));
+    }
+    let deadline = std::time::Instant::now() + SIGN_IN_WAIT;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let Some(event) = watcher.next_event_within(left)? else {
+            eprintln!("The sign-in of {name} did not end in time: begin it again.");
+            return Ok(ExitCode::FAILURE);
+        };
+        if event.data["name"] != name {
+            continue;
+        }
+        match event.name.as_str() {
+            "connection.signed_in" => {
+                println!("Signed in to the connection {name}.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            "connection.sign_in_failed" => {
+                eprintln!(
+                    "The sign-in of {name} failed: {}",
+                    event.data["why"].as_str().unwrap_or("no reason given")
+                );
+                return Ok(ExitCode::FAILURE);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn list_text(answer: &Value) -> String {
@@ -262,6 +323,12 @@ fn list_text(answer: &Value) -> String {
         }
         if let Some(why) = connection["failing"].as_str() {
             text.push_str(&format!("  failing: {why}\n"));
+        }
+        if let Some(why) = connection["signed_out"].as_str() {
+            text.push_str(&format!(
+                "  signed out: {why}; sign in again with `flottille connection login {}`\n",
+                connection["name"].as_str().unwrap_or_default()
+            ));
         }
         for action in connection["actions"].as_array().into_iter().flatten() {
             text.push_str(&format!(
