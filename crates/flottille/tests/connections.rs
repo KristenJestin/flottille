@@ -2578,3 +2578,47 @@ fn no_token_reaches_an_agent_or_a_log() {
     }
     assert!(said[0].1.contains("[masked]"), "{}", said[0].1);
 }
+
+#[test]
+fn a_declared_client_id_is_used_where_the_server_registers_none() {
+    let user = user();
+    let (server, url) = protected_server(&user, json!({"registration": false}));
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url}),
+    )
+    .unwrap();
+    let refused = user
+        .call_within(
+            "connection.login",
+            json!({"name": "notes"}),
+            Duration::from_secs(40),
+        )
+        .unwrap_err()
+        .1;
+    assert!(refused.contains("--client-id"), "{refused}");
+    let edited = user.run(&[
+        "connection",
+        "edit",
+        "notes",
+        "--client-id",
+        "flottille-desk",
+    ]);
+    assert!(
+        edited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&edited.stderr)
+    );
+    sign_in(&user);
+    stopped(server);
+    assert!(logged(&user, "notes", "register").is_empty());
+    assert_eq!(
+        logged(&user, "notes", "authorize")[0]["asked"]["client_id"],
+        "flottille-desk"
+    );
+    assert_eq!(
+        grants(&user, "authorization_code")[0]["client_id"],
+        "flottille-desk"
+    );
+}

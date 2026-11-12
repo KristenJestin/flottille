@@ -53,6 +53,8 @@ fn linger() -> Duration {
 pub struct Live {
     servers: Mutex<HashMap<String, Arc<Server>>>,
     started: AtomicU64,
+    /// The sign-in that waits for the browser, of each connection.
+    pub(super) signing: Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
 
 #[derive(Default)]
@@ -169,6 +171,33 @@ struct Running {
     listing: Listing,
     /// Which start it is: a watcher looks after its own.
     start: u64,
+    /// When the access token it was started with expires, signed in with OAuth.
+    expires_at: Option<u64>,
+}
+
+impl Running {
+    /// Its token expires within the margin: it is started again, with a refreshed one.
+    fn expiring(&self) -> bool {
+        self.expires_at.is_some_and(|at| {
+            at <= flottille_core::store::now_ms() as u64 + super::oauth::MARGIN_MS
+        })
+    }
+}
+
+/// Whether a failure to start is the server asking for a sign-in.
+fn asks_sign_in(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut at = Some(error);
+    while let Some(error) = at {
+        if error
+            .downcast_ref::<rmcp::transport::streamable_http_client::AuthRequiredError>()
+            .is_some()
+            || error.to_string().contains("Auth required")
+        {
+            return true;
+        }
+        at = error.source();
+    }
+    false
 }
 
 fn server_of(daemon: &Daemon, name: &str) -> Arc<Server> {
@@ -341,6 +370,7 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
         name: declaration.name.clone(),
         start,
     };
+    let mut expires_at = None;
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
             let folder = daemon
@@ -421,8 +451,21 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                 headers.insert(name, value);
             }
             let client = http_client(url)?;
-            let config =
+            let mut config =
                 StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(headers);
+            let name = &declaration.name;
+            match super::oauth::bearer(daemon, declaration).await {
+                Ok(Some((token, expires))) => {
+                    config = config.auth_header(token);
+                    expires_at = expires;
+                }
+                Ok(None) => {}
+                Err(super::oauth::Unusable::Failed(why)) => return Err(why),
+                Err(super::oauth::Unusable::SignedOut(why)) => {
+                    super::signed_out(daemon, name, &why).await;
+                    return Err(signed_out_said(name, &why));
+                }
+            }
             let transport = StreamableHttpClientTransport::with_client(client, config);
             let served = tokio::time::timeout(
                 START_LIMIT,
@@ -430,7 +473,13 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
             )
             .await
             .map_err(|_| "it did not answer within 30 seconds".to_owned())?
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match asks_sign_in(&error) {
+                true => format!(
+                    "the server asks to be signed in: the user signs it in with `flottille \
+                     connection login {name}`"
+                ),
+                false => error.to_string(),
+            })?;
             (served, None)
         }
     };
@@ -448,6 +497,7 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                 digest: String::new(),
                 listing: Listing::default(),
                 start,
+                expires_at,
             })
             .await;
             return Err(why);
@@ -470,14 +520,23 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
         digest: declaration.digest(),
         listing: Listing::of(server, instructions, &tools),
         start,
+        expires_at,
     })
 }
 
-/// The HTTP client of a URL connection: no proxy (a proxy variable of the daemon's environment
+/// What a start says of a connection whose authorization server refused to refresh its tokens.
+fn signed_out_said(name: &str, why: &str) -> String {
+    format!(
+        "the connection {name} is signed out ({why}): the user is asked to sign in again \
+         (`flottille connection login {name}`)"
+    )
+}
+
+/// The HTTP client of a URL connection (and of its sign-in): no proxy (a proxy variable of the daemon's environment
 /// would carry the vault's headers to another host), no redirect followed, the system's
 /// certificates for `https://`. A plain `http://` URL, on this machine alone, is given a TLS client that trusts
 /// nothing, which it never uses: reqwest builds none of its own.
-fn http_client(url: &str) -> Result<reqwest::Client, String> {
+pub(super) fn http_client(url: &str) -> Result<reqwest::Client, String> {
     use tokio_rustls::rustls;
     let tls = match url.starts_with("https://") {
         true => (*crate::web::tls()?).clone(),
@@ -696,7 +755,7 @@ pub async fn call(
     let pin = row.pin.clone().expect("a ready connection is pinned");
     if turn
         .as_ref()
-        .is_some_and(|running| running.digest != declaration.digest())
+        .is_some_and(|running| running.digest != declaration.digest() || running.expiring())
         && let Some(running) = turn.take()
     {
         stop_running(running).await;
@@ -704,6 +763,10 @@ pub async fn call(
     if turn.is_none() {
         let running = match start(daemon, &declaration).await {
             Ok(running) => running,
+            Err(why) if super::row(daemon, name).signed_out.is_some() => {
+                drop(turn);
+                return Outcome::Failed(crate::mcp::masked(&why, &grant.place));
+            }
             Err(why) => {
                 let why = not_started(&why, |why| crate::mcp::masked(why, &grant.place));
                 *server.failing.lock().unwrap() = Some(why.clone());

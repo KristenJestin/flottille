@@ -7,6 +7,7 @@
 
 mod client;
 pub mod command;
+mod oauth;
 mod schema;
 
 use std::collections::BTreeMap;
@@ -29,6 +30,7 @@ use crate::mcp::{Definition, Grant, Outcome};
 use crate::projects::Failure;
 
 pub use client::{Live, stop_all};
+pub use oauth::secrets_in;
 
 pub const EXTENSION: Extension = Extension {
     name: "connections",
@@ -45,7 +47,8 @@ pub const EXTENSION: Extension = Extension {
         order: 6,
     },
     settings: &[],
-    migrations: &["
+    migrations: &[
+        "
     -- A connection, by its name: what the user accepted of its server (the pin, JSON: its name and
     -- version, its instructions, its actions), the declaration it was accepted for (a digest),
     -- the setting of each action (JSON: judged, passes, asked or off), what the last review
@@ -60,7 +63,12 @@ pub const EXTENSION: Extension = Extension {
         cut_off     TEXT,
         accepted_at INTEGER
     ) STRICT;
-    "],
+    ",
+        "
+    -- Why the connection is signed out: its authorization server refused to refresh its tokens.
+    ALTER TABLE ext_connections_connections ADD COLUMN signed_out TEXT;
+    ",
+    ],
     methods: Methods {
         prefix: "connection",
         call,
@@ -84,7 +92,10 @@ pub const EXTENSION: Extension = Extension {
         call: tool_call,
         described,
     }),
-    needs_you: &[("connection.cut_off", cut_off_text)],
+    needs_you: &[
+        ("connection.cut_off", cut_off_text),
+        ("connection.signed_out", signed_out_text),
+    ],
 };
 
 fn starts_no_session(_: &Daemon, _: &str) -> bool {
@@ -134,6 +145,8 @@ pub struct Declaration {
     pub only: BTreeMap<String, Vec<String>>,
     /// The projects whose agents do not get it.
     pub except: Vec<String>,
+    /// The OAuth client id the user registered with the server's authorization server, for a URL.
+    pub client_id: Option<String>,
 }
 
 /// How the daemon reaches the server.
@@ -146,7 +159,16 @@ pub enum Reach {
 }
 
 const KEYS: &[&str] = &[
-    "name", "about", "enabled", "command", "url", "env", "headers", "only", "except",
+    "name",
+    "about",
+    "enabled",
+    "command",
+    "url",
+    "env",
+    "headers",
+    "only",
+    "except",
+    "client_id",
 ];
 
 impl Declaration {
@@ -285,6 +307,17 @@ impl Declaration {
                 })
                 .ok_or_else(|| format!("{at}.except: must be a list of project names"))?,
         };
+        let client_id = text("client_id")?;
+        if let Some(id) = &client_id {
+            if matches!(reach, Reach::Command(_)) {
+                return Err(format!(
+                    "{at}.client_id: only a url signs in with OAuth; a command takes env"
+                ));
+            }
+            if id.trim().is_empty() || id.chars().any(char::is_control) {
+                return Err(format!("{at}.client_id: must be a client id, on one line"));
+            }
+        }
         Ok(Declaration {
             name,
             about,
@@ -294,6 +327,7 @@ impl Declaration {
             headers,
             only,
             except,
+            client_id,
         })
     }
 
@@ -322,6 +356,9 @@ impl Declaration {
         }
         if !self.except.is_empty() {
             table["except"] = json!(self.except);
+        }
+        if let Some(id) = &self.client_id {
+            table["client_id"] = json!(id);
         }
         table
     }
@@ -580,6 +617,7 @@ struct Row {
     seen: Option<Listing>,
     seen_for: Option<String>,
     cut_off: Option<String>,
+    signed_out: Option<String>,
 }
 
 fn read<T>(daemon: &Daemon, work: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
@@ -605,7 +643,7 @@ fn parsed<T: serde::de::DeserializeOwned>(text: Option<String>) -> Option<T> {
 fn row_in(tables: &Connection, name: &str) -> Result<Option<Row>> {
     let found = tables
         .query_row(
-            "SELECT pin, pinned_for, settings, seen, seen_for, cut_off \
+            "SELECT pin, pinned_for, settings, seen, seen_for, cut_off, signed_out \
              FROM ext_connections_connections WHERE name = ?1",
             [name],
             |row| {
@@ -616,20 +654,22 @@ fn row_in(tables: &Connection, name: &str) -> Result<Option<Row>> {
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             },
         )
         .optional()?;
-    Ok(
-        found.map(|(pin, pinned_for, settings, seen, seen_for, cut_off)| Row {
+    Ok(found.map(
+        |(pin, pinned_for, settings, seen, seen_for, cut_off, signed_out)| Row {
             pin: parsed(pin),
             pinned_for,
             settings: serde_json::from_str(&settings).unwrap_or_default(),
             seen: parsed(seen),
             seen_for,
             cut_off,
-        }),
-    )
+            signed_out,
+        },
+    ))
 }
 
 fn row(daemon: &Daemon, name: &str) -> Row {
@@ -657,10 +697,11 @@ fn write_row(
         };
         tables.execute(
             "INSERT INTO ext_connections_connections \
-             (name, pin, pinned_for, settings, seen, seen_for, cut_off, accepted_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             (name, pin, pinned_for, settings, seen, seen_for, cut_off, accepted_at, signed_out) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
              ON CONFLICT (name) DO UPDATE SET pin = ?2, pinned_for = ?3, settings = ?4, \
-             seen = ?5, seen_for = ?6, cut_off = ?7, accepted_at = coalesce(?8, accepted_at)",
+             seen = ?5, seen_for = ?6, cut_off = ?7, accepted_at = coalesce(?8, accepted_at), \
+             signed_out = ?9",
             params![
                 name,
                 text(&row.pin),
@@ -670,6 +711,7 @@ fn write_row(
                 row.seen_for,
                 row.cut_off,
                 Option::<i64>::None,
+                row.signed_out,
             ],
         )?;
         let event = match event {
@@ -699,6 +741,8 @@ enum State {
     Awaiting,
     /// Its server is not what the user accepted.
     CutOff,
+    /// Its authorization server refused to refresh its tokens: the user must sign in again.
+    SignedOut,
     /// Given to every agent.
     Ready,
 }
@@ -709,6 +753,7 @@ impl State {
             State::Off => "off",
             State::Awaiting => "awaiting review",
             State::CutOff => "cut off",
+            State::SignedOut => "signed out",
             State::Ready => "ready",
         }
     }
@@ -719,6 +764,8 @@ fn state_of(on: bool, declaration: &Declaration, row: &Row) -> State {
         State::Off
     } else if row.cut_off.is_some() {
         State::CutOff
+    } else if row.signed_out.is_some() {
+        State::SignedOut
     } else if row.pin.is_none() || row.pinned_for.as_deref() != Some(&declaration.digest()) {
         State::Awaiting
     } else {
@@ -1130,6 +1177,85 @@ fn cut_off_text(data: &Value) -> String {
     )
 }
 
+/// The connection's authorization server refused to refresh its tokens: they are removed, its
+/// tool leaves every session at once, and the inbox asks the user to sign in again.
+async fn signed_out(daemon: &Arc<Daemon>, name: &str, why: &str) {
+    let event = json!({"name": name, "tool": format!("{PREFIX}{name}"), "why": why});
+    if let Err(error) = write_row(
+        daemon,
+        name,
+        |row| row.signed_out = Some(why.to_owned()),
+        Some(("connection.signed_out", event)),
+    ) {
+        eprintln!("flottille daemon: connection {name}: {error}");
+    }
+    if let Err(why) = oauth::forget(daemon, name).await {
+        eprintln!("flottille daemon: connection {name}: its tokens stay in the vault: {why}");
+    }
+    crate::projects::tools_changed(daemon);
+    changed_event(daemon, name, Some(why));
+}
+
+fn signed_out_text(data: &Value) -> String {
+    let name = data["name"].as_str().unwrap_or_default();
+    format!(
+        "The connection {name} is signed out: {}. Its tool left every session; sign in again to \
+         give it back (`flottille connection login {name}`).",
+        data["why"].as_str().unwrap_or("its sign-in ended")
+    )
+}
+
+/// How a sign-in ended: its tokens kept, the connection is signed in again, its server started
+/// anew with them at the next call; or why not.
+async fn signed_in(daemon: &Arc<Daemon>, name: &str, ended: std::result::Result<(), String>) {
+    match ended {
+        Ok(()) => {
+            let was_out = row(daemon, name).signed_out.is_some();
+            if let Err(error) = write_row(
+                daemon,
+                name,
+                |row| row.signed_out = None,
+                Some(("connection.signed_in", json!({"name": name}))),
+            ) {
+                eprintln!("flottille daemon: connection {name}: {error}");
+            }
+            client::stop(daemon, name).await;
+            if was_out {
+                crate::projects::tools_changed(daemon);
+            }
+            changed_event(daemon, name, None);
+        }
+        Err(why) => {
+            let why = cut(
+                &flottille_core::secrets::mask(&why, &Default::default()),
+                600,
+            );
+            let data = json!({"name": name, "why": why});
+            if let Err(error) = daemon.emit("connection.sign_in_failed", data) {
+                eprintln!("flottille daemon: connection {name}: {error}");
+            }
+        }
+    }
+}
+
+/// `connection.login {name}`: begins the sign-in of a URL connection, and answers the address the
+/// user's browser opens; how it ends comes as `connection.signed_in` or
+/// `connection.sign_in_failed`.
+async fn login(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    let name = named(&params)?;
+    let declaration = declaration(&daemon.paths, &name)?;
+    let url = oauth::begin(daemon, &declaration).await.map_err(|why| {
+        Failure::new(
+            "unavailable",
+            cut(
+                &flottille_core::secrets::mask(&why, &Default::default()),
+                600,
+            ),
+        )
+    })?;
+    Ok(json!({"name": name, "url": url}))
+}
+
 /// `connection.changed`, with the state the connection is in now.
 fn changed_event(daemon: &Daemon, name: &str, why: Option<&str>) {
     let state = now_of(daemon, name).map(|(_, _, state)| state.word());
@@ -1155,6 +1281,7 @@ fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
             "connection.remove" => remove(&daemon, params).await,
             "connection.review" => review(&daemon, params).await,
             "connection.accept" => accept(&daemon, params).await,
+            "connection.login" => login(&daemon, params).await,
             method => Err(Failure::new(
                 "unknown-method",
                 format!("unknown method `{method}`"),
@@ -1184,6 +1311,7 @@ fn connection_json(daemon: &Daemon, declaration: &Declaration, on: bool) -> Valu
                     || row.pinned_for.as_deref() != Some(&declaration.digest())))
     );
     entry["cut_off"] = json!(row.cut_off);
+    entry["signed_out"] = json!(row.signed_out);
     entry["running"] = json!(client::running(daemon, &declaration.name));
     entry["failing"] = json!(client::failing(daemon, &declaration.name));
     entry["server"] = row
@@ -1371,6 +1499,9 @@ async fn remove(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
     })?;
     client::stop(daemon, &name).await;
     forget_row(daemon, &name)?;
+    oauth::forget(daemon, &name)
+        .await
+        .map_err(|why| Failure::new("unavailable", why))?;
     changed_event(daemon, &name, None);
     Ok(json!({"name": name, "removed": true}))
 }

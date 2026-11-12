@@ -780,7 +780,13 @@ pub async fn load(daemon: &Daemon) {
     };
     for entry in entries {
         match daemon.vault.read(&entry.name).await {
-            Ok(Some(secret)) => secrets::add_vault_value(&secret),
+            Ok(Some(secret)) => {
+                // A connection's sign-in keeps its tokens in one value: each is masked alone too.
+                for inner in crate::extensions::secrets_in(&secret) {
+                    secrets::add_vault_value(&inner);
+                }
+                secrets::add_vault_value(&secret);
+            }
             Ok(None) => {}
             Err(why) => eprintln!("flottille daemon: vault entry {}: {why}", entry.name),
         }
