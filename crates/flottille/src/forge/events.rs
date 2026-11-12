@@ -224,7 +224,7 @@ fn summary(head: &str, jobs: &[Job], more: usize, repository: &str) -> String {
             .unwrap_or_default();
         // How it ended is said before any reason: the code's failure by its error line, the
         // others by what they are.
-        let why = match (job.ending.said(job.took), &job.log) {
+        let why = match (job.said(repository), &job.log) {
             (Some(said), _) => Some(said),
             (None, Some(Ok(log))) => logs::why(log),
             (None, Some(Err(why))) => Some(format!("no log: {why}")),
@@ -557,6 +557,7 @@ mod tests {
             })),
             ending: Ending::Code,
             took: None,
+            rerun: None,
         };
 
         let text = summary("The checks ended.", &[job], 0, "api");
@@ -581,6 +582,7 @@ mod tests {
             log: Some(Err(why.clone())),
             ending: Ending::Code,
             took: Some(14),
+            rerun: None,
         };
 
         let text = summary("The checks ended.", &[job], 0, "api");

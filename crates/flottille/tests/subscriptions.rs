@@ -10,7 +10,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::User;
-use common::mcp::{Mcp, server_of};
+use common::mcp::{Answer, Mcp, server_of};
 use flottille_core::store::Store;
 use serde_json::{Value, json};
 
@@ -66,16 +66,18 @@ fn fixture_on(user: &User, others: &[&str], url: &str, forge: Value) {
     );
     user.git(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
     user.git(&dir, &["push", "--quiet", "origin", "main"]);
+    // The remote leads to the forge before the workspace is made (offline: nothing is fetched from
+    // it), so that what it records is what a write checks the remote against.
+    user.git(&dir, &["remote", "set-url", "origin", url]);
     user.call("project.add", json!({"folder": folder, "name": "app"}))
         .unwrap();
     let workspace = user
         .call(
             "workspace.create",
-            json!({"project": "app", "name": "login"}),
+            json!({"project": "app", "name": "login", "offline": true}),
         )
         .unwrap();
     assert_eq!(workspace["state"], "ready", "{workspace}");
-    user.git(&dir, &["remote", "set-url", "origin", url]);
     user.call(
         "project.set_settings",
         json!({"name": "app", "repositories": std::iter::once(
@@ -2850,13 +2852,69 @@ fn a_closed_bitbucket_pull_request_by_number_is_refused() {
 // A failed check says whether the code or the CI failed (`docs/forges.md`, "A wake about failed
 // checks is a summary", "What kind of failure it was").
 
-/// What a job's line says of a failure of the CI itself, after the reason.
-const RERUN: &str = "run it again (forge step … do: rerun)";
+/// The call a delivery names to run a job again (`run it again (forge {…})`), as the agent makes it.
+fn hinted(delivery: &str) -> Value {
+    let (_, rest) = delivery
+        .split_once("run it again (forge ")
+        .unwrap_or_else(|| panic!("no call is named to run it again in {delivery}"));
+    let (call, _) = rest
+        .split_once("})")
+        .unwrap_or_else(|| panic!("what is named to run it again is no call: {rest}"));
+    let call: Value = serde_json::from_str(&format!("{call}}}")).unwrap();
+    call["action"].as_str().expect("an action");
+    call
+}
+
+/// The number of the request the gate holds a call on.
+fn held(answer: &Answer) -> u64 {
+    assert!(!answer.error, "{}", answer.text);
+    answer
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap_or_else(|| panic!("not held: {}", answer.text))
+}
+
+/// The call the delivery names, made by the agent and allowed by the user: what the tool answers
+/// (an error when it refused or failed it).
+fn rerun_through(user: &User, mcp: &Mcp, delivery: &str) -> Answer {
+    let number = held(&mcp.call("forge", hinted(delivery)));
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    let store = || Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let id = format!("approval-{number}");
+    eventually("the answer", || store().delivery(&id).unwrap().is_some());
+    let text = store().delivery(&id).unwrap().unwrap().body;
+    Answer {
+        error: !text.contains("and Flottille has now done it"),
+        text,
+    }
+}
+
+/// The calls of the fake forge `calls` (`gh_received`, `bkt_received`) as command lines.
+fn lines(calls: Vec<Value>) -> Vec<String> {
+    calls
+        .iter()
+        .map(|call| {
+            let args = call["args"].as_array().unwrap();
+            args.iter()
+                .map(|a| a.as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
 
 /// The daemon subscribed to the checks of `app/login`, which end as `checks` say (the fake
 /// `gh`'s check runs), `logs` being the failed logs it holds: the delivery that wakes the agent
 /// and its session.
-fn woken_by_checks(user: &User, checks: Vec<Value>, logs: Value) -> (String, Mcp) {
+fn woken_by_checks(
+    user: &User,
+    checks: Vec<Value>,
+    logs: Value,
+    run_views: Value,
+) -> (String, Mcp) {
     fixture(user);
     script(user, pull());
     let (_, mcp) = agent(user);
@@ -2865,7 +2923,8 @@ fn woken_by_checks(user: &User, checks: Vec<Value>, logs: Value) -> (String, Mcp
     ended["statusCheckRollup"] = checks.into();
     user.gh_script(json!({
         "pulls": {"acme/api": {"app/login": changed(ended)}},
-        "logs": logs
+        "logs": logs,
+        "run_views": run_views
     }));
     a_round(user);
     (the_delivery(user), mcp)
@@ -2875,6 +2934,11 @@ fn shown(mcp: &Mcp) -> String {
     let answer = mcp.call("forge", json!({"action": "show"}));
     assert!(!answer.error, "{}", answer.text);
     answer.text
+}
+
+/// The fake `gh`'s run 900, which holds the job `2`: what `gh run view` says of it.
+fn run_900_with_job_2() -> Value {
+    json!({"acme/api": {"900": {"jobs": [{"databaseId": 2, "name": "deploy"}]}}})
 }
 
 #[test]
@@ -2887,13 +2951,60 @@ fn a_github_startup_failure_is_said_as_a_ci_failure() {
             check("deploy", "COMPLETED", "STARTUP_FAILURE", 2),
         ],
         json!({}),
+        run_900_with_job_2(),
     );
 
-    let line = format!("- deploy: the CI failed, not the code: startup failure; {RERUN}");
-    assert!(delivery.contains(&line), "{line} in {delivery}");
+    let line = "- deploy: the CI failed, not the code: startup failure; run it again (forge \
+                {\"action\": \"step\", \"repository\": \"api\", \"run\": 900, \"step\": \"2\", \"do\": \"rerun\"})";
+    assert!(delivery.contains(line), "{line} in {delivery}");
     assert!(!delivery.contains("no log"), "{delivery}");
     let shown = shown(&mcp);
-    assert!(shown.contains(&line), "{line} in {shown}");
+    assert!(shown.contains(line), "{line} in {shown}");
+}
+
+#[test]
+fn a_github_wake_hints_the_call_that_runs_the_job_again_and_the_tool_accepts_it() {
+    let user = user();
+    let (delivery, mcp) = woken_by_checks(
+        &user,
+        vec![
+            timed("build", "SUCCESS", 1, 30),
+            check("deploy", "COMPLETED", "STARTUP_FAILURE", 2),
+        ],
+        json!({}),
+        run_900_with_job_2(),
+    );
+
+    let done = rerun_through(&user, &mcp, &delivery);
+
+    assert!(!done.error, "{}", done.text);
+    assert!(
+        lines(user.gh_received()).contains(&"run rerun 900 -R github.com/acme/api --job 2".into()),
+        "{:?}",
+        lines(user.gh_received())
+    );
+}
+
+#[test]
+fn a_github_ci_failure_whose_run_holds_no_such_job_says_nothing_of_running_it_again() {
+    let user = user();
+    // `step … do: rerun` is refused for a job the run does not hold: it is not hinted.
+    let (delivery, mcp) = woken_by_checks(
+        &user,
+        vec![
+            timed("build", "SUCCESS", 1, 30),
+            check("deploy", "COMPLETED", "STARTUP_FAILURE", 2),
+        ],
+        json!({}),
+        json!({"acme/api": {"900": {"jobs": [{"databaseId": 1, "name": "build"}]}}}),
+    );
+
+    assert!(
+        delivery.contains("- deploy: the CI failed, not the code: startup failure\n"),
+        "{delivery}"
+    );
+    assert!(!delivery.contains("run it again"), "{delivery}");
+    assert!(!shown(&mcp).contains("run it again"));
 }
 
 #[test]
@@ -2905,6 +3016,7 @@ fn a_cancelled_github_job_is_said_stopped_not_failed() {
             timed("build", "SUCCESS", 1, 30),
             timed("deploy", "CANCELLED", 2, 65),
         ],
+        json!({}),
         json!({}),
     );
 
@@ -2926,6 +3038,7 @@ fn a_timed_out_job_says_after_how_long() {
             timed("build", "SUCCESS", 1, 30),
             timed("slow", "TIMED_OUT", 2, 600),
         ],
+        json!({}),
         json!({}),
     );
 
@@ -2954,6 +3067,7 @@ fn the_wake_counts_ci_failures_apart_from_failed_checks() {
             timed("slow", "TIMED_OUT", 4, 600),
         ],
         json!({}),
+        json!({}),
     );
 
     assert!(
@@ -2973,6 +3087,7 @@ fn a_failed_github_job_is_still_said_by_its_error_line() {
         ],
         json!({"acme/api": {"456":
             "test\tRun cargo test\t2026-01-01T00:00:01.1234567Z error: test failed, to rerun pass `--lib`\n"}}),
+        json!({}),
     );
 
     assert!(
@@ -3009,13 +3124,19 @@ impl Bitbucket {
     /// The agent subscribed to the checks of the pull request #12, which end as `checks` say:
     /// its delivery.
     fn woken_by(self, checks: Value, more: Value) -> String {
+        self.woken_with(checks, more).2
+    }
+
+    /// The same, with the user and the agent's session, for what the agent does after the wake.
+    fn woken_with(self, checks: Value, more: Value) -> (User, Mcp, String) {
         let user = self.user();
         self.script(&user, &[], "INPROGRESS");
         let (_, mcp) = agent(&user);
         subscribe(&mcp, json!({"events": ["checks"]}));
         self.script_failing(&user, checks, more);
         a_round(&user);
-        the_delivery(&user)
+        let delivery = the_delivery(&user);
+        (user, mcp, delivery)
     }
 }
 
@@ -3029,6 +3150,16 @@ fn steps(result: &str) -> Value {
     ]})
 }
 
+/// The pipeline of the build 31 on the branch of the pull request, which ended as `result`.
+fn pipeline_ended(result: &str) -> Value {
+    json!([{"uuid": "{31}", "build_number": 31,
+        "target": {"type": "pipeline_ref_target", "ref_name": "app/login"},
+        "state": {"name": "COMPLETED", "result": {"name": result}}}])
+}
+
+/// What the line of a CI failure says of running it again on Bitbucket Cloud: `forge` `checks`.
+const CHECKS_HINT: &str = "run it again (forge {\"action\": \"checks\", \"repository\": \"api\"})";
+
 fn build_check(state: &str) -> Value {
     json!([{"state": state, "key": "pipelines", "name": "Pipeline #31", "url": BUILD}])
 }
@@ -3038,11 +3169,12 @@ fn a_bitbucket_step_in_error_is_said_as_a_ci_failure() {
     let delivery = Bitbucket::Cloud.woken_by(
         build_check("FAILED"),
         json!({"steps": steps("ERROR"),
+            "pipelines": pipeline_ended("ERROR"),
             "logs": {"31": {SETUP_STEP: "fine\n", TEST_STEP: "+ cargo test\nBuild setup failed\n"}}}),
     );
 
     let line = format!(
-        "- Pipeline #31: the CI failed, not the code: the step test ended in error; {RERUN}"
+        "- Pipeline #31: the CI failed, not the code: the step test ended in error; {CHECKS_HINT}"
     );
     assert!(delivery.contains(&line), "{line} in {delivery}");
     assert!(
@@ -3058,11 +3190,11 @@ fn a_bitbucket_pipeline_that_died_outside_a_step_is_said_as_a_ci_failure() {
         json!({"steps": {"31": [
             {"uuid": SETUP_STEP, "name": "setup",
                 "state": {"name": "COMPLETED", "result": {"name": "SUCCESSFUL"}}}
-        ]}, "logs": {"31": {SETUP_STEP: "fine\n"}}}),
+        ]}, "pipelines": pipeline_ended("FAILED"), "logs": {"31": {SETUP_STEP: "fine\n"}}}),
     );
 
     let line = format!(
-        "- Pipeline #31: the CI failed, not the code: the pipeline #31 ended outside any step; {RERUN}"
+        "- Pipeline #31: the CI failed, not the code: the pipeline #31 ended outside any step; {CHECKS_HINT}"
     );
     assert!(delivery.contains(&line), "{line} in {delivery}");
     assert!(!delivery.contains("no failed step"), "{delivery}");
@@ -3113,8 +3245,50 @@ fn a_bitbucket_data_center_status_in_error_is_said_as_a_ci_failure_from_its_stat
         json!({}),
     );
 
-    let line = format!("- Jenkins: the CI failed, not the code: error; {RERUN}");
-    assert!(delivery.contains(&line), "{line} in {delivery}");
+    // Bitbucket Data Center has no pipelines to run again: nothing is hinted.
+    assert!(
+        delivery.contains("- Jenkins: the CI failed, not the code: error\n"),
+        "{delivery}"
+    );
+    assert!(!delivery.contains("run it again"), "{delivery}");
+}
+
+#[test]
+fn a_bitbucket_wake_hints_the_call_that_runs_the_build_again_and_the_tool_accepts_it() {
+    let (user, mcp, delivery) = Bitbucket::Cloud.woken_with(
+        build_check("FAILED"),
+        json!({"steps": steps("ERROR"), "pipelines": pipeline_ended("ERROR"),
+            "logs": {"31": {SETUP_STEP: "fine\n", TEST_STEP: "+ cargo test\nBuild setup failed\n"}}}),
+    );
+
+    let done = rerun_through(&user, &mcp, &delivery);
+
+    assert!(!done.error, "{}", done.text);
+    assert!(
+        lines(user.bkt_received())
+            .iter()
+            .any(|call| call.starts_with("pipeline run ") && call.ends_with("--ref app/login")),
+        "{:?}",
+        lines(user.bkt_received())
+    );
+}
+
+#[test]
+fn a_bitbucket_ci_failure_whose_build_cannot_be_run_again_says_nothing_of_it() {
+    // The build's own state does not say it failed: `forge checks` would refuse it.
+    let delivery = Bitbucket::Cloud.woken_by(
+        build_check("FAILED"),
+        json!({"steps": steps("ERROR"), "pipelines": pipeline_ended("STOPPED"),
+            "logs": {"31": {SETUP_STEP: "fine\n", TEST_STEP: "+ cargo test\nBuild setup failed\n"}}}),
+    );
+
+    assert!(
+        delivery.contains(
+            "- Pipeline #31: the CI failed, not the code: the step test ended in error\n"
+        ),
+        "{delivery}"
+    );
+    assert!(!delivery.contains("run it again"), "{delivery}");
 }
 
 #[test]

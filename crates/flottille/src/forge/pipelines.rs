@@ -1231,6 +1231,14 @@ fn job_id(seen: &Value, step: &str) -> Option<u64> {
         .as_u64()
 }
 
+/// Whether the run `run` holds the job `job`, which is what `step` `rerun` needs on GitHub.
+pub(super) async fn github_holds(forge: &Forge, run: u64, job: u64) -> bool {
+    match github_seen(forge, run).await {
+        Ok(seen) => job_id(&seen, &job.to_string()).is_some(),
+        Err(_) => false,
+    }
+}
+
 /// The job `step` of a run, or the refusal that says it has none.
 async fn github_job(forge: &Forge, run: u64, step: &str) -> Result<u64, Outcome> {
     let seen = github_seen(forge, run).await.map_err(Outcome::Failed)?;

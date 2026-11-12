@@ -34,14 +34,16 @@ impl Ending {
         }
     }
 
-    /// What a job's line says in place of its error line, with how long it took; none for the
-    /// code's failure, which is said by its error line.
-    pub(super) fn said(&self, took: Option<u64>) -> Option<String> {
+    /// What a job's line says in place of its error line, with how long it took and the call that
+    /// runs it again when there is one; none for the code's failure, which is said by its error
+    /// line. Nothing is said of running it again when no call is known to be accepted.
+    pub(super) fn said(&self, took: Option<u64>, rerun: Option<&str>) -> Option<String> {
         match self {
             Ending::Code => None,
-            Ending::Ci(what) => Some(format!(
-                "the CI failed, not the code: {what}; run it again (forge step … do: rerun)"
-            )),
+            Ending::Ci(what) => Some(match rerun {
+                Some(call) => format!("the CI failed, not the code: {what}; run it again ({call})"),
+                None => format!("the CI failed, not the code: {what}"),
+            }),
             Ending::Stopped(None) => Some("stopped, not failed".into()),
             Ending::Stopped(Some(who)) => Some(format!("stopped, not failed, by {who}")),
             Ending::TimedOut => Some(match took {
@@ -58,7 +60,37 @@ pub(super) fn took(started: Option<&str>, ended: Option<&str>) -> Option<u64> {
     end.checked_sub(start).map(|ms| ms / 1000)
 }
 
+/// The call that runs a failed job again, once the forge is known to accept it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Rerun {
+    /// Bitbucket Cloud: `forge` `checks` runs the failed pipeline of the branch again.
+    Checks,
+    /// GitHub: `forge` `step` runs a job of a run again.
+    Step { run: u64, job: u64 },
+}
+
+impl Rerun {
+    /// The call, as the agent makes it.
+    fn call(&self, repository: &str) -> String {
+        let repository = serde_json::Value::from(repository);
+        match self {
+            Rerun::Checks => {
+                format!("forge {{\"action\": \"checks\", \"repository\": {repository}}}")
+            }
+            Rerun::Step { run, job } => format!(
+                "forge {{\"action\": \"step\", \"repository\": {repository}, \"run\": {run}, \"step\": \"{job}\", \"do\": \"rerun\"}}"
+            ),
+        }
+    }
+}
+
 impl Job {
+    /// What its line says of how it ended, in place of an error line: none for the code's failure.
+    pub(super) fn said(&self, repository: &str) -> Option<String> {
+        let call = self.rerun.as_ref().map(|rerun| rerun.call(repository));
+        self.ending.said(self.took, call.as_deref())
+    }
+
     /// The job a failing check is, its log not read yet.
     pub(super) fn of(check: &Check) -> Job {
         Job {
@@ -67,6 +99,7 @@ impl Job {
             log: None,
             ending: Ending::of(check.outcome.as_deref()),
             took: took(check.started_at.as_deref(), check.ended_at.as_deref()),
+            rerun: None,
         }
     }
 }
@@ -95,26 +128,56 @@ mod tests {
             (Some("something new"), None),
             (
                 Some("startup_failure"),
-                Some(
-                    "the CI failed, not the code: startup failure; run it again (forge step … do: rerun)",
-                ),
+                Some("the CI failed, not the code: startup failure"),
             ),
-            (
-                Some("error"),
-                Some("the CI failed, not the code: error; run it again (forge step … do: rerun)"),
-            ),
+            (Some("error"), Some("the CI failed, not the code: error")),
             (Some("cancelled"), Some("stopped, not failed")),
             (Some("stopped"), Some("stopped, not failed")),
             (Some("timed_out"), Some("timed out")),
         ] {
-            assert_eq!(Ending::of(word).said(None).as_deref(), said, "{word:?}");
+            assert_eq!(
+                Ending::of(word).said(None, None).as_deref(),
+                said,
+                "{word:?}"
+            );
         }
+    }
+
+    #[test]
+    fn a_rerun_is_named_only_when_there_is_a_call_for_it() {
+        let ci = Ending::Ci("error".into());
+        let job = |rerun| Job {
+            name: "deploy".into(),
+            details: None,
+            log: None,
+            ending: ci.clone(),
+            took: None,
+            rerun,
+        };
+        assert_eq!(
+            job(None).said("api").as_deref(),
+            Some("the CI failed, not the code: error")
+        );
+        assert_eq!(
+            job(Some(Rerun::Checks)).said("api").as_deref(),
+            Some(
+                "the CI failed, not the code: error; run it again (forge {\"action\": \"checks\", \"repository\": \"api\"})"
+            )
+        );
+        assert_eq!(
+            job(Some(Rerun::Step { run: 900, job: 2 }))
+                .said("api")
+                .as_deref(),
+            Some(
+                "the CI failed, not the code: error; run it again (forge {\"action\": \"step\", \"repository\": \"api\", \"run\": 900, \"step\": \"2\", \"do\": \"rerun\"})"
+            )
+        );
     }
 
     #[test]
     fn a_timeout_says_after_how_long() {
         assert_eq!(
-            Ending::TimedOut.said(Some(21_600)).as_deref(),
+            Ending::TimedOut.said(Some(21_600), None).as_deref(),
             Some("timed out after 6 h")
         );
     }
@@ -122,7 +185,9 @@ mod tests {
     #[test]
     fn a_stop_says_who_when_it_is_known() {
         assert_eq!(
-            Ending::Stopped(Some("Alice".into())).said(None).as_deref(),
+            Ending::Stopped(Some("Alice".into()))
+                .said(None, None)
+                .as_deref(),
             Some("stopped, not failed, by Alice")
         );
     }

@@ -338,6 +338,8 @@ pub struct Job {
     pub ending: ending::Ending,
     /// How many seconds it ran, when the forge gave its start and its end.
     pub took: Option<u64>,
+    /// The call that runs it again, when the forge is known to accept it (`logs::attach`).
+    pub rerun: Option<ending::Rerun>,
 }
 
 /// The end of a job's log: `shown` of its `total` lines (the failing command's when `part`),

@@ -1125,6 +1125,9 @@ pub(super) struct Built {
     /// A step in `ERROR` (Bitbucket's system error) or a pipeline that ended outside any step is
     /// the CI's, not the code's; a pipeline that was stopped, by whom when it says it.
     pub ending: Option<Ending>,
+    /// Whether the build failed, so that `forge` `checks` runs it again: it refuses a pipeline
+    /// that did not fail.
+    pub rerunnable: bool,
 }
 
 /// The log of the first failed step of the build `build`: `bkt pipeline view` names the steps,
@@ -1144,6 +1147,7 @@ pub(super) async fn failed_step_log(forge: &Forge, context: &str, build: u64) ->
             return Built {
                 log: Err(why),
                 ending: None,
+                rerunnable: false,
             };
         }
     };
@@ -1181,10 +1185,15 @@ pub(super) async fn failed_step_log(forge: &Forge, context: &str, build: u64) ->
             ))),
         },
     };
+    let rerunnable = matches!(
+        seen["pipeline"]["state"]["result"]["name"].as_str(),
+        Some("FAILED" | "ERROR")
+    );
     let Some(uuid) = uuid else {
         return Built {
             log: Err(format!("the pipeline #{build} has no failed step")),
             ending,
+            rerunnable,
         };
     };
     let log = text(&command(
@@ -1195,7 +1204,11 @@ pub(super) async fn failed_step_log(forge: &Forge, context: &str, build: u64) ->
     ))
     .await
     .map(|log| (uuid.to_owned(), log));
-    Built { log, ending }
+    Built {
+        log,
+        ending,
+        rerunnable,
+    }
 }
 
 /// The path of a Cloud pull request's own page, for `bkt api`.

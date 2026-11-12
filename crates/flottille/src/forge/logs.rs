@@ -6,7 +6,7 @@
 use super::bitbucket::{self, Contexts};
 use serde_json::Value;
 
-use super::ending::Ending;
+use super::ending::{Ending, Rerun};
 use super::{Forge, Job, Log, gh_text};
 
 /// The lines of a log that are given, counted from its end.
@@ -76,10 +76,11 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
             Plan::Said(_) => None,
             Plan::Read(Source::Bitbucket(context, build)) => {
                 let built = bitbucket::failed_step_log(forge, context, *build).await;
-                Some((built.ending, built.log))
+                Some((built.ending, built.rerunnable, built.log))
             }
             Plan::Read(Source::GitHub(_, job)) => Some((
                 None,
+                false,
                 gh_text(&[
                     "run",
                     "view",
@@ -98,9 +99,9 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
     // The total is shared out in the jobs' order, as it is when they are read one after the other.
     let mut left = TOTAL_BYTES;
     for ((job, plan), raw) in jobs.iter_mut().zip(plans).zip(raws) {
-        let (ending, raw) = match raw {
-            Some((ending, raw)) => (ending, Some(raw)),
-            None => (None, None),
+        let (ending, rerunnable, raw) = match raw {
+            Some((ending, rerunnable, raw)) => (ending, rerunnable, Some(raw)),
+            None => (None, false, None),
         };
         // What the build says of its end refines what the check's status said: a failed status
         // is the CI's when the build died of its own, and a stop may say who made it.
@@ -108,6 +109,10 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
             (Ending::Code, Some(ending)) => job.ending = ending,
             (Ending::Stopped(None), Some(ending @ Ending::Stopped(Some(_)))) => job.ending = ending,
             _ => {}
+        }
+        // `forge` `checks` runs a Bitbucket build again once it failed.
+        if matches!(job.ending, Ending::Ci(_)) && rerunnable {
+            job.rerun = Some(Rerun::Checks);
         }
         let log = match (plan, raw) {
             (Plan::Said(said), _) => said,
@@ -127,6 +132,23 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
             left -= log.text.len().min(left);
         }
         job.log = Some(log);
+    }
+    // On GitHub `forge` `step` runs a job again only when its run holds that job (a job that never
+    // started has none): ask the run, and name nothing when it does not.
+    if matches!(forge, Forge::GitHub { .. }) {
+        let held = futures::future::join_all(jobs.iter().take(JOBS).map(|job| async {
+            let (run, id) = actions_job(job.details.as_deref())?;
+            match matches!(job.ending, Ending::Ci(_))
+                && super::pipelines::github_holds(forge, run, id).await
+            {
+                true => Some(Rerun::Step { run, job: id }),
+                false => None,
+            }
+        }))
+        .await;
+        for (job, rerun) in jobs.iter_mut().zip(held) {
+            job.rerun = rerun;
+        }
     }
 }
 
@@ -434,7 +456,7 @@ pub(super) fn text(jobs: &[Job], repository: &str) -> String {
     }
     let mut text = format!("  failed jobs ({}):\n", jobs.len());
     for job in jobs {
-        let said = job.ending.said(job.took);
+        let said = job.said(repository);
         // A job the CI did not run to its end has no failing command's output to show.
         let log = match (&job.log, &job.ending) {
             (_, Ending::Stopped(_) | Ending::TimedOut) => None,
