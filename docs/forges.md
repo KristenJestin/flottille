@@ -401,8 +401,12 @@ the base the repository started from):
 
 - `create`: `bkt pr create … --source <branch> --target <base>`, a `--reviewer` for each of
   the project's reviewers; it prints no link, so the pull request is read back by its number for
-  the answer. A reviewer is the name Bitbucket knows them by (Cloud: the username; Data Center: the
-  user's slug).
+  the answer. A reviewer is the name Bitbucket knows them by (Cloud: `bkt` sends `{"uuid": …}` for a
+  `{uuid}`, `{"account_id": …}` for an account id of the shape `<number>:<uuid>`, else the
+  deprecated `{"username": …}`, `pkg/bbcloud/pullrequests.go` `reviewerIdentity` at v0.37.0, and
+  `pr edit --remove-reviewer` matches a `{uuid}`, a username or an account id,
+  `matchesCloudUser`; Data Center: the user's `name`, the login). What the agent names is
+  found first (#795, "People" below), and Flottille sends a Cloud person's `{uuid}`.
 - `merge`: the open pull request of the branch, not from a fork (Cloud: source and
   destination repositories are the same; Data Center: the same slug and project key), into the
   base: `bkt pr merge <id> --strategy S --close-source=false`, `S` the method's strategy: `squash`
@@ -471,6 +475,33 @@ the base the repository started from):
   has no command for it.
 - `list`: `bkt pr list --state OPEN | MERGED | DECLINED | all` (`closed` is `DECLINED`), the
   newest 50, the branch picked from them; `show` with a number finds it among them.
+
+### People
+
+`forge people` and the finding of a reviewer by name (#795, `docs/tools.md`, "People") read, with
+the user's own sign-in and no write, what `bkt` and `gh` can list of a repository's people. **No
+`bkt` command lists them** (v0.37.0 has `repo default-reviewers list`, which is the repository's
+effective default reviewers alone, and no user search), so they are read with `bkt api`, which
+passes the server's answer through. **These shapes are assumed from Atlassian's REST documentation,
+and the maintainer checks them**:
+
+| What | Path (`--context C`, `--param pagelen=50`/`limit=50`) | Read |
+|---|---|---|
+| Cloud workspace members | `/workspaces/{workspace}/members` | `values[].user`: `display_name`, `nickname`, `uuid`, `account_id` |
+| Cloud default reviewers | `/repositories/{w}/{r}/default-reviewers` | `values[]` as a user |
+| Cloud effective default reviewers | `/repositories/{w}/{r}/effective-default-reviewers` | `values[].user` (`bkt` reads it so: `GetEffectiveDefaultReviewers`) |
+| Data Center, administrators | `/rest/api/1.0/projects/{k}/repos/{r}/permissions/users` | `values[].user`: `name`, `slug`, `displayName`, `emailAddress` |
+| Data Center, else | `/rest/api/1.0/users?permission=REPO_READ&permission.projectKey={k}&permission.repositorySlug={r}` | `values[]`: the same user fields; slower on a large instance (BSERV-13303) |
+| Seen on pull requests | `bkt pr list --state all --limit 50 --json` | Cloud `author`; Data Center `participants[].user` |
+| GitHub | `gh api repos/{o}/{r}/assignees` and `…/collaborators` `-F per_page=100 --jq '.[].login'`; `gh pr list --state all --limit 100 --json author,reviews,reviewRequests,assignees` | logins; `login` and `name` of the people on the pull requests |
+
+The Cloud members and the people seen on the newest pull requests are read up to 200 and 50: a
+larger workspace's member the pull requests did not show is not found by display name, and the
+refusal's `looked` says where it looked. Two sources of one account are one person (they share an
+identifier, a UUID or an account id). Cloud's person is sent as the `{uuid}`, which `bkt`
+takes for both `--reviewer` and `--remove-reviewer` (`reviewerIdentity`, `matchesCloudUser`) and
+Atlassian no longer takes a `username` for (deprecated); the identifier an agent reads is the
+nickname, else the account id.
 
 ### Reviews
 
@@ -815,7 +846,12 @@ it, after the checks.
   each reviewer participant; Data Center: `APPROVED` on each reviewer) every reviewer has approved
   and none asks for changes, a pull request with no reviewer never. Where `review` wakes the agent
   at each reviewer's verdict, this wakes it once the review as a whole is approved, so it need not
-  read the pull request to know. The delivery says who approved and the checks in one line
+  read the pull request to know. **A person is said by display name and identifier** (#795: `approved
+  by Alice (alice), Bob (bob)`, `A review by Bob (bob): approved`, `A comment by Carol Poe (cpoe)`,
+  and `reviewers: Bob (bob) approved` in `forge show`), so the agent can name them back to `forge`
+  (`docs/tools.md`, "People"): a Bitbucket Cloud person's nickname (else account id), a Data Center
+  user's login; on GitHub the login is the author's name already and is said alone. The
+  delivery says who approved and the checks in one line
   (`checks: 12 passed`, `checks still running`, `checks: 2 failed`, `checks: 2 skipped`, `no checks`), as the round
   stored them. It is judged against the decision the item held before the round, not read again
   from the forge: a decision already approved when the agent subscribes (`show` says it), or read

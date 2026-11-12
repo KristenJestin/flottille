@@ -544,7 +544,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, verdict?, comments?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, follow?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, query?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, verdict?, comments?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, follow?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -557,6 +557,17 @@ pending requests.
   and why its last round failed when it did. A repository no round read yet is listed from the
   forge (on Bitbucket, the newest 50, and the answer says when a list may be cut; Bitbucket lists
   by state and the branch is picked from them, [`forges.md`](forges.md), "Bitbucket").
+- **`people {repository?, query?}`** (a read): who can be named as a reviewer, in each repository
+  or the one named, each as `- Jane Doe (jdoe)`: the display name, and the identifier the agent
+  names them back by, those seen on the repository's pull requests first (up to 50 lines, the
+  answer says how many more: narrow with `query`, words that the name, nickname or e-mail hold,
+  case and accents aside). Bitbucket Cloud: the workspace's members and the repository's default
+  and effective reviewers (`bkt api`); Data Center: the users with access to the repository;
+  GitHub: the repository's assignable users and collaborators, with the name `gh` says for those
+  on its pull requests (the users' own listing says no name, so a person never seen on a pull
+  request is found by their login alone). A forge whose list cannot be read says why, and a
+  list with only the people seen on the pull requests says so.
+  See "People" below, which every field that names a person follows.
 - **`show {workspace?, repository?, detail?}`**: the pull request of a workspace's branch in each
   of its repositories, or the one named (`workspace` names the workspace: the agent's own when
   left out, required in `main`, where `refused: this agent works in main, which has no workspace
@@ -638,7 +649,7 @@ pending requests.
   gate with another method, `refused: forge merge by merge takes no message: …`, or on another
   action), or re-runs the failed jobs of its last
   commit's pipelines (`docs/commands.md`, "`forge`"). **`create`** also takes `reviewers`
-  (added to the project's, none twice), `labels` (GitHub only: Bitbucket has no labels on pull
+  (each a person as the agent knows them, "People" below; added to the project's, none twice), `labels` (GitHub only: Bitbucket has no labels on pull
   requests, and the call is refused saying so, before anything is opened) and
   `delete_branch_on_merge`. On Bitbucket that one is the pull request's own "close source branch"
   (`bkt pr create --close-source`); GitHub has no such flag per pull request, so Flottille keeps
@@ -684,7 +695,8 @@ pending requests.
   the place; **`edit {number, repository?, title?, body?, draft?, reviewers_add?,
   reviewers_remove?, labels_add?, labels_remove?, base?}`** changes it, at least one field
   (refused at once otherwise, and for a reviewer or a label that would be an option of the command
-  line: empty, starting with `-`, holding a comma, a reviewer holding a space too; and for a
+  line: empty, starting with `-`, holding a comma; a reviewer may hold spaces, a display name, which
+  is found among the forge's people ("People" below); and for a
   `base`, anything git's reference rules refuse in a branch name: a space, `..`, `~`, `^`, `:`,
   `?`, `*`, `[`, `\`, `@{`, `//`, a leading `-` or `/`, a trailing `/`, `.` or `.lock`, and `#`,
   which would change the address it is read at). GitHub: one
@@ -881,12 +893,68 @@ reasons.
  How the forge is read, and what it never touches (a token,
 `gh auth token`), is in [`forges.md`](forges.md).
 
+### People
+
+Every field of `forge` and `tickets` that names a person (`reviewers` of `create`, `reviewers_add`
+and `reviewers_remove` of `edit`, a ticket's `assignee`, `assignees` and `remove_assignees`) takes
+the person **as the agent knows them**: a display name, a nickname, an account id or an e-mail, as
+the comments, the approvals and the wakes say them (an approval says `approved by Jane Doe
+(jdoe)`, a comment `A comment by Jane Doe (jdoe)`, `forge show` `reviewers: Jane Doe (jdoe)
+approved`; GitHub's logins are their own identifier, said alone). Flottille finds the person in the
+forge's or the tracker's own list of people (`forge people`, `tickets people`), **after the user
+allowed the call and before anything is sent**, and sends the identifier the command line takes
+(Bitbucket Cloud: their UUID, which `bkt pr create --reviewer` and `bkt pr edit --reviewer` and
+`--remove-reviewer` all take and which never changes; Data Center: their login; GitHub: their login;
+Jira: their account id, else their e-mail). The card shows the names as given.
+
+- **How a name is matched**, ignoring case, accents and extra spaces: (1) an exact match on an
+  identifier, a nickname or an e-mail; (2) else an exact match on the whole display name; (3) else
+  a display name holding every word given as a word (`jane` or `doe` alone match `Jane Doe`), the
+  step that matches deciding. At that step **more than one person is refused, listing them**
+  (display name and identifier, ten at most, then how many more): `refused: reviewers_add: "jane"
+  matches 2 people in acme/app: Jane Doe (jdoe), Jane Roe (jroe); name one by their identifier;
+  nothing was written`. **Nobody is refused naming where it looked** (`"Zed Nobody" matches nobody
+  in acme/app: the members of the workspace acme, its default reviewers and the people on its pull
+  requests`), and nothing is written.
+- **The answer says who was added**, by display name and identifier (`Reviewers: added Jane Doe
+  (jdoe); removed Bob Roe (broe).`, `Assigned to Anne Example (anne@example.org).`), so a wrong
+  guess shows at once.
+- **A list that cannot be read** (`gh` or `bkt` failing on it, a GitHub repository the user may
+  not list the users of) takes a name of one word as it was given, as before, and refuses one with
+  spaces: `refused: reviewers_add: "Jane Doe" is a name with spaces, which bkt takes for nobody, and
+  the forge's people cannot be listed to find them (…); give their identifier; nothing was written`.
+  The people seen on the pull requests are no list of everyone: with them alone, a name they do not
+  hold is not refused as nobody's.
+- **What a command line cannot list is said so.** `acli` has no command that looks a Jira user up:
+  `tickets people` shows the people it shows, **the assignees of the project's newest 100 assigned
+  work items** (`acli jira workitem search --jql 'project in (…) AND assignee is not EMPTY ORDER BY
+  updated DESC' --fields key,assignee --json --limit 100`), each by their e-mail when the site
+  shows it, else their account id, and a person no work item is assigned to is not found: the
+  refusal says it (`… acli having no command that looks a user up`), and the agent gives their
+  e-mail or account id, which are sent as they are. A person whose site shows neither an e-mail nor an
+  account id is not listed, since nothing could name them to `acli`.
+- **The forges' own endpoints** (`bkt api`, `gh api`, read only, the user's own sign-in, never a
+  token read): Bitbucket Cloud `/workspaces/{w}/members`, `/repositories/{w}/{r}/default-reviewers`
+  and `…/effective-default-reviewers`; Data Center
+  `/rest/api/1.0/projects/{k}/repos/{r}/permissions/users`, else `/rest/api/1.0/users?permission=
+  REPO_READ&permission.projectKey={k}&permission.repositorySlug={r}`; GitHub `repos/{o}/{r}/assignees`
+  and `…/collaborators` (the first 100 of each) and `gh pr list --state all --limit 100 --json
+  author,reviews,reviewRequests,assignees` (`gh issue list … author,assignees` for a tracker). Up
+  to 200 of each Bitbucket collection are read. **Their shapes are assumed from Atlassian's REST
+  documentation, and the maintainer checks them** ([`forges.md`](forges.md), "People").
+- **The project's own `[pull_requests] reviewers`** are the forge's identifiers already and are
+  not looked up. A project reviewer and one the agent names are asked once.
+
 ## The tickets
 
 | Tool | |
 |---|---|
 | `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, parent?, board?, milestone?, remove_milestone?, due?, description?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
+- **`people {query?}`** (a read): who can be named as an assignee, each as `- Anne Example
+  (anne@example.org)`: GitHub the tracker repository's assignable users and collaborators, as
+  `forge people`; Jira the assignees of the project's newest work items, `acli` having no way to
+  list the site's users ("People" under "The forge"). `query` narrows them.
 - **`list {state?, label?, assignee?, updated_within?}`**: every ticket of a state, in one call, a
   line each (`- #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default),
   `closed` or `all`; up to 200, the newest, and the answer says when there may be more.
@@ -998,9 +1066,8 @@ reasons.
   twice ([`tickets.md`](tickets.md), "Types and assignment").
 - **`assignee` on Jira**: `create` and `edit` take `"me"` (the user the agent works for: `acli`'s
   `@me`, the user it is signed in as, which `acli` resolves itself; `"@me"` is taken too), an email
-  or an account id, as `acli` takes them; anything else, a display name above all, is refused
-  before anything is asked (`assignee is me, an email or an account id; a display name cannot be
-  looked up with acli`); `edit` with `assignee: null` removes it. A creation `acli` refuses with
+  or an account id, as `acli` takes them, or a person by display name, nickname or e-mail found
+  among those `tickets people` lists ("People" below); `edit` with `assignee: null` removes it. A creation `acli` refuses with
   its assignee says it (`acli refused the creation assigned to "…": …; nothing was created`) and
   is never tried again without it. Nothing is assigned unless the agent asks (a tracker may assign
   a new work item by default). On GitHub, `assignees` (edit), `"me"` sent as `@me`. The request

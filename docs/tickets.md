@@ -472,10 +472,17 @@ refused it, and the new work item went to the project's default assignee.
   user the agent works for, sent as `acli`'s `@me` (`"@me"` is taken too), which `acli` resolves
   itself (`acli jira workitem create --help`: "Use '@me' to self-assign"), so Flottille reads no
   account and no credential for it. An account id is 24 hexadecimal digits or `<number>:<uuid>`.
-  **Anything else is refused before anything is asked**: seen in daily use, an agent gave the
-  user's display name, and `acli` refused the whole creation (`invalid format for assignee email:
-  mail: missing '@' or angle-addr`); `acli` cannot look a name up. The answer is `assignee is me,
-  an email or an account id; a display name cannot be looked up with acli`. A blank assignee is no
+  **Anything else is a name to find** (#795): seen in daily use, an agent gave the user's display
+  name, and `acli` refused the whole creation (`invalid format for assignee email: mail: missing
+  '@' or angle-addr`). `acli` cannot look a user up, so the name is found among the assignees of
+  the project's newest assigned work items (`acli jira workitem search --jql 'project in (…) AND
+  assignee is not EMPTY ORDER BY updated DESC' --fields key,assignee --json --limit 100`, which
+  `tickets people` lists: `assignee.displayName`, `accountId`, `emailAddress`, assumed from
+  Jira's REST shape as for `view`), after the user allowed the call and before `acli` is run, the
+  account id (else the e-mail) is what `acli` is given, and the answer says `Assigned to Anne
+  Example (anne@example.org).`; a name that is nobody's of them, or several, is refused (`docs/tools.md`,
+  "People"), nothing written. A person no work item is assigned to is not found: the agent gives
+  their e-mail. A blank assignee is no
   assignee; a `null` one is told from a missing one (a blank is never a removal). On GitHub it is
   `assignees` (`edit`, `--add-assignee`, `me` sent as `gh`'s `@me`); `assignee` there is refused,
   and on `comment`, `close`, `reopen` and `status` on both trackers.
