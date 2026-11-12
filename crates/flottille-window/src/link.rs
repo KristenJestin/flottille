@@ -442,6 +442,8 @@ fn matters(event: &Event) -> bool {
                 | "agent.compaction_failed"
                 // A session that waits for its quota's reset says it on its row.
                 | "agent.quota"
+                // A session given another model or effort says it on its row.
+                | "agent.options_taken"
         ),
         _ => false,
     }

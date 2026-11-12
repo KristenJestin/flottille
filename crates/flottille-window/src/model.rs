@@ -229,6 +229,11 @@ pub struct Session {
     /// The agent that leads it, by the name it goes by: `None` for a session no agent leads (one
     /// handed to the user, or detached from its pilot).
     pub led_by: Option<String>,
+    /// What its root agent runs on, as the daemon says it: the provider, and the model and the
+    /// effort it took or was asked (`None`: the provider's own).
+    pub provider: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
     /// The session of the agent that leads it, whose row it sits under.
     pub pilot: Option<String>,
 }
@@ -798,6 +803,9 @@ impl Snapshot {
                     commands: commands_of("root", &id),
                     started_by: agent["launched_by"].as_str().map(name_of),
                     led_by: agent["led_by"].as_str().map(name_of),
+                    provider: text(agent, "provider"),
+                    model: agent["model"].as_str().map(str::to_owned),
+                    effort: agent["effort"].as_str().map(str::to_owned),
                     pilot: agent["led_by"]
                         .as_str()
                         .map(|pilot| root_of(&parents, pilot).to_owned()),

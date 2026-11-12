@@ -1609,6 +1609,11 @@ impl SessionPage {
                     provider: agent.provider.clone(),
                     model: agent.model.clone(),
                     runs_on: runs_on(&self.providers, &agent.provider, agent.model.as_deref()),
+                    model_effort: self.providers.model_and_effort(
+                        &agent.provider,
+                        agent.model.as_deref(),
+                        agent.effort.as_deref(),
+                    ),
                     depth: agent.depth,
                     parent: agent.parent.clone(),
                     ended: matches!(state_of(agent), AgentState::Completed | AgentState::Stopped),
@@ -6642,6 +6647,8 @@ pub struct RailAgent {
     pub model: Option<String>,
     /// Its provider and model, as a line.
     pub runs_on: String,
+    /// Its model and effort, by name: what a child's row says before what it does.
+    pub model_effort: String,
     pub depth: u64,
     /// The agent that launched it; `None` for the root.
     pub parent: Option<String>,
@@ -7601,11 +7608,8 @@ impl Render for SessionRail {
                 true => (
                     agent.name.clone(),
                     Some(match agent.doing.as_str() {
-                        "" => agent.model.clone().unwrap_or(agent.provider.clone()),
-                        doing => format!(
-                            "{} · {doing}",
-                            agent.model.clone().unwrap_or(agent.provider.clone())
-                        ),
+                        "" => agent.model_effort.clone(),
+                        doing => format!("{} · {doing}", agent.model_effort),
                     }),
                 ),
             };

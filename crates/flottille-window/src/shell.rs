@@ -785,7 +785,12 @@ impl Shell {
         let Some(project) = self.snapshot.session(session).map(|s| s.project.clone()) else {
             return;
         };
-        let live = self.snapshot.live_sessions_of(&project);
+        self.relist_project(&project, cx);
+    }
+
+    /// A project's level drawn again, from what the daemon last said.
+    fn relist_project(&mut self, project: &str, cx: &mut Context<Self>) {
+        let live = self.snapshot.live_sessions_of(project);
         let rows: Vec<Entity<SessionRow>> = live
             .iter()
             .filter_map(|s| self.sessions.get(&s.id).cloned())
@@ -793,8 +798,8 @@ impl Shell {
         if rows.len() != live.len() {
             return;
         }
-        let rows = nested(&live, &rows, cx);
-        if let Some(node) = self.projects.get(&project).cloned() {
+        let rows = nested(&live, &rows, &self.providers, cx);
+        if let Some(node) = self.projects.get(project).cloned() {
             node.update(cx, |node, cx| node.set_rows(rows, cx));
         }
     }
@@ -2024,6 +2029,16 @@ impl Shell {
         // The notice of a judge Flottille picked comes and goes with them.
         let notice = self.judge_notice();
         self.providers = providers;
+        // The led sessions' rows name what they run on by the models the providers list.
+        let projects: Vec<String> = self
+            .snapshot
+            .projects
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        for project in projects {
+            self.relist_project(&project, cx);
+        }
         if self.judge_notice() != notice {
             cx.notify();
         }
@@ -2196,7 +2211,7 @@ impl Shell {
             let mut marks = Vec::new();
             let live = snapshot.live_sessions_of(&project.name);
             let rows = self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
-            let rows = nested(&live, &rows, cx);
+            let rows = nested(&live, &rows, &self.providers, cx);
             let node = self.projects.remove(&project.name).unwrap_or_else(|| {
                 let name = project.name.clone();
                 let this = this.clone();
@@ -3410,6 +3425,7 @@ fn logo(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
 fn nested(
     live: &[&crate::model::Session],
     rows: &[Entity<SessionRow>],
+    providers: &Providers,
     cx: &mut Context<Shell>,
 ) -> Vec<Entity<SessionRow>> {
     // The place of each session's pilot among them, when it is one of them.
@@ -3437,6 +3453,16 @@ fn nested(
         let led_by = pilots[at].and(live[at].led_by.as_deref());
         if row.read(cx).led_by() != led_by {
             row.update(cx, |row, cx| row.set_led_by(led_by, cx));
+        }
+        let runs = led_by.map_or_else(String::new, |_| {
+            providers.model_and_effort(
+                &live[at].provider,
+                live[at].model.as_deref(),
+                live[at].effort.as_deref(),
+            )
+        });
+        if row.read(cx).runs() != runs {
+            row.update(cx, |row, cx| row.set_runs(&runs, cx));
         }
         if row.read(cx).tie() != tie.as_ref() {
             let tie = tie.clone();

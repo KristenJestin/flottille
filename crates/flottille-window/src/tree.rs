@@ -112,6 +112,12 @@ pub fn session_waits_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-waits-{id}").into())
 }
 
+/// The element id of what a led session runs on, on its second line after the place: labelled
+/// `Sonnet 5.5 · medium`, the model and the effort by name.
+pub fn session_runs_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-runs-{id}").into())
+}
+
 /// The element id of the icon before the place's name: a folder (`Project folder`) or a branch
 /// (`Workspace`).
 pub fn session_place_icon_id(id: &str) -> ElementId {
@@ -825,6 +831,10 @@ pub struct SessionRow {
     /// while the line folds away.
     waits: SharedString,
     waits_shown: SharedString,
+    /// What a led session runs on, for the second line, and the last words it said, which stay
+    /// drawn while the line folds away; empty for a session no agent leads.
+    runs: SharedString,
+    runs_shown: SharedString,
     active_at: u64,
     ago: SharedString,
     selected: bool,
@@ -883,6 +893,8 @@ impl SessionRow {
             words: SharedString::default(),
             waits: SharedString::default(),
             waits_shown: SharedString::default(),
+            runs: SharedString::default(),
+            runs_shown: SharedString::default(),
             active_at: 0,
             ago: SharedString::default(),
             selected: false,
@@ -1168,6 +1180,21 @@ impl SessionRow {
         }
     }
 
+    /// What it runs on, the model and the effort by name: empty unless an agent leads it.
+    pub fn runs(&self) -> &str {
+        &self.runs
+    }
+
+    pub fn set_runs(&mut self, runs: &str, cx: &mut Context<Self>) {
+        if self.runs() != runs {
+            self.runs = SharedString::from(runs.to_owned());
+            if !runs.is_empty() {
+                self.runs_shown = self.runs.clone();
+            }
+            cx.notify();
+        }
+    }
+
     /// The one mark the row ends with: its state, else the unread dot, else the time ago.
     pub fn trailing(&self) -> Trailing {
         match (self.mark.shown, &self.unread) {
@@ -1447,12 +1474,24 @@ impl SessionRow {
         );
         let waits = Some(self.waits_shown.clone())
             .filter(|waits| !waits.is_empty() && (!self.waits.is_empty() || waiting > 0.0));
-        let tip = match (&pull, &waits) {
-            (Some(pull), Some(waits)) => format!("{name} · {waits} · {}", pull_said(pull)),
-            (Some(pull), None) => format!("{name} · {}", pull_said(pull)),
-            (None, Some(waits)) => format!("{name} · {waits}"),
-            (None, None) => name.clone(),
-        };
+        // What a led session runs on unfolds and fades in after the place too, its words fading
+        // as they change.
+        let running = fade(
+            ElementId::Name(format!("session-runs-fade-{}", self.id).into()),
+            !self.runs.is_empty(),
+            PANEL,
+            window,
+            cx,
+        );
+        let runs = Some(self.runs_shown.clone())
+            .filter(|runs| !runs.is_empty() && (!self.runs.is_empty() || running > 0.0));
+        let tip = [Some(name.clone()), waits.as_ref().map(|w| w.to_string())]
+            .into_iter()
+            .chain([runs.as_ref().map(|r| r.to_string())])
+            .flatten()
+            .chain(pull.as_ref().map(pull_said))
+            .collect::<Vec<_>>()
+            .join(" · ");
         let place = div()
             .id(session_place_id(&self.id))
             .aria_label(SharedString::from(name.clone()))
@@ -1527,6 +1566,34 @@ impl SessionRow {
                                         .whitespace_nowrap()
                                         .text_ellipsis()
                                         .child(waits)
+                                        .into_any_element()
+                                },
+                            ))
+                            .test_support()
+                    }))
+                    .children(runs.map(|runs| {
+                        div()
+                            .id(session_runs_id(&self.id))
+                            .aria_label(runs.clone())
+                            .flex()
+                            .items_center()
+                            .gap(space::SM)
+                            .min_w_0()
+                            .h(px(LINE))
+                            .overflow_hidden()
+                            .max_w(px(WAITS_WIDTH * running))
+                            .opacity(running)
+                            .child(div().flex_none().child("·"))
+                            .child(changing(
+                                ElementId::Name(format!("session-runs-words-{}", self.id).into()),
+                                runs.clone(),
+                                move |runs| {
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(runs)
                                         .into_any_element()
                                 },
                             ))
