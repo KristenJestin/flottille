@@ -56,8 +56,12 @@ impl Person {
 
     /// What `other`, the same person read elsewhere, adds.
     fn merge(&mut self, other: Person) {
+        if self.name.is_empty() {
+            self.name = other.name;
+        }
+        // Only an identifier is kept as one: a second display name is no way to name the account
+        // exactly, it may be another person's whole name.
         for (mine, theirs) in [
-            (&mut self.name, other.name),
             (&mut self.handle, other.handle),
             (&mut self.send, other.send),
         ] {
@@ -125,9 +129,14 @@ impl People {
     /// The one person `given` names, as `docs/tools.md` ("People") says: an exact identifier (a
     /// handle, an account id, an e-mail), else the whole display name, else a display name that
     /// holds every word given; case, accents and extra spaces do not count. Never a guess among
-    /// several: they are listed.
-    pub fn find(&self, given: &str) -> Result<&Person, Miss<'_>> {
+    /// several: they are listed. When the list may be incomplete (`complete` false: it was cut, or
+    /// a source could not be read) the last step is no proof of anything, as a second person with
+    /// the words may be missing from it: a part of a name is refused, naming who it could be.
+    pub fn find(&self, given: &str, complete: bool) -> Result<&Person, Miss<'_>> {
         let wanted = fold(given);
+        if wanted.is_empty() {
+            return Err(Miss::Nobody);
+        }
         let by_identifier: Vec<&Person> = self
             .0
             .iter()
@@ -147,14 +156,19 @@ impl People {
                 !given_words.is_empty() && given_words.iter().all(|word| name.contains(word))
             })
             .collect();
-        for step in [by_identifier, by_name, by_words] {
+        for step in [by_identifier, by_name] {
             match step.as_slice() {
                 [] => continue,
                 [one] => return Ok(one),
                 _ => return Err(Miss::Several(step)),
             }
         }
-        Err(Miss::Nobody)
+        match (by_words.as_slice(), complete) {
+            ([], _) => Err(Miss::Nobody),
+            ([one], true) => Ok(one),
+            (_, true) => Err(Miss::Several(by_words)),
+            (_, false) => Err(Miss::Partial(by_words)),
+        }
     }
 }
 
@@ -163,6 +177,8 @@ impl People {
 pub(crate) enum Miss<'a> {
     Nobody,
     Several(Vec<&'a Person>),
+    /// A part of a name, on a list that may be incomplete: who it could be.
+    Partial(Vec<&'a Person>),
 }
 
 impl Miss<'_> {
@@ -173,12 +189,17 @@ impl Miss<'_> {
                 "refused: {key}: {given:?} matches nobody in {looked}: its people are listed by \
                  people, and a name is a display name, a nickname, an account id or an e-mail"
             ),
+            Miss::Partial(found) => {
+                let (listed, more) = shown(found);
+                format!(
+                    "refused: {key}: {given:?} is a part of a name, and the people of {looked} \
+                     may not be all listed: did you mean {}{more}? name them whole, by their \
+                     display name or their identifier",
+                    listed.join(", or ")
+                )
+            }
             Miss::Several(found) => {
-                let listed: Vec<String> = found.iter().take(SHOWN).map(|p| p.said()).collect();
-                let more = match found.len() > SHOWN {
-                    true => format!(" and {} more", found.len() - SHOWN),
-                    false => String::new(),
-                };
+                let (listed, more) = shown(found);
                 format!(
                     "refused: {key}: {given:?} matches {} people in {looked}: {}{more}; name one \
                      by their identifier",
@@ -188,6 +209,16 @@ impl Miss<'_> {
             }
         }
     }
+}
+
+/// The first `SHOWN` of `found`, as a refusal says them, and what is left.
+fn shown(found: &[&Person]) -> (Vec<String>, String) {
+    let listed = found.iter().take(SHOWN).map(|p| p.said()).collect();
+    let more = match found.len() > SHOWN {
+        true => format!(" and {} more", found.len() - SHOWN),
+        false => String::new(),
+    };
+    (listed, more)
 }
 
 /// Up to this many people one `people` answer lists.
@@ -210,7 +241,11 @@ pub(crate) fn lines(found: &[&Person]) -> String {
 
 /// The words of a text, folded.
 fn words(text: &str) -> Vec<String> {
-    fold(text).split(' ').map(str::to_owned).collect()
+    fold(text)
+        .split(' ')
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// A text compared: lower case, without accents, its spaces single.
@@ -285,17 +320,20 @@ mod tests {
         let mut people = people();
         // A person whose display name is another's nickname.
         people.add(Person::new("jdoe", "other", "{other-uuid}", &[]));
-        assert_eq!(people.find("JDOE").unwrap().name, "Jane Doe");
-        assert_eq!(people.find("jane@example.org").unwrap().handle, "jdoe");
-        assert_eq!(people.find("{jane-uuid}").unwrap().handle, "jdoe");
+        assert_eq!(people.find("JDOE", true).unwrap().name, "Jane Doe");
+        assert_eq!(
+            people.find("jane@example.org", true).unwrap().handle,
+            "jdoe"
+        );
+        assert_eq!(people.find("{jane-uuid}", true).unwrap().handle, "jdoe");
     }
 
     #[test]
     fn the_whole_display_name_wins_over_the_words_it_holds() {
         // `jane` alone is Jane and Janet's first word, but `Jane Doe` is one whole name.
         let people = people();
-        assert_eq!(people.find("  jane   DOE ").unwrap().handle, "jdoe");
-        assert!(matches!(people.find("jane"), Ok(person) if person.handle == "jdoe"));
+        assert_eq!(people.find("  jane   DOE ", true).unwrap().handle, "jdoe");
+        assert!(matches!(people.find("jane", true), Ok(person) if person.handle == "jdoe"));
     }
 
     #[test]
@@ -303,16 +341,16 @@ mod tests {
         let mut people = People::default();
         people.add(Person::new("Jane Doe", "jdoe", "a", &[]));
         people.add(Person::new("John Doe", "jodoe", "b", &[]));
-        assert_eq!(people.find("jane").unwrap().handle, "jdoe");
-        assert!(matches!(people.find("doe"), Err(Miss::Several(found)) if found.len() == 2));
-        assert!(matches!(people.find("nobody"), Err(Miss::Nobody)));
+        assert_eq!(people.find("jane", true).unwrap().handle, "jdoe");
+        assert!(matches!(people.find("doe", true), Err(Miss::Several(found)) if found.len() == 2));
+        assert!(matches!(people.find("nobody", true), Err(Miss::Nobody)));
     }
 
     #[test]
     fn accents_and_case_do_not_count() {
         let people = people();
-        assert_eq!(people.find("jose nunez").unwrap().handle, "jose");
-        assert_eq!(people.find("JOSÉ").unwrap().handle, "jose");
+        assert_eq!(people.find("jose nunez", true).unwrap().handle, "jose");
+        assert_eq!(people.find("JOSÉ", true).unwrap().handle, "jose");
     }
 
     #[test]
@@ -327,7 +365,50 @@ mod tests {
         ));
         assert_eq!(people.all().len(), 1);
         assert_eq!(people.all()[0].said(), "Jane Doe (jdoe)");
-        assert_eq!(people.find("jdoe").unwrap().send, "{jane-uuid}");
+        assert_eq!(people.find("jdoe", true).unwrap().send, "{jane-uuid}");
+    }
+
+    #[test]
+    fn a_blank_name_matches_nobody() {
+        let mut people = people();
+        // A login the forge gave no display name for.
+        people.add(Person::new("", "ghost", "ghost", &[]));
+        for blank in ["", "   ", "\t"] {
+            assert!(
+                matches!(people.find(blank, true), Err(Miss::Nobody)),
+                "{blank:?}"
+            );
+        }
+        assert!(people.matching("  ").len() == people.all().len());
+    }
+
+    #[test]
+    fn two_display_names_of_one_account_do_not_make_an_identifier() {
+        let mut people = People::default();
+        people.add(Person::new("Jane Doe", "jdoe", "{jane-uuid}", &[]));
+        // The same account, read elsewhere under another display name.
+        people.add(Person::new("J. Doe", "", "{jane-uuid}", &[]));
+        people.add(Person::new("J. Doe", "jx", "{other-uuid}", &[]));
+        assert_eq!(people.all().len(), 2);
+        // `J. Doe` is the whole display name of the other person: not an identifier of Jane.
+        assert_eq!(people.find("j. doe", true).unwrap().handle, "jx");
+    }
+
+    #[test]
+    fn a_partial_name_is_refused_on_a_list_that_may_be_incomplete() {
+        let people = people();
+        // An identifier and a whole display name still resolve.
+        assert_eq!(people.find("jdoe", false).unwrap().handle, "jdoe");
+        assert_eq!(people.find("jane doe", false).unwrap().handle, "jdoe");
+        // A part of a name is refused naming who it could be.
+        let Err(miss) = people.find("doe", false) else {
+            panic!("a partial name on an incomplete list")
+        };
+        let said = miss.refusal("reviewers", "doe", "acme/app");
+        assert!(said.contains("did you mean Jane Doe (jdoe)?"), "{said}");
+        assert!(said.contains("name them whole"), "{said}");
+        // Nobody stays nobody.
+        assert!(matches!(people.find("zed", false), Err(Miss::Nobody)));
     }
 
     #[test]
@@ -341,7 +422,7 @@ mod tests {
                 &[],
             ));
         }
-        let Err(miss) = people.find("sam") else {
+        let Err(miss) = people.find("sam", true) else {
             panic!("twelve people")
         };
         let said = miss.refusal("reviewers", "sam", "acme/app");

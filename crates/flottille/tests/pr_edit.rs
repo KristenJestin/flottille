@@ -1766,3 +1766,200 @@ fn forge_people_with_a_query_narrows_the_list() {
         answer.text
     );
 }
+
+// A name is only a part of one against a list that may be incomplete (#795, round 2): the lists
+// are cut, and the card shows only the agent's words.
+
+#[test]
+fn a_partial_name_is_refused_against_a_list_that_is_cut() {
+    // Bitbucket Cloud: the members are read up to 200, and the workspace has more. `jane` is one
+    // person among the 200 read, but another Jane may be among those not read.
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "", "");
+    let mut script = cloud_people();
+    let members = script["api"]["/workspaces/acme/members"]["values"]
+        .as_array_mut()
+        .unwrap();
+    for n in 0..210 {
+        let (uuid, name, nick) = (
+            format!("{{99999999-eeee-4eee-8eee-{n:012}}}"),
+            format!("Filler {n}"),
+            format!("filler{n}"),
+        );
+        members.push(json!({"user": cloud_user(&name, &nick, &uuid, "")}));
+    }
+    user.bkt_script(script);
+    let mcp = agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "reviewers_add": ["jane"]}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    for said in [
+        "refused: reviewers_add: \"jane\" is a part of a name",
+        "did you mean Jane Doe (jdoe)?",
+        "name them whole",
+        "nothing was written",
+    ] {
+        assert!(answer.text.contains(said), "{said}: {}", answer.text);
+    }
+    assert!(bkt_starting(&user, "pr edit").is_empty());
+
+    // The same person named whole, by display name or by nickname, is resolved.
+    for given in ["Jane Doe", "jdoe"] {
+        let answer = write(
+            &user,
+            &mcp,
+            json!({"action": "edit", "number": 12, "reviewers_add": [given]}),
+        );
+        assert!(!answer.error, "{given}: {}", answer.text);
+        assert!(
+            answer.text.contains("added Jane Doe (jdoe)"),
+            "{given}: {}",
+            answer.text
+        );
+    }
+}
+
+#[test]
+fn a_partial_name_is_refused_against_data_center_s_direct_grants() {
+    // Data Center's `permissions/users` holds the direct grants only: the members of a group are
+    // not in it.
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_data_center(&user);
+    user.bkt_script(data_center_people());
+    let mcp = agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "reviewers_add": ["jane"]}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("did you mean Jane Doe (jdoe)?"),
+        "{}",
+        answer.text
+    );
+    assert!(bkt_starting(&user, "pr edit").is_empty());
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "reviewers_add": ["Jane Doe"]}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("added Jane Doe (jdoe)"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn data_center_people_seen_on_a_pull_request_are_its_author_reviewers_and_participants() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_data_center(&user);
+    let mut script = data_center_people();
+    let who = |name: &str, login: &str| json!({"name": login, "slug": login, "displayName": name});
+    script["pulls"]["APP/api"][0]["author"] = json!({"user": who("Ann Author", "aauthor")});
+    script["pulls"]["APP/api"][0]["reviewers"] =
+        json!([{"user": who("Rex Reviewer", "rreviewer"), "approved": false}]);
+    script["pulls"]["APP/api"][0]["participants"] =
+        json!([{"user": who("Pat Participant", "ppart"), "role": "PARTICIPANT"}]);
+    // The repository's own list cannot be read: only what the pull requests show is left.
+    script["api"]
+        .as_object_mut()
+        .unwrap()
+        .remove("/rest/api/1.0/projects/APP/repos/api/permissions/users");
+    user.bkt_script(script);
+    let mcp = agent(&user);
+    let answer = mcp.call("forge", json!({"action": "people"}));
+    for said in [
+        "- Ann Author (aauthor)",
+        "- Rex Reviewer (rreviewer)",
+        "- Pat Participant (ppart)",
+    ] {
+        assert!(answer.text.contains(said), "{said}: {}", answer.text);
+    }
+}
+
+#[test]
+fn data_center_users_with_access_are_asked_with_the_documented_permission_filter() {
+    // Not an administrator: the repository's grants cannot be read, so the users who may read it
+    // are asked as Atlassian's REST reference gives the filter.
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_data_center(&user);
+    let mut script = data_center_people();
+    script["api"]
+        .as_object_mut()
+        .unwrap()
+        .remove("/rest/api/1.0/projects/APP/repos/api/permissions/users");
+    script["api"]["/rest/api/1.0/users"] = json!({"values": [
+        {"name": "jdoe", "slug": "jdoe", "displayName": "Jane Doe"}], "isLastPage": true});
+    user.bkt_script(script);
+    let mcp = agent(&user);
+    let answer = mcp.call("forge", json!({"action": "people"}));
+    assert!(answer.text.contains("- Jane Doe (jdoe)"), "{}", answer.text);
+    let asked = bkt(&user).join("\n");
+    for said in [
+        "permission.1=REPO_READ",
+        "permission.1.projectKey=APP",
+        "permission.1.repositorySlug=api",
+    ] {
+        assert!(asked.contains(said), "{said}: {asked}");
+    }
+}
+
+#[test]
+fn a_github_user_list_is_read_past_its_first_page() {
+    // 150 assignable users: the last is on the second page. Bob Roe, seen on a pull request, has
+    // a display name; the lists are whole, so a part of his name is enough.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    let mut script = github_people();
+    let mut users: Vec<Value> = (0..150)
+        .map(|n| json!({"login": format!("user{n:03}")}))
+        .collect();
+    users.push(json!({"login": "jdoe"}));
+    script["assignees"]["acme/app"] = Value::from(users);
+    user.gh_script(script);
+    let mcp = agent(&user);
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "reviewers_add": ["USER149", "bob"]}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("added user149, Bob Roe (broe)"),
+        "{}",
+        answer.text
+    );
+
+    // A list that does not end (more pages than are read) only takes a name whole.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    let mut script = github_people();
+    script["assignees"]["acme/app"] = Value::from(
+        (0..600)
+            .map(|n| json!({"login": format!("user{n:03}")}))
+            .chain([json!({"login": "broe"})])
+            .collect::<Vec<_>>(),
+    );
+    user.gh_script(script);
+    let mcp = agent(&user);
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "reviewers_add": ["bob"]}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("did you mean Bob Roe (broe)?"),
+        "{}",
+        answer.text
+    );
+}

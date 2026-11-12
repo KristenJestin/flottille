@@ -606,3 +606,34 @@ fn the_people_of_a_repository_are_the_script_s_and_a_repository_with_none_is_not
     assert!(!none.status.success());
     assert!(String::from_utf8_lossy(&none.stderr).contains("404"));
 }
+
+#[test]
+fn the_people_of_a_repository_are_given_a_page_at_a_time_when_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let users: Vec<Value> = (1..=5).map(|n| json!({"login": format!("u{n}")})).collect();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"collaborators": {"acme/api": users}}).to_string(),
+    )
+    .unwrap();
+    let page = |n: &str| {
+        let out = fake(dir.path())
+            .args([
+                "api",
+                "repos/acme/api/collaborators",
+                "-F",
+                "per_page=2",
+                "-F",
+                n,
+                "--jq",
+                ".[].login",
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    assert_eq!(page("page=1"), "u1\nu2\n");
+    assert_eq!(page("page=3"), "u5\n");
+    assert_eq!(page("page=4"), "");
+}

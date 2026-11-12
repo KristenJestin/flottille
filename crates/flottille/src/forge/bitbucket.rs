@@ -389,9 +389,22 @@ pub(super) async fn dc_values(
     total: usize,
     params: &[&str],
 ) -> Result<Vec<Value>, String> {
+    dc_values_cut(context, path, total, params)
+        .await
+        .map(|(values, _)| values)
+}
+
+/// `dc_values`, and whether the collection holds more than the `total` that was read.
+pub(super) async fn dc_values_cut(
+    context: &str,
+    path: &str,
+    total: usize,
+    params: &[&str],
+) -> Result<(Vec<Value>, bool), String> {
     let size = format!("limit={PAGE}");
     let mut values = Vec::new();
     let mut start = 0;
+    let mut cut = false;
     loop {
         let from = format!("start={start}");
         let mut args = vec!["api", path, "--context", context, "--param", &size];
@@ -405,14 +418,19 @@ pub(super) async fn dc_values(
         let read = page["values"].as_array().map_or(0, |values| values.len());
         values.extend(page["values"].as_array().into_iter().flatten().cloned());
         match page["nextPageStart"].as_u64() {
-            Some(next) if page["isLastPage"] != true && read > 0 && values.len() < total => {
+            Some(next) if page["isLastPage"] != true && read > 0 => {
+                if values.len() >= total {
+                    cut = true;
+                    break;
+                }
                 start = next as usize
             }
             _ => break,
         }
     }
+    cut |= values.len() > total;
     values.truncate(total);
-    Ok(values)
+    Ok((values, cut))
 }
 
 /// The pull requests in `state` (`all`, `OPEN`…), the newest `LISTED`.

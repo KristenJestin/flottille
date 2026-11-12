@@ -25,6 +25,8 @@ struct Listing {
     looked: String,
     /// Whether the tracker's own list was read: a GitHub repository's users. Jira has none.
     known: bool,
+    /// Whether the people are all the tracker lists: only then is a part of a name trusted.
+    complete: bool,
     why: Option<String>,
 }
 
@@ -33,10 +35,12 @@ async fn read(project: &Project) -> Result<Listing, String> {
         Some(ProjectTracker::Github { .. }) => {
             let forge = issues_of(project).await.map_err(refusal)?;
             let listing = forge::people::read_for(&forge, "issue").await;
+            let complete = listing.complete();
             Ok(Listing {
                 people: listing.people,
                 looked: listing.looked,
                 known: listing.known,
+                complete,
                 why: Some(listing.why.join("; ")).filter(|why| !why.is_empty()),
             })
         }
@@ -61,6 +65,7 @@ async fn read(project: &Project) -> Result<Listing, String> {
                 // What acli shows is the people it shows: a person never assigned a work item is
                 // not one of them, and not being found is not being absent.
                 known: false,
+                complete: false,
                 why,
             })
         }
@@ -199,7 +204,7 @@ fn pick(listing: &Listing, who: &str, key: &str, jira: bool) -> Result<(String, 
     if jira && listing.people.is_empty() && listing.why.is_some() {
         return Err(cannot());
     }
-    match listing.people.find(who) {
+    match listing.people.find(who, listing.complete) {
         Ok(person) => Ok((person.send.clone(), person.said())),
         Err(miss) => Err(format!(
             "{}; nothing was written",

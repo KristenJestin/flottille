@@ -23,6 +23,9 @@ pub(crate) struct Listing {
     /// Whether the forge's own list of who can review was read at all: the people seen on the pull
     /// requests are no list of everyone, and a name missing from them is not refused.
     pub known: bool,
+    /// Whether one of the forge's own lists was cut (a bound, a collection that holds more) or
+    /// only partly what the forge holds (Data Center's direct grants), or could not be read.
+    cut: bool,
     /// Why the sources that failed did.
     pub why: Vec<String>,
 }
@@ -38,6 +41,7 @@ pub(crate) async fn read_for(forge: &Forge, seen_on: &str) -> Listing {
         people: People::default(),
         looked: String::new(),
         known: false,
+        cut: false,
         why: Vec::new(),
     };
     match forge {
@@ -47,16 +51,28 @@ pub(crate) async fn read_for(forge: &Forge, seen_on: &str) -> Listing {
     listing
 }
 
-/// The people a source gave, or why it could not.
-fn took(listing: &mut Listing, source: Result<Vec<Person>, String>, own: bool) {
+impl Listing {
+    /// Whether the people are everyone the forge lists: a name that matches one of them and no
+    /// other cannot be matched by another who is missing. A part of a name is only trusted then.
+    pub fn complete(&self) -> bool {
+        self.known && !self.cut
+    }
+}
+
+/// The people a source gave (and whether it gave them all), or why it could not.
+fn took(listing: &mut Listing, source: Result<(Vec<Person>, bool), String>, own: bool) {
     match source {
-        Ok(found) => {
+        Ok((found, whole)) => {
             listing.known |= own;
+            listing.cut |= own && !whole;
             for person in found {
                 listing.people.add(person);
             }
         }
-        Err(why) => listing.why.push(why),
+        Err(why) => {
+            listing.cut |= own;
+            listing.why.push(why);
+        }
     }
 }
 
@@ -75,30 +91,52 @@ async fn github(forge: &Forge, seen_on: &str, listing: &mut Listing) {
         seen_on, "list", "-R", &repo, "--state", "all", "--limit", "100", "--json", fields,
     ])
     .await
-    .map(|pulls| github_seen(&pulls));
+    .map(|pulls| (github_seen(&pulls), true));
     took(listing, seen, false);
     for source in ["assignees", "collaborators"] {
-        let path = format!("repos/{slug}/{source}");
-        let logins = gh_text(&[
+        let logins = github_logins(&format!("repos/{slug}/{source}")).await;
+        took(listing, logins, true);
+    }
+}
+
+/// How many pages of a hundred one GitHub list is read up to.
+const GITHUB_PAGES: usize = 5;
+
+/// The logins of a GitHub user list, a page of a hundred at a time, and whether that was all of
+/// them: a list that fills its last page is taken as cut.
+async fn github_logins(path: &str) -> Result<(Vec<Person>, bool), String> {
+    let mut found = Vec::new();
+    for page in 1..=GITHUB_PAGES {
+        let page = format!("page={page}");
+        let said = gh_text(&[
             "api",
-            &path,
+            path,
             "--hostname",
             declared::GITHUB,
             "-F",
             "per_page=100",
+            "-F",
+            &page,
             "--jq",
             ".[].login",
         ])
-        .await
-        .map(|said| {
-            said.lines()
-                .map(str::trim)
-                .filter(|login| !login.is_empty() && !login.ends_with("[bot]"))
-                .map(|login| Person::new("", login, login, &[]))
-                .collect()
-        });
-        took(listing, logins, true);
+        .await?;
+        let logins: Vec<&str> = said
+            .lines()
+            .map(str::trim)
+            .filter(|login| !login.is_empty())
+            .collect();
+        found.extend(
+            logins
+                .iter()
+                .filter(|login| !login.ends_with("[bot]"))
+                .map(|login| Person::new("", &masked(login), &masked(login), &[])),
+        );
+        if logins.len() < 100 {
+            return Ok((found, true));
+        }
     }
+    Ok((found, false))
 }
 
 /// The people of `gh pr list --json author,reviews,reviewRequests,assignees`: a login, and the
@@ -148,7 +186,7 @@ async fn bitbucket(forge: &Forge, listing: &mut Listing) {
         &["--state", "all", "--limit", "50", "--json"],
     ))
     .await
-    .map(|said| seen(forge, &said["pull_requests"]));
+    .map(|said| (seen(forge, &said["pull_requests"]), true));
     if bitbucket::cloud(forge) {
         listing.looked = format!(
             "{owner}/{name}: the members of the workspace {owner}, its default reviewers and the \
@@ -163,7 +201,7 @@ async fn bitbucket(forge: &Forge, listing: &mut Listing) {
         for path in places {
             let read = bitbucket::cloud_values_with(context, &path, READ, &[])
                 .await
-                .map(|(values, _)| values.iter().filter_map(cloud_user).collect());
+                .map(|(values, cut)| (values.iter().filter_map(cloud_user).collect(), !cut));
             took(listing, read, true);
         }
         return;
@@ -174,20 +212,26 @@ async fn bitbucket(forge: &Forge, listing: &mut Listing) {
     );
     took(listing, pulls, false);
     // The repository's own permissions (which its administrators read), else the users with at
-    // least the right to read it.
+    // least the right to read it. The first holds the direct grants only (a group's members, a
+    // project's or the instance's are not in it), so it is never the whole list.
     let own = format!("/rest/api/1.0/projects/{owner}/repos/{name}/permissions/users");
-    let mut read = bitbucket::dc_values(context, &own, READ, &[])
+    let mut read = bitbucket::dc_values_cut(context, &own, READ, &[])
         .await
-        .map(|values| values.iter().filter_map(data_center_user).collect());
+        .map(|(values, _)| (values.iter().filter_map(data_center_user).collect(), false));
     if read.is_err() {
+        // The permission filter of `GET /rest/api/1.0/users`, `permission.1=REPO_READ` with the
+        // `projectKey` and `repositorySlug` of the repository, as Atlassian's REST reference of
+        // Data Center gives it (`docs/forges.md`, "People").
         let params = [
-            "permission=REPO_READ",
-            &format!("permission.projectKey={owner}"),
-            &format!("permission.repositorySlug={name}"),
+            "permission.1=REPO_READ",
+            &format!("permission.1.projectKey={owner}"),
+            &format!("permission.1.repositorySlug={name}"),
         ];
-        let users = bitbucket::dc_values(context, "/rest/api/1.0/users", READ, &params).await;
+        let users = bitbucket::dc_values_cut(context, "/rest/api/1.0/users", READ, &params).await;
         match users {
-            Ok(values) => read = Ok(values.iter().filter_map(data_center_user).collect()),
+            Ok((values, cut)) => {
+                read = Ok((values.iter().filter_map(data_center_user).collect(), !cut))
+            }
             Err(why) => listing.why.push(why),
         }
     }
@@ -195,15 +239,18 @@ async fn bitbucket(forge: &Forge, listing: &mut Listing) {
 }
 
 /// The people of the pull requests `bkt pr list` gave: a Cloud pull request's author, a Data
-/// Center one's participants.
+/// Center one's author, reviewers and participants.
 fn seen(forge: &Forge, pulls: &Value) -> Vec<Person> {
     let mut found = Vec::new();
     for pull in pulls.as_array().into_iter().flatten() {
         if bitbucket::cloud(forge) {
             found.extend(cloud_user(&pull["author"]));
         } else {
-            for participant in pull["participants"].as_array().into_iter().flatten() {
-                found.extend(data_center_user(&participant["user"]));
+            found.extend(data_center_user(&pull["author"]["user"]));
+            for who in ["reviewers", "participants"] {
+                for participant in pull[who].as_array().into_iter().flatten() {
+                    found.extend(data_center_user(&participant["user"]));
+                }
             }
         }
     }
@@ -361,7 +408,7 @@ pub(super) async fn named(
                 });
                 continue;
             }
-            match listing.people.find(given) {
+            match listing.people.find(given, listing.complete()) {
                 Ok(person) => found.push(Named {
                     send: person.send.clone(),
                     said: person.said(),

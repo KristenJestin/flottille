@@ -2255,11 +2255,22 @@ fn a_ticket_assigned_by_display_name_is_resolved() {
         ["jira workitem edit --key ABC-1 --assignee 557058:aaaa-0001 --yes"]
     );
 
-    // A word of the name is enough when it is one person's.
-    let done = write_of(
+    // Jira's people are the assignees of the newest work items, not everyone: a word of a name is
+    // refused, naming who it could be, and the whole name is resolved.
+    let refused = write_of(
         &user,
         &mcp,
         json!({"action": "edit", "ticket": "ABC-1", "assignee": "Sample"}),
+    );
+    assert!(
+        refused.contains("did you mean Ben Sample (557058:bbbb-0002)?")
+            && refused.contains("name them whole"),
+        "{refused}"
+    );
+    let done = write_of(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "assignee": "Ben Sample"}),
     );
     assert!(
         done.contains("Assigned to Ben Sample (557058:bbbb-0002)"),

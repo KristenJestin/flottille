@@ -86,7 +86,7 @@
 //!
 //! The people of a repository (#795, `docs/tools.md`, "People"): `assignees` and `collaborators` give,
 //! by repository, what `gh api repos/<owner>/<name>/assignees` and `…/collaborators` list
-//! (`{"assignees": {"acme/app": [{"login": "jdoe"}]}}`); a repository with none is not found.
+//! (`{"assignees": {"acme/app": [{"login": "jdoe"}]}}`), a page of `-F per_page=N -F page=M` at a time when asked; a repository with none is not found.
 //! The name a person set is on the pull requests (`author`, `reviews`, `reviewRequests`,
 //! `assignees`: `{"login": "jdoe", "name": "Jane Doe"}`), which `pr list --json` gives.
 //!
@@ -498,12 +498,26 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("gh: Not Found (HTTP 404)");
                 return 1;
             };
+            // `-F per_page=N -F page=M`: the page of `users` a real server gives, 1-based.
+            let field = |key: &str| {
+                words
+                    .iter()
+                    .find_map(|w| w.strip_prefix(&format!("{key}=")))
+                    .and_then(|n| n.parse::<usize>().ok())
+            };
+            let users: Vec<Value> = match field("per_page") {
+                Some(size) => {
+                    let from = (field("page").unwrap_or(1).max(1) - 1) * size;
+                    users.iter().skip(from).take(size).cloned().collect()
+                }
+                None => users.clone(),
+            };
             if words.contains(&"--jq") {
-                for user in users {
+                for user in &users {
                     println!("{}", user["login"].as_str().unwrap_or_default());
                 }
             } else {
-                println!("{}", Value::from(users.clone()));
+                println!("{}", Value::from(users));
             }
             0
         }
