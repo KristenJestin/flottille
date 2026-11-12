@@ -171,6 +171,14 @@ pub fn out_of_quota(reset_at: Option<u64>) -> String {
     }
 }
 
+/// The same on a row's second line, in lower case: `out of quota until 13:00`, or `out of quota`.
+pub fn out_of_quota_line(reset_at: Option<u64>) -> String {
+    match reset_at {
+        Some(at) => format!("out of quota until {}", clock(at)),
+        None => "out of quota".to_owned(),
+    }
+}
+
 /// The composer's switch while the session waits for a known reset: `Resume at 13:00`.
 pub fn resume_at(reset_at: u64) -> String {
     format!("Resume at {}", clock(reset_at))

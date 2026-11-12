@@ -14,7 +14,9 @@ use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
-use flottille_window::tree::{session_detach_id, session_id, session_mark_id, session_menu_id};
+use flottille_window::tree::{
+    session_detach_id, session_id, session_mark_id, session_menu_id, session_waits_id,
+};
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::{tie_below_id, tie_id, tie_through_id, tie_turn_id, toggle_id};
 use gpui_kit::test::TestWindowExt;
@@ -669,6 +671,28 @@ fn a_folded_root_shows_that_a_led_session_runs(cx: &mut TestAppContext) {
         mark_of(&shell, &led, cx),
         Some(flottille_window::state::AgentState::Running)
     );
+}
+
+#[gpui_kit::test]
+fn a_pilot_that_waits_for_its_led_session_says_which_on_its_row(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "begin the docs session", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "led"}}}]},
+        {"when": "Write the docs", "do": [{"hang": true}]}
+    ]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let (lead, _led) = lead_and_led(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the pilot says what it waits for", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(session_waits_id(&lead))
+                .and_then(|found| found.label().map(str::to_owned))
+                .as_deref()
+                == Some("waits for Docs")
+        })
+    });
 }
 
 const QUESTION: &str = "Cover the logout too?";

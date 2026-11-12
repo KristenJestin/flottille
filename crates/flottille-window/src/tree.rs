@@ -106,6 +106,12 @@ pub fn session_place_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-place-{id}").into())
 }
 
+/// The element id of what a waiting session waits for, on its second line after the place:
+/// labelled `waits for checks of #12`, `out of quota until 13:00`.
+pub fn session_waits_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-waits-{id}").into())
+}
+
 /// The element id of the icon before the place's name: a folder (`Project folder`) or a branch
 /// (`Workspace`).
 pub fn session_place_icon_id(id: &str) -> ElementId {
@@ -815,6 +821,10 @@ pub struct SessionRow {
     said: SharedString,
     /// The words of the mark shown, kept while it folds away.
     words: SharedString,
+    /// What it waits for, for the second line, and the last words it said, which stay drawn
+    /// while the line folds away.
+    waits: SharedString,
+    waits_shown: SharedString,
     active_at: u64,
     ago: SharedString,
     selected: bool,
@@ -871,6 +881,8 @@ impl SessionRow {
             draft: false,
             said: SharedString::default(),
             words: SharedString::default(),
+            waits: SharedString::default(),
+            waits_shown: SharedString::default(),
             active_at: 0,
             ago: SharedString::default(),
             selected: false,
@@ -1141,6 +1153,21 @@ impl SessionRow {
         }
     }
 
+    /// What it waits for, in a few words: empty unless it waits.
+    pub fn waits(&self) -> &str {
+        &self.waits
+    }
+
+    pub fn set_waits(&mut self, waits: &str, cx: &mut Context<Self>) {
+        if self.waits() != waits {
+            self.waits = SharedString::from(waits.to_owned());
+            if !waits.is_empty() {
+                self.waits_shown = self.waits.clone();
+            }
+            cx.notify();
+        }
+    }
+
     /// The one mark the row ends with: its state, else the unread dot, else the time ago.
     pub fn trailing(&self) -> Trailing {
         match (self.mark.shown, &self.unread) {
@@ -1380,6 +1407,9 @@ impl SessionRow {
     }
 }
 
+/// How wide what a session waits for may unfold on its row, more than the sidebar holds: the
+/// row cuts it.
+const WAITS_WIDTH: f32 = 400.;
 /// The height of a session's second line.
 const LINE: f32 = 16.;
 /// The height of a row's first line, above its second.
@@ -1407,9 +1437,21 @@ impl SessionRow {
             .pull_shown
             .clone()
             .filter(|_| self.pull.is_some() || shown > 0.0);
-        let tip = match &pull {
-            Some(pull) => format!("{name} · {}", pull_said(pull)),
-            None => name.clone(),
+        // What it waits for unfolds and fades in after the place, and folds away when it stops.
+        let waiting = fade(
+            ElementId::Name(format!("session-waits-fade-{}", self.id).into()),
+            !self.waits.is_empty(),
+            PANEL,
+            window,
+            cx,
+        );
+        let waits = Some(self.waits_shown.clone())
+            .filter(|waits| !waits.is_empty() && (!self.waits.is_empty() || waiting > 0.0));
+        let tip = match (&pull, &waits) {
+            (Some(pull), Some(waits)) => format!("{name} · {waits} · {}", pull_said(pull)),
+            (Some(pull), None) => format!("{name} · {}", pull_said(pull)),
+            (None, Some(waits)) => format!("{name} · {waits}"),
+            (None, None) => name.clone(),
         };
         let place = div()
             .id(session_place_id(&self.id))
@@ -1451,7 +1493,40 @@ impl SessionRow {
             .overflow_hidden()
             .text_size(px(11.5))
             .text_color(p.faint)
-            .child(place)
+            .child(
+                // One line that never wraps, so that a long wait is cut with an ellipsis instead
+                // of going under the line, out of sight.
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .min_w_0()
+                    .max_w_full()
+                    .h(px(LINE))
+                    .child(place)
+                    .children(waits.map(|waits| {
+                        div()
+                            .id(session_waits_id(&self.id))
+                            .aria_label(waits.clone())
+                            .flex()
+                            .items_center()
+                            .gap(space::SM)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .max_w(px(WAITS_WIDTH * waiting))
+                            .opacity(waiting)
+                            .child(div().flex_none().child("·"))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(waits),
+                            )
+                            .test_support()
+                    })),
+            )
             .children(pull.map(|pull| {
                 let (mark, color) = pull_mark(&pull, &p);
                 div()

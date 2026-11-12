@@ -15,9 +15,9 @@ use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::session::{SessionPage, state_of};
 use flottille_window::session_link::SessionUpdate;
-use flottille_window::state::AgentState;
+use flottille_window::state::{AgentState, Mark, mark_id};
 use flottille_window::subscriptions::SubscriptionRow;
-use flottille_window::tree::session_id;
+use flottille_window::tree::{session_id, session_mark_id};
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -236,6 +236,16 @@ fn mark_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Optio
 
 fn present(cx: &mut VisualTestContext, id: &str) -> bool {
     cx.update(|window, _| window.try_find(id.to_owned()).is_some())
+}
+
+/// Whether the session's row in the sidebar draws that shape of mark.
+fn drawn(cx: &mut VisualTestContext, id: &str, shape: Mark) -> bool {
+    cx.update(|window, _| {
+        window
+            .within(session_mark_id(id))
+            .try_find(mark_id(shape))
+            .is_some()
+    })
 }
 
 fn blocks(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<Block> {
@@ -605,6 +615,95 @@ fn a_session_that_waits_on_a_subscription_is_waiting_not_idle_in_the_sidebar_and
                 .is_some_and(|agent| state_of(agent) == AgentState::Idle)
         })
     });
+}
+
+#[gpui_kit::test]
+fn a_waiting_session_has_its_own_mark_not_the_ring_of_rest(cx: &mut TestAppContext) {
+    let user = user();
+    script(&user, pull());
+    let (lead, mcp) = lead(&user);
+    subscribe(&mcp, json!(["checks", "review"]));
+    let (shell, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the sidebar says it waits", |cx| {
+        mark_of(&shell, &lead, cx) == Some(AgentState::Waiting)
+    });
+    settle(cx);
+
+    // A clock on its row, not the ring that idle, denied and stopped keep.
+    assert!(drawn(cx, &lead, Mark::Clock), "a clock is drawn");
+    assert!(!drawn(cx, &lead, Mark::Hollow), "no ring beside it");
+
+    // At rest again, the clock is gone: the row shows the time since it was active.
+    let id = rows(&session_page(&shell, cx), cx)[0].id.clone();
+    user.call("subscription.cancel", json!({"subscription": id}))
+        .unwrap();
+    until(&shell, cx, "the sidebar is at rest again", |cx| {
+        mark_of(&shell, &lead, cx).is_none()
+    });
+    settle(cx);
+    assert!(!drawn(cx, &lead, Mark::Clock), "the clock folded away");
+}
+
+#[gpui_kit::test]
+fn a_waiting_session_says_what_it_waits_for_on_its_row(cx: &mut TestAppContext) {
+    let user = user();
+    script(&user, pull());
+    let (lead, mcp) = lead(&user);
+    subscribe(&mcp, json!(["checks", "review"]));
+    let (shell, cx) = open_session(&user, &lead, cx);
+
+    until(&shell, cx, "the row says what it waits for", |cx| {
+        label(cx, &format!("session-waits-{lead}")).is_some()
+    });
+    assert_eq!(
+        label(cx, &format!("session-waits-{lead}")).as_deref(),
+        Some("waits for checks, review of #12")
+    );
+    // The mark's tooltip keeps its words.
+    assert_eq!(
+        shell.read_with(cx, |s, _| s
+            .snapshot()
+            .session(&lead)
+            .unwrap()
+            .mark_said
+            .clone()),
+        "Waiting: checks, review of #12"
+    );
+}
+
+#[gpui_kit::test]
+fn the_waiting_line_folds_away_once_it_stops_waiting(cx: &mut TestAppContext) {
+    let user = user();
+    script(&user, pull());
+    let (lead, mcp) = lead(&user);
+    subscribe(&mcp, json!(["checks", "review"]));
+    let (shell, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the row says what it waits for", |cx| {
+        present(cx, &format!("session-waits-{lead}"))
+    });
+    settle(cx);
+
+    let id = rows(&session_page(&shell, cx), cx)[0].id.clone();
+    user.call("subscription.cancel", json!({"subscription": id}))
+        .unwrap();
+    until(&shell, cx, "the model no longer waits", |cx| {
+        mark_of(&shell, &lead, cx).is_none()
+    });
+    // It does not vanish: it stays for the frames of its fold, then is gone.
+    let mut folding = 0;
+    for _ in 0..60 {
+        step(&shell, Duration::from_millis(16), cx);
+        if present(cx, &format!("session-waits-{lead}")) {
+            folding += 1;
+        } else {
+            break;
+        }
+    }
+    assert!(folding >= 2, "it folded over {folding} frames");
+    assert!(
+        !present(cx, &format!("session-waits-{lead}")),
+        "then it is gone"
+    );
 }
 
 #[gpui_kit::test]

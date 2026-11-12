@@ -200,6 +200,9 @@ pub struct Session {
     /// What its mark means, in words, for its tooltip: `Needs you: a permission`, `Running`,
     /// `Waiting: checks of #1`; empty without a mark.
     pub mark_said: String,
+    /// What a waiting session waits for, in a few words, for its row's second line:
+    /// `waits for checks of #1`, `out of quota until 13:00`; empty unless it waits.
+    pub waits: String,
     /// How many agents its tree holds, the root included.
     pub agents: usize,
     /// How many of them have not ended: what ending the session ends.
@@ -654,7 +657,7 @@ impl Snapshot {
             .map(|agent| root_of(&parents, agent))
             .collect();
         // What each of those roots waits for, in a few words: the first of its subscriptions.
-        let mut waiting_for: HashMap<&str, String> = HashMap::new();
+        let mut waiting_for: HashMap<&str, (String, String)> = HashMap::new();
         for subscription in list(answers.subscriptions, "subscriptions") {
             let Some(agent) = subscription["agent"].as_str() else {
                 continue;
@@ -675,20 +678,35 @@ impl Snapshot {
             let wake = (subscription["source"] == "timer")
                 .then(|| subscription["expires_at"].as_u64())
                 .flatten();
-            waiting_for.entry(root_of(&parents, agent)).or_insert(
-                match (events.is_empty(), number) {
-                    _ if run.is_some() => format!("Waiting: {}", run.unwrap_or_default()),
-                    _ if wake.is_some() => {
-                        format!(
-                            "Waiting: wake at {}",
-                            crate::session::clock(wake.unwrap_or(0))
-                        )
-                    }
-                    (false, Some(n)) => format!("Waiting: {} of #{n}", events.join(", ")),
-                    (true, Some(n)) => format!("Waiting: #{n}"),
-                    _ => "Waiting".to_owned(),
-                },
-            );
+            // A session it follows: the one it launched and waits for.
+            let following = (subscription["source"] == "session")
+                .then(|| target["title"].as_str())
+                .flatten()
+                .filter(|title| !title.is_empty());
+            // What it waits for, said once: the tooltip puts "Waiting: " before it, the row's
+            // line "waits for " (a wake is `wakes at`).
+            let (said, line) = match (events.is_empty(), number) {
+                _ if run.is_some() => {
+                    let run = run.unwrap_or_default();
+                    (format!("Waiting: {run}"), format!("waits for {run}"))
+                }
+                _ if wake.is_some() => {
+                    let at = crate::session::clock(wake.unwrap_or(0));
+                    (format!("Waiting: wake at {at}"), format!("wakes at {at}"))
+                }
+                _ if let Some(title) = following => {
+                    (format!("Waiting: {title}"), format!("waits for {title}"))
+                }
+                (false, Some(n)) => {
+                    let what = format!("{} of #{n}", events.join(", "));
+                    (format!("Waiting: {what}"), format!("waits for {what}"))
+                }
+                (true, Some(n)) => (format!("Waiting: #{n}"), format!("waits for #{n}")),
+                _ => ("Waiting".to_owned(), "waits".to_owned()),
+            };
+            waiting_for
+                .entry(root_of(&parents, agent))
+                .or_insert((said, line));
         }
         let name_of = |id: &str| {
             let agent = agents.iter().find(|a| a["id"].as_str() == Some(id));
@@ -721,6 +739,16 @@ impl Snapshot {
                 } else {
                     None
                 };
+                let waits = match mark {
+                    Some(AgentState::Waiting) if let Some(quota) = quota => {
+                        crate::session::out_of_quota_line(quota.reset_at)
+                    }
+                    Some(AgentState::Waiting) => waiting_for
+                        .get(id.as_str())
+                        .map(|(_, line)| line.clone())
+                        .unwrap_or_else(|| "waits".to_owned()),
+                    _ => String::new(),
+                };
                 let mark_said = match mark {
                     None => String::new(),
                     Some(AgentState::Running) if compacting.contains(id.as_str()) => {
@@ -732,7 +760,7 @@ impl Snapshot {
                     }
                     Some(AgentState::Waiting) => waiting_for
                         .get(id.as_str())
-                        .cloned()
+                        .map(|(said, _)| said.clone())
                         .unwrap_or_else(|| "Waiting".to_owned()),
                     Some(_) => match bell.iter().find(|item| item.session == id) {
                         Some(item) if item.key.starts_with("request-") => {
@@ -748,6 +776,7 @@ impl Snapshot {
                     place: agent["workspace"].as_str().map(str::to_owned),
                     mark,
                     mark_said,
+                    waits,
                     agents: size.max(1),
                     live,
                     resumable: agent["resumable"] == true,
@@ -1405,6 +1434,18 @@ mod tests {
         );
         assert_eq!(said("r5"), "", "no mark, no words");
         assert_eq!(said("r7"), "Waiting: run #43");
+
+        // The row's line says the same words, shorter, and only while it waits.
+        let waits = |id: &str| snapshot.session(id).unwrap().waits.as_str();
+        assert_eq!(waits("r4"), "waits for checks of #1");
+        assert_eq!(
+            waits("r6"),
+            format!("wakes at {}", crate::session::clock(600_000))
+        );
+        assert_eq!(waits("r7"), "waits for run #43");
+        for quiet in ["r1", "r2", "r3", "r5"] {
+            assert_eq!(waits(quiet), "", "{quiet} does not wait");
+        }
     }
 
     #[test]
