@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::sync::Arc;
+use std::time::Duration;
 
 use flottille_core::agent::{Agent, AgentState};
 use flottille_core::approval::{self, Decision, Request};
@@ -398,11 +399,27 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     } else {
         brief(daemon, &child);
     }
-    let runs = providers::agent_runs_on(daemon, &child);
     let place = match (workspace, in_main) {
         (_, true) => "main, the project folder".to_owned(),
         (Some(w), _) => format!("workspace {w}"),
         (None, _) => "your own place".to_owned(),
+    };
+    // What the answer says it runs on is what its session took: a model or an effort left out is
+    // the agent's own to take, which only its session says.
+    let runs = match preparing {
+        true => providers::agent_asked_runs_on(daemon, &child),
+        false => match opened(daemon, &child.id).await {
+            Some(agent) if agent.state == AgentState::Failed => {
+                return Ok(Outcome::Done(format!(
+                    "Started {} on {}, in {place}, but its session failed as it opened: {}.",
+                    named(&child),
+                    providers::agent_asked_runs_on(daemon, &child),
+                    agent.state_reason.as_deref().unwrap_or("no reason given")
+                )));
+            }
+            Some(agent) => providers::agent_runs_on(daemon, &agent),
+            None => providers::agent_asked_runs_on(daemon, &child),
+        },
     };
     if led {
         return Ok(Outcome::Done(format!(
@@ -430,6 +447,24 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
          turn.",
         named(&child)
     )))
+}
+
+/// How long a launch waits for its agent's session to open, to say what it took.
+const OPENING: Duration = Duration::from_secs(20);
+
+/// The agent once its session opened (or failed to), waited for a while; `None` while it has not.
+async fn opened(daemon: &Daemon, id: &str) -> Option<Agent> {
+    let deadline = tokio::time::Instant::now() + OPENING;
+    loop {
+        let agent = daemon.read(|store| store.agent(id)).ok().flatten()?;
+        if agent.native_id.is_some() || agent.state.is_final() {
+            return Some(agent);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// A slot of a project's children cap, taken by a launch until its child exists (and counts as a

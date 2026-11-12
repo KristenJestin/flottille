@@ -174,6 +174,31 @@ fn a_launch_without_model_or_effort_says_the_ones_taken_by_name() {
     let (id, answer) = launched(&user, &mcp, "worker", json!({"kind": "child"}));
 
     says_no_default(&answer);
+    says_what_it_took(&user, &id, &answer);
+}
+
+#[test]
+fn a_launch_with_a_model_and_no_effort_says_the_effort_taken() {
+    let user = User::with_fake_agent();
+    user.fake_script(script(json!([])));
+    // The lead runs on fake-small: no session said yet which efforts fake-large offers, nor the
+    // one it takes.
+    let (_, mcp) = lead(&user);
+
+    let (id, answer) = launched(
+        &user,
+        &mcp,
+        "worker",
+        json!({"kind": "child", "model": "fake-large"}),
+    );
+
+    says_no_default(&answer);
+    assert!(!answer.contains("not known"), "{answer}");
+    says_what_it_took(&user, &id, &answer);
+}
+
+/// The answer of a launch says, by name, the model and the effort the agent then took.
+fn says_what_it_took(user: &User, id: &str, answer: &str) {
     let said = answer
         .split(" on ")
         .nth(1)
@@ -181,7 +206,6 @@ fn a_launch_without_model_or_effort_says_the_ones_taken_by_name() {
         .unwrap_or_default()
         .to_owned();
     assert!(said.starts_with("Claude · "), "{answer}");
-    // What the answer said is what the agent then took.
     let taken = user.call("agent.show", json!({"agent": id})).unwrap()["agent"].clone();
     let model = taken["taken"]["model"].as_str().unwrap().to_owned();
     let effort = taken["taken"]["effort"].as_str().unwrap().to_owned();
@@ -190,8 +214,9 @@ fn a_launch_without_model_or_effort_says_the_ones_taken_by_name() {
         "fake-large" => "Fake Large 5.5".to_owned(),
         other => other.to_owned(),
     };
-    assert!(
-        said.starts_with(&format!("Claude · {} · {effort}", named(&model))),
+    assert_eq!(
+        said,
+        format!("Claude · {} · {effort}", named(&model)),
         "{answer}: the child took {model} on {effort}"
     );
 }

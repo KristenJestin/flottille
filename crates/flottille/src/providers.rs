@@ -620,8 +620,34 @@ pub fn runs_on(
     model: Option<&str>,
     effort: Option<&str>,
 ) -> String {
+    named(daemon, provider, model, effort).to_string()
+}
+
+/// What an agent runs on, by name, in its parts: the provider's title, the model, and the effort
+/// (`None` for a model its provider offers no effort for).
+pub struct RunsOn {
+    pub title: String,
+    pub model: String,
+    pub effort: Option<String>,
+}
+
+impl std::fmt::Display for RunsOn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.effort {
+            Some(effort) => write!(f, "{} · {} · {effort}", self.title, self.model),
+            None => write!(f, "{} · {}", self.title, self.model),
+        }
+    }
+}
+
+/// `runs_on`, in its parts.
+pub fn named(daemon: &Daemon, provider: &str, model: Option<&str>, effort: Option<&str>) -> RunsOn {
     let Some(known) = get(provider) else {
-        return provider.to_owned();
+        return RunsOn {
+            title: provider.to_owned(),
+            model: model.unwrap_or(MODEL_UNKNOWN).to_owned(),
+            effort: Some(effort.unwrap_or(EFFORT_UNKNOWN).to_owned()),
+        };
     };
     let models = Settings::load(&daemon.paths)
         .ok()
@@ -675,18 +701,28 @@ pub fn runs_on(
                 .map(str::to_owned)
         })
         .or_else(|| provider::middle_effort(&levels).map(|level| (*level).to_owned()));
-    match (effort, offered) {
-        (Some(effort), _) => format!("{} · {model} · {effort}", known.title),
+    let effort = match (effort, offered) {
+        (Some(effort), _) => Some(effort),
         // A model whose provider offers no effort has none to say.
-        (None, Some(none)) if none.is_empty() => format!("{} · {model}", known.title),
-        (None, _) => format!("{} · {model} · {EFFORT_UNKNOWN}", known.title),
+        (None, Some(none)) if none.is_empty() => None,
+        (None, _) => Some(EFFORT_UNKNOWN.to_owned()),
+    };
+    RunsOn {
+        title: known.title.to_owned(),
+        model,
+        effort,
     }
 }
 
 /// What an agent runs on now, by name (`runs_on`): what it took at its last start, else what was
 /// asked for it.
 pub fn agent_runs_on(daemon: &Daemon, agent: &Agent) -> String {
-    runs_on(
+    agent_named(daemon, agent).to_string()
+}
+
+/// `agent_runs_on`, in its parts.
+pub fn agent_named(daemon: &Daemon, agent: &Agent) -> RunsOn {
+    named(
         daemon,
         &agent.provider,
         agent
@@ -702,6 +738,24 @@ pub fn agent_runs_on(daemon: &Daemon, agent: &Agent) -> String {
             .or(agent.chosen.effort.as_ref())
             .map(String::as_str),
     )
+}
+
+/// What an agent whose session has not opened yet was asked to run on, by name: what was not
+/// asked is the session's to take, so it is said not known yet rather than guessed.
+pub fn agent_asked_runs_on(daemon: &Daemon, agent: &Agent) -> String {
+    let mut asked = named(
+        daemon,
+        &agent.provider,
+        agent.chosen.model.as_deref(),
+        agent.chosen.effort.as_deref(),
+    );
+    if agent.chosen.model.is_none() {
+        asked.model = MODEL_UNKNOWN.to_owned();
+    }
+    if agent.chosen.effort.is_none() && asked.effort.is_some() {
+        asked.effort = Some(EFFORT_UNKNOWN.to_owned());
+    }
+    asked.to_string()
 }
 
 /// What an agent runs on from its next turn, by name: a change waiting is applied.
