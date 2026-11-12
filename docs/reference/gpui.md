@@ -261,7 +261,7 @@ the wrong code first).
     wide as its letters until it does), and a row that hugs its content right-aligned is a flex
     item of a `w_full` row, not a child of a column that aligns to the end. A one-line text (a
     title, a path, a label) is cut with an ellipsis and has its whole text in a tooltip.
-    **[test]** `tests/guard/mod.rs` (`guard::assert_stays_inside(cx, id)`: every observed
+    **[test]** `tests/guard/mod.rs` (`guard::assert_stays_inside(shell, cx, id)`, which waits for `id` to be drawn: every observed
     element under `id` stays between its sides, and the frame inside the window) with one
     `a_long_<thing>_stays_inside_its_card` per kind of row, drawn 360 px wide with a long
     unbroken word and a long spaced sentence (`window_cards.rs`, and the suite of each part that

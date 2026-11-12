@@ -420,7 +420,7 @@ fn a_done_review_is_folded_and_says_its_findings(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_rail_row_says_its_state_whole_when_there_is_room(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
-    let (_, cx, _, pilot_id, check, _) = review_rail(&user, cx);
+    let (shell, cx, _, pilot_id, check, _) = review_rail(&user, cx);
 
     for agent in [&pilot_id, &check] {
         let row = bounds(cx, &format!("rail-row-{agent}"));
@@ -444,7 +444,7 @@ fn a_rail_row_says_its_state_whole_when_there_is_room(cx: &mut TestAppContext) {
         );
     }
     // The rail with a review running keeps every text inside it.
-    guard::assert_stays_inside(cx, "rail-agents");
+    guard::assert_stays_inside(&shell, cx, "rail-agents");
 }
 
 #[gpui_kit::test]
@@ -459,7 +459,7 @@ fn a_long_state_stays_inside_a_narrow_rail(cx: &mut TestAppContext) {
             .is_some_and(|said| said.contains(guard::UNBROKEN))
     });
     settle(cx);
-    guard::assert_stays_inside(cx, "rail-agents");
+    guard::assert_stays_inside(&shell, cx, "rail-agents");
 
     // The state that is cut says itself whole under the pointer.
     let long = format!("rail-runs-on-{check}");

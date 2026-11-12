@@ -917,7 +917,7 @@ fn a_long_answer_stays_inside_its_answered_card(cx: &mut TestAppContext) {
             && has(format!("row-{at}-answered-2-answer"), cx)
     });
     settle(cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-question"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-question"));
     // The words are the user's own: they wrap, whole.
     let (note, spaced) = cx.update(|window, _| {
         (
@@ -939,7 +939,7 @@ fn a_long_answer_stays_inside_its_answered_card(cx: &mut TestAppContext) {
 fn long_ask_answered<'a>(
     user: &User,
     cx: &'a mut TestAppContext,
-) -> (usize, &'a mut VisualTestContext) {
+) -> (Entity<Shell>, usize, &'a mut VisualTestContext) {
     let id = session(user, "full", "long ask");
     let (shell, page, cx) = open_session(user, &id, cx);
     guard::narrow(cx);
@@ -963,14 +963,14 @@ fn long_ask_answered<'a>(
             && has(format!("row-{at}-answered-1-answer"), cx)
     });
     settle(cx);
-    (at, cx)
+    (shell, at, cx)
 }
 
 #[gpui_kit::test]
 fn a_long_question_and_an_unbroken_answer_stay_inside_the_folded_card(cx: &mut TestAppContext) {
     let user = user();
-    let (at, cx) = long_ask_answered(&user, cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-question"));
+    let (shell, at, cx) = long_ask_answered(&user, cx);
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-question"));
     // Both ends of the first question's rows are drawn and inside the card.
     let card = bounds(format!("row-{at}-question"), cx);
     for part in ["answered-0-question", "answered-0-headline"] {
@@ -990,7 +990,7 @@ fn a_long_question_and_an_unbroken_answer_stay_inside_the_folded_card(cx: &mut T
 #[gpui_kit::test]
 fn the_whole_long_question_of_a_folded_card_shows_on_hover(cx: &mut TestAppContext) {
     let user = user();
-    let (at, cx) = long_ask_answered(&user, cx);
+    let (_shell, at, cx) = long_ask_answered(&user, cx);
     let line = format!("row-{at}-answered-0-question");
     assert!(!has(format!("{line}-tooltip"), cx), "no tooltip at rest");
 
@@ -1046,10 +1046,10 @@ fn a_long_question_stays_inside_its_open_card(cx: &mut TestAppContext) {
     // and the line where it was asked inside its row.
     for n in 0..2 {
         show(ask, n, cx);
-        guard::assert_stays_inside(cx, format!("ask-{ask}-question-text"));
-        guard::assert_stays_inside(cx, "ask-dock");
+        guard::assert_stays_inside(&shell, cx, format!("ask-{ask}-question-text"));
+        guard::assert_stays_inside(&shell, cx, "ask-dock");
     }
-    guard::assert_stays_inside(cx, format!("row-{at}-question"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-question"));
 }
 
 #[gpui_kit::test]
