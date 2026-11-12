@@ -752,8 +752,10 @@ pending requests.
   GitHub's workflows that can be dispatched with their inputs), **`runs {repository?, branch?}`**
   the recent runs, **`run_view {repository?, run}`** a run's steps (jobs), **`run_logs
   {repository?, run, step}`** a step's log, masked and cut like other results; **`run
-  {repository?, pipeline, branch?, variables?, follow?}`** runs any pipeline on the workspace's
-  branch (or the one named) with `variables` (`[{key, value, secured?}]`, a secured value masked
+  {repository?, pipeline, branch?, variables?, follow?}`** runs any pipeline on the one named, else the workspace's
+  branch, else (in `main`) the project folder's, which the answer says and reads back from the
+  forge (a run on another branch is stopped and failed, never followed; in `main`, on the branch
+  of the agent's own pull request's base, it is refused naming that pull request's branch), with `variables` (`[{key, value, secured?}]`, a secured value masked
   in every result and record) and follows it unless `follow: false`: a `subscription` delivery
   wakes the agent when it ends (its result, its duration, the failed steps by name) and once when
   it waits on a manual step, read by the rounds of the items ([`forges.md`](forges.md),

@@ -652,3 +652,56 @@ fn a_run_bkt_cannot_read_says_what_bkt_needs() {
         all[0]
     );
 }
+
+#[test]
+fn runs_and_the_end_of_a_run_say_its_branch() {
+    let (user, id, mcp) = setup();
+    bkt_with_run(
+        &user,
+        running(),
+        json!([step("{step-e2e}", "e2e", "IN_PROGRESS", "")]),
+    );
+    started_run(&user, &id, &mcp, json!({}));
+
+    // `runs` of the workspace's branch says each run's branch, not only a list of every branch.
+    let runs = read(&mcp, json!({"action": "runs", "repository": "api"}));
+    assert!(
+        runs.contains("#43 custom: nightly") && runs.contains(", on app/login"),
+        "{runs}"
+    );
+    let view = read(
+        &mcp,
+        json!({"action": "run_view", "repository": "api", "run": 43}),
+    );
+    assert!(view.contains("run #43 of acme/api on app/login"), "{view}");
+
+    bkt_with_run(
+        &user,
+        completed("SUCCESSFUL"),
+        json!([step("{step-e2e}", "e2e", "COMPLETED", "SUCCESSFUL")]),
+    );
+    a_round(&user);
+    let delivery = delivered(&user, &id).remove(0);
+    assert!(
+        delivery.contains("(custom: nightly on app/login)"),
+        "{delivery}"
+    );
+
+    // GitHub says it as well.
+    let mut script = gh_script();
+    script["runs"]["acme/web"] = json!([{"databaseId": 78, "workflowName": "E2E",
+        "status": "in_progress", "conclusion": "", "event": "workflow_dispatch",
+        "headBranch": "app/login", "createdAt": "2026-11-01T10:00:00Z",
+        "url": "https://github.com/acme/web/actions/runs/78"}]);
+    script["run_views"]["acme/web"]["78"] = json!({"databaseId": 78, "workflowName": "E2E",
+        "status": "in_progress", "conclusion": "", "headBranch": "app/login",
+        "url": "https://github.com/acme/web/actions/runs/78", "jobs": []});
+    user.gh_script(script);
+    let runs = read(&mcp, json!({"action": "runs", "repository": "web"}));
+    assert!(runs.contains(", on app/login"), "{runs}");
+    let view = read(
+        &mcp,
+        json!({"action": "run_view", "repository": "web", "run": 78}),
+    );
+    assert!(view.contains("E2E on app/login"), "{view}");
+}
