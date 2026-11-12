@@ -318,3 +318,54 @@ fn no_select_of_the_window_has_a_default_row(cx: &mut TestAppContext) {
         "the recommended value is marked: {every:?}"
     );
 }
+
+#[gpui_kit::test]
+fn with_the_first_provider_s_models_unknown_the_select_opens_on_it(cx: &mut TestAppContext) {
+    // Claude, the provider new sessions start on, has said no model yet; OpenCode has.
+    let user = User::with_fake_providers().with_env("FLOTTILLE_TEST_LIST_MODELS", "1");
+    user.write_providers("[opencode]\nenabled = true\n");
+    user.provider_script("claude", json!({"die_on_open": 3}));
+    user.provider_script(
+        "opencode",
+        json!({"models": ["open/small", "open/medium"], "efforts": ["low", "high"]}),
+    );
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let connect: flottille_window::link::Connect = Arc::new(user.connector());
+    let (shell, cx) = window_through(&user, connect, cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "OpenCode's models are known", |cx| {
+        page.read_with(cx, |p, _| {
+            p.providers()
+                .get("opencode")
+                .is_some_and(|o| o.models.is_some())
+        })
+    });
+    settle(cx);
+    assert!(page.read_with(cx, |p, _| p
+        .providers()
+        .get("claude")
+        .is_some_and(|c| c.models.is_none())));
+
+    // The value that applies is Claude's, its models learnt at its first session: never
+    // OpenCode's recommended model.
+    assert_eq!(
+        label(cx, "new-sessions-on-model").as_deref(),
+        Some("Claude · models learnt at its first session · recommended")
+    );
+    assert_eq!(
+        rows(cx, "new-sessions-on-model", &["opencode-open-small"]),
+        vec!["OpenCode · open/small · recommended".to_owned()]
+    );
+    // Chosen, OpenCode's is a choice; Claude's back clears it.
+    click(cx, "new-sessions-on-model");
+    click(cx, "new-sessions-on-model-opencode-open-small");
+    until(&shell, cx, "the choice is stored", |_| {
+        chosen(&user) == json!({"provider": "opencode"})
+    });
+    settle(cx);
+    click(cx, "new-sessions-on-model");
+    click(cx, "new-sessions-on-model-claude-recommended");
+    until(&shell, cx, "the choice is cleared", |_| {
+        chosen(&user) == serde_json::Value::Null
+    });
+}

@@ -19,6 +19,8 @@ pub fn next_read() -> u64 {
 
 /// What the window says of a model before a session of its provider said the models.
 pub const MODEL_UNKNOWN: &str = "model not known yet";
+/// A provider's entry in a model choice while it has said no model.
+const MODELS_LEARNT: &str = "models learnt at its first session";
 
 /// A model a provider's sessions offered.
 #[derive(Clone, Debug, PartialEq)]
@@ -372,13 +374,18 @@ impl Providers {
                 .flatten()
                 .filter(|m| m.id != crate::composer::DEFAULT || recommended == Some(m.id.as_str()))
                 .collect();
+            // Its models not known yet, it is still the provider's model that applies: marked, so
+            // that a select never opens on another provider's.
             if listed.is_empty() {
-                entries.push(ModelEntry::new(
-                    provider.name.clone(),
-                    provider.title.clone(),
-                    None,
-                    self.model_line(&provider.name, None),
-                ));
+                entries.push(
+                    ModelEntry::new(
+                        provider.name.clone(),
+                        provider.title.clone(),
+                        None,
+                        MODELS_LEARNT,
+                    )
+                    .recommended(),
+                );
             }
             for model in listed {
                 let levels: Vec<&String> =
