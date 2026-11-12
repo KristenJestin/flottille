@@ -555,13 +555,30 @@ checked against its remote, as for `comment` and `edit`. The branch is the one n
 which git must take for a branch's name), else the one the workspace's repository is on now, else,
 in `main`, the one the project's checkout is on. A `run` that names no branch has it worked out
 **before the gate**, and put in the call: the card and the judge say where the pipeline will run
-(`branch` in its arguments), and what the user allows is exactly what is run.
+(`branch` in its arguments, and `branch_from`, `workspace` or `folder`, which an agent never
+sets), and what the user allows is exactly what is run.
+
+**A run never starts on a branch it did not say.** (1) The answer names the branch and where it
+came from: `The pipeline custom: nightly was started on fix/login, the branch your workspace is
+on, in acme/api: #43, …` / `…, the branch you named, …` / `…, the branch the project folder is on:
+name branch to run another, …`. (2) In `main`, a run on the project folder's branch is **refused
+before the user is asked** when that branch is the one the agent's own pull request goes into:
+`refused: you are in the project folder, on develop; your pull request #12 is on fix/login: name
+branch "fix/login"`. The agent's pull requests are those its `forge` subscriptions follow, which
+keep the pull request's head and base as the forge said them when it subscribed; an agent that
+follows none is not refused, only told. (3) What the forge created is read back (Bitbucket `bkt
+pipeline view <run> --json`, `pipeline.target.ref_name`; GitHub `gh run view <run> --json
+headBranch`): a run on another branch than the one asked is **stopped** (as `stop` does) and
+answered as a failure naming both branches, and is not followed; a read that fails or names no
+branch does not fail the run, the answer says it could not be read back. (4) `runs` says each
+run's branch, `run_view` the run's, and the delivery that wakes the agent at a run's end names it
+(`run #43 of api (custom: nightly on fix/login)`).
 
 | Action | GitHub (`gh`) | Bitbucket Cloud (`bkt`) |
 |---|---|---|
 | `pipelines {repository?, branch?}` (read) | the workflows of `.github/workflows/` that accept `workflow_dispatch`: name, file, inputs (required, type, options, default, description) | the pipelines of `bitbucket-pipelines.yml`: `default`, each of `branches`, `tags` and `pull-requests` by its pattern, each `custom` by its name with the variables it declares (default, allowed values, description) |
 | `runs {repository?, branch?}` (read) | `gh run list -R … [--branch <b>] --limit 20 --json databaseId,workflowName,status,conclusion,event,headBranch,createdAt,startedAt,updatedAt,url` | `bkt api /repositories/W/R/pipelines/ --param pagelen=50 --param sort=-created_on [--param target.ref_name=<b>]`, the API giving the branch's runs (the newest 50 of the branch, so a quiet branch's older runs are found): `build_number`, the selector, `state`, `trigger.name`, `created_on`, `duration_in_seconds` |
-| `run_view {repository?, run}` (read) | `gh run view <run> -R … --json databaseId,workflowName,status,conclusion,url,jobs` | `bkt pipeline view <run> --json`: `steps[]` (`name`, `uuid`, `state.name`, `state.result.name`) |
+| `run_view {repository?, run}` (read) | `gh run view <run> -R … --json databaseId,workflowName,status,conclusion,headBranch,url,jobs` | `bkt pipeline view <run> --json`: `steps[]` (`name`, `uuid`, `state.name`, `state.result.name`) |
 | `run_logs {repository?, run, step}` (read) | `gh run view --job <id> -R … --log`, the job found by its name or id among the run's | `bkt pipeline logs <run> --step <uuid>`, the step found by its name or uuid |
 | `run {repository?, pipeline, branch?, variables?, follow?}` (write) | `gh workflow run <file> -R … --ref <b> -f k=v…`; the answer is the run's link when `gh` prints it | without variables `bkt pipeline run --ref <b> [--selector-type <t> --selector-pattern <p>]`, the run's number read by its uuid (`bkt api …/pipelines/{uuid}`) when it prints no `#N`; with variables the REST call through `bkt api` (table above); the answer is the run's number and link |
 | `stop {repository?, run}` (write) | `gh run cancel <run> -R …` | `bkt api …/pipelines/{uuid}/stopPipeline --method POST`, the uuid read with `bkt pipeline view` |
@@ -613,7 +630,8 @@ in `main`, the one the project's checkout is on. A `run` that names no branch ha
   like every long tool result (`docs/tools.md`, "Long results").
 - **Assumed, and the maintainer checks it on his Bitbucket**: the run body's shape (`target`,
   `selector`, `variables`) and the answer's `build_number`, from Atlassian's REST documentation;
-  that `bkt pipeline view --json` gives the run's `pipeline.uuid`; whether `bkt pipeline run`
+  that `bkt pipeline view --json` gives the run's `pipeline.uuid` and its branch
+  (`pipeline.target.ref_name`, which the read-back of a run needs); whether `bkt pipeline run`
   prints the run's number (when it does not, the answer says `forge runs lists it`).
 
 The window says what an agent did to a run like its other forge writes, in the session's list of

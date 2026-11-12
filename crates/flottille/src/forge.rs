@@ -1047,6 +1047,9 @@ pub(crate) struct ForgeCall {
     number: Option<u64>,
     state: Option<String>,
     branch: Option<String>,
+    /// run: where a `branch` left out was taken from (`workspace` or `folder`), put in the call by
+    /// Flottille before the gate; an agent's own is dropped.
+    branch_from: Option<String>,
     detail: Option<String>,
     /// show: read the pull request again even if it was read in the last 30 s.
     #[serde(default)]
@@ -1641,7 +1644,7 @@ async fn read_of_branch(
         )));
     };
     Ok(Followed {
-        target: events::target(&place.project, Some(&workspace.name), &path, pull.number),
+        target: events::target(&place.project, Some(&workspace.name), &path, pull),
         forge: repository.forge.clone(),
         pull: pull.clone(),
         path,
@@ -1691,7 +1694,7 @@ async fn read_numbered(
     };
     know_posts(daemon, &place.project, &checkout.path, &forge, &mut pull);
     Ok(Followed {
-        target: events::target(&place.project, None, &checkout.path, pull.number),
+        target: events::target(&place.project, None, &checkout.path, &pull),
         forge: Some(forge),
         pull,
         path: checkout.path,

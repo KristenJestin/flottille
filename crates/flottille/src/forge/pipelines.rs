@@ -18,6 +18,7 @@ use crate::daemon::Daemon;
 use crate::git::{self, Class};
 use crate::mcp::Outcome;
 use crate::place::Place;
+use crate::subscriptions;
 use crate::workspaces::{self, Head};
 
 /// The actions of the family.
@@ -106,23 +107,101 @@ pub(crate) fn bitbucket_key(key: &str) -> Option<String> {
     })
 }
 
+/// Where the branch of a call comes from, which the answer of a `run` says.
+#[derive(Clone, Copy, PartialEq)]
+enum Source {
+    Named,
+    Workspace,
+    Folder,
+}
+
+impl Source {
+    /// The marker `with_branch` puts in the call (`branch_from`).
+    fn marker(self) -> Option<&'static str> {
+        match self {
+            Source::Named => None,
+            Source::Workspace => Some("workspace"),
+            Source::Folder => Some("folder"),
+        }
+    }
+
+    fn of_marker(marker: Option<&str>) -> Option<Source> {
+        match marker {
+            Some("workspace") => Some(Source::Workspace),
+            Some("folder") => Some(Source::Folder),
+            _ => None,
+        }
+    }
+
+    fn said(self) -> &'static str {
+        match self {
+            Source::Named => "the branch you named",
+            Source::Workspace => "the branch your workspace is on",
+            Source::Folder => "the branch the project folder is on: name branch to run another",
+        }
+    }
+}
+
 /// The branch a `run` that names none will run on, put in the call before the gate sees it, so
-/// that the card and the judge say where a pipeline runs. A branch that cannot be told is left
-/// out: the call refuses it itself.
-pub(crate) async fn with_branch(daemon: &Daemon, place: &Place, mut args: Value) -> Value {
+/// that the card and the judge say where a pipeline runs, and where it comes from
+/// (`branch_from`, which an agent never sets). A branch that cannot be told is left out: the call
+/// refuses it itself. The refusal, when the run would go where the agent's own pull request does
+/// not, is made here too: the user is not asked for a run that is refused.
+pub(crate) async fn with_branch(
+    daemon: &Daemon,
+    agent: &str,
+    place: &Place,
+    mut args: Value,
+) -> (Value, Option<String>) {
+    if let Some(fields) = args.as_object_mut() {
+        fields.remove("branch_from");
+    }
     if args["action"] != "run" || args.get("branch").is_some_and(|b| !b.is_null()) {
-        return args;
+        return (args, None);
     }
     let checkout = place_checkouts(daemon, place)
         .ok()
         .and_then(|all| chosen(all, args["repository"].as_str(), "run", true).ok())
         .and_then(|mut checkouts| checkouts.pop());
+    let mut refusal = None;
     if let Some(checkout) = checkout
-        && let Ok(branch) = branch_of(daemon, place, &checkout, None).await
+        && let Ok((branch, source)) = branch_of(daemon, place, &checkout, None).await
     {
+        refusal = in_main_on_the_base(daemon, agent, place, &checkout, &branch, source);
         args["branch"] = branch.into();
+        args["branch_from"] = source.marker().into();
     }
-    args
+    (args, refusal)
+}
+
+/// Why a run in the project folder is refused: the folder is on the branch the agent's own pull
+/// request goes into, so the run would start there and not on the pull request's branch. The
+/// agent's pull requests are those its subscriptions follow (they hold the branches, as the
+/// forge said them when it subscribed); none, no refusal.
+fn in_main_on_the_base(
+    daemon: &Daemon,
+    agent: &str,
+    place: &Place,
+    checkout: &super::Checkout,
+    branch: &str,
+    source: Source,
+) -> Option<String> {
+    if source != Source::Folder {
+        return None;
+    }
+    let (number, head) = subscriptions::of(daemon, agent)
+        .into_iter()
+        .filter(|s| s.source == "forge")
+        .map(|s| s.target)
+        .filter(|t| t["project"] == place.project.as_str() && t["repository"] == checkout.path)
+        .filter(|t| t["base"] == branch)
+        .filter_map(|t| Some((t["number"].as_u64()?, t["head"].as_str()?.to_owned())))
+        .filter(|(_, head)| head != branch)
+        .max_by_key(|(number, _)| *number)?;
+    Some(format!(
+        "refused: you are in the project folder, on {branch}; your pull request #{number} is on \
+         {head}: name branch \"{head}\""
+    ))
 }
 
 async fn acted(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) -> Outcome {
@@ -186,13 +265,24 @@ async fn acted(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) ->
     }
     let path = checkout.path.clone();
     // The branch: the one named, else the workspace's; `runs` in main reads the repository's.
-    let branch = match (action, &asked.branch, &place.workspace) {
-        ("runs", None, None) | ("run_view" | "run_logs" | "stop" | "step", _, _) => None,
+    let (branch, source) = match (action, &asked.branch, &place.workspace) {
+        ("runs", None, None) | ("run_view" | "run_logs" | "stop" | "step", _, _) => (None, None),
         _ => match branch_of(daemon, place, &checkout, asked.branch.as_deref()).await {
-            Ok(branch) => Some(branch),
+            // A branch `with_branch` put in the call is not one the agent named.
+            Ok((branch, source)) => (
+                Some(branch),
+                Some(Source::of_marker(asked.branch_from.as_deref()).unwrap_or(source)),
+            ),
             Err(refusal) => return Outcome::Refused(refusal),
         },
     };
+    if let (Some(branch), Some(source)) = (&branch, source)
+        && action == "run"
+        && let Some(refusal) = in_main_on_the_base(daemon, agent, place, &checkout, branch, source)
+    {
+        return Outcome::Refused(refusal);
+    }
+    let why = source.map_or("", Source::said);
     let run = asked.run.unwrap_or_default();
     let step = asked.step.as_deref().unwrap_or_default();
     // A run started is followed unless the agent said no.
@@ -218,7 +308,9 @@ async fn acted(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) ->
                     let pipeline = asked.pipeline.as_deref().unwrap_or_default();
                     let variables = asked.variables.unwrap_or_default();
                     let branch = branch.unwrap_or_default();
-                    follow(bitbucket_run(&forge, context, pipeline, &branch, &variables).await)
+                    follow(
+                        bitbucket_run(&forge, context, pipeline, (&branch, why), &variables).await,
+                    )
                 }
                 _ => bitbucket_stop(&forge, context, run).await,
             }
@@ -229,7 +321,8 @@ async fn acted(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) ->
         (Forge::GitHub { .. }, "run") => {
             let pipeline = asked.pipeline.as_deref().unwrap_or_default();
             let variables = asked.variables.unwrap_or_default();
-            follow(github_run(&forge, pipeline, &branch.unwrap_or_default(), &variables).await)
+            let branch = branch.unwrap_or_default();
+            follow(github_run(&forge, pipeline, (&branch, why), &variables).await)
         }
         (Forge::GitHub { .. }, "stop") => {
             let id = run.to_string();
@@ -330,7 +423,7 @@ async fn branch_of(
     place: &Place,
     checkout: &super::Checkout,
     named: Option<&str>,
-) -> Result<String, String> {
+) -> Result<(String, Source), String> {
     if let Some(branch) = named {
         let fine = !branch.starts_with('-')
             && git::run(
@@ -341,7 +434,7 @@ async fn branch_of(
             .await
             .is_ok_and(|checked| checked.success);
         return match fine {
-            true => Ok(branch.to_owned()),
+            true => Ok((branch.to_owned(), Source::Named)),
             false => Err(format!("refused: {branch:?} is no branch's name")),
         };
     }
@@ -358,7 +451,10 @@ async fn branch_of(
             .find(|(repository, _)| repository.path == checkout.path)
             .map(|(_, head)| head.clone())
             .unwrap_or(Head::Unknown);
-        return Ok(head.branch_or(&workspace.branch).to_owned());
+        return Ok((
+            head.branch_or(&workspace.branch).to_owned(),
+            Source::Workspace,
+        ));
     }
     match git::output(
         &checkout.folder,
@@ -367,7 +463,7 @@ async fn branch_of(
     )
     .await
     {
-        Ok(branch) if !branch.trim().is_empty() => Ok(branch.trim().to_owned()),
+        Ok(branch) if !branch.trim().is_empty() => Ok((branch.trim().to_owned(), Source::Folder)),
         _ => Err(format!(
             "refused: {} is on no branch: name the branch (branch)",
             checkout.path
@@ -807,9 +903,7 @@ async fn bitbucket_runs(forge: &Forge, context: &str, branch: Option<&str>) -> O
             if let Some(seconds) = p["duration_in_seconds"].as_u64().filter(|s| *s > 0) {
                 line.push_str(&format!(", {}", events::lasted(seconds)));
             }
-            if branch.is_none()
-                && let Some(on) = bitbucket::pipeline_branch(p)
-            {
+            if let Some(on) = bitbucket::pipeline_branch(p) {
                 line.push_str(&format!(", on {on}"));
             }
             line
@@ -893,8 +987,12 @@ async fn bitbucket_view(forge: &Forge, context: &str, run: u64, path: &str) -> O
     let Forge::Bitbucket { owner, name, .. } = forge else {
         unreachable!("a Bitbucket repository")
     };
+    let on = match seen["pipeline"]["target"]["ref_name"].as_str() {
+        Some(on) => format!(" on {on}"),
+        None => String::new(),
+    };
     Outcome::Done(super::masked(&format!(
-        "The steps of the run #{run} of {}, https://bitbucket.org/{owner}/{name}/pipelines/results/{run}:\n{}\n\
+        "The steps of the run #{run} of {}{on}, https://bitbucket.org/{owner}/{name}/pipelines/results/{run}:\n{}\n\
          Read a step's log with forge {{\"action\": \"run_logs\", \"repository\": {}, \"run\": \
          {run}, \"step\": <its name>}}.",
         forge.slug(),
@@ -985,7 +1083,7 @@ async fn bitbucket_run(
     forge: &Forge,
     context: &str,
     pipeline: &str,
-    branch: &str,
+    (branch, why): (&str, &str),
     variables: &[Variable],
 ) -> (Outcome, Option<Started>) {
     let slug = forge.slug();
@@ -1057,6 +1155,27 @@ async fn bitbucket_run(
         Some(number) => format!("#{number}, {}", link(number)),
         None => "forge runs lists it".to_owned(),
     };
+    // What the forge created is read back: the branch it says is the run's, whatever was asked.
+    let mut unread = String::new();
+    if let Some(number) = number {
+        let seen = bitbucket_seen(forge, context, number).await.map(|seen| {
+            seen["pipeline"]["target"]["ref_name"]
+                .as_str()
+                .map(str::to_owned)
+        });
+        match seen {
+            Ok(Some(on)) if on != branch => {
+                let stopped = bitbucket_stop(forge, context, number).await;
+                return (
+                    started_elsewhere(&format!("#{number}"), &slug, branch, &on, stopped),
+                    None,
+                );
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => unread = " Its branch could not be read back: the forge names none.".into(),
+            Err(why) => unread = format!(" Its branch could not be read back: {why}"),
+        }
+    }
     let started = number.map(|number| Started {
         number,
         pipeline: named.clone(),
@@ -1065,10 +1184,28 @@ async fn bitbucket_run(
     });
     (
         Outcome::Done(format!(
-            "The pipeline {named} was started on {branch} in {slug}: {said}."
+            "The pipeline {named} was started on {branch}, {why}, in {slug}: {said}.{unread}"
         )),
         started,
     )
+}
+
+/// What a run the forge started on another branch than the one asked is answered: a failure that
+/// names both, and whether it was stopped (it never stays running).
+fn started_elsewhere(run: &str, slug: &str, asked: &str, on: &str, stopped: Outcome) -> Outcome {
+    let stopping = match stopped {
+        Outcome::Done(_) => "it was asked to stop".to_owned(),
+        Outcome::Failed(why)
+        | Outcome::Refused(why)
+        | Outcome::Invalid(why)
+        | Outcome::Held(why) => {
+            format!("asking it to stop failed ({why}): it may still run, stop it yourself")
+        }
+    };
+    Outcome::Failed(format!(
+        "failed: the run {run} of {slug} was asked on {asked} but the forge started it on {on}: \
+         {stopping}, and it is not followed"
+    ))
 }
 
 /// The number of the run `bkt pipeline run` named by its uuid (`{…}`) alone, read from the API;
@@ -1158,9 +1295,7 @@ async fn github_runs(forge: &Forge, branch: Option<&str>) -> Outcome {
             {
                 line.push_str(&format!(", {}", events::lasted(seconds)));
             }
-            if branch.is_none()
-                && let Some(on) = run["headBranch"].as_str()
-            {
+            if let Some(on) = run["headBranch"].as_str() {
                 line.push_str(&format!(", on {on}"));
             }
             if let Some(url) = run["url"].as_str() {
@@ -1182,7 +1317,7 @@ async fn github_seen(forge: &Forge, run: u64) -> Result<Value, String> {
         "-R",
         &forge.gh_repository(),
         "--json",
-        "databaseId,workflowName,status,conclusion,url,jobs",
+        "databaseId,workflowName,status,conclusion,headBranch,url,jobs",
     ])
     .await
 }
@@ -1214,8 +1349,12 @@ async fn github_view(forge: &Forge, run: u64, path: &str) -> Outcome {
         Some("completed") => seen["conclusion"].as_str().unwrap_or("completed"),
         other => other.unwrap_or("unknown"),
     };
+    let on = match seen["headBranch"].as_str() {
+        Some(on) => format!(" on {on}"),
+        None => String::new(),
+    };
     Outcome::Done(super::masked(&format!(
-        "The run {run} of {}, {}: {}  {}\n{}\nRead a job's log with forge {{\"action\": \
+        "The run {run} of {}, {}{on}: {}  {}\n{}\nRead a job's log with forge {{\"action\": \
          \"run_logs\", \"repository\": {}, \"run\": {run}, \"step\": <its name>}}.",
         forge.slug(),
         seen["workflowName"].as_str().unwrap_or("a workflow"),
@@ -1281,7 +1420,7 @@ async fn github_log(forge: &Forge, run: u64, step: &str) -> Outcome {
 async fn github_run(
     forge: &Forge,
     workflow: &str,
-    branch: &str,
+    (branch, why): (&str, &str),
     variables: &[Variable],
 ) -> (Outcome, Option<Started>) {
     let repo = forge.gh_repository();
@@ -1308,9 +1447,34 @@ async fn github_run(
                     link: link.to_owned(),
                 })
             });
+            // What GitHub created is read back: the branch it says is the run's.
+            let mut unread = String::new();
+            if let Some(started) = &started {
+                let id = started.number.to_string();
+                let seen = gh_json(&["run", "view", &id, "-R", &repo, "--json", "headBranch"])
+                    .await
+                    .map(|seen| seen["headBranch"].as_str().map(str::to_owned));
+                match seen {
+                    Ok(Some(on)) if on != branch => {
+                        let stopped = match gh_text(&["run", "cancel", &id, "-R", &repo]).await {
+                            Ok(_) => Outcome::Done(String::new()),
+                            Err(why) => Outcome::Failed(why),
+                        };
+                        return (
+                            started_elsewhere(&id, &forge.slug(), branch, &on, stopped),
+                            None,
+                        );
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        unread = " Its branch could not be read back: GitHub names none.".into();
+                    }
+                    Err(why) => unread = format!(" Its branch could not be read back: {why}"),
+                }
+            }
             (
                 Outcome::Done(format!(
-                    "The workflow {workflow} was started on {branch} in {}: {}.",
+                    "The workflow {workflow} was started on {branch}, {why}, in {}: {}.{unread}",
                     forge.slug(),
                     link.unwrap_or("forge runs lists it")
                 )),
