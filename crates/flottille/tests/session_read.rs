@@ -516,9 +516,9 @@ fn a_child_and_an_unknown_session_cannot_be_read() {
     );
     let refused = mcp.call("session_read", json!({"session": "0123456789ab"}));
     assert!(
-        refused
-            .text
-            .starts_with("refused: there is no session 0123456789ab"),
+        refused.text.starts_with(
+            "refused: no session of your project has the id or the title \"0123456789ab\""
+        ),
         "{}",
         refused.text
     );

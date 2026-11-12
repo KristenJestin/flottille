@@ -537,7 +537,13 @@ fn an_unknown_id_an_ended_session_or_an_empty_text_is_refused_before_anything_is
     let empty = send(&mcp, &x, "  ");
 
     for (answer, says) in [
-        (&unknown, ["refused: 000000000000 names no session", ""]),
+        (
+            &unknown,
+            [
+                "refused: no session of your project has the id or the title \"000000000000\"",
+                "",
+            ],
+        ),
         (&to_ended, ["refused: ", " has ended"]),
         (&empty, ["refused: the text is empty", ""]),
     ] {
