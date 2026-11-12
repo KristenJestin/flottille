@@ -14,9 +14,9 @@ use gpui_kit::{
     Task, TestSupportExt, Window, canvas, div, point, px, relative,
 };
 
-use gpui_design_system::Type;
 use gpui_design_system::motion::{Motion, PANEL, SWAP_FROM};
 use gpui_design_system::theme::{Palette, palette, radius};
+use gpui_design_system::{Icon, Type};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AgentState {
@@ -39,7 +39,10 @@ pub enum Mark {
     Spinner,
     /// A dot whose ring pulses.
     Pulse,
+    /// A quiet ring: idle, denied, stopped.
     Hollow,
+    /// A clock: waits for something outside, nothing for the user to do.
+    Clock,
     /// A check in a round.
     Check,
     /// A cross in a round.
@@ -76,7 +79,8 @@ impl AgentState {
         match self {
             Self::Running => Mark::Spinner,
             Self::NeedsYou => Mark::Pulse,
-            Self::Waiting | Self::Idle | Self::Denied | Self::Stopped => Mark::Hollow,
+            Self::Waiting => Mark::Clock,
+            Self::Idle | Self::Denied | Self::Stopped => Mark::Hollow,
             Self::Completed => Mark::Check,
             Self::Failed => Mark::Cross,
         }
@@ -94,7 +98,8 @@ impl AgentState {
             Self::NeedsYou => (p.wait, p.wait_bg),
             Self::Completed => (p.ok, p.ok_bg),
             Self::Failed => (p.fail, p.fail_bg),
-            Self::Waiting | Self::Idle | Self::Denied | Self::Stopped => (p.faint, p.card2),
+            Self::Waiting => (p.pend, p.pend_bg),
+            Self::Idle | Self::Denied | Self::Stopped => (p.faint, p.card2),
         }
     }
 
@@ -260,6 +265,19 @@ pub fn pill_id(state: AgentState) -> SharedString {
     format!("pill-{}", slug(state)).into()
 }
 
+/// The element id of a mark's shape, the same everywhere (`state-mark-clock`, …).
+pub fn mark_id(mark: Mark) -> SharedString {
+    let shape = match mark {
+        Mark::Spinner => "spinner",
+        Mark::Pulse => "pulse",
+        Mark::Hollow => "hollow",
+        Mark::Clock => "clock",
+        Mark::Check => "check",
+        Mark::Cross => "cross",
+    };
+    format!("state-mark-{shape}").into()
+}
+
 fn slug(state: AgentState) -> String {
     state.label().to_lowercase().replace(' ', "-")
 }
@@ -311,6 +329,10 @@ impl Render for StateIcon {
                 .border(px(1.4))
                 .border_color(p.faint)
                 .into_any_element(),
+            Mark::Clock => gpui_design_system::icon(Icon::Clock)
+                .size(size(13.))
+                .text_color(p.pend)
+                .into_any_element(),
             Mark::Check => round(p.ok_bg)
                 .size(size(15.))
                 .child(check(p.ok).size(relative(0.6)))
@@ -330,7 +352,15 @@ impl Render for StateIcon {
             .items_center()
             .justify_center()
             .opacity(opacity)
-            .child(mark)
+            .child(
+                div()
+                    .id(mark_id(state.mark()))
+                    .test_support()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(mark),
+            )
     }
 }
 
@@ -498,7 +528,8 @@ mod tests {
         use AgentState::*;
         assert_eq!(Running.mark(), Mark::Spinner);
         assert_eq!(NeedsYou.mark(), Mark::Pulse);
-        for quiet in [Waiting, Idle, Denied, Stopped] {
+        assert_eq!(Waiting.mark(), Mark::Clock);
+        for quiet in [Idle, Denied, Stopped] {
             assert_eq!(quiet.mark(), Mark::Hollow);
         }
         assert_eq!(Completed.mark(), Mark::Check);
@@ -516,5 +547,24 @@ mod tests {
         let p = Palette::base();
         assert_ne!(AgentState::Waiting.colors(&p).0, p.wait);
         assert_eq!(AgentState::NeedsYou.colors(&p).0, p.wait);
+    }
+
+    #[test]
+    fn waiting_has_a_colour_of_its_own_in_both_shades() {
+        use gpui_design_system::theme::Shade;
+        for shade in [Shade::Dark, Shade::Light] {
+            let p = Palette::own(shade);
+            let (ink, bg) = AgentState::Waiting.colors(&p);
+            assert_eq!((ink, bg), (p.pend, p.pend_bg), "{shade:?}");
+            for rest in [AgentState::Idle, AgentState::Denied, AgentState::Stopped] {
+                assert_ne!(
+                    ink,
+                    rest.colors(&p).0,
+                    "{shade:?}: not the grey of {rest:?}"
+                );
+            }
+            assert_ne!(ink, p.faint, "{shade:?}");
+            assert_ne!(ink, p.wait, "{shade:?}");
+        }
     }
 }

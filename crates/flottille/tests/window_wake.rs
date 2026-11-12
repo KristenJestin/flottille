@@ -238,6 +238,19 @@ fn the_session_reads_as_waiting_on_the_wake_in_the_sidebar_and_the_rail(cx: &mut
 }
 
 #[gpui_kit::test]
+fn a_session_that_waits_for_a_wake_says_when_it_wakes_on_its_row(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
+    let (lead, _mcp) = waking(&user);
+    let at = clock(due(&user, &lead));
+    let (shell, cx) = open_session(&user, &lead, cx);
+
+    let words = format!("wakes at {at}");
+    until(&shell, cx, "the row says when it wakes", |cx| {
+        label(cx, &format!("session-waits-{lead}")).as_deref() == Some(words.as_str())
+    });
+}
+
+#[gpui_kit::test]
 fn the_delivery_of_a_wake_says_the_timer_woke_the_agent(cx: &mut TestAppContext) {
     let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
     let (lead, _mcp) = waking(&user);

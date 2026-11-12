@@ -2817,7 +2817,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-alpha.feat-777-pager-dots.6#19cae4f7dc7d8a5dab18676948040285ebdb9d88"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-alpha.feat-777-pager-dots.8#5ceaa12a54894d9004e8e296e21ec1df82366e3a"
 dependencies = [
  "gpui-kit",
  "toml 1.1.8+spec-1.1.0",

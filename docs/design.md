@@ -1030,12 +1030,28 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   The second line, faint, is the place it works in (a folder icon and `main` for the project
   folder, a branch icon and the workspace's name) and then, when there is room, its pull request
   `#123` with its checks' mark (a check, a cross or a dot: shape as well as colour); it is cut
-  with an ellipsis inside the row and the whole is in a tooltip. The pull request is the one the
+  with an ellipsis inside the row and the whole is in a tooltip. While the session waits, the line
+  says, right after the place, what it waits for in a few words (`main · waits for checks of
+  #812`, `waits for <title of the session it leads>` (its title as it is now, renamed or not),
+  `wakes at 10:42`, `out of quota until 13:00`, `paused, resumes when you write` for a following
+  paused because the two sessions wrote to each other alone, the same facts as the mark's
+  tooltip): cut with an ellipsis inside the row, the whole in the line's tooltip, unfolding and
+  fading in when the wait begins, fading from the old words to the new when they change, and
+  folding away when it ends, with the row's height unchanged. The pull request is the one the
   project page last read for that workspace (`workspace.forge`): the sidebar asks the forge for
   none, so a workspace whose project page was never opened in this window shows its name alone,
   and the pull request fades in when it becomes known. The mark says its words under the pointer
   (`Needs you: a permission`, `Waiting: checks of #1`, `Running`, `New since you looked: opened a
   pull request`); the dot is cleared when the session is opened and lives as long as the window.
+  A state is drawn by its shape as well as its colour: a spinner for running, a pulsing dot for
+  waits for the user, a **clock** in the palette's `pend` colour for waiting (between turns for
+  something outside: a pull request's checks or a review, a session it leads, a wake, its quota's
+  reset), and the quiet ring, in the faint grey, only for rest (idle, denied, stopped). `pend`
+  is a violet of its own in both themes, neither the orange of "needs you" nor the blue of
+  running nor the grey of rest, and reads on every surface like the other state inks (contrast
+  checked by the kit, the way the palette's other inks are). The same mark and colour are
+  drawn in the rail's tree of agents, on the project page's Work tab and in the session's header,
+  whose `WAITING` pill takes the colour.
   The mark is where the work is, once: on the session's own row while that row is in sight, and on
   a folded project, which shows the strongest mark of what it holds, only while it is folded
   (never on a row and on its project together); a session whose agent ended shows no mark. A
