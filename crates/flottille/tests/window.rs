@@ -4679,6 +4679,17 @@ fn composer_on_setting<'a>(
     (shell, composer, cx)
 }
 
+/// Waits for the element to be drawn, then clicks it and lets the window settle: a click on an
+/// element not drawn yet is lost, or panics.
+fn click_when_drawn(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str) {
+    until(shell, cx, &format!("{id} is drawn"), |cx| {
+        cx.update(|window, _| window.try_find(id.to_owned()).is_some())
+    });
+    let id = id.to_owned();
+    cx.update(|window, cx| window.click(id, cx));
+    settle(cx);
+}
+
 /// The effort the composer marks recommended for the model picked.
 fn recommended_effort(composer: &Composer) -> Option<String> {
     composer
@@ -4716,10 +4727,11 @@ fn picking_the_recommended_model_in_the_composer_wins_over_the_setting(cx: &mut 
         Some("fake-large")
     );
     // Claude's recommended model, picked: the session starts on it, not on the setting's.
-    cx.update(|window, cx| window.click("model-picker", cx));
-    cx.update(|window, cx| window.click("model-choice-fake-small", cx));
-    settle(cx);
-    assert_eq!(model_shown(&composer, cx), "fake-small");
+    click_when_drawn(&shell, cx, "model-picker");
+    click_when_drawn(&shell, cx, "model-choice-fake-small");
+    until(&shell, cx, "the composer shows the model", |cx| {
+        model_shown(&composer, cx) == "fake-small"
+    });
     let shown = start_from_composer(&shell, &user, cx);
     assert_eq!(shown["taken"]["model"], "fake-small");
 }
@@ -4745,11 +4757,11 @@ fn picking_the_recommended_effort_in_the_composer_wins_over_the_setting(cx: &mut
         "high",
         "the composer starts on the setting's effort"
     );
-    cx.update(|window, cx| window.click("effort-picker", cx));
-    let row = format!("effort-choice-{own}");
-    cx.update(|window, cx| window.click(row, cx));
-    settle(cx);
-    assert_eq!(composer.read_with(cx, |c, _| c.effort_shown()), own);
+    click_when_drawn(&shell, cx, "effort-picker");
+    click_when_drawn(&shell, cx, &format!("effort-choice-{own}"));
+    until(&shell, cx, "the composer shows the effort", |cx| {
+        composer.read_with(cx, |c, _| c.effort_shown()) == own
+    });
     let shown = start_from_composer(&shell, &user, cx);
     assert_eq!(shown["taken"]["model"], "fake-small");
     assert_eq!(shown["chosen"]["effort"], own.as_str());

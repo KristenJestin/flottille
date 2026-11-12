@@ -87,10 +87,20 @@ fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
     })
 }
 
-fn click(cx: &mut VisualTestContext, id: &str) {
+/// Waits for the element to be drawn, then clicks it: a click on an element the window has not
+/// drawn yet is lost, or panics.
+fn click(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str) {
+    until(shell, cx, &format!("{id} is drawn"), |cx| present(cx, id));
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
     settle(cx);
+}
+
+/// Waits until the element says `text`.
+fn shows(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str, text: &str) {
+    until(shell, cx, &format!("{id} says {text}"), |cx| {
+        label(cx, id).as_deref() == Some(text)
+    });
 }
 
 fn open_settings(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SettingsPage> {
@@ -109,13 +119,22 @@ fn open_settings(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<Se
 }
 
 /// The options of a model select and an effort select, opened: their labels.
-fn rows(cx: &mut VisualTestContext, id: &str, keys: &[&str]) -> Vec<String> {
-    click(cx, id);
+fn rows(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str, keys: &[&str]) -> Vec<String> {
+    click(shell, cx, id);
     let rows = keys
         .iter()
-        .filter_map(|key| label(cx, &format!("{id}-{key}")))
+        .map(|key| {
+            let option = format!("{id}-{key}");
+            until(shell, cx, &format!("{option} is drawn"), |cx| {
+                present(cx, &option)
+            });
+            label(cx, &option).unwrap()
+        })
         .collect();
-    click(cx, id);
+    click(shell, cx, id);
+    until(shell, cx, &format!("{id} is closed"), |cx| {
+        keys.iter().all(|key| !present(cx, &format!("{id}-{key}")))
+    });
     rows
 }
 
@@ -149,17 +168,23 @@ fn settings_page<'a>(
 #[gpui_kit::test]
 fn the_setting_s_pickers_name_the_real_value_never_default(cx: &mut TestAppContext) {
     let user = user();
-    let (_shell, _page, cx) = settings_page(&user, cx);
+    let (shell, _page, cx) = settings_page(&user, cx);
 
     // Left alone, the first provider's recommended model and its effort are selected and named.
-    assert_eq!(
-        label(cx, "new-sessions-on-model").as_deref(),
-        Some("Claude · fake-small · recommended")
+    shows(
+        &shell,
+        cx,
+        "new-sessions-on-model",
+        "Claude · fake-small · recommended",
     );
+    until(&shell, cx, "the effort is said", |cx| {
+        present(cx, "new-sessions-on-effort")
+    });
     let effort = label(cx, "new-sessions-on-effort").unwrap();
     assert!(effort.ends_with(" · recommended"), "{effort}");
     let mut said = vec![label(cx, "new-sessions-on-model").unwrap(), effort];
     said.extend(rows(
+        &shell,
         cx,
         "new-sessions-on-model",
         &[
@@ -169,7 +194,7 @@ fn the_setting_s_pickers_name_the_real_value_never_default(cx: &mut TestAppConte
             "opencode-open-medium",
         ],
     ));
-    said.extend(rows(cx, "new-sessions-on-effort", &["low", "high"]));
+    said.extend(rows(&shell, cx, "new-sessions-on-effort", &["low", "high"]));
     assert_eq!(said.len(), 8, "{said:?}");
     for said in &said {
         assert!(!said.to_lowercase().contains("default"), "{said}");
@@ -186,8 +211,8 @@ fn choosing_the_recommended_model_back_clears_the_choice(cx: &mut TestAppContext
 
     // OpenCode's recommended model: its provider chosen, its model left to it. Its efforts are
     // known, and its effort goes beside it.
-    click(cx, "new-sessions-on-model");
-    click(cx, "new-sessions-on-model-opencode-open-small");
+    click(&shell, cx, "new-sessions-on-model");
+    click(&shell, cx, "new-sessions-on-model-opencode-open-small");
     until(&shell, cx, "the choice is stored", |_| {
         chosen(&user) == json!({"provider": "opencode"})
     });
@@ -196,22 +221,27 @@ fn choosing_the_recommended_model_back_clears_the_choice(cx: &mut TestAppContext
             && present(cx, "new-sessions-on-effort")
     });
     settle(cx);
-    click(cx, "new-sessions-on-effort");
-    click(cx, "new-sessions-on-effort-high");
+    click(&shell, cx, "new-sessions-on-effort");
+    click(&shell, cx, "new-sessions-on-effort-high");
     until(&shell, cx, "the effort is stored", |_| {
         chosen(&user) == json!({"provider": "opencode", "effort": "high"})
     });
-    settle(cx);
+    shows(&shell, cx, "new-sessions-on-effort", "high");
     // Another model of it, then back on its recommended one.
-    click(cx, "new-sessions-on-model");
-    click(cx, "new-sessions-on-model-opencode-open-medium");
+    click(&shell, cx, "new-sessions-on-model");
+    click(&shell, cx, "new-sessions-on-model-opencode-open-medium");
     until(&shell, cx, "the model is stored", |_| {
         chosen(&user) == json!({"provider": "opencode", "model": "open/medium"})
     });
-    settle(cx);
+    shows(
+        &shell,
+        cx,
+        "new-sessions-on-model",
+        "OpenCode · open/medium",
+    );
     // The first provider's recommended model, back: no choice at all, as before.
-    click(cx, "new-sessions-on-model");
-    click(cx, "new-sessions-on-model-claude-fake-small");
+    click(&shell, cx, "new-sessions-on-model");
+    click(&shell, cx, "new-sessions-on-model-claude-fake-small");
     until(&shell, cx, "the choice is cleared", |cx| {
         chosen(&user) == serde_json::Value::Null
             && label(cx, "new-sessions-on-model").as_deref()
@@ -227,38 +257,48 @@ fn a_model_no_longer_offered_falls_back_to_what_the_provider_proposes(cx: &mut T
     user.write_providers(
         "[opencode]\nenabled = true\n[new_session]\nprovider = \"claude\"\nmodel = \"retired\"\n",
     );
-    let (_shell, _page, cx) = settings_page(&user, cx);
+    let (shell, _page, cx) = settings_page(&user, cx);
 
     // The page says so once, and the pickers show what the session starts on.
-    assert_eq!(
-        label(cx, "new-sessions-fallback").as_deref(),
-        Some("Claude no longer offers retired: new sessions start on what it proposes.")
+    shows(
+        &shell,
+        cx,
+        "new-sessions-fallback",
+        "Claude no longer offers retired: new sessions start on what it proposes.",
     );
-    assert_eq!(
-        label(cx, "new-sessions-on-model").as_deref(),
-        Some("Claude · fake-small · recommended")
+    shows(
+        &shell,
+        cx,
+        "new-sessions-on-model",
+        "Claude · fake-small · recommended",
     );
     // Once another model is chosen, it says nothing.
-    click(cx, "new-sessions-on-model");
-    click(cx, "new-sessions-on-model-claude-fake-large");
-    until(&_shell, cx, "the notice is gone", |cx| {
+    click(&shell, cx, "new-sessions-on-model");
+    click(&shell, cx, "new-sessions-on-model-claude-fake-large");
+    // The notice folds away: its animation runs on the clock, which only `settle` advances.
+    until(&shell, cx, "the notice is gone", |cx| {
         settle(cx);
         !present(cx, "new-sessions-fallback")
     });
-    assert_eq!(
-        chosen(&user),
-        json!({"provider": "claude", "model": "fake-large"})
-    );
+    until(&shell, cx, "the choice is stored", |_| {
+        chosen(&user) == json!({"provider": "claude", "model": "fake-large"})
+    });
 }
 
 /// Every label a model select and an effort select say, closed and opened: the model's select
 /// by its id and the models it offers, the effort's by its levels.
-fn said(cx: &mut VisualTestContext, id: &str, models: &[&str], efforts: &[&str]) -> Vec<String> {
+fn said(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    id: &str,
+    models: &[&str],
+    efforts: &[&str],
+) -> Vec<String> {
     let mut said = vec![label(cx, &format!("{id}-model")).unwrap()];
-    said.extend(rows(cx, &format!("{id}-model"), models));
+    said.extend(rows(shell, cx, &format!("{id}-model"), models));
     if let Some(effort) = label(cx, &format!("{id}-effort")) {
         said.push(effort);
-        said.extend(rows(cx, &format!("{id}-effort"), efforts));
+        said.extend(rows(shell, cx, &format!("{id}-effort"), efforts));
     }
     assert!(
         !present(cx, &format!("{id}-model-first")),
@@ -287,27 +327,39 @@ fn no_select_of_the_window_has_a_default_row(cx: &mut TestAppContext) {
 
     // The new sessions' pickers, the judge's, and the compactor's: each opens on what applies,
     // selected and marked, and none has a row named default.
-    every.extend(said(cx, "new-sessions-on", &models, &["low", "high"]));
-    click(cx, "settings-tabs-approvals");
+    every.extend(said(
+        &shell,
+        cx,
+        "new-sessions-on",
+        &models,
+        &["low", "high"],
+    ));
+    click(&shell, cx, "settings-tabs-approvals");
     until(&shell, cx, "the judge's select", |cx| {
         present(cx, "judge-model")
     });
     settle(cx);
-    every.extend(said(cx, "judge", &models, &[]));
+    every.extend(said(&shell, cx, "judge", &models, &[]));
     assert!(
         !present(cx, "judge-effort"),
         "the judge keeps its model's own effort"
     );
-    click(cx, "settings-tabs-features");
+    click(&shell, cx, "settings-tabs-features");
     until(&shell, cx, "the compaction row", |cx| {
         present(cx, "features-compaction")
     });
-    click(cx, "features-compaction");
+    click(&shell, cx, "features-compaction");
     until(&shell, cx, "the compactor's select", |cx| {
         present(cx, "compaction-summary-model")
     });
     settle(cx);
-    every.extend(said(cx, "compaction-summary", &models, &["low", "high"]));
+    every.extend(said(
+        &shell,
+        cx,
+        "compaction-summary",
+        &models,
+        &["low", "high"],
+    ));
 
     assert!(every.len() > 12, "{every:?}");
     for said in &every {
@@ -349,25 +401,41 @@ fn with_the_first_provider_s_models_unknown_the_select_opens_on_it(cx: &mut Test
 
     // The value that applies is Claude's, its models learnt at its first session: never
     // OpenCode's recommended model.
-    assert_eq!(
-        label(cx, "new-sessions-on-model").as_deref(),
-        Some("Claude · models learnt at its first session · recommended")
+    shows(
+        &shell,
+        cx,
+        "new-sessions-on-model",
+        "Claude · models learnt at its first session · recommended",
     );
     assert_eq!(
-        rows(cx, "new-sessions-on-model", &["opencode-open-small"]),
+        rows(
+            &shell,
+            cx,
+            "new-sessions-on-model",
+            &["opencode-open-small"]
+        ),
         vec!["OpenCode · open/small · recommended".to_owned()]
     );
     // Chosen, OpenCode's is a choice; Claude's back clears it.
-    click(cx, "new-sessions-on-model");
-    click(cx, "new-sessions-on-model-opencode-open-small");
+    click(&shell, cx, "new-sessions-on-model");
+    click(&shell, cx, "new-sessions-on-model-opencode-open-small");
     until(&shell, cx, "the choice is stored", |_| {
         chosen(&user) == json!({"provider": "opencode"})
     });
-    settle(cx);
-    click(cx, "new-sessions-on-model");
-    click(cx, "new-sessions-on-model-claude-recommended");
-    until(&shell, cx, "the choice is cleared", |_| {
+    // The window shows the choice before Claude's row is clicked: until then, picking it would
+    // change nothing from the window's point of view.
+    shows(
+        &shell,
+        cx,
+        "new-sessions-on-model",
+        "OpenCode · open/small · recommended",
+    );
+    click(&shell, cx, "new-sessions-on-model");
+    click(&shell, cx, "new-sessions-on-model-claude-recommended");
+    until(&shell, cx, "the choice is cleared", |cx| {
         chosen(&user) == serde_json::Value::Null
+            && label(cx, "new-sessions-on-model").as_deref()
+                == Some("Claude · models learnt at its first session · recommended")
     });
 }
 
@@ -389,46 +457,50 @@ fn the_judge_and_the_compactor_mark_the_model_flottille_applies_for_them(cx: &mu
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let (shell, _page, cx) = settings_page(&user, cx);
 
-    click(cx, "settings-tabs-approvals");
+    click(&shell, cx, "settings-tabs-approvals");
     until(&shell, cx, "the judge's select", |cx| {
         present(cx, "judge-model")
     });
     settle(cx);
     // A judge without a model runs on the provider's: shown as it is, not as the recommended.
+    shows(&shell, cx, "judge-model", "Claude · fake-large");
     assert_eq!(
-        label(cx, "judge-model").as_deref(),
-        Some("Claude · fake-large")
-    );
-    assert_eq!(
-        rows(cx, "judge-model", &["claude-haiku"]),
+        rows(&shell, cx, "judge-model", &["claude-haiku"]),
         vec!["Claude · haiku · recommended".to_owned()]
     );
-    click(cx, "judge-model");
-    click(cx, "judge-model-claude-haiku");
+    click(&shell, cx, "judge-model");
+    click(&shell, cx, "judge-model-claude-haiku");
     until(&shell, cx, "the judge is haiku", |_| {
         let listed = user.call("provider.list", serde_json::Value::Null).unwrap();
         listed["judge"]["provider"] == "claude" && listed["judge"]["model"] == "haiku"
     });
 
-    click(cx, "settings-tabs-features");
+    click(&shell, cx, "settings-tabs-features");
     until(&shell, cx, "the compaction row", |cx| {
         present(cx, "features-compaction")
     });
-    click(cx, "features-compaction");
+    click(&shell, cx, "features-compaction");
     until(&shell, cx, "the compactor's select", |cx| {
         present(cx, "compaction-summary-model")
     });
     settle(cx);
-    assert_eq!(
-        label(cx, "compaction-summary-model").as_deref(),
-        Some("Claude · fake-large")
+    shows(
+        &shell,
+        cx,
+        "compaction-summary-model",
+        "Claude · fake-large",
     );
-    click(cx, "compaction-summary-model");
-    assert_eq!(
-        label(cx, "compaction-summary-model-claude-haiku").as_deref(),
-        Some("Claude · haiku · recommended")
+    click(&shell, cx, "compaction-summary-model");
+    until(&shell, cx, "the haiku row is drawn", |cx| {
+        present(cx, "compaction-summary-model-claude-haiku")
+    });
+    shows(
+        &shell,
+        cx,
+        "compaction-summary-model-claude-haiku",
+        "Claude · haiku · recommended",
     );
-    click(cx, "compaction-summary-model-claude-haiku");
+    click(&shell, cx, "compaction-summary-model-claude-haiku");
     until(&shell, cx, "the compactor is haiku", |_| {
         let shown = user.call("compaction.show", json!({})).unwrap();
         shown["compactor"]["provider"] == "claude" && shown["compactor"]["model"] == "haiku"

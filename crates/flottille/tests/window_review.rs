@@ -175,6 +175,22 @@ fn present(cx: &mut VisualTestContext, id: &str) -> bool {
     cx.update(|window, _| window.try_find(id.to_owned()).is_some())
 }
 
+/// Waits for the element to be drawn, then clicks it and lets the window settle: a click on an
+/// element not drawn yet is lost, or panics.
+fn click_when_drawn(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str) {
+    until(shell, cx, &format!("{id} is drawn"), |cx| present(cx, id));
+    let id = id.to_owned();
+    cx.update(|window, cx| window.click(id, cx));
+    settle(cx);
+}
+
+/// Waits until the element says `text`.
+fn shows(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str, text: &str) {
+    until(shell, cx, &format!("{id} says {text}"), |cx| {
+        label(cx, id).as_deref() == Some(text)
+    });
+}
+
 fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
     cx.update(|window, _| {
         window
@@ -1068,21 +1084,24 @@ fn slot(user: &User, key: &str) -> Value {
 #[gpui_kit::test]
 fn a_check_s_select_opens_on_the_recommended_model_selected(cx: &mut TestAppContext) {
     let user = user_with_models();
-    let (_shell, cx) = review_page(&user, true, cx);
+    let (shell, cx) = review_page(&user, true, cx);
 
     // Each check's select opens on the model it runs on, chosen as if the user had, marked
     // recommended; never a row named Default.
     for (key, _, _) in CHECKS {
-        assert_eq!(
-            label(cx, &format!("review-setting-{key}_model-model")).as_deref(),
-            Some("Claude · opus · recommended for Claude sessions"),
-            "{key}"
+        shows(
+            &shell,
+            cx,
+            &format!("review-setting-{key}_model-model"),
+            "Claude · opus · recommended for Claude sessions",
         );
     }
     // The last check runs one size smaller: its recommended model is that one.
-    assert_eq!(
-        label(cx, "review-setting-verifier_model-model").as_deref(),
-        Some("Claude · sonnet · recommended for Claude sessions")
+    shows(
+        &shell,
+        cx,
+        "review-setting-verifier_model-model",
+        "Claude · sonnet · recommended for Claude sessions",
     );
     let card = bounds(cx, "review-checks");
     let models = label(cx, "review-checks-models").unwrap();
@@ -1100,13 +1119,14 @@ fn a_check_s_select_opens_on_the_recommended_model_selected(cx: &mut TestAppCont
         bounds(cx, "review-checks-rounds").top() >= bounds(cx, "review-checks-models").bottom()
     );
     // Opened, no row is the rule: the models, the recommended one marked.
-    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
-    settle(cx);
-    assert!(!present(cx, "review-setting-bugs_model-model-first"));
-    assert_eq!(
-        label(cx, "review-setting-bugs_model-model-claude-sonnet").as_deref(),
-        Some("Claude · sonnet")
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+    shows(
+        &shell,
+        cx,
+        "review-setting-bugs_model-model-claude-sonnet",
+        "Claude · sonnet",
     );
+    assert!(!present(cx, "review-setting-bugs_model-model-first"));
     assert_eq!(
         slot(&user, "bugs_model"),
         Value::Null,
@@ -1120,9 +1140,8 @@ fn choosing_the_recommended_model_back_clears_the_choice(cx: &mut TestAppContext
     let user = user_with_models();
     let (shell, cx) = review_page(&user, true, cx);
 
-    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
-    settle(cx);
-    cx.update(|window, cx| window.click("review-setting-bugs_model-model-claude-sonnet", cx));
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model-claude-sonnet");
     until(&shell, cx, "the choice is stored", |cx| {
         slot(&user, "bugs_model") == json!({"provider": "claude", "model": "sonnet"})
             && label(cx, "review-setting-bugs_model-model").as_deref() == Some("Claude · sonnet")
@@ -1130,9 +1149,8 @@ fn choosing_the_recommended_model_back_clears_the_choice(cx: &mut TestAppContext
     settle(cx);
 
     // Back on the recommended one: it keeps following the rule, nothing is stored.
-    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
-    settle(cx);
-    cx.update(|window, cx| window.click("review-setting-bugs_model-model-claude-opus", cx));
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model-claude-opus");
     until(&shell, cx, "the choice is cleared", |cx| {
         slot(&user, "bugs_model") == Value::Null
             && label(cx, "review-setting-bugs_model-model").as_deref()
@@ -1149,15 +1167,15 @@ fn a_review_check_chooses_its_effort(cx: &mut TestAppContext) {
 
     // The effort select is beside the check's model, as the compactor's is: the model's
     // recommended effort selected and marked.
-    assert!(present(cx, "review-setting-bugs_model-effort"));
-    let said = label(cx, "review-setting-bugs_model-effort").unwrap();
-    assert!(said.ends_with(" · recommended"), "{said}");
-    assert!(!said.to_lowercase().contains("default"), "{said}");
-    cx.update(|window, cx| window.click("review-setting-bugs_model-effort", cx));
-    settle(cx);
     // The model proposes `low`: choosing `high` stores it.
-    assert_eq!(said, "low · recommended");
-    cx.update(|window, cx| window.click("review-setting-bugs_model-effort-high", cx));
+    shows(
+        &shell,
+        cx,
+        "review-setting-bugs_model-effort",
+        "low · recommended",
+    );
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-effort");
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-effort-high");
     until(&shell, cx, "the effort is stored and shown", |cx| {
         slot(&user, "bugs_model")
             == json!({"provider": "claude", "model": "opus", "effort": "high"})
@@ -1196,34 +1214,38 @@ fn user_with_two_providers() -> User {
 fn a_review_slot_with_no_choice_opens_on_the_first_provider_s_strongest(cx: &mut TestAppContext) {
     let user = user_with_two_providers();
     let (shell, cx) = review_page(&user, true, cx);
+    // The select is opened once, and the window left to learn OpenCode's models while it is.
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
     until(&shell, cx, "OpenCode's models are shown", |cx| {
-        settle(cx);
-        cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
-        settle(cx);
-        let shown = present(cx, "review-setting-bugs_model-model-opencode-open-small");
-        cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
-        settle(cx);
-        shown
+        present(cx, "review-setting-bugs_model-model-opencode-open-small")
     });
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
     // Each provider's strongest is marked for its own sessions; nothing chosen, the first's is
     // selected.
-    assert_eq!(
-        label(cx, "review-setting-bugs_model-model").as_deref(),
-        Some("Claude · opus · recommended for Claude sessions")
+    shows(
+        &shell,
+        cx,
+        "review-setting-bugs_model-model",
+        "Claude · opus · recommended for Claude sessions",
     );
-    assert_eq!(
-        label(cx, "review-setting-verifier_model-model").as_deref(),
-        Some("Claude · sonnet · recommended for Claude sessions")
+    shows(
+        &shell,
+        cx,
+        "review-setting-verifier_model-model",
+        "Claude · sonnet · recommended for Claude sessions",
     );
-    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
-    settle(cx);
-    assert_eq!(
-        label(cx, "review-setting-bugs_model-model-opencode-open-small").as_deref(),
-        Some("OpenCode · open/small · recommended for OpenCode sessions")
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+    shows(
+        &shell,
+        cx,
+        "review-setting-bugs_model-model-opencode-open-small",
+        "OpenCode · open/small · recommended for OpenCode sessions",
     );
-    assert_eq!(
-        label(cx, "review-setting-bugs_model-model-claude-sonnet").as_deref(),
-        Some("Claude · sonnet")
+    shows(
+        &shell,
+        cx,
+        "review-setting-bugs_model-model-claude-sonnet",
+        "Claude · sonnet",
     );
     assert_eq!(slot(&user, "bugs_model"), Value::Null);
     at_rest(cx);
@@ -1234,20 +1256,19 @@ fn choosing_any_provider_s_recommended_model_clears_a_review_slot(cx: &mut TestA
     let user = user_with_two_providers();
     let (shell, cx) = review_page(&user, true, cx);
     let pick = |key: &str, cx: &mut VisualTestContext| {
-        cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
-        settle(cx);
-        let row = format!("review-setting-bugs_model-model-{key}");
-        cx.update(|window, cx| window.click(row, cx));
+        click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+        click_when_drawn(
+            &shell,
+            cx,
+            &format!("review-setting-bugs_model-model-{key}"),
+        );
     };
+    // The select is opened once, and the window left to learn OpenCode's models while it is.
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
     until(&shell, cx, "OpenCode's models are shown", |cx| {
-        settle(cx);
-        cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
-        settle(cx);
-        let shown = present(cx, "review-setting-bugs_model-model-opencode-open-small");
-        cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
-        settle(cx);
-        shown
+        present(cx, "review-setting-bugs_model-model-opencode-open-small")
     });
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
 
     // Pinned: a model that is not recommended.
     pick("opencode-open-medium", cx);
