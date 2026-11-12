@@ -6325,7 +6325,9 @@ impl Row {
         });
         let open = answer;
         let answered = answers.map(|answers| {
-            crate::question_card::answered_card(self.at, &title, when, questions, answers, cx)
+            crate::question_card::answered_card(
+                self.at, &title, when, questions, answers, window, cx,
+            )
         });
         div()
             .id(id("question"))

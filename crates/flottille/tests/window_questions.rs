@@ -811,6 +811,98 @@ fn a_long_answer_stays_inside_its_answered_card(cx: &mut TestAppContext) {
     );
 }
 
+/// The "long ask" folded after an unbroken word in a "Something else" answer to its long
+/// question: the headline row (check and words) and the question's ellipsis line at length.
+fn long_ask_answered<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (usize, &'a mut VisualTestContext) {
+    let id = session(user, "full", "long ask");
+    let (shell, page, cx) = open_session(user, &id, cx);
+    guard::narrow(cx);
+    until(&shell, cx, "the card", |cx| {
+        questions(&page, cx)
+            .first()
+            .is_some_and(|(at, _)| card_shows(*at, cx))
+    });
+    settle(cx);
+    let at = questions(&page, cx)[0].0;
+    click(format!("row-{at}-question-0-other"), cx);
+    settle(cx);
+    write(&page, at, 0, guard::UNBROKEN, cx);
+    click(format!("row-{at}-question-1-option-0"), cx);
+    settle(cx);
+    click(format!("row-{at}-answer-send"), cx);
+    until(&shell, cx, "the card folds to its answers", |cx| {
+        settle(cx);
+        !has(format!("row-{at}-question-text"), cx)
+            && has(format!("row-{at}-answered-1-answer"), cx)
+    });
+    settle(cx);
+    (at, cx)
+}
+
+#[gpui_kit::test]
+fn a_long_question_and_an_unbroken_answer_stay_inside_the_folded_card(cx: &mut TestAppContext) {
+    let user = user();
+    let (at, cx) = long_ask_answered(&user, cx);
+    guard::assert_stays_inside(cx, format!("row-{at}-question"));
+    // Both ends of the first question's rows are drawn and inside the card.
+    let card = bounds(format!("row-{at}-question"), cx);
+    for part in ["answered-0-question", "answered-0-headline"] {
+        let part = bounds(format!("row-{at}-{part}"), cx);
+        assert!(part.right() <= card.right(), "{part:?} in {card:?}");
+    }
+    let headline = bounds(format!("row-{at}-answered-0-headline"), cx);
+    assert!(
+        headline.size.height > px(36.),
+        "the unbroken word wraps on lines: {headline:?}"
+    );
+    let question = bounds(format!("row-{at}-answered-0-question"), cx);
+    assert!(question.size.height < px(24.), "one line: {question:?}");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_whole_long_question_of_a_folded_card_shows_on_hover(cx: &mut TestAppContext) {
+    let user = user();
+    let (at, cx) = long_ask_answered(&user, cx);
+    let line = format!("row-{at}-answered-0-question");
+    assert!(!has(format!("{line}-tooltip"), cx), "no tooltip at rest");
+
+    cx.update(|window, cx| window.hover(line.clone(), cx));
+    settle(cx);
+    assert_eq!(
+        label(format!("{line}-tooltip"), cx).as_deref(),
+        Some(format!("1 · {} {}", guard::UNBROKEN, guard::SPACED).as_str())
+    );
+
+    // The pointer leaves: it fades out and goes.
+    cx.simulate_mouse_move(gpui_kit::point(px(5.), px(1790.)), None, Default::default());
+    settle(cx);
+    assert!(!has(format!("{line}-tooltip"), cx), "the tooltip left");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_question_that_fits_has_no_tooltip_in_a_folded_card(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
+    click(format!("row-{at}-question-0-option-0"), cx);
+    write(&page, at, 1, "Export orders as CSV", cx);
+    click(format!("row-{at}-question-2-option-0"), cx);
+    settle(cx);
+    click(format!("row-{at}-answer-send"), cx);
+    until(&shell, cx, "the card folds to its answers", |cx| {
+        settle(cx);
+        has(format!("row-{at}-answered-2-answer"), cx)
+    });
+    let line = format!("row-{at}-answered-0-question");
+    cx.update(|window, cx| window.hover(line.clone(), cx));
+    settle(cx);
+    assert!(!has(format!("{line}-tooltip"), cx), "it fits: no tooltip");
+}
+
 #[gpui_kit::test]
 fn a_long_question_stays_inside_its_open_card(cx: &mut TestAppContext) {
     let user = user();

@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use flottille_core::question::{Answer, Question};
 use gpui_design_system::{
     Block, Button, Card, ChoiceRow, Field, Icon, Toast, Type as _, changing, icon, palette,
-    presence, quoted_title, space, toast,
+    presence, quoted_title, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -687,7 +687,8 @@ pub fn answered_card(
     when: SharedString,
     questions: &[Question],
     answers: &[Answer],
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> Card {
     let p = palette(cx);
     let id = |part: String| ElementId::Name(format!("row-{at}-{part}").into());
@@ -742,7 +743,7 @@ pub fn answered_card(
                     .flex()
                     .flex_col()
                     .gap(space::XS)
-                    .child(
+                    .child(tipped_when_cut(
                         div()
                             .id(id(format!("answered-{n}-question")))
                             .aria_label(SharedString::from(asked.clone()))
@@ -751,9 +752,11 @@ pub fn answered_card(
                             .text_ellipsis()
                             .text_size(px(13.))
                             .text_color(p.mute)
-                            .child(SharedString::from(format!("{} · {asked}", n + 1)))
-                            .test_support(),
-                    )
+                            .child(SharedString::from(format!("{} · {asked}", n + 1))),
+                        format!("{} · {asked}", n + 1),
+                        window,
+                        cx,
+                    ))
                     .child(
                         div()
                             .id(id(format!("answered-{n}-answer")))
