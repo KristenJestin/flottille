@@ -172,6 +172,9 @@ pub struct Shell {
     /// Each session's composer, made when its page first opens: a draft and a send belong to
     /// their session.
     replies: HashMap<String, Entity<Reply>>,
+    /// Each session's dock of the asks that wait, kept like its composer: what the user chose
+    /// and wrote on a card stays when the page is left and opened again.
+    docks: HashMap<String, Entity<crate::ask_dock::AskDock>>,
     /// Each composer's changes, which the session's row says as a pencil while it is left.
     _drafts: Vec<Subscription>,
     /// The providers as the daemon last listed them, and the number of that read.
@@ -369,6 +372,7 @@ impl Shell {
             session_page: None,
             _chose: None,
             replies: HashMap::new(),
+            docks: HashMap::new(),
             _drafts: Vec::new(),
             providers: Providers::default(),
             providers_read: 0,
@@ -699,7 +703,13 @@ impl Shell {
             mode.update(cx, |mode, cx| mode.set_judge_chosen(chosen, cx));
         }
         let (follow, layout, status) = (self.follow.clone(), self.layout, status.clone());
-        let page = cx.new(|cx| SessionPage::new(this, opened, status, reply, follow, layout, cx));
+        let dock = self
+            .docks
+            .entry(id.clone())
+            .or_insert_with(|| cx.new(|_| crate::ask_dock::AskDock::new()))
+            .clone();
+        let page =
+            cx.new(|cx| SessionPage::new(this, opened, status, reply, dock, follow, layout, cx));
         let providers = self.providers.clone();
         page.update(cx, |page, cx| page.set_providers(&providers, cx));
         self._chose = Some(cx.subscribe(&page, |shell, page, Chose(agent), cx| {
@@ -2227,6 +2237,8 @@ impl Shell {
         self.forms
             .retain(|name, _| snapshot.projects.iter().any(|p| &p.name == name));
         self.replies
+            .retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
+        self.docks
             .retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
         let edited = snapshot.project_changes != self.snapshot.project_changes;
         self.snapshot = snapshot;

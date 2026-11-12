@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod add_project;
+pub mod ask_dock;
 pub mod attachments;
 pub mod claude;
 pub mod commands;

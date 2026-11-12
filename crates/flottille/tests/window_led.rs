@@ -824,6 +824,16 @@ fn row_of(
     })
 }
 
+/// The number of the ask of row `at`, which names the elements of its card in the dock.
+fn seq_at(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) -> u64 {
+    page.read_with(cx, |page, cx| {
+        match &page.conversation().read(cx).blocks()[at] {
+            Block::Question { seq, .. } => *seq,
+            _ => panic!("no ask at row {at}"),
+        }
+    })
+}
+
 #[gpui_kit::test]
 fn a_led_session_s_question_card_says_it_asks_its_pilot(cx: &mut TestAppContext) {
     let user = asking();
@@ -882,16 +892,18 @@ fn once_the_pilot_stops_following_the_card_says_it_asks_you(cx: &mut TestAppCont
             |block| matches!(block, Block::Question { .. }),
             cx,
         ));
-        seen.get()
-            .is_some_and(|at| label(cx, format!("row-{at}-question-title").into()).is_some())
+        seen.get().is_some_and(|at| {
+            let seq = seq_at(&page, at, cx);
+            label(cx, format!("ask-{seq}-question-title").into()).is_some()
+        })
     });
-    let now = seen.get().unwrap();
+    let now = seq_at(&page, seen.get().unwrap(), cx);
     assert_eq!(
-        label(cx, format!("row-{now}-question-title").into()).as_deref(),
+        label(cx, format!("ask-{now}-question-title").into()).as_deref(),
         Some("Write the docs")
     );
     assert_eq!(
-        label(cx, format!("row-{now}-question-tag").into()).as_deref(),
+        label(cx, format!("ask-{now}-question-tag").into()).as_deref(),
         Some("asks you")
     );
     // The card of the pilot folds away: nobody is waiting for it any more.

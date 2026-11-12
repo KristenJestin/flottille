@@ -1413,6 +1413,7 @@ mod tests {
                 started_at: None,
                 ended_at: None,
                 link: None,
+                outcome: None,
             }],
         }
     }
@@ -1747,6 +1748,7 @@ mod tests {
             started_at: None,
             ended_at: None,
             link: None,
+            outcome: None,
         });
         let mut new = old.clone();
         new.checks[1].state = "passing".into();

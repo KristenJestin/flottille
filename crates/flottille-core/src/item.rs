@@ -47,6 +47,10 @@ pub struct Check {
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub link: Option<String>,
+    /// How a failing check ended, in the forge's own word, lowercased (`failure`, `error`,
+    /// `startup_failure`, `cancelled`, `stopped`, `timed_out`…): what tells the code's failure from
+    /// the CI's. None for a check that is not failing.
+    pub outcome: Option<String>,
 }
 
 /// Where the reads of one source of a project stand: a forge's repository for its pull requests,
