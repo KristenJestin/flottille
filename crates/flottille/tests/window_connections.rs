@@ -560,7 +560,9 @@ fn a_url_is_chosen_with_its_radio_and_its_field_unfolds(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
-fn a_variable_is_picked_from_the_vault_and_its_secret_never_shows(cx: &mut TestAppContext) {
+fn a_variable_is_picked_from_the_vault_and_the_dialog_names_its_vault_entry_only(
+    cx: &mut TestAppContext,
+) {
     let user = user();
     turn_on(&user);
     user.call(
