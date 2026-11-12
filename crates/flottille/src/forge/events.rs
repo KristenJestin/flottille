@@ -10,9 +10,9 @@ use flottille_core::item::Item;
 use flottille_core::subscription::Subscription;
 use serde_json::{Value, json};
 
+use super::ending::{self, Ending};
 use super::{BY_AGENT, Forge, Job, Log, Pull, logs};
 use crate::daemon::Daemon;
-use crate::session_read::form;
 use crate::subscriptions::{self, By, Event};
 
 /// The events a pull request has, as a subscription names them.
@@ -34,14 +34,33 @@ fn said<'a>(data: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
     data[key].as_array().into_iter().flatten()
 }
 
-/// The checks of `item`, all ended: how many passed, failed and were skipped.
-fn checks_ended(item: &Item) -> String {
+/// The checks of `item`, all ended: how many passed, failed (the code's, and the jobs that timed
+/// out), failed of the CI's own, were stopped and were skipped. `refined` is what the logs read
+/// since say of how the first failing checks ended, in place of what their status says.
+fn checks_ended(item: &Item, refined: &[Ending]) -> String {
     let count = |state: &str| item.checks.iter().filter(|c| c.state == state).count();
+    let endings: Vec<Ending> = item
+        .checks
+        .iter()
+        .filter(|check| check.state == "failing")
+        .enumerate()
+        .map(|(at, check)| match refined.get(at) {
+            Some(ending) => ending.clone(),
+            None => Ending::of(check.outcome.as_deref()),
+        })
+        .collect();
+    let (code, ci, stopped) = ending::counted(&endings);
     let mut text = format!(
-        "The checks ended: {} passed, {} failed",
-        count("passing"),
-        count("failing")
+        "The checks ended: {} passed, {code} failed",
+        count("passing")
     );
+    if ci > 0 {
+        let s = if ci == 1 { "" } else { "s" };
+        text.push_str(&format!(", {ci} CI failure{s}"));
+    }
+    if stopped > 0 {
+        text.push_str(&format!(", {stopped} stopped"));
+    }
     if count("skipped") > 0 {
         text.push_str(&format!(", {} skipped", count("skipped")));
     }
@@ -79,7 +98,7 @@ fn events_of(
             "item.checks" => found.extend(item.map(|item| Event {
                 kind: "checks",
                 by: None,
-                text: checks_ended(item),
+                text: checks_ended(item, &[]),
             })),
             "item.reviewed" => {
                 for review in said(data, "reviews") {
@@ -170,33 +189,16 @@ fn events_of(
 /// whatever the number of jobs that failed.
 const LISTED: usize = 3;
 
-/// The failing checks of `item` as jobs whose log can be read, `LISTED` at most, each with the
-/// seconds it took, and how many more failed.
-fn jobs_of(item: &Item) -> (Vec<(Job, Option<u64>)>, usize) {
+/// The failing checks of `item` as jobs whose log can be read, `LISTED` at most, and how many
+/// more failed.
+fn jobs_of(item: &Item) -> (Vec<Job>, usize) {
     let failing: Vec<_> = item
         .checks
         .iter()
         .filter(|check| check.state == "failing")
         .collect();
-    let jobs = failing
-        .iter()
-        .take(LISTED)
-        .map(|check| {
-            let job = Job {
-                name: check.name.clone(),
-                details: check.link.clone(),
-                log: None,
-            };
-            let at = |time: &Option<String>| time.as_deref().and_then(form);
-            let took = at(&check.ended_at).zip(at(&check.started_at));
-            (
-                job,
-                took.and_then(|(end, start)| end.checked_sub(start))
-                    .map(|ms| ms / 1000),
-            )
-        })
-        .collect();
-    (jobs, failing.len().saturating_sub(LISTED))
+    let jobs = failing.iter().take(LISTED).map(|check| Job::of(check));
+    (jobs.collect(), failing.len().saturating_sub(LISTED))
 }
 
 /// A duration as a wake says it: `45 s`, `2 min 5 s`, `1 h 2 min`.
@@ -213,24 +215,31 @@ pub(super) fn lasted(seconds: u64) -> String {
 /// What a wake says of the checks that ended: `head`, then for each failed job its name, how long
 /// it took and the line that says why it failed, the others counted, and where the end of
 /// every log is. The wake weighs the agent's context at every turn; `forge show` holds the logs.
-fn summary(head: &str, jobs: &[(Job, Option<u64>)], more: usize, repository: &str) -> String {
+fn summary(head: &str, jobs: &[Job], more: usize, repository: &str) -> String {
     let mut text = head.to_owned();
-    for (job, took) in jobs {
-        let took = took
+    for job in jobs {
+        let took = job
+            .took
             .map(|s| format!(" ({})", lasted(s)))
             .unwrap_or_default();
-        let why = match &job.log {
-            Some(Ok(log)) => logs::why(log),
-            Some(Err(why)) => Some(format!("no log: {why}")),
-            None => None,
+        // How it ended is said before any reason: the code's failure by its error line, the
+        // others by what they are.
+        let why = match (job.ending.said(job.took), &job.log) {
+            (Some(said), _) => Some(said),
+            (None, Some(Ok(log))) => logs::why(log),
+            (None, Some(Err(why))) => Some(format!("no log: {why}")),
+            (None, None) => None,
         };
         text.push_str(&format!("\n- {}{took}", job.name));
         if let Some(why) = why {
             text.push_str(&format!(": {why}"));
         }
-        if let Some(Ok(Log {
-            whole: Some(whole), ..
-        })) = &job.log
+        if let (
+            Ending::Code | Ending::Ci(_),
+            Some(Ok(Log {
+                whole: Some(whole), ..
+            })),
+        ) = (&job.ending, &job.log)
         {
             text.push_str(&format!("\n  {}", logs::read_whole(repository, whole)));
         }
@@ -311,7 +320,7 @@ pub(crate) fn offer(
     let (Some(forge), true, false) = (forge, told_checks, jobs.is_empty()) else {
         return subscriptions::offer(daemon, subscription, &named, &found, ends.as_ref(), false);
     };
-    let (jobs, took): (Vec<Job>, Vec<Option<u64>>) = jobs.into_iter().unzip();
+    let item = item.cloned();
     let (daemon, subscription) = (daemon.clone(), subscription.clone());
     let repository = repository.to_owned();
     READING
@@ -341,12 +350,17 @@ pub(crate) fn offer(
             ended: None,
         };
         logs::attach(&forge, &mut pull.jobs).await;
-        let jobs: Vec<(Job, Option<u64>)> = pull.jobs.into_iter().zip(took).collect();
+        // The logs may say a failed check was the CI's: the head counts it so.
+        let endings: Vec<Ending> = pull.jobs.iter().map(|job| job.ending.clone()).collect();
         let mut found: Vec<Event> = found
             .into_iter()
             .map(|mut event| {
                 if event.kind == "checks" {
-                    event.text = summary(&event.text, &jobs, more, &repository);
+                    let head = match &item {
+                        Some(item) => checks_ended(item, &endings),
+                        None => event.text.clone(),
+                    };
+                    event.text = summary(&head, &pull.jobs, more, &repository);
                 }
                 event
             })
@@ -463,6 +477,7 @@ mod tests {
             started_at: None,
             ended_at: None,
             link: None,
+            outcome: None,
         };
         let item = |states: &[&str]| Item {
             project: "app".into(),
@@ -540,9 +555,11 @@ mod tests {
                 part: true,
                 whole: Some((900, "456".into())),
             })),
+            ending: Ending::Code,
+            took: None,
         };
 
-        let text = summary("The checks ended.", &[(job, None)], 0, "api");
+        let text = summary("The checks ended.", &[job], 0, "api");
 
         assert!(
             text.contains(
@@ -562,9 +579,11 @@ mod tests {
             name: "lint".into(),
             details: None,
             log: Some(Err(why.clone())),
+            ending: Ending::Code,
+            took: Some(14),
         };
 
-        let text = summary("The checks ended.", &[(job, Some(14))], 0, "api");
+        let text = summary("The checks ended.", &[job], 0, "api");
 
         assert!(
             text.contains(&format!("- lint (14 s): no log: {why}")),

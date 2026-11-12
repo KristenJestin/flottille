@@ -2846,3 +2846,306 @@ fn a_closed_bitbucket_pull_request_by_number_is_refused() {
         );
     }
 }
+
+// A failed check says whether the code or the CI failed (`docs/forges.md`, "A wake about failed
+// checks is a summary", "What kind of failure it was").
+
+/// What a job's line says of a failure of the CI itself, after the reason.
+const RERUN: &str = "run it again (forge step … do: rerun)";
+
+/// The daemon subscribed to the checks of `app/login`, which end as `checks` say (the fake
+/// `gh`'s check runs), `logs` being the failed logs it holds: the delivery that wakes the agent
+/// and its session.
+fn woken_by_checks(user: &User, checks: Vec<Value>, logs: Value) -> (String, Mcp) {
+    fixture(user);
+    script(user, pull());
+    let (_, mcp) = agent(user);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    let mut ended = pull();
+    ended["statusCheckRollup"] = checks.into();
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"app/login": changed(ended)}},
+        "logs": logs
+    }));
+    a_round(user);
+    (the_delivery(user), mcp)
+}
+
+fn shown(mcp: &Mcp) -> String {
+    let answer = mcp.call("forge", json!({"action": "show"}));
+    assert!(!answer.error, "{}", answer.text);
+    answer.text
+}
+
+#[test]
+fn a_github_startup_failure_is_said_as_a_ci_failure() {
+    let user = user();
+    let (delivery, mcp) = woken_by_checks(
+        &user,
+        vec![
+            timed("build", "SUCCESS", 1, 30),
+            check("deploy", "COMPLETED", "STARTUP_FAILURE", 2),
+        ],
+        json!({}),
+    );
+
+    let line = format!("- deploy: the CI failed, not the code: startup failure; {RERUN}");
+    assert!(delivery.contains(&line), "{line} in {delivery}");
+    assert!(!delivery.contains("no log"), "{delivery}");
+    let shown = shown(&mcp);
+    assert!(shown.contains(&line), "{line} in {shown}");
+}
+
+#[test]
+fn a_cancelled_github_job_is_said_stopped_not_failed() {
+    let user = user();
+    let (delivery, mcp) = woken_by_checks(
+        &user,
+        vec![
+            timed("build", "SUCCESS", 1, 30),
+            timed("deploy", "CANCELLED", 2, 65),
+        ],
+        json!({}),
+    );
+
+    assert!(
+        delivery.contains("- deploy (1 min 5 s): stopped, not failed\n"),
+        "{delivery}"
+    );
+    assert!(!delivery.contains("no log"), "{delivery}");
+    let shown = shown(&mcp);
+    assert!(shown.contains("- deploy: stopped, not failed\n"), "{shown}");
+}
+
+#[test]
+fn a_timed_out_job_says_after_how_long() {
+    let user = user();
+    let (delivery, mcp) = woken_by_checks(
+        &user,
+        vec![
+            timed("build", "SUCCESS", 1, 30),
+            timed("slow", "TIMED_OUT", 2, 600),
+        ],
+        json!({}),
+    );
+
+    assert!(
+        delivery.contains("- slow (10 min): timed out after 10 min\n"),
+        "{delivery}"
+    );
+    assert!(!delivery.contains("no log"), "{delivery}");
+    let shown = shown(&mcp);
+    assert!(
+        shown.contains("- slow: timed out after 10 min\n"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn the_wake_counts_ci_failures_apart_from_failed_checks() {
+    let user = user();
+    let (delivery, _) = woken_by_checks(
+        &user,
+        vec![
+            timed("build", "SUCCESS", 1, 30),
+            timed("test", "FAILURE", 456, 90),
+            check("deploy", "COMPLETED", "STARTUP_FAILURE", 2),
+            timed("lint", "CANCELLED", 3, 20),
+            timed("slow", "TIMED_OUT", 4, 600),
+        ],
+        json!({}),
+    );
+
+    assert!(
+        delivery.contains("The checks ended: 1 passed, 2 failed, 1 CI failure, 1 stopped."),
+        "{delivery}"
+    );
+}
+
+#[test]
+fn a_failed_github_job_is_still_said_by_its_error_line() {
+    let user = user();
+    let (delivery, _) = woken_by_checks(
+        &user,
+        vec![
+            timed("build", "SUCCESS", 1, 30),
+            timed("test", "FAILURE", 456, 90),
+        ],
+        json!({"acme/api": {"456":
+            "test\tRun cargo test\t2026-01-01T00:00:01.1234567Z error: test failed, to rerun pass `--lib`\n"}}),
+    );
+
+    assert!(
+        delivery.contains("- test (1 min 30 s): error: test failed, to rerun pass `--lib`"),
+        "{delivery}"
+    );
+    assert!(!delivery.contains("not the code"), "{delivery}");
+}
+
+/// The Bitbucket build the checks below are of.
+const BUILD: &str = "https://bitbucket.org/acme/api/pipelines/results/31";
+const SETUP_STEP: &str = "{11111111-1111-1111-1111-111111111111}";
+const TEST_STEP: &str = "{22222222-2222-2222-2222-222222222222}";
+
+impl Bitbucket {
+    /// The fake `bkt` as `script` leaves it, then with `checks` for the pull request #12 and
+    /// the keys of `more` (`steps`, `logs`, `pipelines`) of the repository added.
+    fn script_failing(self, user: &User, checks: Value, more: Value) {
+        self.script(user, &[], "INPROGRESS");
+        let mut script: Value =
+            serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+                .unwrap();
+        let repository = match self {
+            Bitbucket::Cloud => "acme/api",
+            Bitbucket::DataCenter => "APP/api",
+        };
+        script["checks"][repository]["12"] = checks;
+        for (key, value) in more.as_object().into_iter().flatten() {
+            script[key][repository] = value.clone();
+        }
+        user.bkt_script(script);
+    }
+
+    /// The agent subscribed to the checks of the pull request #12, which end as `checks` say:
+    /// its delivery.
+    fn woken_by(self, checks: Value, more: Value) -> String {
+        let user = self.user();
+        self.script(&user, &[], "INPROGRESS");
+        let (_, mcp) = agent(&user);
+        subscribe(&mcp, json!({"events": ["checks"]}));
+        self.script_failing(&user, checks, more);
+        a_round(&user);
+        the_delivery(&user)
+    }
+}
+
+/// A Cloud pipeline's steps, the second one's result being `result`.
+fn steps(result: &str) -> Value {
+    json!({"31": [
+        {"uuid": SETUP_STEP, "name": "setup",
+            "state": {"name": "COMPLETED", "result": {"name": "SUCCESSFUL"}}},
+        {"uuid": TEST_STEP, "name": "test",
+            "state": {"name": "COMPLETED", "result": {"name": result}}}
+    ]})
+}
+
+fn build_check(state: &str) -> Value {
+    json!([{"state": state, "key": "pipelines", "name": "Pipeline #31", "url": BUILD}])
+}
+
+#[test]
+fn a_bitbucket_step_in_error_is_said_as_a_ci_failure() {
+    let delivery = Bitbucket::Cloud.woken_by(
+        build_check("FAILED"),
+        json!({"steps": steps("ERROR"),
+            "logs": {"31": {SETUP_STEP: "fine\n", TEST_STEP: "+ cargo test\nBuild setup failed\n"}}}),
+    );
+
+    let line = format!(
+        "- Pipeline #31: the CI failed, not the code: the step test ended in error; {RERUN}"
+    );
+    assert!(delivery.contains(&line), "{line} in {delivery}");
+    assert!(
+        delivery.contains("The checks ended: 0 passed, 0 failed, 1 CI failure."),
+        "{delivery}"
+    );
+}
+
+#[test]
+fn a_bitbucket_pipeline_that_died_outside_a_step_is_said_as_a_ci_failure() {
+    let delivery = Bitbucket::Cloud.woken_by(
+        build_check("FAILED"),
+        json!({"steps": {"31": [
+            {"uuid": SETUP_STEP, "name": "setup",
+                "state": {"name": "COMPLETED", "result": {"name": "SUCCESSFUL"}}}
+        ]}, "logs": {"31": {SETUP_STEP: "fine\n"}}}),
+    );
+
+    let line = format!(
+        "- Pipeline #31: the CI failed, not the code: the pipeline #31 ended outside any step; {RERUN}"
+    );
+    assert!(delivery.contains(&line), "{line} in {delivery}");
+    assert!(!delivery.contains("no failed step"), "{delivery}");
+    assert!(
+        delivery.contains("The checks ended: 0 passed, 0 failed, 1 CI failure."),
+        "{delivery}"
+    );
+}
+
+#[test]
+fn a_stopped_bitbucket_pipeline_is_said_stopped_not_failed() {
+    // Who stopped it, when the pipeline says it.
+    let delivery = Bitbucket::Cloud.woken_by(
+        build_check("STOPPED"),
+        json!({"steps": steps("STOPPED"),
+            "pipelines": [{"uuid": "{31}", "build_number": 31, "state": {"name": "COMPLETED",
+                "result": {"name": "STOPPED", "terminator": {"display_name": "Alice"}}}}]}),
+    );
+    assert!(
+        delivery.contains("- Pipeline #31: stopped, not failed, by Alice\n"),
+        "{delivery}"
+    );
+    assert!(
+        delivery.contains("The checks ended: 0 passed, 0 failed, 1 stopped."),
+        "{delivery}"
+    );
+
+    // Said by its status alone when nothing says who (all Data Center has).
+    for shape in Bitbucket::ALL {
+        let delivery = shape.woken_by(
+            json!([{"state": "STOPPED", "key": "ci", "name": "Pipeline #31",
+                "url": "https://ci.example.com/builds/5"}]),
+            json!({}),
+        );
+        assert!(
+            delivery.contains("- Pipeline #31: stopped, not failed\n"),
+            "{shape:?}: {delivery}"
+        );
+        assert!(!delivery.contains("no log"), "{shape:?}: {delivery}");
+    }
+}
+
+#[test]
+fn a_bitbucket_data_center_status_in_error_is_said_as_a_ci_failure_from_its_status_alone() {
+    let delivery = Bitbucket::DataCenter.woken_by(
+        json!([{"state": "ERROR", "key": "ci", "name": "Jenkins",
+            "url": "https://ci.example.com/builds/5"}]),
+        json!({}),
+    );
+
+    let line = format!("- Jenkins: the CI failed, not the code: error; {RERUN}");
+    assert!(delivery.contains(&line), "{line} in {delivery}");
+}
+
+#[test]
+fn a_bitbucket_wake_says_each_failed_job_s_line() {
+    // Cloud: the error line of the failed step's log.
+    let delivery = Bitbucket::Cloud.woken_by(
+        json!([
+            {"state": "SUCCESSFUL", "key": "lint", "name": "lint", "url": "https://x"},
+            {"state": "FAILED", "key": "pipelines", "name": "Pipeline #31", "url": BUILD}
+        ]),
+        json!({"steps": steps("FAILED"),
+            "logs": {"31": {SETUP_STEP: "fine\n",
+                TEST_STEP: "+ cargo test\nerror: test failed, to rerun pass `--lib`\n"}}}),
+    );
+    assert!(
+        delivery.contains("The checks ended: 1 passed, 1 failed."),
+        "{delivery}"
+    );
+    assert!(
+        delivery.contains("- Pipeline #31: error: test failed, to rerun pass `--lib`"),
+        "{delivery}"
+    );
+
+    // Data Center gives no log, and says so.
+    let delivery = Bitbucket::DataCenter.woken_by(
+        json!([{"state": "FAILED", "key": "ci", "name": "Jenkins",
+            "url": "https://ci.example.com/builds/5"}]),
+        json!({}),
+    );
+    assert!(
+        delivery.contains("- Jenkins: no log: bkt gives no job logs, read it on Bitbucket"),
+        "{delivery}"
+    );
+}
