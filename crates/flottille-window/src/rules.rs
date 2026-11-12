@@ -28,10 +28,6 @@ use crate::commands::perform_later;
 use crate::settings::Reveal;
 use crate::shell::Shell;
 
-/// What the editor says of when a change takes effect.
-pub const REACH: &str = "A change reaches the agents created from now on; an agent already \
-                         created keeps the rules it was created with.";
-
 /// What a project's editor says when its text starts with the global one.
 pub const REPEATS: &str = "These rules repeat the global ones; you can remove that part.";
 
@@ -417,7 +413,7 @@ impl RulesEditor {
             } else if self.compaction {
                 "They reach the next compaction."
             } else {
-                "The agents created from now on follow them."
+                "Agents started from now on follow them."
             };
             toast(
                 if said.is_failure() {
@@ -454,10 +450,7 @@ impl RulesEditor {
                 } else {
                     Toast::success("The global rules are used too")
                 };
-                toast(
-                    said.detail("The agents created from now on follow them."),
-                    cx,
-                );
+                toast(said.detail("Agents started from now on follow them."), cx);
                 self.problem = None;
                 self.shown = Some(shown);
             }
@@ -497,7 +490,7 @@ impl RulesEditor {
             &self.project,
             self.shown.as_ref().map(|shown| shown.source),
         ) {
-            (_, _, None) => "asking the daemon",
+            (_, _, None) => "asking Flottille",
             (true, _, Some(Source::Global)) => "your own",
             (true, _, Some(_)) => "Flottille's default",
             (false, None, Some(Source::Global)) => "your own",
@@ -509,19 +502,21 @@ impl RulesEditor {
 
     /// What the line beside the buttons says: how to make the text one's own, or when a change
     /// takes effect.
-    fn footer(&self) -> &'static str {
+    ///
+    /// The rules say it in the toast that follows a save, never in a line under the editor.
+    fn footer(&self) -> Option<&'static str> {
         if self.compaction {
-            return COMPACTION_REACH;
+            return Some(COMPACTION_REACH);
         }
         if self.part.is_some() || self.check.is_some() {
-            return PART_REACH;
+            return Some(PART_REACH);
         }
         match (self.judge, &self.project, self.is_own()) {
-            (true, _, _) => JUDGE_REACH,
+            (true, _, _) => Some(JUDGE_REACH),
             (false, Some(_), false) => {
-                "Write the project's rules: they come after the global ones."
+                Some("Write the project's rules: they come after the global ones.")
             }
-            (false, _, _) => REACH,
+            (false, _, _) => None,
         }
     }
 }
@@ -559,15 +554,23 @@ impl Render for RulesEditor {
             .flex()
             .items_center()
             .gap(space::SM)
+            // The line comes and goes with the project's own rules: it folds and fades, never pops.
             .child(
-                div()
-                    .id(id("reach"))
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(12.))
-                    .text_color(p.faint)
-                    .child(self.footer())
-                    .test_support(),
+                div().flex_1().min_w_0().child(
+                    presence_of(id("reach-block"), self.footer().map(SharedString::from), {
+                        let reach = id("reach");
+                        move |line| {
+                            div()
+                                .id(reach)
+                                .text_size(px(12.))
+                                .text_color(p.faint)
+                                .child(line)
+                                .test_support()
+                                .into_any_element()
+                        }
+                    })
+                    .gap(space::XS),
+                ),
             )
             .child(
                 Button::quiet(id("reset"), "Reset to default")
@@ -682,9 +685,7 @@ impl Render for RulesEditor {
             ),
             (false, Some(_)) => (
                 "Rules".into(),
-                "How the project's agents work, after your rules for every project. A change \
-                 reaches the agents created from now on."
-                    .into(),
+                "How the project's agents work, after your rules for every project.".into(),
                 "rules".into(),
             ),
             (false, None) => (

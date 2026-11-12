@@ -781,17 +781,17 @@ impl Render for WriteSpec {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.weak_entity();
         let (ticket, title) = self.ticket.clone().unwrap_or_default();
-        let modes = RadioChoices::new("write-spec-mode", "Mode")
+        let modes = RadioChoices::new("write-spec-mode", "Where the spec lives")
             .choice(
                 "internal",
-                "The spec is Flottille's",
-                "The ticket is read, never written; at the end a draft comment lists where the \
-                 spec departs from it.",
+                "Kept in Flottille",
+                "The ticket is read, never written. At the end, a draft comment lists where the \
+                 spec departs from it; you post it or not.",
             )
             .choice(
                 "ticket",
-                "The ticket is the spec",
-                "Its description is written at each Ready, after reading it again.",
+                "Written to the ticket",
+                "Each Ready writes the spec as the ticket's description, after reading it again.",
             )
             .chosen(usize::from(self.ticket_is_spec))
             .on_choose({

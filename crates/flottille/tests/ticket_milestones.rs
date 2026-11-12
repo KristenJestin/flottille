@@ -566,23 +566,23 @@ fn milestone_writes_go_through_the_gate_as_other_ticket_writes() {
 }
 
 #[test]
-fn milestone_actions_are_refused_on_jira() {
+fn milestone_writes_are_refused_on_jira_where_acli_makes_no_version() {
     let user = user();
     on_jira(&user);
     user.acli_script(json!({"items": {}}));
     let mcp = root_in(&user);
 
+    // A Jira milestone is a version (`ticket_versions.rs`): read, and a work item created in one;
+    // acli makes, changes and releases none, and its edit moves none.
     for args in [
-        json!({"action": "milestones"}),
         json!({"action": "milestone_create", "title": "v1"}),
         json!({"action": "milestone_edit", "milestone": "v1", "state": "closed"}),
-        json!({"action": "create", "title": "T", "milestone": "v1"}),
+        json!({"action": "edit", "ticket": "ABC-1", "milestone": "v1"}),
         json!({"action": "edit", "ticket": "ABC-1", "remove_milestone": true}),
-        json!({"action": "list", "milestone": "v1"}),
     ] {
         let said = refused_at_once(&user, &mcp, args.clone());
         assert!(
-            said.contains("GitHub") && said.contains("sprint"),
+            said.contains("acli") && said.contains("Jira") && said.contains("nothing was written"),
             "{args}: {said}"
         );
     }

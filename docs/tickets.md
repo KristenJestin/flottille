@@ -64,7 +64,7 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
   status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment,issuelinks,attachment,assignee,parent,*navigable`
   (`--fields status` or `--fields comment,attachment` alone for the status of a write and the rounds'
   comments), and `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels --json
-  --limit 200`, `workitem link type --json` and `workitem view <KEY> --json --fields issuelinks` (the link types and an item's links; the JQL of a `list` or a `search` is in `docs/tools.md`); its writes (`workitem create`, `comment create`, `comment update`, `comment delete`, `edit`, `transition`, `link create`, `link delete`, below) run
+  --limit 200`, `workitem link type --json`, `project view --key <P> --json` (a project's work item types and versions) and `workitem view <KEY> --json --fields issuelinks` (the link types and an item's links; the JQL of a `list` or a `search` is in `docs/tools.md`); its writes (`workitem create`, `comment create`, `comment update`, `comment delete`, `edit`, `transition`, `link create`, `link delete`, below) run
   only for a `tickets` call the gate let through, and the tests look at every call the fake
   received. Of `gh`, the reads are `gh issue view <n> -R github.com/owner/name --json
   number,title,state,body,comments,url,milestone` and `gh issue list` (`docs/tools.md`, "The tickets");
@@ -310,7 +310,7 @@ leaves it out.
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
 (by label, assignee and `updated_within`), `search` with words, `in_comments` or `jql`, `show` the workspace's ticket or another of the
-project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards, `milestones` the milestones of a GitHub repository; `create` (on Jira also under a parent and in a sprint; on GitHub in a milestone), `milestone_create` and `milestone_edit` (GitHub, "Milestones" below), `comment`, `log_time` (Jira, "Logging time" below) and `time_spent`, `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
+project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards, `milestones` the milestones of a GitHub repository or the versions of Jira's projects; `create` (on Jira also under a parent, in a sprint and in a version; on GitHub in a milestone), `milestone_create` and `milestone_edit` (GitHub, "Milestones" below; refused on Jira, "Versions"), `comment`, `log_time` (Jira, "Logging time" below) and `time_spent`, `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
 GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
 Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
 tracker does not take, or a creation in a Jira project that is not one of the tracker's, is
@@ -654,14 +654,105 @@ tickets becomes a release with its progress bar. What `gh` can do decides what F
   `list` answered from them shows it on each line (`- #5 open: … milestone: v0.1`), but the filter
   is `gh`'s own. A `search`'s kept answer is keyed by it. `show` reads it with the issue
   (`--json …,milestone`) and says `Milestone: v0.1` when there is one.
-- **On Jira**: `milestones`, `milestone_create`, `milestone_edit`, `milestone`, `remove_milestone`,
-  `due` and `description` are refused, before anything is asked and nothing run, naming a sprint
-  (`a work item goes in a sprint: sprints lists them, create takes sprint`). Jira's versions
-  (fix versions) are a different field, out of scope here.
+- **On Jira** a milestone is a version of a project ("Versions" below): `milestones`, `milestone`
+  at `list`, `search` and `create` work there; `milestone_create`, `milestone_edit` and a
+  `milestone` or `remove_milestone` at `edit` are refused, before anything is asked and nothing
+  run, saying what `acli` cannot do.
 - **Not measured against a real repository**: the shape of the API's answers (`number`, `title`,
   `state`, `due_on`, `open_issues`, `closed_issues`, `html_url`, the REST API's documented fields)
   and that `gh issue edit --milestone` takes a title. The maintainer checks them with `tickets
   milestones`, then a `milestone_create` and an `edit` in a throwaway repository.
+
+### Versions
+
+Seen as a gap of the milestones (#758): a Jira project's releases are its **versions** (a work
+item's `fixVersions`), and an agent told to group work items toward a release had only labels. The
+tool's words stay shared: a milestone on GitHub, a version on Jira (#764). What `acli` offers
+decides what is done, **measured from its public reference** (Atlassian's pages of `acli jira`,
+read on 2026-11-11, which show no `acli` version number; its changelog lists 1.3.15-stable as the
+latest, and `workitem create-bulk` of 1.3.5 is described there):
+
+- **No command lists, makes, releases, archives or renames a version.** `acli jira` has the groups
+  `auth`, `board`, `dashboard`, `field`, `filter`, `project`, `sprint` and `workitem`; `project`
+  lists, views, creates, updates, archives, restores and deletes **projects**; none of the pages
+  mentions a version, a release or `fixVersion`.
+- **No flag sets a fix version.** `workitem create` has `--assignee`, `--description`,
+  `--description-file`, `--editor`, `--from-file`, `--from-json`, `--generate-json`, `--json`,
+  `--label`, `--parent`, `--project`, `--summary`, `--type`; `workitem edit` has `--assignee`,
+  `--description`, `--description-file`, `--filter`, `--from-json`, `--generate-json`,
+  `--ignore-errors`, `--jql`, `--json`, `--key`, `--labels`, `--remove-assignee`, `--remove-labels`,
+  `--summary`, `--type`, `--yes`. The JSON definitions' keys are not documented (`--generate-json`
+  prints one); the sprint work found those of `create` on a real site (`docs/tickets.md`, "Parents
+  and sprints": `additionalAttributes` sets a field outside the flags). `edit`'s JSON has **no
+  `additionalAttributes`**: a user of the real `acli` reports `json: unknown field
+  "additionalAttributes"` and that its template is a subset of `create`'s (Atlassian Community,
+  "Atlassian CLI \"acli jira workitem edit\" cannot set custom fields, unlike \"create\"", May
+  2026), and Atlassian's request to extend the editable fields (CLOUD-12876) was open when this
+  was written.
+- **`workitem search --jql` takes any JQL**, so `fixVersion = "<name>"` filters, and **`workitem
+  view --fields *navigable`** (already asked, for the sprint) brings `fields.fixVersions`
+  (`[{"id", "name", "released", …}]`, Jira's REST field).
+
+What Flottille does with it:
+
+- **`milestones {state?, project?}`**, a read: `acli jira project view --key <P> --json`, the call
+  that already gives a project's work item types, **assumed to print Jira's REST project, which
+  holds its `versions`** (`{"id", "name", "released", "releaseDate", "archived"}`): its page gives
+  no output. Each project of the tracker, or the one `project` names alone (a version belongs to a
+  project), is a section of lines, `- 1.1 open, due 2026-12-01`, `- 1.0 closed, released
+  2026-10-01, archived`: `state` is `open` (the default) for the unreleased versions, `closed` for
+  the released ones, or `all`. A project view with no `versions` is refused saying acli printed
+  none for the project: the versions are read there and nowhere else.
+- **`create {…, milestone}`** puts the work item in a version of the project it is made in (`project`,
+  as for any creation), by its name (any case) or its id, found **before the user is asked**
+  (`It sets its fix version to "1.1" (id 10001, ABC, unreleased, 2026-12-01)`). **What is written
+  is the version that card named**: when the user allows the request, its card is made again and
+  compared with the one they read, as an action's is, so a version renamed, or another that took
+  its name, while the request waited is not written (`what it does changed since the user allowed
+  it; it would now: … (id 10009, …)`), nor one that is gone. The card is the request's own, kept
+  in the store: it holds after a restart of the daemon, and two requests in the same name are
+  each checked against theirs. The name is kept as Jira holds it for the lookup, the JQL and the JSON, and masked only
+  in what is shown. A version `acli` has no flag for is set from the JSON definition (`create
+  --from-json`: `projectKey`, `summary`, `type`, `description` as ADF, `labels`, `parentIssueId`, and
+  `additionalAttributes: {"fixVersions": [{"name": "1.1"}]}`, **assumed**: Jira's REST shape of the
+  field, passed as `acli` passes the Sprint field), the same path as a creation in a sprint, so the
+  same consequences: **`type` is required** (the JSON has no default type), a creation that has
+  an assignee sets it right after with `edit --assignee`, and an answer without the new key says
+  what was not done. A sprint and a version can be given together.
+- **A creation is read back**: `acli` may end it with 0 and Jira keep no fix version, so the work
+  item is read again (`acli jira workitem view <KEY> --json --fields fixVersions`), and the
+  answer says what it holds: `The ticket ABC-12 was opened in ABC, in the version "1.1"`, or `…,
+  but Jira did not set its fix version "1.1"` (with what the user does: set it in Jira), or, when
+  the read fails, after the link, that the version was asked and could not be confirmed. It is never said to be in
+  the version on `acli`'s word alone.
+- **`list` and `search` with `milestone`** add `fixVersion = "<name>"` to the JQL (still
+  confined to the tracker's projects: `project in (…) AND fixVersion = "1.1"`, the name quoted
+  with its `"` and `\` escaped). The name is looked for in the project `project` names, else in
+  every project of the tracker; with `project` the JQL adds `AND project = "<P>"`, so another
+  project's version of the same name is not listed, and without it the filter is on the name alone
+  (the same name in two projects lists both). The stored list of the rounds is not used for it. A
+  line says `milestone: 1.1`; the search asks no `fixVersions` field (which fields `search` allows
+  is not documented: `updated` and `created` were refused), so a line says the version that was
+  asked for, since every item found holds it. **`show`** reads `fixVersions` with the work item and
+  says `Milestone: 1.1, 2.0` (all of its fix versions) when it has some.
+- **A version that does not exist is refused, listing those that do** (`there is no milestone
+  "9.9" among the versions of ABC (its versions are 1.0 (id 10000, closed), 1.1 (id 10001, open));
+  nothing is created implicitly, and acli makes no version: …`), before the user is asked where it
+  is a write, as a GitHub milestone is.
+- **Refused, with what to do instead**, before anything is asked and nothing run: `milestone_create`
+  and `milestone_edit` (`none of acli's jira commands makes, changes or releases a project's
+  version, and Flottille calls no Jira REST API for it: the user does it in Jira, on the
+  project's Releases page`), and `edit` with `milestone` or `remove_milestone` (`acli's workitem
+  edit takes no fix version …: the user changes it in Jira`). This is the rule of a sprint's move
+  (#382): nothing is done through another route, and the daemon calls no REST API for a version.
+- **The writes are judged as every ticket write**: a `create` in a version is held in Ask and
+  allowed in Full, and its card says the version.
+- **Not measured**: no `acli` is installed where this was written, and no Jira was tried. Assumed:
+  that `project view --json` prints `versions`, that `create --from-json` takes a system field such
+  as `fixVersions` in `additionalAttributes` (it takes the Sprint field, a custom one), and the
+  shape of `fixVersions` in a view. The maintainer checks them on their site: `tickets
+  milestones`, then a `create` with `milestone` and `type`, then `list` with `milestone`. If `acli`
+  refuses `fixVersions` in the JSON, the creation answers with its words and nothing else is done.
 
 ### What `acli jira workitem search` prints is assumed too
 

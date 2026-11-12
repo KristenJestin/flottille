@@ -595,3 +595,246 @@ fn a_select_of_models_outside_model_choice_is_refused() {
         found.join("\n")
     );
 }
+
+// ── 4. A switch's label names what it turns on ─────────────────────────────────────────────────
+
+/// The literals of a source, as a person reads them: comments and the tests at the end of a file
+/// left out, a continued line (`\` at its end) joined into one, each with the line it starts on.
+fn literals(source: &str) -> Vec<(usize, String)> {
+    let source = source.split("#[cfg(test)]").next().unwrap_or(source);
+    let chars: Vec<char> = source.chars().collect();
+    let (mut at, mut line) = (0, 1);
+    let mut found = Vec::new();
+    while at < chars.len() {
+        match chars[at] {
+            '\n' => {
+                line += 1;
+                at += 1;
+            }
+            '/' if chars.get(at + 1) == Some(&'/') => {
+                while at < chars.len() && chars[at] != '\n' {
+                    at += 1;
+                }
+            }
+            // A character or a lifetime: never a text.
+            '\'' => {
+                at += match (chars.get(at + 1), chars.get(at + 2)) {
+                    (Some('\\'), _) => 4,
+                    (_, Some('\'')) => 3,
+                    _ => 1,
+                };
+            }
+            '"' => {
+                let (start, mut text) = (line, String::new());
+                at += 1;
+                while at < chars.len() && chars[at] != '"' {
+                    if chars[at] == '\\' {
+                        at += 1;
+                        if chars.get(at) == Some(&'\n') {
+                            while chars.get(at).is_some_and(|c| c.is_whitespace()) {
+                                line += usize::from(chars[at] == '\n');
+                                at += 1;
+                            }
+                            continue;
+                        }
+                        text.push(' ');
+                    } else {
+                        line += usize::from(chars[at] == '\n');
+                        text.push(chars[at]);
+                    }
+                    at += 1;
+                }
+                at += 1;
+                found.push((start, text));
+            }
+            _ => at += 1,
+        }
+    }
+    found
+}
+
+/// The calls that open with `marker` (`Switch::new(`), each as its own text up to the closing
+/// parenthesis, with the line it starts on: what a neighbouring call says is not its own.
+fn calls(source: &str, marker: &str) -> Vec<(usize, String)> {
+    let source = source.split("#[cfg(test)]").next().unwrap_or(source);
+    let mut found = Vec::new();
+    for (start, _) in source.match_indices(marker) {
+        let line_start = source[..start].rfind('\n').map_or(0, |at| at + 1);
+        if source[line_start..start].trim_start().starts_with("//") {
+            continue;
+        }
+        let (mut depth, mut quoted, mut escaped, mut end) = (0, false, false, source.len());
+        for (at, c) in source[start..].char_indices() {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' if quoted => escaped = true,
+                '"' => quoted = !quoted,
+                '(' if !quoted => depth += 1,
+                ')' if !quoted => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + at + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let line = source[..start].matches('\n').count() + 1;
+        found.push((line, source[start..end].to_owned()));
+    }
+    found
+}
+
+/// A switch whose label says its state instead of what it turns on: the switch already draws
+/// whether it is on.
+fn state_labelled_switches(source: &str) -> Vec<(usize, String)> {
+    const STATES: [&str; 5] = ["On", "Off", "Enabled", "Disabled", "Use"];
+    calls(source, "Switch::new(")
+        .into_iter()
+        .flat_map(|(at, call)| {
+            literals(&call)
+                .into_iter()
+                .filter(|(_, text)| STATES.contains(&text.as_str()))
+                .map(move |(_, text)| (at, format!("Switch labelled {text:?}")))
+        })
+        .collect()
+}
+
+#[test]
+fn a_switch_labelled_with_its_state_is_found() {
+    let sample = "Switch::new(\n\"task-flag-serve\",\non,\n\"Enabled\",\n)\n\
+                  Switch::new(id, on, \"Use\")";
+    assert_eq!(state_labelled_switches(sample).len(), 2);
+    let right = "Switch::new(\"x\", on, \"Review changes\").hint(\"On a diff\")";
+    assert!(state_labelled_switches(right).is_empty());
+}
+
+#[test]
+fn no_switch_is_labelled_on_enabled_or_use() {
+    let found = offenders(state_labelled_switches);
+    assert!(
+        found.is_empty(),
+        "a switch's label names what it turns on, never its state (rule 4):\n{}",
+        found.join("\n")
+    );
+}
+
+// ── 8. Words ───────────────────────────────────────────────────────────────────────────────────
+
+/// The words of how Flottille is built, which the window never says (rule 8).
+const INTERNAL: [&str; 9] = [
+    "pilot",
+    "pass",
+    "verifier",
+    "compactor",
+    "daemon",
+    "worktree",
+    "slot",
+    "handoff",
+    "providers.toml",
+];
+
+/// The texts of a source that read as words (a sentence, or a capitalised label) and hold an
+/// internal word, in any case, plural included. Element ids and keys of a message are not words.
+fn internal_words(source: &str) -> Vec<(usize, String)> {
+    literals(source)
+        .into_iter()
+        .filter(|(_, text)| text.contains(' ') || text.starts_with(|c: char| c.is_uppercase()))
+        .filter(|(_, text)| {
+            let lower = text.to_lowercase();
+            lower.contains("providers.toml")
+                || lower.split(|c: char| !c.is_alphanumeric()).any(|word| {
+                    INTERNAL.iter().any(|internal| {
+                        word == *internal
+                            || word == format!("{internal}s")
+                            || word == format!("{internal}es")
+                    })
+                })
+        })
+        .collect()
+}
+
+#[test]
+fn an_internal_word_in_a_text_is_found() {
+    let sample = "f(\"Its pilot answers at the end of its turn.\");\n\
+                  f(\"cannot reach the daemon\");\n\
+                  f(\"A workspace takes a worktree \\\n of it.\");\n\
+                  f(\"Reads providers.toml\");\n\
+                  f(\"Run the Compactors\");";
+    let found = internal_words(sample);
+    assert_eq!(found.len(), 5, "{found:?}");
+    // Not the words: a key, a longer word, a comment, the tests of the file.
+    let right = "f(\"pilot\");\nf(\"The password is kept\");\nf(\"Its lead answers\");\n\
+                 // Its pilot answers\n#[cfg(test)]\nmod tests { f(\"the daemon\"); }";
+    assert!(
+        internal_words(right).is_empty(),
+        "{:?}",
+        internal_words(right)
+    );
+}
+
+#[test]
+fn no_internal_word_reaches_the_window() {
+    let found = offenders(|source| {
+        internal_words(source)
+            .into_iter()
+            .map(|(at, text)| (at, text.chars().take(100).collect()))
+            .collect()
+    });
+    assert!(
+        found.is_empty(),
+        "the window speaks of what the user sees and does, never of how Flottille is built \
+         (rule 8):\n{}",
+        found.join("\n")
+    );
+}
+
+// ── 8. The same gesture has the same verb ──────────────────────────────────────────────────────
+
+/// What the window registers rather than creates: the project, a folder that exists already.
+const ADDS: [&str; 3] = ["Add a project", "Add project", "Add this folder"];
+
+/// A button or a dialog that creates and says "Add …": it says "New …" (a dialog's own button
+/// only says "Add", its title says what is new).
+fn adding_creators(source: &str) -> Vec<(usize, String)> {
+    ["Button::", "Modal::new(", ".action("]
+        .into_iter()
+        .flat_map(|marker| calls(source, marker))
+        .flat_map(|(at, call)| {
+            literals(&call)
+                .into_iter()
+                .filter(|(_, text)| text.starts_with("Add ") && !ADDS.contains(&text.as_str()))
+                .map(move |(_, text)| (at, text))
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+#[test]
+fn a_creating_button_that_says_add_is_found() {
+    let sample = "Button::secondary(\"add-task\", \"Add task\")\n\
+                  Modal::new(\"skill-modal\", \"Add a skill\")\n\
+                  Button::primary(\n\"save-entry\",\nif edit { \"Save\" } else { \"Add entry\" },\n)";
+    assert_eq!(
+        adding_creators(sample).len(),
+        3,
+        "{:?}",
+        adding_creators(sample)
+    );
+    let right = "Button::secondary(\"add-task\", \"New task\")\n\
+                 Button::primary(\"save-task\", \"Add\")\n\
+                 Button::primary(\"add-project-next\", \"Add project\")";
+    assert!(adding_creators(right).is_empty());
+}
+
+#[test]
+fn creating_buttons_say_new() {
+    let found = offenders(adding_creators);
+    assert!(
+        found.is_empty(),
+        "the same gesture has the same verb: New step, skill, command, task, entry (rule 8):\n{}",
+        found.join("\n")
+    );
+}

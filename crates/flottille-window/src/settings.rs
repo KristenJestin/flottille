@@ -325,7 +325,7 @@ impl Render for PagePart {
 pub type Judge = (String, Option<String>);
 
 /// What the judge's switch says under its label.
-pub const JUDGE_HINT: &str = "The rules pass what is known to be harmless; the model allows the \
+pub const JUDGE_HINT: &str = "The rules let through what is known to be harmless; the model allows the \
      rest or asks you. It never denies.";
 
 /// Where and how the judge acts (`**` around the words found elsewhere in the window).

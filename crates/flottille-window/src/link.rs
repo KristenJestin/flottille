@@ -131,7 +131,7 @@ pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen
     std::thread::Builder::new()
         .name("flottille-link".into())
         .spawn(move || run(connect, sender, shared))
-        .expect("a thread for the daemon's socket");
+        .expect("a thread for the link to Flottille");
     seen
 }
 
@@ -149,7 +149,7 @@ fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
                     Err(why) => why,
                 }
             }
-            Err(error) => format!("cannot reach the daemon: {error}"),
+            Err(error) => format!("cannot reach Flottille: {error}"),
         };
         if updates.unbounded_send(Update::Disconnected(why)).is_err() {
             return;
@@ -641,15 +641,15 @@ impl Conn {
         line.push('\n');
         self.writer
             .write_all(line.as_bytes())
-            .map_err(|e| format!("the daemon's socket: {e}"))?;
+            .map_err(|e| format!("the link to Flottille: {e}"))?;
         loop {
             let message = match deadline {
-                None => self.read(None)?.ok_or("the daemon closed the connection")?,
+                None => self.read(None)?.ok_or("Flottille closed the connection")?,
                 Some((at, bound)) => {
                     let left = at.saturating_duration_since(Instant::now());
                     if left.is_zero() {
                         return Err(format!(
-                            "the daemon did not answer {method} within {}",
+                            "Flottille did not answer {method} within {}",
                             spoken(bound)
                         ));
                     }
@@ -691,7 +691,7 @@ impl Conn {
                 }) => return Ok(Some(event)),
                 Some(_) => {}
                 None if left.is_some() => return Ok(None),
-                None => return Err("the daemon closed the connection".into()),
+                None => return Err("Flottille closed the connection".into()),
             }
         }
     }
@@ -704,17 +704,17 @@ impl Conn {
         let read = self.reader.read_until(b'\n', &mut self.partial);
         let _ = self.writer.set_read_timeout(None);
         match read {
-            Ok(0) if wait.is_some() => Err("the daemon closed the connection".into()),
+            Ok(0) if wait.is_some() => Err("Flottille closed the connection".into()),
             Ok(0) => Ok(None),
             Ok(_) if !self.partial.ends_with(b"\n") => Ok(None),
             Ok(_) => {
                 let line = std::mem::take(&mut self.partial);
                 serde_json::from_slice(&line)
                     .map(Some)
-                    .map_err(|e| format!("the daemon sent a line that is not a message: {e}"))
+                    .map_err(|e| format!("Flottille sent a line that is not a message: {e}"))
             }
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => Ok(None),
-            Err(e) => Err(format!("the daemon's socket: {e}")),
+            Err(e) => Err(format!("the link to Flottille: {e}")),
         }
     }
 }

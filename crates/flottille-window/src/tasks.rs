@@ -83,7 +83,7 @@ impl ReadyKind {
                 "An address answers",
                 "Ready once a request to it is answered.",
             ),
-            ReadyKind::Command => ("A command passes", "Ready once a line exits with 0."),
+            ReadyKind::Command => ("A command succeeds", "Ready once a line exits with 0."),
         }
     }
 
@@ -233,11 +233,14 @@ pub enum Flag {
 
 impl Flag {
     pub const ALL: [Flag; 4] = [
-        Flag::Serve,
-        Flag::Check,
         Flag::ReadOnly,
+        Flag::Check,
+        Flag::Serve,
         Flag::AskBeforeRunning,
     ];
+
+    /// The three kinds of task, what "What it is" offers; asking first is not one of them.
+    pub const KINDS: [Flag; 3] = [Flag::ReadOnly, Flag::Check, Flag::Serve];
 
     fn key(self) -> &'static str {
         match self {
@@ -250,8 +253,8 @@ impl Flag {
 
     pub fn label(self) -> &'static str {
         match self {
-            Flag::Serve => "Keeps running",
-            Flag::Check => "A check",
+            Flag::Serve => "A server",
+            Flag::Check => "A check (tests, lint)",
             Flag::ReadOnly => "Changes nothing",
             Flag::AskBeforeRunning => "Ask before each run",
         }
@@ -259,10 +262,12 @@ impl Flag {
 
     pub fn hint(self) -> &'static str {
         match self {
-            Flag::Serve => "A server: it is listed under Runs until it is stopped.",
-            Flag::Check => "Tests or lint: its result is told to the agent that ran it.",
+            Flag::Serve => "Listed under Runs until it is stopped.",
+            Flag::Check => "Its result is told to the agent that ran it.",
             Flag::ReadOnly => "Agents run it without asking, even in main.",
-            Flag::AskBeforeRunning => "Held for you (or the judge) every time an agent runs it.",
+            Flag::AskBeforeRunning => {
+                "Each run by an agent waits for you, or for the judge in Auto."
+            }
         }
     }
 
@@ -946,7 +951,7 @@ impl TasksSection {
             window,
             cx,
         );
-        let switches = Flag::ALL.into_iter().map(|flag| {
+        let mut switch = |flag: Flag| {
             Switch::new(
                 ElementId::Name(format!("task-flag-{}", flag.key()).into()),
                 flag.of(&self.flags),
@@ -954,7 +959,9 @@ impl TasksSection {
             )
             .hint(flag.hint())
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(flag, cx)))
-        });
+        };
+        let kinds: Vec<_> = Flag::KINDS.into_iter().map(&mut switch).collect();
+        let ask = switch(Flag::AskBeforeRunning);
         let mut places = vec![
             SelectOption::new("place", "The place's folder")
                 .line("The project folder, or the workspace's"),
@@ -1032,8 +1039,9 @@ impl TasksSection {
             .child(Field::new(
                 "task-kind",
                 "What it is",
-                div().flex().flex_col().gap(space::MD).children(switches),
+                div().flex().flex_col().gap(space::MD).children(kinds),
             ))
+            .child(ask)
             .child(needs_field(
                 "task",
                 self.services
@@ -1062,16 +1070,9 @@ impl TasksSection {
             ))
             .test_support();
         modal.child(body).action(
-            Button::primary(
-                "save-task",
-                if original.is_some() {
-                    "Save"
-                } else {
-                    "Add task"
-                },
-            )
-            .disabled(self.saving)
-            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+            Button::primary("save-task", if original.is_some() { "Save" } else { "Add" })
+                .disabled(self.saving)
+                .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
         )
     }
 }

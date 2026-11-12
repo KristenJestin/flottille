@@ -673,7 +673,7 @@ fn a_folded_root_shows_that_a_led_session_runs(cx: &mut TestAppContext) {
 
 const QUESTION: &str = "Cover the logout too?";
 
-/// A lead that starts a led session, which asks its pilot a question and goes on.
+/// A lead that starts a led session, which asks its lead a question and goes on.
 fn asking() -> User {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
@@ -735,11 +735,11 @@ fn a_led_session_s_question_card_says_it_asks_its_pilot(cx: &mut TestAppContext)
     let at = seen.get().unwrap();
     assert_eq!(
         label(cx, format!("row-{at}-asked-title").into()).as_deref(),
-        Some("Write the docs asks its pilot begin the docs session")
+        Some("Write the docs asks its lead begin the docs session")
     );
     assert_eq!(
         label(cx, format!("row-{at}-asked-note").into()).as_deref(),
-        Some("Its pilot answers at the end of its turn; you can answer here too.")
+        Some("Its lead answers at the end of its turn; you can answer here too.")
     );
     // A card of the user's own would say it asks them, with a field.
     assert!(row_of(&page, |block| matches!(block, Block::Question { .. }), cx).is_none());

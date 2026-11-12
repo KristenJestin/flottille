@@ -404,7 +404,7 @@ const SERVED: [Definition; 32] = [
             time_spent: this session's work time, to propose). \
             Assign only when asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (sprints lists them). \
-            GitHub milestones: milestones, milestone_create, milestone_edit. \
+            Milestones (Jira: versions): milestones; GitHub: milestone_create/_edit. \
             subscribe: a ticket's events wake you until it is closed; unsubscribe.",
         read_only: false,
         idempotent: false,
@@ -438,12 +438,12 @@ const SERVED: [Definition; 32] = [
                 "comment": {"type": "string", "description": "comment_edit, comment_delete: the id show (detail full) gives a comment an agent posted; no one else's."},
                 "sprint": {"type": "string", "description": "create on Jira (with type): an open sprint, by the name or id sprints gives. An existing item's sprint cannot be changed (acli)."},
                 "parent": {"type": "string", "description": "create on Jira: the work item it goes under (an epic, or a sub-task's parent). An existing item's parent cannot be changed (acli)."},
-                "milestone": {"type": "string", "description": "GitHub: a milestone's title or number (milestones lists them): list, search filter by it; create, edit put the ticket in it; milestone_edit: the one to change."},
-                "remove_milestone": {"type": "boolean", "description": "edit (GitHub): take the ticket out of its milestone."},
+                "milestone": {"type": "string", "description": "A milestone's title or number (GitHub), a version's name or id (Jira); milestones lists them: list, search filter by it; create puts the ticket in it (Jira: with type); edit (GitHub only) moves it; milestone_edit (GitHub): the one to change."},
+                "remove_milestone": {"type": "boolean", "description": "edit (GitHub): take the ticket out of its milestone. Jira's fix version cannot be changed (acli)."},
                 "due": {"type": "string", "description": "milestone_create, milestone_edit: due date, YYYY-MM-DD."},
                 "description": {"type": "string", "description": "milestone_create, milestone_edit: its description."},
                 "board": {"type": "string", "description": "sprints: one board of the project, by name or id; all of them otherwise."},
-                "project": {"type": "string", "description": "create, types, sprints on Jira: the tracker's project; status: the board."},
+                "project": {"type": "string", "description": "create, types, sprints, milestones on Jira: the tracker's project (a version belongs to one; list, search take it with milestone); status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},
                 "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose comments count: anyone (the default), or people (no bot nor agent)."},

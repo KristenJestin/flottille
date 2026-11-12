@@ -9378,6 +9378,42 @@ fn every_switch_of_the_task_dialog_draws_its_label_and_its_hint(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn a_task_s_kinds_read_as_what_they_are(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+
+    cx.update(|window, cx| window.click("add-task", cx));
+    settle(cx);
+    for (id, said) in [
+        ("task-flag-read_only", "Changes nothing"),
+        ("task-flag-check", "A check (tests, lint)"),
+        ("task-flag-serve", "A server"),
+    ] {
+        assert_eq!(
+            text_of(&format!("{id}-label"), cx).as_deref(),
+            Some(said),
+            "{id}"
+        );
+    }
+    // Asking before each run is not a kind of task: it is its own switch, with its own help.
+    assert_eq!(
+        text_of("task-flag-ask_before_running-label", cx).as_deref(),
+        Some("Ask before each run")
+    );
+    assert_eq!(
+        text_of("task-flag-ask_before_running-hint", cx).as_deref(),
+        Some("Each run by an agent waits for you, or for the judge in Auto.")
+    );
+    assert_eq!(
+        text_of("save-task", cx).as_deref(),
+        Some("Add"),
+        "the dialog's title says it is new: its button only says Add"
+    );
+}
+
+#[gpui_kit::test]
 fn a_removal_goes_through_a_confirmation_and_says_it_in_a_toast(cx: &mut TestAppContext) {
     let user = user_with_commands();
     user.call(
@@ -10335,8 +10371,10 @@ fn the_rules_page_edits_the_rules_of_every_project_saves_them_and_resets_them_to
     });
     cx.update(|window, _| {
         assert!(window.find("rules-text-").visible());
-        assert!(window.find("rules-reach-").visible());
-        assert!(flottille_window::rules::REACH.contains("reaches the agents created from now on"));
+        assert!(
+            window.try_find("rules-reach-").is_none(),
+            "the toast says when the rules reach the agents, no line under the editor does"
+        );
         assert!(
             window.try_find("rules-save-").is_none(),
             "Save shows once there is a change"
@@ -10356,6 +10394,18 @@ fn the_rules_page_edits_the_rules_of_every_project_saves_them_and_resets_them_to
         "Answer in French."
     );
     assert!(!editor.read_with(cx, |e, cx| e.is_edited(cx)));
+    let said = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .find(|toast| toast.title() == "Rules saved")
+            .map(|toast| toast.second_line().map(str::to_owned))
+    });
+    assert_eq!(
+        said,
+        Some(Some("Agents started from now on follow them.".to_owned())),
+        "Rules saved · Agents started from now on follow them"
+    );
 
     // A new session gets them.
     let agent = start(&user, "atlas", None, "hello");
@@ -10443,6 +10493,58 @@ fn a_project_s_settings_have_a_rules_section_that_adds_to_the_global_rules_and_r
             .unwrap()
             .contains("feat/")
     );
+}
+
+#[gpui_kit::test]
+fn a_project_s_rules_line_folds_away_with_its_own_rules_and_comes_back_with_the_reset(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    user.call("rules.set", json!({"text": "Answer in French."}))
+        .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("rules", cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+    let line = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .try_find("rules-reach-atlas")
+                .map(|found| found.visible())
+        })
+    };
+    assert_eq!(line(cx), Some(true), "the rules to write say how");
+
+    type_rules(&editor, "Name branches feat/<n>.", cx);
+    settle(cx);
+    cx.update(|window, cx| window.click("rules-save-atlas", cx));
+    until(&shell, cx, "the project's rules are saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_own())
+    });
+    // The line folds and fades: it is still there, a frame is asked, and then it is gone.
+    assert_eq!(line(cx), Some(true), "still folding");
+    assert!(pending_frames(cx) > 0, "its fold is animated");
+    settle(cx);
+    assert_ne!(line(cx), Some(true), "folded away");
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+
+    cx.update(|window, cx| window.click("rules-reset-atlas", cx));
+    until(
+        &shell,
+        cx,
+        "the project follows the global rules again",
+        |cx| editor.read_with(cx, |e, _| !e.is_own()),
+    );
+    assert!(pending_frames(cx) > 0, "its unfolding is animated");
+    settle(cx);
+    assert_eq!(line(cx), Some(true), "it comes back");
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
 }
 
 #[gpui_kit::test]

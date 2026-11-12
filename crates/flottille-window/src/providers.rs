@@ -389,7 +389,7 @@ impl Providers {
             return vec![error.clone()];
         }
         if self.list.is_empty() {
-            return vec!["The daemon lists no provider".into()];
+            return vec!["Flottille lists no provider".into()];
         }
         self.list.iter().map(Provider::state).collect()
     }
