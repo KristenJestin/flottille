@@ -1545,7 +1545,9 @@ async fn review(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
 }
 
 /// The review: the pin against what the server announces now, each action whole where it is new,
-/// both texts where it changed, and what each limit covers.
+/// both texts where it changed, and what each limit covers. The setting it proposes for an action
+/// is what `accept` pins when nothing is said: kept where the action is unchanged, judged where it
+/// is new or changed, so that a client that answers it back gets what the daemon would have done.
 fn diff(declaration: &Declaration, row: &Row, now: &Listing) -> Value {
     let empty = Listing::default();
     let pin = row.pin.as_ref().unwrap_or(&empty);
@@ -1563,7 +1565,10 @@ fn diff(declaration: &Declaration, row: &Row, now: &Listing) -> Value {
         };
         actions.push(json!({"name": action.name, "change": change,
             "pinned": had.map(whole), "now": whole(action),
-            "setting": had.map(|_| setting_of(row, &action.name)).unwrap_or("judged")}));
+            "setting": match change {
+                "unchanged" => setting_of(row, &action.name),
+                _ => "judged",
+            }}));
     }
     for action in &pin.actions {
         if now.action(&action.name).is_none() {

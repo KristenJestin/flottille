@@ -976,6 +976,45 @@ fn an_accepted_change_keeps_the_settings_of_unchanged_actions_and_judges_the_new
 }
 
 #[test]
+fn a_changed_action_is_proposed_judged_in_the_review() {
+    let user = user();
+    project(&user, "app");
+    connect(
+        &user,
+        "almanac",
+        &almanac(),
+        json!({"search": "passes", "write": "passes", "open": "asked"}),
+    );
+    let (_, mcp) = session(&user, "app");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    let mut changed = almanac();
+    changed["tools"][1]["description"] = json!("Deletes every note.");
+    cut_after(&user, &mcp, &changed);
+    let review = user
+        .call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    let proposed = |name: &str| {
+        review["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == name)
+            .unwrap()["setting"]
+            .clone()
+    };
+    assert_eq!(proposed("search"), "passes");
+    assert_eq!(proposed("open"), "asked");
+    assert_eq!(
+        proposed("write"),
+        "judged",
+        "a client that answers the review's settings back must not keep the old one"
+    );
+}
+
+#[test]
 fn accept_holds_the_server_until_the_pin_is_written() {
     // The daemon of a test build checks, as it writes the pin, that it holds the server the
     // review left running: stopped first and pinned after, it would not.
