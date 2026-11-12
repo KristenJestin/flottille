@@ -89,11 +89,15 @@ fn until(
     }
 }
 
-/// The page of a session, in a window 360 px wide.
+/// The page of a session, in a window 360 px wide, and the shell that holds it.
 fn page_of<'a>(
     user: &User,
     cx: &'a mut TestAppContext,
-) -> (Entity<SessionPage>, &'a mut VisualTestContext) {
+) -> (
+    Entity<Shell>,
+    Entity<SessionPage>,
+    &'a mut VisualTestContext,
+) {
     let id = session(user);
     let env = Environment {
         os_release: user.path("os-release"),
@@ -122,7 +126,7 @@ fn page_of<'a>(
         .unwrap();
     guard::narrow(cx);
     settle(cx);
-    (page, cx)
+    (shell, page, cx)
 }
 
 /// The events, numbered after the ones already given, as the page's link would give them.
@@ -160,7 +164,7 @@ fn blocks(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<Block> 
 #[gpui_kit::test]
 fn a_long_message_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     show(
         &page,
         vec![
@@ -180,7 +184,7 @@ fn a_long_message_stays_inside_its_card(cx: &mut TestAppContext) {
         |b| matches!(b, Block::Message { text, .. } if text == UNBROKEN),
         cx,
     );
-    guard::assert_stays_inside(cx, format!("row-{at}-bubble"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-bubble"));
 }
 
 /// Unfolds the group that holds the row `at`, when it is folded: its rows are drawn.
@@ -224,7 +228,7 @@ fn open(at: usize, toggle: &str, cx: &mut VisualTestContext) {
 #[gpui_kit::test]
 fn a_long_reply_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     show(
         &page,
         vec![
@@ -241,13 +245,13 @@ fn a_long_reply_stays_inside_its_card(cx: &mut TestAppContext) {
         |b| matches!(b, Block::Text { text } if text == UNBROKEN),
         cx,
     );
-    guard::assert_stays_inside(cx, format!("row-{at}-text"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-text"));
 }
 
 #[gpui_kit::test]
 fn a_long_thought_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     show(
         &page,
         vec![
@@ -261,13 +265,13 @@ fn a_long_thought_stays_inside_its_card(cx: &mut TestAppContext) {
     );
     let at = row(&page, |b| matches!(b, Block::Thought { .. }), cx);
     open(at, "thought-toggle", cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-thought"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-thought"));
 }
 
 #[gpui_kit::test]
 fn a_long_report_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     show(
         &page,
         vec![(
@@ -278,13 +282,13 @@ fn a_long_report_stays_inside_its_card(cx: &mut TestAppContext) {
     );
     let at = row(&page, |b| matches!(b, Block::Report { .. }), cx);
     open(at, "report-toggle", cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-report"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-report"));
 }
 
 #[gpui_kit::test]
 fn a_long_notice_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     show(
         &page,
         vec![(
@@ -295,13 +299,13 @@ fn a_long_notice_stays_inside_its_card(cx: &mut TestAppContext) {
     );
     let at = row(&page, |b| matches!(b, Block::Notice { .. }), cx);
     open(at, "notice-toggle", cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-notice"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-notice"));
 }
 
 #[gpui_kit::test]
 fn a_long_relayed_message_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     let wrote = format!(
         "[flottille:session]\n\"{UNBROKEN}\" (agent 0123) wrote to this session:\n\n{UNBROKEN}\n{SPACED}"
     );
@@ -315,13 +319,13 @@ fn a_long_relayed_message_stays_inside_its_card(cx: &mut TestAppContext) {
     );
     let at = row(&page, |b| matches!(b, Block::Relayed { .. }), cx);
     open(at, "relayed-toggle", cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-relayed-card"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-relayed-card"));
 }
 
 #[gpui_kit::test]
 fn a_long_ask_of_a_led_session_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     show(
         &page,
         vec![(
@@ -331,13 +335,13 @@ fn a_long_ask_of_a_led_session_stays_inside_its_card(cx: &mut TestAppContext) {
         cx,
     );
     let at = row(&page, |b| matches!(b, Block::Asked { .. }), cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-asked"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-asked"));
 }
 
 #[gpui_kit::test]
 fn a_long_vault_request_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     show(
         &page,
         vec![(
@@ -348,13 +352,13 @@ fn a_long_vault_request_stays_inside_its_card(cx: &mut TestAppContext) {
         cx,
     );
     let at = row(&page, |b| matches!(b, Block::VaultAsk(_)), cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-vault-ask"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-vault-ask"));
 }
 
 #[gpui_kit::test]
 fn a_long_link_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     show(
         &page,
         vec![(
@@ -365,13 +369,13 @@ fn a_long_link_stays_inside_its_card(cx: &mut TestAppContext) {
         cx,
     );
     let at = row(&page, |b| matches!(b, Block::Links { .. }), cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-links"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-links"));
 }
 
 #[gpui_kit::test]
 fn a_long_step_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     let call = |id: &str, title: &str, input: Value| {
         (
             "agent.tool_call",
@@ -401,13 +405,13 @@ fn a_long_step_stays_inside_its_card(cx: &mut TestAppContext) {
     );
     let at = row(&page, |b| matches!(b, Block::Steps { .. }), cx);
     open(at, "steps-toggle", cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-steps"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-steps"));
 }
 
 #[gpui_kit::test]
 fn a_long_edit_stays_inside_its_diff_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     show(
         &page,
         vec![
@@ -431,13 +435,13 @@ fn a_long_edit_stays_inside_its_diff_card(cx: &mut TestAppContext) {
         cx.update(|window, _| window.try_find(format!("row-{at}-diff-line-0")).is_some()),
         "the lines of the diff are drawn"
     );
-    guard::assert_stays_inside(cx, format!("row-{at}-diff"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-diff"));
 }
 
 #[gpui_kit::test]
 fn a_long_delivery_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     show(
         &page,
         vec![(
@@ -453,13 +457,13 @@ fn a_long_delivery_stays_inside_its_card(cx: &mut TestAppContext) {
         cx,
     );
     open(at, "notice-toggle", cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-notice"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-notice"));
 }
 
 #[gpui_kit::test]
 fn a_long_command_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (page, cx) = page_of(&user, cx);
+    let (shell, page, cx) = page_of(&user, cx);
     let body = format!(
         "[flottille:approval]\nRequest #7 (run) has now done it. Its result:\n\nrun r7: (`echo {UNBROKEN} {SPACED}` exited with code 1 after 2.5 s)\n(lines 1-1 of 1)\n{SPACED}"
     );
@@ -472,13 +476,13 @@ fn a_long_command_stays_inside_its_card(cx: &mut TestAppContext) {
         cx,
     );
     let at = row(&page, |b| matches!(b, Block::Command(_)), cx);
-    guard::assert_stays_inside(cx, format!("command-card-{at}"));
+    guard::assert_stays_inside(&shell, cx, format!("command-card-{at}"));
 }
 
 #[gpui_kit::test]
 fn a_long_toast_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
-    let (_page, cx) = page_of(&user, cx);
+    let (shell, _page, cx) = page_of(&user, cx);
     // A toast is 360 px wide whatever the window: the window is the room for it, and its words
     // wrap inside it.
     cx.simulate_resize(size(px(480.), px(900.)));
@@ -490,5 +494,5 @@ fn a_long_toast_stays_inside_its_card(cx: &mut TestAppContext) {
         )
     });
     settle(cx);
-    guard::assert_stays_inside(cx, "toast-1".to_owned());
+    guard::assert_stays_inside(&shell, cx, "toast-1".to_owned());
 }
