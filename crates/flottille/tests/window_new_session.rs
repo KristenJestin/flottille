@@ -341,10 +341,11 @@ fn with_the_first_provider_s_models_unknown_the_select_opens_on_it(cx: &mut Test
         })
     });
     settle(cx);
-    assert!(page.read_with(cx, |p, _| p
-        .providers()
-        .get("claude")
-        .is_some_and(|c| c.models.is_none())));
+    assert!(page.read_with(cx, |p, _| {
+        p.providers()
+            .get("claude")
+            .is_some_and(|c| c.models.is_none())
+    }));
 
     // The value that applies is Claude's, its models learnt at its first session: never
     // OpenCode's recommended model.

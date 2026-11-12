@@ -4689,7 +4689,11 @@ fn recommended_effort(composer: &Composer) -> Option<String> {
 }
 
 /// Sends a task from the composer: what the session started on, as the daemon shows it.
-fn start_from_composer(shell: &Entity<Shell>, user: &User, cx: &mut VisualTestContext) -> serde_json::Value {
+fn start_from_composer(
+    shell: &Entity<Shell>,
+    user: &User,
+    cx: &mut VisualTestContext,
+) -> serde_json::Value {
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
     until(shell, cx, "the session's page opens", |cx| {
@@ -4732,7 +4736,10 @@ fn picking_the_recommended_effort_in_the_composer_wins_over_the_setting(cx: &mut
     let own = composer
         .read_with(cx, |c, _| recommended_effort(c))
         .unwrap();
-    assert_ne!(own, "high", "the setting's effort is not the recommended one");
+    assert_ne!(
+        own, "high",
+        "the setting's effort is not the recommended one"
+    );
     assert_eq!(
         composer.read_with(cx, |c, _| c.effort_shown()),
         "high",
