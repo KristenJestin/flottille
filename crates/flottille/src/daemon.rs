@@ -332,7 +332,7 @@ impl Daemon {
 
     fn subscribe(&self, after: Option<u64>) -> Result<Subscription> {
         let events = self.events.lock().unwrap();
-        let bus = events.bus.as_ref().ok_or("the daemon is stopping")?;
+        let bus = events.bus.as_ref().ok_or("Flottille is stopping")?;
         // Subscribed before the store is read: an event stored meanwhile comes both ways and the
         // number drops the second copy, none falls between the two.
         let live = bus.subscribe();

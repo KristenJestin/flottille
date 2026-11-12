@@ -899,7 +899,10 @@ fn an_agent_can_never_change_its_mode_nor_choose_the_judge() {
         "run",
         json!({"line": format!("flottille agent mode {id} ask")}),
     ));
-    assert!(said.contains("flottille drives the daemon"), "{said}");
+    assert!(
+        said.contains("the flottille command drives Flottille"),
+        "{said}"
+    );
     let settings = user.path("config/flottille/providers.toml");
     let said = refused(mcp.call(
         "fs_write",

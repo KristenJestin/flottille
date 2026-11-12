@@ -412,7 +412,7 @@ fn own(paths: &Paths) -> Result<Option<String>, (String, String)> {
             (
                 String::new(),
                 format!(
-                    "your compactor's guidance ({}) is not UTF-8 text: write it again, or reset it",
+                    "your compaction model's guidance ({}) is not UTF-8 text: write it again, or reset it",
                     file.display()
                 ),
             )
@@ -422,7 +422,7 @@ fn own(paths: &Paths) -> Result<Option<String>, (String, String)> {
             return Err((
                 String::new(),
                 format!(
-                    "your compactor's guidance ({}) cannot be read: {error}",
+                    "your compaction model's guidance ({}) cannot be read: {error}",
                     file.display()
                 ),
             ));
@@ -431,7 +431,7 @@ fn own(paths: &Paths) -> Result<Option<String>, (String, String)> {
     let count = text.chars().count();
     if count > LIMIT {
         let why = format!(
-            "your compactor's guidance ({}) is {count} characters long and may hold {LIMIT}: \
+            "your compaction model's guidance ({}) is {count} characters long and may hold {LIMIT}: \
              shorten it, or reset it",
             file.display()
         );
@@ -579,7 +579,7 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                     let count = text.chars().count();
                     if count > LIMIT {
                         return Err(Failure::refused(format!(
-                            "the compactor's guidance is {count} characters long and may hold \
+                            "the compaction model's guidance is {count} characters long and may hold \
                              {LIMIT}"
                         )));
                     }
@@ -829,7 +829,7 @@ pub fn ask(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent) -> Result
     let settings = settings(daemon)?;
     if !settings.by_agent && settings.compactor.is_none() {
         return Err(Failure::refused(
-            "there is no compactor: choose one in Settings, Features, Compaction, and the agent's CLI \
+            "there is no compaction model: choose one in Settings, Features, Compaction, and the agent's CLI \
              compacts on its own until then",
         ));
     }
@@ -1279,12 +1279,12 @@ fn handed(daemon: &Arc<Daemon>, agent: &str) {
             );
         }
         (_, true) if stop == "end_turn" => {
-            fail_handoff(daemon, agent, "the agent wrote no handoff")
+            fail_handoff(daemon, agent, "the agent wrote no summary")
         }
         _ => fail_handoff(
             daemon,
             agent,
-            &format!("the turn of its handoff ended `{stop}`"),
+            &format!("the turn that asked for its summary ended `{stop}`"),
         ),
     }
 }
@@ -1422,7 +1422,7 @@ async fn run(daemon: Arc<Daemon>, agent: String) {
     let outcome = match tokio::time::timeout(timeout(), compact(&daemon, &agent)).await {
         Ok(outcome) => outcome,
         Err(_) => Err(format!(
-            "the compactor did not answer within {} seconds",
+            "the compaction model did not answer within {} seconds",
             timeout().as_secs()
         )),
     };
@@ -1467,7 +1467,7 @@ async fn compact(daemon: &Arc<Daemon>, agent: &str) -> Result<Compacted, String>
     let settings = settings(daemon).map_err(|failure| failure.message)?;
     let compactor = settings
         .compactor
-        .ok_or("there is no compactor: none was chosen")?;
+        .ok_or("there is no compaction model: none was chosen")?;
     let instructions = instructions(&daemon.paths)?;
     let found = daemon
         .read(|store| store.agent(agent))
@@ -1506,10 +1506,10 @@ pub fn check(summary: &str, stop: &str, tool: bool, replaced: usize) -> Result<(
         return Err("the summary was cut off by its length".into());
     }
     if tool {
-        return Err("the compactor tried to call a tool, which it does not have".into());
+        return Err("the compaction model tried to call a tool, which it does not have".into());
     }
     if summary.is_empty() {
-        return Err("the compactor wrote no summary".into());
+        return Err("the compaction model wrote no summary".into());
     }
     if summary.len() >= replaced {
         return Err(format!(
@@ -1791,7 +1791,7 @@ fn handed_body(daemon: &Daemon, agent: &str, handoff: Option<&str>, interrupted:
                 },
             );
             format!(
-                "Your conversation was compacted by Flottille, and your handoff is missing: you \
+                "Your conversation was compacted by Flottille, and your summary is missing: you \
                  were asked for it and did not write it. This new session starts from your brief \
                  (above), what Flottille holds of you and the user's last message.\n\n{state}\n\n\
                  {last}\n\nCheck the real state of your place first: what you did before is \

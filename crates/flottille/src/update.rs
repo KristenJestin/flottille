@@ -103,7 +103,7 @@ pub fn run(
     }
     if Client::connect(paths)?.is_some() {
         return Err(format!(
-            "the daemon is running, and would go on from a binary that is gone: stop it first \
+            "Flottille is running, and would go on from a binary that is gone: stop it first \
              with `{} daemon stop` (its agents stop with it), then update.",
             program::name()
         )

@@ -570,7 +570,7 @@ pub fn compared(says: &[String]) -> Vec<&String> {
 fn removal_words(removal: Removal) -> Vec<String> {
     let Removal { name, losses, own } = removal;
     let mut says = vec![format!(
-        "Remove the workspace {name}: its worktrees and its folder, and its branch in each \
+        "Remove the workspace {name}: its copies of the repositories and its folder, and its branch in each \
          repository where it holds no commit of its own"
     )];
     if let Some(lines) = &own
@@ -2248,10 +2248,7 @@ fn workspace_text(workspace: &Workspace) -> String {
     for (at, step) in workspace.steps.iter().enumerate() {
         let what = match step_of(step) {
             Some(set) => step_said(&set),
-            None => format!(
-                "the worktree of {}",
-                step.repository.as_deref().unwrap_or(".")
-            ),
+            None => format!("the copy of {}", step.repository.as_deref().unwrap_or(".")),
         };
         text.push_str(&format!("{}. {what}: {}\n", at + 1, step.state.as_str()));
         if let Some(failure) = &step.failure {

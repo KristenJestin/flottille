@@ -1595,20 +1595,26 @@ pub fn mint(daemon: &Daemon, grant: Grant, provider: &Provider) -> Result<String
     let newer = before.as_ref().filter(|b| b.digest != given.digest);
     let (token, outdated) = daemon
         .mcp
-        .mint(grant, provider.takes_new_tools, stored, newer.is_some())
+        .mint(
+            grant,
+            provider.takes_new_tools,
+            stored.clone(),
+            newer.is_some(),
+        )
         .map_err(|e| format!("cannot make the agent's token: {e}"))?;
     if let Some(outdated) = outdated {
         say_outdated(daemon, &agent, outdated);
     }
     // Its conversation still holds what it said of its old tools: an agent that does not list
     // them again reads what changed with its next turn. One whose tools the user reloaded reads
-    // it whatever its agent does, and that nothing changed when nothing did.
+    // them all whatever its agent does, then what changed: a reload says the agent is wrong about
+    // its tools, which a diff against the list its last process was given cannot correct.
     let changes = newer.and_then(|before| given.since(before));
     if crate::agents::take_reload(daemon, &agent) {
-        let said = match changes {
-            Some(changes) => format!("{RELOADED_CHANGED}\n{changes}"),
-            None => RELOADED_UNCHANGED.to_owned(),
-        };
+        let mut said = format!("{RELOADED}\n{}", Given::listed(&stored));
+        if let Some(changes) = changes {
+            said.push_str(&format!("\n{RELOADED_CHANGED}\n{changes}"));
+        }
         deliveries::queue(daemon, &agent, "tools", None, &said);
     } else if let Some(changes) = changes.filter(|_| !provider.lists_tools_again) {
         deliveries::queue(
@@ -1633,11 +1639,11 @@ pub fn mint(daemon: &Daemon, grant: Grant, provider: &Provider) -> Result<String
 /// What an agent whose tools changed since its last process is told, before what changed.
 const UPDATED: &str = "Flottille was updated: your tools changed since you last read them. They \
                        are as listed now, whatever was said of them before:";
-/// The same, for an agent whose tools the user reloaded.
-const RELOADED_CHANGED: &str = "Your tools were reloaded: they changed since you last read them. \
-                                They are as listed now, whatever was said of them before:";
-/// What an agent whose tools the user reloaded is told when they are as they were.
-const RELOADED_UNCHANGED: &str = "Your tools were reloaded: nothing changed.";
+/// What an agent whose tools the user reloaded is told, before the whole list of them.
+const RELOADED: &str = "Your tools were reloaded. These are your tools now, whatever you read of \
+                        them before:";
+/// What it is told after that list when they changed since its last process.
+const RELOADED_CHANGED: &str = "What changed since you last read them:";
 
 /// The tool list a process is given (`docs/tools.md`, "When the tools change"), kept with its
 /// agent: a digest of the tools as they are listed (names, schemas, descriptions), and the
@@ -1656,21 +1662,44 @@ impl Given {
         let listed = serde_json::to_string(&listed).expect("tools are JSON");
         let actions = definitions
             .iter()
-            .map(|definition| {
-                let schema = (definition.schema)();
-                let actions = schema["properties"]["action"]["enum"]
-                    .as_array()
-                    .map(|all| all.iter().filter_map(Value::as_str).map(str::to_owned))
-                    .into_iter()
-                    .flatten()
-                    .collect();
-                (definition.name.to_owned(), actions)
-            })
+            .map(|definition| (definition.name.to_owned(), Given::actions_of(definition)))
             .collect();
         Given {
             digest: files::sha256(listed.as_bytes()),
             actions,
         }
+    }
+
+    /// Every tool of the list, a line each: `- <name>: <actions> — <what it does>`, the actions
+    /// left out for a tool that has none, what it does being its description's first sentence
+    /// (its title when it has no sentence).
+    fn listed(tools: &[&'static str]) -> String {
+        tools
+            .iter()
+            .filter_map(|name| definition(name))
+            .map(|definition| {
+                let actions = Given::actions_of(definition);
+                let said = match first_sentence(definition.description) {
+                    "" => definition.title,
+                    said => said,
+                };
+                match actions.is_empty() {
+                    true => format!("- {}: {said}", definition.name),
+                    false => format!("- {}: {} — {said}", definition.name, actions.join(", ")),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn actions_of(definition: &Definition) -> Vec<String> {
+        let schema = (definition.schema)();
+        schema["properties"]["action"]["enum"]
+            .as_array()
+            .map(|all| all.iter().filter_map(Value::as_str).map(str::to_owned))
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// What changed since `before`: a line for each tool gained, lost, or whose actions changed;
@@ -1708,6 +1737,14 @@ impl Given {
         }
         (!lines.is_empty()).then(|| lines.join("\n"))
     }
+}
+
+/// The first sentence of a description: up to its first full stop followed by a space, the whole
+/// text when it has one only, without its final stop.
+fn first_sentence(description: &str) -> &str {
+    let text = description.trim();
+    let end = text.find(". ").map_or(text.len(), |at| at + 1);
+    text[..end].trim_end_matches('.').trim()
 }
 
 /// The agent's token no longer works: its process is gone (`Server::revoke`).

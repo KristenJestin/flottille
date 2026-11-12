@@ -1574,8 +1574,9 @@ whose session was forgotten (7 days after it ended), one whose workspace or proj
 (`agent.released`, reason `reload`), and the next message starts the next one, which resumes or
 loads its session with the tools its role has now. A turn that runs is never cut: the process goes
 once it ended (`after_turn` true), the prompts waiting going to the next process. The next
-process's prompt carries a `tools` delivery: what changed since the last list the agent was given,
-by tool, else `Your tools were reloaded: nothing changed.`, whatever its agent does with
+process's prompt carries a `tools` delivery: the whole list of the tools the agent has now, one
+line each with its actions and the first sentence of its description, then what changed since the
+last list the agent was given, by tool, when anything did, whatever its agent does with
 `list_changed`. Until that process takes it, the reload waits: `tools_reload` of the agent
 (`agent.show`, `agent.tree`) is true, and `agent.tools_reload` says when it is asked and when it
 is taken (`docs/events.md`). Its children keep their processes. `refused` for a child (the

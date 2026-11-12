@@ -1603,9 +1603,11 @@ fn died(daemon: &Arc<Daemon>, id: &str, status: ExitStatus, turns: &mut Turns) -
         false,
     );
     // Asked for its handoff: the new session starts without it, as a compacted one does.
-    if let Some(compacted) =
-        crate::compaction::handoff_failed(daemon, id, &format!("{reason} during its handoff"))
-    {
+    if let Some(compacted) = crate::compaction::handoff_failed(
+        daemon,
+        id,
+        &format!("{reason} while it wrote its summary"),
+    ) {
         return compacted_session(daemon, id, compacted);
     }
     replace(daemon, id, &reason, true, true)

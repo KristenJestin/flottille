@@ -96,7 +96,7 @@ fn unchecked(data: &Value) -> String {
     }
     if data["interrupted"] == true {
         said.push(
-            "the daemon stopped while it went on, before it put back what was written in its \
+            "Flottille stopped while it went on, before it put back what was written in its \
              agent folders (.claude, .claude.json, .codex, .mcp.json): nothing there was checked \
              nor put back, and it is now how it was left"
                 .to_owned(),
@@ -265,7 +265,7 @@ mod tests {
             &json!({"run": "r1", "folder": "/work/app", "too_large": false,
             "interrupted": true}),
         );
-        assert!(text.contains("daemon stopped"), "{text}");
+        assert!(text.contains("Flottille stopped"), "{text}");
     }
 
     #[test]

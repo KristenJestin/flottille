@@ -579,7 +579,7 @@ fn fail_orphans(daemon: &Daemon, reviews: &[Review]) -> Result<()> {
             let changed = space.tables().execute(
                 "UPDATE ext_review_reviews SET state = 'failed', why = ?2, ended_at = ?3 \
                  WHERE id = ?1 AND state = 'running'",
-                params![review.id, "its pilot is gone", now_ms()],
+                params![review.id, "its lead is gone", now_ms()],
             )?;
             if changed == 0 {
                 return Ok(((), None));
@@ -588,7 +588,7 @@ fn fail_orphans(daemon: &Daemon, reviews: &[Review]) -> Result<()> {
                 "review.failed",
                 json!({"review": review.id, "project": review.project,
                     "session": review.session, "agent": review.pilot,
-                    "why": "its pilot is gone"}),
+                    "why": "its lead is gone"}),
             )?;
             Ok(((), Some(event)))
         })?;
@@ -1441,7 +1441,14 @@ async fn run_pass(
         &EXTENSION,
         pilot,
         "pass",
-        &format!("Review: {pass}"),
+        &format!(
+            "Review: {}",
+            if pass == VERIFIER {
+                "check of the findings"
+            } else {
+                &pass
+            }
+        ),
         &text,
         instructions,
         slot,
