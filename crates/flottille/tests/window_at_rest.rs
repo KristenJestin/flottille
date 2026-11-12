@@ -1052,21 +1052,36 @@ fn asked_three(cx: &mut TestAppContext) -> (User, String, Entity<Shell>, &mut Vi
     (user, id, shell, cx)
 }
 
+/// The number of the ask that waits in the session `id`, as the daemon's tree says it.
+fn asked_seq(user: &User, id: &str) -> u64 {
+    let trees = user.call("agent.trees", json!({})).unwrap();
+    trees["trees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|tree| tree["agents"].as_array().unwrap().clone())
+        .find(|entry| entry["agent"]["id"] == id)
+        .unwrap()["questions"][0]["seq"]
+        .as_u64()
+        .unwrap()
+}
+
 #[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_question_card_open_with_three_questions(
     cx: &mut TestAppContext,
 ) {
-    let (_user, id, shell, cx) = asked_three(cx);
+    let (user, id, shell, cx) = asked_three(cx);
     cx.update(|window, cx| window.click(session_id(&id), cx));
     // Docked above the composer, one question at a time (#777).
+    let seq = asked_seq(&user, &id);
     until(&shell, cx, "the card of the questions is there", |cx| {
         cx.update(|window, _| {
-            (0..12).any(|at| {
-                window
-                    .try_find(format!("row-{at}-question-0-option-1"))
+            window
+                .try_find(format!("ask-{seq}-question-0-option-1"))
+                .is_some()
+                && window
+                    .try_find(format!("ask-{seq}-question-dots"))
                     .is_some()
-                    && window.try_find(format!("row-{at}-question-dots")).is_some()
-            })
         })
     });
     settle(&shell, cx);
@@ -1098,26 +1113,17 @@ fn the_window_draws_no_frame_at_rest_on_a_question_card_folded_to_its_answers(
     let (user, id, shell, cx) = asked_three(cx);
     cx.update(|window, cx| window.click(session_id(&id), cx));
     // Docked above the composer, one question at a time (#777).
+    let seq = asked_seq(&user, &id);
     until(&shell, cx, "the card of the questions is there", |cx| {
         cx.update(|window, _| {
-            (0..12).any(|at| {
-                window
-                    .try_find(format!("row-{at}-question-0-option-1"))
+            window
+                .try_find(format!("ask-{seq}-question-0-option-1"))
+                .is_some()
+                && window
+                    .try_find(format!("ask-{seq}-question-dots"))
                     .is_some()
-                    && window.try_find(format!("row-{at}-question-dots")).is_some()
-            })
         })
     });
-    let trees = user.call("agent.trees", json!({})).unwrap();
-    let seq = trees["trees"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|tree| tree["agents"].as_array().unwrap().clone())
-        .find(|entry| entry["agent"]["id"] == id)
-        .unwrap()["questions"][0]["seq"]
-        .as_u64()
-        .unwrap();
     user.call(
         "agent.answer",
         json!({"agent": id, "question": seq, "answers": [

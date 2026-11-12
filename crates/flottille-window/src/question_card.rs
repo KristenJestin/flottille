@@ -3,8 +3,10 @@
 //! and how many questions are answered, then one question at a time (`2 of 4`, Previous and
 //! Next, `←`/`→`, a dot per question), each with its options as rows (a round mark for one choice, a square one for
 //! several) and, as the last row, "Something else…", which holds its field of several lines,
-//! right of its mark, once it is picked. Once an option is chosen, "+ Add a note" unfolds a field
-//! for a note with the choice (`Enter` breaks a line, `Ctrl+Enter` sends). One Answer for the
+//! right of its mark, once it is picked. Under the options, "+ Add a note" unfolds a field for a
+//! note with the choice, before the choice too: picking one moves on to the next question
+//! (`Enter` breaks a line, `Ctrl+Enter` sends). The steps are the dock's to draw, above the part
+//! that scrolls. One Answer for the
 //! whole card, once every question has a choice or words: the daemon sends the agent one message
 //! quoting each question with its answer under it (`agent.answer`). Once the agent took it, the
 //! card folds to its answers: each question on one line, what the user chose and wrote under it.
@@ -57,7 +59,6 @@ pub fn forget_sent_answers(cx: &mut App) {
 
 /// The ask's card, in its own view: a caret blinks without drawing the row.
 pub struct QuestionCard {
-    at: usize,
     seq: u64,
     session: String,
     page: WeakEntity<SessionPage>,
@@ -92,7 +93,6 @@ pub struct QuestionCard {
 
 impl QuestionCard {
     pub fn new(
-        at: usize,
         seq: u64,
         session: String,
         questions: Vec<Question>,
@@ -148,7 +148,6 @@ impl QuestionCard {
             .map(|q| MarkdownText::new(&q.question, cx))
             .collect();
         QuestionCard {
-            at,
             seq,
             session,
             page,
@@ -186,9 +185,20 @@ impl QuestionCard {
         &self.fields[n]
     }
 
-    /// The row of the conversation where it was asked.
-    pub fn at(&self) -> usize {
-        self.at
+    /// A page of the session opened again on the dock: the answers go through it.
+    pub fn attach(&mut self, page: WeakEntity<SessionPage>) {
+        self.page = page;
+    }
+
+    /// It asks more than one question: it has steps.
+    pub fn several(&self) -> bool {
+        self.questions.len() > 1
+    }
+
+    /// What its elements' ids start with: the ask's number, which a page read again or earlier
+    /// events loaded do not move.
+    fn prefix(&self) -> String {
+        format!("ask-{}", self.seq)
     }
 
     /// The ask's number in the history.
@@ -244,7 +254,7 @@ impl QuestionCard {
 
     /// Picks the option `label` of question `n`, or lets it go: a question of one choice keeps
     /// the last one picked, "Something else…" included.
-    pub fn choose(&mut self, n: usize, label: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn choose(&mut self, n: usize, label: &str, cx: &mut Context<Self>) {
         let multiple = self.questions[n].multiple;
         let chosen = &mut self.chosen[n];
         match chosen.iter().position(|c| c == label) {
@@ -264,7 +274,6 @@ impl QuestionCard {
             .map(|o| o.label.as_str())
             .collect();
         chosen.sort_by_key(|c| order.iter().position(|o| o == c));
-        self.drop_note_without_choice(n, window, cx);
         // One choice is the whole answer: the next question waiting for one comes.
         if !multiple && !self.chosen[n].is_empty() {
             let len = self.questions.len();
@@ -276,23 +285,12 @@ impl QuestionCard {
         cx.notify();
     }
 
-    /// A note goes with a choice: with none left on question `n` it folds away, empty, and
-    /// "+ Add a note" comes back with the next choice.
-    fn drop_note_without_choice(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.chosen[n].is_empty() {
-            return;
-        }
-        self.noting[n] = false;
-        self.notes[n].update(cx, |note, cx| note.set_value("", window, cx));
-    }
-
     /// Picks "Something else…" of question `n`, or lets it go: in a question of one choice it
     /// takes the place of the option chosen.
-    pub fn choose_other(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn choose_other(&mut self, n: usize, cx: &mut Context<Self>) {
         self.other[n] = !self.other[n];
         if self.other[n] && !self.questions[n].multiple {
             self.chosen[n].clear();
-            self.drop_note_without_choice(n, window, cx);
         }
         cx.notify();
     }
@@ -303,15 +301,16 @@ impl QuestionCard {
         self.questions[n].options.is_empty() || self.other[n]
     }
 
-    /// Whether the note of question `n` is open: an option is chosen, and the button was clicked.
+    /// Whether the note of question `n` is open: it may have one, and the button was clicked.
     fn note_open(&self, n: usize) -> bool {
         self.can_note(n) && self.noting[n]
     }
 
-    /// Whether question `n` may have a note: an option is chosen and the words of "Something
-    /// else…" are not.
+    /// Whether question `n` may have a note, before its choice too: it has options, and the
+    /// words of "Something else…" are not asked. A choice moves on to the next question, so a
+    /// note may come first.
     fn can_note(&self, n: usize) -> bool {
-        !self.chosen[n].is_empty() && !self.other[n]
+        !self.questions[n].options.is_empty() && !self.other[n]
     }
 
     /// The answers as the card holds them, one per question: the choices, and the words that
@@ -344,13 +343,13 @@ impl QuestionCard {
             .count()
     }
 
-    /// Whether question `n` has a choice or words.
+    /// Whether question `n` has a choice or words: a note alone is no answer.
     fn is_answered(&self, n: usize, cx: &App) -> bool {
         let answer = &self.answers(cx)[n];
         if self.words_open(n) {
             !answer.text.is_empty()
         } else {
-            !answer.is_empty()
+            !answer.choices.is_empty()
         }
     }
 
@@ -397,8 +396,8 @@ impl QuestionCard {
 
     fn block(&self, n: usize, open: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let at = self.at;
-        let id = |part: String| ElementId::Name(format!("row-{at}-{part}").into());
+        let prefix = self.prefix();
+        let id = |part: String| ElementId::Name(format!("{prefix}-{part}").into());
         let question = &self.questions[n];
         let card = cx.entity().downgrade();
         let rows = question.options.iter().enumerate().map(|(j, option)| {
@@ -409,7 +408,7 @@ impl QuestionCard {
                     let card = card.clone();
                     move |window, cx| {
                         card.update(cx, |card, cx| {
-                            card.choose(n, &label, window, cx);
+                            card.choose(n, &label, cx);
                             window.focus(&card.focus, cx);
                         })
                         .ok();
@@ -451,7 +450,7 @@ impl QuestionCard {
                     let card = card.clone();
                     move |window, cx| {
                         card.update(cx, |card, cx| {
-                            card.choose_other(n, window, cx);
+                            card.choose_other(n, cx);
                             // The words are asked at once; without them, `Ctrl+Enter` still sends.
                             let focus = if card.other[n] {
                                 card.fields[n].read(cx).focus_handle(cx)
@@ -584,13 +583,13 @@ impl QuestionCard {
     /// "n of m answered", faint: it fades back in when the count changes.
     fn count(&self, cx: &App) -> impl IntoElement {
         let p = palette(cx);
-        let id = ElementId::Name(format!("row-{}-question-count", self.at).into());
+        let id = ElementId::Name(format!("{}-question-count", self.prefix()).into());
         let said = format!(
             "{} of {} answered",
             self.answered_count(cx),
             self.questions.len()
         );
-        let fade = ElementId::Name(format!("row-{}-question-count-fade", self.at).into());
+        let fade = ElementId::Name(format!("{}-question-count-fade", self.prefix()).into());
         changing(fade, said, move |text| {
             div()
                 .id(id)
@@ -609,13 +608,13 @@ impl QuestionCard {
 impl Render for QuestionCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let at = self.at;
-        let id = |part: &str| ElementId::Name(format!("row-{at}-{part}").into());
+        let prefix = self.prefix();
+        let id = |part: &str| ElementId::Name(format!("{prefix}-{part}").into());
         let sent = self.is_sent(cx);
         let ready = self.is_ready(cx);
         let mut card = Card::new()
             .title(head(
-                at,
+                &prefix,
                 "question",
                 &self.title,
                 "asks you",
@@ -623,10 +622,6 @@ impl Render for QuestionCard {
                 Some(self.count(cx).into_any_element()),
             ))
             .meta(self.when.clone());
-        // The steps first: in a dock too short for the whole card, they stay in sight.
-        if self.questions.len() > 1 {
-            card = card.block(Block::new().child(self.steps(cx)));
-        }
         let current = self.current;
         let question = self.block(current, !sent, cx);
         // Questions differ in height: the card eases to the one shown.
@@ -729,11 +724,12 @@ impl gpui_kit::Focusable for QuestionCard {
 const PULSE: Duration = gpui_design_system::motion::PANEL;
 
 impl QuestionCard {
-    /// Above the question: Previous, `2 of 4` and a dot per question, Next.
-    fn steps(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Its steps, which the dock draws above the part that scrolls: Previous, `2 of 4` and a
+    /// dot per question, Next.
+    pub fn steps(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
-        let at = self.at;
-        let id = |part: &str| ElementId::Name(format!("row-{at}-{part}").into());
+        let prefix = self.prefix();
+        let id = |part: &str| ElementId::Name(format!("{prefix}-{part}").into());
         let (current, len) = (self.current, self.questions.len());
         let mut dots = Dots::new(id("question-dots"), "Questions").current(current);
         for n in 0..len {
@@ -780,13 +776,14 @@ impl QuestionCard {
                     .disabled(current + 1 >= len)
                     .on_click(cx.listener(|this, _, _, cx| this.go(this.current + 1, cx))),
             )
+            .into_any_element()
     }
 }
 
 /// The header of a card of an ask: the session's title, a tag saying what the card is, what it
 /// counts, if anything. `part` names its title (`<part>-title`) and its tag (`<part>-tag`).
 fn head(
-    at: usize,
+    prefix: &str,
     part: &str,
     title: &str,
     tag: &'static str,
@@ -799,13 +796,13 @@ fn head(
         .gap(space::SM)
         .w_full()
         .child(div().flex_1().min_w_0().child(heading(
-            at,
+            prefix,
             &format!("{part}-title"),
             quoted_title(title),
         )))
         .child(
             div()
-                .id(ElementId::Name(format!("row-{at}-{part}-tag").into()))
+                .id(ElementId::Name(format!("{prefix}-{part}-tag").into()))
                 .aria_label(tag)
                 .flex_none()
                 .px(space::SM)
@@ -824,11 +821,11 @@ fn head(
 /// user may too.
 pub const ASKED_NOTE: &str = "Its lead answers at the end of its turn; you can answer here too.";
 
-/// A card's title, named for who reads it.
-pub(crate) fn heading(at: usize, part: &str, said: String) -> impl IntoElement {
+/// A card's title, named for who reads it; `prefix` starts its id (`row-<at>`, `ask-<seq>`).
+pub(crate) fn heading(prefix: &str, part: &str, said: String) -> impl IntoElement {
     let said = SharedString::from(said);
     div()
-        .id(ElementId::Name(format!("row-{at}-{part}").into()))
+        .id(ElementId::Name(format!("{prefix}-{part}").into()))
         .aria_label(said.clone())
         .overflow_hidden()
         .whitespace_nowrap()
@@ -852,7 +849,7 @@ pub fn answered_card(
     let id = |part: String| ElementId::Name(format!("row-{at}-{part}").into());
     let mut card = Card::new()
         .title(head(
-            at,
+            &format!("row-{at}"),
             "answered",
             title,
             "answered",

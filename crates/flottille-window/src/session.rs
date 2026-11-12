@@ -382,11 +382,13 @@ pub fn older_tools(root: Option<&TreeAgent>) -> Option<&'static str> {
 }
 
 impl SessionPage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shell: WeakEntity<Shell>,
         opened: Opened,
         status: Entity<Status>,
         reply: Entity<Reply>,
+        ask_dock: Entity<crate::ask_dock::AskDock>,
         follow: Follow,
         layout: Layout,
         cx: &mut Context<Self>,
@@ -401,7 +403,7 @@ impl SessionPage {
         });
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         let shown = opened.id.clone();
-        let ask_dock = cx.new(|_| crate::ask_dock::AskDock::new(page.clone()));
+        ask_dock.update(cx, |dock, cx| dock.attach(page.clone(), cx));
         let conversation =
             cx.new(|cx| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None, cx));
         let _status = cx.observe(&status, |this, status, cx| {
@@ -1667,12 +1669,13 @@ impl SessionPage {
         }
     }
 
-    /// The asks of the root that wait for the user, oldest first, as the dock draws them: none
-    /// while a sub-agent's conversation is read.
+    /// The asks of the root that wait for the user, oldest first, as the dock draws them. While
+    /// a sub-agent's conversation is shown, or before the root's is read, the page cannot say
+    /// them: the dock keeps its cards, and drops those the tree says were answered.
     pub(crate) fn asks(&self, cx: &App) -> crate::ask_dock::Asks {
-        let mut waiting = Vec::new();
-        if self.shown == self.opened.id {
+        let waiting = (self.shown == self.opened.id && self.read).then(|| {
             let view = self.conversation.read(cx);
+            let mut waiting = Vec::new();
             for &at in &view.specials {
                 if let Block::Question {
                     seq,
@@ -1691,10 +1694,18 @@ impl SessionPage {
                     });
                 }
             }
-        }
-        waiting.sort_by_key(|w| w.at);
+            waiting.sort_by_key(|w| w.at);
+            waiting
+        });
+        let asking = self
+            .tree
+            .iter()
+            .find(|a| a.parent.is_none())
+            .map(|root| root.questions.iter().map(|q| q.seq).collect());
         crate::ask_dock::Asks {
             waiting,
+            asking,
+            session: self.opened.id.clone(),
             title: self.opened.title.clone(),
             read: self.read,
         }
@@ -1955,6 +1966,9 @@ impl SessionPage {
 impl Render for SessionPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
+        let asks = self.asks(cx);
+        self.ask_dock
+            .update(cx, |dock, cx| dock.sync(asks, window, cx));
         let p = palette(cx);
         let narrow = self.layout == Layout::Narrow;
         let wide = self.layout == Layout::Wide;
@@ -2148,17 +2162,28 @@ impl Render for SessionPage {
                     .child(self.conversation.clone()),
             )
             .child(
-                // Narrower than the composer by a step on each side: it stands on it, apart.
+                // Narrower than the composer by a step on each side: it stands on it, apart. The
+                // steps stay in sight above the part that scrolls.
                 div()
                     .id("ask-dock-frame")
                     .flex_shrink(1.)
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
                     .w_full()
                     .max_w(px(780.))
                     .mx_auto()
                     .px(if narrow { space::XL } else { space::XXXL })
-                    .child(self.ask_dock.clone())
+                    .child(self.ask_dock.update(cx, |dock, cx| dock.header(cx)))
+                    .child(
+                        div()
+                            .id("ask-dock-scroll")
+                            .flex_shrink(1.)
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(self.ask_dock.clone())
+                            .test_support(),
+                    )
                     .test_support(),
             )
             .child(dock)
@@ -6290,7 +6315,11 @@ impl Row {
             None => format!("{title} asks its lead"),
         };
         let card = Card::new()
-            .title(crate::question_card::heading(self.at, "asked-title", said))
+            .title(crate::question_card::heading(
+                &format!("row-{}", self.at),
+                "asked-title",
+                said,
+            ))
             .meta(self.when.map(clock).unwrap_or_default())
             .child(
                 div()

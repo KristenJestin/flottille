@@ -2,13 +2,17 @@
 //! for the user, its card stands above the composer, a little narrower than it, never scrolled
 //! away with the conversation. Several waiting, the oldest shows, `1 of 2 asks` above it; the
 //! next slides in once it is answered, and the dock folds away with the last.
+//!
+//! The asks are the root's, and the dock is the session's, not its page's (the shell keeps one
+//! per session, as it keeps the composer): what the user chose and wrote stays while a
+//! sub-agent's conversation is shown, and when the page is left and opened again.
 
 use flottille_core::question::Question;
 use gpui_design_system::{growing, palette, presence, presence_of, sliding, space};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
 use crate::question_card::QuestionCard;
@@ -28,7 +32,12 @@ pub struct Waiting {
 
 /// What the page says about its asks, for the dock.
 pub struct Asks {
-    pub waiting: Vec<Waiting>,
+    /// The asks that wait, oldest first; `None` while the page cannot say them (a sub-agent's
+    /// conversation is shown, or the root's is not read yet).
+    pub waiting: Option<Vec<Waiting>>,
+    /// The numbers of the asks the daemon's tree says wait, once the tree is read.
+    pub asking: Option<Vec<u64>>,
+    pub session: String,
     pub title: String,
     /// The conversation was read: what waits now waited when the page was opened.
     pub read: bool,
@@ -40,18 +49,34 @@ pub struct AskDock {
     cards: Vec<Entity<QuestionCard>>,
     /// The card last shown, drawn while the dock folds away.
     last: Option<Entity<QuestionCard>>,
-    /// The page was just opened: an ask that waited takes the focus once, as the sidebar's
-    /// "needs you" leads here. One asked later never takes it from the composer.
+    /// A page was just opened on the dock: an ask that waited takes the focus once, as the
+    /// sidebar's "needs you" leads here. One asked later never takes it from the composer.
     opening: bool,
 }
 
+impl Default for AskDock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AskDock {
-    pub fn new(page: WeakEntity<SessionPage>) -> Self {
+    pub fn new() -> Self {
         Self {
-            page,
+            page: WeakEntity::new_invalid(),
             cards: Vec::new(),
             last: None,
             opening: true,
+        }
+    }
+
+    /// A page of the session opens on the dock: the cards answer through it, and an ask that
+    /// waits takes the focus once more.
+    pub fn attach(&mut self, page: WeakEntity<SessionPage>, cx: &mut Context<Self>) {
+        self.page = page.clone();
+        self.opening = true;
+        for card in &self.cards {
+            card.update(cx, |card, _| card.attach(page.clone()));
         }
     }
 
@@ -77,59 +102,83 @@ impl AskDock {
             card.update(cx, |card, cx| card.summon(window, cx));
         }
     }
-}
 
-impl Render for AskDock {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let Some(asks) = self.page.upgrade().map(|page| page.read(cx).asks(cx)) else {
-            return div().into_any_element();
-        };
-        let mut cards = Vec::with_capacity(asks.waiting.len());
-        for waiting in &asks.waiting {
-            let card = match self.card(waiting.seq, cx) {
-                Some(card) => card.clone(),
-                None => {
-                    let (at, seq, questions) = (waiting.at, waiting.seq, waiting.questions.clone());
-                    let session = self
-                        .page
-                        .upgrade()
-                        .map(|page| page.read(cx).id().to_owned())
-                        .unwrap_or_default();
-                    let page = self.page.clone();
-                    cx.new(|cx| QuestionCard::new(at, seq, session, questions, page, window, cx))
+    /// Brings the cards up to what the page says waits, before the page is drawn.
+    pub fn sync(&mut self, asks: Asks, window: &mut Window, cx: &mut Context<Self>) {
+        let before = self.cards.first().cloned();
+        // The card shown held the focus as it left: the next one takes it, the user answers on.
+        let held = before
+            .as_ref()
+            .is_some_and(|card| card.focus_handle(cx).contains_focused(window, cx));
+        match asks.waiting {
+            Some(waiting) => {
+                let mut cards = Vec::with_capacity(waiting.len());
+                for waiting in &waiting {
+                    let card = match self.card(waiting.seq, cx) {
+                        Some(card) => card.clone(),
+                        None => {
+                            let (seq, questions) = (waiting.seq, waiting.questions.clone());
+                            let (session, page) = (asks.session.clone(), self.page.clone());
+                            cx.new(|cx| {
+                                QuestionCard::new(seq, session, questions, page, window, cx)
+                            })
+                        }
+                    };
+                    card.update(cx, |card, cx| {
+                        card.set_answered(waiting.answered);
+                        card.set_header(&asks.title, waiting.when.clone(), cx);
+                    });
+                    cards.push(card);
                 }
-            };
-            card.update(cx, |card, cx| {
-                card.set_answered(waiting.answered);
-                card.set_header(&asks.title, waiting.when.clone(), cx);
-            });
-            cards.push(card);
-        }
-        self.cards = cards;
-        if let Some(first) = self.cards.first().cloned() {
-            if std::mem::take(&mut self.opening) && asks.read {
-                let card = first.clone();
-                cx.defer_in(window, move |_, window, cx| {
-                    card.update(cx, |card, cx| card.summon(window, cx));
-                });
+                self.cards = cards;
             }
-            self.last = Some(first);
-        } else if asks.read {
-            self.opening = false;
+            None => {
+                if let Some(asking) = &asks.asking {
+                    self.cards
+                        .retain(|card| asking.contains(&card.read(cx).seq()));
+                }
+            }
         }
+        match self.cards.first().cloned() {
+            Some(first) => {
+                let opening = self.opening && asks.read;
+                if opening {
+                    self.opening = false;
+                }
+                let moved_on = held && before.as_ref() != Some(&first);
+                if opening || moved_on {
+                    let card = first.clone();
+                    cx.defer_in(window, move |_, window, cx| {
+                        card.update(cx, |card, cx| match opening {
+                            true => card.summon(window, cx),
+                            false => window.focus(&card.focus_handle(cx), cx),
+                        });
+                    });
+                }
+                self.last = Some(first);
+            }
+            None if asks.read => self.opening = false,
+            None => {}
+        }
+    }
+
+    /// Above the part that scrolls, so that it stays in sight: `1 of 2 asks`, then the steps of
+    /// the card shown (Previous, `2 of 4` and its dots, Next).
+    pub fn header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
         let count = (self.cards.len() > 1)
             .then(|| SharedString::from(format!("1 of {} asks", self.cards.len())));
-        let shown = self.last.clone().map(|card| {
-            let seq = card.read(cx).seq();
-            growing(
-                "ask-dock-height",
-                sliding("ask-dock-page", seq as usize, card),
-            )
-        });
-        let content = div()
-            .id("ask-dock")
-            .pb(space::SM)
+        let several = !self.cards.is_empty()
+            && self
+                .last
+                .as_ref()
+                .is_some_and(|card| card.read(cx).several());
+        let steps = match &self.last {
+            Some(card) => card.update(cx, |card, cx| card.steps(cx)),
+            None => div().into_any_element(),
+        };
+        div()
+            .flex_none()
             .flex()
             .flex_col()
             .child(presence_of("ask-dock-count-line", count, move |said| {
@@ -143,8 +192,27 @@ impl Render for AskDock {
                     .test_support()
                     .into_any_element()
             }))
+            .child(presence("ask-dock-steps", several, steps))
+            .into_any_element()
+    }
+}
+
+impl Render for AskDock {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let shown = self.last.clone().map(|card| {
+            let seq = card.read(cx).seq();
+            growing(
+                "ask-dock-height",
+                sliding("ask-dock-page", seq as usize, card),
+            )
+        });
+        let content = div()
+            .id("ask-dock")
+            .pb(space::SM)
+            .flex()
+            .flex_col()
             .children(shown)
             .test_support();
-        presence("ask-dock-open", !self.cards.is_empty(), content).into_any_element()
+        presence("ask-dock-open", !self.cards.is_empty(), content)
     }
 }
