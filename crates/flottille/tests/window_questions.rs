@@ -194,16 +194,38 @@ fn until(
     what: &str,
     check: impl Fn(&mut VisualTestContext) -> bool,
 ) {
+    until_seen(shell, cx, what, |cx| {
+        check(cx).then_some(()).ok_or_else(String::new)
+    });
+}
+
+/// `until`, for what is read from the window: `check` gives it once it is there, or what it saw
+/// instead, which the failure says.
+fn until_seen<T>(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    what: &str,
+    mut check: impl FnMut(&mut VisualTestContext) -> Result<T, String>,
+) -> T {
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
         cx.run_until_parked();
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
-        if check(cx) {
-            return;
-        }
-        assert!(Instant::now() < deadline, "{what} never happened");
+        let seen = match check(cx) {
+            Ok(found) => return found,
+            Err(seen) => seen,
+        };
+        assert!(
+            Instant::now() < deadline,
+            "{what} never happened{}",
+            if seen.is_empty() {
+                String::new()
+            } else {
+                format!(", last seen: {seen}")
+            }
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
 }
@@ -293,7 +315,8 @@ fn questions(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<(usi
         .collect()
 }
 
-/// The number of the ask of row `at`, which names the elements of its card.
+/// The number of the ask of row `at`, which names the elements of its card: a row the test
+/// found by waiting for it (`questions`), which the conversation never moves nor drops.
 fn seq_of(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) -> u64 {
     match &blocks(page, cx)[at] {
         Block::Question { seq, .. } => *seq,
@@ -430,7 +453,7 @@ fn answering_the_card_delivers_the_answer_and_folds_it(cx: &mut TestAppContext) 
     let at = questions(&page, cx)[0].0;
     let ask = seq_of(&page, at, cx);
     // Answered while the agent works: it waits for the end of the turn, and says so.
-    let answer = answer(&page, at, "Drop it.", cx);
+    let answer = answer(&shell, &page, at, "Drop it.", cx);
     until(&shell, cx, "the answer went", |cx| {
         answer.read_with(cx, |a, cx| a.is_sent(cx))
     });
@@ -518,22 +541,49 @@ fn the_steps_line_of_ask_user_says_the_question(cx: &mut TestAppContext) {
     release(&user);
 }
 
-/// The card of the ask of row `at`, in the dock.
+/// The card of the ask of row `at`, once the dock holds it: the dock takes its cards from the
+/// daemon's tree, which the window reads on its own turn, and drops a card once its ask is
+/// taken. Read it while the ask waits, and keep the card for what comes after.
 fn card_of(
+    shell: &Entity<Shell>,
     page: &Entity<SessionPage>,
     at: usize,
     cx: &mut VisualTestContext,
 ) -> Entity<QuestionCard> {
-    let ask = seq_of(page, at, cx);
-    page.read_with(cx, |page, cx| {
-        page.ask_dock().read(cx).card(ask, cx).cloned()
-    })
-    .expect("the card in the dock")
+    until_seen(
+        shell,
+        cx,
+        &format!("the card of row {at} in the dock"),
+        |cx| {
+            let ask = match blocks(page, cx).get(at) {
+                Some(Block::Question { seq, .. }) => *seq,
+                other => return Err(format!("no ask at row {at}: {other:?}")),
+            };
+            page.read_with(cx, |page, cx| {
+                let dock = page.ask_dock().read(cx);
+                dock.card(ask, cx).cloned().ok_or_else(|| {
+                    let held: Vec<u64> = dock.cards().iter().map(|c| c.read(cx).seq()).collect();
+                    format!("the dock holds the asks {held:?}, not {ask}")
+                })
+            })
+        },
+    )
 }
 
-/// The card shown in the dock.
+/// The card shown in the dock, if there is one: for a check of `until`, which waits itself.
 fn docked(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<Entity<QuestionCard>> {
     page.read_with(cx, |page, cx| page.ask_dock().read(cx).shown().cloned())
+}
+
+/// The card shown in the dock, once there is one.
+fn docked_card(
+    shell: &Entity<Shell>,
+    page: &Entity<SessionPage>,
+    cx: &mut VisualTestContext,
+) -> Entity<QuestionCard> {
+    until_seen(shell, cx, "a card shown in the dock", |cx| {
+        docked(page, cx).ok_or_else(|| "the dock holds no card".to_owned())
+    })
 }
 
 /// The question an element of a card belongs to, from its id: `ask-<seq>-question-<n>-…`,
@@ -576,28 +626,43 @@ fn to_question_of(id: &str, cx: &mut VisualTestContext) {
 }
 
 /// Writes `text` in the field of question `n` of the card of row `at`.
-fn write(page: &Entity<SessionPage>, at: usize, n: usize, text: &str, cx: &mut VisualTestContext) {
-    let field = card_of(page, at, cx).read_with(cx, |card, _| card.field(n).clone());
+fn write(
+    shell: &Entity<Shell>,
+    page: &Entity<SessionPage>,
+    at: usize,
+    n: usize,
+    text: &str,
+    cx: &mut VisualTestContext,
+) {
+    let field = card_of(shell, page, at, cx).read_with(cx, |card, _| card.field(n).clone());
     field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
     cx.run_until_parked();
 }
 
 /// Writes `text` in the note of question `n` of the card of row `at`.
-fn note(page: &Entity<SessionPage>, at: usize, n: usize, text: &str, cx: &mut VisualTestContext) {
-    let field = card_of(page, at, cx).read_with(cx, |card, _| card.note(n).clone());
+fn note(
+    shell: &Entity<Shell>,
+    page: &Entity<SessionPage>,
+    at: usize,
+    n: usize,
+    text: &str,
+    cx: &mut VisualTestContext,
+) {
+    let field = card_of(shell, page, at, cx).read_with(cx, |card, _| card.note(n).clone());
     field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
     cx.run_until_parked();
 }
 
 /// Answers the single question of the card of row `at` with `text`.
 fn answer(
+    shell: &Entity<Shell>,
     page: &Entity<SessionPage>,
     at: usize,
     text: &str,
     cx: &mut VisualTestContext,
 ) -> Entity<QuestionCard> {
-    write(page, at, 0, text, cx);
-    let card = card_of(page, at, cx);
+    write(shell, page, at, 0, text, cx);
+    let card = card_of(shell, page, at, cx);
     card.update(cx, |card, cx| card.send(cx));
     card
 }
@@ -631,7 +696,7 @@ fn two_asks_waiting_are_two_cards_answered_apart(cx: &mut TestAppContext) {
     let (first, second) = (questions(&page, cx)[0].0, questions(&page, cx)[1].0);
     let (first_ask, second_ask) = (seq_of(&page, first, cx), seq_of(&page, second, cx));
 
-    answer(&page, first, "Drop it.", cx);
+    answer(&shell, &page, first, "Drop it.", cx);
     release(&user);
     until(
         &shell,
@@ -657,7 +722,7 @@ fn two_asks_waiting_are_two_cards_answered_apart(cx: &mut TestAppContext) {
         "it answers the first alone: {prompt}"
     );
 
-    answer(&page, second, "Blue.", cx);
+    answer(&shell, &page, second, "Blue.", cx);
     until(&shell, cx, "the second folds to its answer", |cx| {
         settle(cx);
         !has(format!("ask-{second_ask}-question-text"), cx)
@@ -701,14 +766,10 @@ fn bounds(id: String, cx: &mut VisualTestContext) -> gpui_kit::Bounds<gpui_kit::
     cx.update(|window, _| window.find(id).bounds())
 }
 
-/// Whether the field of the words of question `n` of the card of row `at` has the focus.
-fn field_focused(
-    page: &Entity<SessionPage>,
-    at: usize,
-    n: usize,
-    cx: &mut VisualTestContext,
-) -> bool {
-    let field = card_of(page, at, cx).read_with(cx, |card, _| card.field(n).clone());
+/// Whether the field of the words of question `n` of `card` has the focus. Of the card the
+/// test holds: once its ask is taken the dock no longer has it.
+fn field_focused(card: &Entity<QuestionCard>, n: usize, cx: &mut VisualTestContext) -> bool {
+    let field = card.read_with(cx, |card, _| card.field(n).clone());
     cx.update(|window, cx| field.read(cx).focus_handle(cx).is_focused(window))
 }
 
@@ -718,14 +779,19 @@ fn chosen(id: String, cx: &mut VisualTestContext) -> Option<bool> {
 }
 
 /// Answers the three questions: Yes with a note, a title, Alice and Carol.
-fn answer_three(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
+fn answer_three(
+    shell: &Entity<Shell>,
+    page: &Entity<SessionPage>,
+    at: usize,
+    cx: &mut VisualTestContext,
+) {
     let ask = seq_of(page, at, cx);
     click(format!("ask-{ask}-question-0-option-0"), cx);
     settle(cx);
     click(format!("ask-{ask}-note-0-add"), cx);
     settle(cx);
-    note(page, at, 0, "Squash it first.", cx);
-    write(page, at, 1, "Export orders as CSV", cx);
+    note(shell, page, at, 0, "Squash it first.", cx);
+    write(shell, page, at, 1, "Export orders as CSV", cx);
     click(format!("ask-{ask}-question-2-option-0"), cx);
     click(format!("ask-{ask}-question-2-option-2"), cx);
     settle(cx);
@@ -764,7 +830,7 @@ fn the_question_card_names_the_session_that_asks(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn an_ask_with_three_questions_shows_three_blocks_each_answered_apart(cx: &mut TestAppContext) {
     let user = user();
-    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     assert_eq!(
         questions(&page, cx)[0].1.lines().count(),
@@ -822,8 +888,8 @@ fn an_ask_with_three_questions_shows_three_blocks_each_answered_apart(cx: &mut T
         Some(true)
     );
     // Words written in one field stay in it.
-    write(&page, at, 1, "Export orders as CSV", cx);
-    let answers = card_of(&page, at, cx).read_with(cx, |card, cx| card.answers(cx));
+    write(&shell, &page, at, 1, "Export orders as CSV", cx);
+    let answers = card_of(&shell, &page, at, cx).read_with(cx, |card, cx| card.answers(cx));
     assert_eq!(answers[0].text, "");
     assert_eq!(answers[0].choices, ["Not yet"]);
     assert_eq!(answers[1].text, "Export orders as CSV");
@@ -890,14 +956,19 @@ fn a_long_option_wraps_and_stays_in_the_card(cx: &mut TestAppContext) {
 
 /// The three questions answered in long words: a choice with a long unbroken note, a long
 /// spaced answer, and the choices of the third left as they were.
-fn answer_three_at_length(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
+fn answer_three_at_length(
+    shell: &Entity<Shell>,
+    page: &Entity<SessionPage>,
+    at: usize,
+    cx: &mut VisualTestContext,
+) {
     let ask = seq_of(page, at, cx);
     click(format!("ask-{ask}-question-0-option-0"), cx);
     settle(cx);
     click(format!("ask-{ask}-note-0-add"), cx);
     settle(cx);
-    note(page, at, 0, guard::UNBROKEN, cx);
-    write(page, at, 1, guard::SPACED, cx);
+    note(shell, page, at, 0, guard::UNBROKEN, cx);
+    write(shell, page, at, 1, guard::SPACED, cx);
     click(format!("ask-{ask}-question-2-option-0"), cx);
     click(format!("ask-{ask}-question-2-option-2"), cx);
     settle(cx);
@@ -910,14 +981,14 @@ fn a_long_answer_stays_inside_its_answered_card(cx: &mut TestAppContext) {
     let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     guard::narrow(cx);
-    answer_three_at_length(&page, at, cx);
+    answer_three_at_length(&shell, &page, at, cx);
     until(&shell, cx, "the card folds to its answers", |cx| {
         settle(cx);
         !has(format!("ask-{ask}-question-text"), cx)
             && has(format!("row-{at}-answered-2-answer"), cx)
     });
     settle(cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-question"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-question"));
     // The words are the user's own: they wrap, whole.
     let (note, spaced) = cx.update(|window, _| {
         (
@@ -939,7 +1010,7 @@ fn a_long_answer_stays_inside_its_answered_card(cx: &mut TestAppContext) {
 fn long_ask_answered<'a>(
     user: &User,
     cx: &'a mut TestAppContext,
-) -> (usize, &'a mut VisualTestContext) {
+) -> (Entity<Shell>, usize, &'a mut VisualTestContext) {
     let id = session(user, "full", "long ask");
     let (shell, page, cx) = open_session(user, &id, cx);
     guard::narrow(cx);
@@ -953,7 +1024,7 @@ fn long_ask_answered<'a>(
     let ask = seq_of(&page, at, cx);
     click(format!("ask-{ask}-question-0-other"), cx);
     settle(cx);
-    write(&page, at, 0, guard::UNBROKEN, cx);
+    write(&shell, &page, at, 0, guard::UNBROKEN, cx);
     click(format!("ask-{ask}-question-1-option-0"), cx);
     settle(cx);
     click(format!("ask-{ask}-answer-send"), cx);
@@ -963,14 +1034,14 @@ fn long_ask_answered<'a>(
             && has(format!("row-{at}-answered-1-answer"), cx)
     });
     settle(cx);
-    (at, cx)
+    (shell, at, cx)
 }
 
 #[gpui_kit::test]
 fn a_long_question_and_an_unbroken_answer_stay_inside_the_folded_card(cx: &mut TestAppContext) {
     let user = user();
-    let (at, cx) = long_ask_answered(&user, cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-question"));
+    let (shell, at, cx) = long_ask_answered(&user, cx);
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-question"));
     // Both ends of the first question's rows are drawn and inside the card.
     let card = bounds(format!("row-{at}-question"), cx);
     for part in ["answered-0-question", "answered-0-headline"] {
@@ -990,7 +1061,7 @@ fn a_long_question_and_an_unbroken_answer_stay_inside_the_folded_card(cx: &mut T
 #[gpui_kit::test]
 fn the_whole_long_question_of_a_folded_card_shows_on_hover(cx: &mut TestAppContext) {
     let user = user();
-    let (at, cx) = long_ask_answered(&user, cx);
+    let (_shell, at, cx) = long_ask_answered(&user, cx);
     let line = format!("row-{at}-answered-0-question");
     assert!(!has(format!("{line}-tooltip"), cx), "no tooltip at rest");
 
@@ -1014,7 +1085,7 @@ fn a_question_that_fits_has_no_tooltip_in_a_folded_card(cx: &mut TestAppContext)
     let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     click(format!("ask-{ask}-question-0-option-0"), cx);
-    write(&page, at, 1, "Export orders as CSV", cx);
+    write(&shell, &page, at, 1, "Export orders as CSV", cx);
     click(format!("ask-{ask}-question-2-option-0"), cx);
     settle(cx);
     click(format!("ask-{ask}-answer-send"), cx);
@@ -1046,10 +1117,10 @@ fn a_long_question_stays_inside_its_open_card(cx: &mut TestAppContext) {
     // and the line where it was asked inside its row.
     for n in 0..2 {
         show(ask, n, cx);
-        guard::assert_stays_inside(cx, format!("ask-{ask}-question-text"));
-        guard::assert_stays_inside(cx, "ask-dock");
+        guard::assert_stays_inside(&shell, cx, format!("ask-{ask}-question-text"));
+        guard::assert_stays_inside(&shell, cx, "ask-dock");
     }
-    guard::assert_stays_inside(cx, format!("row-{at}-question"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-question"));
 }
 
 #[gpui_kit::test]
@@ -1074,11 +1145,11 @@ fn several_choices_have_square_marks_and_say_several_once(cx: &mut TestAppContex
 #[gpui_kit::test]
 fn something_else_holds_a_named_field_and_needs_words(cx: &mut TestAppContext) {
     let user = user();
-    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
     click(format!("ask-{ask}-question-0-option-0"), cx);
-    write(&page, at, 1, "Export orders as CSV", cx);
+    write(&shell, &page, at, 1, "Export orders as CSV", cx);
     click(format!("ask-{ask}-question-2-option-0"), cx);
     settle(cx);
     assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
@@ -1104,7 +1175,7 @@ fn something_else_holds_a_named_field_and_needs_words(cx: &mut TestAppContext) {
         !card.read_with(cx, |card, cx| card.is_ready(cx)),
         "it needs its words"
     );
-    write(&page, at, 0, "Both, in that order", cx);
+    write(&shell, &page, at, 0, "Both, in that order", cx);
     assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
     let answers = card.read_with(cx, |card, cx| card.answers(cx));
     assert_eq!(answers[0].choices, Vec::<String>::new());
@@ -1125,14 +1196,14 @@ fn the_field_of_something_else_is_in_its_row_right_of_the_mark_and_focused(
     cx: &mut TestAppContext,
 ) {
     let user = user();
-    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     let other = format!("ask-{ask}-question-0-other");
     assert!(
         !has(format!("{other}-field"), cx),
         "not picked: a row as any"
     );
-    assert!(!field_focused(&page, at, 0, cx));
+    assert!(!field_focused(&card_of(&shell, &page, at, cx), 0, cx));
     let alone = bounds(other.clone(), cx).size.height;
 
     click(other.clone(), cx);
@@ -1157,7 +1228,10 @@ fn the_field_of_something_else_is_in_its_row_right_of_the_mark_and_focused(
         Some("Something else:"),
         "its words stay beside the field"
     );
-    assert!(field_focused(&page, at, 0, cx), "focused at once");
+    assert!(
+        field_focused(&card_of(&shell, &page, at, cx), 0, cx),
+        "focused at once"
+    );
     at_rest(cx);
 }
 
@@ -1166,12 +1240,12 @@ fn ctrl_enter_in_the_field_of_something_else_sends(cx: &mut TestAppContext) {
     let user = user();
     let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
-    let card = card_of(&page, at, cx);
-    write(&page, at, 1, "Export orders as CSV", cx);
+    let card = card_of(&shell, &page, at, cx);
+    write(&shell, &page, at, 1, "Export orders as CSV", cx);
     click(format!("ask-{ask}-question-2-option-0"), cx);
     click(format!("ask-{ask}-question-0-other"), cx);
     settle(cx);
-    assert!(field_focused(&page, at, 0, cx));
+    assert!(field_focused(&card, 0, cx));
     cx.simulate_input("Both, in that order");
     cx.simulate_keystrokes("enter");
     cx.simulate_input("and say why");
@@ -1191,13 +1265,13 @@ fn ctrl_enter_in_the_field_of_something_else_sends(cx: &mut TestAppContext) {
         !has(format!("ask-{ask}-answer-0-frame"), cx),
         "the field gave way once sent from the field itself"
     );
-    assert!(!field_focused(&page, at, 0, cx), "and holds no focus");
+    assert!(!field_focused(&card, 0, cx), "and holds no focus");
 }
 
 #[gpui_kit::test]
 fn the_field_in_the_row_grows_to_several_lines_inside_it(cx: &mut TestAppContext) {
     let user = user();
-    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     let (other, frame) = (
         format!("ask-{ask}-question-0-other"),
@@ -1206,7 +1280,14 @@ fn the_field_in_the_row_grows_to_several_lines_inside_it(cx: &mut TestAppContext
     click(other.clone(), cx);
     settle(cx);
     let one = (bounds(other.clone(), cx), bounds(frame.clone(), cx));
-    write(&page, at, 0, "First line\nSecond line\nThird line", cx);
+    write(
+        &shell,
+        &page,
+        at,
+        0,
+        "First line\nSecond line\nThird line",
+        cx,
+    );
     settle(cx);
     let three = (bounds(other.clone(), cx), bounds(frame.clone(), cx));
     assert!(
@@ -1229,7 +1310,7 @@ fn the_field_in_the_row_grows_to_several_lines_inside_it(cx: &mut TestAppContext
 #[gpui_kit::test]
 fn in_a_question_of_several_choices_something_else_holds_its_field_too(cx: &mut TestAppContext) {
     let user = user();
-    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     let other = format!("ask-{ask}-question-2-other");
     click(format!("ask-{ask}-question-2-option-0"), cx);
@@ -1251,7 +1332,10 @@ fn in_a_question_of_several_choices_something_else_holds_its_field_too(cx: &mut 
         row.contains(&field.origin) && mark.right() <= field.left(),
         "the field is in the row, right of the mark: {row:?} {field:?}"
     );
-    assert!(field_focused(&page, at, 2, cx), "focused at once");
+    assert!(
+        field_focused(&card_of(&shell, &page, at, cx), 2, cx),
+        "focused at once"
+    );
     at_rest(cx);
 }
 
@@ -1260,10 +1344,10 @@ fn the_field_of_something_else_gives_way_once_the_answer_is_sent(cx: &mut TestAp
     let user = user();
     let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
     click(format!("ask-{ask}-question-0-other"), cx);
-    write(&page, at, 0, "Both, in that order", cx);
-    write(&page, at, 1, "Export orders as CSV", cx);
+    write(&shell, &page, at, 0, "Both, in that order", cx);
+    write(&shell, &page, at, 1, "Export orders as CSV", cx);
     click(format!("ask-{ask}-question-2-option-0"), cx);
     show(ask, 0, cx);
     settle(cx);
@@ -1279,7 +1363,7 @@ fn the_field_of_something_else_gives_way_once_the_answer_is_sent(cx: &mut TestAp
     );
     assert!(!has(format!("ask-{ask}-answer-1-frame"), cx));
     assert!(
-        !field_focused(&page, at, 0, cx),
+        !field_focused(&card, 0, cx),
         "nothing is typed into a field that gave way"
     );
     at_rest(cx);
@@ -1310,13 +1394,13 @@ fn nothing_under_the_options_holds_the_words_of_something_else(cx: &mut TestAppC
 #[gpui_kit::test]
 fn letting_go_of_something_else_folds_its_field_and_keeps_the_words(cx: &mut TestAppContext) {
     let user = user();
-    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     let other = format!("ask-{ask}-question-0-other");
     let alone = bounds(other.clone(), cx).size.height;
     click(other.clone(), cx);
     settle(cx);
-    write(&page, at, 0, "Both, in that order", cx);
+    write(&shell, &page, at, 0, "Both, in that order", cx);
 
     click(format!("{other}-label"), cx);
     settle(cx);
@@ -1331,8 +1415,8 @@ fn letting_go_of_something_else_folds_its_field_and_keeps_the_words(cx: &mut Tes
         Some("Something else…"),
         "the label is back"
     );
-    assert!(!field_focused(&page, at, 0, cx));
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
+    assert!(!field_focused(&card, 0, cx));
     assert!(
         cx.update(|window, cx| card.read(cx).has_focus(window)),
         "the focus goes back to the card"
@@ -1341,7 +1425,8 @@ fn letting_go_of_something_else_folds_its_field_and_keeps_the_words(cx: &mut Tes
     click(other, cx);
     settle(cx);
     assert!(has(format!("ask-{ask}-answer-0-frame"), cx));
-    let words = card_of(&page, at, cx).read_with(cx, |card, cx| card.field(0).read(cx).value());
+    let words =
+        card_of(&shell, &page, at, cx).read_with(cx, |card, cx| card.field(0).read(cx).value());
     assert_eq!(words.as_ref(), "Both, in that order", "kept as it was");
     at_rest(cx);
 }
@@ -1380,13 +1465,13 @@ fn add_a_note_is_offered_on_a_question_of_options_and_sends_the_note(cx: &mut Te
         Some("Note with your choice")
     );
     assert!(!has(format!("ask-{ask}-note-0-add"), cx), "the button left");
-    note(&page, at, 0, "Squash it first.", cx);
-    let answers = card_of(&page, at, cx).read_with(cx, |card, cx| card.answers(cx));
+    note(&shell, &page, at, 0, "Squash it first.", cx);
+    let answers = card_of(&shell, &page, at, cx).read_with(cx, |card, cx| card.answers(cx));
     assert_eq!(answers[0].choices, ["Yes"]);
     assert_eq!(answers[0].text, "Squash it first.");
 
     // The note goes with the choice.
-    write(&page, at, 1, "Export orders as CSV", cx);
+    write(&shell, &page, at, 1, "Export orders as CSV", cx);
     click(format!("ask-{ask}-question-2-option-1"), cx);
     settle(cx);
     click(format!("ask-{ask}-answer-send"), cx);
@@ -1402,7 +1487,7 @@ fn answer_waits_until_every_question_is_answered_and_says_why(cx: &mut TestAppCo
     let user = user();
     let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
     let why = format!("ask-{ask}-answer-why");
     assert_eq!(
         label(why.clone(), cx).as_deref(),
@@ -1415,7 +1500,7 @@ fn answer_waits_until_every_question_is_answered_and_says_why(cx: &mut TestAppCo
         "Answer waits"
     );
     click(format!("ask-{ask}-question-0-option-0"), cx);
-    write(&page, at, 1, "Export orders as CSV", cx);
+    write(&shell, &page, at, 1, "Export orders as CSV", cx);
     click(format!("ask-{ask}-question-2-option-1"), cx);
     settle(cx);
     assert_eq!(
@@ -1435,21 +1520,21 @@ fn answer_waits_until_every_question_is_answered_and_says_why(cx: &mut TestAppCo
 #[gpui_kit::test]
 fn the_count_says_how_many_are_answered(cx: &mut TestAppContext) {
     let user = user();
-    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     let count = format!("ask-{ask}-question-count");
     assert_eq!(label(count.clone(), cx).as_deref(), Some("0 of 3 answered"));
     click(format!("ask-{ask}-question-0-option-0"), cx);
     settle(cx);
     assert_eq!(label(count.clone(), cx).as_deref(), Some("1 of 3 answered"));
-    write(&page, at, 1, "Export orders as CSV", cx);
+    write(&shell, &page, at, 1, "Export orders as CSV", cx);
     settle(cx);
     assert_eq!(label(count.clone(), cx).as_deref(), Some("2 of 3 answered"));
     // Something else, with no words yet, is not an answer.
     click(format!("ask-{ask}-question-2-other"), cx);
     settle(cx);
     assert_eq!(label(count.clone(), cx).as_deref(), Some("2 of 3 answered"));
-    write(&page, at, 2, "Whoever is free", cx);
+    write(&shell, &page, at, 2, "Whoever is free", cx);
     settle(cx);
     assert_eq!(label(count, cx).as_deref(), Some("3 of 3 answered"));
     at_rest(cx);
@@ -1460,7 +1545,7 @@ fn an_option_chosen_and_words_written_go_back_together(cx: &mut TestAppContext) 
     let user = user();
     let (_, shell, _, at, cx) = three_asked(&user, cx);
     let page = session_page(&shell, cx);
-    answer_three(&page, at, cx);
+    answer_three(&shell, &page, at, cx);
     until(&shell, cx, "the agent took the answer", |_| {
         prompts(&user)
             .iter()
@@ -1481,7 +1566,7 @@ fn the_answer_message_quotes_each_question_and_its_answer(cx: &mut TestAppContex
     let user = user();
     let (_, shell, _, at, cx) = three_asked(&user, cx);
     let page = session_page(&shell, cx);
-    answer_three(&page, at, cx);
+    answer_three(&shell, &page, at, cx);
     until(&shell, cx, "the agent took the answer", |_| {
         prompts(&user)
             .iter()
@@ -1505,9 +1590,9 @@ fn answer_is_disabled_until_every_question_has_an_answer(cx: &mut TestAppContext
     let user = user();
     let (id, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
     click(format!("ask-{ask}-question-0-option-0"), cx);
-    write(&page, at, 1, "Export orders as CSV", cx);
+    write(&shell, &page, at, 1, "Export orders as CSV", cx);
     assert!(
         !card.read_with(cx, |card, cx| card.is_ready(cx)),
         "the third has no answer"
@@ -1520,7 +1605,7 @@ fn answer_is_disabled_until_every_question_has_an_answer(cx: &mut TestAppContext
     );
     // Words alone answer a question of options too, through Something else.
     click(format!("ask-{ask}-question-2-other"), cx);
-    write(&page, at, 2, "Whoever is free", cx);
+    write(&shell, &page, at, 2, "Whoever is free", cx);
     assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
     click(format!("ask-{ask}-answer-send"), cx);
     until(&shell, cx, "the answer went", |cx| {
@@ -1541,7 +1626,7 @@ fn enter_breaks_a_line_in_an_answer_and_ctrl_enter_sends(cx: &mut TestAppContext
     });
     settle(cx);
     let at = questions(&page, cx)[0].0;
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
     let field = card.read_with(cx, |card, _| card.field(0).clone());
     field.update_in(cx, |field, window, cx| field.focus(window, cx));
     cx.simulate_input("Drop it");
@@ -1588,7 +1673,7 @@ fn a_single_question_ask_still_works_as_before(cx: &mut TestAppContext) {
         !has(format!("ask-{ask}-question-0-options"), cx),
         "no options"
     );
-    answer(&page, at, "Drop it.", cx);
+    answer(&shell, &page, at, "Drop it.", cx);
     release(&user);
     until(&shell, cx, "the agent took it", |_| {
         prompts(&user).iter().any(|p| p.contains("Drop it."))
@@ -1608,7 +1693,7 @@ fn the_card_folds_to_its_answers_with_the_notes(cx: &mut TestAppContext) {
     let user = user();
     let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
-    answer_three(&page, at, cx);
+    answer_three(&shell, &page, at, cx);
     until(&shell, cx, "the card folds to its answers", |cx| {
         settle(cx);
         !has(format!("ask-{ask}-question-text"), cx)
@@ -1660,7 +1745,7 @@ fn an_answer_sent_stays_sent_when_the_page_is_opened_again(cx: &mut TestAppConte
             .is_some_and(|(at, _)| card_shows(&page, *at, cx))
     });
     let at = questions(&page, cx)[0].0;
-    let sent = answer(&page, at, "Drop it.", cx);
+    let sent = answer(&shell, &page, at, "Drop it.", cx);
     until(&shell, cx, "the answer went", |cx| {
         sent.read_with(cx, |a, cx| a.is_sent(cx))
     });
@@ -1709,7 +1794,7 @@ fn a_card_answered_before_a_restart_stays_answered(cx: &mut TestAppContext) {
             .is_some_and(|(at, _)| card_shows(&page, *at, cx))
     });
     let at = questions(&page, cx)[0].0;
-    let sent = answer(&page, at, "Drop it.", cx);
+    let sent = answer(&shell, &page, at, "Drop it.", cx);
     until(&shell, cx, "the answer went", |cx| {
         sent.read_with(cx, |a, cx| a.is_sent(cx))
     });
@@ -1756,7 +1841,7 @@ fn ctrl_enter_answers_a_card_of_options_alone(cx: &mut TestAppContext) {
     settle(cx);
     let at = questions(&page, cx)[0].0;
     let ask = seq_of(&page, at, cx);
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
 
     // No field is open: the card has only rows, and a click on one is all the user did.
     click(format!("ask-{ask}-question-0-option-0"), cx);
@@ -1772,11 +1857,11 @@ fn ctrl_enter_answers_a_card_of_options_alone(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn something_else_needs_words_even_with_another_choice(cx: &mut TestAppContext) {
     let user = user();
-    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
     click(format!("ask-{ask}-question-0-option-0"), cx);
-    write(&page, at, 1, "Export orders as CSV", cx);
+    write(&shell, &page, at, 1, "Export orders as CSV", cx);
     click(format!("ask-{ask}-question-2-option-0"), cx);
     settle(cx);
     assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
@@ -1808,7 +1893,7 @@ fn something_else_needs_words_even_with_another_choice(cx: &mut TestAppContext) 
         "nothing sent"
     );
 
-    write(&page, at, 2, "Whoever is free", cx);
+    write(&shell, &page, at, 2, "Whoever is free", cx);
     assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
     let answers = card.read_with(cx, |card, cx| card.answers(cx));
     assert_eq!(answers[2].choices, ["Alice"]);
@@ -1818,20 +1903,20 @@ fn something_else_needs_words_even_with_another_choice(cx: &mut TestAppContext) 
 #[gpui_kit::test]
 fn letting_the_choice_go_keeps_the_note(cx: &mut TestAppContext) {
     let user = user();
-    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     click(format!("ask-{ask}-question-0-option-0"), cx);
     settle(cx);
     click(format!("ask-{ask}-note-0-add"), cx);
     settle(cx);
-    note(&page, at, 0, "Squash it first.", cx);
+    note(&shell, &page, at, 0, "Squash it first.", cx);
     assert!(has(format!("ask-{ask}-note-0-frame"), cx));
 
     // The choice goes: a note may come before a choice, so it stays with its words.
     click(format!("ask-{ask}-question-0-option-0"), cx);
     settle(cx);
     assert!(has(format!("ask-{ask}-note-0-frame"), cx), "still open");
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
     let kept = card.read_with(cx, |card, cx| card.note(0).read(cx).value().to_string());
     assert_eq!(kept, "Squash it first.");
     assert_eq!(
@@ -1851,14 +1936,14 @@ fn letting_the_choice_go_keeps_the_note(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_note_written_before_the_choice_comes_back_with_previous(cx: &mut TestAppContext) {
     let user = user();
-    let (_, _, page, at, cx) = four_asked(&user, cx);
+    let (_, shell, page, at, cx) = four_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     cx.simulate_resize(size(px(1440.), px(1800.)));
     settle(cx);
     cx.update(|window, cx| window.click(format!("ask-{ask}-note-0-add"), cx));
     settle(cx);
     assert!(has(format!("ask-{ask}-note-0-frame"), cx), "a note first");
-    note(&page, at, 0, "The one we run already.", cx);
+    note(&shell, &page, at, 0, "The one we run already.", cx);
 
     // The choice made, the next question comes.
     cx.update(|window, cx| window.click(format!("ask-{ask}-question-0-option-0"), cx));
@@ -1874,7 +1959,7 @@ fn a_note_written_before_the_choice_comes_back_with_previous(cx: &mut TestAppCon
         Some(true)
     );
     assert!(has(format!("ask-{ask}-note-0-frame"), cx), "its note");
-    let answers = card_of(&page, at, cx).read_with(cx, |card, cx| card.answers(cx));
+    let answers = card_of(&shell, &page, at, cx).read_with(cx, |card, cx| card.answers(cx));
     assert_eq!(answers[0].choices, ["Postgres"]);
     assert_eq!(answers[0].text, "The one we run already.");
     at_rest(cx);
@@ -1917,7 +2002,7 @@ fn a_waiting_ask_is_docked_above_the_composer_and_stays_in_view_while_the_conver
     cx: &mut TestAppContext,
 ) {
     let user = user();
-    let (id, _, page, at, cx) = four_asked(&user, cx);
+    let (id, shell, page, at, cx) = four_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     let (frame, card, composer, conversation) = (
         bounds("ask-dock-frame".into(), cx),
@@ -1938,7 +2023,10 @@ fn a_waiting_ask_is_docked_above_the_composer_and_stays_in_view_while_the_conver
         Some("Asked you 4 questions · answer below"),
         "one line where it was asked"
     );
-    assert!(docked(&page, cx).is_some_and(|card| card.read_with(cx, |card, _| card.seq() == ask)));
+    assert_eq!(
+        docked_card(&shell, &page, cx).read_with(cx, |card, _| card.seq()),
+        ask
+    );
 
     // Read from the top of the conversation, longer than its height: the card has not moved.
     assert!(following(&page, cx), "at the end");
@@ -1979,7 +2067,7 @@ fn the_dock_is_narrower_than_the_composer(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn one_question_at_a_time_with_previous_and_next(cx: &mut TestAppContext) {
     let user = user();
-    let (_, _, page, at, cx) = four_asked(&user, cx);
+    let (_, shell, page, at, cx) = four_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
     assert_eq!(step(ask, cx).as_deref(), Some("1 of 4"));
     assert!(has(format!("ask-{ask}-question-0"), cx));
@@ -2006,7 +2094,7 @@ fn one_question_at_a_time_with_previous_and_next(cx: &mut TestAppContext) {
     assert_eq!(chosen(dot(1), cx), Some(true));
 
     // The arrows, from the card itself.
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
     cx.update(|window, cx| window.focus(&card.read(cx).focus_handle(cx), cx));
     cx.simulate_keystrokes("right");
     settle(cx);
@@ -2064,8 +2152,8 @@ fn picking_an_option_moves_to_the_next_unanswered_question(cx: &mut TestAppConte
 #[gpui_kit::test]
 fn the_line_in_the_conversation_brings_the_focus_to_the_dock(cx: &mut TestAppContext) {
     let user = user();
-    let (_, _, page, at, cx) = four_asked(&user, cx);
-    let card = card_of(&page, at, cx);
+    let (_, shell, page, at, cx) = four_asked(&user, cx);
+    let card = card_of(&shell, &page, at, cx);
     let composer = page.read_with(cx, |page, cx| {
         page.reply().unwrap().read(cx).field().clone()
     });
@@ -2102,7 +2190,7 @@ fn once_answered_the_dock_folds_and_the_conversation_shows_the_answers(cx: &mut 
         label(format!("row-{at}-question-line"), cx).as_deref(),
         Some("Asked you a question · answer below")
     );
-    answer(&page, at, "Drop it.", cx);
+    answer(&shell, &page, at, "Drop it.", cx);
     settle(cx);
     let open = bounds("ask-dock-open".into(), cx).size.height;
     release(&user);
@@ -2170,9 +2258,13 @@ fn two_asks_waiting_show_the_oldest_first(cx: &mut TestAppContext) {
     let user = user();
     let id = session(&user, "full", "ask twice");
     let (shell, page, cx) = open_session(&user, &id, cx);
+    // The conversation and the daemon's tree are read apart: the second ask is in the dock
+    // once the tree says it waits, which `1 of 2 asks` needs.
     until(&shell, cx, "two asks, the oldest docked", |cx| {
         let open = questions(&page, cx);
-        open.len() == 2 && card_shows(&page, open[0].0, cx)
+        open.len() == 2
+            && card_shows(&page, open[0].0, cx)
+            && page.read_with(cx, |page, cx| page.ask_dock().read(cx).cards().len() == 2)
     });
     settle(cx);
     let (first, second) = (questions(&page, cx)[0].0, questions(&page, cx)[1].0);
@@ -2180,7 +2272,7 @@ fn two_asks_waiting_show_the_oldest_first(cx: &mut TestAppContext) {
     assert_eq!(label("ask-dock-count", cx).as_deref(), Some("1 of 2 asks"));
     assert!(has(format!("row-{second}-question-line"), cx));
 
-    answer(&page, first, "Drop it.", cx);
+    answer(&shell, &page, first, "Drop it.", cx);
     release(&user);
     until(&shell, cx, "the second comes", |cx| {
         settle(cx);
@@ -2233,12 +2325,12 @@ fn a_draft_answer_stays_while_a_sub_agent_s_conversation_is_shown(cx: &mut TestA
     settle(cx);
     let at = questions(&page, cx)[0].0;
     let ask = seq_of(&page, at, cx);
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
     cx.update(|window, cx| window.click(format!("ask-{ask}-question-0-option-1"), cx));
     settle(cx);
     cx.update(|window, cx| window.click(format!("ask-{ask}-note-1-add"), cx));
     settle(cx);
-    note(&page, at, 1, "Not yet.", cx);
+    note(&shell, &page, at, 1, "Not yet.", cx);
     let helper = page.read_with(cx, |page, _| {
         page.tree()
             .iter()
@@ -2274,7 +2366,7 @@ fn a_draft_answer_stays_while_a_sub_agent_s_conversation_is_shown(cx: &mut TestA
             && has(format!("ask-{ask}-question-text"), cx)
     });
     settle(cx);
-    assert_eq!(card_of(&page, at, cx), card, "the same card");
+    assert_eq!(card_of(&shell, &page, at, cx), card, "the same card");
     let answers = card.read_with(cx, |card, cx| card.answers(cx));
     assert_eq!(answers[0].choices, ["SQLite"]);
     assert_eq!(answers[1].text, "Not yet.");
@@ -2302,7 +2394,7 @@ fn a_draft_answer_stays_when_the_session_is_left_and_opened_again(cx: &mut TestA
     let ask = seq_of(&page, at, cx);
     cx.update(|window, cx| window.click(format!("ask-{ask}-question-0-option-1"), cx));
     settle(cx);
-    write(&page, at, 3, "Keep it small.", cx);
+    write(&shell, &page, at, 3, "Keep it small.", cx);
     assert_eq!(step(ask, cx).as_deref(), Some("2 of 4"));
 
     // Another session, then this one again: a new page, the same draft.
@@ -2321,7 +2413,7 @@ fn a_draft_answer_stays_when_the_session_is_left_and_opened_again(cx: &mut TestA
     settle(cx);
     let page = session_page(&shell, cx);
     let at = questions(&page, cx)[0].0;
-    let answers = card_of(&page, at, cx).read_with(cx, |card, cx| card.answers(cx));
+    let answers = card_of(&shell, &page, at, cx).read_with(cx, |card, cx| card.answers(cx));
     assert_eq!(answers[0].choices, ["SQLite"]);
     assert_eq!(answers[3].text, "Keep it small.");
     assert_eq!(
@@ -2330,7 +2422,7 @@ fn a_draft_answer_stays_when_the_session_is_left_and_opened_again(cx: &mut TestA
         "where it was left"
     );
     assert!(
-        in_card(&card_of(&page, at, cx), cx),
+        in_card(&card_of(&shell, &page, at, cx), cx),
         "the page opened with an ask waiting: the dock has the focus"
     );
 }
@@ -2389,9 +2481,9 @@ fn the_steps_of_the_next_card_slide_in_with_its_page(cx: &mut TestAppContext) {
         bounds(format!("ask-{first_ask}-question-previous"), cx).left(),
     );
 
-    write(&page, first, 0, "One.", cx);
-    write(&page, first, 1, "Two.", cx);
-    card_of(&page, first, cx).update(cx, |card, cx| card.send(cx));
+    write(&shell, &page, first, 0, "One.", cx);
+    write(&shell, &page, first, 1, "Two.", cx);
+    card_of(&shell, &page, first, cx).update(cx, |card, cx| card.send(cx));
     release(&user);
     // The clock holds still meanwhile: the move starts at the frame the next card comes.
     until(&shell, cx, "the second card comes", |cx| {
@@ -2423,7 +2515,7 @@ fn the_steps_of_the_next_card_slide_in_with_its_page(cx: &mut TestAppContext) {
 fn the_dock_takes_the_focus_once_when_the_page_opens_with_an_ask_waiting(cx: &mut TestAppContext) {
     let user = user();
     let (_, shell, page, at, cx) = four_asked(&user, cx);
-    let card = card_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
     assert!(in_card(&card, cx), "the page opened on an ask waiting");
 
     // The user goes to the composer: the dock leaves the focus there.
@@ -2499,7 +2591,7 @@ fn an_ask_asked_later_never_takes_the_focus_from_the_composer(cx: &mut TestAppCo
     settle(cx);
     let at = questions(&page, cx)[0].0;
     assert!(composer_focused(&page, cx), "the user types on");
-    assert!(!in_card(&card_of(&page, at, cx), cx));
+    assert!(!in_card(&card_of(&shell, &page, at, cx), cx));
 }
 
 #[gpui_kit::test]
@@ -2513,11 +2605,11 @@ fn once_an_ask_is_answered_the_focus_goes_to_the_next_card(cx: &mut TestAppConte
     });
     settle(cx);
     let (first, second) = (questions(&page, cx)[0].0, questions(&page, cx)[1].0);
-    let card = card_of(&page, first, cx);
+    let card = card_of(&shell, &page, first, cx);
     assert!(in_card(&card, cx), "the oldest has the focus");
 
     // Answered from its card, which keeps the focus until the agent takes it.
-    write(&page, first, 0, "Drop it.", cx);
+    write(&shell, &page, first, 0, "Drop it.", cx);
     cx.update(|window, cx| window.focus(&card.read(cx).focus_handle(cx), cx));
     cx.simulate_keystrokes("ctrl-enter");
     release(&user);
@@ -2527,7 +2619,7 @@ fn once_an_ask_is_answered_the_focus_goes_to_the_next_card(cx: &mut TestAppConte
     });
     settle(cx);
     assert!(
-        in_card(&card_of(&page, second, cx), cx),
+        in_card(&card_of(&shell, &page, second, cx), cx),
         "the focus went to the next card"
     );
     at_rest(cx);

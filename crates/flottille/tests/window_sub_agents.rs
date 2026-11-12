@@ -458,11 +458,11 @@ fn a_long_sub_agent_stays_inside_its_card(cx: &mut TestAppContext) {
         &mcp,
         &format!("{} {}", guard::UNBROKEN, guard::SPACED),
     );
-    let (_shell, _page, at, cx) = card_of(&user, &lead, 1, cx);
+    let (shell, _page, at, cx) = card_of(&user, &lead, 1, cx);
     cx.update(|window, cx| window.click(toggle(at), cx));
     settle(cx);
     assert!(listed(&child, cx), "the list is open");
     guard::narrow(cx);
     settle(cx);
-    guard::assert_stays_inside(cx, format!("row-{at}-sub-agents"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-sub-agents"));
 }

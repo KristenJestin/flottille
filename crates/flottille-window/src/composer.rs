@@ -85,16 +85,42 @@ fn project_model<'a>(
 
 /// The provider, the model and the effort a new session starts on, when the user has not picked
 /// one: the project's provider (its own, else the one its model goes to) with its model, else the
-/// last ones used, else the first provider offered; each only when it is offered now.
+/// ones the user chose for new sessions (Settings), else the last ones used, else the first
+/// provider offered; each only when it is offered now. The setting gives what the project leaves
+/// out, for its own provider, and its effort goes with its own model only.
 pub fn first_pick(providers: &Providers, project: ProjectDefault, last: Option<&Pick>) -> Pick {
     let offered = |name: &str| providers.get(name).is_some_and(Provider::offered);
+    let setting = providers
+        .new_session
+        .as_ref()
+        .filter(|(provider, _, _)| offered(provider));
     if project != (None, None)
         && let Some(provider) = project_provider(providers, project)
         && offered(provider)
     {
-        return Pick {
+        let mut pick = Pick {
             provider: Some(provider.to_owned()),
             ..Pick::default()
+        }
+        .kept(providers, project);
+        if let Some((_, model, effort)) = setting.filter(|(name, _, _)| name == provider) {
+            // The project's model first; the setting gives the one the project leaves out, and
+            // its effort goes with its own model only.
+            if pick.model.is_none() {
+                pick.model = model.clone();
+            }
+            if pick.model == *model {
+                pick.effort = effort.clone();
+            }
+            pick = pick.kept(providers, project);
+        }
+        return pick;
+    }
+    if let Some((provider, model, effort)) = setting {
+        return Pick {
+            provider: Some(provider.clone()),
+            model: model.clone(),
+            effort: effort.clone(),
         }
         .kept(providers, project);
     }
@@ -124,7 +150,9 @@ impl Pick {
             && provider.model(model).is_none()
             && projects != Some(model.as_str())
         {
+            // The effort chosen went with it.
             self.model = None;
+            self.effort = None;
         }
         if self.model.is_none() {
             self.model = projects.map(str::to_owned);
@@ -609,7 +637,7 @@ impl Composer {
         let command = Command::Start {
             project: self.project.clone(),
             target: target.clone(),
-            pick: self.pick.clone(),
+            pick: self.asked(),
             message,
             images: self.attached.sending(),
             mode: self.mode.read(cx).mode().unwrap_or("auto").to_owned(),
@@ -622,6 +650,27 @@ impl Composer {
             .update(cx, |shell, _| shell.perform(command))
             .ok();
         cx.notify();
+    }
+
+    /// What a start asks: once the user picked, the model and the effort the pickers show, by
+    /// their names, so that the setting the daemon applies to a pick that names none does not
+    /// replace what they picked (the recommended ones included).
+    fn asked(&self) -> Pick {
+        let mut pick = self.pick.clone();
+        if !self.picked {
+            return pick;
+        }
+        let pickers = self.pickers();
+        if pick.model.is_none() {
+            pick.model = self
+                .provider()
+                .and_then(Provider::default_model)
+                .map(|m| m.id.clone());
+        }
+        if pickers.picked_effort().is_none() {
+            pick.effort = pickers.own_effort().cloned();
+        }
+        pick
     }
 
     /// The session started: the field is emptied for the next one. What it started on.
@@ -1060,7 +1109,7 @@ impl Pickers<'_> {
                         let note = if projects == Some(model.id.as_str()) {
                             Some("the project's".to_owned())
                         } else {
-                            is_default.then(|| "default".to_owned())
+                            is_default.then(|| "recommended".to_owned())
                         };
                         // A model without effort says so here, the one place it is said: the
                         // effort picker is not there for it.
@@ -1123,7 +1172,7 @@ impl Pickers<'_> {
                     items.push(item(
                         format!("effort-choice-{effort}"),
                         effort.clone(),
-                        default.then(|| "default".to_owned()),
+                        default.then(|| "recommended".to_owned()),
                         on,
                         Some(pick(None, None, (!default).then_some(effort.as_str()))),
                     ));

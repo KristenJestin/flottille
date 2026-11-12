@@ -1,15 +1,18 @@
-//! The guard of #772: a text never leaves its card. `assert_stays_inside(cx, id)` looks at every
-//! element the window observes (`.test_support()`) under the element `id` and refuses one whose
-//! bounds go past the right or left edge of it, or a card that is wider than the window. A card
-//! is drawn at 360 px (`NARROW`) by the tests that use it, so that a long word has no room to
-//! hide in.
+//! The guard of #772: a text never leaves its card. `assert_stays_inside(shell, cx, id)` waits for
+//! `id` to be drawn, then looks at every element the window observes (`.test_support()`) under
+//! the element `id` and refuses one whose bounds go past the right or left edge of it, or a card
+//! that is wider than the window. A card is drawn at 360 px (`NARROW`) by the tests that use it,
+//! so that a long word has no room to hide in.
 //!
 //! The guard sees what is observed: a text that can leave its card gets an id and
 //! `.test_support()`, so that the guard sees it.
 #![allow(dead_code)]
 
+use std::time::{Duration, Instant};
+
+use flottille_window::Shell;
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
-use gpui_kit::{ElementId, VisualTestContext, Window, px, size};
+use gpui_kit::{ElementId, Entity, VisualTestContext, Window, px, size};
 
 /// The width of the window the guard's tests draw in.
 pub const NARROW: f32 = 360.;
@@ -55,21 +58,42 @@ pub fn escapes(window: &mut Window, id: impl Into<ElementId>) -> Vec<String> {
 }
 
 /// Asserts that nothing observed under `id` leaves it, and that the guard looked at something.
-pub fn assert_stays_inside(cx: &mut VisualTestContext, id: impl Into<ElementId>) {
+/// It waits for `id` to be drawn first, as the suites' `until` does: the shell applies what the
+/// daemon sent only when it is polled, so a row written a moment ago comes after a poll.
+pub fn assert_stays_inside(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    id: impl Into<ElementId>,
+) {
     let id = id.into();
-    let (found, escaped) = cx.update(|window, _| {
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.executor().advance_clock(Duration::from_millis(50));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
         // Observed under a path of its own or only through its parts: say what is there.
-        let known: Vec<String> = window
-            .elements()
-            .iter()
-            .filter_map(|e| e.path().last().map(|id| format!("{id:?}")))
-            .filter(|name| !name.contains("glyph:") && !name.contains("enter-"))
-            .collect();
+        let (drawn, known) = cx.update(|window, _| {
+            let known: Vec<String> = window
+                .elements()
+                .iter()
+                .filter_map(|e| e.path().last().map(|id| format!("{id:?}")))
+                .filter(|name| !name.contains("glyph:") && !name.contains("enter-"))
+                .collect();
+            (known.iter().any(|name| *name == format!("{id:?}")), known)
+        });
+        if drawn {
+            break;
+        }
         assert!(
-            known.iter().any(|name| *name == format!("{id:?}")),
+            Instant::now() < deadline,
             "{id:?} is not drawn; the rows drawn are: {}",
             known.join(" ")
         );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let (found, escaped) = cx.update(|window, _| {
         let found = window.within(id.clone()).elements().len();
         if std::env::var_os("GUARD_DUMP").is_some() {
             eprintln!("GUARD frame {id:?} {:?}", window.find(id.clone()).bounds());

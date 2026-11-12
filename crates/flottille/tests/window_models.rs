@@ -119,7 +119,7 @@ fn the_composer_offers_the_models_before_any_session(cx: &mut TestAppContext) {
     // The provider's real default is named, and already selected.
     let default = composer.read_with(cx, |c, _| c.entries(Menu::Model)[0].clone());
     assert!(default.on);
-    assert_eq!(default.note.as_deref(), Some("default"));
+    assert_eq!(default.note.as_deref(), Some("recommended"));
     let agents = user.call("agent.list", serde_json::Value::Null).unwrap();
     assert_eq!(agents["agents"], json!([]), "no session was opened");
 }

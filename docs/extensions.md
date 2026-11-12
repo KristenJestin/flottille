@@ -297,9 +297,9 @@ slot, the judge's own code left as it is until it moves:
 - **Per project** (Review): a slot a project may override, on its page in the project's
   Features.
 - **In the window**, every slot is the one model choice of `reference/gpui.md` (rule 15,
-  `ModelChoice`): one select of `<provider> · <model>`, the effort beside it, the default first and
-  said with what it gives today. A slot is never set to none from it: an extension is turned off by
-  its switch.
+  `ModelChoice`): one select of `<provider> · <model>`, the effort beside it, opening on the model
+  the slot runs on left unset, selected and marked `recommended`; choosing it back clears the
+  slot. A slot is never set to none from it: an extension is turned off by its switch.
 - **Using it:** a provider no longer enabled or ready makes each use of the slot fail, and a use
   that fails falls back as its extension says (the compaction changes nothing; a review pass is
   reported as not run).
@@ -767,10 +767,18 @@ As built (#338):
   results, lost data, crashes the change brings."), **Project rules**, the standards pass ("The
   project's AGENTS.md, read from the base branch."), **Security** ("Secrets, injections, access.
   Off by default."). The last line, **Checking the findings**, is the verifier, with no switch
-  since it always runs ("Each finding confirmed before it reaches the session."), its first option
-  `One size smaller` (`Sonnet for Claude`). The default is said once under the card: "Models: the
-  strongest of the session's provider unless you choose one. Each check is a turn on your own
-  quota.", then "After fixes, one more review of what changed; two at most."
+  since it always runs ("Each finding confirmed before it reaches the session."), on the model one
+  size smaller. The rule is said once under the card: "Models: the strongest of the session's
+  provider unless you choose one. Each check is a turn on your own quota.", then "After fixes, one
+  more review of what changed; two at most."
+- **A check's model**: the rule gives no single value, since it depends on the session's provider.
+  Each provider's model the rule gives (its strongest, one size smaller for the verifier) is marked
+  `recommended for <Provider> sessions`. A check with no model chosen opens on the first ready
+  provider's, with its effort beside it. Choosing any provider's recommended model clears the slot:
+  it follows the rule again. Pinning a check is choosing another model; an effort chosen on a
+  recommended model pins that model with it, the slot needing a model for its effort. In a
+  project's Features, the first option is Settings' value, and choosing a recommended model there
+  pins it for the project.
 - Under each check's line, a quiet fold, **Instructions for this check** (below), its folded line
   `none` or the start of its text.
 - **What every reviewer is told**, the shared guidance ("Added to Flottille's own instructions,

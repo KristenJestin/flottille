@@ -247,10 +247,12 @@ the wrong code first).
 15. **One way to choose a model**: `ModelChoice`, wherever a model is chosen (the judge, the
     compaction's summary, each of Review's checks, what comes later). One select, its entries
     `<provider> · <model>` grouped by provider, with the effort in a narrow select beside it when
-    the model has efforts. A default that is a rule is the first option, said as the rule and, on
-    its second line, what it gives today (`Strongest of the session's provider`, `Opus for
-    Claude`; in a project, `As in Settings`); a model Flottille picked is the one chosen, marked
-    `picked` until its notice is seen. A choice that is not a model (the compaction's `The
+    the model has efforts. **No select of the window has a row named "default"**, for a model or an
+    effort: it opens on the value that applies, selected as if chosen and marked `recommended`
+    (`Claude · Opus 5.5 · recommended`, `high · recommended`), and choosing it back clears the
+    choice (it keeps following the provider, or the feature's rule); in a project, the first
+    option is `As in Settings`; a model Flottille picked is the one chosen, marked `picked` until
+    its notice is seen. A choice that is not a model (the compaction's `The
     session's own agent`) comes before the models. "No model" is never an entry: a feature is
     turned off by its switch. Under it, one line of cost
     ("Each decision is a turn of this model, on your own quota."). Several choices in a row are
@@ -261,8 +263,9 @@ the wrong code first).
     wide as its letters until it does), and a row that hugs its content right-aligned is a flex
     item of a `w_full` row, not a child of a column that aligns to the end. A one-line text (a
     title, a path, a label) is cut with an ellipsis and has its whole text in a tooltip.
-    **[test]** `tests/guard/mod.rs` (`guard::assert_stays_inside(cx, id)`: every observed
-    element under `id` stays between its sides, and the frame inside the window) with one
+    **[test]** `tests/guard/mod.rs` (`guard::assert_stays_inside(shell, cx, id)`, which waits for
+    `id` to be drawn: every observed element under `id` stays between its sides, and the frame
+    inside the window) with one
     `a_long_<thing>_stays_inside_its_card` per kind of row, drawn 360 px wide with a long
     unbroken word and a long spaced sentence (`window_cards.rs`, and the suite of each part that
     has its own cards). A text that can leave its card gets an id and `.test_support()`, so that
@@ -290,7 +293,7 @@ The components that hold them:
 | `ListCard::new(id).row(ListRow)` | rule 7's list; `.scrolling(&ScrollHandle, max_height)` makes a long one scroll inside its card (the screen keeps the handle: it holds the place and takes it back to the top); `ListRow` has `.mono()`, `.tag(t)`, `.line(l)`, `.more(Entity<Menu>)` (its clicks stay its own), `.below(el)` (labelled values, a reason under the title); `.item(id, placement, row)` draws a row of a `Listing` in its `Item`; a search's result has `.pieces(..)` (what matched, in the accent), `.marked(bool)` (the row the keys move to, its fill moving over `HOVER`) and `.on_enter(f)` (the pointer entered it) |
 | `Tabs::new(id, label, chosen).tab(key, words)`, `.counted(key, words, count)`, `.on_choose(f)` | a page of sections shown one at a time (Settings, the project's settings, the project page): as many tabs as sections, a count after the name of a list, the marker slides to the tab chosen over `PANEL`; the page draws the chosen section alone, inside an `enter` that plays again as it is chosen again |
 | `Subpage::new(id, label)` | rule 13: a list that opens, in place of itself and inside its tab, the page of one of its rows. `.entry(key, icon, title, tag, line)` draws a row of a `ListCard` (its icon, its name, its state as a tag, said once: `On`, `Off`, `2 on`, and its one line, what it is for, never its state); `.open(Option<key>)`, `.on_open(f)`, `.page(el)`. Above the open page, a path line, `Features / Review`, whose first word is a link back to the list, as Escape is. The page enters sliding from the right while the list leaves to the left, over `PANEL` with a fade; going back does the reverse. The tab keeps the page open while another tab is shown, and a link (a notice, a mode's "unavailable" line, an action of the quick switcher) opens `Settings › Features › Review` directly with the setting in view; ids `<id>-<key>`, `<id>-back` |
-| `ModelChoice::new(id, label, choice)` | rule 15: `.default(rule, gives)` for its first option, `.effort(Option<effort>)`, `.compact()` for a line of a card, `.cost(line)`, `.inherited(gives)` in a project (its first option `As in Settings`), `.on_choose(f)`; the options come from the providers enabled and ready, their models and efforts as the daemon knows them |
+| `ModelChoice::new(id, label, choice)` | rule 15: `.follows()` where nothing chosen is a rule (the first recommended model applies, and choosing it back clears), `ModelEntry::recommended()` and `.proposes(effort)` for the values that apply, `.effort(Option<effort>)`, `.compact()` for a line of a card, `.cost(line)`, `.inherited(gives)` in a project (its first option `As in Settings`), `.on_choose(f)`; the options come from the providers enabled and ready, their models and efforts as the daemon knows them |
 | `Skeleton::new(id)` | rule 11: `.w(px)` (all the room without), `.h(px)` (12 px without), a block in the faint fill that pulses once every `PULSE`, in its own small view; `awaiting(id, pending, skeleton, content)` crossfades it into the content |
 | `EmptyLine::new(id, Icon, text)` | an empty list; `.action(Button)` |
 | `fuzzy::find(query, title, context)` | a search's matching (the window's quick switcher): each word typed in the title, else as a whole in the context, ignoring case, accents and ligatures; a score and the marks, `Match::pieces(title)` for a `ListRow` |

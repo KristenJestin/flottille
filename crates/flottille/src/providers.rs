@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 use flottille_core::agent::{Agent, Choices};
 use flottille_core::paths::Paths;
 use flottille_core::project::Project;
-use flottille_core::provider::{self, Judge, Settings, says_default};
+use flottille_core::provider::{self, Judge, NewSession, Settings, says_default};
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
@@ -974,6 +974,11 @@ pub fn choose(
 ) -> Result<(&'static Provider, Choices), Failure> {
     let settings =
         Settings::load(&daemon.paths).map_err(|error| Failure::new("invalid-config", error))?;
+    let checks = checks(&settings, Version::Known);
+    // What the user chose for a new session (`[new_session]`) stands below the project's file and
+    // above what the provider proposes: its provider only when the project names none, and only
+    // while that provider is ready.
+    let chosen = settings.new_session.as_ref();
     let provider = match &asked.provider {
         Some(name) => get(name).ok_or_else(|| {
             Failure::refused(format!(
@@ -981,13 +986,21 @@ pub fn choose(
                 provider::NAMES.join(", ")
             ))
         })?,
-        None => project_provider(project, &settings).ok_or_else(|| {
-            Failure::refused(
-                "no provider is enabled: enable one in providers.toml (see `flottille doctor`)",
-            )
-        })?,
+        None => chosen
+            .filter(|_| project.provider.is_none() && project.model.is_none())
+            .filter(|chosen| {
+                checks
+                    .iter()
+                    .any(|c| c.provider.name == chosen.provider && c.ready())
+            })
+            .and_then(|chosen| get(&chosen.provider))
+            .or_else(|| project_provider(project, &settings))
+            .ok_or_else(|| {
+                Failure::refused(
+                    "no provider is enabled: enable one in providers.toml (see `flottille doctor`)",
+                )
+            })?,
     };
-    let checks = checks(&settings, Version::Known);
     let check = checks
         .iter()
         .find(|c| c.provider.name == provider.name)
@@ -1008,24 +1021,62 @@ pub fn choose(
             provider.name
         )));
     }
-    let model = asked.model.or_else(|| {
-        project.model.clone().filter(|_| {
-            project_provider(project, &settings).is_some_and(|p| p.name == provider.name)
-        })
-    });
+    let project_model = project
+        .model
+        .clone()
+        .filter(|_| project_provider(project, &settings).is_some_and(|p| p.name == provider.name));
+    let own = chosen.filter(|chosen| chosen.provider == provider.name);
+    // The model the setting gives is the one left when neither the agent nor the project names
+    // one; the effort it gives belongs to that model, so it goes with another.
+    let from_setting = asked.model.is_none() && project_model.is_none();
+    let model = asked
+        .model
+        .or(project_model)
+        .or_else(|| own.and_then(|chosen| chosen.model.clone()));
+    let setting_model = own.and_then(|chosen| chosen.model.clone());
+    let setting_effort = own
+        .and_then(|chosen| chosen.effort.clone())
+        .filter(|_| asked.effort.is_none() && model == setting_model);
+    let (mut model, mut effort) = (model, asked.effort.or(setting_effort.clone()));
     // What the provider offers is known once one of its sessions said it; until then a model or
     // an effort it does not offer fails the agent when its session opens. Without a model, an
     // effort is the default model's, once a new session said which it is.
     let check = Check::of(provider, &settings, Version::Skip);
-    let mut model = model;
     if let Some(models) = known_models(daemon, &check) {
-        check_known(provider, &models, &mut model, asked.effort.as_deref(), None)?;
+        // What the setting gave and the provider no longer offers is let go, not refused: the
+        // session starts on what the provider proposes.
+        if from_setting && setting_model.is_some() {
+            let offered = models.iter().filter_map(|m| m["id"].as_str());
+            if let Some(listed) = model
+                .as_deref()
+                .and_then(|asked| provider::listed_model(offered, asked))
+            {
+                model = Some(listed.to_owned());
+            } else {
+                model = None;
+                effort = effort.filter(|_| setting_effort.is_none());
+            }
+        }
+        if let Some(given) = setting_effort.as_ref()
+            && effort.as_ref() == Some(given)
+            && let Some(offered) = models
+                .iter()
+                .find(|m| match &model {
+                    Some(model) => m["id"] == model.as_str(),
+                    None => m["default"] == true,
+                })
+                .and_then(|m| m["efforts"].as_array())
+            && !offered.iter().any(|e| e == given.as_str())
+        {
+            effort = None;
+        }
+        check_known(provider, &models, &mut model, effort.as_deref(), None)?;
     }
     Ok((
         provider,
         Choices {
             model,
-            effort: asked.effort,
+            effort,
             mode: None,
         },
     ))
@@ -1149,6 +1200,55 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
             }
             Ok(json!({"judge": judge}))
         }
+        "provider.set_new_session" => {
+            // The user's choice only: no tool of an agent reaches this method.
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Chosen {
+                #[serde(default)]
+                provider: Option<String>,
+                #[serde(default)]
+                model: Option<String>,
+                #[serde(default)]
+                effort: Option<String>,
+            }
+            let Chosen {
+                provider,
+                model,
+                effort,
+            } = serde_json::from_value(params)?;
+            let chosen = match provider {
+                None => None,
+                Some(name) => {
+                    let provider = get(&name).ok_or_else(|| {
+                        Failure::new(
+                            "not-found",
+                            format!(
+                                "there is no provider {name}: the providers are {}",
+                                provider::NAMES.join(", ")
+                            ),
+                        )
+                    })?;
+                    let model = model
+                        .filter(|m| !m.trim().is_empty())
+                        .map(|asked| listed_or_asked(&daemon, provider, asked));
+                    Some(NewSession {
+                        provider: provider.name.to_owned(),
+                        model,
+                        effort: effort.filter(|e| !e.trim().is_empty()),
+                    })
+                }
+            };
+            if set_new_session(&daemon.paths, chosen.as_ref())? {
+                daemon
+                    .emit(
+                        "provider.new_session_changed",
+                        json!({"new_session": chosen}),
+                    )
+                    .map_err(|error| Failure::new("unavailable", error.to_string()))?;
+            }
+            Ok(json!({"new_session": chosen}))
+        }
         "provider.judge_noticed" => {
             if judge_noticed(&daemon.paths)? {
                 let judge = Settings::load(&daemon.paths)
@@ -1253,6 +1353,30 @@ fn set_judge(paths: &Paths, judge: Option<&Judge>) -> Result<bool, Failure> {
     })
 }
 
+/// Sets `[new_session]` in `providers.toml`, or removes it when `chosen` is none: new sessions
+/// follow what the provider proposes again. The rest of the file is kept as the user wrote it.
+/// Whether it changed.
+fn set_new_session(paths: &Paths, chosen: Option<&NewSession>) -> Result<bool, Failure> {
+    edit_judge(paths, |before, document| {
+        if before.new_session.as_ref() == chosen {
+            return false;
+        }
+        document.remove("new_session");
+        if let Some(chosen) = chosen {
+            let mut table = toml_edit::Table::new();
+            table.insert("provider", toml_edit::value(chosen.provider.as_str()));
+            if let Some(model) = &chosen.model {
+                table.insert("model", toml_edit::value(model.as_str()));
+            }
+            if let Some(effort) = &chosen.effort {
+                table.insert("effort", toml_edit::value(effort.as_str()));
+            }
+            document.insert("new_session", toml_edit::Item::Table(table));
+        }
+        true
+    })
+}
+
 /// `[judge]` as `providers.toml` holds it.
 fn judge_table(judge: &Judge) -> toml_edit::Item {
     let mut table = toml_edit::Table::new();
@@ -1299,10 +1423,7 @@ fn edit_judge(
     Ok(true)
 }
 
-/// The smallest model of each provider, in the form its agent takes it: what Flottille picks as
-/// the Auto judge for a user who never chose one (`docs/design.md` §7.1). A provider not listed
-/// gets nothing picked: its smallest model is not known for sure.
-pub const SMALLEST: [(&str, &str); 1] = [("claude", "haiku")];
+pub use flottille_core::provider::SMALLEST;
 
 /// What the comment above a judge Flottille picked says.
 const PICKED: &str = "# Picked by Flottille as the Auto judge: the smallest model of the first \
@@ -1523,6 +1644,27 @@ fn switched(name: &str, enabled: bool, announced: Result<(), String>) -> Value {
     answer
 }
 
+/// What a new session starts on, in words: `claude, opus, high`, the provider's own words for
+/// what is left out.
+fn new_session_words(chosen: &Value) -> String {
+    let Some(provider) = chosen["provider"].as_str() else {
+        return "what the provider proposes".into();
+    };
+    match (chosen["model"].as_str(), chosen["effort"].as_str()) {
+        (None, None) => format!("{provider}, the model and the effort it proposes"),
+        (model, effort) => format!(
+            "{provider}, {}, {}",
+            model.unwrap_or("the model it proposes"),
+            effort.unwrap_or("the effort it proposes")
+        ),
+    }
+}
+
+/// What `flottille provider new-session` says once it set what a new session starts on.
+pub fn new_session_text(chosen: &Value) -> String {
+    format!("New sessions start on {}.\n", new_session_words(chosen))
+}
+
 /// `flottille provider list`: each provider, whether its agents can run, and the Auto judge,
 /// said picked by Flottille until the user saw it.
 pub fn list_text(answer: &Value) -> String {
@@ -1553,6 +1695,10 @@ pub fn list_text(answer: &Value) -> String {
             format!("Auto judge: {provider}{model}{picked}.\n")
         }
     });
+    shown.push_str(&format!(
+        "New sessions: {}.\n",
+        new_session_words(&answer["new_session"])
+    ));
     shown
 }
 
@@ -1575,7 +1721,11 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
             entry
         })
         .collect();
-    let mut answer = json!({"providers": providers, "judge": settings.judge});
+    let mut answer = json!({
+        "providers": providers,
+        "judge": settings.judge,
+        "new_session": settings.new_session,
+    });
     if let Some(project) = project {
         let provider = project_provider(project, &settings);
         answer["project"] = json!({

@@ -175,6 +175,22 @@ fn present(cx: &mut VisualTestContext, id: &str) -> bool {
     cx.update(|window, _| window.try_find(id.to_owned()).is_some())
 }
 
+/// Waits for the element to be drawn, then clicks it and lets the window settle: a click on an
+/// element not drawn yet is lost, or panics.
+fn click_when_drawn(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str) {
+    until(shell, cx, &format!("{id} is drawn"), |cx| present(cx, id));
+    let id = id.to_owned();
+    cx.update(|window, cx| window.click(id, cx));
+    settle(cx);
+}
+
+/// Waits until the element says `text`.
+fn shows(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str, text: &str) {
+    until(shell, cx, &format!("{id} says {text}"), |cx| {
+        label(cx, id).as_deref() == Some(text)
+    });
+}
+
 fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
     cx.update(|window, _| {
         window
@@ -420,7 +436,7 @@ fn a_done_review_is_folded_and_says_its_findings(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_rail_row_says_its_state_whole_when_there_is_room(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
-    let (_, cx, _, pilot_id, check, _) = review_rail(&user, cx);
+    let (shell, cx, _, pilot_id, check, _) = review_rail(&user, cx);
 
     for agent in [&pilot_id, &check] {
         let row = bounds(cx, &format!("rail-row-{agent}"));
@@ -444,7 +460,7 @@ fn a_rail_row_says_its_state_whole_when_there_is_room(cx: &mut TestAppContext) {
         );
     }
     // The rail with a review running keeps every text inside it.
-    guard::assert_stays_inside(cx, "rail-agents");
+    guard::assert_stays_inside(&shell, cx, "rail-agents");
 }
 
 #[gpui_kit::test]
@@ -459,7 +475,7 @@ fn a_long_state_stays_inside_a_narrow_rail(cx: &mut TestAppContext) {
             .is_some_and(|said| said.contains(guard::UNBROKEN))
     });
     settle(cx);
-    guard::assert_stays_inside(cx, "rail-agents");
+    guard::assert_stays_inside(&shell, cx, "rail-agents");
 
     // The state that is cut says itself whole under the pointer.
     let long = format!("rail-runs-on-{check}");
@@ -1033,11 +1049,10 @@ fn a_project_s_two_switches_carry_the_dot_and_go_back_to_settings(cx: &mut TestA
     at_rest(cx);
 }
 
-#[gpui_kit::test]
-fn the_default_model_is_said_once_under_the_card(cx: &mut TestAppContext) {
-    // The daemon is asked for the models of the provider, which offers the one it picks.
+/// A user whose provider offers `opus` and `sonnet`, the daemon having listed them, with Review on.
+fn user_with_models() -> User {
     let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_LIST_MODELS", "1");
-    user.fake_script(json!({"models": ["opus", "sonnet"]}));
+    user.fake_script(json!({"models": ["opus", "sonnet"], "efforts": ["low", "high"]}));
     user.call("extension.set", json!({"name": "review", "enabled": true}))
         .unwrap();
     eventually("the models the daemon picks", || {
@@ -1047,19 +1062,46 @@ fn the_default_model_is_said_once_under_the_card(cx: &mut TestAppContext) {
             .iter()
             .any(|s| s["key"] == "bugs_model" && s["default"]["gives"]["claude"] == "opus")
     });
-    let (_shell, cx) = review_page(&user, true, cx);
+    user
+}
 
-    // Each check's select says its default in a word, the rule under the card, once.
+/// What a check's model slot holds, `null` while unset.
+fn slot(user: &User, key: &str) -> Value {
+    let listed = review_listed(user);
+    let setting = listed["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == key)
+        .unwrap();
+    if setting["set"] == true {
+        setting["value"].clone()
+    } else {
+        Value::Null
+    }
+}
+
+#[gpui_kit::test]
+fn a_check_s_select_opens_on_the_recommended_model_selected(cx: &mut TestAppContext) {
+    let user = user_with_models();
+    let (shell, cx) = review_page(&user, true, cx);
+
+    // Each check's select opens on the model it runs on, chosen as if the user had, marked
+    // recommended; never a row named Default.
     for (key, _, _) in CHECKS {
-        assert_eq!(
-            label(cx, &format!("review-setting-{key}_model-model")).as_deref(),
-            Some("Default"),
-            "{key}"
+        shows(
+            &shell,
+            cx,
+            &format!("review-setting-{key}_model-model"),
+            "Claude · opus · recommended for Claude sessions",
         );
     }
-    assert_eq!(
-        label(cx, "review-setting-verifier_model-model").as_deref(),
-        Some("One size smaller")
+    // The last check runs one size smaller: its recommended model is that one.
+    shows(
+        &shell,
+        cx,
+        "review-setting-verifier_model-model",
+        "Claude · sonnet · recommended for Claude sessions",
     );
     let card = bounds(cx, "review-checks");
     let models = label(cx, "review-checks-models").unwrap();
@@ -1076,13 +1118,172 @@ fn the_default_model_is_said_once_under_the_card(cx: &mut TestAppContext) {
     assert!(
         bounds(cx, "review-checks-rounds").top() >= bounds(cx, "review-checks-models").bottom()
     );
-    // Opened, the first option says what it gives today.
-    cx.update(|window, cx| window.click("review-setting-bugs_model-model", cx));
-    settle(cx);
-    assert_eq!(
-        label(cx, "review-setting-bugs_model-model-first-line").as_deref(),
-        Some("opus for Claude")
+    // Opened, no row is the rule: the models, the recommended one marked.
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+    shows(
+        &shell,
+        cx,
+        "review-setting-bugs_model-model-claude-sonnet",
+        "Claude · sonnet",
     );
+    assert!(!present(cx, "review-setting-bugs_model-model-first"));
+    assert_eq!(
+        slot(&user, "bugs_model"),
+        Value::Null,
+        "nothing was chosen by looking"
+    );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn choosing_the_recommended_model_back_clears_the_choice(cx: &mut TestAppContext) {
+    let user = user_with_models();
+    let (shell, cx) = review_page(&user, true, cx);
+
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model-claude-sonnet");
+    until(&shell, cx, "the choice is stored", |cx| {
+        slot(&user, "bugs_model") == json!({"provider": "claude", "model": "sonnet"})
+            && label(cx, "review-setting-bugs_model-model").as_deref() == Some("Claude · sonnet")
+    });
+    settle(cx);
+
+    // Back on the recommended one: it keeps following the rule, nothing is stored.
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model-claude-opus");
+    until(&shell, cx, "the choice is cleared", |cx| {
+        slot(&user, "bugs_model") == Value::Null
+            && label(cx, "review-setting-bugs_model-model").as_deref()
+                == Some("Claude · opus · recommended for Claude sessions")
+    });
+    settle(cx);
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_review_check_chooses_its_effort(cx: &mut TestAppContext) {
+    let user = user_with_models();
+    let (shell, cx) = review_page(&user, true, cx);
+
+    // The effort select is beside the check's model, as the compactor's is: the model's
+    // recommended effort selected and marked.
+    // The model proposes `low`: choosing `high` stores it.
+    shows(
+        &shell,
+        cx,
+        "review-setting-bugs_model-effort",
+        "low · recommended",
+    );
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-effort");
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-effort-high");
+    until(&shell, cx, "the effort is stored and shown", |cx| {
+        slot(&user, "bugs_model")
+            == json!({"provider": "claude", "model": "opus", "effort": "high"})
+            && label(cx, "review-setting-bugs_model-effort").as_deref() == Some("high")
+    });
+    settle(cx);
+    // The other checks are untouched.
+    assert_eq!(slot(&user, "spec_model"), Value::Null);
+    at_rest(cx);
+}
+
+/// A user with two providers whose models the daemon listed, Claude first, with Review on.
+fn user_with_two_providers() -> User {
+    let user = User::with_fake_providers().with_env("FLOTTILLE_TEST_LIST_MODELS", "1");
+    user.provider_script(
+        "claude",
+        json!({"models": ["opus", "sonnet"], "efforts": ["low", "high"]}),
+    );
+    user.provider_script(
+        "opencode",
+        json!({"models": ["open/small", "open/medium"], "efforts": ["low", "high"]}),
+    );
+    user.call("extension.set", json!({"name": "review", "enabled": true}))
+        .unwrap();
+    eventually("the models the daemon picks", || {
+        review_listed(&user)["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["key"] == "bugs_model" && s["default"]["gives"]["claude"] == "opus")
+    });
+    user
+}
+
+#[gpui_kit::test]
+fn a_review_slot_with_no_choice_opens_on_the_first_provider_s_strongest(cx: &mut TestAppContext) {
+    let user = user_with_two_providers();
+    let (shell, cx) = review_page(&user, true, cx);
+    // The select is opened once, and the window left to learn OpenCode's models while it is.
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+    until(&shell, cx, "OpenCode's models are shown", |cx| {
+        present(cx, "review-setting-bugs_model-model-opencode-open-small")
+    });
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+    // Each provider's strongest is marked for its own sessions; nothing chosen, the first's is
+    // selected.
+    shows(
+        &shell,
+        cx,
+        "review-setting-bugs_model-model",
+        "Claude · opus · recommended for Claude sessions",
+    );
+    shows(
+        &shell,
+        cx,
+        "review-setting-verifier_model-model",
+        "Claude · sonnet · recommended for Claude sessions",
+    );
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+    shows(
+        &shell,
+        cx,
+        "review-setting-bugs_model-model-opencode-open-small",
+        "OpenCode · open/small · recommended for OpenCode sessions",
+    );
+    shows(
+        &shell,
+        cx,
+        "review-setting-bugs_model-model-claude-sonnet",
+        "Claude · sonnet",
+    );
+    assert_eq!(slot(&user, "bugs_model"), Value::Null);
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn choosing_any_provider_s_recommended_model_clears_a_review_slot(cx: &mut TestAppContext) {
+    let user = user_with_two_providers();
+    let (shell, cx) = review_page(&user, true, cx);
+    let pick = |key: &str, cx: &mut VisualTestContext| {
+        click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+        click_when_drawn(
+            &shell,
+            cx,
+            &format!("review-setting-bugs_model-model-{key}"),
+        );
+    };
+    // The select is opened once, and the window left to learn OpenCode's models while it is.
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+    until(&shell, cx, "OpenCode's models are shown", |cx| {
+        present(cx, "review-setting-bugs_model-model-opencode-open-small")
+    });
+    click_when_drawn(&shell, cx, "review-setting-bugs_model-model");
+
+    // Pinned: a model that is not recommended.
+    pick("opencode-open-medium", cx);
+    until(&shell, cx, "the slot is pinned", |_| {
+        slot(&user, "bugs_model") == json!({"provider": "opencode", "model": "open/medium"})
+    });
+    settle(cx);
+    // OpenCode's recommended model, not the first provider's: the slot follows the rule again.
+    pick("opencode-open-small", cx);
+    until(&shell, cx, "the slot is cleared", |cx| {
+        slot(&user, "bugs_model") == Value::Null
+            && label(cx, "review-setting-bugs_model-model").as_deref()
+                == Some("Claude · opus · recommended for Claude sessions")
+    });
+    settle(cx);
     at_rest(cx);
 }
 

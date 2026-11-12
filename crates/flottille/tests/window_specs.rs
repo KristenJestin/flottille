@@ -1290,13 +1290,40 @@ fn a_long_spec_stays_inside_its_cards(cx: &mut TestAppContext) {
     open_project(&shell, cx);
     click(cx, "project-tabs-specs");
     settle(cx);
-    guard::assert_stays_inside(cx, "project-specs-list".to_owned());
+    guard::assert_stays_inside(&shell, cx, "project-specs-list".to_owned());
     open_spec(&shell, cx, spec);
     cx.simulate_resize(size(px(guard::NARROW), px(1600.)));
     settle(cx);
-    guard::assert_stays_inside(cx, "spec-header".to_owned());
+    guard::assert_stays_inside(&shell, cx, "spec-header".to_owned());
     open_spec(&shell, cx, asked);
     cx.simulate_resize(size(px(guard::NARROW), px(1600.)));
     settle(cx);
-    guard::assert_stays_inside(cx, format!("spec-question-{question}"));
+    guard::assert_stays_inside(&shell, cx, format!("spec-question-{question}"));
+}
+
+#[gpui_kit::test]
+fn the_guard_waits_for_a_spec_written_after_the_list_opened(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    user.call(
+        "spec.new",
+        json!({"project": "app", "title": "Written first"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(guard::NARROW), px(1600.)));
+    open_project(&shell, cx);
+    click(cx, "project-tabs-specs");
+    settle(cx);
+    // The daemon sends the new spec; the window has it only once the shell polls its updates.
+    let late = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Written late"}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    guard::assert_stays_inside(&shell, cx, format!("spec-{late}"));
 }
