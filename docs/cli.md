@@ -256,14 +256,16 @@ back as it was.
 Your connections (`docs/extensions.md`, "Connections"): whether Connections is on, and each
 connection with its tool, its state, why it is cut off or failing, and the setting of each action.
 
-### `flottille connection add <name> --about S (--command W... | --url U) [--env V=E]... [--header H=E]... [--only A=v1,v2]... [--except P]...`
+### `flottille connection add <name> --about S (--command W... | --url U) [--env V=E]... [--header H=E]... [--only A=v1,v2]... [--except P]... [--client-id ID]`
 
 Declares a connection under `[[connections.server]]` of `extensions.toml`: a command spawned
 without a shell (its words given after `--command`), or an `https://` URL (`http://` on this
 machine alone). `--env` and `--header` name vault entries of every project, `--only` limits the
-values of an argument, `--except` leaves a project out. It is given to no agent until reviewed.
+values of an argument, `--except` leaves a project out, `--client-id` is the OAuth client id you
+registered with the server's authorization server, when it registers none by itself (`connection
+login`). It is given to no agent until reviewed.
 
-### `flottille connection edit <name> [--about S] [--command W... | --url U] [--env…] [--header…] [--only…] [--except…] [--on | --off]`
+### `flottille connection edit <name> [--about S] [--command W... | --url U] [--env…] [--header…] [--only…] [--except…] [--client-id ID] [--on | --off]`
 
 Replaces what is given. A change of the command, the URL, the variables, the headers or the
 limits asks for a new review.
@@ -275,6 +277,20 @@ limits asks for a new review.
 Starts its server and prints, as plain text, what it announces against what you accepted: the
 version, the instructions and each action, old lines `-`, new lines `+`, and what each limit
 covers.
+
+### `flottille connection login <name> [--no-browser]`
+
+Signs a URL connection in with OAuth (`docs/reference/mcp-authorization.md`): opens the
+authorization server's page in your default browser, waits up to five minutes for you to sign in
+there, and keeps the tokens in the vault, bound to the connection (`<name>.oauth`), refreshed
+before they expire and never shown. `--no-browser` prints the address to open instead. Run it
+again when the connection is signed out (`connection list` says so, and the inbox).
+
+```
+$ flottille connection login notes
+Opening https://auth.example.com/authorize?… in your browser to sign in to the connection notes.
+Signed in to the connection notes.
+```
 
 ### `flottille connection accept <name> [--set ACTION=SETTING]...`
 
