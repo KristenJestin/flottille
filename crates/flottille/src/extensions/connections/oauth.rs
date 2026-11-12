@@ -196,12 +196,18 @@ async fn refreshed(tokens: &Tokens) -> Result<Tokens, Unusable> {
     }
     let (status, answer) = posted_form(&tokens.token_endpoint, &form)
         .await
-        .map_err(Unusable::Failed)?;
+        .map_err(|why| Unusable::Failed(format!("the sign-in is kept, try again: {why}")))?;
     if !(200..300).contains(&status) {
         let why = refusal(&answer);
-        return Err(match status {
-            400 | 401 if answer["error"].is_string() => Unusable::SignedOut(why),
-            _ => Unusable::Failed(format!("the authorization server answered {status}: {why}")),
+        // Only a refresh token that is no good, or a client that is not known, ends the sign-in:
+        // an authorization server that is busy or confused keeps it.
+        return Err(match (status, answer["error"].as_str()) {
+            (400 | 401, Some("invalid_grant")) | (401, Some("invalid_client")) => {
+                Unusable::SignedOut(why)
+            }
+            _ => Unusable::Failed(format!(
+                "the sign-in is kept, try again: the refresh answered {status} {why}"
+            )),
         });
     }
     let mut fresh = granted(tokens.clone(), &answer).map_err(Unusable::Failed)?;

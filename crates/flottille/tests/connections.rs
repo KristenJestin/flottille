@@ -2704,3 +2704,61 @@ fn an_authorization_endpoint_on_another_host_with_iss_is_accepted() {
     stopped(server);
     assert_eq!(grants(&user, "authorization_code").len(), 1);
 }
+
+/// What a call of `conn_notes` says, which fails.
+fn failed_call(mcp: &Mcp) -> String {
+    refused(mcp.call(
+        "conn_notes",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ))
+}
+
+#[test]
+fn a_temporarily_unavailable_refresh_keeps_the_tokens() {
+    let user = user();
+    project(&user, "app");
+    let (server, url) = protected_server(&user, json!({"expires_in": 30}));
+    signed_in(&user, &url);
+    reviewed(&user);
+    let (_, mcp) = session(&user, "app");
+    for error in ["temporarily_unavailable", "invalid_request"] {
+        change_oauth(&user, |oauth| oauth["refresh_error"] = json!(error));
+        let failed = failed_call(&mcp);
+        assert!(failed.contains(error), "{failed}");
+        assert!(failed.contains("try again"), "{failed}");
+        let listed = connection(&user, "notes");
+        assert_ne!(listed["state"], "signed out", "{error}: {listed}");
+        assert!(has(&mcp, "conn_notes"), "{error}: the tool left the session");
+        let entries = user.call("vault.list", json!({})).unwrap().to_string();
+        assert!(entries.contains("notes.oauth"), "{error}: {entries}");
+    }
+    let inbox = user.call("inbox.list", json!({})).unwrap().to_string();
+    assert!(!inbox.contains("signed out"), "{inbox}");
+    // The server is back: the same tokens refresh, and the call goes through.
+    change_oauth(&user, |oauth| {
+        oauth.as_object_mut().unwrap().remove("refresh_error");
+    });
+    let text = done(mcp.call(
+        "conn_notes",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    stopped(server);
+    assert!(text.contains("found: the login decision"), "{text}");
+}
+
+#[test]
+fn an_invalid_grant_refresh_signs_out() {
+    let user = user();
+    project(&user, "app");
+    let (server, url) = protected_server(&user, json!({"expires_in": 30}));
+    signed_in(&user, &url);
+    reviewed(&user);
+    let (_, mcp) = session(&user, "app");
+    change_oauth(&user, |oauth| oauth["refresh_error"] = json!("invalid_grant"));
+    let failed = failed_call(&mcp);
+    stopped(server);
+    assert!(failed.contains("sign in again"), "{failed}");
+    assert_eq!(connection(&user, "notes")["state"], "signed out");
+    let entries = user.call("vault.list", json!({})).unwrap().to_string();
+    assert!(!entries.contains("notes.oauth"), "{entries}");
+}

@@ -134,10 +134,12 @@ client may not assume it gets one. An invalid or expired token is answered `401`
   within 60 seconds, it is refreshed first (`grant_type=refresh_token`, with `resource`); a server
   that runs when its token comes within those 60 seconds is started again, before the call, with
   the refreshed one. A refresh token given back replaces the old one.
-- **A refused refresh** (the token endpoint answers an OAuth error: the refresh token was revoked
-  or has expired) **signs the connection out**: its tokens are removed from the vault, its tool
-  leaves every session, and the inbox asks the user to sign in again. An authorization server
-  that cannot be reached is a failure to start, as any, and the tokens are kept.
+- **A refused refresh signs the connection out**: the token endpoint answers `invalid_grant` (the
+  refresh token was revoked or has expired), or `401 invalid_client`. Its tokens are removed from
+  the vault, its tool leaves every session, and the inbox asks the user to sign in again. Any other
+  answer (`temporarily_unavailable`, `invalid_request`, a `5xx`) and an authorization server that
+  cannot be reached keep the tokens: the call fails saying to try again, as a server that fails to
+  start does.
 - No token at all, or a server that still answers `401`: the call fails saying that the user must
   sign in (`flottille connection login <name>`).
 

@@ -18,7 +18,8 @@
 //! is its own authorization server too, at `/as` (its protected resource metadata, its metadata,
 //! `register`, `authorize` with PKCE `S256`, which redirects at once with a code, its `state` and
 //! its `iss`, and `token`). `oauth` takes `expires_in` (the tokens' life, 3600 seconds by
-//! default), `refresh: "refused"` (every refresh answers `invalid_grant`), `registration: false`
+//! default), `refresh: "refused"` (every refresh answers `invalid_grant`), `refresh_error`
+//! (every refresh answers that OAuth error instead, and keeps the refresh token valid), `registration: false`
 //! (no dynamic registration), `authorize_at`, `token_at` and `register_at: "elsewhere"` (that
 //! endpoint named on `localhost`, another origin than the issuer's `127.0.0.1`), `iss: false`
 //! (no `iss` in the authorization response, and none promised), and `tokens_file`, where every token it issues is written, so that a
@@ -560,6 +561,7 @@ impl Issuer {
                     ),
                     "refresh_token" => {
                         oauth["refresh"] != "refused"
+                            && !oauth["refresh_error"].is_string()
                             && self.refresh.remove(&field("refresh_token")).is_some()
                     }
                     _ => false,
@@ -575,7 +577,9 @@ impl Issuer {
                     Some(tokens) => reply("200 OK", Some(tokens)),
                     None => reply(
                         "400 Bad Request",
-                        Some(json!({"error": "invalid_grant",
+                        Some(json!({"error": oauth["refresh_error"].as_str()
+                                .filter(|_| grant == "refresh_token")
+                                .unwrap_or("invalid_grant"),
                             "error_description": "the grant is not valid"})),
                     ),
                 }
