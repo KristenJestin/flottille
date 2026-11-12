@@ -469,3 +469,32 @@ fn a_model_asked_before_the_models_are_known_is_said_as_asked_and_its_refusal_he
             .any(|body| body.contains("fake-huge"))
     });
 }
+
+#[test]
+fn the_window_is_given_what_each_agent_runs_on_by_name() {
+    let user = User::with_fake_agent();
+    user.fake_script(script(json!([])));
+    let (lead, mcp) = lead(&user);
+    let (child, _) = launched(
+        &user,
+        &mcp,
+        "deep",
+        json!({"kind": "child", "model": "fake-large", "effort": "high"}),
+    );
+
+    // The daemon names them, as its tools do: the window shows what it is given.
+    let listed = agent_of(&user, "deep");
+    assert_eq!(
+        listed["runs_on"],
+        json!({"model": "Fake Large 5.5", "effort": "high"})
+    );
+    let tree = user.call("agent.tree", json!({"agent": lead})).unwrap();
+    let entry = tree["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["agent"]["id"] == child.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(entry["agent"]["runs_on"], listed["runs_on"]);
+}

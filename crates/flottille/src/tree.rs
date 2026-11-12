@@ -2477,12 +2477,16 @@ pub fn resume_refusal(daemon: &Daemon, agent: &Agent) -> Option<&'static str> {
 
 /// An agent as a list shows it: without its instructions and its brief.
 pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
+    let runs = providers::agent_named(daemon, agent);
     json!({
         "id": agent.id,
         "provider": agent.provider,
         // What it runs on: what it took at its last start, else what was asked.
         "model": agent.taken.model.as_ref().or(agent.chosen.model.as_ref()),
         "effort": agent.taken.effort.as_ref().or(agent.chosen.effort.as_ref()),
+        // The same by name, as the agents' tools say it (`providers::runs_on`): `effort` `null`
+        // for a model its provider offers none for.
+        "runs_on": {"model": runs.model, "effort": runs.effort},
         // What the user changed to, set before the next prompt: `null` when nothing waits.
         "pending": (agent.pending.model.is_some() || agent.pending.effort.is_some())
             .then(|| json!({"model": agent.pending.model, "effort": agent.pending.effort})),
