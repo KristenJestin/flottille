@@ -2814,7 +2814,7 @@ fn a_long_refused_message_stays_inside_its_card(cx: &mut TestAppContext) {
     });
     guard::narrow(cx);
     settle(cx);
-    guard::assert_stays_inside(cx, format!("pending-{key}-message"));
+    guard::assert_stays_inside(&shell, cx, format!("pending-{key}-message"));
 }
 
 #[gpui_kit::test]
@@ -2845,7 +2845,7 @@ fn a_long_refused_message_under_a_running_turn_stays_inside_its_card(cx: &mut Te
     });
     guard::narrow(cx);
     settle(cx);
-    guard::assert_stays_inside(cx, queued_id(&waiting));
+    guard::assert_stays_inside(&shell, cx, queued_id(&waiting));
 }
 
 #[gpui_kit::test]
@@ -3791,9 +3791,9 @@ fn a_long_waiting_message_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
     let lead = lead(&user);
     let text = format!("{} {}", guard::UNBROKEN, guard::SPACED);
-    let (_shell, _page, _, delivery, cx) =
+    let (shell, _page, _, delivery, cx) =
         with_a_waiting_message(&user, &lead, "work a while", &text, cx);
     guard::narrow(cx);
     settle(cx);
-    guard::assert_stays_inside(cx, queued_id(&delivery));
+    guard::assert_stays_inside(&shell, cx, queued_id(&delivery));
 }

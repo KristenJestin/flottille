@@ -591,7 +591,7 @@ fn a_long_call_stays_inside_its_waiting_card(cx: &mut TestAppContext) {
     settle(cx);
     cx.update(|window, cx| window.click(format!("approval-details-{number}"), cx));
     settle(cx);
-    guard::assert_stays_inside(cx, format!("approval-{number}"));
+    guard::assert_stays_inside(&shell, cx, format!("approval-{number}"));
 }
 
 #[gpui_kit::test]
@@ -611,7 +611,7 @@ fn a_long_call_stays_inside_its_request_line_in_a_narrow_conversation(cx: &mut T
         has(format!("approval-line-{number}"), cx)
     });
     settle(cx);
-    guard::assert_stays_inside(cx, format!("approval-line-{number}"));
+    guard::assert_stays_inside(&shell, cx, format!("approval-line-{number}"));
     let line = rect(format!("approval-line-{number}"), cx);
     assert!(line.size.height < px(40.), "one line: {line:?}");
 
@@ -638,7 +638,7 @@ fn a_long_call_stays_inside_its_request_line_in_a_narrow_conversation(cx: &mut T
         has(format!("approval-record-{number}"), cx),
         "the record is drawn"
     );
-    guard::assert_stays_inside(cx, format!("approval-decided-{number}"));
+    guard::assert_stays_inside(&shell, cx, format!("approval-decided-{number}"));
 }
 
 #[gpui_kit::test]
