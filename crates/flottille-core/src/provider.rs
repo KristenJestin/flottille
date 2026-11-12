@@ -60,6 +60,12 @@ pub fn default_model<'a>(
         .or_else(|| offered.iter().copied().find(|v| *v != OWN_CHOICE))
 }
 
+/// The smallest model of each provider, in the form its agent takes it: what Flottille picks as
+/// the Auto judge and the compactor for a user who never chose one (`docs/design.md` §7.1), and
+/// what the window marks recommended for them. A provider not listed gets nothing picked: its
+/// smallest model is not known for sure.
+pub const SMALLEST: [(&str, &str); 1] = [("claude", "haiku")];
+
 /// The effort a model runs with when its provider does not say one: the middle of the levels it
 /// offers (the upper one of the two middles), `default` aside.
 pub fn middle_effort<S: AsRef<str>>(levels: &[S]) -> Option<&S> {

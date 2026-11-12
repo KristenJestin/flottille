@@ -1423,10 +1423,7 @@ fn edit_judge(
     Ok(true)
 }
 
-/// The smallest model of each provider, in the form its agent takes it: what Flottille picks as
-/// the Auto judge for a user who never chose one (`docs/design.md` §7.1). A provider not listed
-/// gets nothing picked: its smallest model is not known for sure.
-pub const SMALLEST: [(&str, &str); 1] = [("claude", "haiku")];
+pub use flottille_core::provider::SMALLEST;
 
 /// What the comment above a judge Flottille picked says.
 const PICKED: &str = "# Picked by Flottille as the Auto judge: the smallest model of the first \

@@ -370,3 +370,67 @@ fn with_the_first_provider_s_models_unknown_the_select_opens_on_it(cx: &mut Test
         chosen(&user) == serde_json::Value::Null
     });
 }
+
+#[gpui_kit::test]
+fn the_judge_and_the_compactor_mark_the_model_flottille_applies_for_them(cx: &mut TestAppContext) {
+    // Claude proposes fake-large; Flottille's judge and compactor run on its smallest, haiku.
+    let user = User::with_fake_providers().with_env("FLOTTILLE_TEST_LIST_MODELS", "1");
+    user.write_providers("[opencode]\nenabled = true\n[judge]\nprovider = \"claude\"\n");
+    std::fs::write(
+        user.path("config/flottille/compaction.toml"),
+        "[compactor]\nprovider = \"claude\"\n",
+    )
+    .unwrap();
+    user.provider_script(
+        "claude",
+        json!({"models": ["fake-large", "haiku"], "efforts": ["low", "high"]}),
+    );
+    user.provider_script("opencode", json!({"models": ["open/small"]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let (shell, _page, cx) = settings_page(&user, cx);
+
+    click(cx, "settings-tabs-approvals");
+    until(&shell, cx, "the judge's select", |cx| {
+        present(cx, "judge-model")
+    });
+    settle(cx);
+    // A judge without a model runs on the provider's: shown as it is, not as the recommended.
+    assert_eq!(
+        label(cx, "judge-model").as_deref(),
+        Some("Claude · fake-large")
+    );
+    assert_eq!(
+        rows(cx, "judge-model", &["claude-haiku"]),
+        vec!["Claude · haiku · recommended".to_owned()]
+    );
+    click(cx, "judge-model");
+    click(cx, "judge-model-claude-haiku");
+    until(&shell, cx, "the judge is haiku", |_| {
+        let listed = user.call("provider.list", serde_json::Value::Null).unwrap();
+        listed["judge"]["provider"] == "claude" && listed["judge"]["model"] == "haiku"
+    });
+
+    click(cx, "settings-tabs-features");
+    until(&shell, cx, "the compaction row", |cx| {
+        present(cx, "features-compaction")
+    });
+    click(cx, "features-compaction");
+    until(&shell, cx, "the compactor's select", |cx| {
+        present(cx, "compaction-summary-model")
+    });
+    settle(cx);
+    assert_eq!(
+        label(cx, "compaction-summary-model").as_deref(),
+        Some("Claude · fake-large")
+    );
+    click(cx, "compaction-summary-model");
+    assert_eq!(
+        label(cx, "compaction-summary-model-claude-haiku").as_deref(),
+        Some("Claude · haiku · recommended")
+    );
+    click(cx, "compaction-summary-model-claude-haiku");
+    until(&shell, cx, "the compactor is haiku", |_| {
+        let shown = user.call("compaction.show", json!({})).unwrap();
+        shown["compactor"]["provider"] == "claude" && shown["compactor"]["model"] == "haiku"
+    });
+}

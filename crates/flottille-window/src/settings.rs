@@ -557,17 +557,19 @@ impl SettingsPage {
         let chosen = match (&shown.compactor, shown.by_agent) {
             (_, true) => Chosen::Choice("agent".into()),
             (Some((provider, model, _)), false) => {
-                self.providers.chosen(provider, model.as_deref())
+                self.providers.chosen_running(provider, model.as_deref())
             }
             (None, false) => Chosen::First,
         };
+        // Marked recommended: the model Flottille picks for the compactor.
+        let smallest = Providers::smallest();
         let summary = ModelChoice::new("compaction-summary", "Summary written by", chosen)
             .choice(
                 "agent",
                 "The session's own agent",
                 "The agent summarises its own conversation, in its session.",
             )
-            .models(self.providers.model_entries())
+            .models(self.providers.model_entries_giving(&smallest))
             .effort(
                 shown
                     .compactor
@@ -579,11 +581,18 @@ impl SettingsPage {
             .disabled(off)
             .on_choose({
                 let this = this.clone();
+                let providers = self.providers.clone();
                 move |chosen, effort, _, cx| {
                     let params = match chosen {
                         Chosen::Model(provider, model) => json!({
                             "summary": "compactor",
-                            "compactor": {"provider": provider, "model": model, "effort": effort},
+                            "compactor": {
+                                "provider": provider,
+                                "model": model.map(|m| m.to_string()).or_else(|| {
+                                    providers.recommended(&provider, &smallest)
+                                }),
+                                "effort": effort,
+                            },
                         }),
                         _ => json!({"summary": "agent"}),
                     };
@@ -1693,14 +1702,17 @@ impl SettingsPage {
             .disabled(self.judge_pending)
             .on_click(cx.listener(|this, _, _, cx| this.flip_judge(cx)));
         let chosen = match &self.providers.judge {
-            Some((provider, model)) => self.providers.chosen(provider, model.as_deref()),
+            Some((provider, model)) => self.providers.chosen_running(provider, model.as_deref()),
             None => Chosen::First,
         };
         let this = cx.entity().downgrade();
+        // Marked recommended: the model Flottille picks for the judge.
+        let smallest = Providers::smallest();
+        let providers = self.providers.clone();
         // A judge runs on its model's own effort: the daemon keeps none for it.
         let models = self
             .providers
-            .model_entries()
+            .model_entries_giving(&smallest)
             .into_iter()
             .map(|entry| entry.efforts(Vec::<String>::new()));
         let model = ModelChoice::new("judge", "Model", chosen)
@@ -1710,7 +1722,10 @@ impl SettingsPage {
             .disabled(self.judge_pending)
             .on_choose(move |chosen, _, _, cx| {
                 if let Chosen::Model(provider, model) = chosen {
-                    let judge = (provider.to_string(), model.map(|m| m.to_string()));
+                    let model = model
+                        .map(|m| m.to_string())
+                        .or_else(|| providers.recommended(&provider, &smallest));
+                    let judge = (provider.to_string(), model);
                     this.update(cx, |this, cx| this.choose_judge(Some(judge), cx))
                         .ok();
                 }

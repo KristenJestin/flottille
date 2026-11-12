@@ -359,15 +359,38 @@ impl Providers {
         self.entries(gives)
     }
 
+    /// What Flottille's judge and compactor run on, by provider: the smallest model where
+    /// Flottille knows it (`SMALLEST`), the provider's own elsewhere.
+    pub fn smallest() -> Vec<(String, Option<String>)> {
+        provider::SMALLEST
+            .iter()
+            .map(|(name, model)| ((*name).to_owned(), Some((*model).to_owned())))
+            .collect()
+    }
+
+    /// The model, by its id, that `provider`'s entry marked recommended stands for under `gives`.
+    pub fn recommended(
+        &self,
+        provider: &str,
+        gives: &[(String, Option<String>)],
+    ) -> Option<String> {
+        recommended_of(self.get(provider)?, gives).map(|m| m.id.clone())
+    }
+
+    /// A model chosen as a `ModelChoice` shows it where no model chosen is the provider's own,
+    /// not the recommended one (the judge's, the compactor's): by the model it runs on.
+    pub fn chosen_running(&self, provider: &str, model: Option<&str>) -> Chosen {
+        let own = || self.get(provider)?.default_model().map(|m| m.id.as_str());
+        let model = model
+            .filter(|m| *m != crate::composer::DEFAULT)
+            .or_else(own);
+        self.chosen(provider, model)
+    }
+
     fn entries(&self, gives: &[(String, Option<String>)]) -> Vec<ModelEntry> {
         let mut entries = Vec::new();
         for provider in self.offered() {
-            let recommended = gives
-                .iter()
-                .find(|(name, _)| *name == provider.name)
-                .and_then(|(_, model)| provider.model(model.as_deref()?))
-                .or_else(|| provider.default_model())
-                .map(|m| m.id.as_str());
+            let recommended = recommended_of(provider, gives).map(|m| m.id.as_str());
             let listed: Vec<&Model> = provider
                 .models
                 .iter()
@@ -439,6 +462,19 @@ impl Providers {
         }
         self.list.iter().map(Provider::state).collect()
     }
+}
+
+/// The model `provider`'s recommended entry stands for: the one `gives` names for it, else its
+/// own.
+fn recommended_of<'a>(
+    provider: &'a Provider,
+    gives: &[(String, Option<String>)],
+) -> Option<&'a Model> {
+    gives
+        .iter()
+        .find(|(name, _)| *name == provider.name)
+        .and_then(|(_, model)| provider.model(model.as_deref()?))
+        .or_else(|| provider.default_model())
 }
 
 #[cfg(test)]
