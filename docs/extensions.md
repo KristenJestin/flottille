@@ -973,8 +973,12 @@ gets it. A new version stops it until you review it again."), shown while it is 
 them, **Servers** (a count, **New server**) in the list pattern (rule 7 of `reference/gpui.md`):
 one row per connection, its plug, its name, the version accepted as a tag, one line of its state
 (`On · 12 actions`, `Waiting for its first review`, `Waiting for a review of your edit`,
-`Stopped: new version, review it`, `Failing: …`, `Off`) and a "⋯" menu (Edit, Review, Turn off or
-Turn on, Remove…, which asks in a confirmation). A click on a row edits it.
+`Stopped: new version, review it`, `Signed out: sign in again`, `Failing: …`, `Off`) and a "⋯"
+menu (Edit, Review, Turn off or Turn on, **Sign in** for a URL, Remove…, which asks in a
+confirmation). A click on a row edits it. **Sign in** asks `connection.login` and opens the address
+it answers with the system's default handler; meanwhile the row says `Signing in: finish it in
+your browser`, and a toast says how it ended (`Signed in to notes`, or why not), as it says a
+connection signed out or whose tokens were not saved.
 Adding or editing one is a form dialog: its name (not editable once made), what it is for, how it
 is reached (radios: a program, its command one line split as a task's, shell syntax refused under
 it; or a URL), its variables (headers for a URL), each a name and a vault entry picked among those
