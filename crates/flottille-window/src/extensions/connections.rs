@@ -1386,17 +1386,25 @@ impl ConnectionsSection {
             this.variables.retain(|v| v.key != key);
             cx.notify();
         }));
+        let (name, entry) = match self.reach {
+            Reach::Command => ("Variable", "Vault entry"),
+            Reach::Url => ("Header", "Vault entry"),
+        };
         div()
             .id(SharedString::from(id.clone()))
             .flex()
-            .items_center()
+            .items_end()
             .gap(space::SM)
-            .child(div().flex_1().min_w_0().child(boxed(
-                format!("{id}-name"),
-                Input::new(&variable.name),
-                cx,
+            .child(div().flex_1().min_w_0().child(Field::new(
+                SharedString::from(format!("{id}-name-field")),
+                name,
+                boxed(format!("{id}-name"), Input::new(&variable.name), cx),
             )))
-            .child(div().flex_1().min_w_0().child(select))
+            .child(div().flex_1().min_w_0().child(Field::new(
+                SharedString::from(format!("{id}-entry-field")),
+                entry,
+                select,
+            )))
             .child(remove)
             .into_any_element()
     }
@@ -1416,17 +1424,17 @@ impl ConnectionsSection {
         div()
             .id(SharedString::from(id.clone()))
             .flex()
-            .items_center()
+            .items_end()
             .gap(space::SM)
-            .child(div().w(px(160.)).child(boxed(
-                format!("{id}-argument"),
-                Input::new(&limit.argument),
-                cx,
+            .child(div().w(px(160.)).child(Field::new(
+                SharedString::from(format!("{id}-argument-field")),
+                "Argument",
+                boxed(format!("{id}-argument"), Input::new(&limit.argument), cx),
             )))
-            .child(div().flex_1().min_w_0().child(boxed(
-                format!("{id}-values"),
-                Input::new(&limit.values),
-                cx,
+            .child(div().flex_1().min_w_0().child(Field::new(
+                SharedString::from(format!("{id}-values-field")),
+                "Allowed values",
+                boxed(format!("{id}-values"), Input::new(&limit.values), cx),
             )))
             .child(remove)
             .into_any_element()

@@ -638,6 +638,73 @@ fn a_variable_is_picked_from_the_vault_and_its_secret_never_shows(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+fn every_control_of_the_form_has_a_visible_label(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    click(cx, "new-connection");
+    click(cx, "connection-new-variable");
+    click(cx, "connection-new-limit");
+    until(&shell, cx, "the rows unfold", |cx| {
+        visible(cx, "connection-variable-0-name") && visible(cx, "connection-limit-0-argument")
+    });
+    settle(cx);
+    // A control and the label that names it, visible with it.
+    let named = [
+        ("connection-name", "connection-name-field", "Name"),
+        (
+            "connection-about",
+            "connection-about-field",
+            "What it is for",
+        ),
+        ("connection-command", "connection-command-field", "Command"),
+        (
+            "connection-variable-0-name",
+            "connection-variable-0-name-field",
+            "Variable",
+        ),
+        (
+            "connection-variable-0-entry",
+            "connection-variable-0-entry-field",
+            "Vault entry",
+        ),
+        (
+            "connection-limit-0-argument",
+            "connection-limit-0-argument-field",
+            "Argument",
+        ),
+        (
+            "connection-limit-0-values",
+            "connection-limit-0-values-field",
+            "Allowed values",
+        ),
+    ];
+    for (control, field, said) in named {
+        assert!(visible(cx, control), "{control} is drawn");
+        assert_eq!(
+            label(cx, &format!("{field}-label")).as_deref(),
+            Some(said),
+            "{control}"
+        );
+        assert!(visible(cx, &format!("{field}-label")), "{field}-label");
+    }
+    // A URL's requests carry headers, and say so.
+    click(cx, "connection-reach-url");
+    until(&shell, cx, "the URL's field unfolds", |cx| {
+        visible(cx, "connection-url")
+    });
+    assert_eq!(
+        label(cx, "connection-variable-0-name-field-label").as_deref(),
+        Some("Header")
+    );
+    assert_eq!(
+        label(cx, "connection-url-field-label").as_deref(),
+        Some("URL")
+    );
+}
+
+#[gpui_kit::test]
 fn editing_the_command_asks_for_a_new_review(cx: &mut TestAppContext) {
     let user = user();
     turn_on(&user);
