@@ -92,6 +92,15 @@ fn script() -> Value {
             ]}}},
             {"say": "Asked four. Meanwhile, a long look at the code follows."},
             {"say": "Still looking."}]},
+        {"when": "ask two by two", "do": [
+            {"mcp": {"tool": "ask", "arguments": {"questions": [
+                {"question": FOUR[0]}, {"question": FOUR[1]}
+            ]}}},
+            {"mcp": {"tool": "ask", "arguments": {"questions": [
+                {"question": FOUR[2]}, {"question": FOUR[3]}
+            ]}}},
+            {"say": "Asked twice."},
+            {"hold": "release"}]},
         {"when": "ask beside a helper", "do": [
             {"mcp": {"tool": "agent_launch",
                 "arguments": {"kind": "child", "title": "Helper", "brief": "help me look"}}},
@@ -2360,6 +2369,53 @@ fn the_steps_stay_in_sight_while_the_dock_scrolls(cx: &mut TestAppContext) {
             "{part} stays in sight: {steps:?} in {frame:?}"
         );
     }
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_steps_of_the_next_card_slide_in_with_its_page(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "ask two by two");
+    let (shell, page, cx) = open_session(&user, &id, cx);
+    until(&shell, cx, "two asks, the oldest docked", |cx| {
+        let open = questions(&page, cx);
+        open.len() == 2 && card_shows(&page, open[0].0, cx)
+    });
+    settle(cx);
+    let (first, second) = (questions(&page, cx)[0].0, questions(&page, cx)[1].0);
+    let (first_ask, second_ask) = (seq_of(&page, first, cx), seq_of(&page, second, cx));
+    let rest = (
+        bounds(format!("ask-{first_ask}-question-0"), cx).left(),
+        bounds(format!("ask-{first_ask}-question-previous"), cx).left(),
+    );
+
+    write(&page, first, 0, "One.", cx);
+    write(&page, first, 1, "Two.", cx);
+    card_of(&page, first, cx).update(cx, |card, cx| card.send(cx));
+    release(&user);
+    // The clock holds still meanwhile: the move starts at the frame the next card comes.
+    until(&shell, cx, "the second card comes", |cx| {
+        docked(&page, cx).is_some_and(|card| card.read_with(cx, |card, _| card.seq()) == second_ask)
+    });
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.executor()
+        .advance_clock(gpui_design_system::motion::PANEL / 3);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    let (body, steps) = (
+        bounds(format!("ask-{second_ask}-question-0"), cx).left(),
+        bounds(format!("ask-{second_ask}-question-previous"), cx).left(),
+    );
+    assert!(body > rest.0, "the card slides in: {body:?} {:?}", rest.0);
+    assert!(
+        steps > rest.1,
+        "its steps slide in with it, not switched: {steps:?} {:?}",
+        rest.1
+    );
+    settle(cx);
+    assert_eq!(
+        bounds(format!("ask-{second_ask}-question-previous"), cx).left(),
+        rest.1
+    );
     at_rest(cx);
 }
 

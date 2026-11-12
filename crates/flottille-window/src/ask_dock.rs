@@ -173,8 +173,13 @@ impl AskDock {
                 .last
                 .as_ref()
                 .is_some_and(|card| card.read(cx).several());
+        // The steps move with their card's page: the next card's come in as it does.
         let steps = match &self.last {
-            Some(card) => card.update(cx, |card, cx| card.steps(cx)),
+            Some(card) => {
+                let seq = card.read(cx).seq();
+                let steps = card.update(cx, |card, cx| card.steps(cx));
+                sliding("ask-dock-steps-page", seq as usize, steps).into_any_element()
+            }
             None => div().into_any_element(),
         };
         div()
