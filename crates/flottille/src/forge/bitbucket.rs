@@ -9,6 +9,7 @@
 
 use serde_json::{Value, json};
 
+use super::ending::{Ending, Rerun};
 use super::{
     Branch, Comment, Deletion, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Seen, after, blocks,
     commit_hash, masked, method_refused, run,
@@ -538,18 +539,10 @@ async fn detailed_with(
         _ => None,
     };
     let (reviewers, comments, closing) = people?;
-    let jobs = statuses
+    let jobs = checks_of_statuses(&statuses)
         .iter()
-        .zip(&checks)
-        .filter(|(_, (_, state))| *state == "failing")
-        .map(|(status, (name, _))| super::Job {
-            name: name.clone(),
-            details: status["url"]
-                .as_str()
-                .filter(|link| !link.is_empty())
-                .map(masked),
-            log: None,
-        })
+        .filter(|check| check.state == "failing")
+        .map(super::Job::of)
         .collect();
     let pull = Pull {
         number: found.id,
@@ -846,6 +839,9 @@ fn checks_of_statuses(statuses: &[Value]) -> Vec<flottille_core::item::Check> {
                     .as_str()
                     .filter(|link| !link.is_empty())
                     .map(masked),
+                outcome: (state == "failing")
+                    .then(|| status["state"].as_str().map(str::to_ascii_lowercase))
+                    .flatten(),
             }
         })
         .collect()
@@ -1122,29 +1118,49 @@ pub(super) fn build_of(forge: &Forge, link: Option<&str>) -> Option<u64> {
     digits.parse().ok().filter(|build| *build > 0)
 }
 
+/// What a Cloud build says: its failed step's log, and how it ended when that was not the code.
+pub(super) struct Built {
+    /// The uuid of the first failed step and its log, or why there is none.
+    pub log: Result<(String, String), String>,
+    /// A step in `ERROR` (Bitbucket's system error) or a pipeline that ended outside any step is
+    /// the CI's, not the code's; a pipeline that was stopped, by whom when it says it.
+    pub ending: Option<Ending>,
+    /// The call that runs the build's pipeline again, when the build failed (`forge` `checks`
+    /// refuses a pipeline that did not) and the tool accepts a call for that pipeline.
+    pub rerun: Option<Rerun>,
+}
+
 /// The log of the first failed step of the build `build`: `bkt pipeline view` names the steps,
 /// `bkt pipeline logs --step` prints one. The step's uuid and its log, masked.
-pub(super) async fn failed_step_log(
-    forge: &Forge,
-    context: &str,
-    build: u64,
-) -> Result<(String, String), String> {
+pub(super) async fn failed_step_log(forge: &Forge, context: &str, build: u64) -> Built {
     let build = build.to_string();
-    let seen = json(&command(
+    let seen = match json(&command(
         forge,
         context,
         &["pipeline", "view", &build],
         &["--json"],
     ))
-    .await?;
-    let failed = seen["steps"].as_array().into_iter().flatten().find(|step| {
-        matches!(
-            step["state"]["result"]["name"]
-                .as_str()
-                .or(step["result"]["name"].as_str()),
-            Some("FAILED" | "ERROR")
-        )
-    });
+    .await
+    {
+        Ok(seen) => seen,
+        Err(why) => {
+            return Built {
+                log: Err(why),
+                ending: None,
+                rerun: None,
+            };
+        }
+    };
+    fn result(step: &Value) -> Option<&str> {
+        step["state"]["result"]["name"]
+            .as_str()
+            .or(step["result"]["name"].as_str())
+    }
+    let failed = seen["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|step| matches!(result(step), Some("FAILED" | "ERROR")));
     // The uuid goes to a command line: only what a uuid is made of.
     let uuid = failed
         .and_then(|step| step["uuid"].as_str())
@@ -1152,8 +1168,30 @@ pub(super) async fn failed_step_log(
             uuid.chars()
                 .all(|c| c.is_ascii_hexdigit() || "{}-".contains(c))
         });
+    let ending = match failed {
+        Some(step) if result(step) == Some("ERROR") => Some(Ending::Ci(format!(
+            "the step {} ended in error",
+            masked(step["name"].as_str().unwrap_or("?"))
+        ))),
+        Some(_) => None,
+        None => match seen["pipeline"]["state"]["result"]["name"].as_str() {
+            Some("STOPPED") => Some(Ending::Stopped(
+                seen["pipeline"]["state"]["result"]["terminator"]["display_name"]
+                    .as_str()
+                    .map(masked),
+            )),
+            _ => Some(Ending::Ci(format!(
+                "the pipeline #{build} ended outside any step"
+            ))),
+        },
+    };
+    let rerun = rerun_of(&seen["pipeline"]);
     let Some(uuid) = uuid else {
-        return Err(format!("the pipeline #{build} has no failed step"));
+        return Built {
+            log: Err(format!("the pipeline #{build} has no failed step")),
+            ending,
+            rerun,
+        };
     };
     let log = text(&command(
         forge,
@@ -1161,8 +1199,41 @@ pub(super) async fn failed_step_log(
         &["pipeline", "logs", &build],
         &["--step", uuid],
     ))
-    .await?;
-    Ok((uuid.to_owned(), log))
+    .await
+    .map(|log| (uuid.to_owned(), log));
+    Built { log, ending, rerun }
+}
+
+/// The call that runs the failed `pipeline` again. Bitbucket runs a whole pipeline, never a step.
+/// A pull request's pipeline (`bkt` starts one only as the branch run `forge` `checks` makes);
+/// another one (a branch's push, a custom one) is `forge` `run` of its selector on its branch.
+/// None when it did not fail (`checks` refuses it), or when `forge` `run` would refuse it or run
+/// something else: a tag's pipeline, which `bkt pipeline run` starts as a branch run.
+fn rerun_of(pipeline: &Value) -> Option<Rerun> {
+    if !matches!(
+        pipeline["state"]["result"]["name"].as_str(),
+        Some("FAILED" | "ERROR")
+    ) {
+        return None;
+    }
+    let target = &pipeline["target"];
+    if target["type"] == "pipeline_pullrequest_target"
+        || target["selector"]["type"] == "pull-requests"
+    {
+        return Some(Rerun::Checks);
+    }
+    let branch = target["ref_name"]
+        .as_str()
+        .filter(|b| !b.is_empty() && !b.starts_with('-'))?;
+    if !matches!(target["ref_type"].as_str(), None | Some("branch")) {
+        return None;
+    }
+    let pipeline = super::pipelines::pipeline_named(pipeline);
+    super::pipelines::bitbucket_selector(&pipeline).ok()?;
+    Some(Rerun::Run {
+        pipeline,
+        branch: branch.to_owned(),
+    })
 }
 
 /// The path of a Cloud pull request's own page, for `bkt api`.

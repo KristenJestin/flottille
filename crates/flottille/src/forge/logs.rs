@@ -6,6 +6,7 @@
 use super::bitbucket::{self, Contexts};
 use serde_json::Value;
 
+use super::ending::{Ending, Rerun};
 use super::{Forge, Job, Log, gh_text};
 
 /// The lines of a log that are given, counted from its end.
@@ -53,6 +54,10 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
                     }
                 },
             },
+            // A job the CI did not run to its end has no failing command's log to read.
+            Forge::GitHub { .. } if job.ending != Ending::Code => {
+                Plan::Said(Err("it did not fail on a command".into()))
+            }
             Forge::GitHub { .. } => match actions_job(job.details.as_deref()) {
                 None => Plan::Said(Err(match &job.details {
                     Some(link) => format!("it is not a GitHub Actions job, see {link}"),
@@ -70,9 +75,12 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
         match plan {
             Plan::Said(_) => None,
             Plan::Read(Source::Bitbucket(context, build)) => {
-                Some(bitbucket::failed_step_log(forge, context, *build).await)
+                let built = bitbucket::failed_step_log(forge, context, *build).await;
+                Some((built.ending, built.rerun, built.log))
             }
-            Plan::Read(Source::GitHub(_, job)) => Some(
+            Plan::Read(Source::GitHub(_, job)) => Some((
+                None,
+                None,
                 gh_text(&[
                     "run",
                     "view",
@@ -84,13 +92,28 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
                 ])
                 .await
                 .map(|log| (job.to_string(), log)),
-            ),
+            )),
         }
     }))
     .await;
     // The total is shared out in the jobs' order, as it is when they are read one after the other.
     let mut left = TOTAL_BYTES;
     for ((job, plan), raw) in jobs.iter_mut().zip(plans).zip(raws) {
+        let (ending, rerun, raw) = match raw {
+            Some((ending, rerun, raw)) => (ending, rerun, Some(raw)),
+            None => (None, None, None),
+        };
+        // What the build says of its end refines what the check's status said: a failed status
+        // is the CI's when the build died of its own, and a stop may say who made it.
+        match (&job.ending, ending) {
+            (Ending::Code, Some(ending)) => job.ending = ending,
+            (Ending::Stopped(None), Some(ending @ Ending::Stopped(Some(_)))) => job.ending = ending,
+            _ => {}
+        }
+        // The call that runs the build's pipeline again, once it failed.
+        if matches!(job.ending, Ending::Ci(_)) {
+            job.rerun = rerun;
+        }
         let log = match (plan, raw) {
             (Plan::Said(said), _) => said,
             (Plan::Read(_), _) if left == 0 => Err(too_many()),
@@ -109,6 +132,23 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
             left -= log.text.len().min(left);
         }
         job.log = Some(log);
+    }
+    // On GitHub `forge` `step` runs a job again only when its run holds that job (a job that never
+    // started has none): ask the run, and name nothing when it does not.
+    if matches!(forge, Forge::GitHub { .. }) {
+        let held = futures::future::join_all(jobs.iter().take(JOBS).map(|job| async {
+            let (run, id) = actions_job(job.details.as_deref())?;
+            match matches!(job.ending, Ending::Ci(_))
+                && super::pipelines::github_holds(forge, run, id).await
+            {
+                true => Some(Rerun::Step { run, job: id }),
+                false => None,
+            }
+        }))
+        .await;
+        for (job, rerun) in jobs.iter_mut().zip(held) {
+            job.rerun = rerun;
+        }
     }
 }
 
@@ -407,25 +447,33 @@ pub(super) fn read_whole(repository: &str, (run, step): &(u64, String)) -> Strin
     )
 }
 
-/// The failed jobs of a pull request, as `forge show` says them: the end of each log, or why there
-/// is none. Nothing for a pull request with no failed job.
+/// The failed jobs of a pull request, as `forge show` says them: how each ended when it was not
+/// the code's failure, the end of each log, or why there is none. Nothing for a pull request with
+/// no failed job.
 pub(super) fn text(jobs: &[Job], repository: &str) -> String {
     if jobs.is_empty() {
         return String::new();
     }
     let mut text = format!("  failed jobs ({}):\n", jobs.len());
     for job in jobs {
-        match &job.log {
-            Some(Ok(log)) => {
+        let said = job.said(repository);
+        // A job the CI did not run to its end has no failing command's output to show.
+        let log = match (&job.log, &job.ending) {
+            (_, Ending::Stopped(_) | Ending::TimedOut) => None,
+            (log, _) => log.as_ref(),
+        };
+        match (log, said) {
+            (Some(Ok(log)), said) => {
                 let of = if log.part {
                     "of the failing command's output"
                 } else {
                     "of its log"
                 };
-                text.push_str(&format!(
-                    "  - {}: the last {} of {} lines {of}:\n",
-                    job.name, log.shown, log.total
-                ));
+                let tail = format!("the last {} of {} lines {of}", log.shown, log.total);
+                match said {
+                    Some(said) => text.push_str(&format!("  - {}: {said}; {tail}:\n", job.name)),
+                    None => text.push_str(&format!("  - {}: {tail}:\n", job.name)),
+                }
                 for line in log.text.lines() {
                     text.push_str(&format!("    {line}\n"));
                 }
@@ -433,8 +481,9 @@ pub(super) fn text(jobs: &[Job], repository: &str) -> String {
                     text.push_str(&format!("    {}\n", read_whole(repository, whole)));
                 }
             }
-            Some(Err(why)) => text.push_str(&format!("  - {}: no log: {why}\n", job.name)),
-            None => text.push_str(&format!("  - {}\n", job.name)),
+            (_, Some(said)) => text.push_str(&format!("  - {}: {said}\n", job.name)),
+            (Some(Err(why)), None) => text.push_str(&format!("  - {}: no log: {why}\n", job.name)),
+            (None, None) => text.push_str(&format!("  - {}\n", job.name)),
         }
     }
     text

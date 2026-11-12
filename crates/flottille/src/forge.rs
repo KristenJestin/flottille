@@ -37,6 +37,7 @@ use crate::workspaces::{self, Head};
 mod bitbucket;
 mod ci;
 mod closing;
+mod ending;
 mod events;
 pub(crate) mod followed;
 mod logs;
@@ -333,6 +334,12 @@ pub struct Job {
     pub details: Option<String>,
     /// The end of its log, or why there is none; not read yet while none.
     pub log: Option<Result<Log, String>>,
+    /// Whether it is the code, the CI, a stop or the time that failed.
+    pub ending: ending::Ending,
+    /// How many seconds it ran, when the forge gave its start and its end.
+    pub took: Option<u64>,
+    /// The call that runs it again, when the forge is known to accept it (`logs::attach`).
+    pub rerun: Option<ending::Rerun>,
 }
 
 /// The end of a job's log: `shown` of its `total` lines (the failing command's when `part`),
@@ -483,20 +490,10 @@ impl Pull {
             comments: comments("comments"),
             reviews: comments("reviews"),
             reviewers: Vec::new(),
-            jobs: value["statusCheckRollup"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|check| check_of(check).1 == "failing")
-                .map(|check| Job {
-                    name: check_of(check).0,
-                    details: check["detailsUrl"]
-                        .as_str()
-                        .or(check["targetUrl"].as_str())
-                        .filter(|link| !link.is_empty())
-                        .map(masked),
-                    log: None,
-                })
+            jobs: github_checks(value)
+                .iter()
+                .filter(|check| check.state == "failing")
+                .map(Job::of)
                 .collect(),
             ci: None,
             closing: None,
@@ -540,6 +537,19 @@ fn check_of(check: &Value) -> (String, &'static str) {
         },
     };
     (masked(name), state)
+}
+
+/// How a failing check run of `statusCheckRollup` ended, in GitHub's own word lowercased
+/// (`failure`, `startup_failure`, `cancelled`, `timed_out`, `action_required`); a commit status
+/// says no more than `failure`. None for a check that is not failing.
+fn outcome_of(check: &Value, state: &str) -> Option<String> {
+    if state != "failing" {
+        return None;
+    }
+    match check["__typename"].as_str() {
+        Some("StatusContext") => Some("failure".into()),
+        _ => check["conclusion"].as_str().map(str::to_ascii_lowercase),
+    }
 }
 
 /// What reading one repository's forge found.
@@ -3606,6 +3616,7 @@ fn fetched_pull(path: &str, source: &str, pull: &Pull, detailed: bool) -> crate:
                     started_at: None,
                     ended_at: None,
                     link: None,
+                    outcome: None,
                 })
                 .collect(),
         },
@@ -3641,6 +3652,7 @@ fn github_checks(value: &Value) -> Vec<flottille_core::item::Check> {
                     .or(check["targetUrl"].as_str())
                     .filter(|link| !link.is_empty())
                     .map(masked),
+                outcome: outcome_of(check, state),
             }
         })
         .collect()

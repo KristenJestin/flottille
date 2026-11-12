@@ -764,7 +764,7 @@ fn worded(state: &str) -> String {
 }
 
 /// Which pipeline of the file a Bitbucket run ran: `default`, `custom: <name>`…
-fn pipeline_named(pipeline: &Value) -> String {
+pub(super) fn pipeline_named(pipeline: &Value) -> String {
     let selector = &pipeline["target"]["selector"];
     match (selector["type"].as_str(), selector["pattern"].as_str()) {
         (None | Some("default"), _) => "default".to_owned(),
@@ -955,6 +955,29 @@ async fn bitbucket_log(forge: &Forge, context: &str, run: u64, step: &str) -> Ou
     }
 }
 
+/// The selector a Bitbucket pipeline names, `forge pipelines`' way: none for `default`, else its
+/// kind and pattern; or why `run` refuses it.
+pub(super) fn bitbucket_selector(pipeline: &str) -> Result<Option<(&str, &str)>, String> {
+    let pipeline = pipeline.trim();
+    let selector = match pipeline.split_once(':') {
+        _ if pipeline == "default" => None,
+        Some((kind, pattern)) => Some((kind.trim(), pattern.trim())),
+        None => Some(("custom", pipeline)),
+    };
+    if let Some((kind, pattern)) = selector
+        && (!["custom", "branches", "tags", "pull-requests"].contains(&kind)
+            || pattern.is_empty()
+            || pattern.starts_with('-'))
+    {
+        return Err(format!(
+            "refused: {pipeline:?} is no pipeline of Bitbucket: default, custom: <name>, \
+             branches: <pattern>, tags: <pattern> or pull-requests: <pattern>, as forge \
+             pipelines lists them"
+        ));
+    }
+    Ok(selector)
+}
+
 /// `run` on Bitbucket: `bkt pipeline run` when no variable is given; with variables, the API's own
 /// call through `bkt api`, since `bkt`'s `--var` splits a value at its commas and has no secured
 /// variable. The run started, when the forge said its number.
@@ -967,25 +990,10 @@ async fn bitbucket_run(
 ) -> (Outcome, Option<Started>) {
     let slug = forge.slug();
     let pipeline = pipeline.trim();
-    let selector = match pipeline.split_once(':') {
-        _ if pipeline == "default" => None,
-        Some((kind, pattern)) => Some((kind.trim(), pattern.trim())),
-        None => Some(("custom", pipeline)),
+    let selector = match bitbucket_selector(pipeline) {
+        Ok(selector) => selector,
+        Err(refused) => return (Outcome::Refused(refused), None),
     };
-    if let Some((kind, pattern)) = selector
-        && (!["custom", "branches", "tags", "pull-requests"].contains(&kind)
-            || pattern.is_empty()
-            || pattern.starts_with('-'))
-    {
-        return (
-            Outcome::Refused(format!(
-                "refused: {pipeline:?} is no pipeline of Bitbucket: default, custom: <name>, \
-                 branches: <pattern>, tags: <pattern> or pull-requests: <pattern>, as forge \
-                 pipelines lists them"
-            )),
-            None,
-        );
-    }
     let named = match selector {
         None => "default".to_owned(),
         Some((kind, pattern)) => format!("{kind}: {pattern}"),
@@ -1229,6 +1237,14 @@ fn job_id(seen: &Value, step: &str) -> Option<u64> {
                 == Some(step)
     })?["databaseId"]
         .as_u64()
+}
+
+/// Whether the run `run` holds the job `job`, which is what `step` `rerun` needs on GitHub.
+pub(super) async fn github_holds(forge: &Forge, run: u64, job: u64) -> bool {
+    match github_seen(forge, run).await {
+        Ok(seen) => job_id(&seen, &job.to_string()).is_some(),
+        Err(_) => false,
+    }
 }
 
 /// The job `step` of a run, or the refusal that says it has none.

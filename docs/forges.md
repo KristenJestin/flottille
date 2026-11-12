@@ -854,9 +854,54 @@ The end of each failed job's log is in `forge` `show` of the pull request.
   (`... ok`, `0 failed`, `Compiling thiserror`), nor is the runner's `##[error]Process completed
   with exit code N`, which says nothing of why. The line is cut at 160 characters, and masked as
   every line of a log is. A job whose log cannot be read says `no log:` and why, whole.
+- **The line says first what kind of failure it was** ("What kind of failure it was" below), and
+  the first line counts them apart: `The checks ended: 3 passed, 1 failed, 1 CI failure, 1 stopped.`
+  (`failed` is the code's and the timeouts; the others are said only when there are some).
 - **The details are `forge` `show`**, which gives the end of every failed job's log as before.
   The wake gives, under each failed job whose log was read, the same call that reads the whole
   log (`Read the whole log with forge {"action": "run_logs", …}.`, "The whole log" above).
+
+### What kind of failure it was
+
+An agent woken by "failed" went to open the run to learn that the runner had failed, not its
+code. Each failed job's line says it, before any reason, in the same words for Bitbucket Cloud,
+Bitbucket Data Center and GitHub, in the wake and in `forge` `show` (which gives no log of a job
+that was stopped or timed out):
+
+| It ended… | The line says |
+|---|---|
+| in the code (a step or a job failed; Bitbucket `FAILED`, GitHub `failure`, anything not below) | its error line, as before |
+| in the CI itself (Bitbucket `ERROR` or a step in `ERROR`, a pipeline that ended outside any step; GitHub `startup_failure`, `action_required`) | `the CI failed, not the code: <what the forge says>`, then `; run it again (<the call>)` when there is a call the tool accepts (on Bitbucket, `, the whole pipeline: Bitbucket cannot run one step again` follows) |
+| stopped (Bitbucket `STOPPED` or `CANCELLED`, GitHub `cancelled`) | `stopped, not failed`, then `, by <who>` when the forge says who |
+| out of time (GitHub `timed_out`) | `timed out after <duration>` (`timed out` when the forge gave no times) |
+
+- **Read from the check's own status first** (`item_checks.outcome`, the forge's word lowercased),
+  which is all Bitbucket Data Center gives. **Bitbucket Cloud then refines it with the build**
+  the log is read from (`bkt pipeline view`): a failed status whose build has a step in `ERROR` is
+  the CI's (`the step test ended in error`); one whose build has no failed step is the CI's too
+  (`the pipeline #31 ended outside any step`), where it said `no log: the pipeline #31 has no
+  failed step`; a stopped one says who when the pipeline does (`state.result.terminator.display_name`,
+  **assumed** from Bitbucket's API, the maintainer checks it on his Bitbucket). The head counts
+  the first listed jobs by what the build said, the others by their status.
+- **`run it again` names a call only when the tool accepts it, and nothing otherwise** (never an
+  action the tool refuses). Bitbucket runs a whole pipeline, never one step (`bkt` has no rerun, and the page's
+  "Rerun failed steps" is not in the public API), so both its calls say `the whole pipeline:
+  Bitbucket cannot run one step again`. On **Bitbucket Cloud** the call fits the pipeline that
+  failed, read from the build's own `target`, and is named only when its state says it failed
+  (`FAILED` or `ERROR`: `checks` refuses a pipeline that did not): a **pull request's** pipeline
+  (`pipeline_pullrequest_target`, or the `pull-requests` selector) is `forge {"action": "checks",
+  "repository": "api"}`; a **branch's or a custom** pipeline is `forge {"action": "run",
+  "repository": "api", "pipeline": "<its selector as `forge pipelines` names it: default, custom:
+  <name>, branches: <pattern>>", "branch": "<its ref_name>"}`, `checks` being the wrong call for it
+  (it runs the pull request's definition). A **tag's** pipeline, or one whose selector `run`
+  refuses, gets none: `bkt pipeline run` starts a branch run. `forge` `step` is refused there
+  ("The CI family"). On **GitHub** it is
+  `forge {"action": "step", "repository": "api", "run": 900, "step": "2", "do": "rerun"}`, named when
+  the check's link names a run and a job and `gh run view` says the run holds that job (a job that
+  never started has none, and `step` refuses it): one more read for each such job. **Bitbucket
+  Data Center** has no pipeline to run, so nothing is named.
+- **Not the code, not read**: a GitHub job that was stopped, timed out or failed to start has no
+  failing command, so its log is not asked for.
 
 ## What Flottille posts is recorded
 

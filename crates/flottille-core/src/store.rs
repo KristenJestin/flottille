@@ -724,6 +724,11 @@ const MIGRATIONS: &[&str] = &[
     -- feature reads it. The entries that exist are bound to none, and work as they did.
     ALTER TABLE vault_entries ADD COLUMN bound TEXT;
 ",
+    "
+    -- How a failing check ended, in the forge's own word, so that a wake says whether the code or
+    -- the CI failed (`docs/forges.md`, \"What kind of failure it was\").
+    ALTER TABLE item_checks ADD COLUMN outcome TEXT;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -2692,7 +2697,7 @@ impl Store {
         )?;
         let mut items: Vec<Item> = rows.collect::<rusqlite::Result<_>>()?;
         let mut checks = self.connection.prepare_cached(
-            "SELECT name, state, started_at, ended_at, link FROM item_checks \
+            "SELECT name, state, started_at, ended_at, link, outcome FROM item_checks \
              WHERE project = ?1 AND kind = ?2 AND repository = ?3 AND key = ?4 ORDER BY position",
         )?;
         for item in &mut items {
@@ -2706,6 +2711,7 @@ impl Store {
                             started_at: row.get(2)?,
                             ended_at: row.get(3)?,
                             link: row.get(4)?,
+                            outcome: row.get(5)?,
                         })
                     },
                 )?
@@ -2750,8 +2756,8 @@ impl Store {
             for (position, check) in item.checks.iter().enumerate() {
                 transaction.execute(
                     "INSERT INTO item_checks (project, kind, repository, key, position, name, \
-                     state, started_at, ended_at, link) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     state, started_at, ended_at, link, outcome) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         item.project,
                         item.kind,
@@ -2762,7 +2768,8 @@ impl Store {
                         check.state,
                         check.started_at,
                         check.ended_at,
-                        check.link
+                        check.link,
+                        check.outcome
                     ],
                 )?;
             }
@@ -6540,6 +6547,7 @@ mod tests {
             started_at: Some("2026-10-01T00:00:00Z".into()),
             ended_at: None,
             link: Some("https://example.com/1".into()),
+            outcome: None,
         }];
         let written = store
             .put_items(
