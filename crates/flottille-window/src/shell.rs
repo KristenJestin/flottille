@@ -2127,6 +2127,9 @@ impl Shell {
             if row.read(cx).said() != session.mark_said {
                 row.update(cx, |row, cx| row.set_said(&session.mark_said, cx));
             }
+            if row.read(cx).waits() != session.waits {
+                row.update(cx, |row, cx| row.set_waits(&session.waits, cx));
+            }
             if row.read(cx).commands() != session.commands {
                 row.update(cx, |row, cx| row.set_commands(session.commands, cx));
             }

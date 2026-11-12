@@ -218,6 +218,24 @@ fn a_session_out_of_quota_says_it_once_in_the_sidebar_and_the_rail(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn a_session_out_of_quota_says_what_it_waits_for_on_its_row(cx: &mut TestAppContext) {
+    let user = user();
+    let (id, reset) = spent(&user);
+    let (shell, cx) = window(&user, cx);
+    let _page = open_session(&shell, &id, cx);
+    let words = format!("out of quota until {}", clock(reset));
+
+    until(&shell, cx, "the row says it", |cx| {
+        label(cx, &format!("session-waits-{id}")).as_deref() == Some(words.as_str())
+    });
+    // The mark's tooltip keeps its own words.
+    assert_eq!(
+        mark_said(&shell, &id, cx),
+        format!("Out of quota, resets at {}", clock(reset))
+    );
+}
+
+#[gpui_kit::test]
 fn the_composer_chip_shows_in_the_toolbar_only_while_the_reset_is_known(cx: &mut TestAppContext) {
     let user = user();
     let (id, reset) = spent(&user);
