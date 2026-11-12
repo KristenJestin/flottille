@@ -5,6 +5,7 @@
 //! rmcp's client in place of the writing session's own. No window opens on a screen.
 
 mod common;
+mod guard;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1244,4 +1245,58 @@ fn an_amendment_waits_on_the_spec_page_and_folds_away_once_answered(cx: &mut Tes
     settle(cx);
     assert!(found(cx, &format!("spec-amendment-{added}-refused")));
     at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_long_spec_stays_inside_its_cards(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    let long = format!("{} {}", guard::UNBROKEN, guard::SPACED);
+    let spec = user
+        .call("spec.new", json!({"project": "app", "title": long}))
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    user.call(
+        "spec.write",
+        json!({"spec": spec, "section": "behaviour", "content": [{"text": long}]}),
+    )
+    .unwrap();
+    let opened = user.received_requests("session/new").len();
+    let writing = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "idea": "Write a long one"}),
+        )
+        .unwrap();
+    let (url, authorization) = server_of(&user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+    let asked = writing["spec"]["spec"].as_u64().unwrap();
+    let answer = mcp.call(
+        "spec",
+        json!({"action": "ask", "spec": asked, "questions": [{
+            "question": long,
+            "options": [&guard::UNBROKEN[..58], &guard::SPACED[..58]],
+            "recommended": &guard::SPACED[..58],
+            "reason": long
+        }]}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let question = question_of(&user, asked);
+
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(guard::NARROW), px(1600.)));
+    open_project(&shell, cx);
+    click(cx, "project-tabs-specs");
+    settle(cx);
+    guard::assert_stays_inside(cx, "project-specs-list".to_owned());
+    open_spec(&shell, cx, spec);
+    cx.simulate_resize(size(px(guard::NARROW), px(1600.)));
+    settle(cx);
+    guard::assert_stays_inside(cx, "spec-header".to_owned());
+    open_spec(&shell, cx, asked);
+    cx.simulate_resize(size(px(guard::NARROW), px(1600.)));
+    settle(cx);
+    guard::assert_stays_inside(cx, format!("spec-question-{question}"));
 }

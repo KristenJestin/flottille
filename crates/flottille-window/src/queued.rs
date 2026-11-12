@@ -301,8 +301,8 @@ impl Render for QueuedMessages {
                         .text_size(px(11.5))
                         .text_color(ink)
                         .aria_label(said.clone())
-                        .child(icon(glyph).size(px(11.)).text_color(ink))
-                        .child(said)
+                        .child(icon(glyph).size(px(11.)).flex_none().text_color(ink))
+                        .child(div().min_w_0().child(said))
                 };
                 let (said, line) = match &entry {
                     Entry::Waiting(_) => {
@@ -448,7 +448,8 @@ impl Render for QueuedMessages {
                     .flex_col()
                     .items_end()
                     .gap(space::XS)
-                    .child(bubble)
+                    // A flex item, which shrinks to the room there is: the words under it wrap.
+                    .child(div().w_full().flex().justify_end().child(bubble.min_w_0()))
                     .child(
                         presence(
                             ElementId::Name(format!("queued-{key}-buttons-shown").into()),

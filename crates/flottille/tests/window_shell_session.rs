@@ -4,6 +4,7 @@
 //! screen.
 
 mod common;
+mod guard;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -568,6 +569,76 @@ fn a_waiting_card_says_the_call_on_one_line_and_its_class_and_reason_on_the_next
         !has(format!("approval-base-{number}"), cx),
         "the rest is in Details"
     );
+}
+
+// 1440 px is enough: the card has the rail's own width (`RAIL`), in the rail of a wide window
+// and in the drawer a narrow one opens, so the window's width does not decide where its text
+// breaks. The line the conversation keeps for the request is at the window's width: its test
+// is below, in a narrow one.
+#[gpui_kit::test]
+fn a_long_call_stays_inside_its_waiting_card(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    let held = mcp.call(
+        "fs_read",
+        json!({"path": format!(".env/{}/{}", guard::UNBROKEN, guard::SPACED)}),
+    );
+    let number = held_number(held);
+    until(&shell, cx, "the card is in the rail", |cx| {
+        has(format!("allow-{number}"), cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("approval-details-{number}"), cx));
+    settle(cx);
+    guard::assert_stays_inside(cx, format!("approval-{number}"));
+}
+
+#[gpui_kit::test]
+fn a_long_call_stays_inside_its_request_line_in_a_narrow_conversation(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    // The tree is a drawer in a narrow window: the session is opened first, then the window narrows.
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    cx.simulate_resize(size(px(guard::NARROW), px(800.)));
+    settle(cx);
+    let held = mcp.call(
+        "fs_read",
+        json!({"path": format!(".env/{}/{}", guard::UNBROKEN, guard::SPACED)}),
+    );
+    let number = held_number(held);
+    until(&shell, cx, "the request's line is in the chat", |cx| {
+        has(format!("approval-line-{number}"), cx)
+    });
+    settle(cx);
+    guard::assert_stays_inside(cx, format!("approval-line-{number}"));
+    let line = rect(format!("approval-line-{number}"), cx);
+    assert!(line.size.height < px(40.), "one line: {line:?}");
+
+    // Denied, the line folds into the group of the steps; opened, it holds the record, which
+    // says the same words and wraps.
+    user.call("approval.deny", json!({"number": number}))
+        .unwrap();
+    until(&shell, cx, "the line folds away", |cx| {
+        settle(cx);
+        !has(format!("approval-line-{number}"), cx)
+    });
+    let page = session_page(&shell, cx);
+    let group = page.read_with(cx, |page, cx| {
+        let conversation = page.conversation().read(cx);
+        let groups = conversation.groups();
+        let line = groups
+            .first()
+            .and_then(|group| conversation.group_id(group));
+        line.expect("the steps are a group")
+    });
+    cx.update(|window, cx| window.click(group, cx));
+    settle(cx);
+    assert!(
+        has(format!("approval-record-{number}"), cx),
+        "the record is drawn"
+    );
+    guard::assert_stays_inside(cx, format!("approval-decided-{number}"));
 }
 
 #[gpui_kit::test]
