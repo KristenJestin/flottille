@@ -209,7 +209,11 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   runs a model no other value does, or when its description names the model it runs and no
   `recommendedValue` is given, as Claude's adapter does when no other row runs that model), else
   the first model it lists; the effort it says, else the middle of the levels the model offers (the upper of the two
-  middles). The window shows these same names, never that a provider chooses. The row of the
+  middles). The effort holds for every process of the session, not for its first alone: a process
+  that opens on the agent's own choice again (a resumed or loaded session, none having chosen
+  its effort) and a model set that the effort does not survive are set to it by its name too, and
+  `taken.effort` is never stored as `default`; the window resolves a `default` it is given the
+  same way. The window shows these same names, never that a provider chooses. The row of the
   provider's own choice is named by its model, never by the adapter's "Default (recommended)":
   by its description when it names a model ("Opus 5.5 (1M context)"), else by the model Flottille
   applies, else "<Provider>'s model"; a name that says "default" is never kept, a stored one
