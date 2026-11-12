@@ -459,8 +459,16 @@ fn a_model_asked_before_the_models_are_known_is_said_as_asked_and_its_refusal_he
     assert!(!answer.error, "{}", answer.text);
     says_no_default(&answer.text);
     // Said as asked, and the session's refusal with it.
-    assert!(answer.text.contains("on OpenCode · fake-huge · "), "{}", answer.text);
-    assert!(answer.text.contains("failed as it opened"), "{}", answer.text);
+    assert!(
+        answer.text.contains("on OpenCode · fake-huge · "),
+        "{}",
+        answer.text
+    );
+    assert!(
+        answer.text.contains("failed as it opened"),
+        "{}",
+        answer.text
+    );
     assert!(answer.text.contains("fake-huge"), "{}", answer.text);
     // Its parent hears it as of any child that fails.
     eventually("the parent told", || {
