@@ -5,6 +5,7 @@
 //! fake ACP agent, with a throwaway user. No window opens on a screen.
 
 mod common;
+mod guard;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -446,4 +447,22 @@ fn the_folded_sub_agents_card_is_at_rest(cx: &mut TestAppContext) {
         "folded"
     );
     at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_long_sub_agent_stays_inside_its_card(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    let (child, _worker) = running(
+        &user,
+        &mcp,
+        &format!("{} {}", guard::UNBROKEN, guard::SPACED),
+    );
+    let (_shell, _page, at, cx) = card_of(&user, &lead, 1, cx);
+    cx.update(|window, cx| window.click(toggle(at), cx));
+    settle(cx);
+    assert!(listed(&child, cx), "the list is open");
+    guard::narrow(cx);
+    settle(cx);
+    guard::assert_stays_inside(cx, format!("row-{at}-sub-agents"));
 }

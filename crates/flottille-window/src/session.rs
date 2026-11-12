@@ -4177,18 +4177,28 @@ impl Row {
             .items_end()
             .gap(space::XS)
             .child(
-                div()
-                    .id(pending_part(key, "failed"))
-                    .max_w(px(540.))
-                    .flex()
-                    .items_center()
-                    .gap(space::XS)
-                    .text_size(px(11.5))
-                    .text_color(p.fail)
-                    .aria_label(said.clone())
-                    .child(icon(Icon::Warning).size(px(11.)).text_color(p.fail))
-                    .child(said)
-                    .test_support(),
+                // The reason is the daemon's words: the line shrinks to the room there is, and
+                // they wrap in it.
+                div().w_full().flex().justify_end().child(
+                    div()
+                        .id(pending_part(key, "failed"))
+                        .min_w_0()
+                        .max_w(px(540.))
+                        .flex()
+                        .items_center()
+                        .gap(space::XS)
+                        .text_size(px(11.5))
+                        .text_color(p.fail)
+                        .aria_label(said.clone())
+                        .child(
+                            icon(Icon::Warning)
+                                .size(px(11.))
+                                .flex_none()
+                                .text_color(p.fail),
+                        )
+                        .child(div().min_w_0().child(said))
+                        .test_support(),
+                ),
             )
             .child(
                 div()
@@ -5128,6 +5138,7 @@ impl Render for Row {
                 let lines = self.sent_lines(window, cx);
                 let message = div()
                     .id(id("message"))
+                    .w_full()
                     .flex()
                     .flex_col()
                     .items_end()
@@ -5949,12 +5960,14 @@ impl Render for Row {
                     .child(div().flex_none().child(SharedString::from(kind.clone())))
                     .child(
                         div()
+                            .id(id("notice-text"))
                             .min_w_0()
                             // A session's title is one line, cut; a failure's reason is whole.
                             .when(kind == STARTED_SESSION_KIND, |d| {
                                 d.overflow_hidden().whitespace_nowrap().text_ellipsis()
                             })
-                            .child(SharedString::from(text.clone())),
+                            .child(SharedString::from(text.clone()))
+                            .test_support(),
                     )
                     .test_support()
                     .into_any_element();
@@ -6136,7 +6149,7 @@ impl Render for Row {
                 questions,
                 answers,
                 ..
-            } => self.render_question(*seq, questions, answers.as_deref(), cx),
+            } => self.render_question(*seq, questions, answers.as_deref(), window, cx),
             Block::Asked { moved, .. } => self.render_asked(*moved, cx),
             Block::VaultAsk(ask) => self.render_vault_ask(ask.clone(), window, cx),
             Block::Answered { .. } => div().into_any_element(),
@@ -6351,6 +6364,7 @@ impl Row {
         seq: u64,
         questions: &[flottille_core::question::Question],
         answers: Option<&[flottille_core::question::Answer]>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette(cx);
@@ -6393,7 +6407,9 @@ impl Row {
                 .text_color(mix(p.mute, p.text, t))
         });
         let answered = answers.map(|answers| {
-            crate::question_card::answered_card(self.at, &title, when, questions, answers, cx)
+            crate::question_card::answered_card(
+                self.at, &title, when, questions, answers, window, cx,
+            )
         });
         div()
             .id(id("question"))

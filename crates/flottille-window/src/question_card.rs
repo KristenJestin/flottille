@@ -15,7 +15,7 @@ use std::time::Duration;
 use flottille_core::question::{Answer, Question};
 use gpui_design_system::{
     Block, Button, Card, ChoiceRow, Dots, Field, Icon, Toast, Type as _, changing, fade, icon,
-    palette, presence, quoted_title, sliding, space, toast,
+    palette, presence, quoted_title, sliding, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -845,7 +845,8 @@ pub fn answered_card(
     when: SharedString,
     questions: &[Question],
     answers: &[Answer],
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> Card {
     let p = palette(cx);
     let id = |part: String| ElementId::Name(format!("row-{at}-{part}").into());
@@ -875,8 +876,10 @@ pub fn answered_card(
             true => (a.text.clone(), String::new()),
             false => (a.choices.join(", "), a.text.clone()),
         };
-        let lines = |text: &str, ink, weight| {
+        let lines = |part: &str, text: &str, ink, weight| {
             div()
+                .id(id(format!("answered-{n}-{part}")))
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .text_size(px(13.))
@@ -887,58 +890,66 @@ pub fn answered_card(
                         .map(|line| div().child(line.to_owned()))
                         .collect::<Vec<_>>(),
                 )
+                .test_support()
         };
-        card =
-            card.block(
-                Block::new().child(
-                    div()
-                        .id(id(format!("answered-{n}")))
-                        .px(space::LG)
-                        .py(space::MD)
-                        .flex()
-                        .flex_col()
-                        .gap(space::XS)
-                        .child(
-                            div()
-                                .id(id(format!("answered-{n}-question")))
-                                .aria_label(SharedString::from(asked.clone()))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(13.))
-                                .text_color(p.mute)
-                                .child(SharedString::from(format!("{} · {asked}", n + 1)))
-                                .test_support(),
-                        )
-                        .child(
-                            div()
-                                .id(id(format!("answered-{n}-answer")))
-                                .aria_label(SharedString::from(said.clone()))
-                                .flex()
-                                .flex_col()
-                                .gap(space::XS)
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_start()
-                                        .gap(space::SM)
-                                        .child(div().flex_none().pt(space::XS).child(
+        card = card.block(
+            Block::new().child(
+                div()
+                    .id(id(format!("answered-{n}")))
+                    .px(space::LG)
+                    .py(space::MD)
+                    .flex()
+                    .flex_col()
+                    .gap(space::XS)
+                    .child(tipped_when_cut(
+                        div()
+                            .id(id(format!("answered-{n}-question")))
+                            .aria_label(SharedString::from(asked.clone()))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(13.))
+                            .text_color(p.mute)
+                            .child(SharedString::from(format!("{} · {asked}", n + 1))),
+                        format!("{} · {asked}", n + 1),
+                        window,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .id(id(format!("answered-{n}-answer")))
+                            .aria_label(SharedString::from(said.clone()))
+                            .flex()
+                            .flex_col()
+                            .gap(space::XS)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .gap(space::SM)
+                                    .child(
+                                        div().flex_none().pt(space::XS).child(
                                             icon(Icon::Check).size(px(13.)).text_color(p.ok),
-                                        ))
-                                        .child(lines(&headline, p.text, FontWeight::MEDIUM)),
-                                )
-                                .when(!note.is_empty(), |d| {
-                                    d.child(div().ml(space::XL).child(lines(
-                                        &note,
-                                        p.mute,
-                                        FontWeight::NORMAL,
-                                    )))
-                                })
-                                .test_support(),
-                        )
-                        .test_support(),
-                ),
-            );
+                                        ),
+                                    )
+                                    .child(
+                                        lines("headline", &headline, p.text, FontWeight::MEDIUM)
+                                            .flex_1(),
+                                    ),
+                            )
+                            .when(!note.is_empty(), |d| {
+                                d.child(div().ml(space::XL).child(lines(
+                                    "note",
+                                    &note,
+                                    p.mute,
+                                    FontWeight::NORMAL,
+                                )))
+                            })
+                            .test_support(),
+                    )
+                    .test_support(),
+            ),
+        );
     }
     card
 }

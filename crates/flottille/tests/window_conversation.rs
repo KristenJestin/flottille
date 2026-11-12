@@ -6,6 +6,7 @@
 //! screen.
 
 mod common;
+mod guard;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -2796,6 +2797,58 @@ fn a_refused_message_stays_with_retry_and_edit(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_long_refused_message_stays_inside_its_card(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    a_command_that_cannot_be_read(&user);
+    let (shell, _page, cx) = open_session(&user, &lead, cx);
+    let reply = composer(&shell, &lead, cx);
+
+    let key = send(
+        &reply,
+        &format!("/review {} {}", guard::UNBROKEN, guard::SPACED),
+        cx,
+    );
+    until(&shell, cx, "the daemon refuses it", |cx| {
+        has(pending_part(key, "failed"), cx)
+    });
+    guard::narrow(cx);
+    settle(cx);
+    guard::assert_stays_inside(cx, format!("pending-{key}-message"));
+}
+
+#[gpui_kit::test]
+fn a_long_refused_message_under_a_running_turn_stays_inside_its_card(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    a_command_that_cannot_be_read(&user);
+    let (shell, _page, cx) = open_session(&user, &lead, cx);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "work a while"}),
+    )
+    .unwrap();
+    let reply = composer(&shell, &lead, cx);
+    until(&shell, cx, "the turn runs", |cx| {
+        reply.read_with(cx, |r, _| r.is_running())
+    });
+
+    let key = send(
+        &reply,
+        &format!("/review {} {}", guard::UNBROKEN, guard::SPACED),
+        cx,
+    );
+    let waiting = format!("pending-{key}");
+    until(&shell, cx, "the daemon refuses it", |cx| {
+        has(format!("queued-{waiting}-waits"), cx) && has(pending_part(key, "retry"), cx)
+            || has(queued_button(&waiting, "retry"), cx)
+    });
+    guard::narrow(cx);
+    settle(cx);
+    guard::assert_stays_inside(cx, queued_id(&waiting));
+}
+
+#[gpui_kit::test]
 fn retry_sends_the_failed_message_again(cx: &mut TestAppContext) {
     let user = user();
     let lead = lead(&user);
@@ -3731,4 +3784,16 @@ fn a_retried_step_unfolded_shows_its_refusal_faint(cx: &mut TestAppContext) {
         !has(format!("step-{at}-1-refusal"), cx),
         "the call that passed has none to say"
     );
+}
+
+#[gpui_kit::test]
+fn a_long_waiting_message_stays_inside_its_card(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let text = format!("{} {}", guard::UNBROKEN, guard::SPACED);
+    let (_shell, _page, _, delivery, cx) =
+        with_a_waiting_message(&user, &lead, "work a while", &text, cx);
+    guard::narrow(cx);
+    settle(cx);
+    guard::assert_stays_inside(cx, queued_id(&delivery));
 }

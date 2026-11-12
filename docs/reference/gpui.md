@@ -256,6 +256,17 @@ the wrong code first).
     ("Each decision is a turn of this model, on your own quota."). Several choices in a row are
     one card with a line each and the compact select on the right, the default and the cost said
     once under the card, never stacked full-width selects.
+16. **A text stays in its card.** What the user or an agent wrote wraps inside its frame, never
+    cut and never past an edge: a text in a flex row has `flex_1` or `min_w_0` (a long word is as
+    wide as its letters until it does), and a row that hugs its content right-aligned is a flex
+    item of a `w_full` row, not a child of a column that aligns to the end. A one-line text (a
+    title, a path, a label) is cut with an ellipsis and has its whole text in a tooltip.
+    **[test]** `tests/guard/mod.rs` (`guard::assert_stays_inside(cx, id)`: every observed
+    element under `id` stays between its sides, and the frame inside the window) with one
+    `a_long_<thing>_stays_inside_its_card` per kind of row, drawn 360 px wide with a long
+    unbroken word and a long spaced sentence (`window_cards.rs`, and the suite of each part that
+    has its own cards). A text that can leave its card gets an id and `.test_support()`, so that
+    the guard sees it; a new card gets its test.
 
 The components that hold them:
 
