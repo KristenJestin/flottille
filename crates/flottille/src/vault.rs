@@ -103,6 +103,9 @@ impl Keyring {
     async fn store(&self, name: &str, secret: &str) -> Result<(), String> {
         match self {
             Keyring::Memory { kept, file } => {
+                if refuses_a_store(file) {
+                    return Err("the keyring refused to store it".to_owned());
+                }
                 Self::memory(kept, file)?.insert(name.to_owned(), secret.to_owned());
                 Ok(())
             }
@@ -164,6 +167,24 @@ impl Keyring {
     }
 }
 
+/// For a test of a keyring that fails to store: `fail_stores = 2` in the memory keyring's file
+/// refuses the next two stores, counting down in the file.
+fn refuses_a_store(file: &Path) -> bool {
+    let Some(left) = setting(file, "fail_stores")
+        .and_then(|left| left.parse::<i64>().ok())
+        .filter(|left| *left > 0)
+    else {
+        return false;
+    };
+    if let Ok(text) = std::fs::read_to_string(file)
+        && let Ok(mut document) = text.parse::<toml_edit::DocumentMut>()
+    {
+        document["fail_stores"] = toml_edit::value(left - 1);
+        let _ = std::fs::write(file, document.to_string());
+    }
+    true
+}
+
 /// A key of the keyring's file, as text.
 fn setting(file: &Path, key: &str) -> Option<String> {
     let document = std::fs::read_to_string(file)
@@ -174,6 +195,7 @@ fn setting(file: &Path, key: &str) -> Option<String> {
     item.as_str()
         .map(str::to_owned)
         .or_else(|| item.as_bool().map(|on| on.to_string()))
+        .or_else(|| item.as_integer().map(|number| number.to_string()))
 }
 
 /// The secret of `name` in the table `kept` of the memory keyring's file.

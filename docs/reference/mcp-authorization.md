@@ -134,6 +134,15 @@ client may not assume it gets one. An invalid or expired token is answered `401`
   within 60 seconds, it is refreshed first (`grant_type=refresh_token`, with `resource`); a server
   that runs when its token comes within those 60 seconds is started again, before the call, with
   the refreshed one. A refresh token given back replaces the old one.
+- **The tokens are written under the connection's turn**, the lock a call, a review and a start of
+  its server hold: a sign-in that ends while a refresh runs waits for it, and writes its own
+  tokens after; and a refresh whose refresh token is no longer the stored one (a sign-in replaced
+  it) discards its result, whether it was given or refused.
+- **A refresh whose tokens cannot be written** (the keyring is locked or busy) is written again
+  once; if the vault still refuses, the new tokens are kept in the daemon's memory for as long as
+  it runs, and used, never the old refresh token, which the authorization server spent. The inbox
+  says so (`connection.tokens_unsaved`); the next refresh writes them again, and stopping the
+  daemon first loses them (the connection is then signed out at its next refresh).
 - **A refused refresh signs the connection out**: the token endpoint answers `invalid_grant` (the
   refresh token was revoked or has expired), or `401 invalid_client`. Its tokens are removed from
   the vault, its tool leaves every session, and the inbox asks the user to sign in again. Any other

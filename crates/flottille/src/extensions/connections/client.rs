@@ -55,6 +55,10 @@ pub struct Live {
     started: AtomicU64,
     /// The sign-in that waits for the browser, of each connection.
     pub(super) signing: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    /// The tokens of a connection that could not be written to the vault after a refresh gave
+    /// new ones: the old refresh token is spent, so these are the only good ones, kept here until
+    /// the vault takes them.
+    pub(super) unsaved: Mutex<HashMap<String, super::oauth::Tokens>>,
 }
 
 #[derive(Default)]
@@ -221,6 +225,18 @@ fn existing(daemon: &Daemon, name: &str) -> Option<Arc<Server>> {
         .unwrap()
         .get(name)
         .cloned()
+}
+
+/// `work` while the connection's turn is held: what a call, a review and a start of its server
+/// hold, so that tokens are never written while a refresh of them runs.
+pub(super) async fn exclusively<T>(
+    daemon: &Daemon,
+    name: &str,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    let server = server_of(daemon, name);
+    let _turn = server.turn.lock().await;
+    work.await
 }
 
 /// Whether the connection's server runs.

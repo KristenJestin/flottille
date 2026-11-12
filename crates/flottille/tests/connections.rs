@@ -2764,3 +2764,135 @@ fn an_invalid_grant_refresh_signs_out() {
     let entries = user.call("vault.list", json!({})).unwrap().to_string();
     assert!(!entries.contains("notes.oauth"), "{entries}");
 }
+
+/// The number of the token of the server's last request that carried one.
+fn last_bearer(user: &User) -> u64 {
+    logged(user, "notes", "http")
+        .iter()
+        .rev()
+        .find_map(|request| request["bearer"].as_u64())
+        .expect("a request with a token")
+}
+
+#[test]
+fn a_sign_in_during_a_refresh_keeps_the_new_tokens() {
+    let user = user();
+    project(&user, "app");
+    let (server, url) = protected_server(&user, json!({"expires_in": 30}));
+    signed_in(&user, &url);
+    reviewed(&user);
+    // The next refresh is held by the authorization server; what it issues lives an hour.
+    let hold = user.path("hold-refresh");
+    change_oauth(&user, |oauth| {
+        oauth["expires_in"] = json!(3600);
+        oauth["refresh_hold"] = json!(hold);
+    });
+    std::thread::scope(|scope| {
+        // A review starts the server: its token is about to expire, so it is refreshed.
+        let refreshing = scope.spawn(|| {
+            user.call_within(
+                "connection.review",
+                json!({"name": "notes"}),
+                Duration::from_secs(60),
+            )
+            .unwrap()
+        });
+        eventually("the refresh is held", || {
+            !logged(&user, "notes", "hold").is_empty()
+        });
+        // The user signs in again meanwhile, and the browser comes back.
+        let login = user
+            .call_within(
+                "connection.login",
+                json!({"name": "notes"}),
+                Duration::from_secs(40),
+            )
+            .unwrap();
+        let address = login["url"].as_str().unwrap().to_owned();
+        let coming_back = scope.spawn(move || browse(&redirect_of(&address)));
+        eventually("the code is exchanged", || {
+            !grants(&user, "authorization_code").is_empty()
+                && grants(&user, "authorization_code").len() == 2
+        });
+        std::fs::write(&hold, "").unwrap();
+        refreshing.join().unwrap();
+        let (status, _, page) = coming_back.join().unwrap();
+        assert_eq!(status, 200, "{page}");
+    });
+    // What the sign-in kept is what the server is reached with: not what the old refresh gave.
+    let signed = grants(&user, "authorization_code").last().unwrap().clone();
+    let refreshed = grants(&user, "refresh_token").last().unwrap().clone();
+    assert_ne!(signed["serial"], refreshed["serial"]);
+    user.call_within(
+        "connection.review",
+        json!({"name": "notes"}),
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    stopped(server);
+    assert_eq!(
+        Some(last_bearer(&user)),
+        signed["serial"].as_u64(),
+        "the refresh that began before the sign-in overwrote its tokens"
+    );
+}
+
+/// The memory keyring refuses its next `times` stores.
+fn keyring_refuses(user: &User, times: u32) {
+    let file = user.path("config/flottille/keyring.toml");
+    let kept = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("fail_stores = {times}\n{kept}")).unwrap();
+}
+
+fn searched(mcp: &Mcp) -> Answer {
+    mcp.call(
+        "conn_notes",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    )
+}
+
+#[test]
+fn a_failed_save_after_a_refresh_is_tried_again_once() {
+    let user = user();
+    project(&user, "app");
+    let (server, url) = protected_server(&user, json!({"expires_in": 30}));
+    signed_in(&user, &url);
+    reviewed(&user);
+    let (_, mcp) = session(&user, "app");
+    keyring_refuses(&user, 1);
+    let first = done(searched(&mcp));
+    assert!(first.contains("found: the login decision"), "{first}");
+    // The new refresh token was kept: the next refresh uses it, the old one is spent.
+    let second = done(searched(&mcp));
+    stopped(server);
+    assert!(second.contains("found: the login decision"), "{second}");
+    assert_ne!(connection(&user, "notes")["state"], "signed out");
+    let inbox = user.call("inbox.list", json!({})).unwrap().to_string();
+    assert!(!inbox.contains("would not keep"), "{inbox}");
+}
+
+#[test]
+fn a_refresh_that_cannot_be_saved_keeps_its_tokens_in_memory() {
+    let user = user();
+    project(&user, "app");
+    let (server, url) = protected_server(&user, json!({"expires_in": 30}));
+    signed_in(&user, &url);
+    reviewed(&user);
+    let (_, mcp) = session(&user, "app");
+    // Both writes of the first refresh fail: its tokens are the connection's in memory.
+    keyring_refuses(&user, 2);
+    let first = done(searched(&mcp));
+    assert!(first.contains("found: the login decision"), "{first}");
+    let inbox = user.call("inbox.list", json!({})).unwrap().to_string();
+    assert!(inbox.contains("would not keep the new tokens"), "{inbox}");
+    // The next refresh is with the new refresh token, never the old one the server spent.
+    let second = done(searched(&mcp));
+    stopped(server);
+    assert!(second.contains("found: the login decision"), "{second}");
+    assert_ne!(connection(&user, "notes")["state"], "signed out");
+    let refreshes = grants(&user, "refresh_token");
+    assert!(
+        refreshes.iter().all(|refresh| refresh["ok"] == true),
+        "a refresh was refused: {refreshes:?}"
+    );
+}

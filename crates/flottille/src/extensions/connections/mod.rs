@@ -95,6 +95,7 @@ pub const EXTENSION: Extension = Extension {
     needs_you: &[
         ("connection.cut_off", cut_off_text),
         ("connection.signed_out", signed_out_text),
+        ("connection.tokens_unsaved", tokens_unsaved_text),
     ],
 };
 
@@ -1194,6 +1195,17 @@ async fn signed_out(daemon: &Arc<Daemon>, name: &str, why: &str) {
     }
     crate::projects::tools_changed(daemon);
     changed_event(daemon, name, Some(why));
+}
+
+fn tokens_unsaved_text(data: &Value) -> String {
+    let name = data["name"].as_str().unwrap_or_default();
+    format!(
+        "The vault would not keep the new tokens of the connection {name} ({}). Flottille holds \
+         them in memory and keeps using them; when the daemon stops they are lost, and the \
+         connection is signed out. Fix the keyring, or sign in again (`flottille connection login \
+         {name}`).",
+        data["why"].as_str().unwrap_or("no reason given")
+    )
 }
 
 fn signed_out_text(data: &Value) -> String {

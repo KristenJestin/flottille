@@ -104,6 +104,16 @@ pub enum Unusable {
 
 /// The tokens kept for the connection, if it signed in.
 async fn kept(daemon: &Daemon, name: &str) -> Result<Option<Tokens>, String> {
+    if let Some(unsaved) = daemon
+        .extensions
+        .connections
+        .unsaved
+        .lock()
+        .unwrap()
+        .get(name)
+    {
+        return Ok(Some(unsaved.clone()));
+    }
     let entries = daemon
         .read(|store| store.vault_entries())
         .map_err(|error| error.to_string())?;
@@ -129,12 +139,56 @@ async fn keep(daemon: &Arc<Daemon>, name: &str, tokens: &Tokens) -> Result<(), S
             "url": tokens.url, "for": flottille_core::vault::connection(name)}),
     )
     .await
-    .map(|_| ())
-    .map_err(|failure| failure.message)
+    .map_err(|failure| failure.message)?;
+    daemon
+        .extensions
+        .connections
+        .unsaved
+        .lock()
+        .unwrap()
+        .remove(name);
+    Ok(())
+}
+
+/// Keeps the tokens a refresh gave, which replace a refresh token that is spent: the write is
+/// tried twice, and if the vault still refuses, the new tokens are the connection's in memory
+/// (never the old refresh token again) and the user is told, in the inbox.
+async fn save(daemon: &Arc<Daemon>, name: &str, tokens: &Tokens) {
+    let why = match keep(daemon, name, tokens).await {
+        Ok(()) => return,
+        Err(_) => match keep(daemon, name, tokens).await {
+            Ok(()) => return,
+            Err(why) => why,
+        },
+    };
+    let told = daemon
+        .extensions
+        .connections
+        .unsaved
+        .lock()
+        .unwrap()
+        .insert(name.to_owned(), tokens.clone())
+        .is_none();
+    if told {
+        let why = super::cut(&secrets::mask(&why, &Default::default()), 300);
+        if let Err(error) = daemon.emit(
+            "connection.tokens_unsaved",
+            json!({"name": name, "why": why}),
+        ) {
+            eprintln!("flottille daemon: connection {name}: {error}");
+        }
+    }
 }
 
 /// Removes the connection's tokens, if it has any.
 pub async fn forget(daemon: &Arc<Daemon>, name: &str) -> Result<(), String> {
+    daemon
+        .extensions
+        .connections
+        .unsaved
+        .lock()
+        .unwrap()
+        .remove(name);
     match crate::vault::call(
         daemon.clone(),
         "vault.remove",
@@ -172,11 +226,21 @@ pub async fn bearer(
     let tokens = match tokens.expiring() {
         false => tokens,
         true => {
-            let fresh = refreshed(&tokens).await?;
-            keep(daemon, &declaration.name, &fresh)
+            let refreshed = refreshed(&tokens).await;
+            // A sign-in may have replaced the tokens while the refresh ran: what it gave, or
+            // refused, is then of a refresh token that is no longer the connection's.
+            match kept(daemon, &declaration.name)
                 .await
-                .map_err(Unusable::Failed)?;
-            fresh
+                .map_err(Unusable::Failed)?
+            {
+                Some(stored) if stored.refresh_token != tokens.refresh_token => stored,
+                None => return Ok(None),
+                Some(_) => {
+                    let fresh = refreshed?;
+                    save(daemon, &declaration.name, &fresh).await;
+                    fresh
+                }
+            }
         }
     };
     Ok(Some((tokens.access_token, tokens.expires_at)))
@@ -837,7 +901,14 @@ async fn exchanged(
     }
     let tokens = granted(base.clone(), &answer)?;
     let daemon = daemon.upgrade().ok_or("the daemon stopped")?;
-    keep(&daemon, &pending.name, &tokens).await
+    // Not while a call or a start of the server refreshes the tokens it holds: that one's would
+    // overwrite these.
+    super::client::exclusively(
+        &daemon,
+        &pending.name,
+        keep(&daemon, &pending.name, &tokens),
+    )
+    .await
 }
 
 /// The query of a `GET /callback`, read from the browser's request.

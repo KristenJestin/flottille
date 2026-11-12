@@ -229,6 +229,17 @@ vault, its tool left every session, and the inbox asks the user to sign in again
 | `name`, `tool` | The connection's name and its tool. |
 | `why` | The authorization server's refusal, masked (`invalid_grant: the grant is not valid`). |
 
+### `connection.tokens_unsaved`
+
+A refresh gave a connection new tokens, and the vault refused them twice: they are kept in the
+daemon's memory, and used, until the vault takes them (the next refresh writes them again) or the
+daemon stops. The inbox says so (kind `connections`). Said once for as long as they stay unsaved.
+
+| Field | |
+|---|---|
+| `name` | The connection's. |
+| `why` | Why the vault refused, masked. |
+
 ### `review.started`, `review.progress`, `review.reported`, `review.failed`
 
 A review of a session started, launched or ended a pass, reported, or ended without its findings

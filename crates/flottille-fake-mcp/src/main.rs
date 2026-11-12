@@ -19,7 +19,9 @@
 //! `register`, `authorize` with PKCE `S256`, which redirects at once with a code, its `state` and
 //! its `iss`, and `token`). `oauth` takes `expires_in` (the tokens' life, 3600 seconds by
 //! default), `refresh: "refused"` (every refresh answers `invalid_grant`), `refresh_error`
-//! (every refresh answers that OAuth error instead, and keeps the refresh token valid), `registration: false`
+//! (every refresh answers that OAuth error instead, and keeps the refresh token valid),
+//! `refresh_hold` (the path of a file: a refresh is answered once it exists, and logs `hold` as it
+//! waits), `registration: false`
 //! (no dynamic registration), `authorize_at`, `token_at` and `register_at: "elsewhere"` (that
 //! endpoint named on `localhost`, another origin than the issuer's `127.0.0.1`), `iss: false`
 //! (no `iss` in the authorization response, and none promised), and `tokens_file`, where every token it issues is written, so that a
@@ -293,148 +295,181 @@ fn call(
     json!({"content": content})
 }
 
-/// Streamable HTTP, one request a connection. The script is read again at each request.
+/// Streamable HTTP, one request a connection, each on its own thread: a request the script holds
+/// does not hold the others. The script is read again at each request.
 fn http(script_path: &str, log: &Option<String>, port_file: &str) {
-    use std::io::{BufRead, BufReader, Read};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::fs::write(port_file, port.to_string()).unwrap();
     let base = format!("http://127.0.0.1:{port}");
-    let mut issuer = Issuer::default();
+    let issuer = std::sync::Arc::new(std::sync::Mutex::new(Issuer::default()));
     for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        let script = &read(script_path);
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut first = String::new();
-        if reader.read_line(&mut first).is_err() {
-            continue;
+        let Ok(stream) = stream else { continue };
+        let (script_path, log, base, issuer) = (
+            script_path.to_owned(),
+            log.clone(),
+            base.clone(),
+            issuer.clone(),
+        );
+        std::thread::spawn(move || serve(stream, &script_path, &log, &base, &issuer));
+    }
+}
+
+fn serve(
+    mut stream: std::net::TcpStream,
+    script_path: &str,
+    log: &Option<String>,
+    base: &str,
+    issuer: &std::sync::Mutex<Issuer>,
+) {
+    use std::io::{BufRead, BufReader, Read};
+    let script = &read(script_path);
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut first = String::new();
+    if reader.read_line(&mut first).is_err() {
+        return;
+    }
+    let mut headers = serde_json::Map::new();
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+            break;
         }
-        let mut headers = serde_json::Map::new();
-        let mut length = 0;
+        if let Some((name, value)) = line.split_once(':') {
+            let (name, value) = (name.trim().to_lowercase(), value.trim().to_owned());
+            if name == "content-length" {
+                length = value.parse().unwrap_or(0);
+            }
+            headers.insert(name, json!(value));
+        }
+    }
+    let mut body = vec![0; length];
+    let _ = reader.read_exact(&mut body);
+    // reqwest sends a body of unknown length in chunks.
+    if headers.get("transfer-encoding").and_then(Value::as_str) == Some("chunked") {
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+            let mut size = String::new();
+            if reader.read_line(&mut size).unwrap_or(0) == 0 {
                 break;
             }
-            if let Some((name, value)) = line.split_once(':') {
-                let (name, value) = (name.trim().to_lowercase(), value.trim().to_owned());
-                if name == "content-length" {
-                    length = value.parse().unwrap_or(0);
-                }
-                headers.insert(name, json!(value));
+            let size = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+            let mut chunk = vec![0; size + 2];
+            if reader.read_exact(&mut chunk).is_err() || size == 0 {
+                break;
             }
+            body.extend_from_slice(&chunk[..size]);
         }
-        let mut body = vec![0; length];
-        let _ = reader.read_exact(&mut body);
-        // reqwest sends a body of unknown length in chunks.
-        if headers.get("transfer-encoding").and_then(Value::as_str) == Some("chunked") {
-            loop {
-                let mut size = String::new();
-                if reader.read_line(&mut size).unwrap_or(0) == 0 {
-                    break;
-                }
-                let size = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
-                let mut chunk = vec![0; size + 2];
-                if reader.read_exact(&mut chunk).is_err() || size == 0 {
-                    break;
-                }
-                body.extend_from_slice(&chunk[..size]);
-            }
-        }
-        let mut words = first.split_whitespace();
-        let method = words.next().unwrap_or_default().to_owned();
-        let target = words.next().unwrap_or_default().to_owned();
-        let (path, query) = target.split_once('?').unwrap_or((&target, ""));
-        let reply = |status: &str, body: Option<Value>| {
-            let text = body.map(|body| body.to_string()).unwrap_or_default();
-            format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nMcp-Session-Id: fake\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{text}",
-                text.len()
-            )
-        };
-        let oauth = &script["oauth"];
-        if oauth.is_object() {
-            // A token is never written to the log: which one it is, by its number.
-            let bearer = headers
-                .remove("authorization")
-                .and_then(|value| issuer.serial_of(value.as_str()?.strip_prefix("Bearer ")?));
-            if path != "/mcp" || method != "POST" || bearer.is_none() {
-                write_log(
-                    log,
-                    json!({"event": "http", "method": method, "path": path, "headers": headers,
-                        "bearer": bearer}),
-                );
-            }
-            if path != "/mcp" {
-                let answer = issuer.answer(oauth, &base, &method, path, query, &body, log, &reply);
-                let _ = stream.write_all(answer.as_bytes());
-                continue;
-            }
-            if bearer.is_none() {
-                let challenge = format!(
-                    "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\", \
-                     scope=\"notes:read\""
-                );
-                let text = r#"{"error":"invalid_token"}"#;
-                let answer = format!(
-                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\
-                     WWW-Authenticate: {challenge}\r\nContent-Length: {}\r\n\
-                     Connection: close\r\n\r\n{text}",
-                    text.len()
-                );
-                let _ = stream.write_all(answer.as_bytes());
-                continue;
-            }
-            let message: Value = serde_json::from_slice(&body).unwrap_or_default();
+    }
+    let mut words = first.split_whitespace();
+    let method = words.next().unwrap_or_default().to_owned();
+    let target = words.next().unwrap_or_default().to_owned();
+    let (path, query) = target.split_once('?').unwrap_or((&target, ""));
+    let reply = |status: &str, body: Option<Value>| {
+        let text = body.map(|body| body.to_string()).unwrap_or_default();
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nMcp-Session-Id: fake\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{text}",
+            text.len()
+        )
+    };
+    let oauth = &script["oauth"];
+    if oauth.is_object() {
+        // A token is never written to the log: which one it is, by its number.
+        let bearer = headers.remove("authorization").and_then(|value| {
+            issuer
+                .lock()
+                .unwrap()
+                .serial_of(value.as_str()?.strip_prefix("Bearer ")?)
+        });
+        if path != "/mcp" || method != "POST" || bearer.is_none() {
             write_log(
                 log,
                 json!({"event": "http", "method": method, "path": path, "headers": headers,
-                    "bearer": bearer, "rpc": message["method"]}),
-            );
-        } else {
-            write_log(
-                log,
-                json!({"event": "http", "method": method, "headers": headers}),
+                    "bearer": bearer}),
             );
         }
-        let answer = match method.as_str() {
-            "POST" => {
-                let message: Value = serde_json::from_slice(&body).unwrap_or_default();
-                let id = message["id"].clone();
-                let params = &message["params"];
-                let result = match message["method"].as_str().unwrap_or_default() {
-                    "initialize" => Some(json!({
-                        "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-                        "capabilities": {"tools": {}}, "serverInfo": script["server"],
-                        "instructions": script["instructions"]})),
-                    "tools/list" => Some(json!({"tools": script["tools"]})),
-                    "tools/call" => {
-                        let tool = params["name"].as_str().unwrap_or_default();
-                        let answer = &script["answers"][tool];
-                        Some(call(
-                            answer,
-                            &params["arguments"],
-                            &mut std::iter::empty::<std::io::Result<String>>(),
-                            &mut 0,
-                        ))
-                    }
-                    _ if id.is_null() => None,
-                    _ => Some(json!({})),
-                };
-                match (result, id.is_null()) {
-                    (Some(result), false) => reply(
-                        "200 OK",
-                        Some(json!({"jsonrpc": "2.0", "id": id, "result": result})),
-                    ),
-                    _ => reply("202 Accepted", None),
+        if path != "/mcp" {
+            // A refresh the script holds is answered once its file exists, the others meanwhile.
+            let held = (path == "/as/token" && form(&body)["grant_type"] == "refresh_token")
+                .then(|| oauth["refresh_hold"].as_str())
+                .flatten();
+            let answer = issuer
+                .lock()
+                .unwrap()
+                .answer(oauth, base, &method, path, query, &body, log, &reply);
+            if let Some(file) = held {
+                write_log(log, json!({"event": "hold"}));
+                while !std::path::Path::new(file).exists() {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
                 }
             }
-            "DELETE" => reply("200 OK", None),
-            _ => reply("405 Method Not Allowed", None),
-        };
-        let _ = stream.write_all(answer.as_bytes());
+            let _ = stream.write_all(answer.as_bytes());
+            return;
+        }
+        if bearer.is_none() {
+            let challenge = format!(
+                "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\", \
+                 scope=\"notes:read\""
+            );
+            let text = r#"{"error":"invalid_token"}"#;
+            let answer = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\
+                 WWW-Authenticate: {challenge}\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{text}",
+                text.len()
+            );
+            let _ = stream.write_all(answer.as_bytes());
+            return;
+        }
+        let message: Value = serde_json::from_slice(&body).unwrap_or_default();
+        write_log(
+            log,
+            json!({"event": "http", "method": method, "path": path, "headers": headers,
+                "bearer": bearer, "rpc": message["method"]}),
+        );
+    } else {
+        write_log(
+            log,
+            json!({"event": "http", "method": method, "headers": headers}),
+        );
     }
+    let answer = match method.as_str() {
+        "POST" => {
+            let message: Value = serde_json::from_slice(&body).unwrap_or_default();
+            let id = message["id"].clone();
+            let params = &message["params"];
+            let result = match message["method"].as_str().unwrap_or_default() {
+                "initialize" => Some(json!({
+                    "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+                    "capabilities": {"tools": {}}, "serverInfo": script["server"],
+                    "instructions": script["instructions"]})),
+                "tools/list" => Some(json!({"tools": script["tools"]})),
+                "tools/call" => {
+                    let tool = params["name"].as_str().unwrap_or_default();
+                    let answer = &script["answers"][tool];
+                    Some(call(
+                        answer,
+                        &params["arguments"],
+                        &mut std::iter::empty::<std::io::Result<String>>(),
+                        &mut 0,
+                    ))
+                }
+                _ if id.is_null() => None,
+                _ => Some(json!({})),
+            };
+            match (result, id.is_null()) {
+                (Some(result), false) => reply(
+                    "200 OK",
+                    Some(json!({"jsonrpc": "2.0", "id": id, "result": result})),
+                ),
+                _ => reply("202 Accepted", None),
+            }
+        }
+        "DELETE" => reply("200 OK", None),
+        _ => reply("405 Method Not Allowed", None),
+    };
+    let _ = stream.write_all(answer.as_bytes());
 }
 
 /// The authorization server of a protected server (`oauth` in the script): its tokens, the codes
