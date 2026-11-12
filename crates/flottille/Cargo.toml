@@ -60,7 +60,7 @@ flate2 = "1.1.10"
 # To make real pictures, and read the size of the one that was stored.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # The window's scenarios run on GPUI's test platform, in front of a real daemon.
-gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.2.0-alpha.feat-10-choice-row-field.6" }
+gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.2.0-beta.5" }
 gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets", "test-support"] }
 rmcp = { version = "3.7.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 # Only to give reqwest, under rmcp's test client, the crypto provider it insists on even for http.
