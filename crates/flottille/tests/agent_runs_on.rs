@@ -439,3 +439,33 @@ fn a_provider_that_offers_no_effort_says_the_model_alone() {
     );
     assert!(!answer.contains("effort not known"), "{answer}");
 }
+
+#[test]
+fn a_model_asked_before_the_models_are_known_is_said_as_asked_and_its_refusal_heard() {
+    let user = User::with_fake_providers();
+    user.write_providers("[opencode]\nenabled = true\n");
+    for provider in ["claude", "opencode"] {
+        user.provider_script(provider, script(json!([])));
+    }
+    // No agent of opencode ran yet: its models are not known, so the launch is not refused.
+    let (lead, mcp) = lead_on(&user, Some("claude"));
+
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "huge", "brief": "Do the work.",
+            "provider": "opencode", "model": "fake-huge"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    says_no_default(&answer.text);
+    // Said as asked, and the session's refusal with it.
+    assert!(answer.text.contains("on OpenCode · fake-huge · "), "{}", answer.text);
+    assert!(answer.text.contains("failed as it opened"), "{}", answer.text);
+    assert!(answer.text.contains("fake-huge"), "{}", answer.text);
+    // Its parent hears it as of any child that fails.
+    eventually("the parent told", || {
+        delivered(&user, &lead, "child-failed")
+            .iter()
+            .any(|body| body.contains("fake-huge"))
+    });
+}
