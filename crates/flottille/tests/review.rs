@@ -152,6 +152,15 @@ fn start(user: &User, session: &str) -> Value {
         .unwrap()
 }
 
+/// Review's own switch `key` (`auto_on_pull_request`, `agents_start`), in Settings or in `app`.
+fn switch(user: &User, project: Option<&str>, key: &str, on: bool) {
+    let mut params = json!({"name": "review", "settings": {key: on}});
+    if let Some(project) = project {
+        params["project"] = json!(project);
+    }
+    user.call("extension.set", params).unwrap();
+}
+
 fn reviews(user: &User, session: &str) -> Vec<Value> {
     user.call("review.list", json!({"session": session}))
         .unwrap()["reviews"]
@@ -297,6 +306,7 @@ fn flottille_review_starts_a_review_of_a_session() {
 fn a_root_reviews_itself_with_the_review_tool() {
     let user = user();
     let (session, mcp) = changed_session(&user);
+    switch(&user, None, "agents_start", true);
 
     let text = ok(mcp.call("review", json!({"action": "start"})));
 
@@ -856,7 +866,7 @@ fn on_github(user: &User) {
 }
 
 #[test]
-fn opening_the_session_s_pull_request_starts_a_review() {
+fn with_the_switch_on_an_opened_pull_request_starts_a_review() {
     let user = User::with_fake_agent()
         .with_fake_gh()
         .with_fetcher()
@@ -864,6 +874,7 @@ fn opening_the_session_s_pull_request_starts_a_review() {
     user.fake_script(script());
     let folder = project(&user);
     change(&user, &folder);
+    switch(&user, None, "auto_on_pull_request", true);
     on_github(&user);
     user.call(
         "project.set_settings",
@@ -907,6 +918,7 @@ fn an_automatic_review_refused_at_the_cap_tells_the_session() {
     let file = user.project_file("app");
     let text = std::fs::read_to_string(&file).unwrap();
     std::fs::write(&file, text.replace("max_children = 12", "max_children = 1")).unwrap();
+    switch(&user, None, "auto_on_pull_request", true);
     on_github(&user);
     user.call(
         "project.set_settings",
@@ -936,6 +948,181 @@ fn an_automatic_review_refused_at_the_cap_tells_the_session() {
     assert!(told.contains("could not start"), "{told}");
     assert!(told.contains("/review"), "{told}");
     assert!(reviews(&user, &session).is_empty());
+}
+
+/// A session in a workspace with a change, on a forge that has no pull request yet: its id and
+/// the branch its pull request would come from.
+fn forge_session(user: &User) -> (String, String) {
+    let folder = project(user);
+    change(user, &folder);
+    on_github(user);
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}]}),
+    )
+    .unwrap();
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let (session, _) = session(user);
+    let branch = user
+        .call("workspace.show", json!({"project": "app", "name": "w"}))
+        .unwrap()["branch"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (session, branch)
+}
+
+#[test]
+fn by_default_an_opened_pull_request_starts_no_review() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fetcher()
+        .with_env("GIT_SSH_COMMAND", "false");
+    user.fake_script(script());
+    let (session, branch) = forge_session(&user);
+
+    user.gh_script(json!({"pulls": {"acme/app": {branch.clone(): pull(7, &branch)}}}));
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+
+    // The twin of `with_the_switch_on_an_opened_pull_request_starts_a_review`: the pull request
+    // is known, and the review it would start has had time to appear.
+    let pulls = user
+        .call("items.list", json!({"project": "app", "kind": "pull"}))
+        .unwrap();
+    assert_eq!(pulls["items"].as_array().map(Vec::len), Some(1), "{pulls}");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(reviews(&user, &session).is_empty());
+    assert!(
+        !prompts(&user)
+            .iter()
+            .any(|prompt| prompt.contains("could not start")),
+        "{:?}",
+        prompts(&user)
+    );
+}
+
+/// The tool a root is given, as its MCP session lists it now, once a call has let it see the
+/// tools it has.
+fn review_tool(mcp: &Mcp) -> Option<Value> {
+    mcp.call("fs_list", json!({"path": "."}));
+    mcp.tools()
+        .into_iter()
+        .find(|tool| tool["name"] == "review")
+}
+
+#[test]
+fn by_default_agents_are_not_given_review_start() {
+    let user = user();
+    let (session, mcp) = changed_session(&user);
+
+    assert!(review_tool(&mcp).is_none(), "{:?}", mcp.names());
+    assert!(mcp.call("review", json!({"action": "start"})).error);
+    assert!(reviews(&user, &session).is_empty());
+
+    // The pilot of a review the user asked for keeps `run_pass` and `report`.
+    start(&user, &session);
+    let pilot = pilot(&user);
+    assert!(review_tool(&pilot).is_some(), "{:?}", pilot.names());
+    let text = ok(pilot.call("review", json!({"action": "run_pass", "pass": "bugs"})));
+    assert!(agent_id(&text).is_some(), "{text}");
+    let answer = report(&pilot, json!([]));
+    assert!(!answer.error, "{}", answer.text);
+}
+
+#[test]
+fn with_the_switch_on_agents_can_start_a_review() {
+    let user = user();
+    let (session, mcp) = changed_session(&user);
+    assert!(review_tool(&mcp).is_none());
+
+    switch(&user, None, "agents_start", true);
+    let tool = review_tool(&mcp).expect("the review tool, once the switch is on");
+    let description = tool["description"].as_str().unwrap();
+    assert!(
+        description.contains("what the user's /review does"),
+        "{description}"
+    );
+    let text = ok(mcp.call("review", json!({"action": "start"})));
+    assert!(text.contains("round 1"), "{text}");
+    assert_eq!(reviews(&user, &session).len(), 1);
+
+    // A project's own value wins over Settings': the tool leaves the list, and a call of it is
+    // refused.
+    switch(&user, Some("app"), "agents_start", false);
+    assert!(review_tool(&mcp).is_none(), "{:?}", mcp.names());
+    assert!(mcp.call("review", json!({"action": "start"})).error);
+    switch(&user, Some("app"), "agents_start", true);
+    assert!(review_tool(&mcp).is_some());
+}
+
+#[test]
+fn slash_review_and_the_cli_start_a_review_whatever_the_switches() {
+    let user = user();
+    let folder = project(&user);
+    change(&user, &folder);
+    switch(&user, None, "auto_on_pull_request", false);
+    switch(&user, None, "agents_start", false);
+    let (first, _) = session(&user);
+    let (second, _) = session(&user);
+
+    let answer = user
+        .call("agent.send", json!({"agent": first, "message": "/review"}))
+        .unwrap();
+    assert_eq!(answer["command"]["round"], 1, "{answer}");
+    let output = user.run(&["review", &second]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(reviews(&user, &first).len(), 1);
+    assert_eq!(reviews(&user, &second).len(), 1);
+}
+
+#[test]
+fn the_switches_are_off_by_default_and_take_only_a_boolean() {
+    let user = user();
+    project(&user);
+
+    let listed = user.call("extension.list", json!({})).unwrap();
+    let review = listed["extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|extension| extension["name"] == "review")
+        .unwrap();
+    for key in ["auto_on_pull_request", "agents_start"] {
+        let setting = review["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|setting| setting["key"] == key)
+            .unwrap_or_else(|| panic!("no setting {key}"));
+        assert_eq!(setting["kind"], "switch", "{setting}");
+        assert_eq!(setting["value"], false, "{setting}");
+        assert_eq!(setting["set"], false, "{setting}");
+        assert_eq!(setting["per_project"], true, "{setting}");
+        assert!(!setting["label"].as_str().unwrap().is_empty());
+        assert!(!setting["hint"].as_str().unwrap().is_empty());
+    }
+    let (_, message) = user
+        .call(
+            "extension.set",
+            json!({"name": "review", "settings": {"agents_start": "yes"}}),
+        )
+        .unwrap_err();
+    assert!(message.contains("agents_start"), "{message}");
+    let (_, message) = user
+        .call(
+            "extension.set",
+            json!({"name": "review", "project": "app", "settings": {"agent_start": true}}),
+        )
+        .unwrap_err();
+    assert!(message.contains("agent_start"), "{message}");
+
+    switch(&user, Some("app"), "agents_start", true);
+    let file = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(file.contains("agents_start = true"), "{file}");
 }
 
 /// A Ready spec of project `app` developed by a session in a workspace of its own, which made a

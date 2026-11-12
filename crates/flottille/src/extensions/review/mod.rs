@@ -24,6 +24,10 @@ use crate::providers;
 
 /// The passes a review may run, in their order; the verifier comes after them.
 const PASSES: &[&str] = &["spec", "bugs", "standards", "security"];
+
+/// The switches of the user's other doors: both off unless the user turns them on.
+const AUTO: &str = "auto_on_pull_request";
+const AGENTS: &str = "agents_start";
 const VERIFIER: &str = "verifier";
 /// Rounds of a session's review, at most: the first, and one re-review after the fixes.
 const ROUNDS: u64 = 2;
@@ -65,8 +69,7 @@ pub const EXTENSION: Extension = Extension {
     scope: Scope::Project,
     on_by_default: false,
     switch: "Review changes",
-    usage: "A review starts when a session's pull request opens, when you type **/review** in its \
-            composer, or when its agent asks for one. From a terminal: \
+    usage: "A review starts when you type **/review** in a session's composer. From a terminal: \
             **flottille review <session>**.",
     place: Place::Row {
         icon: "scan-search",
@@ -132,6 +135,20 @@ pub const EXTENSION: Extension = Extension {
                 rule: SMALLER_RULE,
                 gives: smaller,
             },
+            per_project: true,
+        },
+        Setting {
+            key: AUTO,
+            label: "Start a review when a session's pull request opens",
+            hint: "Off, a review starts only when you ask for one.",
+            kind: Kind::Switch,
+            per_project: true,
+        },
+        Setting {
+            key: AGENTS,
+            label: "Let agents start a review",
+            hint: "Off, an agent cannot ask for a review of its own change: only you can.",
+            kind: Kind::Switch,
             per_project: true,
         },
     ],
@@ -215,6 +232,21 @@ fn starts_no_session(_: &Daemon, _: &str) -> bool {
     false
 }
 
+/// Whether the project's switch `key` is on: a project's own value, else Settings', else off. A
+/// file that cannot be read leaves it off.
+fn switched(daemon: &Daemon, project: &flottille_core::project::Project, key: &str) -> bool {
+    super::value(daemon, &EXTENSION, project, key)
+        .ok()
+        .and_then(|on| on.as_bool())
+        .unwrap_or(false)
+}
+
+/// The roots get `review` only while agents may start a review (`agents_start`): it has no other
+/// action for them. The pilot's `run_pass` and `report` are the user's review's own.
+fn offered(daemon: &Daemon, project: &flottille_core::project::Project, to: To) -> bool {
+    to != To::Roots || switched(daemon, project, AGENTS)
+}
+
 const ROOT_ACTIONS: &[&str] = &["start"];
 const PILOT_ACTIONS: &[&str] = &["run_pass", "report"];
 
@@ -223,9 +255,10 @@ const TOOL: Tool = Tool {
         name: "review",
         title: "Review a change",
         description: "A review of a session's change with fresh eyes (`docs/extensions.md`, \
-            \"Review\"). start, for a session: review your own change from its base, the answer \
-            and the findings coming later as a delivery [flottille:review]; two rounds at most, \
-            the second reading what changed since the first. run_pass, for the pilot of a review: \
+            \"Review\"). start, for a session: what the user's /review does: review your own \
+            change from its base, the answer and the findings coming later as a delivery \
+            [flottille:review]; two rounds at most, the second reading what changed since the \
+            first. run_pass, for the pilot of a review: \
             run one pass as your child (pass spec, bugs, standards, security or verifier; brief, \
             what it should look at), each once. report, for the pilot: the findings, once \
             (summary; findings [{severity high|medium|low|info, confidence confirmed|plausible|\
@@ -240,6 +273,7 @@ const TOOL: Tool = Tool {
         (To::Roots, ROOT_ACTIONS),
         (To::Launched("pilot"), PILOT_ACTIONS),
     ],
+    offered,
     // Each writes the review in Flottille's store, and launches what the user asked for when they
     // asked for a review: the pilot, then the passes it may run, each once, within the cap.
     harmless: &["start", "run_pass", "report"],
@@ -1157,8 +1191,8 @@ fn settle(daemon: &Daemon, asked: Settle) -> std::result::Result<Value, Failure>
     Ok(json!({"session": asked.session, "finding": asked.finding, "status": asked.status}))
 }
 
-/// The Core event trigger on a pull request opened: the session whose workspace's branch it is
-/// gets a review, as `/review` would start one. Refused at the cap, the session is told, and
+/// The Core event trigger on a pull request opened, while the project's `auto_on_pull_request`
+/// is on: the session whose workspace's branch it is gets a review, as `/review` would start one. Refused at the cap, the session is told, and
 /// `/review` can be run later; refused for nothing to read or one running, nothing is said.
 fn pull_opened(daemon: &Arc<Daemon>, data: &Value) {
     if data["kind"] != "pull" {
@@ -1167,9 +1201,14 @@ fn pull_opened(daemon: &Arc<Daemon>, data: &Value) {
     let (Some(project), Some(key)) = (data["project"].as_str(), data["key"].as_str()) else {
         return;
     };
-    if super::active(daemon, &EXTENSION, project).is_err() {
+    let Ok(project) = super::active(daemon, &EXTENSION, project) else {
+        return;
+    };
+    // Off unless the user turned it on: `/review` and `flottille review` do not look here.
+    if !switched(daemon, &project, AUTO) {
         return;
     }
+    let project = project.name.as_str();
     let filter = flottille_core::item::Filter {
         kind: Some("pull".to_owned()),
         ..Default::default()

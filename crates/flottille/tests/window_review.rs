@@ -436,8 +436,10 @@ fn the_usage_line_shows_while_review_is_off(cx: &mut TestAppContext) {
     );
     let usage = label(cx, "review-usage").unwrap();
     assert!(usage.contains("/review"), "{usage}");
-    assert!(usage.contains("pull request opens"), "{usage}");
     assert!(usage.contains("flottille review <session>"), "{usage}");
+    // Both switches are off by default: the usage says the user's doors alone.
+    assert!(!usage.contains("pull request"), "{usage}");
+    assert!(!usage.contains("agent"), "{usage}");
     // Off, the page is that block alone.
     assert!(!present(cx, "review-checks"));
     assert!(!present(cx, "review-guidance-text"));
@@ -564,6 +566,129 @@ fn review_s_page_shows_what_it_checks_as_one_card(cx: &mut TestAppContext) {
     });
     settle(cx);
     assert!(present(cx, "review-projects-acme-shop"), "a link");
+    at_rest(cx);
+}
+
+/// The two switches of when a review starts: the key, its label and its help line.
+const DOORS: [(&str, &str, &str); 2] = [
+    (
+        "auto_on_pull_request",
+        "Start a review when a session's pull request opens",
+        "Off, a review starts only when you ask for one.",
+    ),
+    (
+        "agents_start",
+        "Let agents start a review",
+        "Off, an agent cannot ask for a review of its own change: only you can.",
+    ),
+];
+
+/// Whether a switch's knob is on its right: the switch is on.
+fn is_on(cx: &mut VisualTestContext, id: &str) -> bool {
+    let knob = bounds(cx, &format!("{id}-knob"));
+    let track = bounds(cx, &format!("{id}-track"));
+    knob.left() - track.left() > track.size.width / 3.
+}
+
+fn door_value(user: &User, key: &str) -> Value {
+    review_listed(user)["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|setting| setting["key"] == key)
+        .unwrap()["value"]
+        .clone()
+}
+
+#[gpui_kit::test]
+fn review_s_page_has_both_switches_off_by_default(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx) = review_page(&user, true, cx);
+
+    // Each with its visible label and its help line, off.
+    for (key, name, line) in DOORS {
+        let switch = format!("review-door-{key}-switch");
+        assert_eq!(label(cx, &format!("{switch}-label")).as_deref(), Some(name));
+        assert_eq!(label(cx, &format!("{switch}-hint")).as_deref(), Some(line));
+        assert!(!is_on(cx, &switch), "{key} is off by default");
+        assert_eq!(door_value(&user, key), false);
+    }
+    // They come before what a review checks.
+    assert!(
+        bounds(cx, "review-door-agents_start-switch").bottom()
+            <= bounds(cx, "review-check-spec-switch").top()
+    );
+    let usage = label(cx, "review-usage").unwrap();
+    assert!(
+        !usage.contains("pull request") && !usage.contains("agent"),
+        "{usage}"
+    );
+
+    // Turned on, a switch is the daemon's and slides; the usage line then says what it adds.
+    cx.update(|window, cx| window.click("review-door-auto_on_pull_request-switch", cx));
+    until(&shell, cx, "the daemon has it on", |_| {
+        door_value(&user, "auto_on_pull_request") == true
+    });
+    // The window reads the list again a moment after the event; the switch then slides, and the
+    // usage line says what it adds.
+    let moved = std::cell::Cell::new(0);
+    until(&shell, cx, "the usage says the pull request", |cx| {
+        moved.set(moved.get() + step(cx));
+        label(cx, "review-usage").is_some_and(|usage| usage.contains("pull request opens"))
+    });
+    settle(cx);
+    assert!(moved.get() > 0, "the switch moves");
+    assert!(is_on(cx, "review-door-auto_on_pull_request-switch"));
+    assert!(!is_on(cx, "review-door-agents_start-switch"));
+    cx.update(|window, cx| window.click("review-door-agents_start-switch", cx));
+    until(&shell, cx, "the daemon has agents on", |_| {
+        door_value(&user, "agents_start") == true
+    });
+    until(&shell, cx, "the usage says the agents", |cx| {
+        label(cx, "review-usage").is_some_and(|usage| usage.contains("agent"))
+    });
+    let usage = label(cx, "review-usage").unwrap();
+    assert!(usage.contains("/review") && usage.contains("flottille review <session>"));
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_project_s_two_switches_carry_the_dot_and_go_back_to_settings(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx) = project_page(&user, cx);
+
+    for (key, name, line) in DOORS {
+        let switch = format!("project-review-door-{key}-switch");
+        assert_eq!(label(cx, &format!("{switch}-label")).as_deref(), Some(name));
+        assert_eq!(label(cx, &format!("{switch}-hint")).as_deref(), Some(line));
+        assert!(!is_on(cx, &switch), "{key}");
+        assert!(!present(cx, &format!("project-review-door-{key}-set")));
+    }
+    cx.update(|window, cx| window.click("project-review-door-agents_start-switch", cx));
+    until(&shell, cx, "the project lets agents start", |_| {
+        review_listed(&user)["projects"][0]["settings"]["agents_start"] == true
+    });
+    until(&shell, cx, "the dot is shown", |cx| {
+        settle(cx);
+        present(cx, "project-review-door-agents_start-set")
+    });
+    assert!(!present(cx, "project-review-door-auto_on_pull_request-set"));
+    assert_eq!(door_value(&user, "agents_start"), false, "Settings' own");
+    cx.update(|window, cx| window.click("project-review-door-agents_start-reset", cx));
+    until(
+        &shell,
+        cx,
+        "the project goes back to Settings' value",
+        |_| {
+            review_listed(&user)["projects"][0]["settings"]
+                .get("agents_start")
+                .is_none_or(Value::is_null)
+        },
+    );
+    until(&shell, cx, "the dot goes", |cx| {
+        settle(cx);
+        !present(cx, "project-review-door-agents_start-set")
+    });
     at_rest(cx);
 }
 
