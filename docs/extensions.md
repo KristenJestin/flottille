@@ -274,7 +274,8 @@ the components of the kit (`gpui-design-system`) and under the rules of the wind
   something to compact), **an action of a session** (Compact,
   in the root's "⋯" menu of the rail), **a line of the conversation** (a compaction, folded,
   unfolding to the summary) (the compaction).
-- **A folded line of the tree** grouping the agents it launched, with its state (Review).
+- **A row of the tree** that folds, from its right, the agents it launched and what they found,
+  with its state on its second line (Review).
 
 ### Model slots (the compaction)
 
@@ -704,13 +705,18 @@ or without a spec. Project-scoped.
   By default the strongest model of the session's provider; the verifier may be one size smaller.
 - **Rounds**: after the fixes, one re-review of what changed since and of the open findings,
   matched by identifier; two rounds at most, then what is left stays open.
-- **In the window**: the review's agents are grouped under one folded "Review" line of the tree,
-  with its state (`Review · 3/4 checks · 2 findings`).
+- **In the window**: a review is **one row** of the session's rail, its own agent's: its title
+  (`Review, round 1`) and, on its second line, its state (`3/4 checks · 2 findings`). A chevron at
+  the end of the row, on the right as the sidebar's rows have it, folds and unfolds what is under
+  it: its checks, as children, then its findings. It is unfolded while the review runs and folded
+  once it is done; what the user chose by hand holds until the review ends. Its conversation, opened by a
+  click on the row, shows its steps and, while checks run, one line saying what it waits for
+  (`Waiting for 3 checks: bugs, standards, security`).
 - **Instructions**: its fixed text, the project's rules from the base branch (the standards pass
   only), an editable guidance shared by every agent of a review, and, for each pass, an optional
   guidance of its own, empty by default ("Each check's guidance").
 - **Builds**: agents an extension launches and the depth exception, slots overridable per project,
-  the composer command, the folded line of the tree.
+  the composer command, the folded row of the tree.
 
 As built (#338):
 
@@ -734,7 +740,7 @@ As built (#338):
   its strongest model (Claude's `opus`; the verifier `sonnet`), once its sessions said they offer
   it, else the provider's default. The pilot runs on the session's provider, as the strongest.
 - **Findings** are kept per session and named `F1`, `F2`… across rounds; a `rejected` one is not
-  kept. `review.finding` marks one. They show under the review's line of the session's rail and,
+  kept. `review.finding` marks one. They show under the review's row of the session's rail and,
   for a spec's development, on the spec's page.
 - **Guidance**: `review.md`, 4,000 characters, edited on Review's page.
 - **Data**: `ext_review_reviews`, `ext_review_agents`, `ext_review_findings`. The core's scan
@@ -771,7 +777,7 @@ As built (#338):
   default and Save once it changed.
 - One line names the projects that do otherwise (`acme-shop runs Security too`), when one does.
 
-The tree's folded line says `Review · 3/4 checks · 2 findings`.
+The review's row of the tree says `3/4 checks · 2 findings` under `Review, round 1`.
 
 **Each check's guidance** (the maintainer's decision of 2026-11-10, built in #706). Beside the shared
 guidance, each pass may have instructions of its own, **empty by default**:

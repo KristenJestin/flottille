@@ -1247,8 +1247,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   is sent as text); the message and the queued message show what the user typed, each command as a
   chip, what the agent received in a fold; the header says the session's title and its place,
   and no state; a rail with, from its top, the session's tree of agents (each row with the share
-  of its context the agent used, a percentage beside a thin bar, on one line; the session's own
-  agent says only what it runs on, the others their name over what they run on and do; the composer's bar does not say
+  of its context the agent used, a percentage beside a thin bar, at the right of the name's line so that the second line has the whole row's width and is cut, with its whole text in a tooltip, only when it cannot fit; the session's own
+  agent says only what it runs on, the others their name over what they run on and do; a review is one such row, `Review, round 1` over `3/4 checks · 2 findings`, with a chevron at its right end that folds its checks and its findings, unfolded while it runs and folded once it is done; the composer's bar does not say
   it; under the composer's field, the provider is named and not changeable, and the model and
   effort pickers are the start composer's own: a change chosen while a turn runs waits for its end,
   and a dot on its picker says it until the agent took it, its menu saying when it applies,
