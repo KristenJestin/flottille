@@ -703,7 +703,7 @@ or without a spec. Project-scoped.
   (`Review, round 1`) and, on its second line, its state (`3/4 checks · 2 findings`). A chevron at
   the end of the row, on the right as the sidebar's rows have it, folds and unfolds what is under
   it: its checks, as children, then its findings. It is unfolded while the review runs and folded
-  once it is done, unless the user chose otherwise while it ran. Its conversation, opened by a
+  once it is done; what the user chose by hand holds until the review ends. Its conversation, opened by a
   click on the row, shows its steps and, while checks run, one line saying what it waits for
   (`Waiting for 3 checks: bugs, standards, security`).
 - **Instructions**: its fixed text, the project's rules from the base branch (the standards pass
