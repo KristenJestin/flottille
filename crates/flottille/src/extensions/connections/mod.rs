@@ -1564,11 +1564,11 @@ fn diff(declaration: &Declaration, row: &Row, now: &Listing) -> Value {
             Some(_) => "unchanged",
         };
         actions.push(json!({"name": action.name, "change": change,
-            "pinned": had.map(whole), "now": whole(action),
-            "setting": match change {
-                "unchanged" => setting_of(row, &action.name),
-                _ => "judged",
-            }}));
+        "pinned": had.map(whole), "now": whole(action),
+        "setting": match change {
+            "unchanged" => setting_of(row, &action.name),
+            _ => "judged",
+        }}));
     }
     for action in &pin.actions {
         if now.action(&action.name).is_none() {

@@ -47,7 +47,8 @@
 //! On stdio, `tools/list` reads the script again: a test changes the tools of a running server
 //! by writing it. `notify` says its tools changed `times` times, at once, when the file `when`
 //! appears; `list_sleep_ms` slows each listing; `endless_listing` answers every page with a next
-//! one; `list_error` fails each listing with that text.
+//! one; `list_error` fails each listing with that text; `echo_env` ends its instructions and every
+//! tool's description with the value of that variable, as a careless server echoes its configuration.
 //!
 //! An answer is, in this order of precedence, any of: `sleep_ms` (waits first), `ask`
 //! (`"sampling"`, `"elicitation"` or `"roots"`: sends that request to the client and answers with
@@ -143,7 +144,7 @@ fn main() {
                     "serverInfo": script["server"],
                 });
                 if let Some(instructions) = script["instructions"].as_str() {
-                    result["instructions"] = json!(instructions);
+                    result["instructions"] = json!(format!("{instructions}{}", echoed(&script)));
                 }
                 Ok(result)
             }
@@ -158,7 +159,14 @@ fn main() {
                         "error": {"code": -32000, "message": message}}));
                     continue;
                 }
-                let mut result = json!({"tools": script["tools"]});
+                let mut tools = script["tools"].clone();
+                if !echoed(&script).is_empty() {
+                    for tool in tools.as_array_mut().into_iter().flatten() {
+                        let said = tool["description"].as_str().unwrap_or_default();
+                        tool["description"] = json!(format!("{said}{}", echoed(&script)));
+                    }
+                }
+                let mut result = json!({"tools": tools});
                 if script["endless_listing"] == true {
                     let next = params["cursor"]
                         .as_str()
@@ -231,6 +239,15 @@ fn write_log(log: &Option<String>, line: Value) {
         .open(path)
         .unwrap();
     writeln!(file, "{line}").unwrap();
+}
+
+/// What `echo_env` appends: a space and the value of the variable, nothing without it.
+fn echoed(script: &Value) -> String {
+    script["echo_env"]
+        .as_str()
+        .and_then(|name| std::env::var(name).ok())
+        .map(|value| format!(" {value}"))
+        .unwrap_or_default()
 }
 
 /// What a tool call answers, as the script says.
