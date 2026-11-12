@@ -390,14 +390,17 @@ fn pull_named(project: &str, repository: &str, number: u64) -> String {
 }
 
 /// What a subscription of the forge watches: a pull request of a repository, found by a
-/// workspace's branch, or by its number alone.
+/// workspace's branch, or by its number alone. It keeps the branches the pull request had when it
+/// was subscribed to: a run started in the project folder is checked against them
+/// (`pipelines::in_main_on_the_base`).
 pub(super) fn target(
     project: &str,
     workspace: Option<&str>,
     repository: &str,
-    number: u64,
+    pull: &super::Pull,
 ) -> Value {
-    let mut target = json!({"project": project, "repository": repository, "number": number});
+    let mut target = json!({"project": project, "repository": repository,
+        "number": pull.number, "head": pull.head, "base": pull.base});
     if let Some(workspace) = workspace {
         target["workspace"] = workspace.into();
     }

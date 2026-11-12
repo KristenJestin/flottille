@@ -349,7 +349,7 @@ const SERVED: [Definition; 32] = [
                 "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; all of the place's when left out (list, show); the only one is taken without being named."},
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, review, edit, subscribe, unsubscribe: a pull request. subscribe and unsubscribe take it with repository, without workspace, for one that is not your workspace's branch's."},
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
-                "branch": {"type": "string", "description": "list: its source branch."},
+                "branch": {"type": "string", "description": "list: its source branch. pipelines, runs, run: the branch to read or run on; left out, your workspace's, in main the project folder's, which a run says; with a pull request of your own in main, name its branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the pull request again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
@@ -2233,11 +2233,11 @@ async fn played_in(
     };
     let reads = Reads::default();
     // A run that names no branch says the one it will run on, to the card and the judge.
-    let args = match tool {
+    let (args, branch_refused) = match tool {
         "forge" if !replaced && removed.is_none() => {
-            crate::forge::with_branch(daemon, &grant.place, args).await
+            crate::forge::with_branch(daemon, &grant.agent, &grant.place, args).await
         }
-        _ => args,
+        _ => (args, None),
     };
     // A session named by its title is the session of its id from here on, for the gate, the leave
     // and the request alike (`session_name`).
@@ -2264,6 +2264,8 @@ async fn played_in(
         Outcome::Refused(format!("refused: {why}"))
     } else if let Some(refused) = unnamed {
         refused
+    } else if let Some(why) = branch_refused {
+        Outcome::Refused(why)
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.
