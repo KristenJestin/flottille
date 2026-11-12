@@ -67,7 +67,10 @@ An entry made for one precise feature is that feature's alone. `for` names it:
 - **Unbound entries behave as they always did**, and every entry that existed before uses were
   added is unbound: no worklog token or connection of the user's stops working.
 
-The OAuth tokens a connection signs in for (#674) are entries bound to it the same way.
+The OAuth tokens a connection signs in for (`flottille connection login`, `docs/extensions.md`,
+"Signing in with OAuth") are one entry bound to it the same way, `<name>.oauth`, every project's:
+its value holds the tokens, and each of them is masked alone as well as the whole. Signing in
+sets it, a refused refresh and removing the connection remove it.
 
 ## The secret is write-only
 

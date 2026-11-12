@@ -185,7 +185,7 @@ or failed to start (`docs/extensions.md`, "Connections"): `connection.list` says
 | Field | |
 |---|---|
 | `name` | The connection's. |
-| `state` | `off`, `awaiting review`, `cut off` or `ready`; `null` once it is removed. |
+| `state` | `off`, `awaiting review`, `cut off`, `signed out` or `ready`; `null` once it is removed. |
 | `running` | Whether its server runs. |
 | `why` | Why it failed to start, or what changed when it was cut off; `null` otherwise. |
 
@@ -198,6 +198,47 @@ its tools changed: its tool left every session, and the inbox lists it (kind `co
 |---|---|
 | `name`, `tool` | The connection's name and its tool (`conn_almanac`). |
 | `changed` | What changed, a sentence each (`the server is now almanac 1.1.0, not almanac 1.0.0`). |
+
+### `connection.signed_in`
+
+The sign-in that `connection.login` began ended well: the connection's tokens are in the vault
+(`<name>.oauth`), and its server is started with them at the next call or review.
+
+| Field | |
+|---|---|
+| `name` | The connection's. |
+
+### `connection.sign_in_failed`
+
+The sign-in that `connection.login` began did not end well: the browser did not come back within
+five minutes, the authorization server refused, or its answer could not be used.
+
+| Field | |
+|---|---|
+| `name` | The connection's. |
+| `why` | Why, masked. |
+
+### `connection.signed_out`
+
+The connection's authorization server refused to refresh its tokens: they are removed from the
+vault, its tool left every session, and the inbox asks the user to sign in again (kind
+`connections`).
+
+| Field | |
+|---|---|
+| `name`, `tool` | The connection's name and its tool. |
+| `why` | The authorization server's refusal, masked (`invalid_grant: the grant is not valid`). |
+
+### `connection.tokens_unsaved`
+
+A refresh gave a connection new tokens, and the vault refused them twice: they are kept in the
+daemon's memory, and used, until the vault takes them (the next refresh writes them again) or the
+daemon stops. The inbox says so (kind `connections`). Said once for as long as they stay unsaved.
+
+| Field | |
+|---|---|
+| `name` | The connection's. |
+| `why` | Why the vault refused, masked. |
 
 ### `review.started`, `review.progress`, `review.reported`, `review.failed`
 

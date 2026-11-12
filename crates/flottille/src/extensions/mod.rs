@@ -640,6 +640,12 @@ pub fn bound_names(daemon: &Daemon, bound: &str, entry: &str) -> Result<bool, St
     }
 }
 
+/// The secrets a vault entry's value holds besides itself: a connection's sign-in keeps its
+/// tokens in one value, each masked alone.
+pub fn secrets_in(value: &str) -> Vec<String> {
+    connections::secrets_in(value)
+}
+
 /// Whether the use of an extension's feature a vault entry would be bound to (`bound`,
 /// `connection:<name>`) can exist: a connection's name is checked as connections check theirs.
 pub fn bound_possible(bound: &str) -> bool {
