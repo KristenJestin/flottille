@@ -612,3 +612,106 @@ fn the_line_that_says_when_a_change_applies_does_not_answer_the_pointer(cx: &mut
         "no hover fades on a line that is not a choice"
     );
 }
+
+/// An agent that, as Claude's bridge does, lists its own choice (`default`) among the efforts
+/// and opens on it every time its process starts, without saying which effort it stands for.
+fn own_effort_user() -> User {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({
+        "models": ["fake-small", "fake-large"],
+        "efforts": ["default", "low", "high"],
+        "model_efforts": {"fake-large": ["default", "medium", "max"]}
+    }));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user
+}
+
+/// Every effort label the window draws for the session: what the bar's picker says, and the rows
+/// its list offers.
+fn effort_labels(shell: &Entity<Shell>, agent: &str, cx: &mut VisualTestContext) -> Vec<String> {
+    let options = options(shell, agent, cx);
+    let mut said = vec![];
+    said.push(options.read_with(cx, |o, _| o.effort_shown()));
+    said.extend(options.read_with(cx, |o, _| {
+        o.entries(flottille_window::composer::Menu::Effort)
+            .into_iter()
+            .map(|entry| entry.label)
+    }));
+    said
+}
+
+/// What is drawn never reads `default` as an effort, whichever path brought the session here.
+fn assert_no_effort_reads_default(shell: &Entity<Shell>, agent: &str, cx: &mut VisualTestContext) {
+    let said = effort_labels(shell, agent, cx);
+    assert!(!said.is_empty(), "no effort is drawn");
+    for said in said {
+        assert!(!said.to_lowercase().contains("default"), "{said:?}");
+    }
+}
+
+#[gpui_kit::test]
+fn a_new_session_with_no_effort_chosen_shows_its_effort_by_name(cx: &mut TestAppContext) {
+    let user = own_effort_user();
+    project(&user, "app");
+    let id = start(&user, "hello", true);
+    let (shell, cx) = open_session(&user, &id, cx);
+    until(&shell, cx, "the effort is said", |cx| {
+        has("session-effort-picker", cx)
+    });
+
+    assert_eq!(effort_labels(&shell, &id, cx)[0], "high");
+    assert_no_effort_reads_default(&shell, &id, cx);
+}
+
+#[gpui_kit::test]
+fn a_resumed_session_shows_its_effort_by_name(cx: &mut TestAppContext) {
+    let user = own_effort_user();
+    project(&user, "app");
+    let id = start(&user, "hello", true);
+    // Reopened after its process went, no effort ever chosen: the agent opens on its own choice.
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    eventually("the agent ended", || shown(&user, &id)["state"] == "ended");
+    user.resume(&id);
+    user.call("agent.send", json!({"agent": id, "message": "again"}))
+        .unwrap();
+    eventually("the reopened session's turn ends", || {
+        let agent = shown(&user, &id);
+        agent["state"] == "idle" && agent["taken"]["effort"] != Value::Null
+    });
+
+    let (shell, cx) = open_session(&user, &id, cx);
+    until(&shell, cx, "the effort is said", |cx| {
+        has("session-effort-picker", cx)
+    });
+
+    assert_eq!(effort_labels(&shell, &id, cx)[0], "high");
+    assert_no_effort_reads_default(&shell, &id, cx);
+}
+
+#[gpui_kit::test]
+fn a_model_switch_that_drops_the_effort_shows_the_new_effort_by_name(cx: &mut TestAppContext) {
+    let user = own_effort_user();
+    project(&user, "app");
+    let id = start(&user, "hello", true);
+    let (shell, cx) = open_session(&user, &id, cx);
+    until(&shell, cx, "the effort is said", |cx| {
+        has("session-effort-picker", cx)
+    });
+
+    // `fake-large` has no `high`: the agent goes back to its own choice.
+    pick_model(&shell, "fake-large", cx);
+    eventually("the model is set on the agent", || {
+        shown(&user, &id)["taken"]["model"] == "fake-large"
+    });
+
+    until(
+        &shell,
+        cx,
+        "the new model's effort is said by its name",
+        |cx| {
+            settle(cx);
+            effort_labels(&shell, &id, cx)[0] == "max"
+        },
+    );
+    assert_no_effort_reads_default(&shell, &id, cx);
+}

@@ -574,3 +574,80 @@ fn a_pending_model_replaces_a_chosen_one_the_agent_no_longer_offers() {
     assert_eq!(agent["chosen"]["model"], "fake-small");
     assert_eq!(agent["pending"]["model"], Value::Null);
 }
+
+/// An agent that, as Claude's bridge does, offers its own choice (`default`) among the efforts and
+/// starts on it every time its process opens, and that says no `recommendedValue` for it.
+fn own_effort_agent() -> Value {
+    json!({
+        "models": ["fake-small", "fake-large"],
+        "efforts": ["default", "low", "high"],
+        "model_efforts": {"fake-large": ["default", "medium", "max"]}
+    })
+}
+
+#[test]
+fn taken_effort_is_never_stored_as_default() {
+    let user = User::with_fake_agent();
+    user.fake_script(own_effort_agent());
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    // A new session with no effort chosen: its own effort, set by its name (the upper middle).
+    assert_eq!(show(&user, &id)["taken"]["effort"], "high");
+
+    // A session reopened after its process went: no effort was ever chosen, and the agent opens
+    // on its own choice again.
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    events_until(&user, &id, after, "agent.ended");
+    user.resume(&id);
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "again"}))
+        .unwrap();
+    let events = events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+    let started = events
+        .iter()
+        .find(|e| e["name"] == "agent.started")
+        .unwrap();
+    assert_eq!(started["data"]["opened"], "resumed");
+    assert_eq!(started["data"]["taken"]["effort"], "high", "{started}");
+    assert_eq!(show(&user, &id)["taken"]["effort"], "high");
+    assert_eq!(
+        received(&user).last_chunk::<2>().map(|c| c.to_vec()),
+        Some(vec!["set:effort=high".to_owned(), "prompt".to_owned()]),
+        "the agent runs with the effort it is said to"
+    );
+}
+
+#[test]
+fn a_model_switch_that_drops_the_effort_names_the_new_effort() {
+    let user = User::with_fake_agent();
+    user.fake_script(own_effort_agent());
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    assert_eq!(show(&user, &id)["taken"]["effort"], "high");
+
+    // A model whose efforts do not hold the one set: the agent goes back to its own choice, and
+    // the effort it is given is named.
+    let asked = user
+        .call("agent.options", json!({"agent": id, "model": "fake-large"}))
+        .unwrap();
+    events_until(
+        &user,
+        &id,
+        asked["after"].as_u64().unwrap(),
+        "agent.options_taken",
+    );
+    let agent = show(&user, &id);
+    assert_eq!(agent["taken"]["model"], "fake-large");
+    assert_eq!(agent["taken"]["effort"], "max", "{agent}");
+    assert_eq!(
+        received(&user)[received(&user).len() - 2..],
+        ["set:model=fake-large", "set:effort=max"]
+    );
+}

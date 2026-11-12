@@ -967,11 +967,16 @@ impl Pickers<'_> {
     /// What the effort picker shows: the effort picked, else the one the model runs with, else
     /// that its efforts are not known yet.
     pub fn effort_shown(&self) -> String {
-        self.pick
-            .effort
-            .clone()
+        self.picked_effort()
+            .cloned()
             .or_else(|| self.own_effort().cloned())
             .unwrap_or_else(|| "effort not known yet".to_owned())
+    }
+
+    /// The effort picked. A `default` that a daemon reported or a store kept is none: the
+    /// model's own effort is shown by its name, as the model's label is.
+    fn picked_effort(&self) -> Option<&String> {
+        self.pick.effort.as_ref().filter(|e| e.as_str() != DEFAULT)
     }
 
     /// The effort the model picked (the provider's default one when none) runs with when none
@@ -1110,7 +1115,7 @@ impl Pickers<'_> {
                     .flat_map(|efforts| levels(efforts))
                 {
                     let default = own == Some(effort);
-                    let on = match &self.pick.effort {
+                    let on = match self.picked_effort() {
                         Some(picked) => picked == effort,
                         None => default,
                     };

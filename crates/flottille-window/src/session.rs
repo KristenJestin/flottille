@@ -30,9 +30,10 @@ use gpui_design_system::color::mix;
 use gpui_design_system::motion::{HOVER, Motion, PANEL};
 use gpui_design_system::{
     Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette,
-    PulsingLabel, Side, Skeleton, Toast, Type, awaiting, changing, enter, fade, fold_frame,
-    follow_theme, hoverable, icon, palette, path_line, presence, presence_of, section_label,
-    selectable, space, text_region, tint, tipped_when_cut, toast, turning,
+    PulsingLabel, Side, Skeleton, Toast, Type, awaiting, changed, changing, enter, fade,
+    fold_frame, follow_theme, hoverable, icon, palette, path_line, presence, presence_of,
+    section_label, selectable, space, text_region, tint, tipped_when_cut, toast, toggle_id,
+    turning,
 };
 use gpui_kit::base::input::{
     Escape, Input, InputEvent, InputState, MoveDown, MoveUp, TextareaState,
@@ -2179,6 +2180,31 @@ impl Render for SessionPage {
                     .min_h(gpui_kit::relative(0.5))
                     .child(self.conversation.clone()),
             )
+            // A review says what it waits for under its steps, and the line folds away with it.
+            .child(presence_of(
+                "session-waiting-checks-line",
+                crate::extensions::review::waiting_for(&self.tree, &self.shown)
+                    .map(SharedString::from),
+                move |said| {
+                    div()
+                        .id("session-waiting-checks")
+                        .flex_none()
+                        .w_full()
+                        .max_w(px(780.))
+                        .mx_auto()
+                        .px(if narrow { space::LG } else { space::XXL })
+                        .pb(space::SM)
+                        .text_size(px(12.5))
+                        .text_color(p.faint)
+                        .aria_label(said.clone())
+                        // The count changes as checks end: the new words fade in.
+                        .child(changing("session-waiting-checks-said", said, |said| {
+                            div().child(said).into_any_element()
+                        }))
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
             .child(
                 // Narrower than the composer by a step on each side: it stands on it, apart. The
                 // steps stay in sight above the part that scrolls.
@@ -3874,13 +3900,19 @@ impl Render for ConversationView {
                 .size_full()
                 .child(
                     div()
+                        .id(SharedString::from(format!(
+                            "conversation-empty-{}",
+                            self.id
+                        )))
                         .max_w(px(780.))
                         .w_full()
                         .mx_auto()
                         .px(if narrow { space::LG } else { space::XXL })
                         .pt(if narrow { space::XL } else { space::XXL })
                         .text_color(p.faint)
-                        .child("Nothing said yet."),
+                        .aria_label("Nothing said yet.")
+                        .child("Nothing said yet.")
+                        .test_support(),
                 )
                 .into_any_element();
         }
@@ -6632,8 +6664,8 @@ pub struct RailAgent {
     pub extensions: serde_json::Value,
 }
 
-/// A row of the rail: an agent, the folded row that gathers the ended children of `parent`, or the
-/// folded "Review" line that gathers a review's agents, its pilot and the pilot's passes.
+/// A row of the rail: an agent, the folded row that gathers the ended children of `parent`, or a
+/// review's own row, which folds from its right what is under it: its checks and its findings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RailRow {
     Agent(String),
@@ -6645,13 +6677,13 @@ pub enum RailRow {
     },
     Review {
         pilot: String,
-        /// The agents behind the line: the pilot and its passes.
+        /// The agents behind the row: its checks, every one of them, ended or not.
         count: usize,
         open: bool,
     },
 }
 
-/// The key a review's line is kept open under, beside the "ended" rows' parents.
+/// The key a review's fold is animated under, beside the "ended" rows' parents.
 pub fn review_key(pilot: &str) -> String {
     format!("review:{pilot}")
 }
@@ -6661,7 +6693,7 @@ struct Node<'a> {
     id: &'a str,
     parent: Option<&'a str>,
     ended: bool,
-    /// It is the pilot of a review: it and its passes are one line.
+    /// It is the pilot of a review: its row folds its passes.
     pilot: bool,
 }
 
@@ -6688,7 +6720,7 @@ fn rail_rows(nodes: &[Node], open: &HashSet<String>) -> Vec<RailRow> {
         let mut gathered: Vec<&str> = Vec::new();
         for child in children(nodes, parent) {
             if child.pilot {
-                let mut behind = vec![child.id];
+                let mut behind = Vec::new();
                 descendants(nodes, child.id, &mut behind);
                 let open = open.contains(&review_key(child.id));
                 rows.push(RailRow::Review {
@@ -6738,6 +6770,9 @@ fn rail_rows(nodes: &[Node], open: &HashSet<String>) -> Vec<RailRow> {
 /// The height of a child's row in the rail, which the lines that tie it to its parent run over.
 const RAIL_ROW: f32 = 44.;
 
+/// The column of a row's context gauge, the same on every row so that the gauges line up.
+const GAUGE: Pixels = px(64.);
+
 /// The lines the rail draws on a row to tie the children to their parent: a child turns right
 /// into its row from the line that comes down from its parent, and that line goes on below the
 /// turn while the parent has another child under this one, past every row between them.
@@ -6752,7 +6787,7 @@ struct Lines {
 }
 
 /// The lines of each row of the rail, in order: `rows` holds, for each row, the parent and the
-/// depth of a child's row, `None` for any other row (a root, the folded "ended" row, a review).
+/// depth of a child's row, `None` for any other row (a root, the folded "ended" row).
 fn rail_lines(rows: &[Option<(&str, u64)>]) -> Vec<Lines> {
     // Where the children of each parent start and stop, and their depth.
     let mut spans: HashMap<&str, (usize, usize, u64)> = HashMap::new();
@@ -6842,12 +6877,17 @@ fn rail_tie(
         }))
 }
 
-/// What a review's line says of it, from its pilot's facts: `Review · 3/4 checks · 2 findings`,
+/// Whether a review still runs, from its pilot's facts.
+fn review_runs(facts: &serde_json::Value) -> bool {
+    !matches!(facts["review"]["state"].as_str(), Some("done" | "failed"))
+}
+
+/// What a review's row says under its title, from its pilot's facts: `3/4 checks · 2 findings`,
 /// and how it ended once it did.
 pub fn review_said(facts: &serde_json::Value) -> String {
     let review = &facts["review"];
     let mut said = format!(
-        "Review · {}/{} checks",
+        "{}/{} checks",
         review["passes"]["done"].as_u64().unwrap_or(0),
         review["passes"]["total"].as_u64().unwrap_or(0)
     );
@@ -6952,8 +6992,12 @@ pub struct SessionRail {
     marks: HashMap<String, Entity<StateIcon>>,
     /// The parents whose "ended" row is open: kept while the window shows the session.
     open_ended: HashSet<String>,
-    /// How far each "ended" row's children are unfolded: they stay drawn until a fold ends.
+    /// How far each "ended" row's children, and each review's, are unfolded: they stay drawn
+    /// until a fold ends.
     ended_folds: HashMap<String, EndedFold>,
+    /// The reviews the user folded or unfolded by hand, by their pilot; the others are open while
+    /// they run and folded once they ended.
+    review_choice: HashMap<String, bool>,
     /// How far the bar of each agent's gauge is filled, following the use.
     gauges: HashMap<String, Motion>,
     /// How many task runs each agent last had going: its row says it while the count folds away.
@@ -7042,6 +7086,7 @@ impl SessionRail {
             marks: HashMap::new(),
             open_ended: HashSet::new(),
             ended_folds: HashMap::new(),
+            review_choice: HashMap::new(),
             gauges: HashMap::new(),
             last_runs: HashMap::new(),
             menu,
@@ -7190,7 +7235,43 @@ impl SessionRail {
 
     /// What the rail draws of the agents: the ones in their place, and the folded rows.
     pub fn rows(&self) -> Vec<RailRow> {
-        self.rows_among(&self.open_ended)
+        self.rows_among(&self.open_keys())
+    }
+
+    /// Whether a review's row is unfolded: as the user left it, else while the review runs.
+    fn review_open(&self, pilot: &RailAgent) -> bool {
+        self.review_choice
+            .get(&pilot.id)
+            .copied()
+            .unwrap_or_else(|| review_runs(&pilot.extensions))
+    }
+
+    /// The keys of the rows that are unfolded: the "ended" rows' parents and the reviews'.
+    fn open_keys(&self) -> HashSet<String> {
+        let mut open = self.open_ended.clone();
+        open.extend(
+            self.agents
+                .iter()
+                .filter(|a| a.extensions["review"]["kind"] == "pilot" && self.review_open(a))
+                .map(|a| review_key(&a.id)),
+        );
+        open
+    }
+
+    /// Folds or unfolds a review's row, over [`PANEL`], and keeps what the user chose.
+    pub fn toggle_review(&mut self, pilot: &str, cx: &mut Context<Self>) {
+        let Some(agent) = self.agents.iter().find(|a| a.id == pilot) else {
+            return;
+        };
+        let open = !self.review_open(agent);
+        self.review_choice.insert(pilot.to_owned(), open);
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        self.ended_folds
+            .entry(review_key(pilot))
+            .or_insert_with(|| EndedFold::at(!open))
+            .animate(open, now, reduce);
+        cx.notify();
     }
 
     /// [`SessionRail::rows`] with the "ended" rows of `open` unfolded.
@@ -7264,6 +7345,12 @@ impl SessionRail {
         // The gauges of the agents that left the rail go with them.
         self.gauges
             .retain(|id, _| agents.iter().any(|agent| &agent.id == id));
+        // So do a review's fold and the choice the user made of it.
+        let here = |id: &str| agents.iter().any(|agent| agent.id == id);
+        self.review_choice.retain(|id, _| here(id));
+        for gone in self.agents.iter().filter(|agent| !here(&agent.id)) {
+            self.ended_folds.remove(&review_key(&gone.id));
+        }
         for agent in &agents {
             let fill = agent.context.unwrap_or(0) as f32;
             let had_bar = self
@@ -7280,7 +7367,39 @@ impl SessionRail {
                 }
             }
         }
+        // A review folds when it ends and unfolds when it runs, unless the user chose: what they
+        // chose holds until the review ends.
+        let before: HashMap<String, (bool, bool)> = self
+            .agents
+            .iter()
+            .filter(|a| a.extensions["review"]["kind"] == "pilot")
+            .map(|a| {
+                (
+                    a.id.clone(),
+                    (self.review_open(a), review_runs(&a.extensions)),
+                )
+            })
+            .collect();
         self.agents = agents;
+        for at in 0..self.agents.len() {
+            let agent = &self.agents[at];
+            if agent.extensions["review"]["kind"] != "pilot" {
+                continue;
+            }
+            let id = agent.id.clone();
+            let was = before.get(&id).copied();
+            if was.is_some_and(|(_, runs)| runs != review_runs(&agent.extensions)) {
+                self.review_choice.remove(&id);
+            }
+            let open = self.review_open(&self.agents[at]);
+            let fold = self
+                .ended_folds
+                .entry(review_key(&id))
+                .or_insert_with(|| EndedFold::at(was.map_or(open, |(open, _)| open)));
+            if was.is_some_and(|(was, _)| was != open) {
+                fold.animate(open, now, reduce);
+            }
+        }
         cx.notify();
     }
 
@@ -7346,7 +7465,8 @@ impl Render for SessionRail {
         let p = palette(cx);
         // A folding "ended" row still has its children until the fold ends.
         let now = cx.background_executor().now();
-        let mut drawn_open = self.open_ended.clone();
+        let open_now = self.open_keys();
+        let mut drawn_open = open_now.clone();
         for (parent, fold) in &mut self.ended_folds {
             if fold.motion.is_running(now) {
                 window.request_animation_frame();
@@ -7377,18 +7497,18 @@ impl Render for SessionRail {
             .map(|row| match row {
                 RailRow::Agent(id) => id.clone(),
                 RailRow::Ended { parent, .. } => format!("ended-{parent}"),
-                RailRow::Review { pilot, .. } => format!("review-{pilot}"),
+                RailRow::Review { pilot, .. } => pilot.clone(),
             })
             .collect();
         let tied: Vec<Option<(&str, u64)>> = listed
             .iter()
             .map(|row| match row {
-                RailRow::Agent(id) => self
+                RailRow::Agent(id) | RailRow::Review { pilot: id, .. } => self
                     .agents
                     .iter()
                     .find(|a| &a.id == id)
                     .and_then(|a| (a.depth > 0).then_some((a.parent.as_deref()?, a.depth))),
-                RailRow::Ended { .. } | RailRow::Review { .. } => None,
+                RailRow::Ended { .. } => None,
             })
             .collect();
         let lines: HashMap<String, Lines> = keys.into_iter().zip(rail_lines(&tied)).collect();
@@ -7406,7 +7526,7 @@ impl Render for SessionRail {
                 RailRow::Agent(_) => None,
             })
             .map(|(key, id)| {
-                let open = self.open_ended.contains(&key);
+                let open = open_now.contains(&key);
                 let id = ElementId::Name(id.into());
                 (key, turning(id, open, window, cx))
             })
@@ -7455,7 +7575,13 @@ impl Render for SessionRail {
                 (agent.id.clone(), fade(id, on, PANEL, window, cx))
             })
             .collect();
-        let agent_row = |agent: &RailAgent, tie: &Lines, window: &mut Window, cx: &mut App| {
+        let rail = cx.entity().downgrade();
+        // `fold` is `Some((open, turned))` on a review's row, which folds what is under it.
+        let agent_row = |agent: &RailAgent,
+                         tie: &Lines,
+                         fold: Option<(bool, f32)>,
+                         window: &mut Window,
+                         cx: &mut App| {
             let mark = self.marks[&agent.id].clone();
             let page = self.page.clone();
             let target = agent.id.clone();
@@ -7469,6 +7595,9 @@ impl Render for SessionRail {
             };
             let (name, said) = match kid {
                 false => (runs, None),
+                true if fold.is_some() => {
+                    (agent.name.clone(), Some(review_said(&agent.extensions)))
+                }
                 true => (
                     agent.name.clone(),
                     Some(match agent.doing.as_str() {
@@ -7548,6 +7677,7 @@ impl Render for SessionRail {
                     // The share (or the tokens used) and its bar on one line, the share before it.
                     div()
                         .id(ElementId::Name(format!("rail-context-{}", agent.id).into()))
+                        .w(GAUGE)
                         .flex()
                         .items_center()
                         .justify_end()
@@ -7626,45 +7756,49 @@ impl Render for SessionRail {
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .child({
-                            let name = tipped_when_cut(
-                                div()
-                                    .id(ElementId::Name(top_id.into()))
-                                    .medium()
-                                    .text_size(px(13.))
-                                    .text_ellipsis()
-                                    .overflow_hidden()
-                                    .aria_label(SharedString::from(name.clone()))
-                                    .when(runs_chip.is_some(), |d| d.flex_1().min_w_0())
-                                    .child(SharedString::from(name.clone())),
-                                SharedString::from(name),
-                                window,
-                                cx,
-                            );
-                            match runs_chip {
-                                Some(chip) => div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(space::XS)
-                                    .child(name)
-                                    .child(chip)
-                                    .into_any_element(),
-                                None => name.into_any_element(),
-                            }
-                        })
+                        // The gauge sits at the right of the first line, so that the second says
+                        // its words whole with all the row's width.
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(space::XS)
+                                .child(tipped_when_cut(
+                                    div()
+                                        .id(ElementId::Name(top_id.into()))
+                                        .medium()
+                                        .text_size(px(13.))
+                                        .text_ellipsis()
+                                        .overflow_hidden()
+                                        .aria_label(SharedString::from(name.clone()))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(SharedString::from(name.clone())),
+                                    SharedString::from(name),
+                                    window,
+                                    cx,
+                                ))
+                                .children(runs_chip)
+                                .child(
+                                    div().w(GAUGE).flex_none().flex().justify_end().child(gauge),
+                                ),
+                        )
                         .children(said.map(|said| {
+                            let said = SharedString::from(said);
+                            let id = ElementId::Name(format!("rail-runs-on-{}", agent.id).into());
+                            // A new state fades in as it changes.
+                            let shown = changed(&id, &said, window, cx);
                             tipped_when_cut(
                                 div()
-                                    .id(ElementId::Name(
-                                        format!("rail-runs-on-{}", agent.id).into(),
-                                    ))
+                                    .id(id)
                                     .mono(11.)
                                     .text_color(p.faint)
                                     .text_ellipsis()
                                     .overflow_hidden()
-                                    .aria_label(SharedString::from(said.clone()))
-                                    .child(SharedString::from(said.clone())),
-                                SharedString::from(said),
+                                    .opacity(shown)
+                                    .aria_label(said.clone())
+                                    .child(said.clone()),
+                                said,
                                 window,
                                 cx,
                             )
@@ -7694,17 +7828,54 @@ impl Render for SessionRail {
                             ))
                         }),
                 )
-                .child(
-                    div()
-                        .w(px(64.))
-                        .flex_none()
-                        .flex()
-                        .justify_end()
-                        .child(gauge),
-                )
-                .map(|d| match !kid && endable {
-                    true => d.child(agent_menu.clone()),
-                    false => d.child(div().w(px(28.)).flex_none()),
+                .map(|d| match (fold, !kid && endable) {
+                    (Some((open, turn)), _) => {
+                        // At the row's end, as the sidebar's rows have it: it folds what is under
+                        // the review, and never opens the review's conversation.
+                        let (rail, pilot) = (rail.clone(), agent.id.clone());
+                        let mark = hoverable(
+                            div()
+                                .id(ElementId::Name(
+                                    format!("rail-review-{}-mark", agent.id).into(),
+                                ))
+                                .size(px(28.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.))
+                                .child(
+                                    icon(Icon::Chevron)
+                                        .size(px(12.))
+                                        .text_color(p.faint)
+                                        .with_transformation(Transformation::rotate(radians(
+                                            -FRAC_PI_2 * turn,
+                                        ))),
+                                ),
+                            move |d, t| d.bg(p.hover.opacity(t)),
+                        );
+                        d.child(
+                            div()
+                                .id(toggle_id(ElementId::Name(
+                                    format!("rail-row-{}", agent.id).into(),
+                                )))
+                                .flex_none()
+                                .cursor_pointer()
+                                .aria_expanded(open)
+                                .aria_label(match open {
+                                    true => "Fold the review",
+                                    false => "Unfold the review",
+                                })
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    rail.update(cx, |rail, cx| rail.toggle_review(&pilot, cx))
+                                        .ok();
+                                })
+                                .child(mark)
+                                .test_support(),
+                        )
+                    }
+                    (None, true) => d.child(agent_menu.clone()),
+                    (None, false) => d.child(div().w(px(28.)).flex_none()),
                 })
                 .on_click(move |_, _, cx| {
                     if let Some(page) = page.upgrade() {
@@ -7772,55 +7943,13 @@ impl Render for SessionRail {
                         cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)),
                     ))
             };
-        // A review's line says its state; a new state fades in as it changes.
-        let review_line = |pilot: &str, open: bool, turn: f32, tie: &Lines, cx: &Context<Self>| {
-            let depth = self
-                .agents
-                .iter()
-                .find(|a| a.id == pilot)
-                .map_or(1, |a| a.depth);
-            let indent = space::LG * depth as f32;
-            let said = SharedString::from(
-                self.agents
-                    .iter()
-                    .find(|a| a.id == pilot)
-                    .map_or_else(|| "Review".to_owned(), |a| review_said(&a.extensions)),
-            );
-            let key = review_key(pilot);
-            div()
-                .relative()
-                .pl(indent)
-                .when(!tie.through.is_empty(), |d| {
-                    d.child(rail_tie(
-                        &format!("review-{pilot}"),
-                        tie,
-                        None,
-                        0.,
-                        None,
-                        p.line2,
-                    ))
-                })
-                .child(runs::ended_row(
-                    ElementId::Name(format!("rail-review-{pilot}").into()),
-                    said.clone(),
-                    changing(
-                        ElementId::Name(format!("rail-review-state-{pilot}").into()),
-                        said,
-                        |said| div().child(said).into_any_element(),
-                    ),
-                    open,
-                    turn,
-                    p,
-                    cx.listener(move |this, _, _, cx| this.toggle_ended(&key, cx)),
-                ))
-        };
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut listed = listed.into_iter();
         while let Some(row) = listed.next() {
             match row {
                 RailRow::Agent(id) => {
                     rows.extend(self.agents.iter().find(|a| a.id == id).map(|agent| {
-                        agent_row(agent, &lines_of(&id), window, cx).into_any_element()
+                        agent_row(agent, &lines_of(&id), None, window, cx).into_any_element()
                     }));
                 }
                 RailRow::Ended {
@@ -7850,7 +7979,8 @@ impl Render for SessionRail {
                             RailRow::Agent(id) => {
                                 let agent = self.agents.iter().find(|a| a.id == id)?;
                                 Some(
-                                    agent_row(agent, &lines_of(&id), window, cx).into_any_element(),
+                                    agent_row(agent, &lines_of(&id), None, window, cx)
+                                        .into_any_element(),
                                 )
                             }
                             RailRow::Ended { .. } | RailRow::Review { .. } => None,
@@ -7873,12 +8003,19 @@ impl Render for SessionRail {
                 }
                 RailRow::Review { pilot, count, open } => {
                     let key = review_key(&pilot);
+                    let Some(pilot_agent) = self.agents.iter().find(|a| a.id == pilot) else {
+                        continue;
+                    };
+                    // The review's own row, with its chevron at the end.
                     rows.push(
-                        review_line(
-                            &pilot,
-                            self.open_ended.contains(&key),
-                            turns.get(&key).copied().unwrap_or(0.0),
-                            &lines_of(&format!("review-{pilot}")),
+                        agent_row(
+                            pilot_agent,
+                            &lines_of(&pilot),
+                            Some((
+                                self.review_open(pilot_agent),
+                                turns.get(&key).copied().unwrap_or(0.0),
+                            )),
+                            window,
                             cx,
                         )
                         .into_any_element(),
@@ -7886,27 +8023,48 @@ impl Render for SessionRail {
                     if !open {
                         continue;
                     }
-                    // The pilot and its passes behind the line follow it, and fold with it, then
-                    // the review's findings.
+                    // Its checks behind the row follow it, and fold with it, then the findings.
+                    let mut last = pilot.clone();
                     let mut children: Vec<AnyElement> = listed
                         .by_ref()
                         .take(count)
                         .filter_map(|row| match row {
                             RailRow::Agent(id) => {
                                 let agent = self.agents.iter().find(|a| a.id == id)?;
+                                last = id.clone();
                                 Some(
-                                    agent_row(agent, &lines_of(&id), window, cx).into_any_element(),
+                                    agent_row(agent, &lines_of(&id), None, window, cx)
+                                        .into_any_element(),
                                 )
                             }
                             RailRow::Ended { .. } | RailRow::Review { .. } => None,
                         })
                         .collect();
-                    if let Some(pilot_agent) = self.agents.iter().find(|a| a.id == pilot) {
-                        let indent = space::LG * (pilot_agent.depth as f32 + 1.0);
-                        children.extend(
-                            review_findings(&pilot, &pilot_agent.extensions, p)
-                                .into_iter()
-                                .map(|row| div().pl(indent).child(row).into_any_element()),
+                    let indent = space::LG * (pilot_agent.depth as f32 + 1.0);
+                    // The lines of the levels above go on past the findings.
+                    let through = lines_of(&last).through;
+                    let findings = review_findings(&pilot, &pilot_agent.extensions, p);
+                    if !findings.is_empty() {
+                        children.push(
+                            div()
+                                .relative()
+                                .child(rail_tie(
+                                    &format!("findings-{pilot}"),
+                                    &Lines {
+                                        through,
+                                        ..Lines::default()
+                                    },
+                                    None,
+                                    0.,
+                                    None,
+                                    p.line2,
+                                ))
+                                .children(
+                                    findings
+                                        .into_iter()
+                                        .map(|row| div().pl(indent).child(row).into_any_element()),
+                                )
+                                .into_any_element(),
                         );
                     }
                     let Some(fold) = self.ended_folds.get(&key) else {
@@ -7915,7 +8073,7 @@ impl Render for SessionRail {
                     rows.push(
                         fold_frame(
                             ElementId::Name(format!("rail-review-children-{pilot}").into()),
-                            self.open_ended.contains(&key),
+                            open_now.contains(&key),
                             fold.motion.is_running(now),
                             fold.motion.value(now),
                             &fold.height,
@@ -10342,7 +10500,7 @@ mod tests {
     }
 
     #[test]
-    fn a_review_s_agents_are_one_folded_line_ended_or_not() {
+    fn a_review_is_one_row_with_its_checks_behind_it_ended_or_not() {
         let nodes = [
             node("lead", None, false),
             Node {
@@ -10359,7 +10517,7 @@ mod tests {
                 agent_row("lead"),
                 RailRow::Review {
                     pilot: "pilot".into(),
-                    count: 3,
+                    count: 2,
                     open: false
                 },
                 agent_row("helper"),
@@ -10367,14 +10525,13 @@ mod tests {
         );
         let open: HashSet<String> = [review_key("pilot")].into();
         assert_eq!(
-            rail_rows(&nodes, &open)[1..5],
+            rail_rows(&nodes, &open)[1..4],
             [
                 RailRow::Review {
                     pilot: "pilot".into(),
-                    count: 3,
+                    count: 2,
                     open: true
                 },
-                agent_row("pilot"),
                 agent_row("bugs"),
                 agent_row("standards"),
             ]
@@ -10382,13 +10539,13 @@ mod tests {
     }
 
     #[test]
-    fn a_review_s_line_says_its_checks_and_its_findings() {
+    fn a_review_s_row_says_its_checks_and_its_findings() {
         let running = serde_json::json!({"review": {"state": "running",
             "passes": {"done": 1, "total": 2}, "findings": 0, "changed": null}});
-        assert_eq!(review_said(&running), "Review · 1/2 checks");
+        assert_eq!(review_said(&running), "1/2 checks");
         let done = serde_json::json!({"review": {"state": "done",
             "passes": {"done": 3, "total": 4}, "findings": 2, "changed": null}});
-        assert_eq!(review_said(&done), "Review · 3/4 checks · 2 findings");
+        assert_eq!(review_said(&done), "3/4 checks · 2 findings");
     }
 
     #[test]
