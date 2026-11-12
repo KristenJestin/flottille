@@ -222,6 +222,46 @@ fn says_what_it_took(user: &User, id: &str, answer: &str) {
 }
 
 #[test]
+fn launches_in_parallel_up_to_the_cap_are_all_accepted_while_their_sessions_open() {
+    let user = User::with_fake_agent();
+    user.fake_script(script(json!([])));
+    let (_, mcp) = lead(&user);
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("max_children = 12", "max_children = 3")).unwrap();
+    // From now on a session takes a while to open: the children exist, and count as live, before
+    // their launch is answered.
+    user.fake_script(json!({"init_wait": 1500, "turns": []}));
+    let (url, authorization) = server_of(&user, 0);
+
+    let answers: Vec<_> = std::thread::scope(|scope| {
+        let launches: Vec<_> = (0..3)
+            .map(|n| {
+                let (url, authorization) = (url.clone(), authorization.clone());
+                scope.spawn(move || {
+                    Mcp::initialize(&url, &authorization).call(
+                        "agent_launch",
+                        json!({"kind": "child", "title": format!("worker {n}"),
+                            "brief": "Do the work."}),
+                    )
+                })
+            })
+            .collect();
+        launches.into_iter().map(|l| l.join().unwrap()).collect()
+    });
+
+    for answer in &answers {
+        assert!(!answer.error, "{}", answer.text);
+    }
+    let more = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "one more", "brief": "Do the work."}),
+    );
+    assert!(more.error, "{}", more.text);
+    assert!(more.text.contains("3 children already run"), "{}", more.text);
+}
+
+#[test]
 fn agent_status_says_each_child_s_model_and_effort() {
     let user = User::with_fake_agent();
     user.fake_script(script(json!([])));

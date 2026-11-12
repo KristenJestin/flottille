@@ -391,6 +391,8 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         },
     )
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
+    // The child is a live child now: held on, it would count twice while its session opens.
+    drop(_slot);
     // Before its first message, so that its first turn wakes its pilot too.
     if led {
         crate::subscriptions::lead(daemon, &caller.id, &child).map_err(failed)?;
