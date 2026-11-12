@@ -1071,3 +1071,83 @@ fn the_last_usage_of_a_turn_is_said_at_its_end_even_with_no_window() {
     assert_eq!(last["data"]["used"], 61070, "{:?}", names(&events));
     assert!(last["data"]["size"].is_null(), "{last}");
 }
+
+#[test]
+fn the_bridge_reports_a_named_effort_never_default() {
+    let user = User::with_fake_claude();
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+    // Claude's own levels are low, medium, high, xhigh: the one Flottille names is the upper middle.
+    assert_eq!(show(&user, &id)["agent"]["taken"]["effort"], "high");
+
+    // Its process opens again on Claude's own effort (`default`): the session reopened runs with a
+    // named one.
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    events_until(&user, &id, after, "agent.ended");
+    user.resume(&id);
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "again"}))
+        .unwrap();
+    events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+    assert_eq!(show(&user, &id)["agent"]["taken"]["effort"], "high");
+    let efforts: Vec<Value> = asked(&user)
+        .into_iter()
+        .filter(|r| r["subtype"] == "apply_flag_settings")
+        .map(|r| r["settings"].clone())
+        .collect();
+    assert_eq!(
+        efforts,
+        [
+            json!({"effortLevel": "high"}),
+            json!({"effortLevel": "high"})
+        ],
+        "each process of the session runs with the named effort"
+    );
+}
+
+#[test]
+fn a_model_switch_the_effort_does_not_survive_names_the_new_effort() {
+    let user = User::with_fake_claude();
+    project(&user);
+    // `max` is fable's alone: the default model's levels stop at xhigh.
+    let answer = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "hello", "model": "fable", "effort": "max"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    events_until(
+        &user,
+        &id,
+        answer["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+
+    let asked_now = user
+        .call("agent.options", json!({"agent": id, "model": "default"}))
+        .unwrap();
+    events_until(
+        &user,
+        &id,
+        asked_now["after"].as_u64().unwrap(),
+        "agent.options_taken",
+    );
+
+    let taken = &show(&user, &id)["agent"]["taken"];
+    // The default stands for fable, which has `max`; the default's own levels stop at xhigh.
+    assert_eq!(taken["model"], "fable");
+    assert_eq!(taken["effort"], "high", "{taken}");
+    let last = asked(&user).pop().unwrap();
+    assert_eq!(
+        last,
+        json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "high"}}),
+        "Claude runs with the effort it is said to"
+    );
+}

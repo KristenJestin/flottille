@@ -348,9 +348,9 @@ async fn drive(
         let own = match (category, value) {
             (_, Some(_)) => None,
             ("model", None) if new && waiting.model.is_none() => own_choice(&options, category),
-            ("thought_level", None) if new && waiting.effort.is_none() => {
-                own_choice(&options, category)
-            }
+            // Not only a new session: a process that opens on the agent's own choice again (a
+            // resumed session, none having chosen its effort) runs with a named effort too.
+            ("thought_level", None) if waiting.effort.is_none() => own_choice(&options, category),
             _ => None,
         };
         let Some(value) = value.as_ref().or(own.as_ref()) else {
@@ -547,9 +547,14 @@ fn taken_of(options: &Value) -> Choices {
             _ => value.to_owned(),
         })
     };
+    // An effort is never kept as `default`: it is the one Flottille applies for it, else none.
+    let effort = match current("thought_level") {
+        Some(effort) if effort == provider::OWN_CHOICE => own_choice(options, "thought_level"),
+        effort => effort,
+    };
     Choices {
         model: current("model"),
-        effort: current("thought_level"),
+        effort,
         mode: current("mode"),
     }
 }
@@ -696,6 +701,19 @@ async fn apply_pending(
                 eprintln!("flottille daemon: session {native_id}: {reason}; kept for later");
                 held = true;
             }
+        }
+    }
+    // A model the agent set back on its own effort (the one before is not the new model's) runs
+    // with the effort Flottille names for it, as a new session does.
+    if pending.effort.is_none()
+        && !held
+        && let Some(own) = own_choice(options, "thought_level")
+    {
+        // Nothing waits for it: an agent that does not take it is shown by the name anyway.
+        if let Ok((set, _)) =
+            set_option(cx, native_id, options, "thought_level", "effort", &own).await
+        {
+            *options = set;
         }
     }
     events.options_set(settled, changed, taken_of(options), options, refused);
