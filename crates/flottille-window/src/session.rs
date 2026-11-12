@@ -7223,6 +7223,12 @@ impl SessionRail {
         // The gauges of the agents that left the rail go with them.
         self.gauges
             .retain(|id, _| agents.iter().any(|agent| &agent.id == id));
+        // So do a review's fold and the choice the user made of it.
+        let here = |id: &str| agents.iter().any(|agent| agent.id == id);
+        self.review_choice.retain(|id, _| here(id));
+        for gone in self.agents.iter().filter(|agent| !here(&agent.id)) {
+            self.ended_folds.remove(&review_key(&gone.id));
+        }
         for agent in &agents {
             let fill = agent.context.unwrap_or(0) as f32;
             let had_bar = self
