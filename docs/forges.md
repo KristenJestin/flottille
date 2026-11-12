@@ -871,7 +871,7 @@ that was stopped or timed out):
 | It ended… | The line says |
 |---|---|
 | in the code (a step or a job failed; Bitbucket `FAILED`, GitHub `failure`, anything not below) | its error line, as before |
-| in the CI itself (Bitbucket `ERROR` or a step in `ERROR`, a pipeline that ended outside any step; GitHub `startup_failure`, `action_required`) | `the CI failed, not the code: <what the forge says>; run it again (forge step … do: rerun)` |
+| in the CI itself (Bitbucket `ERROR` or a step in `ERROR`, a pipeline that ended outside any step; GitHub `startup_failure`, `action_required`) | `the CI failed, not the code: <what the forge says>`, then `; run it again (<the call>)` when there is a call the tool accepts |
 | stopped (Bitbucket `STOPPED` or `CANCELLED`, GitHub `cancelled`) | `stopped, not failed`, then `, by <who>` when the forge says who |
 | out of time (GitHub `timed_out`) | `timed out after <duration>` (`timed out` when the forge gave no times) |
 
@@ -883,8 +883,14 @@ that was stopped or timed out):
   failed step`; a stopped one says who when the pipeline does (`state.result.terminator.display_name`,
   **assumed** from Bitbucket's API, the maintainer checks it on his Bitbucket). The head counts
   the first listed jobs by what the build said, the others by their status.
-- **`run it again`** is the words of the issue. `step … do: rerun` is refused on Bitbucket
-  ("The CI family"): `forge` `checks` is what re-runs a Bitbucket build there.
+- **`run it again` names a call only when the tool accepts it, and nothing otherwise** (never an
+  action the tool refuses). On **Bitbucket Cloud** it is `forge {"action": "checks", "repository":
+  "api"}`, named when the build's own state says it failed (`FAILED` or `ERROR`: `checks` refuses a
+  pipeline that did not fail); `forge` `step` is refused there ("The CI family"). On **GitHub** it is
+  `forge {"action": "step", "repository": "api", "run": 900, "step": "2", "do": "rerun"}`, named when
+  the check's link names a run and a job and `gh run view` says the run holds that job (a job that
+  never started has none, and `step` refuses it): one more read for each such job. **Bitbucket
+  Data Center** has no pipeline to run, so nothing is named.
 - **Not the code, not read**: a GitHub job that was stopped, timed out or failed to start has no
   failing command, so its log is not asked for.
 
