@@ -2097,25 +2097,32 @@ fn an_unknown_assignee_is_refused() {
     jira_planned(&user);
     let (_, mcp) = root_in(&user, None);
 
-    // A display name: acli takes none, so nothing is asked of anyone.
+    // A display name is found among the people acli shows (#795): nobody here has that name,
+    // so nothing is written.
     for action in ["create", "edit"] {
-        let refused = mcp.call(
-            "tickets",
+        let answer = write_of(
+            &user,
+            &mcp,
             json!({"action": action, "ticket": "ABC-1", "project": "ABC", "title": "Add a logout",
                 "assignee": "Kristen"}),
         );
-        assert!(refused.error, "{}", refused.text);
         assert!(
-            refused.text.contains(
-                "assignee is me, an email or an account id; a display name cannot be looked up \
-                 with acli"
-            ),
-            "{}",
-            refused.text
+            answer.contains("refused: assignee: \"Kristen\" matches nobody in ABC, DEF"),
+            "{answer}"
+        );
+        assert!(
+            answer.contains("acli having no command that looks a user up"),
+            "{answer}"
         );
     }
-    assert!(no_request(&user));
-    assert!(user.acli_received().is_empty());
+    assert!(
+        words(user.acli_received())
+            .iter()
+            .all(|call| !call.starts_with("jira workitem create")
+                && !call.starts_with("jira workitem edit")),
+        "{:?}",
+        words(user.acli_received())
+    );
 
     // An email the site does not know: the tracker's words, and nothing was created.
     let (created, calls) = jira_asked(
@@ -2149,6 +2156,141 @@ fn an_unknown_assignee_is_refused() {
     assert!(!edited.contains("ABC-1 was changed"), "{edited}");
     assert!(edited.contains("can't be edited"), "{edited}");
     assert!(edited.contains("bob@example.org"), "{edited}");
+}
+
+/// A write the user allows: what the agent is handed for it.
+fn write_of(user: &User, mcp: &Mcp, args: Value) -> String {
+    allow(user, held(&mcp.call("tickets", args)))
+}
+
+/// [`jira_planned`] where ABC-4 is assigned to Anne Example, as a site names her in full, and ABC-1
+/// to Ben Sample, who set no e-mail visible to the site (`acli` shows only his account id).
+fn jira_with_people(user: &User) {
+    jira_planned_with(user, |script| {
+        script["users"] = json!(["ana@example.org", "557058:aaaa-0001", "557058:bbbb-0002"]);
+        script["items"]["ABC-4"]["fields"]["assignee"] = json!({
+            "accountId": "557058:aaaa-0001", "emailAddress": "anne@example.org",
+            "displayName": "Anne Example"});
+        script["items"]["ABC-1"]["fields"]["assignee"] = json!({
+            "accountId": "557058:bbbb-0002", "displayName": "Ben Sample"});
+    });
+}
+
+#[test]
+fn tickets_people_lists_the_assignable_users() {
+    // Jira: acli lists no user, so they are the assignees of the newest work items, by their
+    // e-mail when the site shows it, else their account id.
+    let user = user();
+    on_jira(&user);
+    jira_with_people(&user);
+    let (_, mcp) = root_in(&user, None);
+    let listed = read(&user, mcp.call("tickets", json!({"action": "people"})));
+    let lines: Vec<&str> = listed.lines().filter(|l| l.starts_with("- ")).collect();
+    assert_eq!(
+        lines,
+        [
+            "- Ben Sample (557058:bbbb-0002)",
+            "- Anne Example (anne@example.org)"
+        ],
+        "{listed}"
+    );
+    let narrowed = read(
+        &user,
+        mcp.call("tickets", json!({"action": "people", "query": "anne"})),
+    );
+    let lines: Vec<&str> = narrowed.lines().filter(|l| l.starts_with("- ")).collect();
+    assert_eq!(lines, ["- Anne Example (anne@example.org)"], "{narrowed}");
+    let search = words(user.acli_received())
+        .into_iter()
+        .find(|call| call.starts_with("jira workitem search"))
+        .unwrap();
+    assert!(search.contains("assignee is not EMPTY"), "{search}");
+
+    // GitHub: the repository's assignable users, the name `gh` says on an issue where it says one.
+    let user = self::user();
+    on_github(&user);
+    github_people(&user);
+    let (_, mcp) = root_in(&user, None);
+    let listed = read(&user, mcp.call("tickets", json!({"action": "people"})));
+    let lines: Vec<&str> = listed.lines().filter(|l| l.starts_with("- ")).collect();
+    assert_eq!(lines, ["- Ana Example (ana)", "- bob"], "{listed}");
+}
+
+/// GitHub's `acme/app`: Ana Example (whose name `gh` says on the issue she wrote) and Bob can be
+/// assigned.
+fn github_people(user: &User) {
+    many_issues(user);
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("gh/script.json")).unwrap())
+            .unwrap();
+    script["issues"]["acme/app"]["1"]["author"] = json!({"login": "ana", "name": "Ana Example"});
+    script["assignees"] = json!({"acme/app": [{"login": "ana"}, {"login": "bob"}]});
+    user.gh_script(script);
+}
+
+#[test]
+fn a_ticket_assigned_by_display_name_is_resolved() {
+    let user = user();
+    on_jira(&user);
+    jira_with_people(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    // Jira takes the account id acli was shown.
+    let done = write_of(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "assignee": "anne example"}),
+    );
+    assert!(done.contains("ABC-1 was changed."), "{done}");
+    assert!(
+        done.contains("Assigned to Anne Example (anne@example.org)"),
+        "{done}"
+    );
+    let edits: Vec<String> = words(user.acli_received())
+        .into_iter()
+        .filter(|call| call.starts_with("jira workitem edit"))
+        .collect();
+    assert_eq!(
+        edits,
+        ["jira workitem edit --key ABC-1 --assignee 557058:aaaa-0001 --yes"]
+    );
+
+    // A word of the name is enough when it is one person's.
+    let done = write_of(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "assignee": "Sample"}),
+    );
+    assert!(
+        done.contains("Assigned to Ben Sample (557058:bbbb-0002)"),
+        "{done}"
+    );
+
+    // GitHub: a login is sent, found by the name that was said.
+    let user = self::user();
+    on_github(&user);
+    github_people(&user);
+    let (_, mcp) = root_in(&user, None);
+    let done = write_of(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "#2", "assignees": ["ana example", "me"],
+            "remove_assignees": ["BOB"]}),
+    );
+    assert!(done.contains("#2 of acme/app was changed."), "{done}");
+    assert!(done.contains("added Ana Example (ana)"), "{done}");
+    assert!(done.contains("removed bob"), "{done}");
+    let edits: Vec<String> = words(user.gh_received())
+        .into_iter()
+        .filter(|call| call.starts_with("issue edit"))
+        .collect();
+    assert_eq!(
+        edits,
+        [
+            "issue edit 2 -R github.com/acme/app --add-assignee ana --add-assignee @me \
+          --remove-assignee bob"
+        ]
+    );
 }
 
 #[test]

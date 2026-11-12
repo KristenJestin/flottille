@@ -344,7 +344,7 @@ const SERVED: [Definition; 32] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "review", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
+                "action": {"type": "string", "enum": ["list", "show", "people", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "review", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; all of the place's when left out (list, show); the only one is taken without being named."},
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, review, edit, subscribe, unsubscribe: a pull request. subscribe and unsubscribe take it with repository, without workspace, for one that is not your workspace's branch's."},
@@ -355,7 +355,8 @@ const SERVED: [Definition; 32] = [
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment. review: its words. create without it takes the project's pull request template when it has one (project settings shows it): fill the template in body rather than replace it."},
                 "draft": {"type": "boolean", "description": "create: open as a draft. edit: false marks it ready for review, true makes it a draft again."},
-                "reviewers": {"type": "array", "items": {"type": "string"}, "description": "create: reviewers besides the project's."},
+                "reviewers": {"type": "array", "items": {"type": "string"}, "description": "create: reviewers besides the project's, each by display name, nickname, account id or e-mail; people finds them."},
+                "query": {"type": "string", "description": "people: lists who can be named a reviewer (a display name, nickname or e-mail does for reviewers); these words narrow it."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels (GitHub only)."},
                 "delete_branch_on_merge": {"type": "boolean", "description": "create: delete the source branch when it is merged."},
                 "reviewers_add": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to ask."},
@@ -411,12 +412,12 @@ const SERVED: [Definition; 32] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "sprints", "milestones", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "link_types", "sprints", "milestones", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes)."},
                 "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out."},
                 "workspace": {"type": "string"},
-                "query": {"type": "string", "description": "search: words."},
+                "query": {"type": "string", "description": "search: words. people: lists who can be assigned (assignee takes their name); these words narrow it."},
                 "updated_within": {"type": "integer", "minimum": 1, "maximum": 365, "description": "list, search: updated in the last that many days."},
                 "in_comments": {"type": "string", "description": "search on Jira: words of the comments (not by author). Not for list."},
                 "jql": {"type": "string", "description": "search on Jira: a JQL query, answered only within the tracker's projects (what it may refer to is not checked); ORDER BY allowed. Not for list."},

@@ -2555,6 +2555,98 @@ fn the_second_bitbucket_approval_wakes_an_approved_subscription() {
     }
 }
 
+/// The fake `bkt`'s script as `Bitbucket::script` left it, with every person of Cloud's pull
+/// request #12 given the nickname that is their name in lower case, and `comments` on it: what
+/// Cloud's API says of a person beside their display name. Data Center's users have their login.
+fn with_nicknames(user: &User, comments: &[(&str, &str, &str)]) {
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    let page = "/repositories/acme/api/pullrequests/12";
+    if script["api"][page].is_object() {
+        for participant in script["api"][page]["participants"].as_array_mut().unwrap() {
+            let name = participant["user"]["display_name"]
+                .as_str()
+                .unwrap()
+                .to_lowercase();
+            participant["user"]["nickname"] = json!(name);
+        }
+        script["api"][format!("{page}/comments")]["values"] = json!(
+            comments
+                .iter()
+                .map(
+                    |(name, nickname, text)| json!({"id": 5, "content": {"raw": text},
+                    "deleted": false, "user": {"display_name": name, "nickname": nickname}})
+                )
+                .collect::<Vec<_>>()
+        );
+    } else {
+        let activities = "/rest/api/1.0/projects/APP/repos/api/pull-requests/12/activities";
+        script["api"][activities]["values"] = json!(
+            comments
+                .iter()
+                .map(
+                    |(name, nickname, text)| json!({"action": "COMMENTED", "comment": {"id": 5,
+                    "text": text, "author": {"name": nickname, "displayName": name},
+                    "comments": []}})
+                )
+                .collect::<Vec<_>>()
+        );
+    }
+    user.bkt_script(script);
+}
+
+#[test]
+fn an_approval_wake_says_the_person_s_identifier() {
+    for shape in Bitbucket::ALL {
+        let user = shape.user();
+        shape.script(
+            &user,
+            &[("Alice", "approved"), ("Bob", "pending")],
+            "SUCCESSFUL",
+        );
+        with_nicknames(&user, &[]);
+        let (_, mcp) = agent(&user);
+
+        subscribe(&mcp, json!({"events": ["approved", "review"]}));
+        shape.script(
+            &user,
+            &[("Alice", "approved"), ("Bob", "approved")],
+            "SUCCESSFUL",
+        );
+        with_nicknames(&user, &[]);
+        a_round(&user);
+        let delivery = the_delivery(&user);
+        // The display name and the identifier an agent names them back by.
+        for part in [
+            "approved by Alice (alice), Bob (bob)",
+            "A review by Bob (bob): approved",
+        ] {
+            assert!(delivery.contains(part), "{shape:?}: {part} in {delivery}");
+        }
+    }
+}
+
+#[test]
+fn a_comment_wake_says_the_person_s_identifier() {
+    for shape in Bitbucket::ALL {
+        let user = shape.user();
+        shape.script(&user, &[("Alice", "pending")], "SUCCESSFUL");
+        with_nicknames(&user, &[]);
+        let (_, mcp) = agent(&user);
+
+        subscribe(&mcp, json!({"events": ["comment"]}));
+        shape.script(&user, &[("Alice", "pending")], "SUCCESSFUL");
+        with_nicknames(&user, &[("Carol Poe", "cpoe", "Rename the form")]);
+        a_round(&user);
+        let delivery = the_delivery(&user);
+        assert!(
+            delivery.contains("A comment by Carol Poe (cpoe): Rename the form"),
+            "{shape:?}: {delivery}"
+        );
+    }
+}
+
 #[test]
 fn a_bitbucket_pull_request_with_no_reviewer_is_never_approved() {
     for shape in Bitbucket::ALL {

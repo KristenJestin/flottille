@@ -41,6 +41,7 @@ mod ending;
 mod events;
 pub(crate) mod followed;
 mod logs;
+pub(crate) mod people;
 mod pipelines;
 mod review;
 mod yaml;
@@ -313,7 +314,7 @@ pub struct Pull {
     pub reviews: Vec<Comment>,
     /// The reviewers asked and their verdict (`approved`, `changes requested`, `pending`), of
     /// the forges that say them (Bitbucket); empty for GitHub, whose reviews say it.
-    pub reviewers: Vec<(String, &'static str)>,
+    pub reviewers: Vec<Reviewer>,
     /// The failing checks, whose log `forge show` gives (`logs::attach`).
     pub jobs: Vec<Job>,
     /// How long its repository's CI usually takes, when the forge says it (`ci::attach`).
@@ -324,6 +325,27 @@ pub struct Pull {
     /// Who merged it and when (milliseconds), when `gh pr view` says it: the closing comment is
     /// then found without asking the issue's events (`closing`).
     pub ended: Option<(String, u64)>,
+}
+
+/// A reviewer: the name Bitbucket shows, their verdict, and the handle an agent names them by
+/// (a nickname, a login) when the forge says one, else empty.
+pub type Reviewer = (String, &'static str, String);
+
+/// `Jane Doe (jdoe)`: a person as a result says them, for an agent to name them back; the name
+/// alone when the forge says no handle or the name is it.
+pub(crate) fn named_as(name: &str, handle: &str) -> String {
+    match handle.is_empty() || handle == name {
+        true => name.to_owned(),
+        false => format!("{name} ({handle})"),
+    }
+}
+
+/// A reviewer as an item keeps it: the handle only when there is one.
+pub(crate) fn reviewer_json((name, state, handle): &Reviewer) -> Value {
+    match handle.is_empty() {
+        true => json!({"name": name, "state": state}),
+        false => json!({"name": name, "state": state, "handle": handle}),
+    }
 }
 
 /// A failing check of a pull request.
@@ -359,6 +381,9 @@ pub struct Log {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Comment {
     pub author: String,
+    /// What the author is named by when it is not their display name (a Bitbucket nickname, a
+    /// login), for an agent to name them back; none where the author already is that (GitHub).
+    pub handle: Option<String>,
     /// A review's verdict; none for a comment.
     pub state: Option<String>,
     pub body: String,
@@ -424,11 +449,7 @@ impl Pull {
             pull["not_started"] = json!(commit);
         }
         if !self.reviewers.is_empty() {
-            pull["reviewers"] = self
-                .reviewers
-                .iter()
-                .map(|(name, state)| json!({"name": name, "state": state}))
-                .collect();
+            pull["reviewers"] = self.reviewers.iter().map(reviewer_json).collect();
         }
         pull
     }
@@ -442,6 +463,7 @@ impl Pull {
                 .flatten()
                 .map(|comment| Comment {
                     author: text(&comment["author"]["login"]),
+                    handle: None,
                     bot: is_bot(&comment["author"]),
                     state: comment["state"]
                         .as_str()
@@ -1065,6 +1087,8 @@ pub(crate) struct ForgeCall {
     labels: Option<Vec<String>>,
     /// create: the source branch is deleted when the pull request is merged.
     delete_branch_on_merge: Option<bool>,
+    /// people: words the names, nicknames, identifiers and e-mails of the people held.
+    query: Option<String>,
     /// edit: reviewers asked, reviewers taken off.
     reviewers_add: Option<Vec<String>>,
     reviewers_remove: Option<Vec<String>>,
@@ -1133,19 +1157,15 @@ impl ForgeCall {
         for (key, names, label) in lists {
             for name in names.iter().flatten() {
                 // Each is one value of a `--reviewer` or `--label`, never an option of its own;
-                // the forge's commands split a value at its commas.
-                let spaced = !label && name.contains(char::is_whitespace);
-                let blank = label && name.trim().is_empty();
-                if name.is_empty()
-                    || blank
-                    || name.starts_with('-')
-                    || name.contains([',', '\n'])
-                    || spaced
-                {
+                // the forge's commands split a value at its commas. A reviewer may be a display
+                // name, with spaces: it is found among the forge's people before it is sent.
+                let blank = name.trim().is_empty();
+                if blank || name.starts_with('-') || name.contains([',', '\n']) {
                     let what = match label {
                         true => "one label, not starting with -, without comma",
                         false => {
-                            "one name of the forge, without space nor comma, not starting with -"
+                            "one person, by name, nickname or e-mail, not starting with -, \
+                             without comma"
                         }
                     };
                     return Some(format!("refused: {key}: {name:?} is not {what}"));
@@ -1368,6 +1388,7 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
     }
     match (asked.action.as_str(), asked.number) {
         ("list", _) => forge_list(daemon, place, asked).await,
+        ("people", _) => forge_people(daemon, place, asked).await,
         ("show", number) => {
             let shown = match number {
                 None => forge_read(daemon, place, asked).await,
@@ -1983,6 +2004,17 @@ async fn forge_list(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
     Outcome::Done(text)
 }
 
+/// `forge people`: who can be named as a reviewer in the place's repositories.
+async fn forge_people(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+    let checkouts = match place_checkouts(daemon, place)
+        .and_then(|all| chosen(all, asked.repository.as_deref(), "people", false))
+    {
+        Ok(checkouts) => checkouts,
+        Err(refusal) => return refusal,
+    };
+    people::people(&checkouts, asked.query.as_deref()).await
+}
+
 /// What `forge list` says of a repository the items' rounds read: its pull requests in `state`
 /// (`open` holding the drafts), of `branch` when given, the newest 100, and how old the read is.
 fn stored_list(
@@ -2190,8 +2222,9 @@ async fn attached(forge: &Forge, pull: &mut Pull) {
 
 /// `forge comment` and `forge edit`: a comment on a pull request of one repository of the place,
 /// or a new title or description of it.
-async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
-    let action = asked.action.as_str();
+async fn forge_note(daemon: &Daemon, place: &Place, mut asked: ForgeCall) -> Outcome {
+    let verb = asked.action.clone();
+    let action = verb.as_str();
     let Some(number) = asked.number else {
         return Outcome::Refused(format!(
             "refused: forge {action} needs number, the pull request's: forge list lists them"
@@ -2260,6 +2293,31 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         }
     }
     let number = number.to_string();
+    let mut reviewers_said = String::new();
+    if action == "edit" {
+        let (add, remove) = (
+            asked.reviewers_add.clone().unwrap_or_default(),
+            asked.reviewers_remove.clone().unwrap_or_default(),
+        );
+        let found = people::named(
+            &forge,
+            &[("reviewers_add", &add), ("reviewers_remove", &remove)],
+        )
+        .await;
+        match found {
+            Ok(mut found) => {
+                let (removed, added) = (found.remove(1), found.remove(0));
+                let sent = |list: &[people::Named]| {
+                    Some(list.iter().map(|n| n.send.clone()).collect::<Vec<_>>())
+                        .filter(|sent| !sent.is_empty())
+                };
+                asked.reviewers_add = sent(&added);
+                asked.reviewers_remove = sent(&removed);
+                reviewers_said = people::told(&added, &removed);
+            }
+            Err(refusal) => return refusal,
+        }
+    }
     if action == "edit"
         && let Err(refusal) = edit_checked(&forge, &asked).await
     {
@@ -2312,7 +2370,9 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
             if let Some(body) = body {
                 crate::posts::record_body(daemon, on, body);
             }
-            Outcome::Done(format!("Pull request #{number} of {slug} was changed."))
+            Outcome::Done(format!(
+                "Pull request #{number} of {slug} was changed.{reviewers_said}"
+            ))
         }
     }
 }
@@ -2830,6 +2890,21 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     if let Err(refusal) = messages_checked(&at, &asked).await {
         return Outcome::Refused(refusal);
     }
+    // What an agent asked for is found among the forge's people; the project's own are the
+    // forge's identifiers already.
+    let mut reviewers_said = String::new();
+    if asked.action == "create" {
+        let given = asked.reviewers.clone().unwrap_or_default();
+        match people::named(&forge, &[("reviewers", &given)]).await {
+            Ok(mut found) => {
+                let found = found.remove(0);
+                asked.reviewers = Some(found.iter().map(|n| n.send.clone()).collect())
+                    .filter(|sent: &Vec<String>| !sent.is_empty());
+                reviewers_said = people::told(&found, &[]);
+            }
+            Err(refusal) => return refusal,
+        }
+    }
     let reviewers = without_twice(&project.pull_requests.reviewers, &asked.reviewers);
     let labels = asked.labels.clone().unwrap_or_default();
     if matches!(forge, Forge::Bitbucket { .. }) && asked.action == "create" && !labels.is_empty() {
@@ -2860,7 +2935,12 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     if matches!(forge, Forge::Bitbucket { .. }) {
         let base = &repository.base.branch;
         let on = (daemon, place.project.as_str(), checkout.path.as_str());
-        return bitbucket::write(on, &forge, (branch, base), &reviewers, &deletion, asked).await;
+        let written =
+            bitbucket::write(on, &forge, (branch, base), &reviewers, &deletion, asked).await;
+        return match written {
+            Outcome::Done(said) => Outcome::Done(said + &reviewers_said),
+            other => other,
+        };
     }
     if let Err(problem) = signed_in().await {
         return Outcome::Failed(problem);
@@ -2920,7 +3000,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                                 a merge too";
                         }
                     }
-                    Outcome::Done(told)
+                    Outcome::Done(told + &reviewers_said)
                 }
                 Err(why) => Outcome::Failed(why),
             }
@@ -3260,7 +3340,10 @@ fn pull_text(
         let each: Vec<String> = pull
             .reviewers
             .iter()
-            .map(|(name, state)| format!("{name} {state}"))
+            .map(|(name, state, handle)| match handle.is_empty() {
+                true => format!("{name} {state}"),
+                false => format!("{name} ({handle}) {state}"),
+            })
             .collect();
         text.push_str(&format!("  reviewers: {}\n", each.join(", ")));
     }
@@ -3587,11 +3670,7 @@ fn fetched_pull(path: &str, source: &str, pull: &Pull, detailed: bool) -> crate:
         details["reviews"] = json!(pull.reviews.len());
     }
     if !pull.reviewers.is_empty() {
-        details["reviewers"] = pull
-            .reviewers
-            .iter()
-            .map(|(name, state)| json!({"name": name, "state": state}))
-            .collect();
+        details["reviewers"] = pull.reviewers.iter().map(reviewer_json).collect();
     }
     crate::items::Fetched {
         item: flottille_core::item::Item {

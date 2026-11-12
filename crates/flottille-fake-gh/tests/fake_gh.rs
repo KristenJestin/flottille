@@ -576,3 +576,33 @@ fn step_fail_makes_one_pull_request_write_fail_and_the_others_work() {
     assert!(!ready.status.success());
     assert!(String::from_utf8_lossy(&ready.stderr).contains("HTTP 502"));
 }
+
+#[test]
+fn the_people_of_a_repository_are_the_script_s_and_a_repository_with_none_is_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"assignees": {"acme/api": [{"login": "jdoe"}, {"login": "broe"}]}}).to_string(),
+    )
+    .unwrap();
+    let run = |args: &[&str]| fake(dir.path()).args(args).output().unwrap();
+
+    let logins = run(&[
+        "api",
+        "repos/acme/api/assignees",
+        "-F",
+        "per_page=100",
+        "--jq",
+        ".[].login",
+    ]);
+    let json = run(&["api", "repos/acme/api/assignees"]);
+    let none = run(&["api", "repos/acme/api/collaborators"]);
+
+    assert_eq!(String::from_utf8_lossy(&logins.stdout), "jdoe\nbroe\n");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&json.stdout).unwrap(),
+        json!([{"login": "jdoe"}, {"login": "broe"}])
+    );
+    assert!(!none.status.success());
+    assert!(String::from_utf8_lossy(&none.stderr).contains("404"));
+}

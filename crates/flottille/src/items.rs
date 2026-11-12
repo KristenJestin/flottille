@@ -42,6 +42,8 @@ const EXCERPT_CHARS: usize = 200;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Said {
     pub author: String,
+    /// What the author is named by besides their display name (`forge::Comment::handle`).
+    pub handle: Option<String>,
     pub bot: bool,
     /// Posted by an agent of Flottille (`docs/forges.md`, "What Flottille posts is recorded").
     pub by_agent: bool,
@@ -60,6 +62,7 @@ impl Said {
         let (text, by_agent) = comment.unmarked();
         Said {
             author: comment.author.clone(),
+            handle: comment.handle.clone(),
             bot: comment.bot,
             by_agent,
             id: comment.id.clone(),
@@ -77,8 +80,12 @@ impl Said {
     }
 
     fn to_json(&self) -> Value {
-        json!({"author": self.author, "bot": self.bot, "by_agent": self.by_agent,
-            "state": self.state, "excerpt": self.excerpt})
+        let mut said = json!({"author": self.author, "bot": self.bot, "by_agent": self.by_agent,
+            "state": self.state, "excerpt": self.excerpt});
+        if let Some(handle) = &self.handle {
+            said["handle"] = json!(handle);
+        }
+        said
     }
 }
 
@@ -1064,7 +1071,13 @@ fn approvers(new: &Fetched) -> Vec<String> {
         return reviewers
             .iter()
             .filter(|r| r["state"] == "approved")
-            .filter_map(|r| r["name"].as_str().map(str::to_owned))
+            .filter_map(|r| {
+                let name = r["name"].as_str()?;
+                Some(forge::named_as(
+                    name,
+                    r["handle"].as_str().unwrap_or_default(),
+                ))
+            })
             .collect();
     }
     let mut last: Vec<(&str, &str)> = Vec::new();
@@ -1146,9 +1159,17 @@ fn events_of(old: Option<&Item>, new: &Fetched) -> Vec<(&'static str, Value)> {
             && item.details.get("review").is_some()
             && old.details["review"] != item.details["review"])
         || old.details.get("reviewers").is_some_and(|reviewers| {
+            // A handle read later is no new verdict.
+            let verdicts = |list: &Value| {
+                list.as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|r| (r["name"].clone(), r["state"].clone()))
+                    .collect::<Vec<_>>()
+            };
             item.details
                 .get("reviewers")
-                .is_some_and(|now| now != reviewers)
+                .is_some_and(|now| verdicts(now) != verdicts(reviewers))
         });
     if reviewed {
         let mut data = with(base(), "review", item.details["review"].clone());
@@ -1519,6 +1540,7 @@ mod tests {
         new.details["review"] = json!("approved");
         let said = |author: &str| Said {
             author: author.into(),
+            handle: None,
             bot: false,
             by_agent: false,
             id: None,
@@ -1555,6 +1577,7 @@ mod tests {
     fn a_decision_that_becomes_approved_is_item_approved_once_saying_who_approved() {
         let said = |author: &str, state: &str| Said {
             author: author.into(),
+            handle: None,
             bot: false,
             by_agent: false,
             id: None,

@@ -1407,8 +1407,8 @@ fn a_data_center_branch_shows_its_pull_request_with_reviewers_checks_and_comment
             "mark": "failing",
             "comments": 2,
             "reviewers": [
-                {"name": "Bob", "state": "approved"},
-                {"name": "Carol", "state": "pending"}
+                {"name": "Bob", "state": "approved", "handle": "bob"},
+                {"name": "Carol", "state": "pending", "handle": "carol"}
             ]
         })
     );
@@ -1583,7 +1583,7 @@ fn forge_read_returns_the_bitbucket_pull_requests_of_the_workspace() {
         "- Alice: Looks good to me",
         "web (APP/web): pull request #7, open, app/login into main: Add the login form",
         "review: review required",
-        "reviewers: Bob approved, Carol pending",
+        "reviewers: Bob (bob) approved, Carol (carol) pending",
         "checks: failing (Jenkins failing)",
         "- Carol: Rename the form",
         "- Alice: Done",
