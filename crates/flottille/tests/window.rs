@@ -2598,7 +2598,7 @@ fn the_auto_judge_is_chosen_in_settings_which_say_it_uses_the_quota(cx: &mut Tes
     // One select of the models, the cost said once under it.
     assert_eq!(
         text_of("judge-model", cx).as_deref(),
-        Some("OpenCode · open/small")
+        Some("OpenCode · open/small · recommended")
     );
     assert_eq!(
         text_of("judge-cost", cx).as_deref(),
@@ -2910,10 +2910,10 @@ fn the_judge_s_model_picker_names_the_provider_s_default_model_once_it_is_known(
         },
     );
     settle(cx);
-    // The default model's entry is the chosen one, never a second "default" entry.
+    // The recommended model's entry is the chosen one, marked, never a second entry of the provider's own.
     assert_eq!(
         text_of("judge-model", cx).as_deref(),
-        Some("OpenCode · open/small")
+        Some("OpenCode · open/small · recommended")
     );
     cx.update(|window, cx| window.click("judge-model", cx));
     settle(cx);
@@ -4408,8 +4408,8 @@ fn choosing_the_other_and_a_model_starts_the_session_on_them_and_the_tree_shows_
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
     let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
     assert_eq!(shown["provider"], "opencode");
-    // open/small is OpenCode's default: its row names no model, and the session takes it.
-    assert_eq!(shown["chosen"]["model"], serde_json::Value::Null);
+    // open/small is OpenCode's default: picked, it is asked by its name.
+    assert_eq!(shown["chosen"]["model"], "open/small");
     assert_eq!(shown["taken"]["model"], "open/small");
     assert_eq!(shown["chosen"]["effort"], "high");
     until(&shell, cx, "the rail shows both agents", |cx| {
@@ -4652,6 +4652,119 @@ fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_s
     let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
     assert_eq!(shown["provider"], "claude");
     assert_eq!(shown["chosen"]["model"], "fake-large");
+}
+
+/// A window on atlas whose composer starts on what the new-session setting `chosen` gives,
+/// Claude's models and efforts known.
+fn composer_on_setting<'a>(
+    user: &User,
+    chosen: serde_json::Value,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, Entity<Composer>, &'a mut VisualTestContext) {
+    project(user, "atlas");
+    learn_models(user, "atlas", "claude", "fake-small");
+    let model = chosen["model"].as_str().map(str::to_owned);
+    user.call("provider.set_new_session", chosen).unwrap();
+    let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "the composer starts on the setting", |cx| {
+        composer.read_with(cx, |c, _| {
+            c.pick().provider.as_deref() == Some("claude")
+                && c.pick().model == model
+                && c.entries(Menu::Model).len() > 1
+        })
+    });
+    settle(cx);
+    (shell, composer, cx)
+}
+
+/// Waits for the element to be drawn, then clicks it and lets the window settle: a click on an
+/// element not drawn yet is lost, or panics.
+fn click_when_drawn(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str) {
+    until(shell, cx, &format!("{id} is drawn"), |cx| {
+        cx.update(|window, _| window.try_find(id.to_owned()).is_some())
+    });
+    let id = id.to_owned();
+    cx.update(|window, cx| window.click(id, cx));
+    settle(cx);
+}
+
+/// The effort the composer marks recommended for the model picked.
+fn recommended_effort(composer: &Composer) -> Option<String> {
+    composer
+        .entries(Menu::Effort)
+        .into_iter()
+        .find(|e| e.note.as_deref() == Some("recommended"))
+        .map(|e| e.label)
+}
+
+/// Sends a task from the composer: what the session started on, as the daemon shows it.
+fn start_from_composer(
+    shell: &Entity<Shell>,
+    user: &User,
+    cx: &mut VisualTestContext,
+) -> serde_json::Value {
+    type_task("A first task", cx);
+    cx.simulate_keystrokes("enter");
+    until(shell, cx, "the session's page opens", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    let page = session_page(shell, cx);
+    let lead = page.read_with(cx, |p, _| p.id().to_owned());
+    user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone()
+}
+
+#[gpui_kit::test]
+fn picking_the_recommended_model_in_the_composer_wins_over_the_setting(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let setting = json!({"provider": "claude", "model": "fake-large", "effort": "low"});
+    let (shell, composer, cx) = composer_on_setting(&user, setting, cx);
+    assert_eq!(
+        composer
+            .read_with(cx, |c, _| c.pick().model.clone())
+            .as_deref(),
+        Some("fake-large")
+    );
+    // Claude's recommended model, picked: the session starts on it, not on the setting's.
+    click_when_drawn(&shell, cx, "model-picker");
+    click_when_drawn(&shell, cx, "model-choice-fake-small");
+    until(&shell, cx, "the composer shows the model", |cx| {
+        model_shown(&composer, cx) == "fake-small"
+    });
+    let shown = start_from_composer(&shell, &user, cx);
+    assert_eq!(shown["taken"]["model"], "fake-small");
+}
+
+#[gpui_kit::test]
+fn picking_the_recommended_effort_in_the_composer_wins_over_the_setting(cx: &mut TestAppContext) {
+    let user = providers_user();
+    // The setting's effort is the one the model does not run with by itself.
+    let (shell, composer, cx) = composer_on_setting(
+        &user,
+        json!({"provider": "claude", "model": "fake-small", "effort": "high"}),
+        cx,
+    );
+    let own = composer
+        .read_with(cx, |c, _| recommended_effort(c))
+        .unwrap();
+    assert_ne!(
+        own, "high",
+        "the setting's effort is not the recommended one"
+    );
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.effort_shown()),
+        "high",
+        "the composer starts on the setting's effort"
+    );
+    click_when_drawn(&shell, cx, "effort-picker");
+    click_when_drawn(&shell, cx, &format!("effort-choice-{own}"));
+    until(&shell, cx, "the composer shows the effort", |cx| {
+        composer.read_with(cx, |c, _| c.effort_shown()) == own
+    });
+    let shown = start_from_composer(&shell, &user, cx);
+    assert_eq!(shown["taken"]["model"], "fake-small");
+    assert_eq!(shown["chosen"]["effort"], own.as_str());
 }
 
 #[gpui_kit::test]
@@ -5077,7 +5190,7 @@ fn no_default_wording(composer: &Entity<Composer>, cx: &mut VisualTestContext) {
 }
 
 #[gpui_kit::test]
-fn a_provider_s_default_alias_shows_as_the_model_it_stands_for_selected_with_a_default_note(
+fn a_provider_s_default_alias_shows_as_the_model_it_stands_for_selected_with_a_recommended_note(
     cx: &mut TestAppContext,
 ) {
     let user = User::with_fake_claude();
@@ -5101,7 +5214,7 @@ fn a_provider_s_default_alias_shows_as_the_model_it_stands_for_selected_with_a_d
     assert_eq!(menu_labels(&composer, Menu::Model, cx), ["Fable", "Haiku"]);
     let fable = composer.read_with(cx, |c, _| c.entries(Menu::Model)[0].clone());
     assert!(fable.on, "the default model's row is the selected one");
-    assert_eq!(fable.note.as_deref(), Some("default"));
+    assert_eq!(fable.note.as_deref(), Some("recommended"));
     no_default_wording(&composer, cx);
 
     // Another model, then the default's row again: that is picking none.
@@ -5195,7 +5308,7 @@ fn the_project_s_model_still_wins_and_is_marked(cx: &mut TestAppContext) {
     assert_eq!(haiku.note.as_deref(), Some("the project's · no effort"));
     let fable = rows.iter().find(|e| e.id == "model-choice-fable").unwrap();
     assert!(!fable.on);
-    assert_eq!(fable.note.as_deref(), Some("default"));
+    assert_eq!(fable.note.as_deref(), Some("recommended"));
 
     type_task("A first task", cx);
     cx.simulate_keystrokes("enter");
@@ -5330,12 +5443,12 @@ fn the_effort_shown_is_the_one_the_model_runs_with(cx: &mut TestAppContext) {
     );
     let high = composer.read_with(cx, |c, _| c.entries(Menu::Effort)[2].clone());
     assert!(high.on);
-    assert_eq!(high.note.as_deref(), Some("default"));
+    assert_eq!(high.note.as_deref(), Some("recommended"));
     no_default_wording(&composer, cx);
 }
 
 #[gpui_kit::test]
-fn the_effort_a_model_runs_with_is_shown_selected_with_a_default_note(cx: &mut TestAppContext) {
+fn the_effort_a_model_runs_with_is_shown_selected_with_a_recommended_note(cx: &mut TestAppContext) {
     let user = providers_user();
     project(&user, "atlas");
     learn_models(&user, "atlas", "claude", "fake-small");
@@ -5351,7 +5464,7 @@ fn the_effort_a_model_runs_with_is_shown_selected_with_a_default_note(cx: &mut T
     assert_eq!(menu_labels(&composer, Menu::Effort, cx), ["low", "high"]);
     let low = composer.read_with(cx, |c, _| c.entries(Menu::Effort)[0].clone());
     assert!(low.on);
-    assert_eq!(low.note.as_deref(), Some("default"));
+    assert_eq!(low.note.as_deref(), Some("recommended"));
     no_default_wording(&composer, cx);
 
     cx.update(|window, cx| window.click("effort-picker", cx));
@@ -10370,6 +10483,11 @@ fn the_rules_page_edits_the_rules_of_every_project_saves_them_and_resets_them_to
         assert!(!e.is_own());
     });
     cx.update(|window, _| {
+        assert_eq!(
+            window.find("rules-tag").label(),
+            Some("Flottille's own"),
+            "no chip says default"
+        );
         assert!(window.find("rules-text-").visible());
         assert!(
             window.try_find("rules-reach-").is_none(),

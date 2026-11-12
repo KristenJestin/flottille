@@ -19,6 +19,8 @@ pub fn next_read() -> u64 {
 
 /// What the window says of a model before a session of its provider said the models.
 pub const MODEL_UNKNOWN: &str = "model not known yet";
+/// A provider's entry in a model choice while it has said no model.
+const MODELS_LEARNT: &str = "models learnt at its first session";
 
 /// A model a provider's sessions offered.
 #[derive(Clone, Debug, PartialEq)]
@@ -87,7 +89,13 @@ pub struct Providers {
     pub judge: Option<(String, Option<String>)>,
     /// Flottille picked the judge, and the user has not seen the notice that says so yet.
     pub judge_picked: bool,
+    /// What the user chose a new session starts on: its provider, and its model and effort (the
+    /// provider's to propose when none); `None` while nothing is chosen.
+    pub new_session: Option<NewSession>,
 }
+
+/// The provider, the model and the effort a new session starts on, as the user chose them.
+pub type NewSession = (String, Option<String>, Option<String>);
 
 fn text(value: &Value) -> Option<String> {
     value.as_str().map(str::to_owned)
@@ -310,6 +318,13 @@ impl Providers {
                 judge: text(&answer["judge"]["provider"])
                     .map(|provider| (provider, text(&answer["judge"]["model"]))),
                 judge_picked: answer["judge"]["picked"] == true,
+                new_session: text(&answer["new_session"]["provider"]).map(|provider| {
+                    (
+                        provider,
+                        text(&answer["new_session"]["model"]),
+                        text(&answer["new_session"]["effort"]),
+                    )
+                }),
             },
             Err(error) => Providers {
                 list: Vec::new(),
@@ -317,6 +332,7 @@ impl Providers {
                 known: true,
                 judge: None,
                 judge_picked: false,
+                new_session: None,
             },
         }
     }
@@ -331,55 +347,124 @@ impl Providers {
     }
 
     /// What a `ModelChoice` offers: the models of the providers enabled and ready, as the daemon
-    /// knows them; a provider whose models no session said yet, by its default.
+    /// knows them, each provider's recommended one (the model it takes when none is named)
+    /// marked; a provider whose models no session said yet, by its name.
     pub fn model_entries(&self) -> Vec<ModelEntry> {
+        self.entries(&[], None)
+    }
+
+    /// The same, the recommended model of a provider being the one `gives` names for it (a
+    /// feature's own rule), its own when `gives` says none.
+    pub fn model_entries_giving(&self, gives: &[(String, Option<String>)]) -> Vec<ModelEntry> {
+        self.entries(gives, None)
+    }
+
+    /// The same where the rule depends on the session's provider (Review's checks): each
+    /// provider's recommended model is marked for its own sessions.
+    pub fn model_entries_per_provider(
+        &self,
+        gives: &[(String, Option<String>)],
+    ) -> Vec<ModelEntry> {
+        self.entries(
+            gives,
+            Some(&|provider: &Provider| format!("recommended for {} sessions", provider.title)),
+        )
+    }
+
+    /// What Flottille's judge and compactor run on, by provider: the smallest model where
+    /// Flottille knows it (`SMALLEST`), the provider's own elsewhere.
+    pub fn smallest() -> Vec<(String, Option<String>)> {
+        provider::SMALLEST
+            .iter()
+            .map(|(name, model)| ((*name).to_owned(), Some((*model).to_owned())))
+            .collect()
+    }
+
+    /// The model, by its id, that `provider`'s entry marked recommended stands for under `gives`.
+    pub fn recommended(
+        &self,
+        provider: &str,
+        gives: &[(String, Option<String>)],
+    ) -> Option<String> {
+        recommended_of(self.get(provider)?, gives).map(|m| m.id.clone())
+    }
+
+    /// A model chosen as a `ModelChoice` shows it where no model chosen is the provider's own,
+    /// not the recommended one (the judge's, the compactor's): by the model it runs on.
+    pub fn chosen_running(&self, provider: &str, model: Option<&str>) -> Chosen {
+        let own = || self.get(provider)?.default_model().map(|m| m.id.as_str());
+        let model = model
+            .filter(|m| *m != crate::composer::DEFAULT)
+            .or_else(own);
+        self.chosen(provider, model)
+    }
+
+    fn entries(
+        &self,
+        gives: &[(String, Option<String>)],
+        mark: Option<&dyn Fn(&Provider) -> String>,
+    ) -> Vec<ModelEntry> {
         let mut entries = Vec::new();
         for provider in self.offered() {
+            let recommended = recommended_of(provider, gives).map(|m| m.id.as_str());
             let listed: Vec<&Model> = provider
                 .models
                 .iter()
                 .flatten()
-                .filter(|m| m.id != crate::composer::DEFAULT)
+                .filter(|m| m.id != crate::composer::DEFAULT || recommended == Some(m.id.as_str()))
                 .collect();
+            // Its models not known yet, it is still the provider's model that applies: marked, so
+            // that a select never opens on another provider's.
             if listed.is_empty() {
-                entries.push(ModelEntry::new(
-                    provider.name.clone(),
-                    provider.title.clone(),
-                    None,
-                    self.model_line(&provider.name, None),
-                ));
-            }
-            for model in listed {
                 entries.push(
                     ModelEntry::new(
                         provider.name.clone(),
                         provider.title.clone(),
-                        Some(model.id.clone().into()),
-                        model.label(),
+                        None,
+                        MODELS_LEARNT,
                     )
-                    .efforts(
-                        crate::composer::levels(model.efforts.as_deref().unwrap_or_default())
-                            .cloned(),
-                    ),
+                    .recommended(),
                 );
+            }
+            for model in listed {
+                let levels: Vec<&String> =
+                    crate::composer::levels(model.efforts.as_deref().unwrap_or_default()).collect();
+                let mut entry = ModelEntry::new(
+                    provider.name.clone(),
+                    provider.title.clone(),
+                    Some(model.id.clone().into()),
+                    model.label(),
+                )
+                .efforts(levels.iter().copied().cloned());
+                // The effort it runs with when none is chosen: what its provider said, else the
+                // middle one, as the daemon applies it.
+                if let Some(effort) = model
+                    .default_effort
+                    .as_ref()
+                    .filter(|e| levels.contains(e))
+                    .or_else(|| provider::middle_effort(&levels).copied())
+                {
+                    entry = entry.proposes(effort.clone());
+                }
+                if recommended == Some(model.id.as_str()) {
+                    entry = match mark {
+                        Some(mark) => entry.recommended_as(mark(provider)),
+                        None => entry.recommended(),
+                    };
+                }
+                entries.push(entry);
             }
         }
         entries
     }
 
-    /// A model chosen as a `ModelChoice` shows it: the provider's default (no model, or its own
-    /// `default`) is its default model's entry, once a session said it.
+    /// A model chosen as a `ModelChoice` shows it: `None` is the provider's recommended one, which
+    /// the choice selects and marks; the provider's own `default` is the same.
     pub fn chosen(&self, provider: &str, model: Option<&str>) -> Chosen {
         let model = model
             .filter(|m| *m != crate::composer::DEFAULT)
-            .map(str::to_owned)
-            .or_else(|| {
-                self.get(provider)
-                    .filter(|p| p.offered())
-                    .and_then(|p| p.default_model())
-                    .map(|m| m.id.clone())
-            });
-        Chosen::Model(provider.to_owned().into(), model.map(Into::into))
+            .map(|m| m.to_owned().into());
+        Chosen::Model(provider.to_owned().into(), model)
     }
 
     /// Why no session can start, one sentence per provider; empty when one can, or while the
@@ -396,6 +481,19 @@ impl Providers {
         }
         self.list.iter().map(Provider::state).collect()
     }
+}
+
+/// The model `provider`'s recommended entry stands for: the one `gives` names for it, else its
+/// own.
+fn recommended_of<'a>(
+    provider: &'a Provider,
+    gives: &[(String, Option<String>)],
+) -> Option<&'a Model> {
+    gives
+        .iter()
+        .find(|(name, _)| *name == provider.name)
+        .and_then(|(_, model)| provider.model(model.as_deref()?))
+        .or_else(|| provider.default_model())
 }
 
 #[cfg(test)]
@@ -602,7 +700,11 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("Opus 5.5 (1M context)".into(), true, Some("default".into())),
+                (
+                    "Opus 5.5 (1M context)".into(),
+                    true,
+                    Some("recommended".into())
+                ),
                 ("Claude Opus 5.5".into(), false, None)
             ]
         );

@@ -265,6 +265,19 @@ enum ProviderAction {
     Enable { name: String },
     /// Start no more agents on it: those running now go on, and fail at their next start
     Disable { name: String },
+    /// Choose the provider, model and effort a new session starts on
+    NewSession {
+        /// The provider; with no model or effort, they are the ones it proposes
+        #[arg(required_unless_present = "clear")]
+        provider: Option<String>,
+        #[arg(long, requires = "provider")]
+        model: Option<String>,
+        #[arg(long, requires = "provider")]
+        effort: Option<String>,
+        /// Go back to what the provider proposes
+        #[arg(long, conflicts_with = "provider")]
+        clear: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -348,6 +361,19 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Doctor { json } => return agent_command::doctor(&paths, json),
         Command::Provider { action } => {
             let (method, name) = match action {
+                ProviderAction::NewSession {
+                    provider,
+                    model,
+                    effort,
+                    clear: _,
+                } => {
+                    let answer = Client::connect_or_start(&paths)?.request(
+                        "provider.set_new_session",
+                        serde_json::json!({"provider": provider, "model": model, "effort": effort}),
+                    )?;
+                    print!("{}", providers::new_session_text(&answer["new_session"]));
+                    return Ok(ExitCode::SUCCESS);
+                }
                 ProviderAction::List { json } => {
                     let answer = Client::connect_or_start(&paths)?
                         .request("provider.list", serde_json::json!({}))?;

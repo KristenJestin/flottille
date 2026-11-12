@@ -1209,6 +1209,13 @@ impl Shell {
                 self.settings
                     .update(cx, |page, cx| page.judge_answered(refused, cx));
             }
+            Outcome::NewSessionSet { refused } => {
+                if refused.is_none() {
+                    self.actions.send(Command::ReadProviders);
+                }
+                self.settings
+                    .update(cx, |page, cx| page.new_session_answered(refused, cx));
+            }
             Outcome::ProviderSet { name, refused } => {
                 // The change shows once the providers are read again: now, rather than only when
                 // its event comes, since a change to what the file already said emits none.
