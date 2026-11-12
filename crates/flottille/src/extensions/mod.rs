@@ -181,6 +181,9 @@ pub struct Tool {
     pub definition: Definition,
     /// Who gets it, and the actions of its `action` argument each of them may call.
     pub given: &'static [(To, &'static [&'static str])],
+    /// Whether the project's settings leave it to those `To` gives it to now: a tool a switch
+    /// withholds leaves their lists, as one a forge-less project has not (`tools_for`).
+    pub offered: fn(&Daemon, &Project, To) -> bool,
     /// The actions declared harmless, as the core's own reads are: they read or write
     /// Flottille's store and nothing else, and pass in every mode. Any other action is held as a
     /// call to judge, which the mode lets through, asks the judge or the user about.
@@ -194,6 +197,11 @@ pub struct Tool {
 
 /// What a call of an extension's tool answers, once its work is done.
 pub type Called = BoxFuture<'static, Outcome>;
+
+/// What a tool whose settings withhold nothing says of `Tool::offered`.
+pub fn always(_: &Daemon, _: &Project, _: To) -> bool {
+    true
+}
 
 /// Who a tool is given to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -258,6 +266,8 @@ pub enum Kind {
         of: &'static [&'static str],
         default: &'static [&'static str],
     },
+    /// On or off: a boolean, off when none is set.
+    Switch,
     /// A model slot: `{provider, model?, effort?}`, each checked when it is used; none set leaves
     /// the choice to the extension (`null`). `rule` says what the extension does with a slot left
     /// unset, and `gives` the model it then runs on for a provider: what `extension.list` says of
@@ -371,6 +381,10 @@ fn checked(kind: Kind, value: &Value) -> Result<Value, String> {
                     .collect::<Vec<_>>()
             ))
         }
+        Kind::Switch => match value.as_bool() {
+            Some(on) => Ok(json!(on)),
+            None => Err(format!("must be true or false, not {value}")),
+        },
         Kind::Model { .. } => {
             let refuse = || {
                 format!(
@@ -421,6 +435,7 @@ fn default_of(kind: Kind) -> Value {
         Kind::Language => json!(user_language()),
         Kind::Choice { default, .. } => json!(default),
         Kind::Subset { default, .. } => json!(default),
+        Kind::Switch => json!(false),
         Kind::Model { .. } => Value::Null,
     }
 }
@@ -447,6 +462,7 @@ fn kind_word(kind: Kind) -> Value {
             "line": choice.line,
         })).collect::<Vec<_>>()}),
         Kind::Subset { of, .. } => json!({"subset": of}),
+        Kind::Switch => json!("switch"),
         Kind::Model { .. } => json!("model"),
     }
 }
@@ -713,9 +729,10 @@ pub fn tools_for(
         .iter()
         .flat_map(|extension| {
             extension.tools.iter().filter(move |tool| {
-                tool.given
-                    .iter()
-                    .any(|(to, _)| gets(*to, extension.name, root, launched))
+                tool.given.iter().any(|(to, _)| {
+                    gets(*to, extension.name, root, launched)
+                        && (tool.offered)(daemon, project, *to)
+                })
             })
         })
         .map(|tool| tool.definition.name)
@@ -1535,6 +1552,7 @@ mod tests {
                 schema: no_schema,
             },
             given: &[(To::Roots, &["read", "send"])],
+            offered: always,
             harmless: &["read"],
             gate: never_refused,
             call: not_called,
