@@ -491,13 +491,32 @@ and the maintainer checks them**:
 | Cloud default reviewers | `/repositories/{w}/{r}/default-reviewers` | `values[]` as a user |
 | Cloud effective default reviewers | `/repositories/{w}/{r}/effective-default-reviewers` | `values[].user` (`bkt` reads it so: `GetEffectiveDefaultReviewers`) |
 | Data Center, administrators | `/rest/api/1.0/projects/{k}/repos/{r}/permissions/users` | `values[].user`: `name`, `slug`, `displayName`, `emailAddress` |
-| Data Center, else | `/rest/api/1.0/users?permission=REPO_READ&permission.projectKey={k}&permission.repositorySlug={r}` | `values[]`: the same user fields; slower on a large instance (BSERV-13303) |
-| Seen on pull requests | `bkt pr list --state all --limit 50 --json` | Cloud `author`; Data Center `participants[].user` |
-| GitHub | `gh api repos/{o}/{r}/assignees` and `…/collaborators` `-F per_page=100 --jq '.[].login'`; `gh pr list --state all --limit 100 --json author,reviews,reviewRequests,assignees` | logins; `login` and `name` of the people on the pull requests |
+| Data Center, else | `/rest/api/1.0/users?permission.1=REPO_READ&permission.1.projectKey={k}&permission.1.repositorySlug={r}` | `values[]`: the same user fields; slower on a large instance (BSERV-13303) |
+| Seen on pull requests | `bkt pr list --state all --limit 50 --json` | Cloud `author`; Data Center `author`, `reviewers[]` and `participants[]`, each `.user` |
+| GitHub | `gh api repos/{o}/{r}/assignees` and `…/collaborators` `-F per_page=100 -F page=N --jq '.[].login'`, up to 5 pages; `gh pr list --state all --limit 100 --json author,reviews,reviewRequests,assignees` | logins; `login` and `name` of the people on the pull requests |
+
+The Data Center users filter is the one Atlassian's REST reference gives for `GET
+/rest/api/latest/users` (its OpenAPI description, Bitbucket Data Center 9.0): a repository
+permission filter is the numbered root `permission.N` (`N` from 1) with `permission.N.projectKey`
+and `permission.N.repositorySlug` (its example: `permission.2=REPO_ADMIN&permission.2.projectKey=
+TEST_PROJECT&permission.2.repositorySlug=test_repo`); `filter` is the text a name, e-mail or login
+contains. The path and its parameters are the documented ones, **still unverified on a real
+server**.
+
+**Whether a list is the whole of the people.** A part of a name (a word of a display name) is only
+trusted when no one else with those words can be missing, so a listing says whether it is
+*complete*: the forge's own lists were all read, none was cut (Bitbucket's 200, GitHub's 5 pages of
+a hundred; a collection that holds more, or a GitHub page that is full on the last page read, is
+cut), and none failed. Data Center's `permissions/users` holds **the direct grants only** (a group's
+members, the project's and the instance's are not in it), so it is never complete; the users filter
+above is, when it was not cut. Jira's people (the assignees of the newest work items) are never
+complete. The people seen on pull requests are no list of everyone and do not make one complete.
+On a list that is not complete only an exact identifier or the whole display name resolve; a part of
+a name is refused naming who it could be (`did you mean Jane Doe (jdoe)? name them whole`).
 
 The Cloud members and the people seen on the newest pull requests are read up to 200 and 50: a
-larger workspace's member the pull requests did not show is not found by display name, and the
-refusal's `looked` says where it looked. Two sources of one account are one person (they share an
+larger workspace's member the pull requests did not show is not found by display name, a part of a
+name is refused (the list is cut), and the refusal's `looked` says where it looked. Two sources of one account are one person (they share an
 identifier, a UUID or an account id). Cloud's person is sent as the `{uuid}`, which `bkt`
 takes for both `--reviewer` and `--remove-reviewer` (`reviewerIdentity`, `matchesCloudUser`) and
 Atlassian no longer takes a `username` for (deprecated); the identifier an agent reads is the

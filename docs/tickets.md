@@ -480,7 +480,8 @@ refused it, and the new work item went to the project's default assignee.
   `tickets people` lists: `assignee.displayName`, `accountId`, `emailAddress`, assumed from
   Jira's REST shape as for `view`), after the user allowed the call and before `acli` is run, the
   account id (else the e-mail) is what `acli` is given, and the answer says `Assigned to Anne
-  Example (anne@example.org).`; a name that is nobody's of them, or several, is refused (`docs/tools.md`,
+  Example (anne@example.org).`; a name that is nobody's of them, or several, is refused, and **so is a part of a name** (these
+  are not all the site's people: `did you mean Ben Sample (…)? name them whole`; `docs/tools.md`,
   "People"), nothing written. A person no work item is assigned to is not found: the agent gives
   their e-mail. A blank assignee is no
   assignee; a `null` one is told from a missing one (a blank is never a removal). On GitHub it is

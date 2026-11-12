@@ -910,12 +910,25 @@ Jira: their account id, else their e-mail). The card shows the names as given.
 - **How a name is matched**, ignoring case, accents and extra spaces: (1) an exact match on an
   identifier, a nickname or an e-mail; (2) else an exact match on the whole display name; (3) else
   a display name holding every word given as a word (`jane` or `doe` alone match `Jane Doe`), the
-  step that matches deciding. At that step **more than one person is refused, listing them**
+  step that matches deciding. **Step (3) is only trusted on a list that is the whole of the people**
+  (`docs/forges.md`, "People": every list read, none cut, none failed): on Jira's (the assignees of
+  the newest work items), Data Center's direct grants, a Bitbucket workspace of more than 200
+  members, a GitHub list of more than 500 users, or a list a source of which could not be read, a
+  person with those words may be missing, so **a part of a name is refused, naming who it could
+  be** (`refused: reviewers_add: "jane" is a part of a name, and the people of acme/app … may not be
+  all listed: did you mean Jane Doe (jdoe)? name them whole, by their display name or their
+  identifier; nothing was written`), and the agent tries again with the whole name. At the steps
+  that match, **more than one person is refused, listing them**
   (display name and identifier, ten at most, then how many more): `refused: reviewers_add: "jane"
   matches 2 people in acme/app: Jane Doe (jdoe), Jane Roe (jroe); name one by their identifier;
   nothing was written`. **Nobody is refused naming where it looked** (`"Zed Nobody" matches nobody
   in acme/app: the members of the workspace acme, its default reviewers and the people on its pull
   requests`), and nothing is written.
+- **A mention is no field.** No field of Flottille's tools names a person for a mention: one is
+  free text in a comment's or a description's `body`, which Flottille does not read, resolve or
+  rewrite (a Jira mention Jira rewrites on its own). An agent finds the identifier with `people`
+  and writes the mention as the forge or the tracker wants it. If a tool gets such a field, it is
+  resolved here like the others.
 - **The answer says who was added**, by display name and identifier (`Reviewers: added Jane Doe
   (jdoe); removed Bob Roe (broe).`, `Assigned to Anne Example (anne@example.org).`), so a wrong
   guess shows at once.
@@ -936,9 +949,9 @@ Jira: their account id, else their e-mail). The card shows the names as given.
 - **The forges' own endpoints** (`bkt api`, `gh api`, read only, the user's own sign-in, never a
   token read): Bitbucket Cloud `/workspaces/{w}/members`, `/repositories/{w}/{r}/default-reviewers`
   and `…/effective-default-reviewers`; Data Center
-  `/rest/api/1.0/projects/{k}/repos/{r}/permissions/users`, else `/rest/api/1.0/users?permission=
-  REPO_READ&permission.projectKey={k}&permission.repositorySlug={r}`; GitHub `repos/{o}/{r}/assignees`
-  and `…/collaborators` (the first 100 of each) and `gh pr list --state all --limit 100 --json
+  `/rest/api/1.0/projects/{k}/repos/{r}/permissions/users`, else `/rest/api/1.0/users?permission.1=
+  REPO_READ&permission.1.projectKey={k}&permission.1.repositorySlug={r}`; GitHub `repos/{o}/{r}/assignees`
+  and `…/collaborators` (up to 5 pages of 100 of each) and `gh pr list --state all --limit 100 --json
   author,reviews,reviewRequests,assignees` (`gh issue list … author,assignees` for a tracker). Up
   to 200 of each Bitbucket collection are read. **Their shapes are assumed from Atlassian's REST
   documentation, and the maintainer checks them** ([`forges.md`](forges.md), "People").
