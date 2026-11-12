@@ -142,8 +142,65 @@ fn reload_tools_restarts_the_process_on_the_same_conversation() {
     );
 }
 
+/// The sentence every reload opens its delivery with.
+const RELOADED: &str = "Your tools were reloaded. These are your tools now, whatever you read of \
+                        them before:";
+
+/// Turns Specs on, for every project.
+fn specs_on(user: &User) {
+    user.call(
+        "extension.set",
+        json!({"name": "specs", "enabled": true, "project": null}),
+    )
+    .unwrap();
+}
+
+/// The line of `tool` in a prompt's tools delivery, the first one that starts so.
+fn line_of<'a>(prompt: &'a str, tool: &str) -> &'a str {
+    let start = prompt
+        .find(&format!("- {tool}: "))
+        .unwrap_or_else(|| panic!("no line for {tool}: {prompt}"));
+    // A prompt is its JSON, so its lines end with an escaped newline.
+    prompt[start..].split("\\n").next().unwrap()
+}
+
 #[test]
-fn a_reload_with_new_tools_sends_the_tools_delivery_with_what_changed() {
+fn a_reload_tells_the_agent_every_tool_it_has_with_its_actions_even_when_nothing_changed() {
+    let user = User::with_fake_agent();
+    project(&user);
+    specs_on(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    let prompt = reload_then_send(&user, &id);
+
+    assert!(prompt.contains("[flottille:tools]"), "{prompt}");
+    assert!(prompt.contains("go on"), "with what woke it: {prompt}");
+    assert!(prompt.contains(RELOADED), "{prompt}");
+    assert!(!prompt.contains("nothing changed"), "{prompt}");
+    assert!(!prompt.contains("Flottille was updated"), "{prompt}");
+    let spec = line_of(&prompt, "spec");
+    assert!(
+        spec.starts_with("- spec: new, read, write, ask, questions, amend")
+            && spec.contains(" — The specs of this project: what an agent needs to build a task"),
+        "{spec}"
+    );
+    // A tool without actions has no actions part: its line is its name and what it does.
+    let fs_read = line_of(&prompt, "fs_read");
+    assert!(
+        fs_read.starts_with("- fs_read: Reads a text file"),
+        "{fs_read}"
+    );
+    // Said once: the process after holds the same list, and is told nothing.
+    let sent = prompts(&user).len();
+    user.call("agent.send", json!({"agent": id, "message": "and then"}))
+        .unwrap();
+    eventually("the message is sent", || prompts(&user).len() > sent);
+    assert!(!prompts(&user)[sent].contains("[flottille:tools]"));
+}
+
+#[test]
+fn a_reload_after_a_change_lists_every_tool_and_then_what_changed() {
     let user = User::with_fake_agent();
     project(&user);
     let (id, after) = run(&user, "hello");
@@ -162,35 +219,52 @@ fn a_reload_with_new_tools_sends_the_tools_delivery_with_what_changed() {
     assert!(prompt.contains("go on"), "with what woke it: {prompt}");
     assert!(prompt.contains("[flottille:tools]"), "{prompt}");
     // The reload's own words, not those of an update a restart would give.
+    assert!(prompt.contains(RELOADED), "{prompt}");
+    assert!(!prompt.contains("Flottille was updated"), "{prompt}");
+    assert!(!prompt.contains("nothing changed"), "{prompt}");
+    // The whole list first, then what changed.
+    let list = prompt.find("- fs_read: ").expect("the whole list");
+    let changed = prompt
+        .find("What changed since you last read them:")
+        .expect("what changed, said after the list");
+    assert!(list < changed, "{prompt}");
     assert!(
-        prompt.contains("Your tools were reloaded: they changed"),
+        line_of(&prompt, "tickets").starts_with("- tickets: "),
         "{prompt}"
     );
-    assert!(!prompt.contains("Flottille was updated"), "{prompt}");
-    assert!(prompt.contains("- tickets: new"), "{prompt}");
-    assert!(!prompt.contains("nothing changed"), "{prompt}");
+    assert!(prompt[changed..].contains("- tickets: new"), "{prompt}");
 }
 
 #[test]
-fn a_reload_with_nothing_changed_says_so() {
+fn an_update_without_a_reload_still_says_only_what_changed() {
     let user = User::with_fake_agent();
     project(&user);
     let (id, after) = run(&user, "hello");
     events_until(&user, &id, after, "agent.turn_ended");
-
-    let prompt = reload_then_send(&user, &id);
-
-    assert!(prompt.contains("[flottille:tools]"), "{prompt}");
-    assert!(
-        prompt.contains("Your tools were reloaded: nothing changed"),
-        "{prompt}"
-    );
-    // Said once: the process after holds the same list, and is told nothing.
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}],
+            "tracker": {"kind": "github", "repository": "."}}),
+    )
+    .unwrap();
+    // The next process starts on its own, no reload asked.
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    user.resume(&id);
     let sent = prompts(&user).len();
-    user.call("agent.send", json!({"agent": id, "message": "and then"}))
+    user.call("agent.send", json!({"agent": id, "message": "go on"}))
         .unwrap();
     eventually("the message is sent", || prompts(&user).len() > sent);
-    assert!(!prompts(&user)[sent].contains("[flottille:tools]"));
+
+    let prompt = prompts(&user)[sent].clone();
+
+    assert!(prompt.contains("Flottille was updated"), "{prompt}");
+    assert!(prompt.contains("- tickets: new"), "{prompt}");
+    assert!(!prompt.contains(RELOADED), "{prompt}");
+    assert!(
+        !prompt.contains("- fs_read: "),
+        "only what changed, not the whole list: {prompt}"
+    );
 }
 
 #[test]
