@@ -345,6 +345,7 @@ const TOOL: Tool = Tool {
         schema: tool_schema,
     },
     given: &[(To::Roots, ACTIONS)],
+    offered: super::always,
     // Each reads or writes a spec in Flottille's store, and nothing of the machine.
     harmless: ACTIONS,
     gate: tool_gate,

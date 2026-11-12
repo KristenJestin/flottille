@@ -167,6 +167,12 @@ fn kinds(user: &User) -> Vec<Kind> {
             .unwrap();
         }
     }
+    // The roots of `app` are given `review` only while the user lets agents start a review.
+    user.call(
+        "extension.set",
+        json!({"name": "review", "settings": {"agents_start": true}}),
+    )
+    .unwrap();
     let workspace = user
         .call("workspace.create", json!({"project": "app", "name": "w"}))
         .unwrap();

@@ -34,7 +34,8 @@ pub struct Setting {
     pub key: String,
     pub label: String,
     pub hint: String,
-    /// `language`, `choice` (one of `choices`), `subset` (some of `options`) or `model` (a slot):
+    /// `language`, `choice` (one of `choices`), `subset` (some of `options`), `switch` (on or off)
+    /// or `model` (a slot):
     /// the kinds come with their first need.
     pub kind: String,
     /// The values a `subset` takes some of, in their order.
@@ -1123,7 +1124,11 @@ pub fn feature_page(registry: &Entity<Registry>, name: &str, cx: &App) -> Option
         review::NAME => review::checks(registry, &listed, None, name, cx),
         _ => fields(registry, &listed, None, listed.settings.iter(), name, cx),
     };
-    let usage = usage_line(format!("{name}-usage"), &listed.usage, cx).into_any_element();
+    let said = match name {
+        review::NAME => review::usage(&listed, None),
+        _ => listed.usage.clone(),
+    };
+    let usage = usage_line(format!("{name}-usage"), &said, cx).into_any_element();
     let card = card(
         name,
         switch,
@@ -1285,7 +1290,11 @@ pub fn project_page(
             cx,
         ),
     };
-    let usage = usage_line(format!("{prefix}-usage"), &listed.usage, cx).into_any_element();
+    let said = match name {
+        review::NAME => review::usage(&listed, Some(project)),
+        _ => listed.usage.clone(),
+    };
+    let usage = usage_line(format!("{prefix}-usage"), &said, cx).into_any_element();
     let error = listed
         .in_project(project)
         .and_then(|side| side.error.clone());

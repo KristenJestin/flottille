@@ -404,7 +404,7 @@ spec is Done.
 ### `flottille review <session> [--json]`
 
 Reviews the session's change with fresh eyes (`docs/extensions.md`, "Review"), as `/review` in its
-composer does: a pilot, a child of the session, reads the diff of its workspace from its base, runs
+composer does, whatever Review's switches say (they open other doors, not the user's): a pilot, a child of the session, reads the diff of its workspace from its base, runs
 the passes Review's settings enable (spec, only for a session that develops a spec; bugs;
 standards; security) and a verifier, and delivers the findings that matter to the session. Prints
 the round, the pilot and the passes; `--json` prints `review.start`'s answer. Refused, before any
