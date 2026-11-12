@@ -588,7 +588,7 @@ const TREE_EVENTS: &[&str] = &[
     "delivery.queued",
     // A waiting message taken back leaves the queue under the conversation.
     "delivery.withdrawn",
-    // A review's line says its passes and its findings: its pilot is the event's agent.
+    // A review's row says its passes and its findings: its pilot is the event's agent.
     "review.started",
     "review.progress",
     "review.reported",
