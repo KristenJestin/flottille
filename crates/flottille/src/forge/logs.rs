@@ -76,11 +76,11 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
             Plan::Said(_) => None,
             Plan::Read(Source::Bitbucket(context, build)) => {
                 let built = bitbucket::failed_step_log(forge, context, *build).await;
-                Some((built.ending, built.rerunnable, built.log))
+                Some((built.ending, built.rerun, built.log))
             }
             Plan::Read(Source::GitHub(_, job)) => Some((
                 None,
-                false,
+                None,
                 gh_text(&[
                     "run",
                     "view",
@@ -99,9 +99,9 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
     // The total is shared out in the jobs' order, as it is when they are read one after the other.
     let mut left = TOTAL_BYTES;
     for ((job, plan), raw) in jobs.iter_mut().zip(plans).zip(raws) {
-        let (ending, rerunnable, raw) = match raw {
-            Some((ending, rerunnable, raw)) => (ending, rerunnable, Some(raw)),
-            None => (None, false, None),
+        let (ending, rerun, raw) = match raw {
+            Some((ending, rerun, raw)) => (ending, rerun, Some(raw)),
+            None => (None, None, None),
         };
         // What the build says of its end refines what the check's status said: a failed status
         // is the CI's when the build died of its own, and a stop may say who made it.
@@ -110,9 +110,9 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
             (Ending::Stopped(None), Some(ending @ Ending::Stopped(Some(_)))) => job.ending = ending,
             _ => {}
         }
-        // `forge` `checks` runs a Bitbucket build again once it failed.
-        if matches!(job.ending, Ending::Ci(_)) && rerunnable {
-            job.rerun = Some(Rerun::Checks);
+        // The call that runs the build's pipeline again, once it failed.
+        if matches!(job.ending, Ending::Ci(_)) {
+            job.rerun = rerun;
         }
         let log = match (plan, raw) {
             (Plan::Said(said), _) => said,

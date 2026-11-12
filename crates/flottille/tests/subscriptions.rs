@@ -3150,15 +3150,35 @@ fn steps(result: &str) -> Value {
     ]})
 }
 
-/// The pipeline of the build 31 on the branch of the pull request, which ended as `result`.
+/// The pull request's own pipeline, build 31, which ended as `result`.
 fn pipeline_ended(result: &str) -> Value {
     json!([{"uuid": "{31}", "build_number": 31,
-        "target": {"type": "pipeline_ref_target", "ref_name": "app/login"},
+        "target": {"type": "pipeline_pullrequest_target", "source": "app/login",
+            "destination": "main", "selector": {"type": "pull-requests", "pattern": "**"}},
         "state": {"name": "COMPLETED", "result": {"name": result}}}])
 }
 
-/// What the line of a CI failure says of running it again on Bitbucket Cloud: `forge` `checks`.
-const CHECKS_HINT: &str = "run it again (forge {\"action\": \"checks\", \"repository\": \"api\"})";
+/// A pipeline of the branch itself (a push, a tag, a custom one), build 31, which ended as `result`:
+/// `ref_type` and `ref_name` say what it ran on, `selector` which pipeline of the file it was.
+fn ref_pipeline_ended(result: &str, ref_type: &str, selector: Value) -> Value {
+    json!([{"uuid": "{31}", "build_number": 31,
+        "target": {"type": "pipeline_ref_target", "ref_type": ref_type, "ref_name": "app/login",
+            "selector": selector},
+        "state": {"name": "COMPLETED", "result": {"name": result}}}])
+}
+
+/// What both calls that run a pipeline again say of what they run.
+const WHOLE: &str = "the whole pipeline: Bitbucket cannot run one step again";
+
+/// What the line of a CI failure says of running a pull request's pipeline again: `forge` `checks`.
+const CHECKS_HINT: &str = "run it again (forge {\"action\": \"checks\", \"repository\": \"api\"}), the whole pipeline: Bitbucket cannot run one step again";
+
+/// What it says of running a branch's pipeline `pipeline` again: `forge` `run`.
+fn run_hint(pipeline: &str) -> String {
+    format!(
+        "run it again (forge {{\"action\": \"run\", \"repository\": \"api\", \"pipeline\": \"{pipeline}\", \"branch\": \"app/login\"}}), {WHOLE}"
+    )
+}
 
 fn build_check(state: &str) -> Value {
     json!([{"state": state, "key": "pipelines", "name": "Pipeline #31", "url": BUILD}])
@@ -3254,7 +3274,7 @@ fn a_bitbucket_data_center_status_in_error_is_said_as_a_ci_failure_from_its_stat
 }
 
 #[test]
-fn a_bitbucket_wake_hints_the_call_that_runs_the_build_again_and_the_tool_accepts_it() {
+fn a_bitbucket_pull_request_pipeline_that_failed_hints_forge_checks_and_the_tool_accepts_it() {
     let (user, mcp, delivery) = Bitbucket::Cloud.woken_with(
         build_check("FAILED"),
         json!({"steps": steps("ERROR"), "pipelines": pipeline_ended("ERROR"),
@@ -3267,10 +3287,105 @@ fn a_bitbucket_wake_hints_the_call_that_runs_the_build_again_and_the_tool_accept
     assert!(
         lines(user.bkt_received())
             .iter()
-            .any(|call| call.starts_with("pipeline run ") && call.ends_with("--ref app/login")),
+            .any(|call| call.starts_with("pipeline run ")
+                && call.contains("--ref app/login")
+                && call.contains("--selector-type pull-requests")),
         "{:?}",
         lines(user.bkt_received())
     );
+}
+
+/// A branch's own pipeline whose step died on the runner, the pipeline of the file being `selector`.
+fn woken_by_a_branch_pipeline(ref_type: &str, selector: Value) -> (User, Mcp, String) {
+    Bitbucket::Cloud.woken_with(
+        build_check("FAILED"),
+        json!({"steps": steps("ERROR"),
+            "pipelines": ref_pipeline_ended("ERROR", ref_type, selector),
+            "logs": {"31": {SETUP_STEP: "fine\n", TEST_STEP: "+ cargo test\nBuild setup failed\n"}}}),
+    )
+}
+
+#[test]
+fn a_bitbucket_branch_pipeline_that_failed_hints_forge_run_not_checks() {
+    let (user, mcp, delivery) =
+        woken_by_a_branch_pipeline("branch", json!({"type": "default", "pattern": null}));
+
+    let line = format!(
+        "- Pipeline #31: the CI failed, not the code: the step test ended in error; {}",
+        run_hint("default")
+    );
+    assert!(delivery.contains(&line), "{line} in {delivery}");
+    assert!(!delivery.contains("\"action\": \"checks\""), "{delivery}");
+    let done = rerun_through(&user, &mcp, &delivery);
+
+    assert!(!done.error, "{}", done.text);
+    assert!(
+        lines(user.bkt_received())
+            .iter()
+            .any(|call| call.starts_with("pipeline run ")
+                && call.ends_with("--ref app/login")
+                && !call.contains("--selector-type")),
+        "{:?}",
+        lines(user.bkt_received())
+    );
+}
+
+#[test]
+fn a_bitbucket_custom_pipeline_that_failed_hints_forge_run_with_its_name() {
+    let (user, mcp, delivery) =
+        woken_by_a_branch_pipeline("branch", json!({"type": "custom", "pattern": "deploy"}));
+
+    assert!(delivery.contains(&run_hint("custom: deploy")), "{delivery}");
+    let done = rerun_through(&user, &mcp, &delivery);
+
+    assert!(!done.error, "{}", done.text);
+    assert!(
+        lines(user.bkt_received())
+            .iter()
+            .any(|call| call.starts_with("pipeline run ")
+                && call.contains("--ref app/login")
+                && call.contains("--selector-type custom --selector-pattern deploy")),
+        "{:?}",
+        lines(user.bkt_received())
+    );
+}
+
+#[test]
+fn a_bitbucket_branches_pipeline_that_failed_hints_forge_run_with_its_pattern() {
+    let (user, mcp, delivery) = woken_by_a_branch_pipeline(
+        "branch",
+        json!({"type": "branches", "pattern": "release/*"}),
+    );
+
+    assert!(
+        delivery.contains(&run_hint("branches: release/*")),
+        "{delivery}"
+    );
+    let done = rerun_through(&user, &mcp, &delivery);
+
+    assert!(!done.error, "{}", done.text);
+    assert!(
+        lines(user.bkt_received())
+            .iter()
+            .any(|call| call.contains("--selector-type branches --selector-pattern release/*")),
+        "{:?}",
+        lines(user.bkt_received())
+    );
+}
+
+#[test]
+fn a_bitbucket_tag_pipeline_that_failed_hints_no_call() {
+    // `bkt pipeline run` runs a branch: a tag's pipeline cannot be started again by a name.
+    let (_, _, delivery) =
+        woken_by_a_branch_pipeline("tag", json!({"type": "tags", "pattern": "v*"}));
+
+    assert!(
+        delivery.contains(
+            "- Pipeline #31: the CI failed, not the code: the step test ended in error\n"
+        ),
+        "{delivery}"
+    );
+    assert!(!delivery.contains("run it again"), "{delivery}");
 }
 
 #[test]

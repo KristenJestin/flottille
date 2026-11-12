@@ -34,14 +34,14 @@ impl Ending {
         }
     }
 
-    /// What a job's line says in place of its error line, with how long it took and the call that
-    /// runs it again when there is one; none for the code's failure, which is said by its error
-    /// line. Nothing is said of running it again when no call is known to be accepted.
+    /// What a job's line says in place of its error line, with how long it took and how to run it
+    /// again when a call is known; none for the code's failure, which is said by its error line.
+    /// Nothing is said of running it again when no call is known to be accepted.
     pub(super) fn said(&self, took: Option<u64>, rerun: Option<&str>) -> Option<String> {
         match self {
             Ending::Code => None,
             Ending::Ci(what) => Some(match rerun {
-                Some(call) => format!("the CI failed, not the code: {what}; run it again ({call})"),
+                Some(again) => format!("the CI failed, not the code: {what}; {again}"),
                 None => format!("the CI failed, not the code: {what}"),
             }),
             Ending::Stopped(None) => Some("stopped, not failed".into()),
@@ -63,22 +63,36 @@ pub(super) fn took(started: Option<&str>, ended: Option<&str>) -> Option<u64> {
 /// The call that runs a failed job again, once the forge is known to accept it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Rerun {
-    /// Bitbucket Cloud: `forge` `checks` runs the failed pipeline of the branch again.
+    /// Bitbucket Cloud, a pull request's pipeline: `forge` `checks` runs it again.
     Checks,
+    /// Bitbucket Cloud, a branch's or a custom pipeline: `forge` `run` of the pipeline `pipeline`
+    /// (as `forge pipelines` names it) on `branch`.
+    Run { pipeline: String, branch: String },
     /// GitHub: `forge` `step` runs a job of a run again.
     Step { run: u64, job: u64 },
 }
 
 impl Rerun {
-    /// The call, as the agent makes it.
-    fn call(&self, repository: &str) -> String {
+    /// How the line says to run it again: the call, as the agent makes it. Bitbucket cannot run
+    /// one step again, so it says that what runs is the whole pipeline.
+    fn said(&self, repository: &str) -> String {
         let repository = serde_json::Value::from(repository);
+        const WHOLE: &str = "the whole pipeline: Bitbucket cannot run one step again";
         match self {
-            Rerun::Checks => {
-                format!("forge {{\"action\": \"checks\", \"repository\": {repository}}}")
+            Rerun::Checks => format!(
+                "run it again (forge {{\"action\": \"checks\", \"repository\": {repository}}}), {WHOLE}"
+            ),
+            Rerun::Run { pipeline, branch } => {
+                let (pipeline, branch) = (
+                    serde_json::Value::from(pipeline.as_str()),
+                    serde_json::Value::from(branch.as_str()),
+                );
+                format!(
+                    "run it again (forge {{\"action\": \"run\", \"repository\": {repository}, \"pipeline\": {pipeline}, \"branch\": {branch}}}), {WHOLE}"
+                )
             }
             Rerun::Step { run, job } => format!(
-                "forge {{\"action\": \"step\", \"repository\": {repository}, \"run\": {run}, \"step\": \"{job}\", \"do\": \"rerun\"}}"
+                "run it again (forge {{\"action\": \"step\", \"repository\": {repository}, \"run\": {run}, \"step\": \"{job}\", \"do\": \"rerun\"}})"
             ),
         }
     }
@@ -87,8 +101,8 @@ impl Rerun {
 impl Job {
     /// What its line says of how it ended, in place of an error line: none for the code's failure.
     pub(super) fn said(&self, repository: &str) -> Option<String> {
-        let call = self.rerun.as_ref().map(|rerun| rerun.call(repository));
-        self.ending.said(self.took, call.as_deref())
+        let again = self.rerun.as_ref().map(|rerun| rerun.said(repository));
+        self.ending.said(self.took, again.as_deref())
     }
 
     /// The job a failing check is, its log not read yet.
@@ -161,7 +175,18 @@ mod tests {
         assert_eq!(
             job(Some(Rerun::Checks)).said("api").as_deref(),
             Some(
-                "the CI failed, not the code: error; run it again (forge {\"action\": \"checks\", \"repository\": \"api\"})"
+                "the CI failed, not the code: error; run it again (forge {\"action\": \"checks\", \"repository\": \"api\"}), the whole pipeline: Bitbucket cannot run one step again"
+            )
+        );
+        assert_eq!(
+            job(Some(Rerun::Run {
+                pipeline: "custom: deploy".into(),
+                branch: "app/login".into()
+            }))
+            .said("api")
+            .as_deref(),
+            Some(
+                "the CI failed, not the code: error; run it again (forge {\"action\": \"run\", \"repository\": \"api\", \"pipeline\": \"custom: deploy\", \"branch\": \"app/login\"}), the whole pipeline: Bitbucket cannot run one step again"
             )
         );
         assert_eq!(

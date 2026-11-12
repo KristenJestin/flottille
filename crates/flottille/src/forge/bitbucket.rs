@@ -9,7 +9,7 @@
 
 use serde_json::{Value, json};
 
-use super::ending::Ending;
+use super::ending::{Ending, Rerun};
 use super::{
     Branch, Comment, Deletion, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Seen, after, blocks,
     commit_hash, masked, method_refused, run,
@@ -1125,9 +1125,9 @@ pub(super) struct Built {
     /// A step in `ERROR` (Bitbucket's system error) or a pipeline that ended outside any step is
     /// the CI's, not the code's; a pipeline that was stopped, by whom when it says it.
     pub ending: Option<Ending>,
-    /// Whether the build failed, so that `forge` `checks` runs it again: it refuses a pipeline
-    /// that did not fail.
-    pub rerunnable: bool,
+    /// The call that runs the build's pipeline again, when the build failed (`forge` `checks`
+    /// refuses a pipeline that did not) and the tool accepts a call for that pipeline.
+    pub rerun: Option<Rerun>,
 }
 
 /// The log of the first failed step of the build `build`: `bkt pipeline view` names the steps,
@@ -1147,7 +1147,7 @@ pub(super) async fn failed_step_log(forge: &Forge, context: &str, build: u64) ->
             return Built {
                 log: Err(why),
                 ending: None,
-                rerunnable: false,
+                rerun: None,
             };
         }
     };
@@ -1185,15 +1185,12 @@ pub(super) async fn failed_step_log(forge: &Forge, context: &str, build: u64) ->
             ))),
         },
     };
-    let rerunnable = matches!(
-        seen["pipeline"]["state"]["result"]["name"].as_str(),
-        Some("FAILED" | "ERROR")
-    );
+    let rerun = rerun_of(&seen["pipeline"]);
     let Some(uuid) = uuid else {
         return Built {
             log: Err(format!("the pipeline #{build} has no failed step")),
             ending,
-            rerunnable,
+            rerun,
         };
     };
     let log = text(&command(
@@ -1204,11 +1201,39 @@ pub(super) async fn failed_step_log(forge: &Forge, context: &str, build: u64) ->
     ))
     .await
     .map(|log| (uuid.to_owned(), log));
-    Built {
-        log,
-        ending,
-        rerunnable,
+    Built { log, ending, rerun }
+}
+
+/// The call that runs the failed `pipeline` again. Bitbucket runs a whole pipeline, never a step.
+/// A pull request's pipeline (`bkt` starts one only as the branch run `forge` `checks` makes);
+/// another one (a branch's push, a custom one) is `forge` `run` of its selector on its branch.
+/// None when it did not fail (`checks` refuses it), or when `forge` `run` would refuse it or run
+/// something else: a tag's pipeline, which `bkt pipeline run` starts as a branch run.
+fn rerun_of(pipeline: &Value) -> Option<Rerun> {
+    if !matches!(
+        pipeline["state"]["result"]["name"].as_str(),
+        Some("FAILED" | "ERROR")
+    ) {
+        return None;
     }
+    let target = &pipeline["target"];
+    if target["type"] == "pipeline_pullrequest_target"
+        || target["selector"]["type"] == "pull-requests"
+    {
+        return Some(Rerun::Checks);
+    }
+    let branch = target["ref_name"]
+        .as_str()
+        .filter(|b| !b.is_empty() && !b.starts_with('-'))?;
+    if !matches!(target["ref_type"].as_str(), None | Some("branch")) {
+        return None;
+    }
+    let pipeline = super::pipelines::pipeline_named(pipeline);
+    super::pipelines::bitbucket_selector(&pipeline).ok()?;
+    Some(Rerun::Run {
+        pipeline,
+        branch: branch.to_owned(),
+    })
 }
 
 /// The path of a Cloud pull request's own page, for `bkt api`.
