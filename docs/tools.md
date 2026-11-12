@@ -617,7 +617,7 @@ pending requests.
   **`unsubscribe {run, repository?}`** stops following a run it started (`repository` needed
   when the project has several); **`unsubscribe
   {session}`** stops following a
-  session the agent started ("Following a session", under "The tree's tools").
+  session the agent started, named by its id or its title ("Following a session", under "The tree's tools").
 - **`create`, `merge`, `checks` `{workspace?, repository?, …}`** (`repository` is needed when the
   workspace has several, and the refusal lists them): opens the pull request of a
   workspace's branch (`title`, `body`, `draft`, with the project's reviewers; without `body`, the
@@ -1301,8 +1301,8 @@ Flottille recognizes nothing by its text.
 The pilot may answer with `session_send` (unchanged: judged as a write), relay to the user with
 its own `ask` when the decision is the user's, or do nothing. It is a subscription of the source
 `session`: `forge show` lists it under "Your subscriptions", `subscription.list` and the window's
-rail show it (`Following <title>`, with no end time), and **`forge unsubscribe {session}`** ends
-it (`session` goes alone; a session that is not followed is refused): the session stays led, but
+rail show it (`Following <title>`, with no end time), and **`forge unsubscribe {session}`** (the session's id or its
+title) ends it (`session` goes alone; a session that is not followed is refused): the session stays led, but
 its pilot is no longer woken, and its questions go to the user, who would otherwise never see
 them. It also ends when the session ends or fails (the wake says so), and when the pilot ends.
 It never blocks the inactivity sweep of the pilot (`docs/design.md` §5.7) and does not draw it as
@@ -1479,18 +1479,21 @@ refused before anything is asked.
 reads the conversation of another session of the caller's project, a page at a time, never all of
 it at once.
 
-- **Named by its id or its title**, in `session` here, `session` of `session_send` and `agent_id`
-  of `agent_stop` when it names a session: the user speaks of a session by the title the window
-  shows, and an agent is never told the id behind it. An id that names an agent is that agent. Any
-  other name is a title, matched among the roots of the caller's project, whole, ignoring case and
-  the spaces around it (a session with no title yet is matched by none). One match is used as its
+- **Named by its id or its title**, in `session` here, `session` of `session_send`, `agent_id`
+  of `agent_stop` when it names a session and `session` of `forge unsubscribe`: the user speaks of a session by the title the window
+  shows, and an agent is never told the id behind it. An id that names an agent is that agent
+  (the spaces around it are dropped). Any other name is a title, matched among the roots of the caller's project, whole, ignoring case and
+  the spaces around it (a session with no title yet is matched by none; the live one when an ended session and a live
+  one share it, for `session_send` and `agent_stop`, which an ended session cannot take). One match is used as its
   id would be, resolved before the gate decides: the request names the session, the leave of
   `session_send` is asked once for the pair whichever name each message carries, and a session of
   another project or a child, reached by its id, is refused as ever (a title is never matched
-  outside the caller's project, nor among children). Several sessions with that title are refused, each listed, `<title> · <id>
+  outside the caller's project, nor among children). Several sessions with that title are refused, each listed (an untitled one as `(untitled)`: what
+  a session was started with is its own), `<title> · <id>
   · <place> · <state>, active <when> ago`, so that the agent picks the id; no session with that
   id or title is refused too, listing the project's roots the same way, the most recently active
-  first, 20 at most (`(and n more)` for the rest). The lines are masked and on one line each, as
+  first, as many whole lines as fit under the limit of a refusal, 20 at most (`(and n more)` for
+  the rest). The lines are masked and on one line each, as
   every result is.
 - **Which session**: a root of the caller's project, whoever started it, running or ended. A
   session of another project is refused before anything is asked (`refused: <id> is a session of
