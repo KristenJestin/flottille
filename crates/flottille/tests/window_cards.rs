@@ -444,3 +444,21 @@ fn a_long_command_stays_inside_its_card(cx: &mut TestAppContext) {
     let at = row(&page, |b| matches!(b, Block::Command(_)), cx);
     guard::assert_stays_inside(cx, format!("command-card-{at}"));
 }
+
+#[gpui_kit::test]
+fn a_long_toast_stays_inside_its_card(cx: &mut TestAppContext) {
+    let user = user();
+    let (_page, cx) = page_of(&user, cx);
+    // A toast is 360 px wide whatever the window: the window is the room for it, and its words
+    // wrap inside it.
+    cx.simulate_resize(size(px(480.), px(900.)));
+    cx.update(|_, cx| {
+        gpui_design_system::toast(
+            gpui_design_system::Toast::failure(format!("{UNBROKEN} {SPACED}"))
+                .detail(format!("{UNBROKEN} {SPACED}")),
+            cx,
+        )
+    });
+    settle(cx);
+    guard::assert_stays_inside(cx, "toast-1".to_owned());
+}

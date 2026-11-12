@@ -72,6 +72,7 @@ pub fn assert_stays_inside(cx: &mut VisualTestContext, id: impl Into<ElementId>)
         );
         let found = window.within(id.clone()).elements().len();
         if std::env::var_os("GUARD_DUMP").is_some() {
+            eprintln!("GUARD frame {id:?} {:?}", window.find(id.clone()).bounds());
             for below in window.within(id.clone()).elements() {
                 eprintln!("GUARD {:?} {:?}", below.path().last(), below.bounds());
             }

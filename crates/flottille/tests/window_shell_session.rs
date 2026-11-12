@@ -4,6 +4,7 @@
 //! screen.
 
 mod common;
+mod guard;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -568,6 +569,25 @@ fn a_waiting_card_says_the_call_on_one_line_and_its_class_and_reason_on_the_next
         !has(format!("approval-base-{number}"), cx),
         "the rest is in Details"
     );
+}
+
+#[gpui_kit::test]
+fn a_long_call_stays_inside_its_waiting_card(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    let held = mcp.call(
+        "fs_read",
+        json!({"path": format!(".env/{}/{}", guard::UNBROKEN, guard::SPACED)}),
+    );
+    let number = held_number(held);
+    until(&shell, cx, "the card is in the rail", |cx| {
+        has(format!("allow-{number}"), cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("approval-details-{number}"), cx));
+    settle(cx);
+    guard::assert_stays_inside(cx, format!("approval-{number}"));
 }
 
 #[gpui_kit::test]
