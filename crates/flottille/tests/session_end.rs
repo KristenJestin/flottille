@@ -252,7 +252,8 @@ fn ending_a_session_of_another_project_or_itself_is_refused_before_asking() {
         ),
         (
             "000000000000".to_owned(),
-            "refused: 000000000000 names no agent".to_owned(),
+            "refused: no session of your project has the id or the title \"000000000000\""
+                .to_owned(),
         ),
     ] {
         let refused = stop(&mcp, &id);
