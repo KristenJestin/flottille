@@ -7,12 +7,13 @@
 //! the repository the project's tracker declares, never one an agent names). A milestone is named
 //! by an agent by its title or its number and found in the repository's list first: the title is
 //! what `gh` is then given, one that does not exist is refused listing those that do, and nothing
-//! is created implicitly. Jira has no milestones: its sprints are what an agent is told to use.
+//! is created implicitly. On Jira a milestone is a version of a project (`versions.rs`).
 
 use flottille_core::declared::{self, ProjectTracker};
 use flottille_core::project::Project;
 use serde_json::Value;
 
+use super::versions::{self, IN_JIRA};
 use super::{NO_TRACKER, TicketsCall, github_of};
 use crate::forge::{self, Forge, masked};
 use crate::mcp::Outcome;
@@ -106,12 +107,23 @@ fn is_day(text: &str) -> bool {
     (1..=days).contains(&day)
 }
 
-/// What the Jira refusal of a milestone's action or argument says: what a Jira work item has
-/// instead.
-fn on_jira(what: &str) -> String {
+/// What the refusal of a version's write says: `acli` has no command for it, and the daemon
+/// calls no Jira REST API for it, so it is the user's, on Jira's own page.
+fn cannot_make(what: &str) -> String {
     format!(
-        "refused: tickets {what} is GitHub's: Jira has no milestones, a work item goes in a \
-         sprint (sprints lists them, create takes sprint); versions are not supported"
+        "refused: tickets {what} on Jira: none of acli's jira commands makes, changes or releases \
+         a project's version, and Flottille calls no Jira REST API for it: {IN_JIRA}; nothing was \
+         written"
+    )
+}
+
+/// The refusal of a fix version changed on a work item that exists.
+fn cannot_move() -> String {
+    format!(
+        "refused: acli's workitem edit takes no fix version (it has no flag for it, and its JSON \
+         takes no additionalAttributes): changing the fix version of an existing work item needs \
+         Jira's REST API, which Flottille does not call; the user changes it in Jira (the work \
+         item's Fix versions field, or {IN_JIRA}); nothing was written"
     )
 }
 
@@ -147,11 +159,11 @@ pub(super) fn unusable(project: &Project, action: &str, args: &Value) -> Option<
         return None;
     }
     if matches!(project.tracker, Some(ProjectTracker::Jira { .. })) {
-        let what = match ACTIONS.contains(&action) {
-            true => action,
-            false => "with a milestone",
-        };
-        return Some(on_jira(what));
+        match action {
+            "milestone_create" | "milestone_edit" => return Some(cannot_make(action)),
+            "edit" => return Some(cannot_move()),
+            _ => {}
+        }
     }
     if given(args, "milestone").is_some() && args["remove_milestone"] == true {
         return Some(
@@ -209,7 +221,7 @@ pub(super) fn unusable(project: &Project, action: &str, args: &Value) -> Option<
 async fn forge_of(project: &Project) -> Result<Forge, String> {
     match &project.tracker {
         Some(ProjectTracker::Github { repository }) => github_of(project, repository).await,
-        Some(ProjectTracker::Jira { .. }) => Err(on_jira("milestones")),
+        Some(ProjectTracker::Jira { .. }) => Err(cannot_make("milestones")),
         None => Err(NO_TRACKER.to_owned()),
     }
 }
@@ -298,6 +310,9 @@ pub(super) async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
             "refused: tickets has no state {state:?}: its states are open (the default), closed \
              and all"
         ));
+    }
+    if matches!(project.tracker, Some(ProjectTracker::Jira { .. })) {
+        return versions::listed(project, state, asked).await;
     }
     let forge = match forge_of(project).await {
         Ok(forge) => forge,
@@ -480,6 +495,9 @@ pub(super) async fn chosen(forge: &Forge, named: Option<&str>) -> Result<Option<
 /// one a ticket goes in, the one that is changed, the title a new one takes. Refused when the
 /// milestone is none or the title is used. Nothing for another call.
 pub async fn says(project: &Project, args: &Value) -> Result<Vec<String>, String> {
+    if matches!(project.tracker, Some(ProjectTracker::Jira { .. })) {
+        return versions::says(project, args).await;
+    }
     let action = args["action"].as_str().unwrap_or_default();
     let milestone = given(args, "milestone");
     let mut says = Vec::new();

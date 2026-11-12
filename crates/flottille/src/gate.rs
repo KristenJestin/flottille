@@ -524,6 +524,17 @@ pub fn asks_review(ask: &Ask) -> bool {
         .any(|reason| reason.contains(REVIEW_VERDICT))
 }
 
+/// Whether a call of `tickets` creates a ticket in a milestone: its card names the milestone the
+/// tracker had under that name when it was asked (a Jira version by its id), which a rename or
+/// another of the same name may no longer be when the user allows it.
+pub fn creates_in_a_milestone(tool: &str, args: &Value) -> bool {
+    tool == "tickets"
+        && args["action"] == "create"
+        && args["milestone"]
+            .as_str()
+            .is_some_and(|named| !named.trim().is_empty())
+}
+
 /// Whether a call of `forge` approves a pull request or requests changes on it.
 pub fn decides_a_review(tool: &str, args: &Value) -> bool {
     tool == "forge"

@@ -383,8 +383,12 @@ async fn performed(
     // What the user allowed is what they read: an action whose words changed meanwhile (its
     // command was edited, its skill removed) is not done.
     // A verdict on a pull request is read as it stood: its card says the head it was given on.
+    // A ticket created in a milestone goes in the one its card named, not one merely named so now.
     let review = gate::decides_a_review(tool, &request.arguments);
-    if request.kind == Kind::Action || review {
+    if request.kind == Kind::Action
+        || review
+        || gate::creates_in_a_milestone(tool, &request.arguments)
+    {
         match actions::prepared(daemon, &grant, tool, &request.arguments).await {
             Err(
                 Outcome::Refused(why)

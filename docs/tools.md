@@ -1017,11 +1017,27 @@ reasons.
   asked (the request says the one it puts the ticket in, `It puts it in the milestone "v0.1", due
   2026-12-01`, or the one it changes); nothing is created implicitly. The writes are held as the
   other `tickets` writes are (`it creates a milestone on the tracker`, `it changes a milestone of
-  the tracker`), the reads are not. **On Jira** the actions and the arguments are refused, naming
-  what a work item has instead (`a work item goes in a sprint: sprints lists them, create takes
-  sprint`); versions are not supported. `milestone` is for `list`, `search`, `create`, `edit` and
+  the tracker`), the reads are not. `milestone` is for `list`, `search`, `create`, `edit` and
   `milestone_edit`, `remove_milestone` for `edit`, `due` and `description` for the two milestone
   writes alone ([`tickets.md`](tickets.md), "Milestones").
+- **Versions on Jira are its milestones**, the words of the tool staying shared (a milestone on
+  GitHub, a version of a project on Jira). What `acli` can do decides what is done
+  ([`tickets.md`](tickets.md), "Versions"): **`milestones {state?, project?}`** (a read) lists the
+  versions of the tracker's projects (the one `project` names alone), a line each (`- 1.1 open,
+  due 2026-12-01`, `- 1.0 closed, released 2026-10-01, archived`; `open` is unreleased, `closed`
+  released) from `acli jira project view --key <P> --json`; **`create`** takes `milestone`, a
+  version of its project by its name or its id (with `type`: `acli` sets it from a JSON
+  definition, `additionalAttributes.fixVersions`); **`list`** and **`search`** take `milestone`
+  (JQL `fixVersion = "<name>"`, and `AND project = "<P>"` when `project` is given, which also says
+  where the name is looked for) and a line says it;
+  **`show`** says `Milestone: 1.1`. A version that does not exist is refused, listing those that
+  do, before the user is asked, and a `create` is read back: it says so when Jira did not set the
+  version. Once allowed, a `create` in a milestone has its card made again and compared with
+  the one the user read: a version renamed or replaced meanwhile is not written. **Refused, saying what to do instead** (the user's, in Jira, on the
+  project's Releases page; nothing run): `milestone_create`, `milestone_edit`, and `edit` with
+  `milestone` or `remove_milestone`, since `acli` has no command that makes or releases a version
+  and its `workitem edit` takes no fix version; Flottille calls no Jira REST API for it (as for a
+  sprint).
 - **Parents and sprints on Jira**: `create` takes `parent` (a key of the tracker, the epic or the
   sub-task's parent: `--parent`) and `sprint` (an open sprint, by its name or its id, with a
   `type`); `sprints {project?, board?}` (a read, never held) lists the active and future sprints
