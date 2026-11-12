@@ -17,13 +17,22 @@ const LISTED: usize = 20;
 /// What a line keeps of a title, or of the name the agent gave.
 const LABEL_CHARS: usize = 80;
 
-/// The field of the tool's arguments that names a session, for a tool that takes a title.
-fn field(tool: &str) -> Option<&'static str> {
+/// The field of the call that names a session, and what the refusals call the tool, for a call
+/// that takes a title.
+fn field(tool: &str, args: &Value) -> Option<(&'static str, &'static str)> {
     match tool {
-        "session_read" | "session_send" => Some("session"),
-        "agent_stop" => Some("agent_id"),
+        "session_read" => Some(("session", "session_read")),
+        "session_send" => Some(("session", "session_send")),
+        "agent_stop" => Some(("agent_id", "agent_stop")),
+        "forge" if args["action"] == "unsubscribe" => Some(("session", "forge unsubscribe")),
         _ => None,
     }
+}
+
+/// Whether an ended session can take what the tool does to it: `session_send` and `agent_stop`
+/// refuse one, `session_read` and `forge unsubscribe` do not.
+fn needs_a_live_session(tool: &str) -> bool {
+    matches!(tool, "session_send" | "agent_stop")
 }
 
 /// The arguments of the call with the session it names given by its id, or the refusal when a
@@ -35,17 +44,19 @@ pub fn resolve(
     tool: &str,
     mut args: Value,
 ) -> Result<Value, Outcome> {
-    let Some(field) = field(tool) else {
+    let Some((field, what)) = field(tool, &args) else {
         return Ok(args);
     };
-    let Some(name) = args[field].as_str().map(str::to_owned) else {
+    let Some(given) = args[field].as_str() else {
         return Ok(args);
     };
+    let name = given.trim().to_owned();
     let failed = |error: String| Outcome::Failed(error);
     let found = daemon
         .read(|store| store.agent(&name))
         .map_err(|error| failed(error.to_string()))?;
     if found.is_some() {
+        args[field] = Value::String(name);
         return Ok(args);
     }
     let caller = daemon
@@ -59,8 +70,8 @@ pub fn resolve(
         .filter(|agent| agent.parent.is_none() && agent.project == caller.project)
         .collect();
     roots.sort_by_key(|agent| std::cmp::Reverse((last_sign(agent), agent.created_at)));
-    let wanted = name.trim().to_lowercase();
-    let same: Vec<&Agent> = roots
+    let wanted = name.to_lowercase();
+    let mut same: Vec<&Agent> = roots
         .iter()
         .filter(|agent| {
             !wanted.is_empty()
@@ -70,27 +81,62 @@ pub fn resolve(
                     .is_some_and(|title| title.trim().to_lowercase() == wanted)
         })
         .collect();
-    let refusal = match same.as_slice() {
+    // A session that ended cannot take a message or be stopped: the live one is meant.
+    if needs_a_live_session(tool) && same.iter().any(|agent| !agent.state.is_final()) {
+        same.retain(|agent| !agent.state.is_final());
+    }
+    let (header, listed) = match same.as_slice() {
         [one] => {
             args[field] = Value::String(one.id.clone());
             return Ok(args);
         }
-        [] => format!(
-            "refused: no session of your project has the id or the title \"{}\": {tool} names a \
-             session by its agent id or by its title. The sessions of this project, the most \
-             recently active first:\n{}",
-            label(&name),
-            lines(&roots.iter().collect::<Vec<_>>(), roots.len())
+        [] => (
+            format!(
+                "refused: no session of your project has the id or the title \"{}\": {what} \
+                 names a session by its agent id or by its title. The sessions of this project, \
+                 the most recently active first:",
+                label(&name)
+            ),
+            roots.iter().collect::<Vec<_>>(),
         ),
-        several => format!(
-            "refused: {} sessions of your project are titled \"{}\": name the one you mean by \
-             its agent id:\n{}",
-            several.len(),
-            label(&name),
-            lines(several, several.len())
+        several => (
+            format!(
+                "refused: {} sessions of your project are titled \"{}\": name the one you mean \
+                 by its agent id:",
+                several.len(),
+                label(&name)
+            ),
+            several.to_vec(),
         ),
     };
-    Err(Outcome::Refused(crate::mcp::masked(&refusal, &grant.place)))
+    Err(Outcome::Refused(listing(grant, &header, &listed)))
+}
+
+/// The refusal: `header`, then as many of the sessions' lines, whole, as fit under the limit of
+/// a refusal once masked and escaped (`LISTED` at most), then how many are left out.
+fn listing(grant: &Grant, header: &str, sessions: &[&Agent]) -> String {
+    let now = now_ms();
+    let lines: Vec<String> = sessions
+        .iter()
+        .take(LISTED)
+        .map(|agent| line(agent, now))
+        .collect();
+    let text = |kept: usize| {
+        let mut text = vec![header.to_owned()];
+        text.extend(lines[..kept].iter().cloned());
+        if kept < sessions.len() {
+            text.push(format!("(and {} more)", sessions.len() - kept));
+        }
+        crate::mcp::masked(&text.join("\n"), &grant.place)
+    };
+    let fits = |kept: usize| {
+        crate::deliveries::escape(&text(kept)).chars().count() <= crate::mcp::ERROR_LIMIT
+    };
+    let kept = (0..=lines.len())
+        .rev()
+        .find(|kept| fits(*kept))
+        .unwrap_or(0);
+    text(kept)
 }
 
 /// When the session last showed a sign of life.
@@ -114,42 +160,27 @@ fn label(text: &str) -> String {
     }
 }
 
-/// What names a session on a line: its title, else the first line of the message that started it.
+/// What names a session on a line: its title. What it was started with is the user's opening
+/// message, which no other session is given.
 fn name_of(agent: &Agent) -> String {
-    let named = agent.title.as_deref().map(label).filter(|t| !t.is_empty());
-    let first = || {
-        agent
-            .brief
-            .as_deref()
-            .and_then(|brief| brief.lines().map(label).find(|line| !line.is_empty()))
-    };
-    named
-        .or_else(first)
+    agent
+        .title
+        .as_deref()
+        .map(label)
+        .filter(|title| !title.is_empty())
         .unwrap_or_else(|| "(untitled)".to_owned())
 }
 
-/// A line each, `<title> · <id> · <place> · <state>, active <when>`, the first `LISTED` of
-/// `total` sessions.
-fn lines(sessions: &[&Agent], total: usize) -> String {
-    let now = now_ms();
-    let mut text: Vec<String> = sessions
-        .iter()
-        .take(LISTED)
-        .map(|agent| {
-            format!(
-                "{} · {} · {} · {}, active {} ago",
-                name_of(agent),
-                agent.id,
-                agent.workspace.as_deref().unwrap_or("main"),
-                agent.state.as_str(),
-                ago(now.saturating_sub(last_sign(agent)))
-            )
-        })
-        .collect();
-    if total > LISTED {
-        text.push(format!("(and {} more)", total - LISTED));
-    }
-    text.join("\n")
+/// `<title> · <id> · <place> · <state>, active <when> ago`.
+fn line(agent: &Agent, now: u64) -> String {
+    format!(
+        "{} · {} · {} · {}, active {} ago",
+        name_of(agent),
+        agent.id,
+        agent.workspace.as_deref().unwrap_or("main"),
+        agent.state.as_str(),
+        ago(now.saturating_sub(last_sign(agent)))
+    )
 }
 
 #[cfg(test)]
@@ -199,17 +230,15 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_lists_twenty_sessions_and_counts_the_others() {
-        let sessions: Vec<Agent> = (0..23)
-            .map(|n| a_session(&format!("{n:012}"), Some("Rework the login")))
-            .collect();
-        let all: Vec<&Agent> = sessions.iter().collect();
+    fn a_line_says_the_title_the_id_the_place_and_the_state() {
+        let session = a_session("0123456789ab", Some("Rework the login"));
 
-        let text = lines(&all, all.len());
+        let text = line(&session, 1_000);
 
-        assert_eq!(text.lines().count(), 21, "{text}");
-        assert!(text.ends_with("(and 3 more)"), "{text}");
-        assert!(text.contains("Rework the login · 000000000000 · main · idle, active "));
+        assert!(
+            text.starts_with("Rework the login · 0123456789ab · main · idle, active "),
+            "{text}"
+        );
     }
 
     #[test]
@@ -220,11 +249,10 @@ mod tests {
     }
 
     #[test]
-    fn a_session_without_a_title_is_named_by_the_first_line_of_its_brief() {
+    fn a_session_without_a_title_is_never_named_by_what_it_was_started_with() {
         let mut session = a_session("0123456789ab", None);
-        session.brief = Some("\nFix the login\nand the logout".into());
+        session.brief = Some("Fix the login with the token s3cret".into());
 
-        assert_eq!(name_of(&session), "Fix the login");
-        assert_eq!(name_of(&a_session("0123456789ab", None)), "(untitled)");
+        assert_eq!(name_of(&session), "(untitled)");
     }
 }

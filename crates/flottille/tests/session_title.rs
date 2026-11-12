@@ -309,3 +309,189 @@ fn a_title_of_another_project_s_session_is_not_found_in_this_one() {
     }
     assert!(requests(&user).is_empty());
 }
+
+/// What `mcp` launches as a child titled `title`: its id.
+fn child(user: &User, mcp: &Mcp, title: &str) -> String {
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": title, "brief": "Write the tests."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    eventually("the child", || {
+        store(user)
+            .agents()
+            .unwrap()
+            .iter()
+            .any(|agent| agent.title.as_deref() == Some(title))
+    });
+    store(user)
+        .agents()
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.title.as_deref() == Some(title))
+        .unwrap()
+        .id
+}
+
+#[test]
+fn a_refusal_never_carries_a_session_s_brief() {
+    let user = user();
+    let (_, mcp) = root(&user, "app");
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "Private opening words about the merger"}),
+        )
+        .unwrap();
+    let untitled = started["agent"]["id"].as_str().unwrap().to_owned();
+    let _ = server_of(&user, opened);
+    idle(&user, &untitled);
+
+    let refused = mcp.call("session_read", json!({"session": "Nothing of the kind"}));
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .contains(&format!("(untitled) · {untitled} · main · ")),
+        "{}",
+        refused.text
+    );
+    assert!(!refused.text.contains("merger"), "{}", refused.text);
+}
+
+#[test]
+fn a_refusal_fits_its_limit_with_whole_lines_then_how_many_are_left() {
+    let user = user();
+    let (_, mcp) = root(&user, "app");
+    for n in 0..22 {
+        titled(
+            &user,
+            "app",
+            &format!("{n:02} {}", "very long title ".repeat(6)),
+        );
+    }
+
+    let refused = mcp.call("session_read", json!({"session": "Nothing of the kind"}));
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused.text.chars().count() <= 2_000,
+        "{}",
+        refused.text.len()
+    );
+    let lines: Vec<&str> = refused.text.lines().skip(1).collect();
+    let (more, listed) = lines.split_last().unwrap();
+    let left: usize = more
+        .strip_prefix("(and ")
+        .and_then(|rest| rest.strip_suffix(" more)"))
+        .unwrap_or_else(|| panic!("no count of the others: {}", refused.text))
+        .parse()
+        .unwrap();
+    assert_eq!(listed.len() + left, 23, "{}", refused.text);
+    assert!(listed.len() < 20, "{}", refused.text);
+    for line in listed {
+        assert!(
+            line.contains(" · main · idle, active ") && line.ends_with(" ago"),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn a_title_shared_by_an_ended_and_a_live_session_is_the_live_one_to_write_to_or_stop() {
+    let user = user();
+    let (_, mcp) = root(&user, "app");
+    let (ended, _) = titled(&user, "app", TITLE);
+    user.call("agent.stop", json!({"agent": ended})).unwrap();
+    let (live, _) = titled(&user, "app", TITLE);
+
+    held(&mcp.call("session_send", json!({"session": TITLE, "text": "Hi."})));
+    held(&mcp.call("agent_stop", json!({"agent_id": TITLE})));
+
+    let asked: Vec<String> = requests(&user).iter().map(says).collect();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    for says in &asked {
+        assert!(says.contains(&format!("(agent {live})")), "{says}");
+        assert!(!says.contains(&ended), "{says}");
+    }
+    // A read has no live one to prefer: both can be read, so it says which.
+    let read = mcp.call("session_read", json!({"session": TITLE}));
+    assert!(
+        read.error && read.text.contains("2 sessions of your project are titled"),
+        "{}",
+        read.text
+    );
+}
+
+#[test]
+fn an_id_with_spaces_around_it_is_trimmed() {
+    let user = user();
+    let (reader, mcp) = root(&user, "app");
+    let (session, _) = root(&user, "app");
+    set_mode(&user, &reader, "full");
+
+    let page = mcp.call("session_read", json!({"session": format!("  {session}\n")}));
+
+    assert!(!page.error, "{}", page.text);
+    assert!(
+        page.text
+            .contains(&format!("The conversation of the session agent {session},")),
+        "{}",
+        page.text
+    );
+}
+
+#[test]
+fn a_child_s_title_is_not_resolved() {
+    let user = user();
+    let (reader, mcp) = root(&user, "app");
+    let child = child(&user, &mcp, "worker bee");
+    set_mode(&user, &reader, "full");
+
+    let refused = mcp.call("session_read", json!({"session": "worker bee"}));
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused.text.starts_with(
+            "refused: no session of your project has the id or the title \"worker bee\""
+        ),
+        "{}",
+        refused.text
+    );
+    assert!(!refused.text.contains(&child), "{}", refused.text);
+}
+
+#[test]
+fn a_title_equal_to_another_session_s_id_gives_the_id() {
+    let user = user();
+    let (reader, mcp) = root(&user, "app");
+    let (first, _) = titled(&user, "app", TITLE);
+    let (_, _) = titled(&user, "app", &first);
+    set_mode(&user, &reader, "full");
+
+    let page = mcp.call("session_read", json!({"session": first}));
+
+    assert!(!page.error, "{}", page.text);
+    assert!(
+        page.text.contains(&format!("\"{TITLE}\" (agent {first})")),
+        "{}",
+        page.text
+    );
+}
+
+#[test]
+fn the_caller_s_own_title_reads_its_own_mode() {
+    let user = user();
+    let (me, mcp) = titled(&user, "app", TITLE);
+
+    let own = mcp.call("session_read", json!({"session": TITLE}));
+
+    assert!(!own.error, "{}", own.text);
+    assert!(
+        own.text.starts_with("This is your own session, ") && own.text.contains(&me),
+        "{}",
+        own.text
+    );
+}
