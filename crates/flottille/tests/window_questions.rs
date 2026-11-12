@@ -2438,6 +2438,48 @@ fn the_dock_takes_the_focus_once_when_the_page_opens_with_an_ask_waiting(cx: &mu
 }
 
 #[gpui_kit::test]
+fn typing_in_the_composer_before_the_history_is_read_keeps_the_focus(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "ask four");
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        has(session_id(&id), cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    // The page is open and its composer there; what the history says is still to come.
+    let page = session_page(&shell, cx);
+    cx.run_until_parked();
+    assert!(
+        questions(&page, cx).is_empty() && docked(&page, cx).is_none(),
+        "the history is not read yet"
+    );
+    focus_composer(&page, cx);
+    cx.simulate_input("Mean");
+
+    until(&shell, cx, "the docked card", |cx| {
+        questions(&page, cx)
+            .first()
+            .is_some_and(|(at, _)| card_shows(&page, *at, cx))
+    });
+    for _ in 0..5 {
+        until(&shell, cx, "a frame", |_| true);
+        settle(cx);
+    }
+    assert!(composer_focused(&page, cx), "the composer keeps the focus");
+    let typed = page.read_with(cx, |page, cx| {
+        page.reply()
+            .unwrap()
+            .read(cx)
+            .field()
+            .read(cx)
+            .value()
+            .to_string()
+    });
+    assert_eq!(typed, "Mean");
+}
+
+#[gpui_kit::test]
 fn an_ask_asked_later_never_takes_the_focus_from_the_composer(cx: &mut TestAppContext) {
     let user = user();
     let id = session(&user, "full", "Export orders");

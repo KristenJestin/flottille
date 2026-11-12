@@ -717,6 +717,16 @@ impl SessionPage {
         (self.shown == self.opened.id).then_some(&self.reply)
     }
 
+    /// Whether the user is typing in the composer: nothing takes the focus from it.
+    pub(crate) fn typing(&self, window: &Window, cx: &gpui_kit::App) -> bool {
+        self.reply
+            .read(cx)
+            .field()
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+    }
+
     /// The state the page draws an agent of its tree with.
     pub fn state(&self, agent: &str, cx: &gpui_kit::App) -> Option<AgentState> {
         self.statuses.get(agent).map(|s| s.read(cx).state())

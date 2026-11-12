@@ -148,7 +148,17 @@ impl AskDock {
                 let moved_on = held && before.as_ref() != Some(&first);
                 if opening || moved_on {
                     let card = first.clone();
-                    cx.defer_in(window, move |_, window, cx| {
+                    cx.defer_in(window, move |this, window, cx| {
+                        // The history is read after the page opens: a user who has begun to
+                        // write meanwhile keeps the focus.
+                        let typing = opening
+                            && this
+                                .page
+                                .read_with(cx, |page, cx| page.typing(window, cx))
+                                .unwrap_or(false);
+                        if typing {
+                            return;
+                        }
                         card.update(cx, |card, cx| match opening {
                             true => card.summon(window, cx),
                             false => window.focus(&card.focus_handle(cx), cx),
