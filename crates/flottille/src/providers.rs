@@ -655,8 +655,8 @@ pub fn runs_on(
         (Some(asked), None) => asked.to_owned(),
         (None, None) => MODEL_UNKNOWN.to_owned(),
     };
-    let levels: Vec<&str> = entry
-        .and_then(|m| m["efforts"].as_array())
+    let offered = entry.and_then(|m| m["efforts"].as_array());
+    let levels: Vec<&str> = offered
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
@@ -674,9 +674,13 @@ pub fn runs_on(
                 .filter(|own| levels.contains(own))
                 .map(str::to_owned)
         })
-        .or_else(|| provider::middle_effort(&levels).map(|level| (*level).to_owned()))
-        .unwrap_or_else(|| EFFORT_UNKNOWN.to_owned());
-    format!("{} · {model} · {effort}", known.title)
+        .or_else(|| provider::middle_effort(&levels).map(|level| (*level).to_owned()));
+    match (effort, offered) {
+        (Some(effort), _) => format!("{} · {model} · {effort}", known.title),
+        // A model whose provider offers no effort has none to say.
+        (None, Some(none)) if none.is_empty() => format!("{} · {model}", known.title),
+        (None, _) => format!("{} · {model} · {EFFORT_UNKNOWN}", known.title),
+    }
 }
 
 /// What an agent runs on now, by name (`runs_on`): what it took at its last start, else what was

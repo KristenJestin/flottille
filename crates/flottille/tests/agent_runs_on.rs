@@ -395,3 +395,22 @@ fn every_provider_says_what_its_agents_run_on() {
         );
     }
 }
+
+#[test]
+fn a_provider_that_offers_no_effort_says_the_model_alone() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({
+        "models": ["fake-small"],
+        "model_rows": {"fake-small": {"name": "Fake Small 5.5"}},
+        "turns": []
+    }));
+    let (_, mcp) = lead(&user);
+
+    let (_, answer) = launched(&user, &mcp, "worker", json!({"kind": "child"}));
+
+    assert!(
+        answer.contains("on Claude · Fake Small 5.5, in "),
+        "{answer}"
+    );
+    assert!(!answer.contains("effort not known"), "{answer}");
+}
