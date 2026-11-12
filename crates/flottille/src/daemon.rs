@@ -268,6 +268,11 @@ impl Daemon {
         Ok(event)
     }
 
+    /// The events from now on, as they come; `None` once the daemon stops.
+    pub fn live(&self) -> Option<broadcast::Receiver<Event>> {
+        Some(self.events.lock().unwrap().bus.as_ref()?.subscribe())
+    }
+
     /// Reads the store.
     pub fn read<T>(
         &self,

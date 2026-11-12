@@ -19,6 +19,7 @@ use flottille_core::store::{AgentChange, Store, now_ms};
 use flottille_core::subscription::Subscription;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::agents::{self, DEPTH_LIMIT, New, Order};
 use crate::approvals;
@@ -453,18 +454,27 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
 const OPENING: Duration = Duration::from_secs(20);
 
 /// The agent once its session opened (or failed to), waited for a while; `None` while it has not.
+/// Answered as soon as it did, before its first turn could do anything.
 async fn opened(daemon: &Daemon, id: &str) -> Option<Agent> {
-    let deadline = tokio::time::Instant::now() + OPENING;
-    loop {
-        let agent = daemon.read(|store| store.agent(id)).ok().flatten()?;
-        if agent.native_id.is_some() || agent.state.is_final() {
-            return Some(agent);
+    // Subscribed before the store is read: an opening meanwhile is not missed.
+    let mut live = daemon.live()?;
+    let wait = async {
+        loop {
+            let agent = daemon.read(|store| store.agent(id)).ok().flatten()?;
+            if agent.native_id.is_some() || agent.state.is_final() {
+                return Some(agent);
+            }
+            loop {
+                match live.recv().await {
+                    Ok(event) if event.data["agent"] == id => break,
+                    Ok(_) => {}
+                    Err(RecvError::Lagged(_)) => break,
+                    Err(RecvError::Closed) => return None,
+                }
+            }
         }
-        if tokio::time::Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    };
+    tokio::time::timeout(OPENING, wait).await.ok().flatten()
 }
 
 /// A slot of a project's children cap, taken by a launch until its child exists (and counts as a
