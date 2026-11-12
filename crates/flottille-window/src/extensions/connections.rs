@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use gpui_design_system::{
     Button, Confirm, Disclosure, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal,
-    RadioChoices, Section, Select, SelectOption, Skeleton, Switch, Toast, Type as _, awaiting,
+    RadioChoices, Section, Select, SelectOption, Skeleton, Switch, Tag, Toast, Type as _, awaiting,
     icon, palette, presence, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
@@ -1723,19 +1723,9 @@ impl ConnectionsSection {
                     .text_color(p.text)
                     .child(SharedString::from(action.name.clone())),
             )
-            .children(change.map(|change| {
-                div()
-                    .id(SharedString::from(format!("{id}-change")))
-                    .aria_label(change)
-                    .px(space::SM)
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(p.line)
-                    .text_size(px(11.))
-                    .text_color(p.mute)
-                    .child(change)
-                    .test_support()
-            }));
+            .children(
+                change.map(|change| Tag::new(SharedString::from(format!("{id}-change")), change)),
+            );
         let mut block = div()
             .id(SharedString::from(id.clone()))
             .flex()
