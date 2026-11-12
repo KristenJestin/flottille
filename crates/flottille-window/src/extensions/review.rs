@@ -1,6 +1,6 @@
 //! Review in the window (`docs/extensions.md`, "Review"): `/review` in a session's composer, which
-//! Flottille runs and never sends to the agent. A review's agents and findings are one folded line
-//! of the session's rail (`session.rs`, `RailRow::Review`). Its page ("Its page") draws what it
+//! Flottille runs and never sends to the agent. A review is one row of the session's rail, folded
+//! from its right over its checks and its findings (`session.rs`, `RailRow::Review`). Its page ("Its page") draws what it
 //! checks as one card, a line per check with its switch and its model, each check's own
 //! instructions folded under its line.
 
