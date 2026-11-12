@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_window::Shell;
 use flottille_window::extensions::connections::{ConnectionsSection, Then};
+use gpui_design_system::motion::PANEL;
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::base::input::InputState;
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
@@ -163,6 +164,32 @@ fn settle(cx: &mut VisualTestContext) {
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
     }
+}
+
+/// The height drawn now of the element `id`, 0 where it is not there: what a fold or an unfold
+/// measures. A motion that is instant is either 0 or its whole height, never between.
+fn height(cx: &mut VisualTestContext, id: &str) -> f32 {
+    let id = id.to_owned();
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .map_or(0., |found| f32::from(found.bounds().size.height))
+    })
+}
+
+/// A click that leaves the clock where it is, so that a motion it starts is measured as it goes.
+fn press(cx: &mut VisualTestContext, id: &str) {
+    let id = id.to_owned();
+    cx.update(|window, cx| window.click(id, cx));
+    cx.run_until_parked();
+}
+
+/// A third of a panel's motion later: a motion that moves is neither at its start nor at its end.
+fn a_third_later(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.executor().advance_clock(PANEL / 3);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
 }
 
 fn present(cx: &mut VisualTestContext, id: &str) -> bool {
@@ -329,10 +356,20 @@ fn its_page_shows_its_usage_line_while_off(cx: &mut TestAppContext) {
     );
     assert!(!present(cx, "new-connection"));
 
-    click(cx, "connections-switch");
-    until(&shell, cx, "the servers unfold", |cx| {
-        visible(cx, "connection-servers-title")
+    assert_eq!(height(cx, "connection-servers-block"), 0.);
+    press(cx, "connections-switch");
+    until(&shell, cx, "the servers begin to unfold", |cx| {
+        height(cx, "connection-servers-block") > 0.
     });
+    a_third_later(cx);
+    let unfolding = height(cx, "connection-servers-block");
+    settle(cx);
+    let open = height(cx, "connection-servers-block");
+    assert!(
+        0. < unfolding && unfolding < open,
+        "they unfold, over a panel's time: {unfolding} of {open}"
+    );
+    assert!(visible(cx, "connection-servers-title"));
     assert!(visible(cx, "connections-usage"));
 }
 
@@ -751,7 +788,18 @@ fn removing_a_server_asks_in_a_confirmation(cx: &mut TestAppContext) {
 
     click(cx, "connection-more-almanac");
     click(cx, "remove-connection-almanac");
-    click(cx, "connection-removal-action");
+    let whole = height(cx, "connection-item-almanac");
+    assert!(whole > 0.);
+    press(cx, "connection-removal-action");
+    until(&shell, cx, "its row begins to fold", |cx| {
+        height(cx, "connection-item-almanac") < whole
+    });
+    a_third_later(cx);
+    let folding = height(cx, "connection-item-almanac");
+    assert!(
+        0. < folding && folding < whole,
+        "its row folds away, over a panel's time: {folding} of {whole}"
+    );
     until(&shell, cx, "its row folds away", |cx| {
         !present(cx, "connection-almanac")
     });
@@ -805,7 +853,15 @@ fn the_review_is_a_large_dialog_where_each_action_is_judged_by_default(cx: &mut 
 
     // Search is allowed, open is turned off, write stays judged.
     click(cx, "connection-review-action-search-setting-passes");
-    click(cx, "connection-review-action-open-offer");
+    let open = height(cx, "connection-review-action-open-when-block");
+    assert!(open > 0.);
+    press(cx, "connection-review-action-open-offer");
+    a_third_later(cx);
+    let folding = height(cx, "connection-review-action-open-when-block");
+    assert!(
+        0. < folding && folding < open,
+        "its choices fold, over a panel's time: {folding} of {open}"
+    );
     until(&shell, cx, "its choices fold away", |cx| {
         !visible(cx, "connection-review-action-open-setting-judged")
     });
