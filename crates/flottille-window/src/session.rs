@@ -141,7 +141,7 @@ pub const AGENT_ENDED: &str = "the session ended before the agent read it";
 pub const NEVER_READ: &str = "the agent ended before it read it";
 pub const NOT_INTERRUPTED: &str = "The turn was not interrupted";
 /// The state an agent of the tree is drawn with, from what the daemon says of it: only a root can
-/// need the user; a child waiting on its parent is waiting, in grey.
+/// need the user; a child waiting on its parent is waiting, in the colour of what waits outside.
 pub fn state_of(agent: &TreeAgent) -> AgentState {
     match agent.state.as_str() {
         "failed" => AgentState::Failed,
@@ -168,6 +168,14 @@ pub fn out_of_quota(reset_at: Option<u64>) -> String {
     match reset_at {
         Some(at) => format!("Out of quota, resets at {}", clock(at)),
         None => "Out of quota".to_owned(),
+    }
+}
+
+/// The same on a row's second line, in lower case: `out of quota until 13:00`, or `out of quota`.
+pub fn out_of_quota_line(reset_at: Option<u64>) -> String {
+    match reset_at {
+        Some(at) => format!("out of quota until {}", clock(at)),
+        None => "out of quota".to_owned(),
     }
 }
 

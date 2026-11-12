@@ -2817,7 +2817,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-beta.5#b89687b02048e2dfa579ed5aaa63f5e86074e66b"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-beta.6#9c12a45d21aed135429e6075596bc2dd599e1dfb"
 dependencies = [
  "gpui-kit",
  "toml 1.1.8+spec-1.1.0",
