@@ -149,8 +149,12 @@ client may not assume it gets one. An invalid or expired token is answered `401`
   answer (`temporarily_unavailable`, `invalid_request`, a `5xx`) and an authorization server that
   cannot be reached keep the tokens: the call fails saying to try again, as a server that fails to
   start does.
-- No token at all, or a server that still answers `401`: the call fails saying that the user must
-  sign in (`flottille connection login <name>`).
+- **A `401` on a request with a token** (it was revoked, whatever its expiry says) is a refused
+  token: one refresh is tried. Refused by the authorization server (`invalid_grant`), it signs the
+  connection out as above; given, the call fails saying a new token was asked for and to try
+  again (the server is started again with it); not answered, the tokens are kept as above.
+- No token at all: the call fails saying that the user must sign in
+  (`flottille connection login <name>`).
 
 ## What is left out
 

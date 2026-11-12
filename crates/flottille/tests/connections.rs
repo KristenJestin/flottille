@@ -2896,3 +2896,60 @@ fn a_refresh_that_cannot_be_saved_keeps_its_tokens_in_memory() {
         "a refresh was refused: {refreshes:?}"
     );
 }
+
+#[test]
+fn a_revoked_token_signs_out_after_one_refresh() {
+    let user = user();
+    project(&user, "app");
+    // Tokens that say no expiry: only the server's `401` tells they were revoked.
+    let (server, url) = protected_server(&user, json!({"no_expiry": true}));
+    signed_in(&user, &url);
+    reviewed(&user);
+    let (_, mcp) = session(&user, "app");
+    let first = done(searched(&mcp));
+    assert!(first.contains("found: the login decision"), "{first}");
+    change_oauth(&user, |oauth| {
+        oauth["revoked"] = json!(true);
+        oauth["refresh"] = json!("refused");
+    });
+    let failed = failed_call(&mcp);
+    stopped(server);
+    assert!(failed.contains("sign in again"), "{failed}");
+    assert_eq!(
+        grants(&user, "refresh_token").len(),
+        1,
+        "one refresh was tried"
+    );
+    assert_eq!(connection(&user, "notes")["state"], "signed out");
+    eventually("the tool leaves the session", || !has(&mcp, "conn_notes"));
+    let entries = user.call("vault.list", json!({})).unwrap().to_string();
+    assert!(!entries.contains("notes.oauth"), "{entries}");
+    let inbox = user.call("inbox.list", json!({})).unwrap().to_string();
+    assert!(
+        inbox.contains("flottille connection login notes"),
+        "{inbox}"
+    );
+}
+
+#[test]
+fn a_revoked_token_refused_as_the_server_starts_signs_out() {
+    let user = user();
+    let (server, url) = protected_server(&user, json!({"no_expiry": true}));
+    signed_in(&user, &url);
+    change_oauth(&user, |oauth| {
+        oauth["revoked"] = json!(true);
+        oauth["refresh"] = json!("refused");
+    });
+    let failed = user
+        .call_within(
+            "connection.review",
+            json!({"name": "notes"}),
+            Duration::from_secs(40),
+        )
+        .unwrap_err()
+        .1;
+    stopped(server);
+    assert!(failed.contains("is signed out"), "{failed}");
+    assert_eq!(grants(&user, "refresh_token").len(), 1);
+    assert_eq!(connection(&user, "notes")["state"], "signed out");
+}

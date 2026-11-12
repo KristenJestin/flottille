@@ -20,6 +20,7 @@
 //! its `iss`, and `token`). `oauth` takes `expires_in` (the tokens' life, 3600 seconds by
 //! default), `refresh: "refused"` (every refresh answers `invalid_grant`), `refresh_error`
 //! (every refresh answers that OAuth error instead, and keeps the refresh token valid),
+//! `no_expiry` (the tokens carry no `expires_in`), `revoked` (`/mcp` answers `401` to every token),
 //! `refresh_hold` (the path of a file: a refresh is answered once it exists, and logs `hold` as it
 //! waits), `registration: false`
 //! (no dynamic registration), `authorize_at`, `token_at` and `register_at: "elsewhere"` (that
@@ -377,10 +378,10 @@ fn serve(
     if oauth.is_object() {
         // A token is never written to the log: which one it is, by its number.
         let bearer = headers.remove("authorization").and_then(|value| {
-            issuer
-                .lock()
-                .unwrap()
-                .serial_of(value.as_str()?.strip_prefix("Bearer ")?)
+            let token = value.as_str()?.strip_prefix("Bearer ")?;
+            // A revoked token is one it issued and no longer knows.
+            let serial = issuer.lock().unwrap().serial_of(token);
+            serial.filter(|_| oauth["revoked"] != true)
         });
         if path != "/mcp" || method != "POST" || bearer.is_none() {
             write_log(
@@ -503,9 +504,12 @@ impl Issuer {
         }
         self.access.insert(access.clone(), n);
         self.refresh.insert(refresh.clone(), n);
-        json!({"access_token": access, "token_type": "Bearer",
-            "expires_in": oauth["expires_in"].as_u64().unwrap_or(3600),
-            "refresh_token": refresh})
+        let mut tokens = json!({"access_token": access, "token_type": "Bearer",
+            "refresh_token": refresh});
+        if oauth["no_expiry"] != true {
+            tokens["expires_in"] = json!(oauth["expires_in"].as_u64().unwrap_or(3600));
+        }
+        tokens
     }
 
     #[allow(clippy::too_many_arguments)]

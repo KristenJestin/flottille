@@ -225,25 +225,45 @@ pub async fn bearer(
     }
     let tokens = match tokens.expiring() {
         false => tokens,
-        true => {
-            let refreshed = refreshed(&tokens).await;
-            // A sign-in may have replaced the tokens while the refresh ran: what it gave, or
-            // refused, is then of a refresh token that is no longer the connection's.
-            match kept(daemon, &declaration.name)
-                .await
-                .map_err(Unusable::Failed)?
-            {
-                Some(stored) if stored.refresh_token != tokens.refresh_token => stored,
-                None => return Ok(None),
-                Some(_) => {
-                    let fresh = refreshed?;
-                    save(daemon, &declaration.name, &fresh).await;
-                    fresh
-                }
-            }
-        }
+        true => match renewed(daemon, &declaration.name, &tokens).await? {
+            Some(renewed) => renewed,
+            None => return Ok(None),
+        },
     };
     Ok(Some((tokens.access_token, tokens.expires_at)))
+}
+
+/// The tokens `old` is refreshed into and kept; the stored ones when a sign-in replaced `old`
+/// while the refresh ran (what the refresh gave or was refused is then of a refresh token that is
+/// no longer the connection's); none when the connection signed out meanwhile.
+async fn renewed(
+    daemon: &Arc<Daemon>,
+    name: &str,
+    old: &Tokens,
+) -> Result<Option<Tokens>, Unusable> {
+    let refreshed = refreshed(old).await;
+    match kept(daemon, name).await.map_err(Unusable::Failed)? {
+        Some(stored) if stored.refresh_token != old.refresh_token => Ok(Some(stored)),
+        None => Ok(None),
+        Some(_) => {
+            let fresh = refreshed?;
+            save(daemon, name, &fresh).await;
+            Ok(Some(fresh))
+        }
+    }
+}
+
+/// The server refused the access token it was given (`401`): a token that says no expiry may
+/// have been revoked. One refresh is tried: whether the connection holds tokens, and they were
+/// renewed; a refresh the authorization server refuses is the sign-out of any refused refresh.
+pub async fn rejected(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<bool, Unusable> {
+    let Some(tokens) = kept(daemon, &declaration.name)
+        .await
+        .map_err(Unusable::Failed)?
+    else {
+        return Ok(false);
+    };
+    Ok(renewed(daemon, &declaration.name, &tokens).await?.is_some())
 }
 
 /// A refresh of the tokens: the old refresh token is kept when the answer gives no new one.

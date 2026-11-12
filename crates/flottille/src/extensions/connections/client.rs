@@ -470,10 +470,12 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
             let mut config =
                 StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(headers);
             let name = &declaration.name;
+            let mut bearing = false;
             match super::oauth::bearer(daemon, declaration).await {
                 Ok(Some((token, expires))) => {
                     config = config.auth_header(token);
                     expires_at = expires;
+                    bearing = true;
                 }
                 Ok(None) => {}
                 Err(super::oauth::Unusable::Failed(why)) => return Err(why),
@@ -488,14 +490,20 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
                 handler.serve_with_lifecycle(transport, ClientLifecycleMode::Initialize),
             )
             .await
-            .map_err(|_| "it did not answer within 30 seconds".to_owned())?
-            .map_err(|error| match asks_sign_in(&error) {
-                true => format!(
-                    "the server asks to be signed in: the user signs it in with `flottille \
-                     connection login {name}`"
-                ),
-                false => error.to_string(),
-            })?;
+            .map_err(|_| "it did not answer within 30 seconds".to_owned())?;
+            let served = match served {
+                Ok(served) => served,
+                Err(error) if asks_sign_in(&error) => {
+                    if bearing && let Some(said) = token_refused(daemon, declaration).await {
+                        return Err(said);
+                    }
+                    return Err(format!(
+                        "the server asks to be signed in: the user signs it in with `flottille \
+                         connection login {name}`"
+                    ));
+                }
+                Err(error) => return Err(error.to_string()),
+            };
             (served, None)
         }
     };
@@ -538,6 +546,29 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
         start,
         expires_at,
     })
+}
+
+/// The server refused the access token of a connection signed in with OAuth: one refresh is tried
+/// (`oauth::rejected`), and what the call or the start says of it; none when the connection holds
+/// no tokens, which is the server asking to be signed in. A refresh the authorization server
+/// refuses signs the connection out, as any refused refresh does.
+async fn token_refused(daemon: &Arc<Daemon>, declaration: &Declaration) -> Option<String> {
+    let name = &declaration.name;
+    match super::oauth::rejected(daemon, declaration).await {
+        Ok(false) => None,
+        Ok(true) => Some(format!(
+            "the server refused the access token of the connection {name}: a new one was asked \
+             for, try again"
+        )),
+        Err(super::oauth::Unusable::Failed(why)) => Some(format!(
+            "the server refused the access token of the connection {name}, and it could not be \
+             refreshed: {why}"
+        )),
+        Err(super::oauth::Unusable::SignedOut(why)) => {
+            super::signed_out(daemon, name, &why).await;
+            Some(signed_out_said(name, &why))
+        }
+    }
 }
 
 /// What a start says of a connection whose authorization server refused to refresh its tokens.
@@ -827,10 +858,26 @@ pub async fn call(
                 CALL_LIMIT.as_secs()
             ));
         }
-        Ok(Err(error)) => failed_framed(
-            &format!("the server of conn_{name} could not be called ({action})"),
-            &crate::mcp::masked(&error.to_string(), &grant.place),
-        ),
+        Ok(Err(error)) => {
+            let said = match asks_sign_in(&error) {
+                true => {
+                    // Its token is refused: the server is started again with a refreshed one.
+                    if let Some(running) = turn.take() {
+                        *server.leader.lock().unwrap() = None;
+                        stop_running(running).await;
+                    }
+                    token_refused(daemon, &declaration).await
+                }
+                false => None,
+            };
+            match said {
+                Some(said) => Outcome::Failed(crate::mcp::masked(&said, &grant.place)),
+                None => failed_framed(
+                    &format!("the server of conn_{name} could not be called ({action})"),
+                    &crate::mcp::masked(&error.to_string(), &grant.place),
+                ),
+            }
+        }
         _ if matches!(now, Some(State::Off) | None) => Outcome::Failed(
             "the connection was turned off while it ran; it may have been performed".into(),
         ),
