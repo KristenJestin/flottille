@@ -10370,6 +10370,11 @@ fn the_rules_page_edits_the_rules_of_every_project_saves_them_and_resets_them_to
         assert!(!e.is_own());
     });
     cx.update(|window, _| {
+        assert_eq!(
+            window.find("rules-tag").label(),
+            Some("Flottille's own"),
+            "no chip says default"
+        );
         assert!(window.find("rules-text-").visible());
         assert!(
             window.try_find("rules-reach-").is_none(),

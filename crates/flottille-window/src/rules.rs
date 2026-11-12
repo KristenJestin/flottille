@@ -492,9 +492,9 @@ impl RulesEditor {
         ) {
             (_, _, None) => "asking Flottille",
             (true, _, Some(Source::Global)) => "your own",
-            (true, _, Some(_)) => "Flottille's default",
+            (true, _, Some(_)) => "Flottille's own",
             (false, None, Some(Source::Global)) => "your own",
-            (false, None, Some(_)) => "Flottille's default",
+            (false, None, Some(_)) => "Flottille's own",
             (false, Some(_), Some(Source::Project)) => "this project's own",
             (false, Some(_), Some(_)) => "none of its own",
         }
