@@ -1,12 +1,12 @@
 //! The card of an ask of the root to the user (`docs/tools.md`, "ask"): who asks, by the
 //! session's title, an `asks you` tag and how many questions are answered, then one block per
 //! question, each with its options as rows (a round mark for one choice, a square one for
-//! several) and, as the last row, "Something else…", whose field of several lines unfolds when it
-//! is picked. Once an option is chosen, "+ Add a note" unfolds a field for a note with the choice
-//! (`Enter` breaks a line, `Ctrl+Enter` sends). One Answer for the whole card, once every question
-//! has a choice or words: the daemon sends the agent one message quoting each question with its
-//! answer under it (`agent.answer`). Once the agent took it, the card folds to its answers: each
-//! question on one line, what the user chose and wrote under it.
+//! several) and, as the last row, "Something else…", which holds its field of several lines,
+//! right of its mark, once it is picked. Once an option is chosen, "+ Add a note" unfolds a field
+//! for a note with the choice (`Enter` breaks a line, `Ctrl+Enter` sends). One Answer for the
+//! whole card, once every question has a choice or words: the daemon sends the agent one message
+//! quoting each question with its answer under it (`agent.answer`). Once the agent took it, the
+//! card folds to its answers: each question on one line, what the user chose and wrote under it.
 
 use std::collections::HashSet;
 
@@ -18,10 +18,10 @@ use gpui_design_system::{
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, TestSupportExt as _, WeakEntity, Window,
-    div, px,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
+    FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, TestSupportExt as _,
+    WeakEntity, Window, div, px,
 };
 
 use crate::session::{MarkdownText, SessionPage};
@@ -107,12 +107,18 @@ impl QuestionCard {
                 subscriptions.push(cx.subscribe_in(
                     &field,
                     window,
-                    move |this: &mut Self, _, event, _, cx| match event {
+                    move |this: &mut Self, _, event, window, cx| match event {
                         InputEvent::Change => cx.notify(),
-                        // `Enter` breaks the line in the field; `Ctrl+Enter` sends.
+                        // `Enter` breaks the line in the field; `Ctrl+Enter` sends, and the
+                        // field that gives way with the card does not keep the focus.
                         InputEvent::PressEnter {
                             secondary: true, ..
-                        } => this.send(cx),
+                        } => {
+                            this.send(cx);
+                            if this.sending {
+                                window.focus(&this.focus, cx);
+                            }
+                        }
                         _ => {}
                     },
                 ));
@@ -168,6 +174,11 @@ impl QuestionCard {
     /// of a question with no options.
     pub fn field(&self, n: usize) -> &Entity<TextareaState> {
         &self.fields[n]
+    }
+
+    /// Whether the card itself holds the focus (what takes `Ctrl+Enter` when no field has it).
+    pub fn has_focus(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
     }
 
     /// The field of the note that goes with the choice of question `n`.
@@ -346,16 +357,42 @@ impl QuestionCard {
                 None => row,
             }
         });
+        // The words of "Something else…" are its field, in its row: the row's words are its label,
+        // so the field is named for readers of the screen only.
+        let inline = {
+            let frame = div()
+                .id(id(format!("answer-{n}-frame")))
+                .aria_label("Your answer")
+                .px(space::MD)
+                .py(space::XS)
+                .rounded(px(8.))
+                .bg(p.field)
+                .border_1()
+                .border_color(p.line2)
+                .text_size(px(13.))
+                .line_height(px(20.))
+                .child(self.fields[n].clone())
+                .test_support();
+            gpui_design_system::growing(id(format!("answer-{n}-height")), frame)
+        };
         let other = (!question.options.is_empty()).then(|| {
             let mut row = ChoiceRow::new(id(format!("question-{n}-other")), "Something else…")
                 .faint()
                 .chosen(self.other[n])
+                .field("Something else:", inline)
+                .field_inset(px(5.))
                 .on_click({
                     let card = card.clone();
                     move |window, cx| {
                         card.update(cx, |card, cx| {
                             card.choose_other(n, window, cx);
-                            window.focus(&card.focus, cx);
+                            // The words are asked at once; without them, `Ctrl+Enter` still sends.
+                            let focus = if card.other[n] {
+                                card.fields[n].read(cx).focus_handle(cx)
+                            } else {
+                                card.focus.clone()
+                            };
+                            window.focus(&focus, cx);
                         })
                         .ok();
                     }
@@ -434,7 +471,7 @@ impl QuestionCard {
             .child(
                 presence(
                     id(format!("question-{n}-words")),
-                    open && self.words_open(n),
+                    open && question.options.is_empty(),
                     field("answer", "Your answer", &self.fields[n]),
                 )
                 .gap(space::SM),

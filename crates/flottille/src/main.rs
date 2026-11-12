@@ -63,6 +63,7 @@ mod runs;
 mod runs_command;
 mod service_command;
 mod services;
+mod session_name;
 mod session_read;
 mod setup;
 mod show;
