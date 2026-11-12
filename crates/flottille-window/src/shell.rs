@@ -900,6 +900,12 @@ impl Shell {
             Update::CompactionChanged => self.actions.send(Command::CompactionRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
             Update::VaultChanged => self.actions.send(Command::Vault),
+            Update::SignIn { said, name, why } => {
+                let section = self.settings.read(cx).connections().clone();
+                section.update(cx, |section, cx| {
+                    section.sign_in_said(&said, &name, why, cx)
+                });
+            }
             Update::ServicesChanged => {
                 if self.main.read(cx).services_page().is_some() {
                     self.actions.send(Command::Services);

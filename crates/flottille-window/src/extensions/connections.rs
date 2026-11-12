@@ -88,6 +88,8 @@ pub struct Server {
     pub cut_off: Option<String>,
     /// Why its server did not start.
     pub failing: Option<String>,
+    /// Why it must sign in again.
+    pub signed_out: Option<String>,
     /// The version accepted, once it was.
     pub version: Option<String>,
     /// Each action accepted and its setting (`judged`, `passes`, `asked` or `off`).
@@ -127,6 +129,7 @@ impl Server {
             state: text(&value["state"]),
             cut_off: value["cut_off"].as_str().map(str::to_owned),
             failing: value["failing"].as_str().map(str::to_owned),
+            signed_out: value["signed_out"].as_str().map(str::to_owned),
             version: value["server"]["version"].as_str().map(str::to_owned),
             actions: value["actions"]
                 .as_array()
@@ -157,6 +160,7 @@ impl Server {
             },
             "awaiting review" if self.version.is_none() => "Waiting for its first review".into(),
             "awaiting review" => "Waiting for a review of your edit".into(),
+            "signed out" => "Signed out: sign in again".into(),
             "cut off" => format!(
                 "Stopped: {}, review it",
                 stopped_by(self.cut_off.as_deref().unwrap_or_default())
@@ -450,6 +454,10 @@ pub enum Then {
     Accepted {
         name: String,
     },
+    /// `connection.login` of `name`: the address to open in the browser.
+    SignIn {
+        name: String,
+    },
 }
 
 /// How the server is reached.
@@ -507,7 +515,7 @@ pub struct ConnectionsSection {
     listed: Option<Vec<Server>>,
     rows: Listing<Server>,
     /// Each row's menu, and whether the server was on when it was made: its entries follow.
-    menus: HashMap<String, (bool, Entity<Menu>)>,
+    menus: HashMap<String, ((bool, bool), Entity<Menu>)>,
     problem: Option<SharedString>,
     asked: u64,
     listed_at: u64,
@@ -524,6 +532,8 @@ pub struct ConnectionsSection {
     review: Option<Review>,
     review_open: bool,
     confirming: Option<String>,
+    /// The servers whose sign-in waits for the browser.
+    signing: std::collections::HashSet<String>,
     /// The server the confirmation names, kept while it fades away.
     asked_name: String,
     _subscriptions: Vec<Subscription>,
@@ -553,6 +563,7 @@ impl ConnectionsSection {
             review: None,
             review_open: false,
             confirming: None,
+            signing: Default::default(),
             asked_name: String::new(),
             _subscriptions: Vec::new(),
         }
@@ -656,6 +667,23 @@ impl ConnectionsSection {
                     review.answer = Some(answer);
                 }
             }
+            Then::SignIn { name } => match answer {
+                Ok(begun) => {
+                    let url = begun["url"].as_str().unwrap_or_default().to_owned();
+                    // The answer comes while the shell is busy giving it: it opens after.
+                    let shell = self.shell.clone();
+                    cx.defer(move |cx| {
+                        shell.update(cx, |shell, _| shell.open_link(&url)).ok();
+                    });
+                }
+                Err(why) => {
+                    self.signing.remove(&name);
+                    toast(
+                        Toast::failure(format!("{name} was not signed in")).detail(why),
+                        cx,
+                    );
+                }
+            },
             Then::Accepted { name } => {
                 let Some(review) = self.review.as_mut().filter(|r| r.name == name) else {
                     return;
@@ -721,6 +749,45 @@ impl ConnectionsSection {
                 ),
             },
         }
+        cx.notify();
+    }
+
+    /// Begins the sign-in of `name`: the daemon answers the address its browser opens.
+    pub fn sign_in(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.signing.insert(name.to_owned());
+        self.ask(
+            "connection.login",
+            json!({"name": name}),
+            Then::SignIn {
+                name: name.to_owned(),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// An event of a sign-in: how it ended, or that its tokens were lost or not kept.
+    pub fn sign_in_said(
+        &mut self,
+        said: &str,
+        name: &str,
+        why: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let why = why.unwrap_or_default();
+        let shown = match said {
+            "signed_in" => Toast::success(format!("Signed in to {name}"))
+                .detail("Its server is reached with your account from now on."),
+            "sign_in_failed" => Toast::failure(format!("{name} was not signed in")).detail(why),
+            "signed_out" => Toast::failure(format!("{name} is signed out"))
+                .detail("Its tool left every agent; sign in again from its menu."),
+            _ => Toast::failure(format!("{name}'s sign-in was not saved")).detail(why),
+        };
+        if matches!(said, "signed_in" | "sign_in_failed") {
+            self.signing.remove(name);
+        }
+        toast(shown, cx);
+        self.read(cx);
         cx.notify();
     }
 
@@ -1073,8 +1140,9 @@ impl ConnectionsSection {
     }
 
     fn menu(&mut self, server: &Server, cx: &mut Context<Self>) -> Entity<Menu> {
-        if let Some((on, menu)) = self.menus.get(&server.name)
-            && *on == server.enabled
+        let url = server.url.is_some();
+        if let Some((made, menu)) = self.menus.get(&server.name)
+            && *made == (server.enabled, url)
         {
             return menu.clone();
         }
@@ -1087,7 +1155,7 @@ impl ConnectionsSection {
                 (this.clone(), this.clone(), this.clone(), this.clone());
             let (to_edit, to_review, to_switch, to_remove) =
                 (name.clone(), name.clone(), name.clone(), name.clone());
-            Menu::new(id, "More", cx)
+            let menu = Menu::new(id, "More", cx)
                 .entry(
                     format!("edit-connection-{name}"),
                     "Edit",
@@ -1116,18 +1184,33 @@ impl ConnectionsSection {
                             .update(cx, |this, cx| this.switch(&to_switch, cx))
                             .ok();
                     },
-                )
-                .danger(
-                    format!("remove-connection-{name}"),
-                    "Remove…",
-                    move |_, cx| {
-                        remove
-                            .update(cx, |this, cx| this.remove(&to_remove, cx))
-                            .ok();
-                    },
-                )
+                );
+            // Signing in is a URL's: a program reaches no account of the user's.
+            let menu = match url {
+                true => {
+                    let (sign, to_sign) = (this.clone(), name.clone());
+                    menu.entry(
+                        format!("sign-in-connection-{name}"),
+                        "Sign in",
+                        Some(Icon::Lucide("log-in")),
+                        move |_, cx| {
+                            sign.update(cx, |this, cx| this.sign_in(&to_sign, cx)).ok();
+                        },
+                    )
+                }
+                false => menu,
+            };
+            menu.danger(
+                format!("remove-connection-{name}"),
+                "Remove…",
+                move |_, cx| {
+                    remove
+                        .update(cx, |this, cx| this.remove(&to_remove, cx))
+                        .ok();
+                },
+            )
         });
-        self.menus.insert(name, (on, menu.clone()));
+        self.menus.insert(name, ((on, url), menu.clone()));
         menu
     }
 
@@ -1144,7 +1227,11 @@ impl ConnectionsSection {
         if let Some(version) = &server.version {
             row = row.tag(SharedString::from(version.clone()));
         }
-        row.line(SharedString::from(server.line()))
+        let line = match self.signing.contains(&server.name) {
+            true => "Signing in: finish it in your browser".to_owned(),
+            false => server.line(),
+        };
+        row.line(SharedString::from(line))
             .more(menu)
             .on_click(cx.listener(move |this, _, window, cx| {
                 if !this.saving {
@@ -2049,6 +2136,10 @@ mod tests {
         assert_eq!(
             server("ready", json!({"failing": "no such program"})),
             "Failing: no such program"
+        );
+        assert_eq!(
+            server("signed out", json!({"signed_out": "invalid_grant"})),
+            "Signed out: sign in again"
         );
     }
 }

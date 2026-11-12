@@ -895,3 +895,190 @@ fn a_call_held_for_the_user_names_the_connection_the_action_and_its_arguments(
         "{line}"
     );
 }
+
+// ── Signing in ───────────────────────────────────────────────────────────────────────────────
+
+/// The fake server over HTTP, behind its OAuth authorization server: its process and its URL.
+fn protected_server(user: &User) -> (std::process::Child, String) {
+    let mut script = almanac();
+    script["oauth"] = json!({"tokens_file": user.path("notes-tokens")});
+    write_script(user, "notes", &script);
+    let port_file = user.path("notes-port");
+    let server = std::process::Command::new(fake_mcp())
+        .args([
+            "--script",
+            script_file(user, "notes").to_str().unwrap(),
+            "--log",
+            user.path("notes-log.jsonl").to_str().unwrap(),
+            "--http",
+            port_file.to_str().unwrap(),
+        ])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !port_file.exists() || std::fs::read_to_string(&port_file).unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the server never listened");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let port = std::fs::read_to_string(&port_file).unwrap();
+    (server, format!("http://127.0.0.1:{port}/mcp"))
+}
+
+/// A GET as the browser makes it, following nothing: its status and its `Location`.
+fn browse(address: &str) -> (u16, Option<String>) {
+    use std::io::{Read, Write};
+    let url = url::Url::parse(address).unwrap();
+    let mut stream = std::net::TcpStream::connect((
+        url.host_str().unwrap(),
+        url.port_or_known_default().unwrap(),
+    ))
+    .unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let target = match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_owned(),
+    };
+    write!(
+        stream,
+        "GET {target} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        url.host_str().unwrap()
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let head = answer.split("\r\n\r\n").next().unwrap_or_default();
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let location = head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("location")
+            .then(|| value.trim().to_owned())
+    });
+    (status, location)
+}
+
+#[gpui_kit::test]
+fn signing_in_opens_the_browser_and_says_when_it_is_signed_in(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let (mut server, url) = protected_server(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url}),
+    )
+    .unwrap();
+    declare(&user, "almanac", &almanac());
+    let (shell, cx) = window(&user, cx);
+    let opened = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let opened = opened.clone();
+        shell.update(cx, |s, _| {
+            s.set_opener(Arc::new(move |path: &Path| {
+                opened.lock().unwrap().push(path.display().to_string());
+            }))
+        });
+    }
+    open_page(&shell, cx);
+    until(&shell, cx, "the servers are listed", |cx| {
+        present(cx, "connection-notes") && present(cx, "connection-almanac")
+    });
+    // A program has no sign-in.
+    click(cx, "connection-more-almanac");
+    assert!(visible(cx, "edit-connection-almanac"));
+    assert!(!present(cx, "sign-in-connection-almanac"));
+    cx.update(|window, cx| window.press("escape", cx));
+    settle(cx);
+
+    click(cx, "connection-more-notes");
+    assert_eq!(
+        label(cx, "sign-in-connection-notes-label").as_deref(),
+        Some("Sign in")
+    );
+    click(cx, "sign-in-connection-notes");
+    assert_eq!(
+        label(cx, "connection-notes-line").as_deref(),
+        Some("Signing in: finish it in your browser")
+    );
+    until(&shell, cx, "the browser is opened on the sign-in", |cx| {
+        let shown: Vec<String> = shell.read_with(cx, |s, cx| {
+            s.toasts()
+                .read(cx)
+                .toasts()
+                .map(|t| format!("{}: {:?}", t.title(), t.second_line()))
+                .collect()
+        });
+        assert!(
+            shown.iter().all(|t| !t.contains("not signed in")),
+            "{shown:?}"
+        );
+        !opened.lock().unwrap().is_empty()
+    });
+    let address = opened.lock().unwrap()[0].clone();
+    assert!(address.contains("/as/authorize"), "{address}");
+
+    // The user signs in: the browser comes back to the daemon.
+    let (status, location) = browse(&address);
+    assert_eq!(status, 302);
+    let (status, _) = browse(&location.unwrap());
+    assert_eq!(status, 200);
+    until(&shell, cx, "it says it is signed in", |cx| {
+        toasts(&shell, cx).iter().any(|t| t == "Signed in to notes")
+    });
+    until(&shell, cx, "the row no longer waits", |cx| {
+        label(cx, "connection-notes-line").as_deref() == Some("Waiting for its first review")
+    });
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[gpui_kit::test]
+fn a_sign_in_that_cannot_begin_says_why_in_a_toast(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    // A server that asks for no sign-in: there is nothing to sign in to.
+    write_script(&user, "plain", &almanac());
+    let port_file = user.path("plain-port");
+    let mut server = std::process::Command::new(fake_mcp())
+        .args([
+            "--script",
+            script_file(&user, "plain").to_str().unwrap(),
+            "--http",
+            port_file.to_str().unwrap(),
+        ])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !port_file.exists() || std::fs::read_to_string(&port_file).unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the server never listened");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let port = std::fs::read_to_string(&port_file).unwrap();
+    user.call(
+        "connection.add",
+        json!({"name": "plain", "about": "A notes server.",
+            "url": format!("http://127.0.0.1:{port}/mcp")}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "the server is listed", |cx| {
+        present(cx, "connection-plain")
+    });
+    click(cx, "connection-more-plain");
+    click(cx, "sign-in-connection-plain");
+    until(&shell, cx, "the failure", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "plain was not signed in")
+    });
+    until(&shell, cx, "the row no longer waits", |cx| {
+        label(cx, "connection-plain-line").as_deref() == Some("Waiting for its first review")
+    });
+    let _ = server.kill();
+    let _ = server.wait();
+}

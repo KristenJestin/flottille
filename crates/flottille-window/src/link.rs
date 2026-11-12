@@ -82,6 +82,14 @@ pub enum Update {
     /// A part of Flottille the window draws in its places was switched or changed what it keeps
     /// (`extension.changed`, `spec.*`), or a project changed: what it shows is read again.
     Extensions,
+    /// A connection's sign-in ended, or its tokens were lost or not kept (`connection.signed_in`,
+    /// `.sign_in_failed`, `.signed_out`, `.tokens_unsaved`): the event's last word, the
+    /// connection's name and why.
+    SignIn {
+        said: String,
+        name: String,
+        why: Option<String>,
+    },
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,
@@ -225,6 +233,18 @@ fn follow(
         }
         if extensions_of(event) {
             let _ = updates.unbounded_send(Update::Extensions);
+        }
+        if let Some(said) = event.name.strip_prefix("connection.")
+            && matches!(
+                said,
+                "signed_in" | "sign_in_failed" | "signed_out" | "tokens_unsaved"
+            )
+        {
+            let _ = updates.unbounded_send(Update::SignIn {
+                said: said.to_owned(),
+                name: event.data["name"].as_str().unwrap_or_default().to_owned(),
+                why: event.data["why"].as_str().map(str::to_owned),
+            });
         }
         if event.name == "agent.prompted"
             && let Some(agent) = event.data["agent"].as_str()
