@@ -405,6 +405,36 @@ fn a_long_step_stays_inside_its_card(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_long_edit_stays_inside_its_diff_card(cx: &mut TestAppContext) {
+    let user = user();
+    let (page, cx) = page_of(&user, cx);
+    show(
+        &page,
+        vec![
+            (
+                "agent.tool_call",
+                json!({"id": "e", "title": "fs_edit", "status": "in_progress",
+                    "raw_input": {"path": format!("{UNBROKEN}/{UNBROKEN}.rs"), "edits": [
+                        {"old": format!("let old = {UNBROKEN};\nlet two = 2;"),
+                         "new": format!("let new = {UNBROKEN};\n// {SPACED}")}]}}),
+            ),
+            (
+                "agent.tool_call",
+                json!({"id": "e", "update": true, "status": "completed"}),
+            ),
+        ],
+        cx,
+    );
+    let at = row(&page, |b| matches!(b, Block::Diff { .. }), cx);
+    open(at, "diff-toggle", cx);
+    assert!(
+        cx.update(|window, _| window.try_find(format!("row-{at}-diff-line-0")).is_some()),
+        "the lines of the diff are drawn"
+    );
+    guard::assert_stays_inside(cx, format!("row-{at}-diff"));
+}
+
+#[gpui_kit::test]
 fn a_long_delivery_stays_inside_its_card(cx: &mut TestAppContext) {
     let user = user();
     let (page, cx) = page_of(&user, cx);
