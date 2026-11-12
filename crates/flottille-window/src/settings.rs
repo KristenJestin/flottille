@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 
 use crate::actions::{Command, SessionsSetting};
 use crate::extensions::Registry;
+use crate::extensions::connections::{self, ConnectionsSection};
 use crate::providers::{Provider, Providers};
 use crate::rules::RulesEditor;
 use crate::shell::Shell;
@@ -255,6 +256,7 @@ pub struct SettingsPage {
     workspaces: Entity<WorkspacesFolder>,
     /// The vault's entries, set and removed on this page.
     vault: Entity<VaultSection>,
+    connections: Entity<ConnectionsSection>,
     /// A judge chosen, until the daemon lists it.
     judge_pending: bool,
     /// The judge's switch flipped, until the daemon answers: what it was asked to become.
@@ -343,6 +345,7 @@ impl SettingsPage {
         compaction_guidance: Entity<RulesEditor>,
         workspaces: Entity<WorkspacesFolder>,
         vault: Entity<VaultSection>,
+        connections: Entity<ConnectionsSection>,
     ) -> Self {
         Self {
             rules,
@@ -352,6 +355,7 @@ impl SettingsPage {
             compaction_pending: false,
             workspaces,
             vault,
+            connections,
             shell,
             providers: Providers::default(),
             pending: HashMap::new(),
@@ -878,6 +882,10 @@ impl SettingsPage {
 
     pub fn vault(&self) -> &Entity<VaultSection> {
         &self.vault
+    }
+
+    pub fn connections(&self) -> &Entity<ConnectionsSection> {
+        &self.connections
     }
 
     pub fn providers(&self) -> &Providers {
@@ -1880,11 +1888,21 @@ impl SettingsPage {
             let registry = registry.read(cx);
             for listed in registry.rows() {
                 let on = registry.switch_on(&listed.name, None);
+                // Connections says how many of its servers are on.
+                let count = match listed.name == connections::NAME {
+                    true => self.connections.read(cx).on_count(),
+                    false => None,
+                };
+                let tag = match (on, count) {
+                    (false, _) => "Off".to_owned(),
+                    (true, Some(count)) => format!("{count} on"),
+                    (true, None) => "On".to_owned(),
+                };
                 rows.push((
                     listed.name.clone(),
                     crate::extensions::icon_named(&listed.icon),
                     listed.title.clone(),
-                    if on { "On" } else { "Off" }.to_owned(),
+                    tag,
                     listed.line.clone(),
                     listed.order,
                 ));
@@ -1974,6 +1992,31 @@ impl SettingsPage {
         match part {
             Part::CompactionMore => self.compaction_more(cx),
             Part::Feature(key) if key == COMPACTION => self.compaction_page(window, cx),
+            Part::Feature(key) if key == connections::NAME => {
+                let registry = self.registry(cx);
+                let page = registry
+                    .as_ref()
+                    .and_then(|registry| crate::extensions::feature_page(registry, key, cx));
+                // Its servers, under its switch while it is on.
+                let on = registry.is_some_and(|registry| {
+                    let registry = registry.read(cx);
+                    registry.switch_on(key, None)
+                        && registry.listed(key).is_some_and(|listed| listed.enabled)
+                });
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(page)
+                    .child(
+                        presence(
+                            "connection-servers-block",
+                            on,
+                            enter("connection-servers-enter", 1, self.connections.clone()),
+                        )
+                        .gap(space::XXL),
+                    )
+                    .into_any_element()
+            }
             Part::Feature(key) => self
                 .registry(cx)
                 .and_then(|registry| crate::extensions::feature_page(&registry, key, cx))

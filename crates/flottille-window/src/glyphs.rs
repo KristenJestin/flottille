@@ -29,6 +29,7 @@ gpui_kit::assets::icon_assets!(
         ScanSearch,
         Shrink,
         Plug,
+        Power,
         Blocks
     ]
 );

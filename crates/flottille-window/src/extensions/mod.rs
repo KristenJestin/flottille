@@ -5,6 +5,7 @@
 //! The window never says what these parts are called in the code: each is a feature of the app,
 //! under its own title.
 
+pub mod connections;
 pub mod review;
 pub mod specs;
 
@@ -252,6 +253,8 @@ pub enum Then {
     },
     Specs(specs::Then),
     Review(review::Then),
+    /// Connections' own: the shell gives the answer to its section of Settings.
+    Connections(connections::Then),
 }
 
 /// How long the events that change what is listed must stop before it is read again: a switch
@@ -583,6 +586,7 @@ impl Registry {
             }
             Then::Specs(then) => specs::answered(self, then, answer, cx),
             Then::Review(then) => review::answered(self, then, answer, cx),
+            Then::Connections(_) => {}
         }
     }
 

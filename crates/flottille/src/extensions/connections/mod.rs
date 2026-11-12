@@ -33,12 +33,13 @@ pub use client::{Live, stop_all};
 pub const EXTENSION: Extension = Extension {
     name: "connections",
     title: "Connections",
-    sentence: "Gives every agent your own MCP servers, each as one tool you reviewed, its calls \
-               judged or asked like any other.",
+    sentence: "Your MCP servers, each given to every agent as one tool. Their calls go through \
+               the judge like any other.",
     scope: Scope::Global,
     on_by_default: false,
     switch: "Use connections",
-    usage: "Given to every agent of every project, each server as one tool behind the gate.",
+    usage: "Add a server once; every session of every project gets it. A new version stops it \
+            until you review it again.",
     place: Place::Row {
         icon: "plug",
         line: "Your MCP servers, given to every agent behind the gate.",

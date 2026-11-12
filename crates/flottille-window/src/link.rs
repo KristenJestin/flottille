@@ -292,6 +292,7 @@ fn extensions_of(event: &Event) -> bool {
     name == "extension.changed"
         || name.starts_with("spec.")
         || name.starts_with("review.")
+        || name.starts_with("connection.")
         || matches!(
             name,
             "project.changed" | "project.added" | "project.removed"
