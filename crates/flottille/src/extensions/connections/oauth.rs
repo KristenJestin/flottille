@@ -26,6 +26,10 @@ const SIGN_IN_LIMIT: Duration = Duration::from_secs(300);
 const REQUEST_LIMIT: Duration = Duration::from_secs(30);
 /// A token that expires within this is refreshed before it is used.
 pub const MARGIN_MS: u64 = 60_000;
+/// How long the loopback waits after a connection it could not accept, and how many in a row end
+/// the sign-in: a listener that keeps failing (no file descriptor left) must not spin.
+const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
+const ACCEPT_FAILURES: usize = 10;
 /// The longest answer read from an authorization server or a browser.
 const LONGEST: usize = 64 * 1024;
 
@@ -377,6 +381,23 @@ fn origin_of(url: &url::Url) -> String {
     url.origin().ascii_serialization()
 }
 
+/// Whether `resource` is the server's `url` or a parent of it: the same origin, and its path's
+/// segments the first of the URL's (a string prefix would take `/mc` for `/mcp`).
+fn covers(resource: &str, url: &str) -> bool {
+    let (Ok(resource), Ok(url)) = (url::Url::parse(resource), url::Url::parse(url)) else {
+        return false;
+    };
+    let segments = |url: &url::Url| {
+        url.path()
+            .trim_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    resource.origin() == url.origin() && segments(&url).starts_with(&segments(&resource))
+}
+
 /// The protected resource metadata: the `resource` tokens are asked for, the authorization
 /// server, and the scopes it lists.
 async fn resource_metadata(
@@ -409,8 +430,7 @@ async fn resource_metadata(
             .as_str()
             .ok_or("the resource metadata names no resource")?
             .to_owned();
-        let named = url::Url::parse(&resource).map_err(|error| error.to_string())?;
-        if origin_of(&named) != origin || !url.starts_with(resource.trim_end_matches('/')) {
+        if !covers(&resource, url) {
             return Err(format!(
                 "the resource metadata is for {resource}, which is not {url}"
             ));
@@ -636,7 +656,9 @@ pub async fn begin(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<St
         issuer: issuer.clone(),
         says_iss: metadata["authorization_response_iss_parameter_supported"] == true
             || !same_origin(
-                metadata["authorization_endpoint"].as_str().expect("checked"),
+                metadata["authorization_endpoint"]
+                    .as_str()
+                    .expect("checked"),
                 &issuer,
             ),
         base: Tokens {
@@ -682,6 +704,29 @@ pub async fn begin(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<St
     Ok(address.into())
 }
 
+/// A connection, `accept` tried again after `pause` when it fails, and given up on after
+/// `ACCEPT_FAILURES` failures in a row.
+async fn accepted<T, Attempt: std::future::Future<Output = std::io::Result<T>>>(
+    mut accept: impl FnMut() -> Attempt,
+    pause: Duration,
+) -> Result<T, String> {
+    let mut failures = 0;
+    loop {
+        match accept().await {
+            Ok(connection) => return Ok(connection),
+            Err(error) => {
+                failures += 1;
+                if failures >= ACCEPT_FAILURES {
+                    return Err(format!(
+                        "the loopback could not accept the browser's connection: {error}"
+                    ));
+                }
+                tokio::time::sleep(pause).await;
+            }
+        }
+    }
+}
+
 /// The browser's redirects until the one of this sign-in, whose code is exchanged and whose
 /// tokens are kept. A request with another `state`, or none, is answered as refused and left
 /// aside: it cannot end the user's sign-in, and its code is never exchanged.
@@ -691,9 +736,11 @@ async fn received(
     pending: &Pending,
 ) -> Result<(), String> {
     loop {
-        let Ok((mut stream, _)) = listener.accept().await else {
-            continue;
-        };
+        let mut stream = accepted(
+            || async { listener.accept().await.map(|(stream, _)| stream) },
+            ACCEPT_PAUSE,
+        )
+        .await?;
         let Some(query) = request_query(&mut stream).await else {
             answer_page(&mut stream, 404, "Nothing here.").await;
             continue;
@@ -856,6 +903,58 @@ mod tests {
             Some("files:read files:write")
         );
         assert_eq!(challenge_param("Bearer realm=x", "scope"), None);
+    }
+
+    #[test]
+    fn a_resource_covers_its_own_path_by_segments_not_by_characters() {
+        let url = "https://notes.example.com/mcp";
+        assert!(covers("https://notes.example.com/mcp", url));
+        assert!(covers("https://notes.example.com/mcp/", url));
+        assert!(covers("https://notes.example.com", url));
+        assert!(covers(
+            "https://notes.example.com/mcp",
+            "https://notes.example.com/mcp/v2"
+        ));
+        assert!(!covers("https://notes.example.com/mc", url));
+        assert!(!covers("https://notes.example.com/mcp/v2", url));
+        assert!(!covers("https://other.example.com/mcp", url));
+        assert!(!covers("http://notes.example.com/mcp", url));
+        assert!(!covers("https://notes.example.com:8443/mcp", url));
+        assert!(!covers("not a url", url));
+    }
+
+    #[tokio::test]
+    async fn a_failing_accept_is_paused_and_given_up_on() {
+        let tried = std::cell::Cell::new(0);
+        let started = std::time::Instant::now();
+        let ended = accepted(
+            || async {
+                tried.set(tried.get() + 1);
+                Err::<(), _>(std::io::Error::other("no file descriptor left"))
+            },
+            Duration::from_millis(5),
+        )
+        .await;
+        assert!(ended.unwrap_err().contains("no file descriptor left"));
+        assert_eq!(tried.get(), ACCEPT_FAILURES);
+        assert!(
+            started.elapsed() >= Duration::from_millis(5 * (ACCEPT_FAILURES as u64 - 1)),
+            "the retries did not pause"
+        );
+        // A connection that comes after a few failures is the one taken.
+        let tried = std::cell::Cell::new(0);
+        let taken = accepted(
+            || async {
+                tried.set(tried.get() + 1);
+                match tried.get() {
+                    1..=3 => Err(std::io::Error::other("again")),
+                    _ => Ok("a browser"),
+                }
+            },
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(taken.unwrap(), "a browser");
     }
 
     #[test]

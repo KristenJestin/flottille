@@ -51,8 +51,8 @@ used.
 document is fetched without a proxy and without following a redirect, as a connection's own
 requests are, and every URL it names (metadata, endpoints) must be `https://`, or `http://` on
 this machine (the same rule as a connection's URL): a token never crosses a network in clear. The
-protected resource metadata's `resource` must be the server's own origin and a prefix of its URL;
-it is the `resource` Flottille asks tokens for.
+protected resource metadata's `resource` must be the server's own origin and, by path segments
+(`/mc` is not `/mcp`), a prefix of its URL; it is the `resource` Flottille asks tokens for.
 
 **The endpoints are on the issuer's origin.** The authorization server's metadata is chosen by the
 MCP server, which may be hostile: it could name a real provider as the issuer and its own host as

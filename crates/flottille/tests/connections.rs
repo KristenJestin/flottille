@@ -2664,10 +2664,7 @@ fn a_registration_endpoint_on_another_host_than_the_issuer_is_refused() {
 #[test]
 fn an_authorization_endpoint_on_another_host_without_iss_is_refused() {
     let user = user();
-    let (server, url) = protected_server(
-        &user,
-        json!({"authorize_at": "elsewhere", "iss": false}),
-    );
+    let (server, url) = protected_server(&user, json!({"authorize_at": "elsewhere", "iss": false}));
     let watch = user.watch(&[]);
     let login = begun(&user, &url).unwrap();
     let (status, _, page) = browse(&redirect_of(login["url"].as_str().unwrap()));
@@ -2728,7 +2725,10 @@ fn a_temporarily_unavailable_refresh_keeps_the_tokens() {
         assert!(failed.contains("try again"), "{failed}");
         let listed = connection(&user, "notes");
         assert_ne!(listed["state"], "signed out", "{error}: {listed}");
-        assert!(has(&mcp, "conn_notes"), "{error}: the tool left the session");
+        assert!(
+            has(&mcp, "conn_notes"),
+            "{error}: the tool left the session"
+        );
         let entries = user.call("vault.list", json!({})).unwrap().to_string();
         assert!(entries.contains("notes.oauth"), "{error}: {entries}");
     }
@@ -2754,7 +2754,9 @@ fn an_invalid_grant_refresh_signs_out() {
     signed_in(&user, &url);
     reviewed(&user);
     let (_, mcp) = session(&user, "app");
-    change_oauth(&user, |oauth| oauth["refresh_error"] = json!("invalid_grant"));
+    change_oauth(&user, |oauth| {
+        oauth["refresh_error"] = json!("invalid_grant")
+    });
     let failed = failed_call(&mcp);
     stopped(server);
     assert!(failed.contains("sign in again"), "{failed}");
