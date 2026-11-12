@@ -4107,18 +4107,28 @@ impl Row {
             .items_end()
             .gap(space::XS)
             .child(
-                div()
-                    .id(pending_part(key, "failed"))
-                    .max_w(px(540.))
-                    .flex()
-                    .items_center()
-                    .gap(space::XS)
-                    .text_size(px(11.5))
-                    .text_color(p.fail)
-                    .aria_label(said.clone())
-                    .child(icon(Icon::Warning).size(px(11.)).text_color(p.fail))
-                    .child(said)
-                    .test_support(),
+                // The reason is the daemon's words: the line shrinks to the room there is, and
+                // they wrap in it.
+                div().w_full().flex().justify_end().child(
+                    div()
+                        .id(pending_part(key, "failed"))
+                        .min_w_0()
+                        .max_w(px(540.))
+                        .flex()
+                        .items_center()
+                        .gap(space::XS)
+                        .text_size(px(11.5))
+                        .text_color(p.fail)
+                        .aria_label(said.clone())
+                        .child(
+                            icon(Icon::Warning)
+                                .size(px(11.))
+                                .flex_none()
+                                .text_color(p.fail),
+                        )
+                        .child(div().min_w_0().child(said))
+                        .test_support(),
+                ),
             )
             .child(
                 div()
@@ -5063,6 +5073,7 @@ impl Render for Row {
                 let lines = self.sent_lines(window, cx);
                 let message = div()
                     .id(id("message"))
+                    .w_full()
                     .flex()
                     .flex_col()
                     .items_end()
