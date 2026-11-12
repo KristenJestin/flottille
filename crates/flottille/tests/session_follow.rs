@@ -747,3 +747,31 @@ fn a_following_holds_neither_the_inactivity_sweep_nor_waiting_for() {
         user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["state"] == "ended"
     });
 }
+
+#[test]
+fn unsubscribe_takes_the_followed_session_s_title() {
+    let user = User::with_fake_agent().with_fake_gh();
+    user.fake_script(asking());
+    pulls(&user);
+    let (lead, mcp, _, _) = followed(&user, "Fix the login.");
+
+    let ended = mcp.call(
+        "forge",
+        json!({"action": "unsubscribe", "session": " LOGIN "}),
+    );
+
+    assert!(!ended.error, "{}", ended.text);
+    assert!(subscriptions(&user, &lead).is_empty());
+    let unknown = mcp.call(
+        "forge",
+        json!({"action": "unsubscribe", "session": "Nothing of the kind"}),
+    );
+    assert!(
+        unknown.error
+            && unknown.text.starts_with(
+                "refused: no session of your project has the id or the title \"Nothing of the kind\": forge unsubscribe"
+            ),
+        "{}",
+        unknown.text
+    );
+}
