@@ -132,9 +132,16 @@ starts the next one on the same session, with the tools its role has now. A turn
 never cut: the process goes once it ended, and the window says `Reloads after this turn` until
 then, whoever asked (the agent's `tools_reload`, `agent.tools_reload`). Between turns nothing
 restarts until the next message: the window and the command line say the tools are given then. It relies on the new process, not on `list_changed`, so it works the same for every agent:
-the new process's first prompt carries the `tools` delivery, what changed by tool as above, or
-`Your tools were reloaded: nothing changed.`, so that the agent knows its list is current. Its
-children keep their processes and lists. A session that ended or failed does not offer it.
+the new process's first prompt carries the `tools` delivery: **the whole list of the tools the
+agent has now**, one line each (`- <name>: <actions, comma-separated> — <the first sentence of its
+description>`, the actions part left out for a tool without any), under `Your tools were reloaded.
+These are your tools now, whatever you read of them before:`, then, when anything changed since the
+last list its process was given, `What changed since you last read them:` and what changed by tool
+as above. A reload is the user saying the agent is wrong about its tools, so it never answers with
+a diff alone, and never with `nothing changed`: a diff against the list the last process was given
+confirms a wrong belief of an agent whose conversation holds an older list (a delivery lost in a
+compaction, a description or a schema that changed). Only an update, a new process that starts
+with no reload asked, says what changed alone. Its children keep their processes and lists. A session that ended or failed does not offer it.
 
 What the agents Flottille runs do with the notice (checked in November 2026, from their
 documentation, changelogs and published source, never by running one):
