@@ -19,7 +19,7 @@ use flottille_window::state::AgentState;
 use flottille_window::tree::session_id;
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
 const QUESTION: &str =
@@ -578,6 +578,21 @@ fn click(id: String, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+fn bounds(id: String, cx: &mut VisualTestContext) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    cx.update(|window, _| window.find(id).bounds())
+}
+
+/// Whether the field of the words of question `n` of the card of row `at` has the focus.
+fn field_focused(
+    page: &Entity<SessionPage>,
+    at: usize,
+    n: usize,
+    cx: &mut VisualTestContext,
+) -> bool {
+    let field = card_of(page, at, cx).read_with(cx, |card, _| card.field(n).clone());
+    cx.update(|window, cx| field.read(cx).focus_handle(cx).is_focused(window))
+}
+
 fn chosen(id: String, cx: &mut VisualTestContext) -> Option<bool> {
     cx.update(|window, _| window.try_find(id).and_then(|found| found.selected()))
 }
@@ -643,6 +658,11 @@ fn an_ask_with_three_questions_shows_three_blocks_each_answered_apart(cx: &mut T
     assert!(
         has(format!("row-{at}-answer-1-frame"), cx),
         "its field is there at once"
+    );
+    assert_eq!(
+        label(format!("row-{at}-answer-1-field-label"), cx).as_deref(),
+        Some("Your answer"),
+        "a question in words alone keeps its labelled field"
     );
     assert!(
         !has(format!("row-{at}-answer-0-frame"), cx),
@@ -755,7 +775,7 @@ fn several_choices_have_square_marks_and_say_several_once(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
-fn something_else_unfolds_a_labelled_field_and_needs_words(cx: &mut TestAppContext) {
+fn something_else_holds_a_named_field_and_needs_words(cx: &mut TestAppContext) {
     let user = user();
     let (_, _, page, at, cx) = three_asked(&user, cx);
     let card = card_of(&page, at, cx);
@@ -766,7 +786,7 @@ fn something_else_unfolds_a_labelled_field_and_needs_words(cx: &mut TestAppConte
     assert!(card.read_with(cx, |card, cx| card.is_ready(cx)));
     assert!(!has(format!("row-{at}-answer-0-frame"), cx), "folded");
 
-    // Picked, it takes the place of the choice and unfolds its field, labelled.
+    // Picked, it takes the place of the choice and holds its field, named.
     click(format!("row-{at}-question-0-other"), cx);
     settle(cx);
     assert_eq!(
@@ -776,7 +796,7 @@ fn something_else_unfolds_a_labelled_field_and_needs_words(cx: &mut TestAppConte
     assert_eq!(chosen(format!("row-{at}-question-0-other"), cx), Some(true));
     assert!(has(format!("row-{at}-answer-0-frame"), cx));
     assert_eq!(
-        label(format!("row-{at}-answer-0-field-label"), cx).as_deref(),
+        label(format!("row-{at}-answer-0-frame"), cx).as_deref(),
         Some("Your answer")
     );
     assert!(
@@ -789,10 +809,101 @@ fn something_else_unfolds_a_labelled_field_and_needs_words(cx: &mut TestAppConte
     assert_eq!(answers[0].choices, Vec::<String>::new());
     assert_eq!(answers[0].text, "Both, in that order");
 
-    // Let go of, it folds away.
-    click(format!("row-{at}-question-0-other"), cx);
+    // Let go of, from its words (the middle of the row is its field), it folds away.
+    click(format!("row-{at}-question-0-other-label"), cx);
     settle(cx);
     assert!(!has(format!("row-{at}-answer-0-frame"), cx), "folded again");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_field_of_something_else_is_in_its_row_right_of_the_mark_and_focused(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let other = format!("row-{at}-question-0-other");
+    assert!(
+        !has(format!("{other}-field"), cx),
+        "not picked: a row as any"
+    );
+    assert!(!field_focused(&page, at, 0, cx));
+    let alone = bounds(other.clone(), cx).size.height;
+
+    click(other.clone(), cx);
+    settle(cx);
+    let (row, mark, words, field) = (
+        bounds(other.clone(), cx),
+        bounds(format!("{other}-mark"), cx),
+        bounds(format!("{other}-label"), cx),
+        bounds(format!("row-{at}-answer-0-frame"), cx),
+    );
+    assert!(
+        row.contains(&field.origin) && field.right() <= row.right(),
+        "the field is inside the row: {row:?} {field:?}"
+    );
+    assert!(
+        mark.right() <= words.left() && words.right() <= field.left(),
+        "the mark, then the words, then the field: {mark:?} {words:?} {field:?}"
+    );
+    assert!(row.size.height > alone, "the row is as high as its field");
+    assert_eq!(
+        label(format!("{other}-label"), cx).as_deref(),
+        Some("Something else:"),
+        "its words stay beside the field"
+    );
+    assert!(field_focused(&page, at, 0, cx), "focused at once");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn nothing_under_the_options_holds_the_words_of_something_else(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, _, at, cx) = three_asked(&user, cx);
+    click(format!("row-{at}-question-0-other"), cx);
+    click(format!("row-{at}-question-2-other"), cx);
+    settle(cx);
+    assert!(has(format!("row-{at}-answer-0-frame"), cx));
+    for n in [0, 2] {
+        assert!(
+            !has(format!("row-{at}-answer-{n}-field"), cx),
+            "no separate field under the options of question {n}"
+        );
+        assert!(!has(format!("row-{at}-answer-{n}-field-label"), cx));
+        assert!(!has(format!("row-{at}-question-{n}-words"), cx));
+    }
+}
+
+#[gpui_kit::test]
+fn letting_go_of_something_else_folds_its_field_and_keeps_the_words(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let other = format!("row-{at}-question-0-other");
+    let alone = bounds(other.clone(), cx).size.height;
+    click(other.clone(), cx);
+    settle(cx);
+    write(&page, at, 0, "Both, in that order", cx);
+
+    click(format!("{other}-label"), cx);
+    settle(cx);
+    assert!(!has(format!("row-{at}-answer-0-frame"), cx), "folded away");
+    assert_eq!(
+        bounds(other.clone(), cx).size.height,
+        alone,
+        "the row as before"
+    );
+    assert_eq!(
+        label(format!("{other}-label"), cx).as_deref(),
+        Some("Something else…"),
+        "the label is back"
+    );
+    assert!(!field_focused(&page, at, 0, cx));
+
+    click(other, cx);
+    settle(cx);
+    assert!(has(format!("row-{at}-answer-0-frame"), cx));
+    let words = card_of(&page, at, cx).read_with(cx, |card, cx| card.field(0).read(cx).value());
+    assert_eq!(words.as_ref(), "Both, in that order", "kept as it was");
     at_rest(cx);
 }
 
