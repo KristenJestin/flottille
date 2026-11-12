@@ -1187,15 +1187,20 @@ change" says, and called through the gate as every other.
 ## Review
 
 With Review active in a project (`docs/extensions.md`, "Review"), each root of the project has the
-`review` tool with the action `start`, and the pilot of a review has it with `run_pass` and
-`report`; a pass, the verifier and any other child have none of it. It is an extension's tool:
+`review` tool with the action `start` **only while the project lets agents start a review** (the
+setting `agents_start`, off by default: a review starts when the user asks, with `/review` or
+`flottille review`, which no switch touches), and the pilot of a review has it with `run_pass` and
+`report`; a pass, the verifier and any other child have none of it. Turning the switch on or off,
+in Settings or in the project's file, adds or removes `review` from the lists of the roots through
+"When the tools change"; a call of it made after it left is refused as a call of any tool the agent
+has not. It is an extension's tool:
 added and removed as "When the tools change" says, and called through the gate as every other.
 Review declares its three actions harmless: each writes a review in Flottille's store and launches
 what the user asked for when they asked for a review, within the children cap.
 
 | Tool | |
 |---|---|
-| `review {action: start}` (a root) | Reviews the caller's own change: its workspace's diff from its base, read by a pilot launched as the caller's child, as `/review` does. Refused, before any agent starts, for a session in the project folder, while a review of it runs, when the diff is empty (`nothing to review: workspace w has no change from its base (main)`), after two rounds, and at the children cap. The findings come later as a delivery, `[flottille:review]`: the call waits for no one. The session's `agent_*` tools do not reach the review's agents, and it is told nothing of them as of its children. |
+| `review {action: start}` (a root, while `agents_start` is on) | Does what the user's `/review` does: reviews the caller's own change: its workspace's diff from its base, read by a pilot launched as the caller's child. Its description says so. Refused, before any agent starts, for a session in the project folder, while a review of it runs, when the diff is empty (`nothing to review: workspace w has no change from its base (main)`), after two rounds, and at the children cap. The findings come later as a delivery, `[flottille:review]`: the call waits for no one. The session's `agent_*` tools do not reach the review's agents, and it is told nothing of them as of its children. |
 | `review {action: run_pass, pass, brief?}` (the pilot) | Runs one pass of its review as the pilot's own child (depth 2): `spec` (only for a session that develops a spec), `bugs`, `standards`, `security`, among those Review's settings enable for the project, or the `verifier`; each once. Its instructions are Review's fixed text for that pass and the user's guidance; the standards pass's add the project's `CLAUDE.md` else `AGENTS.md` read from the base branch, never from the workspace. Its first message is the diff (each repository's `git diff <from>` and the files it changes), the spec's `C` and `D` when there is one, and `brief`. Its report comes to the pilot as `[flottille:child-report]`. Refused above the project's children cap (`the project app runs its cap of 2 children: wait for one of them to end`), never queued. |
 | `review {action: report, summary?, findings, previous?}` (the pilot) | The findings, once: each `{severity, confidence, file?, lines?, concerns, quote?, text, case?}`, `severity` `high`, `medium`, `low` or `info`, `confidence` the verifier's (`confirmed`, `plausible`, or `rejected`, which is left out), `concerns` `code` or a `C` or `D` of the spec, `file` a file of the diff. A `high` or `medium` finding without its place (`file`, `lines`) and its failing case (`case`) is refused, and so is one naming a `C` or `D` the spec does not have, or a file the diff does not change: nothing is kept then. In a second round, `previous` gives each open finding of the first by its identifier, `fixed` or `open`. Kept, each finding takes the session's next identifier (`F1`, `F2`…); the confirmed and plausible ones, `info` left out, are delivered to the session, with what changed in the workspace during the review when something did; the pilot's session ends with its turn, its passes still running stop. |
 

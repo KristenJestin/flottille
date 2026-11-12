@@ -142,8 +142,8 @@ for an extension that is not being built.
 
 The extension gives a schema: each setting's key, label, one line of hint, kind, default, and
 whether a project may set its own value. The kinds come with their first need: a choice among
-values (one, with the words that say each, or a subset) and a language (Specs), a switch, a
-percentage, a number of tokens, a duration (the compaction).
+values (one, with the words that say each, or a subset) and a language (Specs), a switch (built
+for Review's two doors, #783: `true` or `false`, off by default), a percentage, a number of tokens, a duration (the compaction).
 
 The core provides:
 
@@ -175,7 +175,9 @@ the judge about (Auto) or holds for the user (Ask).
 As built: a tool is a `Tool` of the declaration, its MCP definition, `given` (who gets it, `To::Roots`
 for now, and the actions of its `action` argument each may call), `harmless` (the actions that
 read or write Flottille's store and nothing else, as the core's own reads: they pass in every
-mode), a `gate` function (the extension's refusal of a call, or none) and a `call` function.
+mode), `offered` (whether the project's settings still give it to those `given` names: Review's
+`agents_start` withholds `review` from the roots, and it leaves their lists as any tool does),
+a `gate` function (the extension's refusal of a call, or none) and a `call` function.
 `agents::tools_of` adds the tools of the extensions active in the project; the server serves them
 as its own; the gate refuses an action the caller is not given and what the extension's `gate`
 refuses before any mode is looked at, lets a harmless action pass and holds the rest as a call to
@@ -674,9 +676,13 @@ From #308, #309 and #320, with the decisions already taken. Global.
 Reads a change with fresh eyes and delivers what is wrong to the session that made it. Works with
 or without a spec. Project-scoped.
 
-- **Launched** by `/review` in a session's composer (a Flottille command, never sent to the
-  agent), by the `review` tool a root calls on itself, automatically when the session's pull
-  request is opened, and by `flottille review <session>`. No button.
+- **Launched** when the user asks: `/review` in a session's composer (a Flottille command, never
+  sent to the agent) and `flottille review <session>`, which always work. No button. Two doors
+  more exist for whoever wants them, **both off by default** and set in Review's settings, in
+  Settings or per project: `auto_on_pull_request`, a review of the session when its pull request is
+  opened, and `agents_start`, the `review` tool's `start` a root calls on itself. A review does not
+  start on its own (the maintainer's decision of 2026-11-12, #783): an agent that started one on
+  its whole branch, unasked, was not wanted.
 - **A pilot**: the review is a child of the reviewed session. It reads the diff, decides which
   passes to run, runs them as its own children through `review`, then a verifier child; it
   dedupes and delivers the confirmed findings to the session. The depth exception of "Agents an
@@ -714,13 +720,18 @@ or without a spec. Project-scoped.
 
 As built (#338):
 
-- **Doors.** `review.start {agent}` (and `extension.act`), `/review` alone in a session's composer
-  (`agent.send` runs it and answers with no delivery: the word is never sent to the agent; with
-  more text it is a message like any other), the `review` tool's `start` for a root, the Core
-  event `item.opened` of a pull request whose head is the branch of a workspace a session runs in
-  (refused at the cap, the session is told, `[flottille:review]`; refused for another reason,
-  nothing is said), and `flottille review <session>`. A session in the project folder has no base
-  to read a diff from: refused.
+- **Doors.** The user's, whatever the switches: `review.start {agent}` (and `extension.act`),
+  `/review` alone in a session's composer (`agent.send` runs it and answers with no delivery: the
+  word is never sent to the agent; with more text it is a message like any other) and `flottille
+  review <session>`. Behind a switch each, both `false` by default (an existing project's file
+  without them reads `false`, a project's own value wins over Settings'): the Core event
+  `item.opened` of a pull request whose head is the branch of a workspace a session runs in, while
+  `auto_on_pull_request` is on (refused at the cap, the session is told, `[flottille:review]`;
+  refused for another reason, nothing is said; off, it starts nothing), and the `review` tool's
+  `start` for a root, while `agents_start` is on (off, the root is not given the `review` tool at
+  all, it leaves its list through `docs/tools.md`, "When the tools change", and the pilot keeps
+  `run_pass` and `report`). A session in the project folder has no base to read a diff from:
+  refused.
 - **The diff** of each repository of the session's workspace starts at the merge base of its base
   (`git diff <from>`, uncommitted and untracked files included); a second round starts at the
   `HEAD` the first one recorded. Each repository's `HEAD` and `git status` are recorded at the
@@ -737,12 +748,18 @@ As built (#338):
 
 **Its page** (Settings, Features, Review; `design.md` §10), in the window's words: none of
 *pilot*, *pass* or *verifier* is shown, and the keys (`spec`, `bugs`, `standards`, `security`,
-`<pass>_model`, `verifier_model`) stay as they are.
+`<pass>_model`, `verifier_model`, `auto_on_pull_request`, `agents_start`) stay as they are.
 
 - The switch **Review changes** ("Agents read a session's change with fresh eyes and send it what
   is wrong. Nothing is blocked."), and its usage line, shown even while it is off: "A review starts
-  when a session's pull request opens, when you type **/review** in its composer, or when its
-  agent asks for one. From a terminal: `flottille review <session>`."
+  when you type **/review** in a session's composer. From a terminal: **flottille review
+  <session>**.", then a sentence for each switch below that is on ("It also starts when a session's
+  pull request opens.", "A session's agent may ask for one too.").
+- **When it starts**, one card above the checks, two switches, each with its label and its help
+  line, both off by default: **Start a review when a session's pull request opens** ("Off, a review
+  starts only when you ask for one.") and **Let agents start a review** ("Off, an agent cannot ask
+  for a review of its own change: only you can."). In a project's page they are the project's,
+  Settings' value when it sets none, and one it sets carries the dot and its way back.
 - **What it checks**: one card, a line per pass, each with its switch, its name, one line of what
   it looks for and its model on the right (a compact `ModelChoice`): **The spec** ("Each expected
   behaviour met, nothing out of scope. Only for a session that builds a spec."), **Bugs** ("Wrong
