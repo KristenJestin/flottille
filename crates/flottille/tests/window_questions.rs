@@ -857,6 +857,125 @@ fn the_field_of_something_else_is_in_its_row_right_of_the_mark_and_focused(
 }
 
 #[gpui_kit::test]
+fn ctrl_enter_in_the_field_of_something_else_sends(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
+    let card = card_of(&page, at, cx);
+    write(&page, at, 1, "Export orders as CSV", cx);
+    click(format!("row-{at}-question-2-option-0"), cx);
+    click(format!("row-{at}-question-0-other"), cx);
+    settle(cx);
+    assert!(field_focused(&page, at, 0, cx));
+    cx.simulate_input("Both, in that order");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("and say why");
+    cx.run_until_parked();
+    assert_eq!(
+        card.read_with(cx, |card, cx| card.field(0).read(cx).value().to_string()),
+        "Both, in that order\nand say why",
+        "Enter breaks the line in the row's field"
+    );
+    assert!(!card.read_with(cx, |card, cx| card.is_sent(cx)));
+    cx.simulate_keystrokes("ctrl-enter");
+    until(&shell, cx, "the answer went", |cx| {
+        card.read_with(cx, |card, cx| card.is_sent(cx))
+    });
+    settle(cx);
+    assert!(
+        !has(format!("row-{at}-answer-0-frame"), cx),
+        "the field gave way once sent from the field itself"
+    );
+    assert!(!field_focused(&page, at, 0, cx), "and holds no focus");
+}
+
+#[gpui_kit::test]
+fn the_field_in_the_row_grows_to_several_lines_inside_it(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let (other, frame) = (
+        format!("row-{at}-question-0-other"),
+        format!("row-{at}-answer-0-frame"),
+    );
+    click(other.clone(), cx);
+    settle(cx);
+    let one = (bounds(other.clone(), cx), bounds(frame.clone(), cx));
+    write(&page, at, 0, "First line\nSecond line\nThird line", cx);
+    settle(cx);
+    let three = (bounds(other.clone(), cx), bounds(frame.clone(), cx));
+    assert!(
+        three.1.size.height > one.1.size.height + px(30.),
+        "the field grows with its lines: {:?} {:?}",
+        one.1,
+        three.1
+    );
+    assert!(
+        three.0.size.height > one.0.size.height + px(30.),
+        "so does the row"
+    );
+    assert!(
+        three.0.contains(&three.1.origin) && three.1.bottom() <= three.0.bottom(),
+        "the field stays inside the row"
+    );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn in_a_question_of_several_choices_something_else_holds_its_field_too(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let other = format!("row-{at}-question-2-other");
+    click(format!("row-{at}-question-2-option-0"), cx);
+    click(other.clone(), cx);
+    settle(cx);
+    assert!(has(format!("{other}-tick"), cx), "a square mark");
+    assert_eq!(chosen(other.clone(), cx), Some(true));
+    assert_eq!(
+        chosen(format!("row-{at}-question-2-option-0"), cx),
+        Some(true),
+        "the other choice stays"
+    );
+    let (row, mark, field) = (
+        bounds(other.clone(), cx),
+        bounds(format!("{other}-mark"), cx),
+        bounds(format!("row-{at}-answer-2-frame"), cx),
+    );
+    assert!(
+        row.contains(&field.origin) && mark.right() <= field.left(),
+        "the field is in the row, right of the mark: {row:?} {field:?}"
+    );
+    assert!(field_focused(&page, at, 2, cx), "focused at once");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_field_of_something_else_gives_way_once_the_answer_is_sent(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
+    let card = card_of(&page, at, cx);
+    click(format!("row-{at}-question-0-other"), cx);
+    write(&page, at, 0, "Both, in that order", cx);
+    write(&page, at, 1, "Export orders as CSV", cx);
+    click(format!("row-{at}-question-2-option-0"), cx);
+    settle(cx);
+    assert!(has(format!("row-{at}-answer-0-frame"), cx));
+    click(format!("row-{at}-answer-send"), cx);
+    until(&shell, cx, "the answer went", |cx| {
+        card.read_with(cx, |card, cx| card.is_sent(cx))
+    });
+    settle(cx);
+    assert!(
+        !has(format!("row-{at}-answer-0-frame"), cx),
+        "the field of the row folded away, no longer editable"
+    );
+    assert!(!has(format!("row-{at}-answer-1-frame"), cx));
+    assert!(
+        !field_focused(&page, at, 0, cx),
+        "nothing is typed into a field that gave way"
+    );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
 fn nothing_under_the_options_holds_the_words_of_something_else(cx: &mut TestAppContext) {
     let user = user();
     let (_, _, _, at, cx) = three_asked(&user, cx);
@@ -898,6 +1017,11 @@ fn letting_go_of_something_else_folds_its_field_and_keeps_the_words(cx: &mut Tes
         "the label is back"
     );
     assert!(!field_focused(&page, at, 0, cx));
+    let card = card_of(&page, at, cx);
+    assert!(
+        cx.update(|window, cx| card.read(cx).has_focus(window)),
+        "the focus goes back to the card"
+    );
 
     click(other, cx);
     settle(cx);

@@ -1346,8 +1346,9 @@ at the right of the question), each with its description under its label. The la
 "Something else…": picked, it becomes `Something else: [field]`, the field (named "Your answer")
 unfolding in the row, right of the mark, focused at once (`Enter` breaks a line, `Ctrl+Enter`
 sends; the field grows with its text up to eight lines, then scrolls), folding away when the row
-is let go (the words are kept), and a question answered this way needs its words. Once an option is chosen, "+ Add a note" unfolds a field "Note with your
-choice": a choice and a note go together. A question with no options is that field alone. One Answer for the card, enabled once
+is let go (the words are kept), and a question answered this way needs its words. Once an option
+is chosen, "+ Add a note" unfolds a field "Note with your choice": a choice and a note go
+together. A question with no options is that field alone. One Answer for the card, enabled once
 every question has a choice or words. The agent gets one message:
 
 ```

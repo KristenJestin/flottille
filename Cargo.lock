@@ -2817,7 +2817,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-alpha.feat-10-choice-row-field.5#394a31c51a175ca70b07772ebf199caa4e131a8a"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-alpha.feat-10-choice-row-field.6#47b64e6d348c3d6490c7b7e5512e8e30f554fbf5"
 dependencies = [
  "gpui-kit",
  "toml 1.1.8+spec-1.1.0",
