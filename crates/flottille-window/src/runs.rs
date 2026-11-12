@@ -524,6 +524,14 @@ impl EndedFold {
         }
     }
 
+    /// A fold that already is open or folded, with nothing moving.
+    pub fn at(open: bool) -> Self {
+        Self {
+            motion: Motion::settled(if open { 1.0 } else { 0.0 }),
+            ..Self::new()
+        }
+    }
+
     /// Unfolds or folds over [`PANEL`].
     pub fn animate(&mut self, open: bool, now: Instant, reduce: bool) {
         self.motion

@@ -4,6 +4,7 @@
 //! screen.
 
 mod common;
+mod guard;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ use flottille_window::session::{RailRow, SessionPage};
 use flottille_window::shell::Selection;
 use flottille_window::tree::session_id;
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::toggle_id;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
@@ -30,10 +32,39 @@ fn eventually(what: &str, mut check: impl FnMut() -> bool) {
 /// A user whose review's agents hang in their turn, so that the test acts as them, with a project
 /// `app`, Review on, its workspace `w` holding a change, and a session in it: the session's id.
 fn session(user: &User) -> String {
-    user.fake_script(json!({"turns": [
-        {"when": "of the change of workspace", "do": [{"hang": true}]},
-        {"when": "The change, in each repository", "do": [{"hang": true}]}
-    ]}));
+    session_scripted(
+        user,
+        review_script(json!(["fake-small", "fake-large"]), false),
+    )
+}
+
+/// The fake agent's script of a review: agents that offer `models`, the pilot and its check
+/// hanging in their turn, and each saying how much of its context it used when `used`.
+fn review_script(models: Value, used: bool) -> Value {
+    let hang = |tokens: u64| match used {
+        true => json!([{"usage": {"used": tokens, "size": 200_000}}, {"hang": true}]),
+        false => json!([{"hang": true}]),
+    };
+    let mut turns = vec![
+        json!({"when": "of the change of workspace", "do": hang(90_000)}),
+        json!({"when": "The change, in each repository", "do": hang(12_000)}),
+    ];
+    if used {
+        turns.push(json!({"when": "build the login", "do": [
+            {"usage": {"used": 150_000, "size": 200_000}}, {"say": "Built."}
+        ]}));
+    }
+    json!({"models": models, "turns": turns})
+}
+
+/// [`session`] for a fake agent that follows `script`.
+fn session_scripted(user: &User, script: Value) -> String {
+    user.fake_script(script);
+    session_with_script(user)
+}
+
+/// [`session`] for a user whose fake agent's script is already set.
+fn session_with_script(user: &User) -> String {
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -173,29 +204,102 @@ fn page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SessionPage
         .expect("a session's page is open")
 }
 
-#[gpui_kit::test]
-fn the_review_s_agents_are_one_folded_line_of_the_tree(cx: &mut TestAppContext) {
-    let user = User::with_fake_agent();
-    let session = session(&user);
+/// A review in a session of the window, its pilot having started the check `bugs`; the session's
+/// page is open and the rail holds the review's row: the session's id, the pilot's, the check's.
+fn review_rail<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    &'a mut VisualTestContext,
+    String,
+    String,
+    String,
+    Mcp,
+) {
+    review_rail_scripted(
+        user,
+        review_script(json!(["fake-small", "fake-large"]), false),
+        cx,
+    )
+}
+
+/// [`review_rail`] for agents that offer these models.
+fn review_rail_of_models<'a>(
+    user: &User,
+    models: Value,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    &'a mut VisualTestContext,
+    String,
+    String,
+    String,
+    Mcp,
+) {
+    review_rail_scripted(user, review_script(models, false), cx)
+}
+
+/// [`review_rail`] for a fake agent that follows `script`.
+fn review_rail_scripted<'a>(
+    user: &User,
+    script: Value,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    &'a mut VisualTestContext,
+    String,
+    String,
+    String,
+    Mcp,
+) {
+    let session = session_scripted(user, script);
     let started = user
         .call("review.start", json!({"agent": session}))
         .unwrap();
     let pilot_id = started["pilot"].as_str().unwrap().to_owned();
-    let pilot = pilot(&user);
+    let pilot = pilot(user);
     let ran = pilot.call("review", json!({"action": "run_pass", "pass": "bugs"}));
     assert!(!ran.error, "{}", ran.text);
-    let (shell, cx) = window(&user, cx);
+    let (shell, cx) = window(user, cx);
     until(&shell, cx, "the session is in the tree", |cx| {
         cx.update(|window, _| window.try_find(session_id(&session)).is_some())
     });
     settle(cx);
     cx.update(|window, cx| window.click(session_id(&session), cx));
-    until(&shell, cx, "the rail holds the review's line", |cx| {
-        cx.update(|window, _| window.try_find(format!("rail-review-{pilot_id}")).is_some())
+    let row = format!("rail-row-{pilot_id}");
+    until(&shell, cx, "the rail holds the review's row", |cx| {
+        present(cx, &row)
     });
     settle(cx);
+    let page = page(&shell, cx);
+    let check = page
+        .read_with(cx, |p, cx| {
+            p.rail()
+                .read(cx)
+                .agents()
+                .iter()
+                .find(|a| a.parent.as_deref() == Some(pilot_id.as_str()))
+                .map(|a| a.id.clone())
+        })
+        .expect("the check is in the rail");
+    (shell, cx, session, pilot_id, check, pilot)
+}
 
-    // One folded line: neither the pilot nor its pass has a row of its own.
+/// The id of the chevron at the end of the review's row.
+fn chevron(pilot: &str) -> gpui_kit::ElementId {
+    toggle_id(gpui_kit::ElementId::Name(
+        format!("rail-row-{pilot}").into(),
+    ))
+}
+
+#[gpui_kit::test]
+fn a_review_is_one_row_that_says_its_checks(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx, session, pilot_id, check, _) = review_rail(&user, cx);
+
+    // One row: the review's own, with no line above it that folds the agents under it.
+    assert!(!present(cx, &format!("rail-review-{pilot_id}")));
     let page = page(&shell, cx);
     let rows = page.read_with(cx, |p, cx| p.rail().read(cx).rows());
     assert_eq!(rows[0], RailRow::Agent(session.clone()));
@@ -203,26 +307,51 @@ fn the_review_s_agents_are_one_folded_line_of_the_tree(cx: &mut TestAppContext) 
         rows[1],
         RailRow::Review {
             pilot: pilot_id.clone(),
-            count: 2,
-            open: false
+            count: 1,
+            open: true
         }
     );
-    assert!(!present(cx, &format!("rail-row-{pilot_id}")));
     assert_eq!(
-        label(cx, &format!("rail-review-{pilot_id}")).as_deref(),
-        Some("Review · 0/2 checks")
+        label(cx, &format!("rail-name-{pilot_id}")).as_deref(),
+        Some("Review, round 1")
     );
+    // What the separate line said is its second line, in the words of the window.
+    let said = label(cx, &format!("rail-runs-on-{pilot_id}")).unwrap();
+    assert_eq!(said, "0/2 checks");
+    assert!(!said.contains("pass"), "{said}");
+    // Unfolded while it runs: its check is under it.
+    assert!(present(cx, &format!("rail-row-{check}")));
+}
+
+#[gpui_kit::test]
+fn the_review_s_fold_is_on_the_right_and_holds_its_passes_and_findings(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx, session, pilot_id, check, pilot) = review_rail(&user, cx);
+    let page = page(&shell, cx);
+
+    // The chevron ends the row, after its title, as the sidebar's rows have it.
+    let row = bounds(cx, &format!("rail-row-{pilot_id}"));
+    let title = bounds(cx, &format!("rail-name-{pilot_id}"));
+    let at = cx.update(|window, _| window.find(chevron(&pilot_id)).bounds());
+    assert!(title.left() < at.left(), "{title:?} then {at:?}");
+    assert!(row.right() - at.right() < px(8.), "{row:?} ends at {at:?}");
+
+    // A click on it folds the check away, and does not open the review's conversation.
+    cx.update(|window, cx| window.click(chevron(&pilot_id), cx));
+    assert_eq!(page.read_with(cx, |p, _| p.shown().to_owned()), session);
+    settle(cx);
+    assert!(!present(cx, &format!("rail-row-{check}")));
     assert_eq!(behind(&pilot_id, cx), None, "folded, nothing is drawn");
 
-    // A click unfolds it to the review's agents, growing into place.
-    cx.update(|window, cx| window.click(format!("rail-review-{pilot_id}"), cx));
+    // A second one unfolds it, growing into place.
+    cx.update(|window, cx| window.click(chevron(&pilot_id), cx));
     let first = behind(&pilot_id, cx).expect("drawn from the first frame");
     settle(cx);
     let open = behind(&pilot_id, cx).unwrap();
     assert!(first < open, "it grows: {first} then {open}");
-    assert!(present(cx, &format!("rail-row-{pilot_id}")));
+    assert!(present(cx, &format!("rail-row-{check}")));
 
-    // Its state follows the review: once it reported, it says its findings.
+    // Its findings come after its checks, each with its status, which follows the user's word.
     let reported = pilot.call(
         "review",
         json!({"action": "report", "findings": [{"severity": "low", "confidence": "confirmed",
@@ -230,58 +359,270 @@ fn the_review_s_agents_are_one_folded_line_of_the_tree(cx: &mut TestAppContext) 
             "case": "read it"}]}),
     );
     assert!(!reported.error, "{}", reported.text);
-    until(&shell, cx, "the line says the findings", |cx| {
-        label(cx, &format!("rail-review-{pilot_id}"))
-            .is_some_and(|said| said.ends_with("· 1 finding"))
+    let finding = format!("rail-finding-row-{pilot_id}-F1");
+    until(&shell, cx, "the review ended", |cx| {
+        label(cx, &format!("rail-runs-on-{pilot_id}"))
+            .is_some_and(|said| said.ends_with("1 finding"))
     });
-
-    // Its findings are under it, each with its status, which follows the user's word.
-    let row = format!("rail-finding-row-{pilot_id}-F1");
-    until(&shell, cx, "the finding is under the line", |cx| {
-        label(cx, &row).is_some_and(|said| said.contains("no doc comment"))
-    });
-    assert!(label(cx, &row).unwrap().contains("· open:"));
+    settle(cx);
+    // Folded once done, whatever was chosen while it ran: unfolded by hand again.
+    assert_eq!(behind(&pilot_id, cx), None);
+    cx.update(|window, cx| window.click(chevron(&pilot_id), cx));
+    settle(cx);
+    assert!(label(cx, &finding).is_some_and(|said| said.contains("no doc comment")));
+    assert!(label(cx, &finding).unwrap().contains("· open:"));
+    let after = bounds(cx, &finding);
+    let checks = bounds(cx, &format!("rail-row-{check}"));
+    assert!(checks.bottom() <= after.top(), "{checks:?} then {after:?}");
     user.call(
         "review.finding",
         json!({"session": session, "finding": "F1", "status": "dismissed"}),
     )
     .unwrap();
     until(&shell, cx, "the finding says it is dismissed", |cx| {
-        label(cx, &row).is_some_and(|said| said.contains("· dismissed:"))
+        label(cx, &finding).is_some_and(|said| said.contains("· dismissed:"))
     });
-
-    // A second click folds it away again, and nothing moves at rest.
-    cx.update(|window, cx| window.click(format!("rail-review-{pilot_id}"), cx));
-    settle(cx);
-    assert!(!present(cx, &format!("rail-row-{pilot_id}")));
     at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_done_review_is_folded_and_says_its_findings(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx, _, pilot_id, check, pilot) = review_rail(&user, cx);
+    assert!(behind(&pilot_id, cx).is_some(), "unfolded while it runs");
+
+    let reported = pilot.call(
+        "review",
+        json!({"action": "report", "findings": [{"severity": "low", "confidence": "confirmed",
+            "concerns": "code", "file": "login.rs", "lines": "1", "text": "no doc comment",
+            "case": "read it"}]}),
+    );
+    assert!(!reported.error, "{}", reported.text);
+    let said = format!("rail-runs-on-{pilot_id}");
+    until(&shell, cx, "the row says the findings", |cx| {
+        label(cx, &said).is_some_and(|said| said.ends_with("· 1 finding"))
+    });
+    // It folds away over a moment rather than at once, and then nothing under it is drawn.
+    assert!(behind(&pilot_id, cx).is_some(), "folding, not gone");
+    settle(cx);
+    assert_eq!(behind(&pilot_id, cx), None);
+    assert!(!present(cx, &format!("rail-row-{check}")));
+    assert!(!present(cx, &format!("rail-finding-row-{pilot_id}-F1")));
+    assert_eq!(label(cx, &said).as_deref(), Some("1/2 checks · 1 finding"));
+    at_rest(cx);
+
+    // Unfolded by hand, its findings are under it.
+    cx.update(|window, cx| window.click(chevron(&pilot_id), cx));
+    settle(cx);
+    assert!(present(cx, &format!("rail-finding-row-{pilot_id}-F1")));
+}
+
+#[gpui_kit::test]
+fn a_rail_row_says_its_state_whole_when_there_is_room(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (_, cx, _, pilot_id, check, _) = review_rail(&user, cx);
+
+    for agent in [&pilot_id, &check] {
+        let row = bounds(cx, &format!("rail-row-{agent}"));
+        let said = bounds(cx, &format!("rail-runs-on-{agent}"));
+        // Nothing of the row's width is kept from it but what its own end holds (the chevron or
+        // the menu's place, 28 px, and the padding).
+        assert!(
+            row.right() - said.right() < px(44.),
+            "{agent}: the second line ends at {:?}, its row at {:?}",
+            said.right(),
+            row.right()
+        );
+        // The text's own measure: the kit shapes it in its font and draws a tooltip under the
+        // pointer only when it is wider than its line.
+        let line = format!("rail-runs-on-{agent}");
+        cx.update(|window, cx| window.hover(line.clone(), cx));
+        settle(cx);
+        assert!(
+            !present(cx, &format!("{line}-tooltip")),
+            "{agent}: a whole text has no tooltip"
+        );
+    }
+    // The rail with a review running keeps every text inside it.
+    guard::assert_stays_inside(cx, "rail-agents");
+}
+
+#[gpui_kit::test]
+fn a_long_state_stays_inside_a_narrow_rail(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    // The check runs on a model that is one long word, which its state says.
+    let (shell, cx, _, _, check, _) = review_rail_of_models(&user, json!([guard::UNBROKEN]), cx);
+    // The rail is 290 px wide at every width (a drawer in a narrow window), so this is its
+    // narrowest: the long word has no room to hide in.
+    until(&shell, cx, "the rail says the long model", |cx| {
+        label(cx, &format!("rail-runs-on-{check}"))
+            .is_some_and(|said| said.contains(guard::UNBROKEN))
+    });
+    settle(cx);
+    guard::assert_stays_inside(cx, "rail-agents");
+
+    // The state that is cut says itself whole under the pointer.
+    let long = format!("rail-runs-on-{check}");
+    cx.update(|window, cx| window.hover(long.clone(), cx));
+    settle(cx);
+    assert_eq!(
+        label(cx, &format!("{long}-tooltip")).as_deref(),
+        label(cx, &long).as_deref()
+    );
+    assert!(label(cx, &long).unwrap().starts_with(guard::UNBROKEN));
+}
+
+#[gpui_kit::test]
+fn the_gauges_of_the_rows_line_up(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx, session, pilot_id, check, _) = review_rail_scripted(
+        &user,
+        review_script(json!(["fake-small", "fake-large"]), true),
+        cx,
+    );
+    let gauges: Vec<String> = [&session, &pilot_id, &check]
+        .iter()
+        .map(|agent| format!("rail-context-{agent}"))
+        .collect();
+    until(&shell, cx, "every row says its context", |cx| {
+        settle(cx);
+        gauges.iter().all(|gauge| present(cx, gauge))
+    });
+    settle(cx);
+    // A row that is a level deeper, a shorter share or a longer name moves none of them.
+    let first = bounds(cx, &gauges[0]);
+    for gauge in &gauges {
+        let at = bounds(cx, gauge);
+        assert_eq!(
+            at.left(),
+            first.left(),
+            "{gauge} starts as the first: {at:?}"
+        );
+        assert_eq!(
+            at.right(),
+            first.right(),
+            "{gauge} ends as the first: {at:?}"
+        );
+    }
+    let shares: Vec<Option<String>> = gauges.iter().map(|gauge| label(cx, gauge)).collect();
+    assert_eq!(
+        shares
+            .iter()
+            .flatten()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3,
+        "{shares:?}"
+    );
 }
 
 #[gpui_kit::test]
 fn the_tree_says_checks_not_passes(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
-    let session = session(&user);
+    let (_, cx, _, pilot_id, _, _) = review_rail(&user, cx);
+
+    let said = label(cx, &format!("rail-runs-on-{pilot_id}")).unwrap();
+    assert_eq!(said, "0/2 checks");
+    assert!(!said.contains("pass"), "{said}");
+}
+
+#[gpui_kit::test]
+fn a_review_s_conversation_shows_its_steps_and_what_it_waits_for(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    // The pilot reads, starts a check and waits for it, as the real one does.
+    user.fake_script(json!({"turns": [
+        {"when": "of the change of workspace", "do": [
+            {"mcp": {"tool": "review", "arguments": {"action": "run_pass", "pass": "bugs"}}},
+            {"hang": true}
+        ]},
+        {"when": "The change, in each repository", "do": [{"hang": true}]}
+    ]}));
+    let session = session_with_script(&user);
     let started = user
         .call("review.start", json!({"agent": session}))
         .unwrap();
     let pilot_id = started["pilot"].as_str().unwrap().to_owned();
-    let ran = pilot(&user).call("review", json!({"action": "run_pass", "pass": "standards"}));
-    assert!(!ran.error, "{}", ran.text);
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "the session is in the tree", |cx| {
         cx.update(|window, _| window.try_find(session_id(&session)).is_some())
     });
     settle(cx);
     cx.update(|window, cx| window.click(session_id(&session), cx));
-    let line = format!("rail-review-{pilot_id}");
-    until(&shell, cx, "the rail holds the review's line", |cx| {
-        present(cx, &line)
+    let row = format!("rail-row-{pilot_id}");
+    until(&shell, cx, "the rail holds the review's row", |cx| {
+        present(cx, &row)
     });
     settle(cx);
 
-    let said = label(cx, &line).unwrap();
-    assert_eq!(said, "Review · 0/2 checks");
-    assert!(!said.contains("pass"), "{said}");
+    // Its row opens its conversation.
+    cx.update(|window, cx| window.click(row, cx));
+    let page = page(&shell, cx);
+    until(&shell, cx, "the review's steps", |cx| {
+        page.read_with(cx, |p, cx| {
+            p.shown() == pilot_id && !p.conversation().read(cx).blocks().is_empty()
+        })
+    });
+    settle(cx);
+    let said: Vec<String> = cx.update(|window, _| {
+        window
+            .within("session-page".to_owned())
+            .elements()
+            .into_iter()
+            .filter_map(|element| element.label().map(str::to_owned))
+            .collect()
+    });
+    assert!(
+        !said.iter().any(|said| said == "Nothing said yet."),
+        "an agent that made calls never says nothing was said: {said:?}"
+    );
+    until(&shell, cx, "the line that says what it waits for", |cx| {
+        present(cx, "session-waiting-checks")
+    });
+    assert_eq!(
+        label(cx, "session-waiting-checks").as_deref(),
+        Some("Waiting for 1 check: bugs")
+    );
+}
+
+#[gpui_kit::test]
+fn the_waiting_line_fades_its_new_count_in(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let (shell, cx, _, pilot_id, _, pilot) = review_rail(&user, cx);
+    cx.update(|window, cx| window.click(format!("rail-row-{pilot_id}"), cx));
+    until(&shell, cx, "the line that says what it waits for", |cx| {
+        label(cx, "session-waiting-checks").is_some()
+    });
+    assert_eq!(
+        label(cx, "session-waiting-checks").as_deref(),
+        Some("Waiting for 1 check: bugs")
+    );
+    // Folded, the rail has nothing of its own to move when a second check starts.
+    cx.update(|window, cx| window.click(chevron(&pilot_id), cx));
+    at_rest(cx);
+
+    let ran = pilot.call("review", json!({"action": "run_pass", "pass": "standards"}));
+    assert!(!ran.error, "{}", ran.text);
+    until(&shell, cx, "the count changes", |cx| {
+        label(cx, "session-waiting-checks").is_some_and(|said| said.starts_with("Waiting for 2"))
+    });
+    // The words go through the kit's `changing`, which fades them in over HOVER (140 ms) from the
+    // last frame's: GPUI shows no opacity, so the test sees its element and the frames it asks
+    // for, while it fades and not once it is done.
+    assert!(present(cx, "session-waiting-checks-said"), "the line fades");
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "fading"
+    );
+    for _ in 0..6 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        assert!(
+            cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+            "still fading"
+        );
+    }
+    cx.executor().advance_clock(Duration::from_millis(80));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    at_rest(cx);
 }
 
 fn at_rest(cx: &mut VisualTestContext) {
