@@ -382,7 +382,7 @@ fn commands_and_skills_are_sections_of_instructions(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "app");
     let (shell, cx) = window(&user, cx);
-    open_settings(&shell, "app", cx);
+    let page = open_settings(&shell, "app", cx);
     tab(cx, "instructions");
 
     // In order: Rules, Commands, Skills, the checks, the pull request template.
@@ -408,12 +408,16 @@ fn commands_and_skills_are_sections_of_instructions(cx: &mut TestAppContext) {
         label(cx, "message-checks-field-app-label").as_deref(),
         Some("One command line per line")
     );
-    // The fold of the rules every project has, and the way to edit them.
-    assert!(present(cx, "rules-global-toggle-app"));
-    assert_eq!(
-        label(cx, "rules-global-toggle-app").as_deref(),
-        Some("Rules for every project, read only")
-    );
+    // The fold of the rules every project has: it carries its name from the first frame it is
+    // drawn, not once the daemon has sent the rules it holds, so each frame until then is read.
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        assert_eq!(
+            label(cx, "rules-global-toggle-app").as_deref(),
+            Some("Rules for every project, read only")
+        );
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
     click(cx, "rules-global-toggle-app");
     assert_eq!(
         label(cx, "rules-global-edit-app").as_deref(),
