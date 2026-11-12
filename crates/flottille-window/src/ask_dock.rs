@@ -4,7 +4,7 @@
 //! next slides in once it is answered, and the dock folds away with the last.
 
 use flottille_core::question::Question;
-use gpui_design_system::{palette, presence, presence_of, sliding, space};
+use gpui_design_system::{growing, palette, presence, presence_of, sliding, space};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -122,7 +122,10 @@ impl Render for AskDock {
             .then(|| SharedString::from(format!("1 of {} asks", self.cards.len())));
         let shown = self.last.clone().map(|card| {
             let seq = card.read(cx).seq();
-            sliding("ask-dock-page", seq as usize, card)
+            growing(
+                "ask-dock-height",
+                sliding("ask-dock-page", seq as usize, card),
+            )
         });
         let content = div()
             .id("ask-dock")

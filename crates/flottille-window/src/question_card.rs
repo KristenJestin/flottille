@@ -629,7 +629,11 @@ impl Render for QuestionCard {
         }
         let current = self.current;
         let question = self.block(current, !sent, cx);
-        card = card.block(Block::new().child(sliding(id("question-page"), current, question)));
+        // Questions differ in height: the card eases to the one shown.
+        card = card.block(Block::new().child(gpui_design_system::growing(
+            id("question-height"),
+            sliding(id("question-page"), current, question),
+        )));
         let why = if ready {
             "Sent to the agent as one message."
         } else {
