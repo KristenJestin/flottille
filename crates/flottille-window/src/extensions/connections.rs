@@ -438,6 +438,43 @@ pub enum Writing {
     Removed(String),
 }
 
+/// Whether the window opens `url` to sign in: the daemon gives an `https` address, or an `http`
+/// one on this machine, and the system's handler is never handed anything else (a `file:` path, a
+/// program's own scheme), whatever the answer says.
+fn sign_in_address(url: &str) -> Result<(), &'static str> {
+    if url.trim().is_empty() {
+        return Err("the daemon gave no address to open");
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("the address is not one a browser is sent to");
+    }
+    let lower = url.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("https://") {
+        return match rest.starts_with(['/', '?', '#']) {
+            true => Err("the address names no host"),
+            false => Ok(()),
+        };
+    }
+    if let Some(rest) = lower.strip_prefix("http://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        // A name before an `@` is not the host: `http://127.0.0.1@elsewhere/` goes elsewhere.
+        let host = match authority.strip_prefix('[') {
+            Some(inside) => inside.split(']').next().unwrap_or_default(),
+            None => authority.split(':').next().unwrap_or_default(),
+        };
+        let loopback = !authority.contains('@')
+            && (host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback()));
+        return match loopback {
+            true => Ok(()),
+            false => Err("a plain http address is only opened on this machine"),
+        };
+    }
+    Err("only an https address is opened")
+}
+
 /// What to do with the daemon's answer to a request of the section.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Then {
@@ -670,11 +707,22 @@ impl ConnectionsSection {
             Then::SignIn { name } => match answer {
                 Ok(begun) => {
                     let url = begun["url"].as_str().unwrap_or_default().to_owned();
-                    // The answer comes while the shell is busy giving it: it opens after.
-                    let shell = self.shell.clone();
-                    cx.defer(move |cx| {
-                        shell.update(cx, |shell, _| shell.open_link(&url)).ok();
-                    });
+                    match sign_in_address(&url) {
+                        Ok(()) => {
+                            // The answer comes while the shell is busy giving it: it opens after.
+                            let shell = self.shell.clone();
+                            cx.defer(move |cx| {
+                                shell.update(cx, |shell, _| shell.open_link(&url)).ok();
+                            });
+                        }
+                        Err(why) => {
+                            self.signing.remove(&name);
+                            toast(
+                                Toast::failure(format!("{name} was not signed in")).detail(why),
+                                cx,
+                            );
+                        }
+                    }
                 }
                 Err(why) => {
                     self.signing.remove(&name);

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use flottille_window::Shell;
-use flottille_window::extensions::connections::ConnectionsSection;
+use flottille_window::extensions::connections::{ConnectionsSection, Then};
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::base::input::InputState;
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
@@ -1137,4 +1137,78 @@ fn a_sign_in_that_cannot_begin_says_why_in_a_toast(cx: &mut TestAppContext) {
     });
     let _ = server.kill();
     let _ = server.wait();
+}
+
+#[gpui_kit::test]
+fn the_window_opens_only_an_https_or_a_local_http_address_to_sign_in(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare(&user, "almanac", &almanac());
+    let (shell, cx) = window(&user, cx);
+    let opened = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let opened = opened.clone();
+        shell.update(cx, |s, _| {
+            s.set_opener(Arc::new(move |path: &Path| {
+                opened.lock().unwrap().push(path.display().to_string());
+            }))
+        });
+    }
+    open_page(&shell, cx);
+    let section = section(&shell, cx);
+    let answer = |url: &str, cx: &mut VisualTestContext| {
+        let url = url.to_owned();
+        cx.update(|window, cx| {
+            section.update(cx, |s, cx| {
+                s.answered(
+                    Then::SignIn {
+                        name: "almanac".into(),
+                    },
+                    Ok(json!({"url": url})),
+                    window,
+                    cx,
+                )
+            })
+        });
+        settle(cx);
+    };
+    for refused in [
+        "",
+        "   ",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "ftp://example.com/",
+        "x-flottille://open",
+        "http://example.com/authorize",
+        "http://127.0.0.1@example.com/authorize",
+        "http://localhost.example.com/authorize",
+        "https:///authorize",
+        "https://example.com/a b",
+    ] {
+        answer(refused, cx);
+        assert!(
+            opened.lock().unwrap().is_empty(),
+            "{refused:?} was opened: {:?}",
+            opened.lock().unwrap()
+        );
+        assert!(
+            toasts(&shell, cx)
+                .iter()
+                .any(|t| t == "almanac was not signed in"),
+            "{refused:?} said nothing"
+        );
+    }
+    for accepted in [
+        "https://auth.example.com/authorize?state=1",
+        "HTTPS://auth.example.com/authorize",
+        "http://127.0.0.1:8080/authorize",
+        "http://localhost:3000/authorize",
+        "http://[::1]:3000/authorize",
+    ] {
+        answer(accepted, cx);
+        until(&shell, cx, "the address is opened", |_| {
+            opened.lock().unwrap().last().map(String::as_str) == Some(accepted)
+        });
+    }
+    assert_eq!(opened.lock().unwrap().len(), 5);
 }
