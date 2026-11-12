@@ -4408,8 +4408,8 @@ fn choosing_the_other_and_a_model_starts_the_session_on_them_and_the_tree_shows_
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
     let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
     assert_eq!(shown["provider"], "opencode");
-    // open/small is OpenCode's default: its row names no model, and the session takes it.
-    assert_eq!(shown["chosen"]["model"], serde_json::Value::Null);
+    // open/small is OpenCode's default: picked, it is asked by its name.
+    assert_eq!(shown["chosen"]["model"], "open/small");
     assert_eq!(shown["taken"]["model"], "open/small");
     assert_eq!(shown["chosen"]["effort"], "high");
     until(&shell, cx, "the rail shows both agents", |cx| {
@@ -4652,6 +4652,100 @@ fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_s
     let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
     assert_eq!(shown["provider"], "claude");
     assert_eq!(shown["chosen"]["model"], "fake-large");
+}
+
+/// A window on atlas whose composer starts on what the new-session setting `chosen` gives,
+/// Claude's models and efforts known.
+fn composer_on_setting<'a>(
+    user: &User,
+    chosen: serde_json::Value,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, Entity<Composer>, &'a mut VisualTestContext) {
+    project(user, "atlas");
+    learn_models(user, "atlas", "claude", "fake-small");
+    let model = chosen["model"].as_str().map(str::to_owned);
+    user.call("provider.set_new_session", chosen).unwrap();
+    let (shell, cx) = window(user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "the composer starts on the setting", |cx| {
+        composer.read_with(cx, |c, _| {
+            c.pick().provider.as_deref() == Some("claude")
+                && c.pick().model == model
+                && c.entries(Menu::Model).len() > 1
+        })
+    });
+    settle(cx);
+    (shell, composer, cx)
+}
+
+/// The effort the composer marks recommended for the model picked.
+fn recommended_effort(composer: &Composer) -> Option<String> {
+    composer
+        .entries(Menu::Effort)
+        .into_iter()
+        .find(|e| e.note.as_deref() == Some("recommended"))
+        .map(|e| e.label)
+}
+
+/// Sends a task from the composer: what the session started on, as the daemon shows it.
+fn start_from_composer(shell: &Entity<Shell>, user: &User, cx: &mut VisualTestContext) -> serde_json::Value {
+    type_task("A first task", cx);
+    cx.simulate_keystrokes("enter");
+    until(shell, cx, "the session's page opens", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    let page = session_page(shell, cx);
+    let lead = page.read_with(cx, |p, _| p.id().to_owned());
+    user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone()
+}
+
+#[gpui_kit::test]
+fn picking_the_recommended_model_in_the_composer_wins_over_the_setting(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let setting = json!({"provider": "claude", "model": "fake-large", "effort": "low"});
+    let (shell, composer, cx) = composer_on_setting(&user, setting, cx);
+    assert_eq!(
+        composer
+            .read_with(cx, |c, _| c.pick().model.clone())
+            .as_deref(),
+        Some("fake-large")
+    );
+    // Claude's recommended model, picked: the session starts on it, not on the setting's.
+    cx.update(|window, cx| window.click("model-picker", cx));
+    cx.update(|window, cx| window.click("model-choice-fake-small", cx));
+    settle(cx);
+    assert_eq!(model_shown(&composer, cx), "fake-small");
+    let shown = start_from_composer(&shell, &user, cx);
+    assert_eq!(shown["taken"]["model"], "fake-small");
+}
+
+#[gpui_kit::test]
+fn picking_the_recommended_effort_in_the_composer_wins_over_the_setting(cx: &mut TestAppContext) {
+    let user = providers_user();
+    // The setting's effort is the one the model does not run with by itself.
+    let (shell, composer, cx) = composer_on_setting(
+        &user,
+        json!({"provider": "claude", "model": "fake-small", "effort": "high"}),
+        cx,
+    );
+    let own = composer
+        .read_with(cx, |c, _| recommended_effort(c))
+        .unwrap();
+    assert_ne!(own, "high", "the setting's effort is not the recommended one");
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.effort_shown()),
+        "high",
+        "the composer starts on the setting's effort"
+    );
+    cx.update(|window, cx| window.click("effort-picker", cx));
+    let row = format!("effort-choice-{own}");
+    cx.update(|window, cx| window.click(row, cx));
+    settle(cx);
+    assert_eq!(composer.read_with(cx, |c, _| c.effort_shown()), own);
+    let shown = start_from_composer(&shell, &user, cx);
+    assert_eq!(shown["taken"]["model"], "fake-small");
+    assert_eq!(shown["chosen"]["effort"], own.as_str());
 }
 
 #[gpui_kit::test]

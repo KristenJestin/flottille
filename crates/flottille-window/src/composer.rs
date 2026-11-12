@@ -637,7 +637,7 @@ impl Composer {
         let command = Command::Start {
             project: self.project.clone(),
             target: target.clone(),
-            pick: self.pick.clone(),
+            pick: self.asked(),
             message,
             images: self.attached.sending(),
             mode: self.mode.read(cx).mode().unwrap_or("auto").to_owned(),
@@ -650,6 +650,27 @@ impl Composer {
             .update(cx, |shell, _| shell.perform(command))
             .ok();
         cx.notify();
+    }
+
+    /// What a start asks: once the user picked, the model and the effort the pickers show, by
+    /// their names, so that the setting the daemon applies to a pick that names none does not
+    /// replace what they picked (the recommended ones included).
+    fn asked(&self) -> Pick {
+        let mut pick = self.pick.clone();
+        if !self.picked {
+            return pick;
+        }
+        let pickers = self.pickers();
+        if pick.model.is_none() {
+            pick.model = self
+                .provider()
+                .and_then(Provider::default_model)
+                .map(|m| m.id.clone());
+        }
+        if pickers.picked_effort().is_none() {
+            pick.effort = pickers.own_effort().cloned();
+        }
+        pick
     }
 
     /// The session started: the field is emptied for the next one. What it started on.
