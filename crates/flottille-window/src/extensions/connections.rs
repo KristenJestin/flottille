@@ -443,7 +443,7 @@ pub enum Writing {
 /// program's own scheme), whatever the answer says.
 fn sign_in_address(url: &str) -> Result<(), &'static str> {
     if url.trim().is_empty() {
-        return Err("the daemon gave no address to open");
+        return Err("there is no address to open");
     }
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err("the address is not one a browser is sent to");

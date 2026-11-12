@@ -1010,7 +1010,7 @@ powerful can act as the user, and no mode changes that; this is Full mode's limi
 an access token (Atlassian's Rovo is one) signs in once in the user's browser, as the MCP
 specification's authorization says (`reference/mcp-authorization.md`, revision 2026-07-28, what
 is followed and what is left out): `flottille connection login <name>`, or the connection's
-**Sign in** in the window (#672), which opens the address the daemon gives only when it is `https://`,
+**Sign in** in the window (#672), which opens the sign-in address only when it is `https://`,
 or `http://` on this machine, and says why in a toast otherwise. The daemon reads the server's challenge, its protected resource
 metadata (RFC 9728) and its authorization server's metadata (RFC 8414, OpenID Connect discovery);
 it uses the `client_id` the user declared, or registers itself (RFC 7591) when the authorization
