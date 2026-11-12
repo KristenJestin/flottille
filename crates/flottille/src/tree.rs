@@ -393,6 +393,8 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
     // The child is a live child now: held on, it would count twice while its session opens.
     drop(_slot);
+    // Told by the answer if its session fails as it opens: `fail_tree` does not tell it again.
+    let waiting = (!preparing).then(|| Opening::new(daemon, &child.id));
     // Before its first message, so that its first turn wakes its pilot too.
     if led {
         crate::subscriptions::lead(daemon, &caller.id, &child).map_err(failed)?;
@@ -411,18 +413,26 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     // the agent's own to take, which only its session says.
     let runs = match preparing {
         true => providers::agent_asked_runs_on(daemon, &child),
-        false => match opened(daemon, &child.id).await {
-            Some(agent) if agent.state == AgentState::Failed => {
-                return Ok(Outcome::Done(format!(
-                    "Started {} on {}, in {place}, but its session failed as it opened: {}.",
-                    named(&child),
-                    providers::agent_asked_runs_on(daemon, &child),
-                    agent.state_reason.as_deref().unwrap_or("no reason given")
-                )));
+        false => {
+            let seen = opened(daemon, &child.id).await;
+            // A failure from here on is told as ever; one in the meantime is read here.
+            drop(waiting);
+            match (
+                seen,
+                daemon.read(|store| store.agent(&child.id)).ok().flatten(),
+            ) {
+                (_, Some(agent)) if agent.state == AgentState::Failed => {
+                    return Ok(Outcome::Done(format!(
+                        "Started {} on {}, in {place}, but its session failed as it opened: {}.",
+                        named(&child),
+                        providers::agent_asked_runs_on(daemon, &child),
+                        agent.state_reason.as_deref().unwrap_or("no reason given")
+                    )));
+                }
+                (Some(_), Some(agent)) => providers::agent_runs_on(daemon, &agent),
+                _ => providers::agent_asked_runs_on(daemon, &child),
             }
-            Some(agent) => providers::agent_runs_on(daemon, &agent),
-            None => providers::agent_asked_runs_on(daemon, &child),
-        },
+        }
     };
     if led {
         return Ok(Outcome::Done(format!(
@@ -477,6 +487,29 @@ async fn opened(daemon: &Daemon, id: &str) -> Option<Agent> {
         }
     };
     tokio::time::timeout(OPENING, wait).await.ok().flatten()
+}
+
+/// A child whose launch waits for its session to open: if the session fails meanwhile, the
+/// launch's answer says so, and its parent is not told again by a delivery.
+struct Opening<'a> {
+    daemon: &'a Daemon,
+    agent: String,
+}
+
+impl<'a> Opening<'a> {
+    fn new(daemon: &'a Daemon, agent: &str) -> Opening<'a> {
+        daemon.opening.lock().unwrap().insert(agent.to_owned());
+        Opening {
+            daemon,
+            agent: agent.to_owned(),
+        }
+    }
+}
+
+impl Drop for Opening<'_> {
+    fn drop(&mut self) {
+        self.daemon.opening.lock().unwrap().remove(&self.agent);
+    }
 }
 
 /// A slot of a project's children cap, taken by a launch until its child exists (and counts as a
@@ -2170,6 +2203,10 @@ pub fn fail_tree(daemon: &Arc<Daemon>, id: &str, reason: &str) {
         for message in messages {
             text.push_str(&format!("\n> {}", cut(&message, MESSAGE_CHARS)));
         }
+    }
+    // Its launch is waiting for its session and answers with the failure: told once.
+    if daemon.opening.lock().unwrap().contains(id) {
+        return;
     }
     tell_parent(daemon, &agent, "child-failed", &text, approval::URGENT);
 }

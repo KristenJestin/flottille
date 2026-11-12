@@ -183,6 +183,8 @@ pub struct Daemon {
     pub compactions: crate::compaction::Live,
     /// The slots launches took in each project's children cap, before their child exists.
     pub launching: Mutex<HashMap<String, usize>>,
+    /// The children whose launch waits for their session to open (`tree::launch`).
+    pub opening: Mutex<HashSet<String>>,
     /// What the forges said of each workspace, and who watches them.
     pub forges: forge::Forges,
     /// The tickets read in the last 30 s, for the next `tickets show` and the window's session
@@ -244,6 +246,7 @@ impl Daemon {
             judge_chose_none: Mutex::new(None),
             compactions: crate::compaction::Live::default(),
             launching: Mutex::new(HashMap::new()),
+            opening: Mutex::new(HashSet::new()),
             forges: forge::Forges::default(),
             kept_tickets: crate::reads::Kept::default(),
             kept_searches: crate::reads::Kept::default(),

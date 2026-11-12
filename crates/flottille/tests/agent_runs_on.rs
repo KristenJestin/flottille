@@ -258,7 +258,11 @@ fn launches_in_parallel_up_to_the_cap_are_all_accepted_while_their_sessions_open
         json!({"kind": "child", "title": "one more", "brief": "Do the work."}),
     );
     assert!(more.error, "{}", more.text);
-    assert!(more.text.contains("3 children already run"), "{}", more.text);
+    assert!(
+        more.text.contains("3 children already run"),
+        "{}",
+        more.text
+    );
 }
 
 #[test]
@@ -481,7 +485,7 @@ fn a_provider_that_offers_no_effort_says_the_model_alone() {
 }
 
 #[test]
-fn a_model_asked_before_the_models_are_known_is_said_as_asked_and_its_refusal_heard() {
+fn a_model_asked_before_the_models_are_known_is_said_as_asked_and_its_refusal_told_once() {
     let user = User::with_fake_providers();
     user.write_providers("[opencode]\nenabled = true\n");
     for provider in ["claude", "opencode"] {
@@ -510,12 +514,10 @@ fn a_model_asked_before_the_models_are_known_is_said_as_asked_and_its_refusal_he
         answer.text
     );
     assert!(answer.text.contains("fake-huge"), "{}", answer.text);
-    // Its parent hears it as of any child that fails.
-    eventually("the parent told", || {
-        delivered(&user, &lead, "child-failed")
-            .iter()
-            .any(|body| body.contains("fake-huge"))
-    });
+    // Said once: by the answer, not again as a note on it nor as a delivery after it.
+    assert!(!answer.text.contains("child-failed"), "{}", answer.text);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(delivered(&user, &lead, "child-failed").is_empty());
 }
 
 #[test]
