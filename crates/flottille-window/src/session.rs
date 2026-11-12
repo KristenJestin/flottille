@@ -2118,7 +2118,10 @@ impl Render for SessionPage {
                         .text_size(px(12.5))
                         .text_color(p.faint)
                         .aria_label(said.clone())
-                        .child(said)
+                        // The count changes as checks end: the new words fade in.
+                        .child(changing("session-waiting-checks-said", said, |said| {
+                            div().child(said).into_any_element()
+                        }))
                         .test_support()
                         .into_any_element()
                 },
