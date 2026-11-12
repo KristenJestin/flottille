@@ -42,6 +42,8 @@ pub struct TreeAgent {
     pub model: Option<String>,
     /// The effort it runs at, when it took or was asked one.
     pub effort: Option<String>,
+    /// Its model and effort by name, as the daemon names them (`model::runs_on`).
+    pub runs_on: String,
     /// The model and the effort the user changed to, set before its next prompt.
     pub pending: Pending,
     pub doing: String,
@@ -138,6 +140,7 @@ impl TreeAgent {
             provider: text(&agent["provider"]).unwrap_or_default(),
             model: text(&agent["model"]),
             effort: text(&agent["effort"]),
+            runs_on: crate::model::runs_on(&agent["runs_on"]),
             pending: Pending {
                 model: text(&agent["pending"]["model"]),
                 effort: text(&agent["pending"]["effort"]),

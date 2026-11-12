@@ -19,8 +19,6 @@ pub fn next_read() -> u64 {
 
 /// What the window says of a model before a session of its provider said the models.
 pub const MODEL_UNKNOWN: &str = "model not known yet";
-/// What the window says of an effort before a session of its provider said the efforts.
-pub const EFFORT_UNKNOWN: &str = "effort not known yet";
 /// A provider's entry in a model choice while it has said no model.
 const MODELS_LEARNT: &str = "models learnt at its first session";
 
@@ -304,67 +302,6 @@ impl Providers {
     pub fn model_line(&self, provider: &str, model: Option<&str>) -> String {
         self.model_said(provider, model)
             .unwrap_or_else(|| MODEL_UNKNOWN.to_owned())
-    }
-
-    /// The model an agent runs on, by the name its provider gives it; the model asked as it is
-    /// while no session said the models.
-    pub fn model_named(&self, provider: &str, model: Option<&str>) -> String {
-        match model.filter(|m| *m != crate::composer::DEFAULT) {
-            Some(asked) => self
-                .get(provider)
-                .and_then(|provider| provider.model(asked))
-                .map_or_else(|| asked.to_owned(), Model::label),
-            None => self.model_line(provider, None),
-        }
-    }
-
-    /// The effort an agent runs at, by its name: the one it took or was asked; none, or the
-    /// provider's own `default`, is the one its model runs with, the one a session said or the
-    /// middle of its levels. Says that it is not known yet until a session said the efforts, and
-    /// nothing for a model that has none.
-    pub fn effort_line(
-        &self,
-        provider: &str,
-        model: Option<&str>,
-        effort: Option<&str>,
-    ) -> Option<String> {
-        if let Some(effort) = effort.filter(|e| *e != crate::composer::DEFAULT) {
-            return Some(effort.to_owned());
-        }
-        let own = || {
-            let provider = self.get(provider)?;
-            let model = match model.filter(|m| *m != crate::composer::DEFAULT) {
-                Some(asked) => provider.model(asked)?,
-                None => provider.default_model()?,
-            };
-            let levels: Vec<&String> = crate::composer::levels(model.efforts.as_deref()?).collect();
-            let own = model
-                .default_effort
-                .as_ref()
-                .filter(|own| levels.contains(own))
-                .or_else(|| provider::middle_effort(&levels).copied());
-            Some(own.cloned())
-        };
-        match own() {
-            Some(None) => None,
-            Some(named) => named,
-            None => Some(EFFORT_UNKNOWN.to_owned()),
-        }
-    }
-
-    /// What an agent runs on, as the rail and the sidebar say it: its model and its effort, by
-    /// name.
-    pub fn model_and_effort(
-        &self,
-        provider: &str,
-        model: Option<&str>,
-        effort: Option<&str>,
-    ) -> String {
-        let named = self.model_named(provider, model);
-        match self.effort_line(provider, model, effort) {
-            Some(effort) => format!("{named} · {effort}"),
-            None => named,
-        }
     }
 
     pub fn of(answer: Result<&Value, String>) -> Providers {
@@ -688,37 +625,6 @@ mod tests {
         assert_eq!(
             (fable.id.as_str(), fable.default_effort.as_deref()),
             ("fable", Some("low"))
-        );
-    }
-
-    #[test]
-    fn what_an_agent_runs_on_is_said_by_name_never_as_default() {
-        let providers = Providers::of(Ok(&json!({"providers": [
-            {"name": "claude", "title": "Claude", "enabled": true, "ready": true,
-             "models": [
-                {"id": "default", "name": "Default (recommended)", "efforts": ["default", "low", "medium", "high"],
-                 "stands_for": "opus"},
-                {"id": "opus", "name": "Opus 5.5", "efforts": ["default", "low", "medium", "high"],
-                 "default": true},
-                {"id": "haiku", "name": "Haiku 5.5", "efforts": ["low"], "default_effort": "low"}]}
-        ]})));
-        let said = |model: Option<&str>, effort: Option<&str>| {
-            providers.model_and_effort("claude", model, effort)
-        };
-        assert_eq!(said(Some("opus"), Some("high")), "Opus 5.5 · high");
-        // Left out, or the provider's own: the model and the effort it runs with, by name.
-        assert_eq!(said(None, None), "Opus 5.5 · medium");
-        assert_eq!(said(Some("default"), Some("default")), "Opus 5.5 · medium");
-        assert_eq!(said(Some("haiku"), None), "Haiku 5.5 · low");
-        // Before a session said the models, the model asked is said as it is.
-        let unknown = Providers::default();
-        assert_eq!(
-            unknown.model_and_effort("claude", Some("opus"), None),
-            "opus · effort not known yet"
-        );
-        assert_eq!(
-            unknown.model_and_effort("claude", None, None),
-            "model not known yet · effort not known yet"
         );
     }
 
