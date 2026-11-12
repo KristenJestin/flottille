@@ -104,16 +104,30 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   that is not signed in at all fails once its provider refuses it. A test override (below) stands for
   the program.
 - **An agent's provider** is the one asked (`--provider`, `agent_start`'s and `agent_launch`'s
-  `provider`), else the project's (`provider` in its file, `docs/projects.md`), else the first one
+  `provider`), else the project's (`provider` in its file, `docs/projects.md`), else the one the
+  user chose for new sessions (`[new_session]`, below) when it is ready, else the first one
   enabled; a child's is its parent's unless it names another. It is kept in the agent and never
   changes: a replacement runs on the same provider. It is checked again at each start of the
   agent's process, a replacement's included: an agent whose provider is no longer enabled or
   ready fails (`agent.failed`, with the sentence a start would be refused with), and is not
   started again.
+- **What a new session starts on** (`[new_session]` in `providers.toml`: `provider`, and `model`
+  and `effort`, each optional) is the user's choice, made in the window's settings page ("New
+  sessions") or with `flottille provider new-session <provider> [--model <model>] [--effort
+  <effort>]` (`--clear` goes back; the method `provider.set_new_session`, `docs/protocol.md`).
+  Without it, a new session follows what the provider proposes, as it always did. The order is
+  the project's file (its `provider` and `model`), then this setting, then what the provider
+  proposes (and, in the window, the last pick). The setting's model and effort apply to its own
+  provider only, and its effort only with its own model: a project that names another model does
+  not take the setting's effort. A model the provider no longer offers (or an effort the model
+  no longer offers) is let go, not refused: the session starts on what the provider proposes,
+  and the settings page says so once. An agent that leaves `model` or `effort` out of
+  `agent_launch` (a child, a led or a handed session) starts by the same order, on its own
+  provider (a child's is its parent's unless it names another).
 - **Its model** is the one asked, else the project's (`model` in its file, for the project's own
-  provider only), else the provider's default: the model a new session has before any is set,
+  provider only), else the new-session setting's (for its provider), else the provider's default: the model a new session has before any is set,
   marked `"default": true` among the models once a session said it. Its effort is the one asked,
-  else the model's default. A provider's own choice (a value `default`) is never left to it: a new
+  else the new-session setting's (with its model), else the model's default. A provider's own choice (a value `default`) is never left to it: a new
   session set on nothing is set to what it stands for, by its name ("The options", below).
 - **The models**: what a session of the provider's agent offers in its config options (the
   `model` option's values and their names, and the `thought_level` option's for the model the

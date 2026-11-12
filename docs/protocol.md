@@ -1936,7 +1936,9 @@ as they were, but refuse no model and no effort until a session says them again.
 none is enabled, its `model` `null` when the project names none. `judge` is the Auto judge the user
 chose (`provider.set_judge`) or Flottille picked, its `model` `null` for the provider's default,
 `"picked": true` while the user has not seen the notice of a judge Flottille picked, or `null` when
-there is none. `not-found` when the project
+there is none. `new_session` is what the user chose for new sessions to start on
+(`provider.set_new_session`), `{"provider", "model", "effort"}` with `model` and `effort` `null` for
+the provider's to propose, or `null` when none is chosen. `not-found` when the project
 does not exist; `invalid-config` when `providers.toml` cannot be read (the sentence names the key
 at fault).
 
@@ -1956,6 +1958,19 @@ on it go on, and each fails at the next start of its process, saying why (`agent
 `not-found` when there is no provider of that name (the sentence names the providers);
 `invalid-config` when `providers.toml` cannot be read (the sentence names the key at fault), and
 the file is then left as it is.
+
+### `provider.set_new_session`
+
+`{"provider", "model"?, "effort"?}`. Chooses the provider, model and effort a new session starts on
+(`docs/agents.md`, "Providers"); `provider` `null` (or left out) chooses none, and new sessions
+follow what the provider proposes again. A model or an effort left out or empty is the
+provider's to propose; once the provider's models are known, a model given without its date
+suffix is written as the listed id. The daemon writes `[new_session]` in `providers.toml`, or
+removes it, keeping the rest of the file as `provider.enable` keeps it, and answers
+`{"new_session"}`, as `provider.list` gives it. When this changes the file it emits
+`provider.new_session_changed` (`docs/events.md`). `not-found` when there is no provider of that
+name; `invalid-config` when `providers.toml` cannot be read. The user's door alone reaches it: no
+tool of an agent chooses it.
 
 ### `provider.set_judge`
 

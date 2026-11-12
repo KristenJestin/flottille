@@ -102,6 +102,15 @@ model whose efforts are not known while it lists, and reads the providers again.
 | `name` | The provider's name. |
 | `learning` | Whether the listing runs. |
 
+### `provider.new_session_changed`
+
+The user chose what a new session starts on, or no choice, through the daemon
+(`provider.set_new_session`). An edit of `providers.toml` by hand is not announced.
+
+| Field | |
+|---|---|
+| `new_session` | `{"provider", "model", "effort"}`, `model` and `effort` `null` for the provider's to propose; `null` when none is chosen. |
+
 ### `provider.judge_changed`
 
 The user chose the Auto judge, or none, through the daemon (`provider.set_judge`), Flottille picked

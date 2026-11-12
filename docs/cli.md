@@ -116,8 +116,8 @@ warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stre
 
 ### `flottille provider list [--json]`
 
-Each provider, whether its agents can run, and the Auto judge (`docs/design.md` §7.1), said
-picked by Flottille until you saw its notice in the window. `--json` prints `provider.list`'s
+Each provider, whether its agents can run, the Auto judge (`docs/design.md` §7.1), said
+picked by Flottille until you saw its notice in the window, and what a new session starts on. `--json` prints `provider.list`'s
 answer, the judge's `"picked": true` while it is so.
 
 ```
@@ -126,6 +126,22 @@ claude: enabled, its agents can run
 codex: enabled, its agents cannot run: codex is not on PATH
 opencode: disabled
 Auto judge: claude (haiku), picked by Flottille: change it in Settings, or choose no judge there.
+New sessions: what the provider proposes.
+```
+
+### `flottille provider new-session <provider> [--model <model>] [--effort <effort>]`
+
+Chooses the provider, model and effort a new session starts on (`docs/agents.md`, "Providers"),
+as the window's settings page does ("New sessions"): `[new_session]` in `providers.toml`, the rest
+of the file kept as you wrote it. What is left out is the provider's to propose. `--clear` goes back
+to what the provider proposes. `provider list` says it on its last line, and `--json` gives it as
+`"new_session"`.
+
+```
+$ flottille provider new-session claude --model opus --effort high
+New sessions start on claude, opus, high.
+$ flottille provider new-session --clear
+New sessions start on what the provider proposes.
 ```
 
 ### `flottille provider enable <name>`
