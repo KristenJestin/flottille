@@ -84,6 +84,12 @@
 //! "2026-01-01T10:00:00Z"}]}}`), `[]` without; with a `--jq`, the `merged` and `closed` ones as
 //! tab-separated lines (`event`, login, time), the filter Flottille asks.
 //!
+//! The people of a repository (#795, `docs/tools.md`, "People"): `assignees` and `collaborators` give,
+//! by repository, what `gh api repos/<owner>/<name>/assignees` and `…/collaborators` list
+//! (`{"assignees": {"acme/app": [{"login": "jdoe"}]}}`), a page of `-F per_page=N -F page=M` at a time when asked; a repository with none is not found.
+//! The name a person set is on the pull requests (`author`, `reviews`, `reviewRequests`,
+//! `assignees`: `{"login": "jdoe", "name": "Jane Doe"}`), which `pr list --json` gives.
+//!
 //! `run_fail` (`{"acme/app": "HTTP 502: Bad Gateway"}`) makes `run list` alone fail that way, the
 //! pull request calls still working.
 //!
@@ -471,6 +477,47 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 }
             } else {
                 println!("{events}");
+            }
+            0
+        }
+        ["api", path, ..]
+            if path.starts_with("repos/")
+                && (path.ends_with("/assignees") || path.ends_with("/collaborators")) =>
+        {
+            // The people of a repository (#795), as `gh api repos/<owner>/<name>/assignees` or
+            // `…/collaborators` lists them: the script's `assignees` or `collaborators`, by
+            // repository, each a user; a repository with none listed is not found, as one whose
+            // listing the user may not read is. With the `--jq .[].login` Flottille gives, the
+            // logins one per line.
+            let parts: Vec<&str> = path.split('/').collect();
+            let [_, owner, name, source] = parts[..] else {
+                eprintln!("fake gh: api {path} is not a call Flottille makes");
+                return 2;
+            };
+            let Some(users) = script[source][format!("{owner}/{name}")].as_array() else {
+                eprintln!("gh: Not Found (HTTP 404)");
+                return 1;
+            };
+            // `-F per_page=N -F page=M`: the page of `users` a real server gives, 1-based.
+            let field = |key: &str| {
+                words
+                    .iter()
+                    .find_map(|w| w.strip_prefix(&format!("{key}=")))
+                    .and_then(|n| n.parse::<usize>().ok())
+            };
+            let users: Vec<Value> = match field("per_page") {
+                Some(size) => {
+                    let from = (field("page").unwrap_or(1).max(1) - 1) * size;
+                    users.iter().skip(from).take(size).cloned().collect()
+                }
+                None => users.clone(),
+            };
+            if words.contains(&"--jq") {
+                for user in &users {
+                    println!("{}", user["login"].as_str().unwrap_or_default());
+                }
+            } else {
+                println!("{}", Value::from(users));
             }
             0
         }

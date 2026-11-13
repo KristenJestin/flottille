@@ -36,6 +36,7 @@ use crate::reads::{self, Reads};
 mod events;
 mod links;
 mod milestones;
+mod people;
 mod sprints;
 mod versions;
 mod worklog;
@@ -687,6 +688,7 @@ pub(crate) fn comments_said(comments: &[Comment]) -> Vec<crate::items::Said> {
         .iter()
         .map(|comment| crate::items::Said {
             author: comment.author.clone(),
+            handle: None,
             bot: forge::is_bot(&json!({"login": comment.author})),
             by_agent: comment.agent,
             id: comment.id.clone(),
@@ -1119,15 +1121,6 @@ fn unplannable(
             .map(str::trim)
             .filter(|text| !text.is_empty())
     };
-    if let (true, "create" | "edit", Some(who)) = (jira, action, given("assignee"))
-        && !assignable(who)
-    {
-        return Some(format!(
-            "refused: assignee is me, an email or an account id; a display name cannot be looked \
-             up with acli (\"{}\"): give the person's email, me for the user, or no assignee",
-            masked(who)
-        ));
-    }
     let nothing = "; nothing was written";
     match (action, given("parent"), given("sprint")) {
         ("edit", Some(_), _) if jira => Some(format!(
@@ -1336,7 +1329,7 @@ fn created_in<'a>(
 /// `tickets`, once the gate let it through: the tickets of the project's tracker, listed,
 /// searched, read and written through the user's own `gh` or `acli`. Never another tracker's.
 pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value) -> Outcome {
-    let asked: TicketsCall = match arguments("tickets", args.clone()) {
+    let mut asked: TicketsCall = match arguments("tickets", args.clone()) {
         Ok(asked) => asked,
         Err(refusal) => return refusal,
     };
@@ -1347,7 +1340,16 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
     if let Some(refusal) = unwritable(&project, &args) {
         return Outcome::Refused(refusal);
     }
-    match asked.action.as_str() {
+    // An assignee named by display name is found among the tracker's people (#795).
+    let mut found = String::new();
+    if ["create", "edit"].contains(&asked.action.as_str()) {
+        match people::resolve(&project, &mut asked).await {
+            Ok(said) => found = said,
+            Err(refusal) => return Outcome::Refused(refusal),
+        }
+    }
+    let outcome = match asked.action.as_str() {
+        "people" => people::people(&project, &asked).await,
         "list" | "search" => listed(daemon, &project, &asked).await,
         "show" => match show(daemon, place, &project, &asked).await {
             Outcome::Done(text) => Outcome::Done(text + &events::subscriptions_text(daemon, agent)),
@@ -1399,6 +1401,10 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
             "refused: tickets has no action {action:?}: its actions are {}",
             crate::gate::TICKET_ACTIONS
         )),
+    };
+    match outcome {
+        Outcome::Done(text) => Outcome::Done(text + &found),
+        other => other,
     }
 }
 
@@ -3469,6 +3475,7 @@ impl Tickets {
             .map(|comment| {
                 crate::items::Said::of(&forge::Comment {
                     author: said(&comment["author"]["login"]),
+                    handle: None,
                     state: None,
                     body: said(&comment["body"]),
                     bot: forge::is_bot(&comment["author"]),

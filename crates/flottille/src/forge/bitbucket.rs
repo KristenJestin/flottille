@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 
 use super::ending::{Ending, Rerun};
 use super::{
-    Branch, Comment, Deletion, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Seen, after, blocks,
-    commit_hash, masked, method_refused, run,
+    Branch, Comment, Deletion, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Reviewer, Seen, after,
+    blocks, commit_hash, masked, method_refused, run,
 };
 use crate::daemon::Daemon;
 use crate::mcp::Outcome;
@@ -237,7 +237,7 @@ struct Listed {
     /// When Cloud says the pull request last changed (a push does), in milliseconds.
     updated: Option<u64>,
     /// Data Center says its reviewers in the list; Cloud does not.
-    reviewers: Vec<(String, &'static str)>,
+    reviewers: Vec<Reviewer>,
 }
 
 fn listed(forge: &Forge, pull: &Value) -> Option<Listed> {
@@ -307,10 +307,27 @@ fn listed(forge: &Forge, pull: &Value) -> Option<Listed> {
                     _ if p["approved"] == true => "approved",
                     _ => "pending",
                 };
-                (person(&p["user"], &["displayName", "name"]), state)
+                (
+                    person(&p["user"], &["displayName", "name"]),
+                    state,
+                    handle_of(&p["user"], &["name"]),
+                )
             })
             .collect(),
     })
+}
+
+/// What a person is named by besides their display name, masked: the first of `keys` that says
+/// one, else empty.
+fn handle_of(user: &Value, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| user[*key].as_str().filter(|name| !name.is_empty()))
+        .map_or_else(String::new, masked)
+}
+
+/// `handle_of` as a comment keeps it.
+fn handle_in(user: &Value, keys: &[&str]) -> Option<String> {
+    Some(handle_of(user, keys)).filter(|handle| !handle.is_empty())
 }
 
 /// A person's name, masked: the first of `keys` that says one.
@@ -365,14 +382,35 @@ pub(super) async fn cloud_values_with(
 }
 
 /// The activities of a Data Center pull request, `PAGE` at a time up to `total`, from where each
-/// page says the next starts.
-async fn dc_values(context: &str, path: &str, total: usize) -> Result<Vec<Value>, String> {
+/// page says the next starts; `params` are more query parameters, each `key=value`.
+pub(super) async fn dc_values(
+    context: &str,
+    path: &str,
+    total: usize,
+    params: &[&str],
+) -> Result<Vec<Value>, String> {
+    dc_values_cut(context, path, total, params)
+        .await
+        .map(|(values, _)| values)
+}
+
+/// `dc_values`, and whether the collection holds more than the `total` that was read.
+pub(super) async fn dc_values_cut(
+    context: &str,
+    path: &str,
+    total: usize,
+    params: &[&str],
+) -> Result<(Vec<Value>, bool), String> {
     let size = format!("limit={PAGE}");
     let mut values = Vec::new();
     let mut start = 0;
+    let mut cut = false;
     loop {
         let from = format!("start={start}");
         let mut args = vec!["api", path, "--context", context, "--param", &size];
+        for param in params {
+            args.extend(["--param", param]);
+        }
         if start > 0 {
             args.extend(["--param", &from]);
         }
@@ -380,14 +418,19 @@ async fn dc_values(context: &str, path: &str, total: usize) -> Result<Vec<Value>
         let read = page["values"].as_array().map_or(0, |values| values.len());
         values.extend(page["values"].as_array().into_iter().flatten().cloned());
         match page["nextPageStart"].as_u64() {
-            Some(next) if page["isLastPage"] != true && read > 0 && values.len() < total => {
+            Some(next) if page["isLastPage"] != true && read > 0 => {
+                if values.len() >= total {
+                    cut = true;
+                    break;
+                }
                 start = next as usize
             }
             _ => break,
         }
     }
+    cut |= values.len() > total;
     values.truncate(total);
-    Ok(values)
+    Ok((values, cut))
 }
 
 /// The pull requests in `state` (`all`, `OPEN`…), the newest `LISTED`.
@@ -519,6 +562,7 @@ async fn detailed_with(
                     "/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}/activities"
                 ),
                 COMMENTS,
+                &[],
             )
             .await?;
             let closing = dc_closing(found.state, &activities);
@@ -673,7 +717,7 @@ pub(super) async fn list_pulls(
     }
     let base = format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests");
     // The open ones: the endpoint's default state.
-    let values = dc_values(context, &base, ALL).await?;
+    let values = dc_values(context, &base, ALL, &[]).await?;
     let mut notes =
         vec!["mine is not known on Bitbucket Data Center: bkt says no user there".to_owned()];
     if values.len() >= ALL {
@@ -750,6 +794,7 @@ fn listed_of(item: &flottille_core::item::Item) -> Option<Listed> {
                 (
                     r["name"].as_str().unwrap_or_default().to_owned(),
                     verdict(r["state"].as_str().unwrap_or_default()),
+                    r["handle"].as_str().unwrap_or_default().to_owned(),
                 )
             })
             .collect(),
@@ -1246,8 +1291,8 @@ fn cloud_page(forge: &Forge, id: &str) -> String {
 
 /// The reviewers' verdicts as one: `changes requested` when one asks for it, else `approved` when
 /// every one approved, else `review required`; none without reviewers.
-fn decision(reviewers: &[(String, &'static str)]) -> Option<&'static str> {
-    let any = |state| reviewers.iter().any(|(_, s)| *s == state);
+fn decision(reviewers: &[Reviewer]) -> Option<&'static str> {
+    let any = |state| reviewers.iter().any(|(_, s, _)| *s == state);
     if reviewers.is_empty() {
         None
     } else if any("changes requested") {
@@ -1280,7 +1325,7 @@ fn check_of(status: &Value) -> (String, &'static str) {
 }
 
 /// The reviewers of a Cloud pull request's own page (`participants`).
-fn cloud_reviewers(pull: &Value) -> Vec<(String, &'static str)> {
+fn cloud_reviewers(pull: &Value) -> Vec<Reviewer> {
     pull["participants"]
         .as_array()
         .into_iter()
@@ -1293,7 +1338,11 @@ fn cloud_reviewers(pull: &Value) -> Vec<(String, &'static str)> {
                 _ if p["approved"] == true => "approved",
                 _ => "pending",
             };
-            (person(&p["user"], &["display_name", "nickname"]), state)
+            (
+                person(&p["user"], &["display_name", "nickname"]),
+                state,
+                handle_of(&p["user"], &["nickname", "account_id"]),
+            )
         })
         .collect()
 }
@@ -1305,6 +1354,7 @@ fn cloud_comments(comments: &[Value]) -> Vec<Comment> {
         .filter(|c| c["deleted"] != true)
         .map(|c| Comment {
             author: person(&c["user"], &["display_name", "nickname"]),
+            handle: handle_in(&c["user"], &["nickname", "account_id"]),
             state: None,
             body: masked(c["content"]["raw"].as_str().unwrap_or_default()),
             // What says a Bitbucket bot is not read: every author is taken for a person.
@@ -1335,6 +1385,7 @@ fn cloud_closing(state: &str, page: &Value) -> Option<Comment> {
         } else {
             String::new()
         },
+        handle: handle_in(&page["closed_by"], &["nickname", "account_id"]),
         state: None,
         body: masked(reason),
         bot: false,
@@ -1370,6 +1421,7 @@ fn dc_closing(state: &str, activities: &[Value]) -> Option<Comment> {
         })
         .map(|a| Comment {
             author: closer.clone(),
+            handle: handle_in(&ended["user"], &["name"]),
             state: None,
             body: masked(a["comment"]["text"].as_str().unwrap_or_default()),
             bot: false,
@@ -1385,6 +1437,7 @@ fn dc_comments(activities: &[Value]) -> Vec<Comment> {
     fn walk(comment: &Value, out: &mut Vec<Comment>) {
         out.push(Comment {
             author: person(&comment["author"], &["displayName", "name"]),
+            handle: handle_in(&comment["author"], &["name"]),
             state: None,
             body: masked(comment["text"].as_str().unwrap_or_default()),
             bot: false,

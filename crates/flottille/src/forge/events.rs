@@ -29,6 +29,15 @@ fn by(said: &Value) -> Option<By> {
     })
 }
 
+/// Who a comment or a review is by, as the event says them: their name, and the handle an agent
+/// names them back by where the forge gives one (`Jane Doe (jdoe)`).
+fn who(said: &Value) -> String {
+    super::named_as(
+        said["author"].as_str().unwrap_or_default(),
+        said["handle"].as_str().unwrap_or_default(),
+    )
+}
+
 /// The newest comments or reviews an event says.
 fn said<'a>(data: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
     data[key].as_array().into_iter().flatten()
@@ -106,7 +115,7 @@ fn events_of(
                     if state == "pending" {
                         continue;
                     }
-                    let author = review["author"].as_str().unwrap_or_default();
+                    let author = who(review);
                     found.push(Event {
                         kind: "review",
                         by: by(review),
@@ -119,6 +128,8 @@ fn events_of(
                 // Bitbucket says a review as a reviewer's verdict.
                 for verdict in said(data, "verdicts") {
                     let name = verdict["name"].as_str().unwrap_or_default();
+                    let said =
+                        super::named_as(name, verdict["handle"].as_str().unwrap_or_default());
                     found.push(Event {
                         kind: "review",
                         by: Some(By {
@@ -127,7 +138,7 @@ fn events_of(
                             marked: false,
                         }),
                         text: format!(
-                            "A review by {name}: {}",
+                            "A review by {said}: {}",
                             verdict["state"].as_str().unwrap_or_default()
                         ),
                     });
@@ -160,7 +171,7 @@ fn events_of(
                         by: by(comment),
                         text: format!(
                             "A comment by {}{agent}: {}",
-                            comment["author"].as_str().unwrap_or_default(),
+                            who(comment),
                             comment["excerpt"].as_str().unwrap_or_default()
                         ),
                     });

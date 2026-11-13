@@ -104,6 +104,7 @@ mod tests {
     fn said(author: &str, at: u64) -> Comment {
         Comment {
             author: author.into(),
+            handle: None,
             state: None,
             body: "text".into(),
             bot: false,
