@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::time::Duration;
 
@@ -15,6 +16,32 @@ use crate::agents::start_time;
 /// sweep runs, so the sweep never sees a child of the daemon's that is not recorded yet.
 static STARTED: crate::locks::Lock<Option<HashMap<u32, u64>>> =
     crate::locks::Lock::named("STARTED", None);
+
+/// The children the daemon started in a session of their own (`in_own_session`), by pid, with
+/// when each started, and the file that says them (`Paths::sessions`): what `daemon stop` ends
+/// with the daemon, read by another process, which cannot tell them from a helper that detached
+/// in a session of its own and was handed to the daemon. Taken only while `STARTED` is held.
+static SESSIONS: crate::locks::Lock<Option<(PathBuf, HashMap<u32, u64>)>> =
+    crate::locks::Lock::named("SESSIONS", None);
+
+/// At the daemon's start: the sessions it starts are said in `file`, none yet.
+pub fn say_sessions_in(file: PathBuf) -> io::Result<()> {
+    let _started = STARTED.lock().unwrap();
+    write_sessions(&file, &HashMap::new())?;
+    *SESSIONS.lock().unwrap() = Some((file, HashMap::new()));
+    Ok(())
+}
+
+fn write_sessions(file: &Path, sessions: &HashMap<u32, u64>) -> io::Result<()> {
+    let text: String = sessions
+        .iter()
+        .map(|(pid, at)| format!("{pid} {at}\n"))
+        .collect();
+    // Whole or not at all, for a `daemon stop` reading it meanwhile.
+    let next = file.with_extension("sessions.next");
+    std::fs::write(&next, text)?;
+    std::fs::rename(&next, file)
+}
 
 /// Spawns a child its caller waits for itself, recorded as the daemon's own.
 pub fn spawn(command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
@@ -34,11 +61,32 @@ fn recorded<C>(
     let child = spawn()?;
     // Not waited for until it is handed out: it is still there, a zombie at worst.
     if let Some(pid) = pid(&child)
-        && let Some(at) = start_time(pid)
+        && let Some(child) = stat(pid)
     {
-        started.get_or_insert_default().insert(pid, at);
+        started.get_or_insert_default().insert(pid, child.started);
+        // The spawn returns once the child ran its `pre_exec`: one started in a session of
+        // its own leads it already.
+        if child.session == pid {
+            started_session(pid, child.started);
+        }
     }
     Ok(child)
+}
+
+fn started_session(pid: u32, at: u64) {
+    let mut guard = SESSIONS.lock().unwrap();
+    let Some((file, sessions)) = guard.as_mut() else {
+        return;
+    };
+    // The ones that ended since are forgotten here, the only time the file is written again.
+    sessions.retain(|pid, at| start_time(*pid) == Some(*at));
+    sessions.insert(pid, at);
+    if let Err(error) = write_sessions(file, sessions) {
+        eprintln!(
+            "flottille daemon: cannot write {} ({error}): daemon stop may leave a run running",
+            file.display()
+        );
+    }
 }
 
 /// The command starts a session of its own, which it leads: what it starts stays in it, even in

@@ -77,6 +77,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.runtime)?;
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
+    children::say_sessions_in(paths.sessions())?;
     let _store_lock = hold_store(paths)?;
     extensions::check_tools(extensions::ALL)?;
     let mut store = Store::open(&paths.database())?;

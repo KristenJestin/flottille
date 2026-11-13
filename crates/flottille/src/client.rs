@@ -252,7 +252,10 @@ pub enum Stopped {
 pub fn stop(paths: &Paths, mut client: Client) -> Result<Stopped> {
     let pid = locked_by(paths);
     // Opened before it is asked: the pid it held may be taken by another process once it ends.
-    let daemon = pid.parse().ok().and_then(Daemon::open);
+    let daemon = pid
+        .parse()
+        .ok()
+        .and_then(|pid| Daemon::open(pid, paths.sessions()));
     let wait = std::env::var("FLOTTILLE_STOP_WAIT_MS")
         .ok()
         .and_then(|ms| ms.parse().ok())
@@ -341,22 +344,36 @@ impl Drop for Process {
     }
 }
 
-/// The daemon being stopped.
-struct Daemon(Process);
+/// The daemon being stopped, and the file where it says the sessions it started
+/// (`Paths::sessions`).
+struct Daemon(Process, PathBuf);
 
 impl Daemon {
-    fn open(pid: u32) -> Option<Daemon> {
-        Process::open(pid).map(Daemon)
+    fn open(pid: u32, sessions: PathBuf) -> Option<Daemon> {
+        Process::open(pid).map(|process| Daemon(process, sessions))
+    }
+
+    /// The leaders of the sessions the daemon started that still run: never one that took the
+    /// pid of one since, nor a child of its that leads a session it did not start.
+    fn leaders(&self) -> Vec<u32> {
+        let said = std::fs::read_to_string(&self.1).unwrap_or_default();
+        said.lines()
+            .filter_map(|line| {
+                let (pid, at) = line.split_once(' ')?;
+                let (pid, at) = (pid.parse().ok()?, at.parse().ok()?);
+                (crate::agents::start_time(pid) == Some(at)).then_some(pid)
+            })
+            .collect()
     }
 
     /// The processes below the daemon that are its own: those of its session (its agents and
-    /// their groups) and of the sessions its children lead (runs, setup steps). As their
+    /// their groups) and of the sessions it started (runs, setup steps, probes). As their
     /// subreaper it holds more: a helper something it ran left detached in a session of its own
-    /// (an ssh control master, an agent of gpg, git's credential cache) may serve the user's
-    /// terminals too, and is never its to end.
+    /// (an ssh control master, an agent of gpg, git's credential cache), even one handed to it as
+    /// its child, may serve the user's terminals too, and is never its to end.
     fn tree(&self) -> Vec<u32> {
         let daemon = self.0.pid;
-        let leaders = children_of(daemon);
+        let leaders = self.leaders();
         let mut tree = Vec::new();
         let mut next = vec![daemon];
         while let Some(pid) = next.pop() {
@@ -377,7 +394,7 @@ impl Daemon {
     /// processes it ran.
     fn end(self) -> usize {
         let daemon = self.0.pid;
-        let leaders = children_of(daemon);
+        let leaders = self.leaders();
         let processes: Vec<Process> = self
             .tree()
             .into_iter()
@@ -401,7 +418,7 @@ impl Daemon {
     }
 }
 
-/// Whether a process of `session` is the daemon's own: its session, or one a child of it leads.
+/// Whether a process of `session` is the daemon's own: its session, or one it started.
 fn owned(daemon: u32, leaders: &[u32], session: u32) -> bool {
     session == daemon || leaders.contains(&session)
 }

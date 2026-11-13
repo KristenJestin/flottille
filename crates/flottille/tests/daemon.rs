@@ -635,6 +635,37 @@ fn daemon_stop_spares_a_detached_helper() {
 }
 
 #[test]
+fn daemon_stop_spares_a_helper_that_daemonized() {
+    let user = User::with_fake_agent()
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
+    app(&user);
+    let pid = user.status()["pid"].as_u64().unwrap();
+    // A helper that detaches the usual way, as git's credential cache does: its parent exits, so
+    // it is handed to the daemon, their subreaper, as a child leading a session of its own.
+    user.fake_script(json!({"stall": true, "daemonized": true}));
+    user.call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let helper = recorded(&user, "daemonized");
+    within(5, "the helper is handed to the daemon", || {
+        std::fs::read_to_string(format!("/proc/{helper}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')').unwrap().1.split_whitespace().nth(1) == Some(&pid.to_string())
+        })
+    });
+    let _held = hold(&user, 600_000);
+
+    let stop = user.run(&["daemon", "stop"]);
+
+    let said = String::from_utf8_lossy(&stop.stdout);
+    assert!(said.contains("The daemon did not stop"), "{said}");
+    within(5, "the daemon is gone", || gone(pid));
+    let spared = !gone(helper);
+    // SAFETY: kill has no memory precondition; the helper is the test's own sleep.
+    unsafe { libc::kill(helper as libc::pid_t, libc::SIGKILL) };
+    assert!(spared, "daemon stop killed a helper that daemonized");
+}
+
+#[test]
 fn daemon_stop_waits_for_a_daemon_that_is_stopping() {
     let user = User::with_fake_agent().with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
     app(&user);
