@@ -13206,22 +13206,34 @@ fn the_window_says_the_daemon_does_not_answer(cx: &mut TestAppContext) {
             keeping.lock().unwrap().push(stream);
         }
     });
-    let connect: Connect = Arc::new(move || std::os::unix::net::UnixStream::connect(&socket));
+    // Once restarted, the window reaches a Flottille that answers.
+    let restored = Arc::new(AtomicBool::new(false));
+    let (answering, connector) = (restored.clone(), user.connector());
+    let connect: Connect = Arc::new(move || match answering.load(Ordering::SeqCst) {
+        true => connector(),
+        false => std::os::unix::net::UnixStream::connect(&socket),
+    });
     // Before the window asks anything.
     let asked = Instant::now();
     let (shell, cx) = window(&user, connect, 1280., cx);
     let restarted = Arc::new(AtomicUsize::new(0));
     let released = Arc::new(AtomicBool::new(false));
-    let (counted, release) = (restarted.clone(), released.clone());
+    let folded = Arc::new(AtomicBool::new(false));
+    let (counted, release, done) = (restarted.clone(), released.clone(), folded.clone());
     shell.update(cx, |shell, _| {
-        // A restart that takes a while, then lets go of every connection, as a daemon ended does.
+        // A restart that takes a while, then lets go of every connection, as a daemon ended does,
+        // and ends only once the banner folded away: it is said to run all along.
         shell.set_restart(Arc::new(move || {
             counted.fetch_add(1, Ordering::SeqCst);
             while !release.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(10));
             }
+            restored.store(true, Ordering::SeqCst);
             for stream in kept.lock().unwrap().drain(..) {
                 let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            while !done.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
             }
         }))
     });
@@ -13271,10 +13283,24 @@ fn the_window_says_the_daemon_does_not_answer(cx: &mut TestAppContext) {
     assert_eq!(restarted.load(Ordering::SeqCst), 1);
 
     released.store(true, Ordering::SeqCst);
+    // Answered again, it folds away still saying it restarts, and cannot be clicked meanwhile.
     until_time_passes(&shell, cx, "the banner folds away", |cx| {
+        let shown = cx.update(|window, _| {
+            window
+                .try_find("restart-flottille")
+                .is_some_and(|button| button.visible())
+        });
+        if shown {
+            assert_eq!(
+                text_of("restart-flottille", cx).as_deref(),
+                Some("Restarting…")
+            );
+            cx.update(|window, cx| window.click("restart-flottille", cx));
+        }
         cx.update(|window, _| window.try_find("not-answering-banner").is_none())
     });
     assert_eq!(restarted.load(Ordering::SeqCst), 1);
+    folded.store(true, Ordering::SeqCst);
     settle(cx);
     assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
 }

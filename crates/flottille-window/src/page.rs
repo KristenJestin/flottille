@@ -69,6 +69,9 @@ pub struct MainArea {
     not_answering: Option<u64>,
     /// Whether "Restart Flottille" runs: it cannot be clicked again meanwhile.
     restarting: bool,
+    /// Whether a restart was asked since Flottille stopped answering: the banner still says it
+    /// runs while it folds away.
+    restarted: bool,
     /// Whether Flottille was read once: until then, an empty page says nothing of the projects.
     read: bool,
 }
@@ -92,12 +95,16 @@ impl MainArea {
             services,
             not_answering: None,
             restarting: false,
+            restarted: false,
             read: false,
         }
     }
 
     pub fn set_not_answering(&mut self, since: Option<u64>, cx: &mut Context<Self>) {
         if self.not_answering != since {
+            if self.not_answering.is_none() {
+                self.restarted = false;
+            }
             self.not_answering = since;
             cx.notify();
         }
@@ -110,6 +117,7 @@ impl MainArea {
     pub fn set_restarting(&mut self, restarting: bool, cx: &mut Context<Self>) {
         if self.restarting != restarting {
             self.restarting = restarting;
+            self.restarted |= restarting;
             cx.notify();
         }
     }
@@ -303,7 +311,12 @@ impl MainArea {
             )
             .into()
         });
-        let (shell, restarting) = (self.shell.clone(), self.restarting);
+        // Folding away, it says what it said when Flottille answered again, and is no longer
+        // clicked.
+        let leaving = self.not_answering.is_none();
+        let restarting = self.restarting || leaving && self.restarted;
+        let disabled = self.restarting || leaving;
+        let shell = self.shell.clone();
         presence_of("not-answering", said, move |said| {
             div()
                 .id("not-answering-banner")
@@ -345,7 +358,7 @@ impl MainArea {
                         } else {
                             "Restart Flottille"
                         })
-                        .disabled(restarting)
+                        .disabled(disabled)
                         .on_click(move |_, _, cx| {
                             shell.update(cx, |shell, cx| shell.restart(cx)).ok();
                         }),
