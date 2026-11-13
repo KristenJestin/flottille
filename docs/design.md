@@ -386,10 +386,15 @@ while nothing changes, up to a ceiling, so a quiet tree costs few wakes.
 
 ### 5.5 Replacement and restarts
 
-Replacement on death, stuck, or a full context, the epoch that makes a replaced agent's late
-calls fail, the replacement limit (2 in 30 min; then a child fails and its parent gets
-`child-failed`, and a root asks the user), and the rebuild at daemon start follow
-`reference/hemera.md` §5.
+Replacement on stuck or a full context, the epoch that makes a replaced agent's late calls fail,
+the replacement limit (2 in 30 min; then a child fails and its parent gets `child-failed`, and a
+root asks the user), and the rebuild at daemon start follow `reference/hemera.md` §5. A death
+does not replace the session: as after a restart, the next process loads the agent's own
+session, told its process died and its last turn was cut, and its conversation is kept; a death
+counts against the limit all the same. A new session starts only when the session cannot be
+loaded (refused, lost or corrupt, a process that dies while it loads it) or the agent is stuck,
+and then from its first message, a summary of its conversation when a compactor is set (§5.8)
+and its latest messages word for word (`docs/agents.md`, "A death", "Replacement").
 
 ### 5.6 Subscriptions: waking on what happens outside
 
@@ -511,7 +516,9 @@ agent wrote is data.
    refused.
 4. **The new session**: the agent starts again in a new session of its CLI the way a replaced one
    does (`docs/agents.md`, "Compaction"), uncounted and with nothing told to its parent: it is sent
-   its brief, the summary, then its latest messages word for word. The summary, masked of the
+   its first message, the summary, then its latest messages word for word. A new session that
+   replaces one that could not be loaded (§5.5) is given the same summary, asked of the
+   compactor then. The summary, masked of the
    daemon's secrets, comes in a block of its own (`<earlier_conversation_summary>`, every `<`
    escaped) under a line that says a model wrote it from the earlier conversation: data, not the
    user's words nor Flottille's instructions. `agent.compacting` says it began, so that the

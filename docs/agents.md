@@ -296,8 +296,9 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
 - **Idle release**: a process with no turn running and nothing waiting for 5 minutes is let go
   (stopped: `SIGTERM` to its group, `SIGKILL` 2 s later); the next prompt starts it again and
   resumes or loads its session.
-- **A death**: a process that ends without being let go is published (`agent.died`) and its
-  session replaced ("Replacement", below).
+- **A death**: a process that ends without being let go is published (`agent.died`) and the
+  agent goes on in its own session, as after a restart: the next process resumes or loads it
+  ("A death", below).
 - **Orphans**: each process's pid and start time are kept in the store while it runs. A daemon
   starting kills the process groups a previous one left behind (a crash), only when the group's
   leader is alive with the start time recorded: never a stranger that took the pid since, and not
@@ -954,15 +955,32 @@ child then waits on its parent, a led session on its pilot (`session_send`), any
 user, who sees it in
 `flottille status` and under the window's bell (`waiting_on_answer`, `docs/protocol.md`).
 
+### A death
+
+An agent whose process died keeps its session and its conversation (`agent.released`, reason
+`died`): the next process resumes or loads it, as after a restart of Flottille. When a turn was
+running, its prompt is in the session's history: its deliveries are taken as sent, and the agent
+is sent a `resume` saying its process died and its last turn was cut. Otherwise what was taken
+for it is given back. The parent is told (`child-replaced`: its process stopped, it goes on in its
+session). Each death counts against the limit of new starts (below).
+
 ### Replacement
 
-A session that cannot go on is replaced: its process dies, or it is stuck (below). The agent
-keeps its id; its epoch counts the sessions. The new session starts from scratch, without the
-old one's session id, and is sent its brief (a root's first message is its brief) and a `resume`
-saying it starts again, once: the briefs and resumes of the old sessions not sent yet are
-superseded. What else the old session was sent and had not finished is given back. The old session's token stays known,
-so that its late calls are refused, saying it was replaced. The parent is told (`child-replaced`).
-Two replacements within 30 minutes are allowed: the third failure fails the agent and its tree.
+A session that cannot go on is replaced: the agent cannot resume or load it (the provider
+refuses it, it is lost or corrupt, the agent can do neither, its process died while it opened
+it), or it is stuck (below). The agent keeps its id; its epoch counts the sessions. The new
+session starts without the old one's session id, and is sent its first message again and a
+`resume` after it, once: the first messages and resumes of the old sessions not sent yet are
+superseded. The `resume` says why it starts again, then gives a summary of its conversation
+when a compactor is set (the compaction's, `docs/design.md` §5.8; none when it fails) and its
+latest messages word for word: never the first message alone. It never calls that message a
+brief. What else the old session was sent and had not finished is given back. The old session's
+token stays known, so that its late calls are refused, saying it was replaced. The parent is
+told (`child-replaced`) what the new session starts from.
+
+Two new starts within 30 minutes are allowed, a death or a replacement that a death or a stuck
+turn caused (a session the provider refuses is not one: its death, if any, was counted): the third
+failure fails the agent and its tree.
 
 A child whose context is compacted by its CLI is sent its brief again.
 

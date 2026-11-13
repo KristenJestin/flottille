@@ -822,12 +822,13 @@ Its process was let go; the next message starts it again.
 | Field | |
 |---|---|
 | `agent` | |
-| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone), `reload` (the user reloaded its tools, `agent.reload_tools`), `failed` (its turn failed for a reason that leaves its session usable: its `state_reason` says it until the next prompt, `docs/agents.md`, "A failed turn") or `stopped` (an ended or failed root whose session is kept: it can be resumed now, `agent.resume`). |
+| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone), `reload` (the user reloaded its tools, `agent.reload_tools`), `failed` (its turn failed for a reason that leaves its session usable: its `state_reason` says it until the next prompt, `docs/agents.md`, "A failed turn"), `died` (its process died: the next one loads its session, `docs/agents.md`, "A death") or `stopped` (an ended or failed root whose session is kept: it can be resumed now, `agent.resume`). |
 
 #### `agent.died`
 
-Its process ended by itself. Its session is replaced (`agent.replaced`), or the agent fails when
-it has been replaced too often (`docs/agents.md`, "Replacement").
+Its process ended by itself. It goes on in its own session (`agent.released`, reason `died`), a
+new one when it died while it loaded it (`agent.replaced`), or the agent fails when it started
+again too often (`docs/agents.md`, "A death").
 
 | Field | |
 |---|---|
