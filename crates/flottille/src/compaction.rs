@@ -1026,8 +1026,8 @@ fn expires_at(lifetime: Option<u64>, last: u64) -> Option<u64> {
 }
 
 /// What only the passing of time decides for an agent at rest (`sweep`): its compaction the margin
-/// before its cache expires, when the user asked for it, and once expired, the event that tells
-/// the window to offer its composer's toggle.
+/// before its cache expires (never once it expired), when the user asked for it, and once expired,
+/// the event that tells the window to offer its composer's toggle.
 pub fn at_rest(daemon: &Arc<Daemon>, agent: &Agent, now: u64) {
     if agent.state != AgentState::Idle
         || daemon
@@ -1048,7 +1048,10 @@ pub fn at_rest(daemon: &Arc<Daemon>, agent: &Agent, now: u64) {
     let queued = daemon
         .read(|store| store.deliveries(&agent.id, "queued"))
         .unwrap_or_default();
-    if settings.before_expiry && queued.is_empty() && now + settings.margin * 60_000 >= expires {
+    // Only while the cache is still warm: once expired the compaction saves nothing (the machine
+    // was off, the first sweep sees every cache cold), and the next message decides (`before_turn`).
+    let inside_margin = expires.saturating_sub(settings.margin * 60_000) <= now && now < expires;
+    if settings.before_expiry && queued.is_empty() && inside_margin {
         start(daemon, &agent.id);
         return;
     }

@@ -527,8 +527,9 @@ agent wrote is data.
    (its last turn's end), and the first turn after it expired reads the whole history again at
    full price. Two settings beside the others use the same compactor and compaction: **Compact
    before the cache expires** (off) compacts an agent at rest (no turn running, nothing waiting
-   for it) a **margin** (5 minutes, 1 to 30) before its cache expires; **Compact a session resumed
-   after its cache expired** (on) compacts first when a message is about to start a turn of an
+   for it) a **margin** (5 minutes, 1 to 30) before its cache expires, and never once it expired
+   (a machine that was off finds every cache cold: nothing would be saved); **Compact a session
+   resumed after its cache expired** (on) compacts first when a message is about to start a turn of an
    agent whose cache expired, and the message goes to the new session. Neither below a **minimum
    size** of context (50,000 tokens), without a compactor, while a picked compactor's notice is
    not seen, for a context that did not grow since the session started or its last compaction

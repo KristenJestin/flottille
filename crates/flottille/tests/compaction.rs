@@ -629,7 +629,7 @@ fn advance(user: &User, ms: u64) {
 }
 
 #[test]
-fn an_agent_at_rest_is_compacted_the_margin_before_its_cache_expires() {
+fn an_agent_is_compacted_at_rest_inside_the_margin() {
     let user = clocked("before_expiry = true");
     let agent = at_rest(&user);
 
@@ -645,6 +645,34 @@ fn an_agent_at_rest_is_compacted_the_margin_before_its_cache_expires() {
     advance(&user, 61 * MINUTE);
     std::thread::sleep(Duration::from_millis(1_500));
     assert_eq!(compacted(&user, &agent).len(), 1);
+}
+
+#[test]
+fn an_agent_is_not_compacted_at_rest_once_its_cache_expired() {
+    let user = clocked("before_expiry = true");
+    let agent = at_rest(&user);
+
+    // The machine was off: the first sweep sees the cache already cold, never inside the margin.
+    advance(&user, 8 * 60 * MINUTE);
+    quiet(&user, &agent);
+    advance(&user, MINUTE);
+    quiet(&user, &agent);
+    assert_eq!(user.received_requests("session/new").len(), 1);
+}
+
+#[test]
+fn an_expired_agent_is_compacted_by_its_next_message() {
+    let user = clocked("before_expiry = true");
+    let agent = at_rest(&user);
+
+    advance(&user, 8 * 60 * MINUTE);
+    quiet(&user, &agent);
+    send(&user, &agent, "go on AFTER");
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    eventually("the message in the new session", || {
+        prompts(&user).iter().any(|p| p.contains("go on AFTER"))
+    });
+    assert_eq!(user.received_requests("session/new").len(), 2);
 }
 
 #[test]
