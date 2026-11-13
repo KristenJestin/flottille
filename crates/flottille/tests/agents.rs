@@ -409,7 +409,6 @@ fn a_death_is_detected_and_published() {
     project(&user);
     let (id, after) = run(&user, json!({"message": "die now"}));
 
-    // Each death replaces the session, which dies again: the third fails the agent.
     let events = events_until(&user, &id, after, "agent.failed");
 
     let died: Vec<&Value> = events
@@ -419,12 +418,13 @@ fn a_death_is_detected_and_published() {
     assert_eq!(died.len(), 3);
     assert_eq!(died[0]["data"]["code"], 3);
     assert_eq!(died[0]["data"]["during_turn"], true);
+    // Each goes on in its session, whose next prompt says it died: the third fails the agent.
     assert_eq!(
         events
             .iter()
             .filter(|e| e["name"] == "agent.replaced")
             .count(),
-        2
+        0
     );
     let ended = events
         .iter()
@@ -443,6 +443,166 @@ fn a_death_is_detected_and_published() {
         .call("agent.send", json!({"agent": id, "message": "again"}))
         .unwrap_err();
     assert_eq!(refused.0, "refused");
+}
+
+/// The texts the fake agents were prompted with, in order.
+fn prompts(user: &User) -> Vec<String> {
+    user.received_requests("session/prompt")
+        .iter()
+        .map(|request| {
+            request["params"]["prompt"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|block| block["text"].as_str())
+                .collect()
+        })
+        .collect()
+}
+
+/// Waits until the agent said something holding `text`: what it said.
+fn said(user: &User, agent: &str, text: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let found = show(user, agent)["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["data"]["text"].as_str().map(str::to_owned))
+            .find(|said| said.contains(text));
+        if let Some(found) = found {
+            return found;
+        }
+        assert!(Instant::now() < deadline, "the agent never said {text}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_dead_agent_goes_on_in_its_own_session() {
+    let user = User::with_fake_agent();
+    // Loaded, not resumed: a load is what replays the history the fake agent kept.
+    user.fake_script(json!({"resume": false, "turns": [
+        {"when": "die", "times": 1, "do": [{"say": "On it."}, {"die": 0}]},
+        {"when": "what did I say", "do": [{"recall": true}]}
+    ]}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "the colour is teal"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    let native = show(&user, &id)["agent"]["native_id"].clone();
+
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "die now"}))
+        .unwrap();
+    let died = events_until(&user, &id, sent["after"].as_u64().unwrap(), "agent.died");
+    assert_eq!(died.last().unwrap()["data"]["code"], 0);
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "what did I say"}),
+    )
+    .unwrap();
+
+    let recalled = said(&user, &id, "earlier you said");
+    assert!(recalled.contains("the colour is teal"), "{recalled}");
+    let loaded = user.received_requests("session/load");
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0]["params"]["sessionId"], native);
+    assert_eq!(user.received_requests("session/new").len(), 1);
+    let agent = show(&user, &id);
+    assert_eq!(agent["agent"]["native_id"], native);
+    assert_eq!(agent["agent"]["epoch"], 0);
+    assert!(
+        !agent["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "agent.replaced")
+    );
+    let prompts = prompts(&user);
+    let told = prompts
+        .iter()
+        .find(|p| p.contains("[flottille:resume]"))
+        .expect("told why it starts again");
+    assert!(
+        told.contains("Your process died (exit code 0), and your last turn was cut"),
+        "{told}"
+    );
+    assert_eq!(
+        prompts
+            .iter()
+            .filter(|p| p.contains("the colour is teal"))
+            .count(),
+        1,
+        "its first message is not given again: {prompts:?}"
+    );
+}
+
+#[test]
+fn the_agent_is_never_told_about_a_brief() {
+    let user = User::with_fake_agent();
+    let turns = json!([
+        {"when": "die", "times": 1, "do": [{"die": 0}]},
+        {"when": "crash", "times": 1, "do": [{"die": 0}]}
+    ]);
+    user.fake_script(json!({"resume": false, "turns": turns}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    // It dies and goes on in its session.
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "die now"}))
+        .unwrap();
+    events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.released",
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !(prompts(&user)
+        .iter()
+        .any(|p| p.contains("last turn was cut"))
+        && show(&user, &id)["agent"]["state"] == "idle")
+    {
+        assert!(Instant::now() < deadline, "{:?}", prompts(&user));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let before = prompts(&user).len();
+    // It dies again, and its session can no longer be loaded (the next process reads that): a
+    // new one starts.
+    user.fake_script(
+        json!({"resume": false, "load_error": "the session is corrupt", "turns": turns}),
+    );
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "crash now"}))
+        .unwrap();
+    events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.replaced",
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !prompts(&user)
+        .iter()
+        .any(|p| p.contains("could not be loaded"))
+    {
+        assert!(Instant::now() < deadline, "{:?}", prompts(&user));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let after_the_death = prompts(&user)[1..].join("\n");
+    assert!(
+        after_the_death.contains("your last turn was cut"),
+        "{after_the_death}"
+    );
+    // The message that killed it, then the new session's first prompt.
+    assert_eq!(prompts(&user).len() - before, 2, "{:?}", prompts(&user));
+    // The kind of a first message is a marker, not words said to it.
+    let words = after_the_death.replace("[flottille:brief]", "");
+    assert!(!words.to_lowercase().contains("brief"), "{words}");
+    // The user's words come back as they were.
+    assert!(words.contains("\nhello"), "{words}");
 }
 
 #[test]

@@ -336,8 +336,11 @@ fn a_start_whose_pictures_cannot_be_stored_leaves_no_agent_to_start_again() {
 #[test]
 fn the_pictures_of_a_first_message_are_given_again_to_the_session_that_replaces_it() {
     let user = User::with_fake_agent();
-    user.fake_script(json!({"images": true, "turns": [
-        {"when": "die", "do": [{"say": "Bye"}, {"die": 3}]}]}));
+    // Its session is lost with its process: a new one replaces it.
+    user.fake_script(
+        json!({"images": true, "load_error": "the session is lost", "turns": [
+        {"when": "die", "do": [{"say": "Bye"}, {"die": 3}]}]}),
+    );
     project(&user);
 
     let started = user

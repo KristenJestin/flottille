@@ -63,6 +63,9 @@ pub enum Exit {
     Died(ExitStatus),
     /// Its session is to be replaced, for this reason.
     Replace(String),
+    /// Its session could not be opened again, for this reason the agent gave: a new one replaces
+    /// it.
+    Unloaded(String),
     /// Its conversation was summarised: a new session goes on from the summary.
     Compact(Box<crate::compaction::Compacted>),
     /// The user reloads its tools: let go between turns, to be started again on its session with
@@ -282,9 +285,11 @@ async fn drive(
                         .meta(meta),
                 )
                 .block_task()
-                .await
-                .map_err(|e| format!("the agent could not resume its session: {e}"))?;
-            let answer = serde_json::to_value(&answer).unwrap_or_default();
+                .await;
+            let answer = match answer {
+                Ok(answer) => serde_json::to_value(&answer).unwrap_or_default(),
+                Err(e) => return Ok(Exit::Unloaded(e.to_string())),
+            };
             ("resumed", native.clone(), answer["configOptions"].clone())
         }
         Some(native) if loads => {
@@ -298,13 +303,19 @@ async fn drive(
                 .block_task()
                 .await;
             replay.store(false, Ordering::SeqCst);
-            let answer = serde_json::to_value(
-                &answer.map_err(|e| format!("the agent could not load its session: {e}"))?,
-            )
-            .unwrap_or_default();
+            let answer = match answer {
+                Ok(answer) => serde_json::to_value(&answer).unwrap_or_default(),
+                Err(e) => return Ok(Exit::Unloaded(e.to_string())),
+            };
             ("loaded", native.clone(), answer["configOptions"].clone())
         }
-        _ => {
+        // Opening a new one would leave the agent without what it said.
+        Some(_) => {
+            return Ok(Exit::Unloaded(
+                "the agent can neither resume nor load a session".to_owned(),
+            ));
+        }
+        None => {
             let answer = cx
                 .send_request(
                     NewSessionRequest::new(folder)

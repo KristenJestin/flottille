@@ -124,15 +124,19 @@ fn the_daemon_runs_a_codex_agent_through_the_bridge_with_its_bare_session() {
 #[test]
 fn a_codex_session_s_thread_is_deleted_when_flottille_forgets_it() {
     let (user, _) = user_with_codex();
-    user.codex_script(json!({"turns": [{"when": "boom", "do": [{"die": 3}]}]}));
+    // A thread it left cannot be resumed: its death is followed by a new session.
+    user.codex_script(
+        json!({"resume_error": true, "turns": [{"when": "boom", "do": [{"die": 3}]}]}),
+    );
     let (id, after) = run(&user, "hello");
     events_until(&user, &id, after, "agent.turn_ended");
     let native = agent(&user, &id)["native_id"].as_str().unwrap().to_owned();
     let thread = user.path(&format!("codex/threads/{native}"));
     assert!(thread.exists());
 
-    // Its process dies: a new session replaces the old one, which nothing will open again (the
-    // message, given back, kills the next ones too, until the agent fails).
+    // Its process dies and its thread cannot be resumed: a new session replaces the old one,
+    // which nothing will open again (the message, among its latest, kills the next ones too,
+    // until the agent fails).
     let sent_at = user
         .call("agent.send", json!({"agent": id, "message": "boom"}))
         .unwrap()["after"]

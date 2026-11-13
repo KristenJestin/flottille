@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -1320,7 +1321,7 @@ async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
                     }
                     Some(Order::Ring) => continue,
                     Some(Order::Replace(reason)) => {
-                        if !replace(&daemon, &id, &reason, true, false) {
+                        if !fresh(&daemon, &id, &reason, true, false, &mut orders).await {
                             return;
                         }
                         continue;
@@ -1471,6 +1472,7 @@ async fn process(
         speech: Speech::new(Secrets::new(&env, &[])),
         env,
         started_at: Mutex::new(None),
+        opened: AtomicBool::new(false),
     });
     let events = recorder.clone();
     let server = acp::Server {
@@ -1549,14 +1551,24 @@ async fn process(
             // run on as an orphan, with its tools.
             signal_group(pid, libc::SIGKILL);
             mcp::retire(daemon, &agent.id);
-            Ok(died(daemon, &agent.id, status, turns))
+            let opened = recorder.opened.load(Ordering::SeqCst);
+            Ok(died(daemon, agent, status, turns, opened, orders).await)
         }
         Ok(Exit::Replace(reason)) => {
             stop(&mut child, pid).await;
             mcp::retire(daemon, &agent.id);
             turns.running = false;
             turns.queued.clear();
-            Ok(replace(daemon, &agent.id, &reason, true, false))
+            Ok(fresh(daemon, &agent.id, &reason, true, false, orders).await)
+        }
+        Ok(Exit::Unloaded(said)) => {
+            // A process that died as it answered is a death, which counts; a refusal does not.
+            let gone = matches!(child.try_wait(), Ok(Some(_)));
+            stop(&mut child, pid).await;
+            turns.running = false;
+            turns.queued.clear();
+            let reason = format!("the session could not be loaded ({said})");
+            Ok(fresh(daemon, &agent.id, &reason, gone, true, orders).await)
         }
         Ok(Exit::Compact(compacted)) => {
             stop(&mut child, pid).await;
@@ -1576,9 +1588,19 @@ async fn process(
     goes_on
 }
 
-/// The process died: published, then the agent's session is replaced. Whether it goes on.
-fn died(daemon: &Arc<Daemon>, id: &str, status: ExitStatus, turns: &mut Turns) -> bool {
+/// The process died: published, then the agent goes on in its own session, which the next
+/// process loads (`docs/reference/hemera.md` §5 "Replacement"), or in a new one when it died
+/// loading it. Whether it goes on.
+async fn died(
+    daemon: &Arc<Daemon>,
+    agent: &Agent,
+    status: ExitStatus,
+    turns: &mut Turns,
+    opened: bool,
+    orders: &mut mpsc::UnboundedReceiver<Order>,
+) -> bool {
     use std::os::unix::process::ExitStatusExt;
+    let id = &agent.id;
     let during_turn = std::mem::replace(&mut turns.running, false);
     turns.queued.clear();
     if during_turn {
@@ -1590,11 +1612,12 @@ fn died(daemon: &Arc<Daemon>, id: &str, status: ExitStatus, turns: &mut Turns) -
             false,
         );
     }
-    let reason = match (status.code(), status.signal()) {
-        (Some(code), _) => format!("its process died (exit code {code})"),
-        (_, Some(signal)) => format!("its process died (signal {signal})"),
-        _ => "its process died".to_owned(),
+    let how = match (status.code(), status.signal()) {
+        (Some(code), _) => format!(" (exit code {code})"),
+        (_, Some(signal)) => format!(" (signal {signal})"),
+        _ => String::new(),
     };
+    let reason = format!("its process died{how}");
     record(
         daemon,
         id,
@@ -1610,15 +1633,150 @@ fn died(daemon: &Arc<Daemon>, id: &str, status: ExitStatus, turns: &mut Turns) -
     ) {
         return compacted_session(daemon, id, compacted);
     }
-    replace(daemon, id, &reason, true, true)
+    if agent.native_id.is_some() && !opened {
+        let reason = format!("the process died{how} while it loaded the session");
+        return fresh(daemon, id, &reason, true, true, orders).await;
+    }
+    revive(daemon, id, &how, during_turn)
 }
 
-/// A new session replaces the agent's (`docs/reference/hemera.md` §5 "Replacement"): what its
-/// last turn did not take is given back, its brief is delivered again with a word on why, and its
-/// parent is told when `tell` (a stuck agent's was told already). Past the replacement limit it
-/// fails instead. Whether it goes on.
-pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell: bool) -> bool {
-    renew(daemon, id, reason, counted, tell, None)
+/// Whether the agent went past the limit of new starts (`REPLACEMENTS_MAX` in
+/// `REPLACEMENT_WINDOW_MS`), its tree failed when it did.
+fn keeps_failing(daemon: &Arc<Daemon>, id: &str, reason: &str) -> bool {
+    let since = now_ms().saturating_sub(REPLACEMENT_WINDOW_MS);
+    let replaced = daemon
+        .read(|store| store.replacements_since(id, since))
+        .unwrap_or(0);
+    if replaced < REPLACEMENTS_MAX {
+        return false;
+    }
+    tree::fail_tree(
+        daemon,
+        id,
+        &format!("it keeps failing: {reason}, after {replaced} new starts in 30 minutes"),
+    );
+    true
+}
+
+/// The agent's process died (`how`, its code or signal): it goes on in its own session, as after
+/// a restart of Flottille. Counted against the limit of new starts; what its cut turn was given is
+/// in the session's history, so it is taken as sent, and the agent is told its turn was cut; its
+/// parent is told. Whether it goes on.
+fn revive(daemon: &Arc<Daemon>, id: &str, how: &str, cut: bool) -> bool {
+    let reason = format!("its process died{how}");
+    if keeps_failing(daemon, id, &reason) {
+        let _ = daemon.write(|store| Ok(((), store.give_back(id)?)));
+        return false;
+    }
+    let Ok(Some(agent)) = daemon.read(|store| store.agent(id)) else {
+        return false;
+    };
+    if agent.state.is_final() {
+        return false;
+    }
+    let _ = daemon.read(|store| store.count_new_start(id, &reason));
+    match cut {
+        true => {
+            let _ = daemon.read(|store| store.deliveries_taken(id));
+        }
+        false => {
+            let _ = daemon.write(|store| Ok(((), store.give_back(id)?)));
+        }
+    }
+    change(
+        daemon,
+        id,
+        AgentState::Idle,
+        None,
+        Some(("agent.released", json!({"reason": "died"}))),
+    );
+    if cut {
+        deliveries::deliver(
+            daemon,
+            id,
+            "resume",
+            Some(format!("resume-{id}-{}-died-{}", agent.epoch, now_ms())),
+            &format!(
+                "Your process died{how}, and your last turn was cut: check the real state of \
+                 your place, then go on."
+            ),
+            approval::BETWEEN_TURNS,
+        );
+    }
+    tree::tell_parent(
+        daemon,
+        &agent,
+        "child-replaced",
+        &format!("its process stopped{how}; it goes on in its session."),
+        approval::BETWEEN_TURNS,
+    );
+    true
+}
+
+/// A new session replaces the agent's (`docs/reference/hemera.md` §5 "Replacement"): its own
+/// could not be loaded, or it was stuck (`reason`). It starts from its first message, a summary
+/// of its conversation when a compactor is set, and its latest messages word for word; its parent
+/// is told when `tell` (a stuck agent's was told already). Past the limit of new starts, when
+/// `counted`, it fails instead. Whether it goes on.
+async fn fresh(
+    daemon: &Arc<Daemon>,
+    id: &str,
+    reason: &str,
+    counted: bool,
+    tell: bool,
+    orders: &mut mpsc::UnboundedReceiver<Order>,
+) -> bool {
+    let reason = secrets::mask(reason, &std::env::vars_os().collect());
+    if counted && keeps_failing(daemon, id, &reason) {
+        let _ = daemon.write(|store| Ok(((), store.give_back(id)?)));
+        return false;
+    }
+    let Some(summary) = summarised(daemon, id, orders).await else {
+        return false;
+    };
+    let kept = crate::compaction::settings(daemon)
+        .map(|settings| crate::compaction::kept_now(daemon, id, &settings))
+        .unwrap_or(crate::compaction::KEPT);
+    // Read before the new session starts: what the old one said is what is kept.
+    let resume = crate::compaction::fresh_body(daemon, id, &reason, summary.as_deref(), kept);
+    let told = tell.then(|| {
+        let from = match summary {
+            Some(_) => "its first message, a summary of its conversation and its latest messages",
+            None => "its first message and its latest messages",
+        };
+        format!("its session was replaced: {reason}. A new session starts from {from}.")
+    });
+    renew(daemon, id, &reason, counted, told.as_deref(), resume, false)
+}
+
+/// The summary of the agent's conversation for its new session, when a compactor is set; None
+/// inside when there is none or it failed. None when the agent is stopped meanwhile.
+async fn summarised(
+    daemon: &Arc<Daemon>,
+    id: &str,
+    orders: &mut mpsc::UnboundedReceiver<Order>,
+) -> Option<Option<String>> {
+    let set = crate::compaction::settings(daemon).is_ok_and(|s| s.compactor.is_some());
+    if !set {
+        return Some(None);
+    }
+    let summary = crate::compaction::summary(daemon, id);
+    tokio::pin!(summary);
+    // The compactor may take minutes: the agent can still be stopped.
+    loop {
+        tokio::select! {
+            summary = &mut summary => return Some(summary),
+            order = orders.recv() => match order {
+                None | Some(Order::Stop) => return None,
+                Some(Order::Cancel(answer)) => {
+                    let _ = answer.send(false);
+                }
+                // Its own compaction is superseded by this new session.
+                Some(Order::Compact(_)) => crate::compaction::over(daemon, id),
+                Some(Order::Ring | Order::Replace(_)) => {}
+            },
+        }
+    }
 }
 
 /// The agent's conversation was summarised (`compaction`): its session is let go and a new one,
@@ -1639,8 +1797,9 @@ fn compacted_session(
         id,
         "its conversation was compacted",
         false,
-        false,
-        Some(resume),
+        None,
+        resume,
+        true,
     );
     if goes_on {
         let mut data = json!({"by": "flottille", "before": compacted.before, "after": after,
@@ -1665,28 +1824,19 @@ fn replayed(id: String, compacted: bool) -> String {
     }
 }
 
-/// `replace`, the new session sent `resume` in place of the word on why it starts again.
+/// A new session replaces the agent's: what its last turn did not take is given back, its first
+/// message is delivered again and `resume` after it, and its parent is told `told`. `replay`
+/// marks what is sent again as no news to the conversation (a compaction's). Whether it goes on.
 fn renew(
     daemon: &Arc<Daemon>,
     id: &str,
     reason: &str,
     counted: bool,
-    tell: bool,
-    resume: Option<String>,
+    told: Option<&str>,
+    resume: String,
+    replay: bool,
 ) -> bool {
     let reason = secrets::mask(reason, &std::env::vars_os().collect());
-    let since = now_ms().saturating_sub(REPLACEMENT_WINDOW_MS);
-    let replaced = daemon
-        .read(|store| store.replacements_since(id, since))
-        .unwrap_or(0);
-    if counted && replaced >= REPLACEMENTS_MAX {
-        tree::fail_tree(
-            daemon,
-            id,
-            &format!("it keeps failing: {reason}, after {replaced} replacements in 30 minutes"),
-        );
-        return false;
-    }
     let _ = daemon.write(|store| Ok(((), store.give_back(id)?)));
     // The new session gets one brief and one word on why: those its old sessions were given, or
     // were still to be given, go.
@@ -1730,8 +1880,6 @@ fn renew(
     if let Some((provider, native)) = replaced {
         (provider.forget_session)(&daemon.paths, &native);
     }
-    // What a compaction sends again is no news to the conversation: its ids say so.
-    let compacted = resume.is_some();
     if agent.brief.is_some() {
         let (kind, brief) = crate::tree::first_message(daemon, &agent);
         // The pictures of the user's first message are given again with it: their files stay
@@ -1746,7 +1894,7 @@ fn renew(
             daemon,
             id,
             kind,
-            Some(replayed(format!("brief-{id}-{}", agent.epoch), compacted)),
+            Some(replayed(format!("brief-{id}-{}", agent.epoch), replay)),
             &crate::commands::Message::plain(&brief),
             approval::BETWEEN_TURNS,
             images,
@@ -1756,23 +1904,16 @@ fn renew(
         daemon,
         id,
         "resume",
-        Some(replayed(format!("resume-{id}-{}", agent.epoch), compacted)),
-        &resume.unwrap_or_else(|| {
-            format!(
-                "A previous session of yours stopped: {reason}. You start again from your brief: \
-                 check the real state of your place first, what it did may be there already."
-            )
-        }),
+        Some(replayed(format!("resume-{id}-{}", agent.epoch), replay)),
+        &resume,
         approval::BETWEEN_TURNS,
     );
-    if tell {
+    if let Some(told) = told {
         tree::tell_parent(
             daemon,
             &agent,
             "child-replaced",
-            &format!(
-                "its session was replaced: {reason}. A new session starts again from its brief."
-            ),
+            told,
             approval::BETWEEN_TURNS,
         );
     }
@@ -1836,6 +1977,8 @@ struct Recorder {
     speech: Speech,
     /// When the turn under way started.
     started_at: Mutex<Option<u64>>,
+    /// Its session is open: a death before is one while it opened it.
+    opened: AtomicBool,
 }
 
 /// Events of the session that say nothing of the conversation: they may come between two pieces
@@ -2217,6 +2360,7 @@ impl acp::Events for Recorder {
         if let Err(error) = result {
             eprintln!("flottille daemon: agent {}: {error}", self.agent);
         }
+        self.opened.store(true, Ordering::SeqCst);
     }
 
     fn turn_started(&self, text: &str, images: &[String], typed: &Value, deliveries: &[String]) {

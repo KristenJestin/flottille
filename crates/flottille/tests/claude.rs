@@ -680,14 +680,24 @@ fn within_10_s(gone: impl Fn() -> bool) -> bool {
 #[test]
 fn through_the_bridge_a_session_s_history_goes_with_its_replacement() {
     let user = User::with_fake_claude();
-    user.claude_script(json!({"turns": [{"when": "boom", "do": [{"die": 3}]}]}));
+    // A session it left cannot be resumed: each death is followed by a new session.
+    user.claude_script(
+        json!({"resume_error": true, "turns": [{"when": "boom", "do": [{"die": 3}]}]}),
+    );
+    // No compactor: the one Flottille would pick is this fake `claude`, which the transcript kills.
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/compaction.toml"),
+        "compactor = \"none\"\n",
+    )
+    .unwrap();
     project(&user);
     let (id, after) = run(&user, "hello");
     events_until(&user, &id, after, "agent.turn_ended");
     let first = history(&user, &id);
     assert!(first.exists());
 
-    // Given back, the message kills each new session too, until the agent fails.
+    // Among its latest messages, the message kills each new session too, until the agent fails.
     let sent = user
         .call("agent.send", json!({"agent": id, "message": "boom"}))
         .unwrap();

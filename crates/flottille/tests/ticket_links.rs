@@ -1095,8 +1095,9 @@ fn an_edited_comment_keeps_one_record() {
 fn a_call_prepared_while_its_agent_is_replaced_is_refused() {
     let user = user();
     on_github(&user);
-    // The root dies once the test creates `die-now`; its replacement plays nothing.
-    user.fake_script(json!({"turns": [
+    // The root dies once the test creates `die-now`, its session lost with its process; its
+    // replacement plays nothing.
+    user.fake_script(json!({"load_error": "the session is lost", "turns": [
         {"when": "hello", "times": 1, "do": [{"hold": "die-now"}, {"die": 3}]}
     ]}));
     user.gh_script(json!({"issues": {"acme/app": {"1": {

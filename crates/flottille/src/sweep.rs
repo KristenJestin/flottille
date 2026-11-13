@@ -143,8 +143,8 @@ fn stuck(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent, now: u64) {
         "child-stuck",
         &format!(
             "was stuck: no sign of activity for {minutes} min in a turn, and no command of its \
-             own running. Flottille replaces it with a new session that starts again from its \
-             brief."
+             own running. Flottille replaces it with a new session that starts from its first \
+             message and what Flottille holds of its conversation."
         ),
         approval::BETWEEN_TURNS,
     );

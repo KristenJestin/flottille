@@ -298,7 +298,7 @@ fn a_worker_ending_a_turn_without_reporting_gets_the_reminder_then_the_lead_gets
 }
 
 #[test]
-fn a_worker_that_dies_is_replaced_once_and_the_lead_is_told() {
+fn a_worker_that_dies_goes_on_in_its_session_and_the_lead_is_told() {
     let user = user();
     let (_, lead) = lead(&user);
 
@@ -306,14 +306,15 @@ fn a_worker_that_dies_is_replaced_once_and_the_lead_is_told() {
 
     let told = prompted(&user, &["[flottille:child-replaced]"]);
     assert!(told.contains("fragile"), "{told}");
+    assert!(told.contains("it goes on in its session"), "{told}");
     let shown = show(&user, &worker)["agent"].clone();
-    assert_eq!(shown["epoch"], 1);
+    assert_eq!(shown["epoch"], 0);
     assert_ne!(shown["state"], "failed");
-    // The new session started again from the brief, given once to each session.
+    // Its own session goes on: told its turn was cut, its first message not given again.
     let resume = prompted(&user, &["[flottille:resume]"]);
-    assert!(resume.contains("start again"), "{resume}");
-    assert_eq!(occurrences(&user, "die-once then work"), 2);
-    assert_eq!(resume.matches("[flottille:brief]").count(), 1, "{resume}");
+    assert!(resume.contains("your last turn was cut"), "{resume}");
+    assert_eq!(occurrences(&user, "die-once then work"), 1);
+    assert!(!resume.contains("[flottille:brief]"), "{resume}");
 }
 
 /// How many times `text` was sent to the fake agents, every prompt counted.
@@ -322,7 +323,7 @@ fn occurrences(user: &User, text: &str) -> usize {
 }
 
 #[test]
-fn a_replaced_lead_gets_its_first_message_once() {
+fn a_lead_that_dies_is_not_given_its_first_message_again() {
     let user = user();
     project(&user);
     let answer = user
@@ -334,11 +335,11 @@ fn a_replaced_lead_gets_its_first_message_once() {
     let id = answer["agent"]["id"].as_str().unwrap().to_owned();
 
     prompted(&user, &["[flottille:resume]"]);
-    eventually("its new session's turn", || state(&user, &id) == "idle");
-    assert_eq!(show(&user, &id)["agent"]["epoch"], 1);
+    eventually("its session's next turn", || state(&user, &id) == "idle");
+    assert_eq!(show(&user, &id)["agent"]["epoch"], 0);
     assert_eq!(
         occurrences(&user, "die-once and lead"),
-        2,
+        1,
         "{:?}",
         prompts(&user)
     );
@@ -350,12 +351,25 @@ fn a_worker_that_dies_three_times_in_30_minutes_fails_and_the_lead_gets_child_fa
     let (_, lead) = lead(&user);
 
     let worker = launch(&lead, "doomed", "die-always");
+    // It goes on in its session after each death, and dies at each new message.
+    for deaths in 1..3 {
+        eventually("its death", || {
+            events(&user, &worker, "agent.died").len() == deaths && state(&user, &worker) == "idle"
+        });
+        ok(lead.call(
+            "agent_send",
+            json!({"agent_id": worker, "message": "die-always"}),
+        ));
+    }
 
     let failed = prompted(&user, &["[flottille:child-failed]"]);
     assert!(failed.contains("doomed"), "{failed}");
     let shown = show(&user, &worker)["agent"].clone();
     assert_eq!(shown["state"], "failed");
-    assert_eq!(shown["epoch"], 2, "replaced twice, then failed");
+    assert_eq!(
+        shown["epoch"], 0,
+        "never replaced: it failed on its third death"
+    );
     assert_eq!(events(&user, &worker, "agent.died").len(), 3);
 }
 
