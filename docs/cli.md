@@ -45,9 +45,10 @@ the lock taken and refuses to start.
 
 ### `flottille daemon stop`
 
-Stops the running daemon, and its agents with it. A daemon that does not answer, or has not
-stopped 30 seconds after it was asked, is ended: it and every process it ran are killed, and the
-command says it had to (`docs/reference/daemon.md`).
+Stops the running daemon, and its agents with it. A daemon that does not answer within 30
+seconds, or does not end in the time its agents take to stop, is ended: it and the processes it
+ran are killed (a helper they left detached in a session of its own is spared), and the command
+says it had to (`docs/reference/daemon.md`).
 
 ```
 $ flottille daemon stop

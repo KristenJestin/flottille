@@ -120,17 +120,6 @@ impl Client {
         }
     }
 
-    /// `request`, its answer waited for `wait` at most.
-    pub fn request_within(&mut self, method: &str, params: Value, wait: Duration) -> Result<Value> {
-        self.writer.set_read_timeout(Some(wait))?;
-        let answer = self.request(method, params);
-        self.writer.set_read_timeout(None)?;
-        answer.map_err(|error| match is_timeout(error.as_ref()) {
-            true => format!("it did not answer {method} within {} s", wait.as_secs()).into(),
-            false => error,
-        })
-    }
-
     /// Sends a request without waiting for its answer: its id.
     pub fn send(&mut self, method: &str, params: Value) -> Result<String> {
         let id = self.next_id.to_string();
@@ -251,64 +240,181 @@ pub fn locked_by(paths: &Paths) -> String {
 pub enum Stopped {
     /// It stopped as it was asked.
     Asked,
-    /// It did not, for the reason said: it was killed, with the processes it ran, counted.
+    /// It did not, for the reason said: it was ended, with the processes it ran, counted.
     Ended(String, usize),
 }
 
-/// Asks the daemon `client` reaches to stop and waits for it, `STOP_WAIT` at most in all; past it
-/// (a daemon that answers nothing, or does not end), kills it and every process it ran, its
-/// agents' bridges included, which a stuck daemon leaves unable to end on their own.
+/// Asks the daemon `client` reaches to stop and waits for it. A daemon that does not answer
+/// within `STOP_WAIT` is ended at once; one that answered stops its agents one after another, up
+/// to `STOPPING_EACH` each, so it is given that much more for each process it runs. Past it, it
+/// and the processes it ran are ended (`end`), its agents' bridges included, which a stuck daemon
+/// leaves unable to end on their own.
 pub fn stop(paths: &Paths, mut client: Client) -> Result<Stopped> {
     let pid = locked_by(paths);
+    // Opened before it is asked: the pid it held may be taken by another process once it ends.
+    let daemon = pid.parse().ok().and_then(Daemon::open);
     let wait = std::env::var("FLOTTILLE_STOP_WAIT_MS")
         .ok()
         .and_then(|ms| ms.parse().ok())
         .map_or(STOP_WAIT, Duration::from_millis);
-    let deadline = Instant::now() + wait;
-    let asked = client.request_within("daemon.stop", Value::Null, wait);
+    client.writer.set_read_timeout(Some(wait))?;
+    let asked = client.request("daemon.stop", Value::Null);
     drop(client);
     // A daemon that closed the connection as it stopped is waited for all the same.
+    let (asked, deadline) = match asked {
+        Err(error) if is_timeout(error.as_ref()) => (
+            Err(format!("it did not answer daemon.stop within {} s", wait.as_secs()).into()),
+            Instant::now(),
+        ),
+        asked => {
+            let running = daemon.as_ref().map_or(0, |daemon| daemon.tree().len());
+            let running = u32::try_from(running).unwrap_or(u32::MAX);
+            (asked, Instant::now() + wait + STOPPING_EACH * running)
+        }
+    };
     let why = match wait_until(paths, &pid, deadline) {
         Ok(()) => return Ok(Stopped::Asked),
         Err(still) => asked.err().unwrap_or(still),
     };
-    let ended = end(paths, &pid)?;
-    Ok(Stopped::Ended(why.to_string(), ended))
-}
-
-/// Kills the daemon `pid` that holds the lock and every process it runs, then waits for the lock
-/// to be let go: how many processes it ran.
-fn end(paths: &Paths, pid: &str) -> Result<usize> {
-    let Ok(daemon) = pid.parse::<u32>() else {
+    let Some(daemon) = daemon else {
         return Err(
             format!("the daemon's lock names no process ({pid:?}): it was not ended").into(),
         );
     };
-    let mut tree = vec![daemon];
-    let mut next = 0;
-    while next < tree.len() {
-        tree.extend(children_of(tree[next]));
-        next += 1;
+    let ended = daemon.end();
+    wait_until(paths, &pid, Instant::now() + START_TIMEOUT)?;
+    Ok(Stopped::Ended(why.to_string(), ended))
+}
+
+/// How long a stopping daemon may take for each process it runs: an agent's task is waited for
+/// twice its grace (`agents::stop_all`), a run's for its grace (`runs`).
+const STOPPING_EACH: Duration = Duration::from_secs(5);
+/// How long the processes of a daemon being ended have to go on `SIGTERM` before `SIGKILL`: a git
+/// killed outright leaves its `index.lock`.
+const TERM_GRACE: Duration = Duration::from_secs(2);
+
+/// A process, through a pidfd: signalled through it, never one that took its pid since.
+struct Process {
+    pid: u32,
+    fd: libc::c_int,
+}
+
+impl Process {
+    fn open(pid: u32) -> Option<Process> {
+        // SAFETY: pidfd_open takes a pid and flags and returns a descriptor or -1.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+        (fd >= 0).then_some(Process {
+            pid,
+            fd: fd as libc::c_int,
+        })
     }
-    // Each through a pidfd opened before the daemon goes: a pid taken since by another process
-    // is never signalled.
-    let fds: Vec<_> = tree.iter().filter_map(|&pid| pidfd(pid)).collect();
-    for &fd in &fds {
-        // SAFETY: the descriptor is a pidfd just opened; no siginfo is passed.
+
+    fn signal(&self, signal: libc::c_int) {
+        // SAFETY: the descriptor is a pidfd of ours; no siginfo is passed.
         unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,
-                fd,
-                libc::SIGKILL,
+                self.fd,
+                signal,
                 std::ptr::null::<libc::siginfo_t>(),
                 0,
             )
         };
-        // SAFETY: the descriptor is ours and closed once.
-        unsafe { libc::close(fd) };
     }
-    wait_until(paths, pid, Instant::now() + START_TIMEOUT)?;
-    Ok(tree.len() - 1)
+
+    /// Whether it ended: its pidfd reads as ready then.
+    fn ended(&self) -> bool {
+        let mut poll = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd, valid for the call.
+        unsafe { libc::poll(&mut poll, 1, 0) == 1 }
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor is ours and closed once.
+        unsafe { libc::close(self.fd) };
+    }
+}
+
+/// The daemon being stopped.
+struct Daemon(Process);
+
+impl Daemon {
+    fn open(pid: u32) -> Option<Daemon> {
+        Process::open(pid).map(Daemon)
+    }
+
+    /// The processes below the daemon that are its own: those of its session (its agents and
+    /// their groups) and of the sessions its children lead (runs, setup steps). As their
+    /// subreaper it holds more: a helper something it ran left detached in a session of its own
+    /// (an ssh control master, an agent of gpg, git's credential cache) may serve the user's
+    /// terminals too, and is never its to end.
+    fn tree(&self) -> Vec<u32> {
+        let daemon = self.0.pid;
+        let leaders = children_of(daemon);
+        let mut tree = Vec::new();
+        let mut next = vec![daemon];
+        while let Some(pid) = next.pop() {
+            // A detached helper's own children are left with it.
+            for child in children_of(pid) {
+                if session(child).is_some_and(|session| owned(daemon, &leaders, session)) {
+                    tree.push(child);
+                    next.push(child);
+                }
+            }
+        }
+        tree
+    }
+
+    /// Ends the daemon and its processes (`tree`): `SIGTERM`, then `SIGKILL` to those left after
+    /// `TERM_GRACE`, each through a pidfd opened, then checked to name a process still in one of
+    /// its sessions, so that a pid taken since by another process is never signalled. How many
+    /// processes it ran.
+    fn end(self) -> usize {
+        let daemon = self.0.pid;
+        let leaders = children_of(daemon);
+        let processes: Vec<Process> = self
+            .tree()
+            .into_iter()
+            .filter_map(Process::open)
+            .filter(|process| {
+                session(process.pid).is_some_and(|session| owned(daemon, &leaders, session))
+            })
+            .collect();
+        let all: Vec<&Process> = std::iter::once(&self.0).chain(&processes).collect();
+        for process in &all {
+            process.signal(libc::SIGTERM);
+        }
+        let deadline = Instant::now() + TERM_GRACE;
+        while Instant::now() < deadline && !all.iter().all(|process| process.ended()) {
+            std::thread::sleep(POLL);
+        }
+        for process in all.iter().filter(|process| !process.ended()) {
+            process.signal(libc::SIGKILL);
+        }
+        processes.len()
+    }
+}
+
+/// Whether a process of `session` is the daemon's own: its session, or one a child of it leads.
+fn owned(daemon: u32, leaders: &[u32], session: u32) -> bool {
+    session == daemon || leaders.contains(&session)
+}
+
+/// The session of `pid`, while it runs.
+fn session(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name, field 2, is in parentheses and may hold spaces.
+    let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+    if matches!(fields.first()?.chars().next()?, 'Z' | 'X') {
+        return None;
+    }
+    fields.get(3)?.parse().ok()
 }
 
 /// The children of `pid`, of every thread of it.
@@ -326,12 +432,6 @@ fn children_of(pid: u32) -> Vec<u32> {
                 .collect::<Vec<u32>>()
         })
         .collect()
-}
-
-fn pidfd(pid: u32) -> Option<libc::c_int> {
-    // SAFETY: pidfd_open takes a pid and flags and returns a descriptor or -1.
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
-    (fd >= 0).then_some(fd as libc::c_int)
 }
 
 /// Waits until the daemon `pid` (`locked_by`, read before it was asked to stop) has let go of its

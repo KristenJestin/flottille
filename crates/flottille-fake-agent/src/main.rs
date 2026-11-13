@@ -26,6 +26,7 @@
 //!   "resume": true,
 //!   "linger": false,
 //!   "child": false,
+//!   "detached": false,
 //!   "stall": false,
 //!   "models": ["fake-small", "fake-large"],
 //!   "efforts": ["low", "high"],
@@ -44,6 +45,8 @@
 //!   the daemon does not know yet (none by default).
 //! - `linger`: keep running once standard input closes, as an orphan would (false by default).
 //! - `child`: start a `sleep` in the process group at startup, recording its pid (`{"child": <pid>}`).
+//! - `detached`: start a `sleep` in a session of its own at startup, as a helper that detaches
+//!   (an ssh control master, an agent of gpg), recording its pid (`{"detached": <pid>}`).
 //! - `stall`: never answer `session/new`, `session/load` or `session/resume`: an agent stuck while
 //!   it opens.
 //! - `die_on_open`: exit with that code on `session/new`, `session/load` or `session/resume`: an
@@ -152,6 +155,9 @@ fn main() {
     agent.record.write(json!({"started": true, "env": env}));
     if agent.script["child"] == true {
         agent.start_child();
+    }
+    if agent.script["detached"] == true {
+        agent.start_detached();
     }
     let linger = agent.script["linger"] == true;
 
@@ -574,6 +580,28 @@ impl Agent {
             .spawn()
             .expect("sleep starts");
         self.record.write(json!({"child": child.id()}));
+    }
+
+    /// A `sleep` in a session of its own, never waited for.
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the helper is meant to outlive its parent"
+    )]
+    fn start_detached(&self) {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("sleep");
+        command.arg("600");
+        // SAFETY: setsid is async-signal-safe, which is all a pre_exec closure may call.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let helper = command.spawn().expect("sleep starts");
+        self.record.write(json!({"detached": helper.id()}));
     }
 
     fn ask_permission(

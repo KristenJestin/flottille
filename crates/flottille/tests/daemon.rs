@@ -598,3 +598,60 @@ fn daemon_stop_ends_a_daemon_that_does_not_answer() {
         }
     );
 }
+
+/// The first pid the fake agent recorded under `key`.
+fn recorded(user: &User, key: &str) -> u64 {
+    let pid = || user.received().iter().find_map(|e| e[key].as_u64());
+    within(10, "the fake agent records its process", || pid().is_some());
+    pid().unwrap()
+}
+
+#[test]
+fn daemon_stop_spares_a_detached_helper() {
+    let user = User::with_fake_agent()
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
+    app(&user);
+    let pid = user.status()["pid"].as_u64().unwrap();
+    // An agent that starts a process in its group, and a helper that detaches in a session of
+    // its own, as an ssh control master does.
+    user.fake_script(json!({"stall": true, "child": true, "detached": true}));
+    user.call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let child = recorded(&user, "child");
+    let helper = recorded(&user, "detached");
+    let _held = hold(&user, 600_000);
+
+    let stop = user.run(&["daemon", "stop"]);
+
+    let said = String::from_utf8_lossy(&stop.stdout);
+    assert!(said.contains("The daemon did not stop"), "{said}");
+    within(5, "the daemon is gone", || gone(pid));
+    within(5, "the agent's child is gone", || gone(child));
+    let spared = !gone(helper);
+    // SAFETY: kill has no memory precondition; the helper is the test's own sleep.
+    unsafe { libc::kill(helper as libc::pid_t, libc::SIGKILL) };
+    assert!(spared, "daemon stop killed a helper that had detached");
+}
+
+#[test]
+fn daemon_stop_waits_for_a_daemon_that_is_stopping() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
+    app(&user);
+    let pid = user.status()["pid"].as_u64().unwrap();
+    // Stuck while it opens its session: the daemon gives it four seconds to stop.
+    let (_, agent) = held_agent(&user);
+
+    let asked = std::time::Instant::now();
+    let stop = user.run(&["daemon", "stop"]);
+
+    let said = String::from_utf8_lossy(&stop.stdout);
+    assert!(said.contains("The daemon stopped."), "{said}");
+    assert!(
+        asked.elapsed() > Duration::from_secs(2),
+        "{:?}",
+        asked.elapsed()
+    );
+    assert!(gone(pid));
+    within(5, "its agent's process is gone", || gone(agent));
+}
