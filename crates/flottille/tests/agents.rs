@@ -595,11 +595,15 @@ fn the_agent_is_never_told_about_a_brief() {
     );
     // The message that killed it, then the new session's first prompt.
     assert_eq!(prompts(&user).len() - before, 2, "{:?}", prompts(&user));
-    // The kind of a first message is a marker, not words said to it.
-    let words = after_the_death.replace("[flottille:brief]", "");
-    assert!(!words.to_lowercase().contains("brief"), "{words}");
-    // The user's words come back as they were.
-    assert!(words.contains("\nhello"), "{words}");
+    // A root's first message is the user's, and said so.
+    assert!(
+        !after_the_death.to_lowercase().contains("brief"),
+        "{after_the_death}"
+    );
+    assert!(
+        after_the_death.contains("[flottille:user]\nhello"),
+        "{after_the_death}"
+    );
 }
 
 #[test]

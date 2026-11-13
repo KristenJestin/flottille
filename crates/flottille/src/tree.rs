@@ -690,14 +690,18 @@ pub fn brief_at_start(daemon: &Arc<Daemon>) {
 /// What follows the launcher's name on the first line of a session an agent started for the user.
 pub const LAUNCHED: &str = " started this session for the user with this message:";
 
-/// The kind and the body of an agent's brief as it is delivered: `brief`, or for a session an
-/// agent started for the user `launched`, under a line naming that agent: never the user's words,
-/// for the window, the judge or the agent itself.
+/// The kind and the body of an agent's first message as it is delivered: a root's is the user's
+/// (`user`), a child's its parent's `brief` (an extension's session's too), and a session an
+/// agent started for the user's `launched`, under a line naming that agent: never the user's
+/// words, for the window, the judge or the agent itself.
 pub fn first_message(daemon: &Daemon, agent: &Agent) -> (&'static str, String) {
     let brief = agent.brief.clone().unwrap_or_default();
     // Detached, it is still that agent's words.
     let Some(launcher) = agent.launched_by.as_ref().or(agent.detached_from.as_ref()) else {
-        return ("brief", brief);
+        // An extension's session was not started with the user's words.
+        let theirs = agent.parent.is_none() && !crate::extensions::started(daemon, &agent.id);
+        let kind = if theirs { "user" } else { "brief" };
+        return (kind, brief);
     };
     let who = match daemon.read(|store| store.agent(launcher)) {
         Ok(Some(launcher)) => named(&launcher),

@@ -1086,9 +1086,13 @@ pub fn before_turn(daemon: &Arc<Daemon>, agent: &str) {
     let queued = daemon
         .read(|store| store.deliveries(agent, "queued"))
         .unwrap_or_default();
-    // A session that starts (its brief, a summary) is no turn of the old conversation.
-    let starts = |kind: &str| matches!(kind, "instructions" | "brief" | "launched" | "resume");
-    if queued.is_empty() || queued.iter().any(|d| starts(&d.kind)) {
+    // A session that starts (its first message, known by its id, a summary) is no turn of the old
+    // conversation.
+    let first = format!("brief-{agent}-");
+    let starts = |d: &flottille_core::approval::Delivery| {
+        matches!(d.kind.as_str(), "instructions" | "resume") || d.id.starts_with(&first)
+    };
+    if queued.is_empty() || queued.iter().any(starts) {
         return;
     }
     let Ok(settings) = settings(daemon) else {

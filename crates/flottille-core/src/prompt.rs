@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn the_text_without_its_replay_keeps_what_the_user_wrote_in_the_same_prompt() {
         let data = json!({
-            "text": "[flottille:brief]\nadd the page\n\n[flottille:resume]\nsummary\n\n[flottille:user]\nand a footer",
+            "text": "[flottille:user]\nadd the page\n\n[flottille:resume]\nsummary\n\n[flottille:user]\nand a footer",
             "deliveries": ["brief-a1-2-replay", "resume-a1-2-replay", "d9"],
         });
         assert_eq!(without_replay(&data), "[flottille:user]\nand a footer");
