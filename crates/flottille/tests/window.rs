@@ -13189,3 +13189,64 @@ fn the_rail_s_line_runs_on_between_two_children_of_one_parent(cx: &mut TestAppCo
         );
     });
 }
+
+/// A Flottille that takes the connection and never answers (#841): the window says so, with a way
+/// to restart it, and never that there is no project.
+#[gpui_kit::test]
+fn the_window_says_the_daemon_does_not_answer(cx: &mut TestAppContext) {
+    let user = user();
+    let socket = user.path("silent.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    // Every connection is taken and kept, and nothing is ever read from it nor written to it.
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        for stream in listener.incoming() {
+            kept.push(stream);
+        }
+    });
+    let connect: Connect = Arc::new(move || std::os::unix::net::UnixStream::connect(&socket));
+    let (shell, cx) = window(&user, connect, 1280., cx);
+    let restarted = Arc::new(AtomicUsize::new(0));
+    let counted = restarted.clone();
+    shell.update(cx, |shell, _| {
+        shell.set_restart(Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }))
+    });
+
+    let asked = Instant::now();
+    until(
+        &shell,
+        cx,
+        "the window says Flottille does not answer",
+        |cx| {
+            assert!(
+                text_of("add-first-project", cx).is_none(),
+                "an empty store is said of a Flottille that never answered"
+            );
+            cx.update(|window, _| window.try_find("not-answering").is_some())
+        },
+    );
+    assert!(
+        asked.elapsed() >= link::NOT_ANSWERING,
+        "{:?}",
+        asked.elapsed()
+    );
+    assert_eq!(
+        text_of("not-answering-title", cx).as_deref(),
+        Some("Flottille is not answering")
+    );
+    let since = text_of("not-answering-since", cx).unwrap();
+    assert!(since.starts_with("It has not answered since "), "{since}");
+    assert!(cx.update(|window, _| window.try_find("add-first-project").is_none()));
+
+    cx.update(|window, cx| window.click("restart-flottille", cx));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while restarted.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "Restart Flottille restarts nothing"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

@@ -2,10 +2,10 @@
 //! ([`SessionPage`]).
 
 use crate::state::Status;
-use gpui_design_system::{Type, palette, space};
+use gpui_design_system::{Type, enter, palette, space};
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    Styled, WeakEntity, Window, div,
+    StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window, div,
 };
 
 use crate::composer::Composer;
@@ -17,6 +17,9 @@ use crate::services::ServicesPage;
 use crate::session::SessionPage;
 use crate::settings::SettingsPage;
 use crate::shell::{Layout, Shell};
+
+/// What the main area says while Flottille does not answer.
+const TITLE: &str = "Flottille is not answering";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Page {
@@ -61,6 +64,11 @@ pub struct MainArea {
     spec: Option<Entity<SpecPage>>,
     /// The services page, one for the window's life.
     services: Entity<ServicesPage>,
+    /// Since when Flottille has not answered the window, in ms after the epoch: said in place of
+    /// any page while it lasts.
+    not_answering: Option<u64>,
+    /// Whether Flottille was read once: until then, an empty page says nothing of the projects.
+    read: bool,
 }
 
 impl MainArea {
@@ -80,6 +88,24 @@ impl MainArea {
             project_settings: None,
             spec: None,
             services,
+            not_answering: None,
+            read: false,
+        }
+    }
+
+    pub fn set_not_answering(&mut self, since: Option<u64>, cx: &mut Context<Self>) {
+        if self.not_answering != since {
+            self.not_answering = since;
+            cx.notify();
+        }
+    }
+
+    /// Flottille was read: it answers, and an empty page now says there is no project.
+    pub fn set_read(&mut self, cx: &mut Context<Self>) {
+        if !self.read || self.not_answering.is_some() {
+            self.read = true;
+            self.not_answering = None;
+            cx.notify();
         }
     }
 
@@ -211,7 +237,53 @@ impl Render for MainArea {
             .bg(p.bg)
             .ui_text()
             .text_color(p.text);
+        if let Some(since) = self.not_answering {
+            let shell = self.shell.clone();
+            return root.child(enter(
+                "not-answering",
+                0,
+                div()
+                    .id("not-answering")
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(space::MD)
+                    .child(
+                        div()
+                            .id("not-answering-title")
+                            .aria_label(TITLE)
+                            .text_color(p.text)
+                            .child(TITLE)
+                            .test_support(),
+                    )
+                    .child({
+                        let said = format!(
+                            "It has not answered since {}. Restarting it cuts the turns under way.",
+                            crate::session::clock(since)
+                        );
+                        div()
+                            .id("not-answering-since")
+                            .aria_label(said.clone())
+                            .text_color(p.faint)
+                            .child(said)
+                            .test_support()
+                    })
+                    .child(
+                        gpui_design_system::Button::primary(
+                            "restart-flottille",
+                            "Restart Flottille",
+                        )
+                        .on_click(move |_, _, cx| {
+                            shell.update(cx, |shell, _| shell.restart()).ok();
+                        }),
+                    ),
+            ));
+        }
         match &self.page {
+            // Nothing read yet: what there is is not known.
+            Page::Empty if !self.read => root,
             Page::Empty => root.child(
                 div()
                     .size_full()

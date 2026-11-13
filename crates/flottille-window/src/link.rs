@@ -34,6 +34,9 @@ pub enum Update {
     Snapshot(Snapshot),
     /// The connection broke, with why; the link is connecting again.
     Disconnected(String),
+    /// Flottille has not answered the link for `NOT_ANSWERING`: since when it was asked, in ms
+    /// after the epoch; `None` once it answers again.
+    NotAnswering(Option<u64>),
     /// What came of something the window asked (`actions`).
     Done(Outcome),
     /// A fresh read of the providers (`provider.list`), with the read's number
@@ -110,7 +113,14 @@ pub struct Seen {
     pub snapshots: AtomicU64,
     /// The `project.changed` events seen.
     pub project_changes: AtomicU64,
+    /// When the link asked what it waits for, in ms after the epoch; 0 while it waits for nothing.
+    pub asking: Arc<AtomicU64>,
 }
+
+/// How long a request of the link may wait before the window says Flottille is not answering.
+pub const NOT_ANSWERING: Duration = Duration::from_secs(10);
+/// How long the link waits for nothing before it asks Flottille whether it still answers.
+const PING: Duration = Duration::from_secs(15);
 
 const FIRST_RETRY: Duration = Duration::from_millis(100);
 const LAST_RETRY: Duration = Duration::from_secs(5);
@@ -136,11 +146,48 @@ pub fn spawn(connect: Connect) -> (UnboundedReceiver<Update>, Arc<Seen>) {
 pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen> {
     let seen = Arc::new(Seen::default());
     let shared = seen.clone();
+    let watched = (seen.asking.clone(), sender.clone());
     std::thread::Builder::new()
         .name("flottille-link".into())
         .spawn(move || run(connect, sender, shared))
         .expect("a thread for the link to Flottille");
+    std::thread::Builder::new()
+        .name("flottille-link-watch".into())
+        .spawn(move || watch(&watched.0, &watched.1, NOT_ANSWERING))
+        .expect("a thread watching the link to Flottille");
     seen
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// Says when what the link asked waits past `limit`, and when it is answered after that; ends
+/// with the window.
+fn watch(asking: &AtomicU64, updates: &UnboundedSender<Update>, limit: Duration) {
+    let limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
+    let mut told = None;
+    while !updates.is_closed() {
+        std::thread::sleep((limit / 10).min(Duration::from_millis(500)));
+        let since = Some(asking.load(Ordering::SeqCst)).filter(|since| *since != 0);
+        let late = since.filter(|since| now_ms().saturating_sub(*since) > limit_ms);
+        match (late, told) {
+            (Some(since), None) => {
+                told = Some(since);
+                let _ = updates.unbounded_send(Update::NotAnswering(Some(since)));
+            }
+            // The request it was told of was answered, or the connection broke.
+            (_, Some(said)) if since != Some(said) => {
+                told = None;
+                let _ = updates.unbounded_send(Update::NotAnswering(None));
+            }
+            _ => {}
+        }
+    }
 }
 
 fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
@@ -177,6 +224,7 @@ fn follow(
     reads: &ProviderReads,
 ) -> Result<()> {
     let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
+    conn.asking = Some(seen.asking.clone());
     let last = seen.last_seq.load(Ordering::Relaxed);
     let after = (seen.connections.load(Ordering::Relaxed) > 1 || last > 0).then_some(last);
     // A window: the daemon reads the items at the window's rhythm while it is open.
@@ -258,12 +306,22 @@ fn follow(
             let _ = updates.unbounded_send(Update::Items { project, item });
         }
     };
+    // When the daemon last said anything: a link that heard nothing for `PING` asks it.
+    let mut heard = Instant::now();
     loop {
         // Everything that came already, then a short quiet (or a short while at most), before
         // reading the shell again.
         let since = [stale, providers].into_iter().flatten().min();
-        match conn.next_event(quiet_wait(since))? {
-            Some(event) => mark(&event, &mut stale, &mut providers),
+        let wait = quiet_wait(since).unwrap_or_else(|| PING.saturating_sub(heard.elapsed()));
+        match conn.next_event(Some(wait))? {
+            Some(event) => {
+                heard = Instant::now();
+                mark(&event, &mut stale, &mut providers);
+            }
+            None if since.is_none() => {
+                conn.request("daemon.status", json!({}))?;
+                heard = Instant::now();
+            }
             None => {
                 if stale.take().is_some() {
                     let snapshot = read(&mut conn, briefs, seen)?;
@@ -599,6 +657,8 @@ pub(crate) struct Conn {
     partial: Vec<u8>,
     /// Events that came while a request waited for its answer, the newest first.
     queued: Vec<Event>,
+    /// Where the link's own connection says when it asked what it waits for (`Seen::asking`).
+    asking: Option<Arc<AtomicU64>>,
 }
 
 impl Conn {
@@ -610,6 +670,7 @@ impl Conn {
             next_id: 1,
             partial: Vec::new(),
             queued: Vec::new(),
+            asking: None,
         })
     }
 
@@ -641,6 +702,22 @@ impl Conn {
     }
 
     fn ask_until(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: Option<(Instant, Duration)>,
+    ) -> Result<std::result::Result<Value, String>> {
+        if let Some(asking) = &self.asking {
+            asking.store(now_ms(), Ordering::SeqCst);
+        }
+        let answer = self.answer_of(method, params, deadline);
+        if let Some(asking) = &self.asking {
+            asking.store(0, Ordering::SeqCst);
+        }
+        answer
+    }
+
+    fn answer_of(
         &mut self,
         method: &str,
         params: Value,
@@ -762,6 +839,36 @@ mod tests {
             name: name.into(),
             data,
         }
+    }
+
+    #[test]
+    fn a_request_that_waits_past_the_limit_is_said_once_then_its_answer() {
+        let asking = Arc::new(AtomicU64::new(0));
+        let (updates, mut said) = unbounded();
+        let watched = asking.clone();
+        let watcher =
+            std::thread::spawn(move || watch(&watched, &updates, Duration::from_millis(100)));
+        let next = |said: &mut UnboundedReceiver<Update>| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(update) = said.try_recv() {
+                    return update;
+                }
+                assert!(Instant::now() < deadline, "nothing said");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        let since = now_ms() - 1000;
+        asking.store(since, Ordering::SeqCst);
+        assert_eq!(next(&mut said), Update::NotAnswering(Some(since)));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(said.try_recv().is_err(), "said once");
+        asking.store(0, Ordering::SeqCst);
+        assert_eq!(next(&mut said), Update::NotAnswering(None));
+
+        drop(said);
+        watcher.join().unwrap();
     }
 
     #[test]

@@ -119,6 +119,9 @@ impl Sharing {
 
 pub struct Shell {
     seen: Arc<Seen>,
+    /// What "Restart Flottille" runs, off the UI's thread: `flottille daemon stop`, after which
+    /// the link starts Flottille again.
+    restart: Arc<dyn Fn() + Send + Sync>,
     snapshot: Snapshot,
     layout: Layout,
     selected: Option<Selection>,
@@ -351,6 +354,7 @@ impl Shell {
             .detach();
         let mut shell = Self {
             seen,
+            restart: Arc::new(restart_flottille),
             snapshot: Snapshot::default(),
             layout: Layout::Wide,
             selected: None,
@@ -883,10 +887,14 @@ impl Shell {
                 self.set_online(false, cx);
                 self.texts_due = true;
             }
+            Update::NotAnswering(since) => self
+                .main
+                .update(cx, |main, cx| main.set_not_answering(since, cx)),
             // The link subscribed to the events before it read: an edit made before that is in
             // what the pages read, not in the events, so they read it again.
             Update::Snapshot(snapshot) => {
                 self.set_online(true, cx);
+                self.main.update(cx, |main, cx| main.set_read(cx));
                 self.show(snapshot, window, cx);
                 if std::mem::take(&mut self.texts_due) {
                     self.read_texts(cx);
@@ -2097,6 +2105,23 @@ impl Shell {
         }
     }
 
+    /// What "Restart Flottille" runs, in place of `flottille daemon stop`.
+    pub fn set_restart(&mut self, restart: Arc<dyn Fn() + Send + Sync>) {
+        self.restart = restart;
+    }
+
+    /// Restarts a Flottille that does not answer, off the UI's thread: what it ran is ended, and
+    /// the link, its connection broken, starts it again.
+    pub fn restart(&mut self) {
+        let restart = self.restart.clone();
+        let started = std::thread::Builder::new()
+            .name("flottille-restart".into())
+            .spawn(move || restart());
+        if let Err(error) = started {
+            eprintln!("flottille: Flottille cannot be restarted: {error}");
+        }
+    }
+
     fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {
         if self.top.read(cx).online != online {
             self.top.update(cx, |top, cx| top.set_online(online, cx));
@@ -3089,6 +3114,21 @@ impl TopBar {
             self.menu = menu;
             cx.notify();
         }
+    }
+}
+
+/// `flottille daemon stop`, by the program the window runs in: it ends a Flottille that does not
+/// answer.
+fn restart_flottille() {
+    let stopped = std::env::current_exe().and_then(|program| {
+        std::process::Command::new(program)
+            .args(["daemon", "stop"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .status()
+    });
+    if let Err(error) = stopped {
+        eprintln!("flottille: Flottille cannot be restarted: {error}");
     }
 }
 
