@@ -24,7 +24,8 @@
 //!
 //! `models`, when given, replaces the models the answer to `initialize` lists (`MODELS`).
 //! `resume_error: true` makes every `--resume` fail as one of a session that has none does: a
-//! session lost or corrupt.
+//! session lost or corrupt. `resume_crash: true` makes it end on `--resume` with another error,
+//! as a broken installation does.
 //! `slow_controls`, when given, is how many milliseconds the fake waits before it reads each
 //! control request but `initialize`, as a busy Claude Code does.
 //!
@@ -124,6 +125,10 @@ fn main() {
     let session = if let Some(id) = flag(&args, "--resume") {
         if !sessions.join(&id).exists() || script["resume_error"] == true {
             eprintln!("No conversation found with session ID: {id}");
+            std::process::exit(1);
+        }
+        if script["resume_crash"] == true {
+            eprintln!("Error: an update left this installation broken");
             std::process::exit(1);
         }
         id

@@ -50,8 +50,9 @@
 //!   agent whose process dies before it takes a prompt.
 //! - `open_error`: answer `session/new`, `session/load` and `session/resume` with an error of that
 //!   message: an agent that cannot open a session at all.
-//! - `load_error`: answer `session/load` and `session/resume` with an error of that message, a new
-//!   session opening as usual: an agent whose session is lost or corrupt.
+//! - `load_error`: answer `session/load` and `session/resume` with ACP's "resource not found" error
+//!   (-32002) of that message, a new session opening as usual: an agent whose session file is lost
+//!   or corrupt.
 //! - `models`, `efforts`: the values of the `model` and `thought_level` options, the first one
 //!   current; no effort option without `efforts`.
 //! - `model_rows`: the name and the description a model's row carries, by value (`{"default":
@@ -198,6 +199,16 @@ fn main() {
                 "error": {"code": -32603, "message": "the service could not be reached"}}));
             continue;
         }
+        // ACP's "resource not found", as an agent says of a session it no longer has.
+        if matches!(
+            request["method"].as_str(),
+            Some("session/load" | "session/resume")
+        ) && let Some(message) = agent.script["load_error"].as_str()
+        {
+            agent.send(json!({"jsonrpc": "2.0", "id": id,
+                "error": {"code": -32002, "message": message}}));
+            continue;
+        }
         let answer = agent.handle(&request, &answered, &cancelled);
         match answer {
             Ok(result) => agent.send(json!({"jsonrpc": "2.0", "id": id, "result": result})),
@@ -262,11 +273,6 @@ impl Agent {
             std::process::exit(code as i32);
         }
         if opens && let Some(message) = self.script["open_error"].as_str() {
-            return Err(message.to_owned());
-        }
-        if matches!(method, "session/load" | "session/resume")
-            && let Some(message) = self.script["load_error"].as_str()
-        {
             return Err(message.to_owned());
         }
         if self.script["stall"] == true
