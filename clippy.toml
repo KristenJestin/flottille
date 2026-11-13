@@ -1,0 +1,5 @@
+# The daemon's named lock (`crates/flottille/src/locks.rs`) is a `std::sync::Mutex`: its guard held
+# across an `.await` is refused as the standard one's is (`await_holding_lock`).
+await-holding-invalid-types = [
+    { path = "flottille::locks::Guard", reason = "a lock of the daemon held across an .await waits for ever on its one thread" },
+]

@@ -74,13 +74,13 @@ const FORGE_CONFIGS: [&str; 3] = ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "BKT_CONFI
 /// The runs going on, by id.
 #[derive(Default)]
 pub struct Live {
-    runs: Mutex<HashMap<String, Arc<Going>>>,
+    runs: crate::locks::Lock<HashMap<String, Arc<Going>>>,
     /// The runs a `run.restart` is working on.
-    restarting: Mutex<HashSet<String>>,
+    restarting: crate::locks::Lock<HashSet<String>>,
     /// One start at a time of each task that keeps running, by its owner (an agent, or none for
     /// the user), its project and its name: a second waits while the services it needs start,
     /// then joins the first.
-    serving: Mutex<HashMap<Serving, Arc<tokio::sync::Mutex<()>>>>,
+    serving: crate::locks::Lock<HashMap<Serving, Arc<tokio::sync::Mutex<()>>>>,
     /// The agent folders of each place an agent's run, or a workspace's setup line, goes on in
     /// (`agent_folders`).
     pub(crate) guards: crate::agent_folders::Guards,

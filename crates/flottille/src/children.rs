@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Mutex, Once};
+use std::sync::Once;
 use std::time::Duration;
 
 use crate::agents::start_time;
@@ -13,7 +13,8 @@ use crate::agents::start_time;
 /// The children the daemon started, by pid, with when each started: what tells one from a
 /// process that took its pid since. Held while a child is spawned and recorded, and while the
 /// sweep runs, so the sweep never sees a child of the daemon's that is not recorded yet.
-static STARTED: Mutex<Option<HashMap<u32, u64>>> = Mutex::new(None);
+static STARTED: crate::locks::Lock<Option<HashMap<u32, u64>>> =
+    crate::locks::Lock::named("STARTED", None);
 
 /// Spawns a child its caller waits for itself, recorded as the daemon's own.
 pub fn spawn(command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {

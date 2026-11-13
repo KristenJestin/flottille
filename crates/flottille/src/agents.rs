@@ -108,13 +108,13 @@ type Task = (mpsc::UnboundedSender<Order>, JoinHandle<()>);
 /// The tasks of the agents that have one, by agent id.
 #[derive(Default)]
 pub struct Live {
-    tasks: Mutex<HashMap<String, Task>>,
+    tasks: crate::locks::Lock<HashMap<String, Task>>,
     /// The processes this daemon started that have not ended, with their start times: the only
     /// ones it kills when it stops, whatever the shared table holds.
-    processes: Mutex<HashMap<u32, u64>>,
+    processes: crate::locks::Lock<HashMap<u32, u64>>,
     /// The agents whose tools the user reloads: their process goes between turns, and the next
     /// one says what changed (`mcp::mint`).
-    reloads: Mutex<HashSet<String>>,
+    reloads: crate::locks::Lock<HashSet<String>>,
 }
 
 /// The user's answers to an ask of the root (`agent.answer`): one message to the root that quotes

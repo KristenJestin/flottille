@@ -477,3 +477,64 @@ fn a_daemon_stopping_kills_only_the_processes_it_started_never_another_s_of_the_
     let _ = other.wait();
     assert!(survived, "the daemon killed a process it did not start");
 }
+
+/// Asks the daemon to hold its store's lock for `ms` on its runtime's thread, as a deadlock
+/// would (`test.hold`), without waiting for the answer: the connection is kept open.
+fn hold(user: &User, ms: u64) -> std::os::unix::net::UnixStream {
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(user.path("runtime/flottille/daemon.sock"))
+            .unwrap();
+    let request = json!({"id": "hold", "method": "test.hold", "params": {"ms": ms}});
+    std::io::Write::write_all(&mut stream, format!("{request}\n").as_bytes()).unwrap();
+    stream
+}
+
+/// Whether the process ended: no longer there, or a zombie its new parent has not waited for yet.
+fn gone(pid: u64) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| rest.starts_with('Z'))
+    })
+}
+
+fn log_of(user: &User) -> String {
+    std::fs::read_to_string(user.path("state/flottille/daemon.log")).unwrap_or_default()
+}
+
+#[test]
+fn a_stuck_daemon_is_reported_by_its_watchdog() {
+    let user = User::new()
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_WATCHDOG_MS", "500");
+    let pid = user.status()["pid"].as_u64().unwrap();
+
+    let _held = hold(&user, 3000);
+
+    within(10, "the watchdog says the daemon answers again", || {
+        log_of(&user).contains("watchdog: the daemon answers again")
+    });
+    let log = log_of(&user);
+    let said: Vec<&str> = log.lines().filter(|l| l.contains("watchdog:")).collect();
+    let line = |start: &str| {
+        said.iter()
+            .find(|l| l.contains(start))
+            .unwrap_or_else(|| panic!("no line {start:?} in {said:#?}"))
+            .to_string()
+    };
+    line("watchdog: the daemon is stuck: the runtime's thread has not run for");
+    // The lock, the line that took it, the thread that holds it, and since when.
+    let held = line("watchdog: held: store at ");
+    assert!(held.contains("src/daemon.rs:"), "{held}");
+    assert!(held.contains("by the thread main"), "{held}");
+    assert!(held.contains(", for "), "{held}");
+    line(&format!("`eu-stack -p {pid}`"));
+    // Once for the whole time it was stuck.
+    assert_eq!(
+        said.iter()
+            .filter(|l| l.contains("the daemon is stuck"))
+            .count(),
+        1,
+        "{said:#?}"
+    );
+    assert!(user.status()["pid"].as_u64() == Some(pid));
+}

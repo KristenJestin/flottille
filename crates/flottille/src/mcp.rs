@@ -1090,13 +1090,13 @@ pub struct Server {
     /// Where agents reach it.
     pub url: String,
     port: u16,
-    tokens: Mutex<Tokens>,
-    keyed: Mutex<Keyed>,
+    tokens: crate::locks::Lock<Tokens>,
+    keyed: crate::locks::Lock<Keyed>,
     pub kept: files::Kept,
     pub runs: runs::Live,
-    refusals: Mutex<VecDeque<Instant>>,
+    refusals: crate::locks::Lock<VecDeque<Instant>>,
     /// The agents whose calls came without a call key, said once in the log.
-    keyless: Mutex<HashSet<String>>,
+    keyless: crate::locks::Lock<HashSet<String>>,
     /// The URLs each agent's tools showed it: `web` reads them again without the judge.
     pub seen: crate::web::Seen,
     /// Moves at every change of a session's tools: what listens for them looks again.
@@ -1172,12 +1172,12 @@ impl Server {
         Server {
             url: format!("http://127.0.0.1:{port}{PATH}"),
             port,
-            tokens: Mutex::default(),
-            keyed: Mutex::default(),
+            tokens: crate::locks::Lock::named("tokens", Default::default()),
+            keyed: crate::locks::Lock::named("keyed", Default::default()),
             kept: files::Kept::default(),
             runs: runs::Live::default(),
-            refusals: Mutex::default(),
-            keyless: Mutex::default(),
+            refusals: crate::locks::Lock::named("refusals", Default::default()),
+            keyless: crate::locks::Lock::named("keyless", Default::default()),
             seen: crate::web::Seen::default(),
             changes: watch::Sender::new(0),
         }

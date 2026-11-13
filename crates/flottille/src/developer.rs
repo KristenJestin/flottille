@@ -7,7 +7,6 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use flottille_core::paths::Paths;
@@ -56,7 +55,7 @@ pub struct Log {
     file: PathBuf,
     limit: u64,
     /// The open log, once a line was written: one writer at a time, so lines never mix.
-    open: Mutex<Option<File>>,
+    open: crate::locks::Lock<Option<File>>,
 }
 
 impl Log {
@@ -70,7 +69,7 @@ impl Log {
             on: AtomicBool::new(on),
             file,
             limit,
-            open: Mutex::new(None),
+            open: crate::locks::Lock::named("developer_log", None),
         }
     }
 

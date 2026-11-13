@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use flottille_core::paths::{Paths, ensure_private_dir};
@@ -31,6 +31,7 @@ use crate::forge;
 use crate::inbox;
 use crate::items;
 use crate::judge;
+use crate::locks::Lock;
 use crate::mcp;
 use crate::projects::{self, Projects};
 use crate::providers;
@@ -43,6 +44,7 @@ use crate::sweep;
 use crate::tasks;
 use crate::tickets;
 use crate::tree;
+use crate::watchdog;
 use crate::workspaces;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -146,26 +148,26 @@ fn hold_store(paths: &Paths) -> Result<File> {
 pub struct Daemon {
     pub paths: Paths,
     started: Instant,
-    events: Mutex<Events>,
+    events: Lock<Events>,
     /// Taken before `events` when both are: the projects' methods emit under it.
-    pub projects: Mutex<Projects>,
+    pub projects: Lock<Projects>,
     /// The workspaces being prepared or removed: one at a time for each.
-    pub preparing: Mutex<HashSet<i64>>,
+    pub preparing: Lock<HashSet<i64>>,
     /// Those of `preparing` held by a removal: nothing starts in them until they are gone, and a
     /// refusal says they are being removed.
-    pub removing_workspaces: Mutex<HashSet<i64>>,
+    pub removing_workspaces: Lock<HashSet<i64>>,
     /// Held while a removal decides which branches to delete and deletes them, one removal at a
     /// time: two removals each counting its branch as kept in the other's would delete both.
     pub landing: tokio::sync::Mutex<()>,
     /// The projects being removed: no agent, workspace or command run starts in them until they
     /// are forgotten or the removal stopped (`projects::refuse_removing`).
-    pub removing_projects: Mutex<HashSet<String>>,
+    pub removing_projects: Lock<HashSet<String>>,
     /// The agents removing their own workspace, with its name and how many removals of it are
     /// under way: meanwhile they start nothing in it (`workspaces::being_removed`).
-    pub removing: Mutex<HashMap<String, (String, usize)>>,
+    pub removing: Lock<HashMap<String, (String, usize)>>,
     /// What the setup steps running write, by workspace and step: they are read while they run
     /// and kept in the store once they ended.
-    pub step_outputs: Mutex<HashMap<(i64, u32), Arc<workspaces::StepLive>>>,
+    pub step_outputs: Lock<HashMap<(i64, u32), Arc<workspaces::StepLive>>>,
     /// The agents that have a task, and so maybe a process.
     pub agents: Live,
     /// The agents' MCP server: its tokens, and what its tools keep (reads, runs).
@@ -175,16 +177,16 @@ pub struct Daemon {
     /// The deliveries pinned as notes on agents' next tool results.
     pub notes: deliveries::Notes,
     /// The agents waiting on their provider (overloaded, rate-limited): not stuck.
-    pub waiting_provider: Mutex<HashSet<String>>,
+    pub waiting_provider: Lock<HashSet<String>>,
     /// Whether the last `provider.judge_changed` chose no judge, once read from the store: kept
     /// with each one said since (`providers::judge_changed`).
-    pub judge_chose_none: Mutex<Option<bool>>,
+    pub judge_chose_none: Lock<Option<bool>>,
     /// Where each agent's compaction by Flottille stands.
     pub compactions: crate::compaction::Live,
     /// The slots launches took in each project's children cap, before their child exists.
-    pub launching: Mutex<HashMap<String, usize>>,
+    pub launching: Lock<HashMap<String, usize>>,
     /// The children whose launch waits for their session to open (`tree::launch`).
-    pub opening: Mutex<HashSet<String>>,
+    pub opening: Lock<HashSet<String>>,
     /// What the forges said of each workspace, and who watches them.
     pub forges: forge::Forges,
     /// The tickets read in the last 30 s, for the next `tickets show` and the window's session
@@ -202,6 +204,8 @@ pub struct Daemon {
     pub vault: crate::vault::Keyring,
     /// What the extensions keep while the daemon runs.
     pub extensions: extensions::Live,
+    /// What the watchdog reads: the requests that wait, and whether the runtime runs.
+    pub watch: Arc<watchdog::Watch>,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -230,23 +234,23 @@ impl Daemon {
         Daemon {
             paths: paths.clone(),
             started: Instant::now(),
-            events: Mutex::new(Events { store, bus }),
-            projects: Mutex::new(projects),
-            preparing: Mutex::new(HashSet::new()),
-            removing_workspaces: Mutex::new(HashSet::new()),
+            events: Lock::named("store", Events { store, bus }),
+            projects: Lock::named("projects", projects),
+            preparing: Lock::named("preparing", HashSet::new()),
+            removing_workspaces: Lock::named("removing_workspaces", HashSet::new()),
             landing: tokio::sync::Mutex::new(()),
-            removing_projects: Mutex::new(HashSet::new()),
-            removing: Mutex::new(HashMap::new()),
-            step_outputs: Mutex::new(HashMap::new()),
+            removing_projects: Lock::named("removing_projects", HashSet::new()),
+            removing: Lock::named("removing", HashMap::new()),
+            step_outputs: Lock::named("step_outputs", HashMap::new()),
             agents: Live::default(),
             mcp: mcp::Server::new(port),
             services: crate::services::Live::default(),
             notes: deliveries::Notes::default(),
-            waiting_provider: Mutex::new(HashSet::new()),
-            judge_chose_none: Mutex::new(None),
+            waiting_provider: Lock::named("waiting_provider", HashSet::new()),
+            judge_chose_none: Lock::named("judge_chose_none", None),
             compactions: crate::compaction::Live::default(),
-            launching: Mutex::new(HashMap::new()),
-            opening: Mutex::new(HashSet::new()),
+            launching: Lock::named("launching", HashMap::new()),
+            opening: Lock::named("opening", HashSet::new()),
             forges: forge::Forges::default(),
             kept_tickets: crate::reads::Kept::default(),
             kept_searches: crate::reads::Kept::default(),
@@ -255,12 +259,14 @@ impl Daemon {
             inactive_checked: AtomicU64::new(0),
             vault: crate::vault::Keyring::open(paths),
             extensions: extensions::Live::default(),
+            watch: Arc::default(),
             stopping: watch::Sender::new(false),
         }
     }
 
     /// Stores the event and hands it to the subscribers under one lock, so that they see the
     /// events in the order of their numbers.
+    #[track_caller]
     pub fn emit(&self, name: &str, data: Value) -> Result<Event> {
         let events = self.events.lock().unwrap();
         let event = events.store.append_event(name, data)?;
@@ -272,11 +278,13 @@ impl Daemon {
     }
 
     /// The events from now on, as they come; `None` once the daemon stops.
+    #[track_caller]
     pub fn live(&self) -> Option<broadcast::Receiver<Event>> {
         Some(self.events.lock().unwrap().bus.as_ref()?.subscribe())
     }
 
     /// Reads the store.
+    #[track_caller]
     pub fn read<T>(
         &self,
         read: impl FnOnce(&Store) -> flottille_core::Result<T>,
@@ -286,6 +294,7 @@ impl Daemon {
 
     /// Writes the store, the change and its event (when it has one) in one transaction of
     /// `write`'s own, then hands the event to the subscribers, under the same lock as `emit`.
+    #[track_caller]
     pub fn write<T, E: Into<Option<Event>>>(
         &self,
         write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
@@ -295,6 +304,7 @@ impl Daemon {
 
     /// `write`, the event left out of the developer log when a line of it says more already. The
     /// subscribers see it all the same.
+    #[track_caller]
     pub fn write_unlogged<T, E: Into<Option<Event>>>(
         &self,
         write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
@@ -302,6 +312,7 @@ impl Daemon {
         self.written(false, write)
     }
 
+    #[track_caller]
     fn written<T, E: Into<Option<Event>>>(
         &self,
         logged: bool,
@@ -321,6 +332,7 @@ impl Daemon {
     }
 
     /// Writes the store as `write` does, for a change with several events.
+    #[track_caller]
     pub fn write_all<T>(
         &self,
         write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, Vec<Event>)>,
@@ -336,6 +348,14 @@ impl Daemon {
             }
         }
         Ok(value)
+    }
+
+    /// Holds the store's lock for `held`, on the calling thread, which does nothing else
+    /// meanwhile: a daemon stuck as a deadlock leaves it, for the tests of the watchdog and of
+    /// `daemon stop` (`sweep::call`, `test.hold`).
+    pub fn hold_store(&self, held: Duration) {
+        let _store = self.events.lock().unwrap();
+        std::thread::sleep(held);
     }
 
     fn subscribe(&self, after: Option<u64>) -> Result<Subscription> {
@@ -406,6 +426,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         tools.local_addr()?.port(),
         Some(bus),
     ));
+    watchdog::start(&daemon.watch)?;
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut child_ended = signal(SignalKind::child())?;
@@ -614,6 +635,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 continue;
             }
         };
+        let waiting = daemon.watch.asked();
         if request.method == "workspace.forge"
             && let Ok(asked) = serde_json::from_value::<WorkspaceForge>(request.params.clone())
             && asked.watch
@@ -712,11 +734,14 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     Err(failure) => Message::error(Some(request.id), failure.code, failure.message),
                 };
                 let _ = out.send(answer).await;
+                drop(waiting);
             });
             continue;
         }
         let (answer, subscription) = handle(&daemon, request);
-        if out.send(answer).await.is_err() {
+        let sent = out.send(answer).await;
+        drop(waiting);
+        if sent.is_err() {
             break true;
         }
         // Started after the answer is queued, so the client reads the answer first.
