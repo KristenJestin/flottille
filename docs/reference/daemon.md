@@ -31,9 +31,13 @@ refused as the standard guard is.
 ## The watchdog
 
 A plain OS thread (`watchdog`, named `flottille-watchdog`), started with the daemon, that is not
-on the runtime. The runtime beats every 500 ms; every request read counts as waiting until its
-answer is queued. The daemon is **stuck** when its runtime has not beaten for 30 s, or when
-requests wait and none was answered for 30 s (`FLOTTILLE_WATCHDOG_MS` sets the 30 s). Then the
+on the runtime. Each quarter of its limit it hands the runtime a probe, a task that does nothing
+but say it ran, unless the last one has not run yet: an idle daemon is woken once every 7.5 s for
+it, never more (`daemon_at_rest`). Every request answered on its connection counts as waiting
+until its answer is queued; one answered by a task of its own (`workspace.prepare`, `agent.start`,
+`task.run`…) does not, as it may wait on work outside the daemon (git, a setup step, an agent) for
+as long as that takes. The daemon is **stuck** when a probe has waited 30 s, or when requests wait
+and none was answered for 30 s (`FLOTTILLE_WATCHDOG_MS` sets the 30 s, 100 ms at least). Then the
 watchdog writes, once, to the daemon's log (`daemon.log` in its state folder), each line starting
 with `flottille daemon: watchdog:`:
 
@@ -45,9 +49,10 @@ with `flottille daemon: watchdog:`:
 
 When it answers again, it says so, and it would report the next time it is stuck.
 
-A long request answered by a task of its own while no other request comes (a workspace prepared
-from the command line, nothing else connected) passes for a stuck daemon: its report says that
-the runtime ran a moment ago, which a stuck runtime never does.
+The gate's verdict on an agent's call (`mcp::judged_off`) is made on the blocking pool, off the
+runtime's thread: it reads the file system (a folder walked for a secret, paths resolved), and
+asks git whether a branch is pushed, 5 s at most (`PUSHED_WAIT`), a git that does not answer
+then taken for "pushed", the safer class.
 
 ## Before ending a stuck daemon
 
@@ -72,18 +77,29 @@ Then `flottille daemon stop`.
 
 ## `daemon stop` always ends
 
-`flottille daemon stop` asks the daemon to stop and waits for it to let go of its lock, 30 s at
-most in all (`FLOTTILLE_STOP_WAIT_MS`). Past that, the daemon that still holds the lock, and every
-process below it (its agents and their bridges, the runs, what they started), are killed
-(`SIGKILL`, each through a pidfd opened first, so a pid taken since by another process is never
-signalled), and the command says it had to: `The daemon did not stop (why): it was ended, with
-the N process(es) it ran.` The next daemon settles what they left, as after any daemon that died
-(`agents::kill_orphans`, `runs::settle_at_start`).
+`flottille daemon stop` asks the daemon to stop. A daemon that does not answer within 30 s
+(`FLOTTILLE_STOP_WAIT_MS`) is ended at once; one that answered is stopping its agents, one after
+another and up to 4 s each, so it is given 30 s more and 5 s for each process it runs before it is
+ended in turn.
+
+Ending it: the daemon and the processes below it that are its own, those of its session (its
+agents and their process groups) and of the sessions its direct children lead (runs, setup
+steps), are sent `SIGTERM`, then, 2 s later, `SIGKILL` for those left (a git killed outright leaves
+its `index.lock`). As their subreaper the daemon holds more: a helper that something it ran left
+detached in a session of its own (an ssh control master, an agent of gpg, git's credential cache)
+may serve the user's terminals too, and is spared. Each process is signalled through a pidfd,
+opened, then checked to be still in one of those sessions, so that a pid taken since by another
+process is never signalled; the daemon's own is opened before it is asked to stop. The command
+says it had to: `The daemon did not stop (why): it was ended, with the N process(es) it ran.` The
+next daemon settles what they left, as after any daemon that died (`agents::kill_orphans`,
+`runs::settle_at_start`).
 
 ## The window
 
-The window's link marks the request it waits for; the window says **Flottille is not answering**
-when one waited more than 10 s, with since when and a button that restarts Flottille
-(`flottille daemon stop`, then the link starts a new daemon), instead of anything it would say
-of an empty store ("No project yet."). While the link has no request out, it asks the daemon's
+The window's link marks the request it waits for; when one waited more than 30 s (the watchdog's
+limit), a banner above the page says **Flottille is not answering**, since when, with a button
+that restarts Flottille (`flottille daemon stop`, then the link starts a new daemon; the button
+says "Restarting…" and cannot be clicked again until it ended). The banner unfolds and fades in,
+and folds away and fades out once Flottille answers again or its connection broke; the page under
+it stays. Before Flottille was read once, an empty page says nothing, never "No project yet.". While the link has no request out, it asks the daemon's
 status every 15 s, so that a daemon stuck while nothing happens is seen too.
