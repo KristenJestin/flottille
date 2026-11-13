@@ -826,9 +826,9 @@ Its process was let go; the next message starts it again.
 
 #### `agent.died`
 
-Its process ended by itself. It goes on in its own session (`agent.released`, reason `died`), a
-new one when it died while it loaded it (`agent.replaced`), or the agent fails when it started
-again too often (`docs/agents.md`, "A death").
+Its process ended by itself, while it opened its session too. It goes on in its own session
+(`agent.released`, reason `died`), or the agent fails when it started again too often
+(`docs/agents.md`, "A death").
 
 | Field | |
 |---|---|

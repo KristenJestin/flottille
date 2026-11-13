@@ -391,9 +391,9 @@ the replacement limit (2 in 30 min; then a child fails and its parent gets `chil
 root asks the user), and the rebuild at daemon start follow `reference/hemera.md` §5. A death
 does not replace the session: as after a restart, the next process loads the agent's own
 session, told its process died and its last turn was cut, and its conversation is kept; a death
-counts against the limit all the same. A new session starts only when the session cannot be
-loaded (refused, lost or corrupt, a process that dies while it loads it) or the agent is stuck,
-and then from its first message, a summary of its conversation when a compactor is set (§5.8)
+counts against the limit all the same, even one while it loads the session. A new session starts
+only when the agent says its session is gone (lost or unreadable: any other failure to load it
+keeps the session and fails the agent, to be resumed) or the agent is stuck, and then from its first message, a summary of its conversation when a compactor is set (§5.8)
 and its latest messages word for word (`docs/agents.md`, "A death", "Replacement").
 
 ### 5.6 Subscriptions: waking on what happens outside
