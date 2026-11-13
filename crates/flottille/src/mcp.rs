@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use flottille_core::agent::{Agent, GateMode};
@@ -2279,7 +2279,7 @@ async fn played_in(
         match crate::actions::prepared(daemon, grant, tool, &args).await {
             Err(refused) => refused,
             Ok(says) => {
-                let (decided, first) = judged(daemon, grant, tool, &args);
+                let (decided, first) = judged_off(daemon, grant, tool, &args).await;
                 verdict = Some(decided.word());
                 match decided {
                     gate::Verdict::Allow => match stale(daemon, grant, tool) {
@@ -2529,6 +2529,29 @@ fn allowed_by(verdict: Option<&str>) -> Option<&'static str> {
 /// Whether a call removes a workspace, whose losses Full discards as the user's answer would.
 fn removes_a_workspace(tool: &str, args: &Value) -> bool {
     tool == "workspace" && args["action"] == "remove"
+}
+
+/// `judged`, off the runtime's thread: the gate reads the file system (a folder walked for a
+/// secret, paths resolved, git asked whether a branch is pushed), which a slow disk or a network
+/// file system can make long, and the runtime's one thread must not wait for it.
+pub async fn judged_off(
+    daemon: &Arc<Daemon>,
+    grant: &Arc<Grant>,
+    tool: &str,
+    args: &Value,
+) -> (gate::Verdict, Vec<String>) {
+    let (daemon, grant, tool, args) =
+        (daemon.clone(), grant.clone(), tool.to_owned(), args.clone());
+    match tokio::task::spawn_blocking(move || judged(&daemon, &grant, &tool, &args)).await {
+        Ok(judged) => judged,
+        Err(error) => match error.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(_) => (
+                gate::Verdict::Deny("Flottille is stopping".into()),
+                Vec::new(),
+            ),
+        },
+    }
 }
 
 /// The gate's verdict on a call of one of the agent's tools.
@@ -2928,23 +2951,53 @@ fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
     let Some(folder) = folder else {
         return false;
     };
-    let listed = crate::children::spawn_std(
-        std::process::Command::new("git")
+    match remote_refs("git".as_ref(), &folder.path, PUSHED_WAIT) {
+        Some(refs) => refs
+            .lines()
+            .any(|name| name.ends_with(&format!("/{}", place.branch))),
+        // What cannot be told is taken for pushed: the safer class.
+        None => true,
+    }
+}
+
+/// How long the gate waits for git to list a repository's remote branches.
+const PUSHED_WAIT: Duration = Duration::from_secs(5);
+
+/// The remote branches of the repository in `folder`, as `git` lists them within `wait`; `None`
+/// when it could not, or not in time (a repository on a network file system that hangs): it is
+/// then killed.
+fn remote_refs(git: &std::ffi::OsStr, folder: &std::path::Path, wait: Duration) -> Option<String> {
+    let mut child = crate::children::spawn_std(
+        std::process::Command::new(git)
             .arg("-C")
-            .arg(&folder.path)
+            .arg(folder)
             .args(["for-each-ref", "--format=%(refname)", "refs/remotes"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()),
     )
-    .and_then(std::process::Child::wait_with_output);
-    match listed {
-        Ok(output) => String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .any(|name| name.ends_with(&format!("/{}", place.branch))),
-        // What cannot be told is taken for pushed: the safer class.
-        Err(_) => true,
+    .ok()?;
+    // Read meanwhile: a long list would fill the pipe and keep git from ending.
+    let mut stdout = child.stdout.take()?;
+    let read = std::thread::spawn(move || {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut stdout, &mut text).map(|_| text)
+    });
+    let deadline = Instant::now() + wait;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
     }
+    read.join().ok()?.ok()
 }
 
 /// `workspace` `remove` of the workspace the agent works in: the only one an agent in a
@@ -3257,6 +3310,26 @@ pub fn cut(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pushed_gives_up_after_its_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        // A git that hangs, as one on a network file system that stopped answering.
+        let git = dir.path().join("git");
+        std::fs::write(&git, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&git, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let asked = Instant::now();
+        let refs = remote_refs(git.as_os_str(), dir.path(), Duration::from_millis(200));
+
+        assert_eq!(refs, None);
+        assert!(
+            asked.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            asked.elapsed()
+        );
+    }
     use crate::claude;
 
     #[test]
