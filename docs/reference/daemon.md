@@ -56,13 +56,17 @@ Its stacks say what each thread waits for, which the log alone may not. With the
 runtime folder, `$XDG_RUNTIME_DIR/flottille`):
 
 ```
-eu-stack -p <pid> > flottille-stacks.txt
-gdb -p <pid> -batch -ex "thread apply all bt" > flottille-stacks.txt
+sudo eu-stack -p <pid> > flottille-stacks.txt
+sudo gdb -p <pid> -batch -ex "thread apply all bt" > flottille-stacks.txt
 ```
 
-Either one is enough (`eu-stack` comes with elfutils, `gdb` with gdb). A release build keeps the
-tables of lines of its code (`[profile.release] debug = "line-tables-only"`, the symbols not
-stripped), so each frame says its function, its file and its line.
+Either one is enough (`eu-stack` comes with elfutils, `gdb` with gdb). Where the kernel lets a
+process trace only its own descendants (`/proc/sys/kernel/yama/ptrace_scope` at 1, the default of
+most distributions), run it with `sudo`: the daemon does not open itself to every process of the
+user, its agents' commands included, which could then read its memory and the vault's secrets in
+it. A release build keeps its symbols and the line tables of Flottille's own crates (`[profile.release]`,
+compressed by `tools/package.sh`), so each frame says its function, and Flottille's its file and
+line.
 
 Then `flottille daemon stop`.
 

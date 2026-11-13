@@ -140,8 +140,8 @@ fn report(why: &str, runtime: &tokio::runtime::Handle) -> String {
         text.push_str(&format!("flottille daemon: watchdog: {line}\n"));
     }
     text.push_str(&format!(
-        "flottille daemon: watchdog: before ending it, its threads' stacks: `eu-stack -p {pid}` or \
-         `gdb -p {pid} -batch -ex \"thread apply all bt\"`\n"
+        "flottille daemon: watchdog: before ending it, its threads' stacks: `sudo eu-stack -p {pid}` \
+         or `sudo gdb -p {pid} -batch -ex \"thread apply all bt\"`\n"
     ));
     text
 }

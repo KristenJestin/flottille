@@ -527,7 +527,7 @@ fn a_stuck_daemon_is_reported_by_its_watchdog() {
     assert!(held.contains("src/daemon.rs:"), "{held}");
     assert!(held.contains("by the thread main"), "{held}");
     assert!(held.contains(", for "), "{held}");
-    line(&format!("`eu-stack -p {pid}`"));
+    line(&format!("`sudo eu-stack -p {pid}`"));
     // Once for the whole time it was stuck.
     assert_eq!(
         said.iter()
