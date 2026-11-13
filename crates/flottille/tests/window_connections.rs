@@ -942,6 +942,14 @@ fn a_server_added_while_the_extension_was_off_is_given_when_its_switch_is_turned
             .any(|t| t == "Server almanac is given to agents")
     });
     assert_eq!(connection(&user, "almanac").unwrap()["state"], "ready");
+    // It does not claim every action is judged: a server pinned again keeps its settings.
+    let second = second_lines(&shell, cx);
+    assert!(
+        second.contains(&Some(
+            "Review it to change what each action does.".to_owned()
+        )),
+        "{second:?}"
+    );
 }
 
 #[gpui_kit::test]

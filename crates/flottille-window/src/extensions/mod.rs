@@ -581,7 +581,7 @@ impl Registry {
                         } else if let [only] = given.as_slice() {
                             toast(
                                 Toast::success(format!("Server {only} is given to agents"))
-                                    .detail("Every action is judged."),
+                                    .detail("Review it to change what each action does."),
                                 cx,
                             );
                         } else if !given.is_empty() {
@@ -590,7 +590,10 @@ impl Registry {
                                     "{} servers are given to agents",
                                     given.len()
                                 ))
-                                .detail(format!("{}. Every action is judged.", given.join(", "))),
+                                .detail(format!(
+                                    "{}. Review one to change what each action does.",
+                                    given.join(", ")
+                                )),
                                 cx,
                             );
                         }
