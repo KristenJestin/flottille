@@ -759,35 +759,37 @@ impl ConnectionsSection {
         self.saving = false;
         match answer {
             Ok(saved) => {
-                // The daemon pins what a server announces as it is added or edited: the tool is
-                // given at once, every action judged, and the review is there to change that.
-                let was_ready = |name: &str| {
-                    self.listed
-                        .iter()
-                        .flatten()
-                        .any(|server| server.name == name && server.state == "ready")
-                };
-                let given = |name: &str, cx: &mut Context<Self>| {
+                // The daemon says whether this very write gave the tool to agents (it pins what a
+                // server announces as it is added, edited or turned on): the list the window
+                // holds may already be the new one, so the answer is what is read.
+                let given = saved["given"] == true;
+                let reviewing = |toast: Toast, name: &str, cx: &mut Context<Self>| {
                     let review = cx.weak_entity();
-                    let to_review = name.to_owned();
-                    Toast::success(format!("Server {name} is given to agents"))
-                        .detail("Every action is judged.")
-                        .action("Review", move |_, cx| {
-                            review
-                                .update(cx, |this, cx| this.open_review(&to_review, cx))
-                                .ok();
-                        })
+                    let name = name.to_owned();
+                    toast.action("Review", move |_, cx| {
+                        review
+                            .update(cx, |this, cx| this.open_review(&name, cx))
+                            .ok();
+                    })
                 };
-                let ready = saved["state"] == "ready";
                 let said = match &writing {
-                    Writing::Added(name) if ready => given(name, cx),
-                    Writing::Edited(name) if ready && !was_ready(name) => given(name, cx),
-                    Writing::Added(name) => Toast::success(format!("Server {name} added")).detail(
-                        match saved["failing"].as_str() {
-                            Some(why) => format!("It waits for its review: {why}"),
-                            None => "Review it to give agents its tool.".to_owned(),
-                        },
-                    ),
+                    Writing::Added(name)
+                    | Writing::Edited(name)
+                    | Writing::Switched(name, true)
+                        if given =>
+                    {
+                        let detail = match writing {
+                            Writing::Added(_) => "Every action is judged.",
+                            _ => "Review it to change what each action does.",
+                        };
+                        reviewing(
+                            Toast::success(format!("Server {name} is given to agents"))
+                                .detail(detail),
+                            name,
+                            cx,
+                        )
+                    }
+                    Writing::Added(name) => Toast::success(format!("Server {name} added")),
                     Writing::Edited(name) => Toast::success(format!("Server {name} saved")),
                     Writing::Switched(name, true) => {
                         Toast::success(format!("Server {name} turned on"))
@@ -797,6 +799,32 @@ impl ConnectionsSection {
                             .detail("Its tool left every agent.")
                     }
                     Writing::Removed(name) => Toast::success(format!("Server {name} removed")),
+                };
+                // What is not given says why: its server did not start, it announces a change
+                // nobody read, or it is off.
+                let said = match (&writing, saved["state"].as_str(), saved["failing"].as_str()) {
+                    (Writing::Removed(_) | Writing::Switched(_, false), ..) => said,
+                    (_, Some("awaiting review"), Some(why)) => {
+                        said.detail(format!("It waits for its review: {why}"))
+                    }
+                    (Writing::Added(name), Some("awaiting review"), None) => reviewing(
+                        said.detail("Review it to give agents its tool."),
+                        name,
+                        cx,
+                    ),
+                    (
+                        Writing::Edited(name) | Writing::Switched(name, true),
+                        Some("awaiting review"),
+                        None,
+                    ) => reviewing(
+                        said.detail("Its server announces a change: review it to give agents its tool again."),
+                        name,
+                        cx,
+                    ),
+                    (Writing::Added(_), Some("off"), _) => {
+                        said.detail("It is off: agents get its tool when you turn it on.")
+                    }
+                    _ => said,
                 };
                 if matches!(writing, Writing::Added(_) | Writing::Edited(_)) {
                     self.form = Form::Closed;
@@ -1676,7 +1704,12 @@ impl ConnectionsSection {
             .action(
                 Button::primary(
                     "save-connection",
-                    if original.is_some() { "Save" } else { "Add" },
+                    match (self.saving, original.is_some()) {
+                        (true, true) => "Saving…",
+                        (true, false) => "Adding…",
+                        (false, true) => "Save",
+                        (false, false) => "Add",
+                    },
                 )
                 .disabled(self.saving)
                 .on_click(cx.listener(|this, _, _, cx| this.save(cx))),

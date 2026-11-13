@@ -560,6 +560,14 @@ impl Registry {
                     .map_or_else(|| name.clone(), |listed| listed.title.clone());
                 match answer {
                     Ok(listed) => {
+                        // Turning Connections on gives the servers added while it was off: the
+                        // daemon names them.
+                        let given: Vec<String> = listed["given"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|name| name.as_str().map(str::to_owned))
+                            .collect();
                         let listed = Listed::of(&listed);
                         if let Some(at) = self.list.iter().position(|l| l.name == listed.name) {
                             self.list[at] = listed;
@@ -568,6 +576,21 @@ impl Registry {
                             toast(
                                 Toast::success(format!("{title}: {label} saved"))
                                     .detail("It applies from now on."),
+                                cx,
+                            );
+                        } else if let [only] = given.as_slice() {
+                            toast(
+                                Toast::success(format!("Server {only} is given to agents"))
+                                    .detail("Every action is judged."),
+                                cx,
+                            );
+                        } else if !given.is_empty() {
+                            toast(
+                                Toast::success(format!(
+                                    "{} servers are given to agents",
+                                    given.len()
+                                ))
+                                .detail(format!("{}. Every action is judged.", given.join(", "))),
                                 cx,
                             );
                         }

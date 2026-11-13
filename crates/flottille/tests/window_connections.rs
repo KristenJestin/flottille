@@ -817,6 +817,133 @@ fn editing_the_command_pins_the_server_again_with_no_review(cx: &mut TestAppCont
     );
 }
 
+/// The second lines of the toasts shown, in the order of `toasts`.
+fn second_lines(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<Option<String>> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|t| t.second_line().map(str::to_owned))
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn an_edit_that_announces_a_change_says_a_review_is_needed(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    connect(&user, "almanac", &almanac(), json!({}));
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| {
+        label(cx, "connection-almanac-line").as_deref() == Some("On · 3 actions")
+    });
+    // The server announces another description now: nobody read it, so it is not pinned.
+    let mut newer = almanac();
+    newer["tools"][1]["description"] = json!("Deletes every note.");
+    write_script(&user, "almanac", &newer);
+    click(cx, "connection-more-almanac");
+    click(cx, "edit-connection-almanac");
+    let section = section(&shell, cx);
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    let said = fields.command.read_with(cx, |f, _| f.value().to_string());
+    type_in(&fields.command, &format!("{said} --quiet"), cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(
+        connection(&user, "almanac").unwrap()["state"],
+        "awaiting review"
+    );
+    let said = toasts(&shell, cx);
+    assert!(said.iter().any(|t| t == "Server almanac saved"), "{said:?}");
+    let second = second_lines(&shell, cx);
+    assert!(
+        second.iter().flatten().any(|line| line.contains("review")),
+        "{second:?}"
+    );
+    assert_eq!(label(cx, "toast-1-action").as_deref(), Some("Review"));
+}
+
+#[gpui_kit::test]
+fn an_edit_whose_server_does_not_start_says_why_in_its_toast(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    connect(&user, "almanac", &almanac(), json!({}));
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| {
+        label(cx, "connection-almanac-line").as_deref() == Some("On · 3 actions")
+    });
+    click(cx, "connection-more-almanac");
+    click(cx, "edit-connection-almanac");
+    let section = section(&shell, cx);
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.command, "/nonexistent/flottille-no-such-server", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    let second = second_lines(&shell, cx);
+    assert!(
+        second
+            .iter()
+            .flatten()
+            .any(|line| line.starts_with("It waits for its review:") && line.contains("start")),
+        "{second:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_form_says_it_is_saving_and_cannot_be_submitted_twice(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    write_script(&user, "almanac", &almanac());
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    click(cx, "new-connection");
+    let section = section(&shell, cx);
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.name, "almanac", cx);
+    type_in(&fields.about, "The user's notes.", cx);
+    let line = command_of(&user, "almanac")
+        .iter()
+        .map(|word| format!("'{word}'"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    type_in(&fields.command, &line, cx);
+    assert_eq!(label(cx, "save-connection").as_deref(), Some("Add"));
+    click(cx, "save-connection");
+    // The daemon lists the server's tools before it answers: the dialog says it waits, and a
+    // second press sends nothing.
+    assert_eq!(label(cx, "save-connection").as_deref(), Some("Adding…"));
+    click(cx, "save-connection");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    let said = toasts(&shell, cx);
+    assert_eq!(said, ["Server almanac is given to agents"], "{said:?}");
+}
+
+#[gpui_kit::test]
+fn a_server_added_while_the_extension_was_off_is_given_when_its_switch_is_turned_on(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    declare(&user, "almanac", &almanac());
+    assert_eq!(connection(&user, "almanac").unwrap()["state"], "off");
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    click(cx, "connections-switch");
+    until(&shell, cx, "the toast says it", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "Server almanac is given to agents")
+    });
+    assert_eq!(connection(&user, "almanac").unwrap()["state"], "ready");
+}
+
 #[gpui_kit::test]
 fn removing_a_server_asks_in_a_confirmation(cx: &mut TestAppContext) {
     let user = user();
