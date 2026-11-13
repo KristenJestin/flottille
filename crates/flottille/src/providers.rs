@@ -486,7 +486,8 @@ pub fn doctor(paths: &Paths) -> Value {
 }
 
 /// `--version` answers, by program path and its modification time.
-static VERSIONS: Mutex<Option<Versions>> = Mutex::new(None);
+static VERSIONS: crate::locks::Lock<Option<Versions>> =
+    crate::locks::Lock::named("providers::VERSIONS", None);
 
 type Versions = HashMap<(PathBuf, SystemTime), Option<String>>;
 
@@ -1460,7 +1461,7 @@ fn listed_or_asked(daemon: &Daemon, provider: &'static Provider, asked: String) 
 }
 
 /// One change of `providers.toml` at a time: each reads what the one before wrote.
-static WRITING: Mutex<()> = Mutex::new(());
+static WRITING: crate::locks::Lock<()> = crate::locks::Lock::named("providers::WRITING", ());
 
 /// Sets `enabled` under the provider's table of `providers.toml`, the rest of the file kept as
 /// the user wrote it, comments included; the file is made when there is none. Whether it

@@ -4,7 +4,7 @@
 //! findings once; Flottille checks them, keeps them and delivers those that matter.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, PoisonError};
 
 use flottille_core::Result;
 use flottille_core::agent::Agent;
@@ -574,7 +574,8 @@ const TEXT_CHARS: usize = 20_000;
 // Starting a review.
 
 /// The sessions whose review is starting: two asked at once for one session start one.
-static STARTING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static STARTING: crate::locks::Lock<BTreeSet<String>> =
+    crate::locks::Lock::named("review::STARTING", BTreeSet::new());
 
 /// A session's place in `STARTING`, given back when its start ends, whichever way.
 struct Starting(String);
