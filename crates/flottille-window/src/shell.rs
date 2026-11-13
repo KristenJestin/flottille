@@ -6,6 +6,7 @@ use crate::glyphs;
 use crate::state::{AgentState, StateIcon, Status};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt as _;
@@ -2111,15 +2112,39 @@ impl Shell {
     }
 
     /// Restarts a Flottille that does not answer, off the UI's thread: what it ran is ended, and
-    /// the link, its connection broken, starts it again.
-    pub fn restart(&mut self) {
+    /// the link, its connection broken, starts it again. Its button says it runs, and cannot be
+    /// clicked again, until it ended.
+    pub fn restart(&mut self, cx: &mut Context<Self>) {
+        if self.main.read(cx).restarting() {
+            return;
+        }
         let restart = self.restart.clone();
+        // Read on the UI's clock: a thread of its own does not wake the UI's tasks.
+        let ended = Arc::new(AtomicBool::new(false));
+        let ending = ended.clone();
         let started = std::thread::Builder::new()
             .name("flottille-restart".into())
-            .spawn(move || restart());
+            .spawn(move || {
+                restart();
+                ending.store(true, Ordering::SeqCst);
+            });
         if let Err(error) = started {
             eprintln!("flottille: Flottille cannot be restarted: {error}");
+            return;
         }
+        self.main
+            .update(cx, |main, cx| main.set_restarting(true, cx));
+        cx.spawn(async move |this: WeakEntity<Shell>, cx| {
+            while !ended.load(Ordering::SeqCst) {
+                cx.background_executor().timer(RESTART_POLL).await;
+            }
+            let _ = this.update(cx, |shell, cx| {
+                shell
+                    .main
+                    .update(cx, |main, cx| main.set_restarting(false, cx))
+            });
+        })
+        .detach();
     }
 
     fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {
@@ -3116,6 +3141,9 @@ impl TopBar {
         }
     }
 }
+
+/// How often the window looks whether "Restart Flottille" ended.
+const RESTART_POLL: Duration = Duration::from_millis(100);
 
 /// `flottille daemon stop`, by the program the window runs in: it ends a Flottille that does not
 /// answer.

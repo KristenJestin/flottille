@@ -13190,41 +13190,53 @@ fn the_rail_s_line_runs_on_between_two_children_of_one_parent(cx: &mut TestAppCo
     });
 }
 
-/// A Flottille that takes the connection and never answers (#841): the window says so, with a way
-/// to restart it, and never that there is no project.
+/// A Flottille that takes the connection and never answers (#841): the window says so in a banner
+/// above the page, with a way to restart it, and never that there is no project; once the
+/// connection is let go, the banner folds away.
 #[gpui_kit::test]
 fn the_window_says_the_daemon_does_not_answer(cx: &mut TestAppContext) {
     let user = user();
     let socket = user.path("silent.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     // Every connection is taken and kept, and nothing is ever read from it nor written to it.
+    let kept = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let keeping = kept.clone();
     std::thread::spawn(move || {
-        let mut kept = Vec::new();
-        for stream in listener.incoming() {
-            kept.push(stream);
+        for stream in listener.incoming().flatten() {
+            keeping.lock().unwrap().push(stream);
         }
     });
     let connect: Connect = Arc::new(move || std::os::unix::net::UnixStream::connect(&socket));
+    // Before the window asks anything.
+    let asked = Instant::now();
     let (shell, cx) = window(&user, connect, 1280., cx);
     let restarted = Arc::new(AtomicUsize::new(0));
-    let counted = restarted.clone();
+    let released = Arc::new(AtomicBool::new(false));
+    let (counted, release) = (restarted.clone(), released.clone());
     shell.update(cx, |shell, _| {
+        // A restart that takes a while, then lets go of every connection, as a daemon ended does.
         shell.set_restart(Arc::new(move || {
             counted.fetch_add(1, Ordering::SeqCst);
+            while !release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            for stream in kept.lock().unwrap().drain(..) {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
         }))
     });
 
-    let asked = Instant::now();
-    until(
+    until_while(
         &shell,
         cx,
         "the window says Flottille does not answer",
+        || asked.elapsed() < link::NOT_ANSWERING + Duration::from_secs(20),
         |cx| {
             assert!(
                 text_of("add-first-project", cx).is_none(),
                 "an empty store is said of a Flottille that never answered"
             );
-            cx.update(|window, _| window.try_find("not-answering").is_some())
+            text_of("not-answering-title", cx).is_some()
         },
     );
     assert!(
@@ -13240,13 +13252,29 @@ fn the_window_says_the_daemon_does_not_answer(cx: &mut TestAppContext) {
     assert!(since.starts_with("It has not answered since "), "{since}");
     assert!(cx.update(|window, _| window.try_find("add-first-project").is_none()));
 
+    // The banner unfolds before its button can be clicked.
+    until_time_passes(&shell, cx, "the banner unfolded", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find("restart-flottille")
+                .is_some_and(|button| button.visible())
+        })
+    });
+    settle(cx);
     cx.update(|window, cx| window.click("restart-flottille", cx));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while restarted.load(Ordering::SeqCst) == 0 {
-        assert!(
-            Instant::now() < deadline,
-            "Restart Flottille restarts nothing"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    until(&shell, cx, "Restart says it runs", |cx| {
+        text_of("restart-flottille", cx).as_deref() == Some("Restarting…")
+    });
+    // Clicked again while it runs: nothing more.
+    cx.update(|window, cx| window.click("restart-flottille", cx));
+    cx.run_until_parked();
+    assert_eq!(restarted.load(Ordering::SeqCst), 1);
+
+    released.store(true, Ordering::SeqCst);
+    until_time_passes(&shell, cx, "the banner folds away", |cx| {
+        cx.update(|window, _| window.try_find("not-answering-banner").is_none())
+    });
+    assert_eq!(restarted.load(Ordering::SeqCst), 1);
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
 }

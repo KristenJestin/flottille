@@ -2,7 +2,7 @@
 //! ([`SessionPage`]).
 
 use crate::state::Status;
-use gpui_design_system::{Type, enter, palette, space};
+use gpui_design_system::{Type, palette, presence_of, space};
 use gpui_kit::{
     AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window, div,
@@ -64,9 +64,11 @@ pub struct MainArea {
     spec: Option<Entity<SpecPage>>,
     /// The services page, one for the window's life.
     services: Entity<ServicesPage>,
-    /// Since when Flottille has not answered the window, in ms after the epoch: said in place of
-    /// any page while it lasts.
+    /// Since when Flottille has not answered the window, in ms after the epoch: said in a banner
+    /// above the page while it lasts.
     not_answering: Option<u64>,
+    /// Whether "Restart Flottille" runs: it cannot be clicked again meanwhile.
+    restarting: bool,
     /// Whether Flottille was read once: until then, an empty page says nothing of the projects.
     read: bool,
 }
@@ -89,6 +91,7 @@ impl MainArea {
             spec: None,
             services,
             not_answering: None,
+            restarting: false,
             read: false,
         }
     }
@@ -100,11 +103,23 @@ impl MainArea {
         }
     }
 
+    pub fn restarting(&self) -> bool {
+        self.restarting
+    }
+
+    pub fn set_restarting(&mut self, restarting: bool, cx: &mut Context<Self>) {
+        if self.restarting != restarting {
+            self.restarting = restarting;
+            cx.notify();
+        }
+    }
+
     /// Flottille was read: it answers, and an empty page now says there is no project.
     pub fn set_read(&mut self, cx: &mut Context<Self>) {
         if !self.read || self.not_answering.is_some() {
             self.read = true;
             self.not_answering = None;
+            self.restarting = false;
             cx.notify();
         }
     }
@@ -237,54 +252,11 @@ impl Render for MainArea {
             .bg(p.bg)
             .ui_text()
             .text_color(p.text);
-        if let Some(since) = self.not_answering {
-            let shell = self.shell.clone();
-            return root.child(enter(
-                "not-answering",
-                0,
-                div()
-                    .id("not-answering")
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(space::MD)
-                    .child(
-                        div()
-                            .id("not-answering-title")
-                            .aria_label(TITLE)
-                            .text_color(p.text)
-                            .child(TITLE)
-                            .test_support(),
-                    )
-                    .child({
-                        let said = format!(
-                            "It has not answered since {}. Restarting it cuts the turns under way.",
-                            crate::session::clock(since)
-                        );
-                        div()
-                            .id("not-answering-since")
-                            .aria_label(said.clone())
-                            .text_color(p.faint)
-                            .child(said)
-                            .test_support()
-                    })
-                    .child(
-                        gpui_design_system::Button::primary(
-                            "restart-flottille",
-                            "Restart Flottille",
-                        )
-                        .on_click(move |_, _, cx| {
-                            shell.update(cx, |shell, _| shell.restart()).ok();
-                        }),
-                    ),
-            ));
-        }
-        match &self.page {
+        let page = div().flex_1().min_h_0().relative();
+        let page = match &self.page {
             // Nothing read yet: what there is is not known.
-            Page::Empty if !self.read => root,
-            Page::Empty => root.child(
+            Page::Empty if !self.read => page,
+            Page::Empty => page.child(
                 div()
                     .size_full()
                     .flex()
@@ -305,12 +277,81 @@ impl Render for MainArea {
                             })
                     }),
             ),
-            Page::Project { .. } => root.children(self.project.clone()),
-            Page::Session { .. } => root.children(self.session.clone()),
-            Page::Settings => root.child(self.settings.clone()),
-            Page::Services => root.child(self.services.clone()),
-            Page::ProjectSettings { .. } => root.children(self.project_settings.clone()),
-            Page::Spec { .. } => root.children(self.spec.clone()),
-        }
+            Page::Project { .. } => page.children(self.project.clone()),
+            Page::Session { .. } => page.children(self.session.clone()),
+            Page::Settings => page.child(self.settings.clone()),
+            Page::Services => page.child(self.services.clone()),
+            Page::ProjectSettings { .. } => page.children(self.project_settings.clone()),
+            Page::Spec { .. } => page.children(self.spec.clone()),
+        };
+        root.flex()
+            .flex_col()
+            .child(self.not_answering_banner(cx))
+            .child(page)
+    }
+}
+
+impl MainArea {
+    /// The banner above the page while Flottille does not answer: it unfolds and fades in, and
+    /// folds away and fades out, with its last words, once it answers again.
+    fn not_answering_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let said = self.not_answering.map(|since| {
+            format!(
+                "It has not answered since {}. Restarting it cuts the turns under way.",
+                crate::session::clock(since)
+            )
+            .into()
+        });
+        let (shell, restarting) = (self.shell.clone(), self.restarting);
+        presence_of("not-answering", said, move |said| {
+            div()
+                .id("not-answering-banner")
+                .flex()
+                .items_center()
+                .gap(space::MD)
+                .px(space::LG)
+                .py(space::MD)
+                .bg(p.wait_bg)
+                .border_b_1()
+                .border_color(p.wait_line)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .id("not-answering-title")
+                                .aria_label(TITLE)
+                                .text_color(p.text)
+                                .child(TITLE)
+                                .test_support(),
+                        )
+                        .child(
+                            div()
+                                .id("not-answering-since")
+                                .aria_label(said.clone())
+                                .text_color(p.mute)
+                                .child(said)
+                                .test_support(),
+                        ),
+                )
+                .child(
+                    gpui_design_system::Button::primary("restart-flottille", "Restart Flottille")
+                        .label(if restarting {
+                            "Restarting…"
+                        } else {
+                            "Restart Flottille"
+                        })
+                        .disabled(restarting)
+                        .on_click(move |_, _, cx| {
+                            shell.update(cx, |shell, cx| shell.restart(cx)).ok();
+                        }),
+                )
+                .test_support()
+                .into_any_element()
+        })
     }
 }

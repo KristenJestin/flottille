@@ -118,7 +118,7 @@ pub struct Seen {
 }
 
 /// How long a request of the link may wait before the window says Flottille is not answering.
-pub const NOT_ANSWERING: Duration = Duration::from_secs(10);
+pub const NOT_ANSWERING: Duration = Duration::from_secs(30);
 /// How long the link waits for nothing before it asks Flottille whether it still answers.
 const PING: Duration = Duration::from_secs(15);
 
