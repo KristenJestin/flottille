@@ -593,6 +593,12 @@ fn version_only(pin: &Listing, now: &Listing) -> bool {
         && action_changes(pin, now).is_empty()
 }
 
+/// Whether pinning `listing` over `pin` would pin something nobody read: the pin exists and the
+/// listing differs from it by more than its version.
+fn unread(pin: Option<&Listing>, listing: &Listing) -> bool {
+    pin.is_some_and(|pin| !changes(pin, listing).is_empty() && !version_only(pin, listing))
+}
+
 /// The pin moves to the version the server announces now, `now` being `version_only` of it: the
 /// settings stay, the connection is not cut off, and the inbox says so.
 fn move_pin(daemon: &Daemon, name: &str, pin: &Listing, now: &Listing) {
@@ -1542,12 +1548,9 @@ async fn pin_at_once(daemon: &Arc<Daemon>, name: &str) -> bool {
     if review(daemon, named.clone()).await.is_err() {
         return false;
     }
-    let now = self::row(daemon, name);
-    let unread = match (&now.pin, &now.seen) {
-        (Some(pin), Some(seen)) => !changes(pin, seen).is_empty() && !version_only(pin, seen),
-        _ => false,
-    };
-    !unread && accept(daemon, named).await.is_ok()
+    // The rule is checked by the accept itself, on the listing it pins and the pin as it is when
+    // it is written: a review that came in between cannot slip a listing past it.
+    accept_checked(daemon, named, true).await.is_ok()
 }
 
 /// The connections that were added while the extension was off, or edited since, given to agents
@@ -1759,6 +1762,17 @@ fn diff(declaration: &Declaration, row: &Row, now: &Listing) -> Value {
 /// started is stopped before the pin, and no other starts until it is written: a change it
 /// announced since is seen when it starts again, against the pin.
 async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    accept_checked(daemon, params, false).await
+}
+
+/// `accept`; with `unread_refused`, as `pin_at_once` asks, a listing that differs from the pin by
+/// more than its version is not pinned (the connection stays awaiting its review): the listing
+/// is compared where it is written, under the connection's turn, against the pin that is there.
+async fn accept_checked(
+    daemon: &Arc<Daemon>,
+    params: Value,
+    unread_refused: bool,
+) -> std::result::Result<Value, Failure> {
     let name = named(&params)?;
     let declaration = declaration(&daemon.paths, &name)?;
     let row = row(daemon, &name);
@@ -1777,14 +1791,24 @@ async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
                 client::held(daemon, &name),
                 "the pin of {name} is written while its server is free"
             );
-            write_row(
+            write_row_if(
                 daemon,
                 &name,
-                |row| pinned(row, listing, digest, settings),
+                |row| {
+                    if unread_refused && unread(row.pin.as_ref(), &listing) {
+                        return false;
+                    }
+                    pinned(row, listing, digest, settings);
+                    true
+                },
                 None,
             )
         };
-        client::stopped(daemon, &name, pin).await?;
+        if !client::stopped(daemon, &name, pin).await? {
+            return Err(Failure::refused(format!(
+                "the server of {name} announces a change nobody read: review it first"
+            )));
+        }
     } else {
         // The pin is read under the turn: a server that starts moves it (`move_pin`), and what is
         // written here is the settings, never the pin read before.
@@ -1879,6 +1903,30 @@ mod tests {
         assert_eq!(row.settings, settings);
         assert_eq!(row.pinned_for.as_deref(), Some("digest"));
         assert_eq!(row.cut_off, None);
+    }
+
+    #[test]
+    fn only_a_listing_that_differs_by_more_than_its_version_is_unread() {
+        let action = |description: &str| Action {
+            name: "search".into(),
+            description: description.into(),
+            schema: json!({"type": "object"}),
+            annotations: Value::Null,
+        };
+        let listing = |version: &str, description: &str| Listing {
+            server: json!({"name": "almanac", "version": version}),
+            actions: vec![action(description)],
+            ..Listing::default()
+        };
+        let pin = listing("1.0.0", "Finds notes.");
+        assert!(
+            !unread(None, &listing("1.0.0", "Anything.")),
+            "no pin: first"
+        );
+        assert!(!unread(Some(&pin), &pin.clone()));
+        assert!(!unread(Some(&pin), &listing("1.1.0", "Finds notes.")));
+        assert!(unread(Some(&pin), &listing("1.1.0", "Deletes notes.")));
+        assert!(unread(Some(&pin), &listing("1.0.0", "Deletes notes.")));
     }
 
     fn parse(table: Value) -> std::result::Result<Declaration, String> {

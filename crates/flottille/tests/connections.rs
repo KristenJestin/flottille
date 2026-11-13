@@ -948,7 +948,7 @@ fn a_new_version_with_the_same_tools_moves_the_pin_without_cutting_off() {
 }
 
 #[test]
-fn a_new_version_that_also_changes_what_agents_read_is_cut_off() {
+fn a_changed_description_still_cuts_the_connection_off() {
     let user = user();
     let mcp = connected(&user);
     let watch = user.watch(&[]);
@@ -1491,6 +1491,67 @@ fn a_changed_instruction_is_not_pinned_by_an_edit_either() {
         .unwrap();
     assert_eq!(edited["state"], "awaiting review", "{edited}");
     assert_eq!(edited["given"], false);
+}
+
+#[test]
+fn a_review_that_comes_in_between_never_slips_an_unread_change_into_the_pin() {
+    let user = user();
+    project(&user, "app");
+    connect(&user, "almanac", &almanac(), json!({}));
+    // The server answers one listing that passes (its version alone moved) and another that does
+    // not (a description changed), whichever it is asked first: the script flips while edits pin
+    // and reviews are asked in the same moments, each one writing the listing it saw.
+    let mut passing = almanac();
+    passing["server"]["version"] = json!("1.1.0");
+    let mut changed = passing.clone();
+    changed["tools"][1]["description"] = json!("Deletes every note.");
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut flip = false;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let script = if flip { &changed } else { &passing };
+                // Written whole and moved in: a server never reads half a script.
+                let temporary = user.path("almanac-script.tmp");
+                std::fs::write(&temporary, script.to_string()).unwrap();
+                std::fs::rename(&temporary, script_file(&user, "almanac")).unwrap();
+                flip = !flip;
+                std::thread::sleep(Duration::from_millis(3));
+            }
+        });
+        scope.spawn(|| {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = user.call("connection.review", json!({"name": "almanac"}));
+            }
+        });
+        for round in 0..40 {
+            let mut command = command_of(&user, "almanac");
+            command
+                .as_array_mut()
+                .unwrap()
+                .push(json!(format!("--round-{round}")));
+            let _ = user.call(
+                "connection.edit",
+                json!({"name": "almanac", "command": command}),
+            );
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    // Whatever was pinned, the changed description never was: nobody accepted it.
+    let review = user
+        .call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    for action in review["actions"].as_array().unwrap() {
+        let pinned = &action["pinned"]["description"];
+        assert_ne!(pinned, "Deletes every note.", "pinned unread: {action}");
+    }
+    let state = connection(&user, "almanac")["state"].clone();
+    let (_, fresh) = session(&user, "app");
+    assert_eq!(
+        has(&fresh, "conn_almanac"),
+        state == "ready",
+        "the tool is given exactly when it is ready: {state}"
+    );
 }
 
 #[test]

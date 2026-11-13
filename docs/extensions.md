@@ -1107,9 +1107,11 @@ off nor signed out, and says whether it pinned. It is called by `connection.add`
 review's 30 seconds, and one that fails leaves the connection awaiting review with `failing`), by
 `extension.set` when Connections is turned on (every declared connection, at the same time, the
 names given in the answer's `given`), by `connection.edit {enabled: true}`, and by the end of a
-sign-in (`connection.signed_in`). Between the review and the accept it compares the pin with what
-the review saw: with a pin, a difference other than the version stops it, and the connection waits
-for its review. A version-only change is found where a server starts for a call (a server already
+sign-in (`connection.signed_in`). Its accept refuses what nobody read: where it writes the pin,
+under the connection's turn, it compares the listing it pins with the pin that is there, and with
+a pin a difference other than the version stops it, the connection waiting for its review. The
+comparison is on the very listing written, so that a review that comes in between cannot slip
+another one past it. A version-only change is found where a server starts for a call (a server already
 running is never compared, as before) and moves the pin there, under the connection's
 one-call-at-a-time turn, so that no accept writes a pin at the same time; the event and the
 `connection.changed` come only if the pin was written. An accept with no review due sets the
