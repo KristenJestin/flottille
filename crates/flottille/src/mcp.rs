@@ -2542,7 +2542,19 @@ pub async fn judged_off(
 ) -> (gate::Verdict, Vec<String>) {
     let (daemon, grant, tool, args) =
         (daemon.clone(), grant.clone(), tool.to_owned(), args.clone());
-    match tokio::task::spawn_blocking(move || judged(&daemon, &grant, &tool, &args)).await {
+    let judging = move || {
+        // For the tests of what changes while a call is judged.
+        if cfg!(debug_assertions)
+            && std::env::var_os("FLOTTILLE_TEST_HOLD").is_some()
+            && let Some(ms) = std::env::var("FLOTTILLE_TEST_JUDGE_MS")
+                .ok()
+                .and_then(|ms| ms.parse().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        judged(&daemon, &grant, &tool, &args)
+    };
+    match tokio::task::spawn_blocking(judging).await {
         Ok(judged) => judged,
         Err(error) => match error.try_into_panic() {
             Ok(panic) => std::panic::resume_unwind(panic),
