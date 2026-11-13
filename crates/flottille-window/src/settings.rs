@@ -2178,9 +2178,11 @@ impl SettingsPage {
                     registry.switch_on(key, None)
                         && registry.listed(key).is_some_and(|listed| listed.enabled)
                 });
+                // The gap is the parent's: `presence(..).gap(..)` only folds it away with the block.
                 div()
                     .flex()
                     .flex_col()
+                    .gap(space::XXL)
                     .children(page)
                     .child(
                         presence(

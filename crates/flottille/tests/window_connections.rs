@@ -16,6 +16,7 @@ use flottille_window::Shell;
 use flottille_window::extensions::connections::{ConnectionsSection, Then};
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::space;
 use gpui_kit::base::input::InputState;
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -371,6 +372,26 @@ fn its_page_shows_its_usage_line_while_off(cx: &mut TestAppContext) {
     );
     assert!(visible(cx, "connection-servers-title"));
     assert!(visible(cx, "connections-usage"));
+}
+
+#[gpui_kit::test]
+fn the_servers_section_keeps_its_gap_under_the_card(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "the servers are in", |cx| {
+        visible(cx, "connection-servers-title")
+    });
+    settle(cx);
+
+    // The section is a block of the page like the others: `space::XXL` under the card. Its
+    // heading sits inside the section, centred in the row of the heading, so the block is measured.
+    let card = cx.update(|window, _| window.find("connections").bounds());
+    let block = cx.update(|window, _| window.find("connection-servers-block").bounds());
+    let title = cx.update(|window, _| window.find("connection-servers-title").bounds());
+    assert_eq!(block.top() - card.bottom(), space::XXL);
+    assert!(title.top() >= block.top(), "the heading is in the block");
 }
 
 // ── The list ─────────────────────────────────────────────────────────────────────────────────

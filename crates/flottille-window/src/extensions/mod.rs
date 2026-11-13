@@ -1175,16 +1175,24 @@ pub fn feature_page(registry: &Entity<Registry>, name: &str, cx: &App) -> Option
         .gap(space::XXL)
     });
     let others = projects_line(registry, name, on, cx);
+    // A presence's gap is the parent's: the card and its line keep `MD`, the guidance `XXL`.
     Some(
         div()
             .flex()
             .flex_col()
-            .child(enter(
-                SharedString::from(format!("{name}-page-enter")),
-                0,
-                card,
-            ))
-            .child(others)
+            .gap(space::XXL)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::MD)
+                    .child(enter(
+                        SharedString::from(format!("{name}-page-enter")),
+                        0,
+                        card,
+                    ))
+                    .child(others),
+            )
             .children(guidance)
             .into_any_element(),
     )

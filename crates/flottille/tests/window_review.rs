@@ -16,6 +16,7 @@ use flottille_window::session::{RailRow, SessionPage};
 use flottille_window::shell::Selection;
 use flottille_window::tree::session_id;
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::space;
 use gpui_design_system::toggle_id;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -884,6 +885,11 @@ fn review_s_page_shows_what_it_checks_as_one_card(cx: &mut TestAppContext) {
         "{sentence}"
     );
     assert!(bounds(cx, "review-guidance-title").top() > card.bottom());
+    // A block of the page like the others: `space::XXL` under the card of the switch.
+    assert_eq!(
+        bounds(cx, "review-guidance-block").top() - bounds(cx, "review").bottom(),
+        space::XXL
+    );
     assert!(present(cx, "review-guidance-text"), "the shared editor");
     assert!(!present(cx, "review-guidance-save"), "no Save at rest");
     // No word of how it is built.
