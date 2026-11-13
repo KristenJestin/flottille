@@ -1015,7 +1015,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   session an agent started offers "Detach from its lead" (`agent.detach`, a toast says the
   result; the lead's title is a second, fainter line of the entry, cut to one line, never wrapped; the
   agent's "⋯" menu in the session's rail offers the same action while the session is led): the row slides back among the project's sessions, its indent and mark fade, and the
-  header's line and the note fold away. A question a led session asks its pilot shows in its
+  header's line and the note fold away. A led session's row says what it runs on, its model and its effort by name (`Sonnet 5.5 · medium`), after its place on its second line, its words fading in as they change (a model or an effort the user or its pilot changed). A question a led session asks its pilot shows in its
   conversation as a card, "<session> asks its pilot <pilot>", with no answer box and, under it in
   small text, "Its pilot answers at the end of its turn; you can answer here too." (the user's
   messages reach the session, as the note above its composer says). The last one still waiting
@@ -1284,7 +1284,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   chip, what the agent received in a fold; the header says the session's title and its place,
   and no state; a rail with, from its top, the session's tree of agents (each row with the share
   of its context the agent used, a percentage beside a thin bar, at the right of the name's line so that the second line has the whole row's width and is cut, with its whole text in a tooltip, only when it cannot fit; the session's own
-  agent says only what it runs on, the others their name over what they run on and do; a review is one such row, `Review, round 1` over `3/4 checks · 2 findings`, with a chevron at its right end that folds its checks and its findings, unfolded while it runs and folded once it is done; the composer's bar does not say
+  agent says only what it runs on, the others their name over their model, their effort (by name, `Sonnet 5.5 · medium`) and what they do; a review is one such row, `Review, round 1` over `3/4 checks · 2 findings`, with a chevron at its right end that folds its checks and its findings, unfolded while it runs and folded once it is done; the composer's bar does not say
   it; under the composer's field, the provider is named and not changeable, and the model and
   effort pickers are the start composer's own: a change chosen while a turn runs waits for its end,
   and a dot on its picker says it until the agent took it, its menu saying when it applies,

@@ -255,6 +255,16 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   that the new model does not offer goes from `chosen`, so that no later start fails on it. A
   process that opens with a pending model sets it before the chosen options, the chosen model
   skipped: a model the agent no longer offers never fails a start the change replaces it in.
+- **What an agent runs on, said to another agent** (#786): `provider · model · effort`, by name
+  (`Claude · Sonnet 5.5 · medium`), is how every tool that tells an agent about another says
+  it, for every provider: the provider's title, the model as the provider's list names it, and
+  the effort the agent took (`taken`), else the one asked (`chosen`). A model or an effort left
+  out, or the provider's own `default`, is the one Flottille knows the agent runs with: the
+  model the list marks (what `default` stands for), and the effort a session said for it, else
+  the middle of its levels; never the word `default`. Before a session of the provider said the
+  models, a model asked is said as asked and the rest says `model not known yet`, `effort not
+  known yet`; a model whose provider offers no effort says none. The places are listed in
+  `docs/tools.md`, "What an agent runs on".
 - **A prompt** is one text block. The turn ends with the agent's stop reason (`end_turn`,
   `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`), or `interrupted` when the process
   died during it. Prompts sent while a turn runs wait their turn.

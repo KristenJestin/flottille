@@ -229,6 +229,8 @@ pub struct Session {
     /// The agent that leads it, by the name it goes by: `None` for a session no agent leads (one
     /// handed to the user, or detached from its pilot).
     pub led_by: Option<String>,
+    /// What its root agent runs on, its model and effort by name, as the daemon names them.
+    pub runs: String,
     /// The session of the agent that leads it, whose row it sits under.
     pub pilot: Option<String>,
 }
@@ -426,6 +428,16 @@ pub struct Answers<'a> {
     pub commands: &'a Value,
     /// `subscription.list`: what the agents wait for outside Flottille.
     pub subscriptions: &'a Value,
+}
+
+/// What an agent runs on, as the rail and the sidebar say it: the model and the effort the daemon
+/// named (`runs_on` of an agent's summary), never named again here.
+pub fn runs_on(runs_on: &Value) -> String {
+    let model = runs_on["model"].as_str().unwrap_or_default();
+    match runs_on["effort"].as_str() {
+        Some(effort) => format!("{model} · {effort}"),
+        None => model.to_owned(),
+    }
 }
 
 fn text(value: &Value, key: &str) -> String {
@@ -798,6 +810,7 @@ impl Snapshot {
                     commands: commands_of("root", &id),
                     started_by: agent["launched_by"].as_str().map(name_of),
                     led_by: agent["led_by"].as_str().map(name_of),
+                    runs: runs_on(&agent["runs_on"]),
                     pilot: agent["led_by"]
                         .as_str()
                         .map(|pilot| root_of(&parents, pilot).to_owned()),

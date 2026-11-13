@@ -604,6 +604,186 @@ pub(crate) fn last_models(daemon: &Daemon, check: &Check) -> Option<(Vec<Value>,
     Some((models.as_array().cloned().unwrap_or_default(), current))
 }
 
+/// What the agents' tools say when a session has not said which model or effort a provider's agent
+/// runs on yet.
+const MODEL_UNKNOWN: &str = "model not known yet";
+const EFFORT_UNKNOWN: &str = "effort not known yet";
+
+/// What an agent of `provider` runs on, by name, as every tool that tells an agent about another
+/// says it: `Claude · Sonnet 5.5 · medium`. A model or an effort left out, or the provider's own
+/// `default`, is the one the provider's agents take then (the model its list marks, the effort
+/// its sessions said or the middle of the levels), never the word `default`; before a session said
+/// the models, it says that it does not know yet.
+pub fn runs_on(
+    daemon: &Daemon,
+    provider: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> String {
+    named(daemon, provider, model, effort).to_string()
+}
+
+/// What an agent runs on, by name, in its parts: the provider's title, the model, and the effort
+/// (`None` for a model its provider offers no effort for).
+pub struct RunsOn {
+    pub title: String,
+    pub model: String,
+    pub effort: Option<String>,
+}
+
+impl std::fmt::Display for RunsOn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.effort {
+            Some(effort) => write!(f, "{} · {} · {effort}", self.title, self.model),
+            None => write!(f, "{} · {}", self.title, self.model),
+        }
+    }
+}
+
+/// `runs_on`, in its parts.
+pub fn named(daemon: &Daemon, provider: &str, model: Option<&str>, effort: Option<&str>) -> RunsOn {
+    let Some(known) = get(provider) else {
+        return RunsOn {
+            title: provider.to_owned(),
+            model: model.unwrap_or(MODEL_UNKNOWN).to_owned(),
+            effort: Some(effort.unwrap_or(EFFORT_UNKNOWN).to_owned()),
+        };
+    };
+    let models = Settings::load(&daemon.paths)
+        .ok()
+        .and_then(|settings| last_models(daemon, &Check::of(known, &settings, Version::Skip)))
+        .map(|(models, _)| models)
+        .unwrap_or_default();
+    let ids = || models.iter().filter_map(|m| m["id"].as_str());
+    let entry = match model.filter(|m| *m != provider::OWN_CHOICE) {
+        Some(asked) => provider::listed_model(ids(), asked)
+            .and_then(|listed| models.iter().find(|m| m["id"] == listed)),
+        None => models
+            .iter()
+            .find(|m| m["default"] == true && m["stands_for"].is_null())
+            .or_else(|| {
+                let stands_for = models
+                    .iter()
+                    .find(|m| m["id"] == provider::OWN_CHOICE)
+                    .and_then(|m| m["stands_for"].as_str());
+                let id = provider::default_model(ids(), stands_for)?;
+                models.iter().find(|m| m["id"] == id)
+            }),
+    };
+    let model = match (model.filter(|m| *m != provider::OWN_CHOICE), entry) {
+        (_, Some(entry)) => match entry["name"].as_str() {
+            Some(name) if !says_default(name) => name.to_owned(),
+            _ => entry["id"]
+                .as_str()
+                .filter(|id| *id != provider::OWN_CHOICE)
+                .map_or_else(|| format!("{}'s model", known.title), str::to_owned),
+        },
+        (Some(asked), None) => asked.to_owned(),
+        (None, None) => MODEL_UNKNOWN.to_owned(),
+    };
+    let offered = entry.and_then(|m| m["efforts"].as_array());
+    let levels: Vec<&str> = offered
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|level| *level != provider::OWN_CHOICE)
+        .collect();
+    // An effort the model does not offer is not the one it runs with: a change of model that left
+    // it behind falls back to the model's own.
+    let effort = effort
+        .filter(|e| *e != provider::OWN_CHOICE)
+        .filter(|e| levels.is_empty() || levels.contains(e))
+        .map(str::to_owned)
+        .or_else(|| {
+            entry
+                .and_then(|m| m["default_effort"].as_str())
+                .filter(|own| levels.contains(own))
+                .map(str::to_owned)
+        })
+        .or_else(|| provider::middle_effort(&levels).map(|level| (*level).to_owned()));
+    let effort = match (effort, offered) {
+        (Some(effort), _) => Some(effort),
+        // A model whose provider offers no effort has none to say.
+        (None, Some(none)) if none.is_empty() => None,
+        (None, _) => Some(EFFORT_UNKNOWN.to_owned()),
+    };
+    RunsOn {
+        title: known.title.to_owned(),
+        model,
+        effort,
+    }
+}
+
+/// What an agent runs on now, by name (`runs_on`): what it took at its last start, else what was
+/// asked for it.
+pub fn agent_runs_on(daemon: &Daemon, agent: &Agent) -> String {
+    agent_named(daemon, agent).to_string()
+}
+
+/// `agent_runs_on`, in its parts.
+pub fn agent_named(daemon: &Daemon, agent: &Agent) -> RunsOn {
+    named(
+        daemon,
+        &agent.provider,
+        agent
+            .taken
+            .model
+            .as_ref()
+            .or(agent.chosen.model.as_ref())
+            .map(String::as_str),
+        agent
+            .taken
+            .effort
+            .as_ref()
+            .or(agent.chosen.effort.as_ref())
+            .map(String::as_str),
+    )
+}
+
+/// What an agent whose session has not opened yet was asked to run on, by name: what was not
+/// asked is the session's to take, so it is said not known yet rather than guessed.
+pub fn agent_asked_runs_on(daemon: &Daemon, agent: &Agent) -> String {
+    let mut asked = named(
+        daemon,
+        &agent.provider,
+        agent.chosen.model.as_deref(),
+        agent.chosen.effort.as_deref(),
+    );
+    if agent.chosen.model.is_none() {
+        asked.model = MODEL_UNKNOWN.to_owned();
+    }
+    if agent.chosen.effort.is_none() && asked.effort.is_some() {
+        asked.effort = Some(EFFORT_UNKNOWN.to_owned());
+    }
+    asked.to_string()
+}
+
+/// What an agent runs on from its next turn, by name: a change waiting is applied.
+pub fn agent_next_runs_on(daemon: &Daemon, agent: &Agent) -> String {
+    let now = |waiting: &Option<String>, taken: &Option<String>, chosen: &Option<String>| {
+        waiting
+            .clone()
+            .or_else(|| taken.clone())
+            .or_else(|| chosen.clone())
+    };
+    runs_on(
+        daemon,
+        &agent.provider,
+        now(
+            &agent.pending.model,
+            &agent.taken.model,
+            &agent.chosen.model,
+        )
+        .as_deref(),
+        now(
+            &agent.pending.effort,
+            &agent.taken.effort,
+            &agent.chosen.effort,
+        )
+        .as_deref(),
+    )
+}
+
 /// Whether a provider's agents take images in a prompt, as the last of its agents that started
 /// said; `None` before one did.
 pub fn takes_images(daemon: &Daemon, provider: &str) -> Option<bool> {

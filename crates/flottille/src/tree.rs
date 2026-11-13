@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::sync::Arc;
+use std::time::Duration;
 
 use flottille_core::agent::{Agent, AgentState};
 use flottille_core::approval::{self, Decision, Request};
@@ -18,6 +19,7 @@ use flottille_core::store::{AgentChange, Store, now_ms};
 use flottille_core::subscription::Subscription;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::agents::{self, DEPTH_LIMIT, New, Order};
 use crate::approvals;
@@ -389,6 +391,10 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         },
     )
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
+    // The child is a live child now: held on, it would count twice while its session opens.
+    drop(_slot);
+    // Told by the answer if its session fails as it opens: `fail_tree` does not tell it again.
+    let waiting = (!preparing).then(|| Opening::new(daemon, &child.id));
     // Before its first message, so that its first turn wakes its pilot too.
     if led {
         crate::subscriptions::lead(daemon, &caller.id, &child).map_err(failed)?;
@@ -403,9 +409,34 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         (Some(w), _) => format!("workspace {w}"),
         (None, _) => "your own place".to_owned(),
     };
+    // What the answer says it runs on is what its session took: a model or an effort left out is
+    // the agent's own to take, which only its session says.
+    let runs = match preparing {
+        true => providers::agent_asked_runs_on(daemon, &child),
+        false => {
+            let seen = opened(daemon, &child.id).await;
+            // A failure from here on is told as ever; one in the meantime is read here.
+            drop(waiting);
+            match (
+                seen,
+                daemon.read(|store| store.agent(&child.id)).ok().flatten(),
+            ) {
+                (_, Some(agent)) if agent.state == AgentState::Failed => {
+                    return Ok(Outcome::Done(format!(
+                        "Started {} on {}, in {place}, but its session failed as it opened: {}.",
+                        named(&child),
+                        providers::agent_asked_runs_on(daemon, &child),
+                        agent.state_reason.as_deref().unwrap_or("no reason given")
+                    )));
+                }
+                (Some(_), Some(agent)) => providers::agent_runs_on(daemon, &agent),
+                _ => providers::agent_asked_runs_on(daemon, &child),
+            }
+        }
+    };
     if led {
         return Ok(Outcome::Done(format!(
-            "Started a session led by you, {}, in {place}. It is a real session, not your child: \
+            "Started a session led by you, {}, on {runs}, in {place}. It is a real session, not your child: \
              the user sees it under you and may talk to it, and the agent_* tools do not reach \
              it. It asks you its questions: a delivery [flottille:session-turn-ended] wakes you \
              when it asks, reports or ends, with its last message. Answer with session_send, \
@@ -416,19 +447,69 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     }
     if session {
         return Ok(Outcome::Done(format!(
-            "Started a session for the user, {}, in {place}, handed over. It is the user's, not \
-             your child: the user follows it in the window and the agent_* tools do not reach \
+            "Started a session for the user, {}, on {runs}, in {place}, handed over. It is the \
+             user's, not your child: the user follows it in the window and the agent_* tools do not reach \
              it. You hear nothing more of it unless it writes to you; you can write to it with \
              session_send.",
             named(&child)
         )));
     }
     Ok(Outcome::Done(format!(
-        "Launched {} in {place}. It works on its own: you are told when it reports, asks, \
+        "Launched {} on {runs}, in {place}. It works on its own: you are told when it reports, asks, \
          fails, is stuck or goes idle, so do not poll it. Go on with your own work, or end your \
          turn.",
         named(&child)
     )))
+}
+
+/// How long a launch waits for its agent's session to open, to say what it took.
+const OPENING: Duration = Duration::from_secs(20);
+
+/// The agent once its session opened (or failed to), waited for a while; `None` while it has not.
+/// Answered as soon as it did, before its first turn could do anything.
+async fn opened(daemon: &Daemon, id: &str) -> Option<Agent> {
+    // Subscribed before the store is read: an opening meanwhile is not missed.
+    let mut live = daemon.live()?;
+    let wait = async {
+        loop {
+            let agent = daemon.read(|store| store.agent(id)).ok().flatten()?;
+            if agent.native_id.is_some() || agent.state.is_final() {
+                return Some(agent);
+            }
+            loop {
+                match live.recv().await {
+                    Ok(event) if event.data["agent"] == id => break,
+                    Ok(_) => {}
+                    Err(RecvError::Lagged(_)) => break,
+                    Err(RecvError::Closed) => return None,
+                }
+            }
+        }
+    };
+    tokio::time::timeout(OPENING, wait).await.ok().flatten()
+}
+
+/// A child whose launch waits for its session to open: if the session fails meanwhile, the
+/// launch's answer says so, and its parent is not told again by a delivery.
+struct Opening<'a> {
+    daemon: &'a Daemon,
+    agent: String,
+}
+
+impl<'a> Opening<'a> {
+    fn new(daemon: &'a Daemon, agent: &str) -> Opening<'a> {
+        daemon.opening.lock().unwrap().insert(agent.to_owned());
+        Opening {
+            daemon,
+            agent: agent.to_owned(),
+        }
+    }
+}
+
+impl Drop for Opening<'_> {
+    fn drop(&mut self) {
+        self.daemon.opening.lock().unwrap().remove(&self.agent);
+    }
 }
 
 /// A slot of a project's children cap, taken by a launch until its child exists (and counts as a
@@ -732,7 +813,13 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         Vec::new(),
     );
     let options = if changed {
-        format!(" Its model and effort change between its turns, before its next prompt.{dropped}")
+        let runs = crate::agents::find(daemon, &child.id)
+            .map(|child| providers::agent_next_runs_on(daemon, &child))
+            .unwrap_or_default();
+        format!(
+            " Its model and effort change between its turns, before its next prompt: it runs on \
+             {runs} from its next turn.{dropped}"
+        )
     } else {
         String::new()
     };
@@ -1015,7 +1102,12 @@ fn states(daemon: &Daemon, caller: &Agent, id: Option<String>, full: bool) -> Do
 /// One line of what a child is and does, as `agent_status` and `children-status` give it.
 pub fn line(daemon: &Daemon, agent: &Agent) -> String {
     let now = now_ms();
-    let mut parts = vec![format!("{}, {}", named(agent), doing(daemon, agent))];
+    let mut parts = vec![format!(
+        "{}, on {}, {}",
+        named(agent),
+        providers::agent_runs_on(daemon, agent),
+        doing(daemon, agent)
+    )];
     if !agent.state.is_final() {
         let last = agent.active_at.unwrap_or(agent.created_at);
         parts.push(format!(
@@ -2112,6 +2204,10 @@ pub fn fail_tree(daemon: &Arc<Daemon>, id: &str, reason: &str) {
             text.push_str(&format!("\n> {}", cut(&message, MESSAGE_CHARS)));
         }
     }
+    // Its launch is waiting for its session and answers with the failure: told once.
+    if daemon.opening.lock().unwrap().contains(id) {
+        return;
+    }
     tell_parent(daemon, &agent, "child-failed", &text, approval::URGENT);
 }
 
@@ -2430,12 +2526,16 @@ pub fn resume_refusal(daemon: &Daemon, agent: &Agent) -> Option<&'static str> {
 
 /// An agent as a list shows it: without its instructions and its brief.
 pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
+    let runs = providers::agent_named(daemon, agent);
     json!({
         "id": agent.id,
         "provider": agent.provider,
         // What it runs on: what it took at its last start, else what was asked.
         "model": agent.taken.model.as_ref().or(agent.chosen.model.as_ref()),
         "effort": agent.taken.effort.as_ref().or(agent.chosen.effort.as_ref()),
+        // The same by name, as the agents' tools say it (`providers::runs_on`): `effort` `null`
+        // for a model its provider offers none for.
+        "runs_on": {"model": runs.model, "effort": runs.effort},
         // What the user changed to, set before the next prompt: `null` when nothing waits.
         "pending": (agent.pending.model.is_some() || agent.pending.effort.is_some())
             .then(|| json!({"model": agent.pending.model, "effort": agent.pending.effort})),

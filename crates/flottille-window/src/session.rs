@@ -1609,6 +1609,7 @@ impl SessionPage {
                     provider: agent.provider.clone(),
                     model: agent.model.clone(),
                     runs_on: runs_on(&self.providers, &agent.provider, agent.model.as_deref()),
+                    model_effort: agent.runs_on.clone(),
                     depth: agent.depth,
                     parent: agent.parent.clone(),
                     ended: matches!(state_of(agent), AgentState::Completed | AgentState::Stopped),
@@ -6642,6 +6643,8 @@ pub struct RailAgent {
     pub model: Option<String>,
     /// Its provider and model, as a line.
     pub runs_on: String,
+    /// Its model and effort, by name: what a child's row says before what it does.
+    pub model_effort: String,
     pub depth: u64,
     /// The agent that launched it; `None` for the root.
     pub parent: Option<String>,
@@ -7601,11 +7604,8 @@ impl Render for SessionRail {
                 true => (
                     agent.name.clone(),
                     Some(match agent.doing.as_str() {
-                        "" => agent.model.clone().unwrap_or(agent.provider.clone()),
-                        doing => format!(
-                            "{} · {doing}",
-                            agent.model.clone().unwrap_or(agent.provider.clone())
-                        ),
+                        "" => agent.model_effort.clone(),
+                        doing => format!("{} · {doing}", agent.model_effort),
                     }),
                 ),
             };
@@ -10428,6 +10428,7 @@ mod tests {
             provider: "claude".into(),
             model: None,
             effort: None,
+            runs_on: String::new(),
             pending: crate::session_link::Pending::default(),
             doing: String::new(),
             waiting_on: None,

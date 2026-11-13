@@ -1312,6 +1312,31 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 They go through the gate like every call (it allows them). Their texts are masked of the
 daemon's secrets before anyone else reads them.
 
+### What an agent runs on
+
+An agent reads what another runs on, by name, `provider · model · effort` (`Claude · Sonnet 5.5 ·
+medium`; `docs/agents.md`, "How an agent runs", "What an agent runs on, said to another agent"),
+never `default`, for every provider, in each place it reads about it (#786):
+
+- `agent_launch`'s answer: `Launched "worker" (agent …) on Claude · Sonnet 5.5 · medium, in your
+  own place.`; for a session, `Started a session led by you, "Login" (agent …), on Claude · …, in
+  workspace login.` and the same for a handed one. It says what the agent's session took: the
+  launch waits for it to open, 20 s at most. A model or an effort left out is the agent's own to
+  take, so before its session opened (it was not in time, or its workspace is being made) the
+  answer says what was asked and `not known yet` for the rest. A session that refuses what was
+  asked (a model asked before its provider's models were known) fails, and the answer says so
+  with the reason: `Started "worker" (agent …) on …, in your own place, but its session failed as
+  it opened: …`; its parent is told too, as of any child that fails.
+- `agent_status`, `status` action: each child's line, short and full, `"worker" (agent …), on
+  Claude · Sonnet 5.5 · medium, in a turn for 12 min; last sign of activity …`; so is the
+  `children-status` delivery.
+- A led or handed session, in what its pilot reads of it: `session_read` says `That session runs on
+  Claude · …`, and so does every delivery that wakes the pilot (`session-turn-ended`: `It runs on
+  Claude · ….`), which says what the session runs on when it wakes, a change the user made
+  included.
+- `agent_send` with `model` or `effort`: the answer says what the child runs on from its next
+  turn, a change waiting applied (`… it runs on Claude · Sonnet 5.5 · low from its next turn.`).
+
 ### Sessions an agent starts
 
 The user asked that the agent they talk to may start, for them, a session like one they start

@@ -3460,6 +3460,10 @@ fn nested(
         if row.read(cx).led_by() != led_by {
             row.update(cx, |row, cx| row.set_led_by(led_by, cx));
         }
+        let runs = led_by.map_or_else(String::new, |_| live[at].runs.clone());
+        if row.read(cx).runs() != runs {
+            row.update(cx, |row, cx| row.set_runs(&runs, cx));
+        }
         if row.read(cx).tie() != tie.as_ref() {
             let tie = tie.clone();
             row.update(cx, |row, cx| row.set_tie(tie, cx));
