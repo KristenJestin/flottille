@@ -77,17 +77,23 @@ Then `flottille daemon stop`.
 
 ## `daemon stop` always ends
 
-`flottille daemon stop` asks the daemon to stop. A daemon that does not answer within 30 s
+`flottille daemon stop` asks the daemon to stop. A daemon that refuses (the command was started
+by an agent) is not stopped, and the command fails with its refusal. A daemon that does not answer
+within 30 s
 (`FLOTTILLE_STOP_WAIT_MS`) is ended at once; one that answered is stopping its agents, one after
 another and up to 4 s each, so it is given 30 s more and 5 s for each process it runs before it is
 ended in turn.
 
 Ending it: the daemon and the processes below it that are its own, those of its session (its
-agents and their process groups) and of the sessions its direct children lead (runs, setup
-steps), are sent `SIGTERM`, then, 2 s later, `SIGKILL` for those left (a git killed outright leaves
+agents and their process groups) and of the sessions it started (runs, setup steps, probes), are
+sent `SIGTERM`, then, 2 s later, `SIGKILL` for those left (a git killed outright leaves
 its `index.lock`). As their subreaper the daemon holds more: a helper that something it ran left
 detached in a session of its own (an ssh control master, an agent of gpg, git's credential cache)
-may serve the user's terminals too, and is spared. Each process is signalled through a pidfd,
+may serve the user's terminals too, and is spared, even one handed to it as its child once its
+parent exited, as git's `daemonize()` and glibc's `daemon()` do. The command runs outside the
+daemon, which cannot be asked when it is stuck: the daemon writes the sessions it starts in
+`$XDG_RUNTIME_DIR/flottille/daemon.sessions` as it starts them (each leader's pid and start time,
+so that one whose pid was taken since is not one of them). Each process is signalled through a pidfd,
 opened, then checked to be still in one of those sessions, so that a pid taken since by another
 process is never signalled; the daemon's own is opened before it is asked to stop. The command
 says it had to: `The daemon did not stop (why): it was ended, with the N process(es) it ran.` The
