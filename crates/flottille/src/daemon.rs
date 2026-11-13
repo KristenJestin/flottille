@@ -521,23 +521,6 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     Ok(())
 }
 
-/// The fields of `/proc/<pid>/stat` the daemon reads.
-struct Stat {
-    parent: u32,
-    /// In clock ticks after boot.
-    started: u64,
-}
-
-fn stat(pid: u32) -> Option<Stat> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The command name, field 2, is in parentheses and may hold spaces.
-    let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
-    Some(Stat {
-        parent: fields.get(1)?.parse().ok()?,
-        started: fields.get(19)?.parse().ok()?,
-    })
-}
-
 /// The pid of a client that descends from the daemon. Everything the daemon starts is an agent,
 /// a command of one, or a program of the daemon's own (git, a forge's command line, a provider's
 /// `--version`), and none of them is a client of the daemon: such a client was started by an
@@ -549,35 +532,7 @@ fn started_by_an_agent(stream: &UnixStream) -> Option<u32> {
         .and_then(|credentials| credentials.pid())
         .and_then(|pid| u32::try_from(pid).ok())
         .unwrap_or(0);
-    descends_from(pid, std::process::id()).then_some(pid)
-}
-
-/// Whether `pid` is `ancestor` or one of its descendants, walking up the parents; a process that
-/// cannot be read (gone already, or out of sight) counts as one.
-fn descends_from(pid: u32, ancestor: u32) -> bool {
-    let mut pid = pid;
-    let Some(mut process) = stat(pid) else {
-        return true;
-    };
-    loop {
-        if pid == ancestor {
-            return true;
-        }
-        // Up to init, or to a process with no parent in sight.
-        if process.parent == 0 {
-            return false;
-        }
-        let Some(parent) = stat(process.parent) else {
-            return true;
-        };
-        // A parent that started after its child is another process under the pid of one that
-        // ended: the child was taken in since, and its ancestry is not known.
-        if parent.started > process.started {
-            return true;
-        }
-        pid = process.parent;
-        process = parent;
-    }
+    children::descends_from(pid, std::process::id()).then_some(pid)
 }
 
 /// Answers each request of a refused client with the refusal, until it leaves or `REFUSED_FOR`
@@ -993,20 +948,6 @@ mod tests {
     use super::*;
 
     const OURS: (u64, u64) = (1, 2);
-
-    #[test]
-    fn a_process_descends_from_its_parents_not_from_its_children_and_one_gone_counts_as_one() {
-        let own = std::process::id();
-        let parent = stat(own).unwrap().parent;
-
-        assert!(descends_from(own, own));
-        assert!(descends_from(own, parent));
-        assert!(!descends_from(parent, own));
-        assert!(!descends_from(1, own));
-        // No such process: refused rather than guessed.
-        assert!(descends_from(u32::MAX, own));
-        assert!(descends_from(0, own));
-    }
 
     #[test]
     fn only_a_socket_path_that_is_not_found_or_leads_elsewhere_is_gone() {

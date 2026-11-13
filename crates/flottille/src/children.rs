@@ -217,6 +217,7 @@ pub fn reap_strays() {
 /// The fields of `/proc/<pid>/stat` read here.
 struct Stat {
     state: char,
+    parent: u32,
     session: u32,
     /// In clock ticks after boot.
     started: u64,
@@ -228,13 +229,58 @@ fn stat(pid: u32) -> Option<Stat> {
     let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
     Some(Stat {
         state: fields.first()?.chars().next()?,
+        parent: fields.get(1)?.parse().ok()?,
         session: fields.get(3)?.parse().ok()?,
         started: fields.get(19)?.parse().ok()?,
     })
 }
 
+/// Whether `pid` is `ancestor` or one of its descendants, walking up the parents; a process that
+/// cannot be read (gone already, or out of sight) counts as one.
+pub fn descends_from(pid: u32, ancestor: u32) -> bool {
+    let mut pid = pid;
+    let Some(mut process) = stat(pid) else {
+        return true;
+    };
+    loop {
+        if pid == ancestor {
+            return true;
+        }
+        // Up to init, or to a process with no parent in sight.
+        if process.parent == 0 {
+            return false;
+        }
+        let Some(parent) = stat(process.parent) else {
+            return true;
+        };
+        // A parent that started after its child is another process under the pid of one that
+        // ended: the child was taken in since, and its ancestry is not known.
+        if parent.started > process.started {
+            return true;
+        }
+        pid = process.parent;
+        process = parent;
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_process_descends_from_its_parents_not_from_its_children_and_one_gone_counts_as_one() {
+        let own = std::process::id();
+        let parent = stat(own).unwrap().parent;
+
+        assert!(descends_from(own, own));
+        assert!(descends_from(own, parent));
+        assert!(!descends_from(parent, own));
+        assert!(!descends_from(1, own));
+        // No such process: refused rather than guessed.
+        assert!(descends_from(u32::MAX, own));
+        assert!(descends_from(0, own));
+    }
+
     /// The code of the daemon's, before its tests: what the daemon runs.
     fn daemon_code(text: &str) -> &str {
         text.split("#[cfg(test)]\nmod tests").next().unwrap()

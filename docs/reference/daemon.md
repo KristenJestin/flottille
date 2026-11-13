@@ -80,7 +80,10 @@ Then `flottille daemon stop`.
 `flottille daemon stop` asks the daemon to stop. A daemon that refuses (the command was started
 by an agent) is not stopped, and the command fails with its refusal. A daemon that does not answer
 within 30 s
-(`FLOTTILLE_STOP_WAIT_MS`) is ended at once; one that answered is stopping its agents, one after
+(`FLOTTILLE_STOP_WAIT_MS`) is ended at once, unless the command descends from it: a stuck daemon
+cannot refuse a client an agent started, so the command refuses itself (`refused: this client was
+started by an agent; it does not end the daemon`), and one whose ancestry cannot be read counts as
+such a client. One that answered is stopping its agents, one after
 another and up to 4 s each, so it is given 30 s more and 5 s for each process it runs before it is
 ended in turn.
 

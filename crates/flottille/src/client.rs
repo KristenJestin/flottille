@@ -267,10 +267,19 @@ pub fn stop(paths: &Paths, mut client: Client) -> Result<Stopped> {
     let (asked, deadline) = match asked {
         // It answered and refused (a client an agent started): it runs, and is not to be ended.
         Err(error) if error.is::<DaemonError>() => return Err(error),
-        Err(error) if is_timeout(error.as_ref()) => (
-            Err(format!("it did not answer daemon.stop within {} s", wait.as_secs()).into()),
-            Instant::now(),
-        ),
+        // A stuck daemon cannot refuse a client an agent started: the client refuses itself. One
+        // whose ancestry cannot be read counts as one (`descends_from`).
+        Err(error) if is_timeout(error.as_ref()) => {
+            if daemon.as_ref().is_some_and(|daemon| {
+                crate::children::descends_from(std::process::id(), daemon.0.pid)
+            }) {
+                return Err(STARTED_BY_AN_AGENT.into());
+            }
+            (
+                Err(format!("it did not answer daemon.stop within {} s", wait.as_secs()).into()),
+                Instant::now(),
+            )
+        }
         asked => {
             let running = daemon.as_ref().map_or(0, |daemon| daemon.tree().len());
             let running = u32::try_from(running).unwrap_or(u32::MAX);
@@ -290,6 +299,10 @@ pub fn stop(paths: &Paths, mut client: Client) -> Result<Stopped> {
     wait_until(paths, &pid, Instant::now() + START_TIMEOUT)?;
     Ok(Stopped::Ended(why.to_string(), ended))
 }
+
+/// Why `daemon stop` does not end a daemon that does not answer, from a client an agent started.
+const STARTED_BY_AN_AGENT: &str =
+    "refused: this client was started by an agent; it does not end the daemon";
 
 /// How long a stopping daemon may take for each process it runs: an agent's task is waited for
 /// twice its grace (`agents::stop_all`), a run's for its grace (`runs`).
