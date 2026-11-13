@@ -538,3 +538,42 @@ fn a_stuck_daemon_is_reported_by_its_watchdog() {
     );
     assert!(user.status()["pid"].as_u64() == Some(pid));
 }
+
+#[test]
+fn daemon_stop_ends_a_daemon_that_does_not_answer() {
+    let user = User::with_fake_agent()
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
+    app(&user);
+    let pid = user.status()["pid"].as_u64().unwrap();
+    let (_, agent) = held_agent(&user);
+    let _held = hold(&user, 600_000);
+
+    let asked = std::time::Instant::now();
+    let stop = user.run(&["daemon", "stop"]);
+
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    assert!(
+        asked.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        asked.elapsed()
+    );
+    let said = String::from_utf8_lossy(&stop.stdout);
+    assert!(
+        said.contains("The daemon did not stop (it did not answer daemon.stop within 1 s): it was ended, with the"),
+        "{said}"
+    );
+    // The daemon and what it ran: its agent's process with it.
+    within(5, "the daemon is gone", || gone(pid));
+    within(5, "its agent's process is gone", || gone(agent));
+    assert!(
+        !user.path("runtime/flottille/daemon.lock").exists() || {
+            let lock = std::fs::File::open(user.path("runtime/flottille/daemon.lock")).unwrap();
+            lock.try_lock().is_ok()
+        }
+    );
+}

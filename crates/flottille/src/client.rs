@@ -17,6 +17,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(25);
+/// How long `daemon stop` waits for the daemon to answer, then to stop, before it ends it.
+const STOP_WAIT: Duration = Duration::from_secs(30);
 
 /// An error the daemon answered a request with: its code (`docs/protocol.md`) and its sentence.
 #[derive(Debug)]
@@ -116,6 +118,17 @@ impl Client {
             }
             return Ok(message.result.unwrap_or(Value::Null));
         }
+    }
+
+    /// `request`, its answer waited for `wait` at most.
+    pub fn request_within(&mut self, method: &str, params: Value, wait: Duration) -> Result<Value> {
+        self.writer.set_read_timeout(Some(wait))?;
+        let answer = self.request(method, params);
+        self.writer.set_read_timeout(None)?;
+        answer.map_err(|error| match is_timeout(error.as_ref()) {
+            true => format!("it did not answer {method} within {} s", wait.as_secs()).into(),
+            false => error,
+        })
     }
 
     /// Sends a request without waiting for its answer: its id.
@@ -234,15 +247,101 @@ pub fn locked_by(paths: &Paths) -> String {
         .to_owned()
 }
 
+/// How `daemon stop` ended the daemon.
+pub enum Stopped {
+    /// It stopped as it was asked.
+    Asked,
+    /// It did not, for the reason said: it was killed, with the processes it ran, counted.
+    Ended(String, usize),
+}
+
+/// Asks the daemon `client` reaches to stop and waits for it, `STOP_WAIT` at most in all; past it
+/// (a daemon that answers nothing, or does not end), kills it and every process it ran, its
+/// agents' bridges included, which a stuck daemon leaves unable to end on their own.
+pub fn stop(paths: &Paths, mut client: Client) -> Result<Stopped> {
+    let pid = locked_by(paths);
+    let wait = std::env::var("FLOTTILLE_STOP_WAIT_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(STOP_WAIT, Duration::from_millis);
+    let deadline = Instant::now() + wait;
+    let asked = client.request_within("daemon.stop", Value::Null, wait);
+    drop(client);
+    // A daemon that closed the connection as it stopped is waited for all the same.
+    let why = match wait_until(paths, &pid, deadline) {
+        Ok(()) => return Ok(Stopped::Asked),
+        Err(still) => asked.err().unwrap_or(still),
+    };
+    let ended = end(paths, &pid)?;
+    Ok(Stopped::Ended(why.to_string(), ended))
+}
+
+/// Kills the daemon `pid` that holds the lock and every process it runs, then waits for the lock
+/// to be let go: how many processes it ran.
+fn end(paths: &Paths, pid: &str) -> Result<usize> {
+    let Ok(daemon) = pid.parse::<u32>() else {
+        return Err(
+            format!("the daemon's lock names no process ({pid:?}): it was not ended").into(),
+        );
+    };
+    let mut tree = vec![daemon];
+    let mut next = 0;
+    while next < tree.len() {
+        tree.extend(children_of(tree[next]));
+        next += 1;
+    }
+    // Each through a pidfd opened before the daemon goes: a pid taken since by another process
+    // is never signalled.
+    let fds: Vec<_> = tree.iter().filter_map(|&pid| pidfd(pid)).collect();
+    for &fd in &fds {
+        // SAFETY: the descriptor is a pidfd just opened; no siginfo is passed.
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd,
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        // SAFETY: the descriptor is ours and closed once.
+        unsafe { libc::close(fd) };
+    }
+    wait_until(paths, pid, Instant::now() + START_TIMEOUT)?;
+    Ok(tree.len() - 1)
+}
+
+/// The children of `pid`, of every thread of it.
+fn children_of(pid: u32) -> Vec<u32> {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return Vec::new();
+    };
+    tasks
+        .flatten()
+        .filter_map(|task| std::fs::read_to_string(task.path().join("children")).ok())
+        .flat_map(|children| {
+            children
+                .split_whitespace()
+                .filter_map(|child| child.parse().ok())
+                .collect::<Vec<u32>>()
+        })
+        .collect()
+}
+
+fn pidfd(pid: u32) -> Option<libc::c_int> {
+    // SAFETY: pidfd_open takes a pid and flags and returns a descriptor or -1.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    (fd >= 0).then_some(fd as libc::c_int)
+}
+
 /// Waits until the daemon `pid` (`locked_by`, read before it was asked to stop) has let go of its
-/// lock, so that the next command starts a new one.
-pub fn wait_until_stopped(paths: &Paths, pid: &str) -> Result<()> {
+/// lock, so that the next command starts a new one; an error past `deadline`.
+fn wait_until(paths: &Paths, pid: &str, deadline: Instant) -> Result<()> {
     let lock = match File::open(paths.lock()) {
         Ok(lock) => lock,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let deadline = Instant::now() + START_TIMEOUT;
     while lock.try_lock().is_err() {
         // A client that connected meanwhile (a window reconnecting) may have started a daemon,
         // which took the lock as soon as it was free: the stopped one is gone.
@@ -250,7 +349,7 @@ pub fn wait_until_stopped(paths: &Paths, pid: &str) -> Result<()> {
             return Ok(());
         }
         if Instant::now() > deadline {
-            return Err("the daemon was asked to stop but is still running".into());
+            return Err("it is still running".into());
         }
         std::thread::sleep(POLL);
     }
