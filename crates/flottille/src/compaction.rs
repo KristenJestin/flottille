@@ -1461,17 +1461,35 @@ async fn run(daemon: Arc<Daemon>, agent: String) {
     }
 }
 
-/// The summary of the agent's conversation for a new session that replaces one that could not go
-/// on (`agents::fresh`), masked; None when the compactor failed, which is said.
-pub async fn summary(daemon: &Arc<Daemon>, agent: &str) -> Option<String> {
+/// A new session replaces the agent's (`agents::fresh`), from a summary: whether the compactor is
+/// at work for it already, whose summary it waits for. Else the compaction is its own from now,
+/// said as one (`agent.compacting`): one asked, or a handoff the agent was writing, which its
+/// process gone will never write, is dropped.
+pub fn take_over(daemon: &Daemon, agent: &str) -> bool {
+    {
+        let mut phases = daemon.compactions.phases.lock().unwrap();
+        if phases.get(agent) == Some(&Phase::Running) {
+            return true;
+        }
+        phases.insert(agent.to_owned(), Phase::Running);
+    }
+    let used = usage(daemon, agent).map_or(0, |(used, _)| used);
+    say_started(daemon, agent, "compactor", used);
+    false
+}
+
+/// The summary of the agent's conversation for the new session `take_over` started a compaction
+/// for, masked; None when the compactor failed, which is said and ends the compaction.
+pub async fn summary(daemon: &Arc<Daemon>, agent: &str) -> Option<Compacted> {
     let used = usage(daemon, agent).map(|(used, _)| used);
     let failed = match tokio::time::timeout(timeout(), compact(daemon, agent)).await {
-        Ok(Ok(compacted)) => {
-            let summary = compacted.summary.unwrap_or_default();
-            return Some(flottille_core::secrets::mask(
+        Ok(Ok(mut compacted)) => {
+            let summary = compacted.summary.take().unwrap_or_default();
+            compacted.summary = Some(flottille_core::secrets::mask(
                 &summary,
                 &std::env::vars_os().collect(),
             ));
+            return Some(compacted);
         }
         Ok(Err(reason)) => reason,
         Err(_) => format!(
@@ -1479,6 +1497,7 @@ pub async fn summary(daemon: &Arc<Daemon>, agent: &str) -> Option<String> {
             timeout().as_secs()
         ),
     };
+    over(daemon, agent);
     agents::record(
         daemon,
         agent,
@@ -1487,6 +1506,21 @@ pub async fn summary(daemon: &Arc<Daemon>, agent: &str) -> Option<String> {
         false,
     );
     None
+}
+
+/// The new session a summary was written for (`agents::fresh`) started from `body`: the
+/// compaction is over, said with what it came to.
+pub fn renewed(daemon: &Daemon, agent: &str, compacted: &Compacted, body: &str) {
+    let after = after(daemon, agent, body);
+    over(daemon, agent);
+    agents::record(
+        daemon,
+        agent,
+        "agent.compacted",
+        json!({"by": "flottille", "before": compacted.before, "after": after,
+            "summary": compacted.summary, "source": "compactor"}),
+        false,
+    );
 }
 
 /// The summary: the compactor given the transcript since the last compaction, the previous
@@ -1656,7 +1690,7 @@ fn cut(text: &str) -> String {
 }
 
 /// What can be written in a block of the prompt: nothing in it closes or opens one.
-fn escaped(text: &str) -> String {
+pub fn escaped(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;")
 }
 
@@ -1770,14 +1804,19 @@ pub fn resumed(daemon: &Daemon, agent: &str, compacted: &Compacted, kept: u64) -
             compactor_body(daemon, agent, summary.as_deref().unwrap_or_default(), kept)
         }
     };
+    let after = after(daemon, agent, &body);
+    (body, after)
+}
+
+/// The tokens a new session starts with: its first message and `body`.
+fn after(daemon: &Daemon, agent: &str, body: &str) -> u64 {
     let brief = daemon
         .read(|store| store.agent(agent))
         .ok()
         .flatten()
         .and_then(|agent| agent.brief)
         .map_or(0, |brief| brief.len());
-    let after = ((brief + body.len()) / CHARS_PER_TOKEN) as u64;
-    (body, after)
+    ((brief + body.len()) / CHARS_PER_TOKEN) as u64
 }
 
 /// The new session's word after its brief when the agent wrote its own handoff.

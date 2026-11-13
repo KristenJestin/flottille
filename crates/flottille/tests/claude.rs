@@ -717,6 +717,41 @@ fn through_the_bridge_a_session_s_history_goes_with_its_replacement() {
 }
 
 #[test]
+fn a_load_that_fails_for_another_reason_keeps_the_session() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "boom", "times": 1, "do": [{"die": 3}]}]}));
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+    let native = show(&user, &id)["agent"]["native_id"].clone();
+    let history = history(&user, &id);
+
+    // It dies, and the next `claude` ends as it resumes the session, saying nothing of it: a
+    // broken update, not a session gone.
+    user.claude_script(json!({"resume_crash": true}));
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "boom"}))
+        .unwrap();
+    let events = events_until(&user, &id, sent["after"].as_u64().unwrap(), "agent.failed");
+
+    let failed = &events.iter().find(|e| e["name"] == "agent.failed").unwrap()["data"];
+    assert!(
+        failed
+            .to_string()
+            .contains("claude ended as the session opened"),
+        "{failed}"
+    );
+    assert!(events.iter().all(|e| e["name"] != "agent.replaced"));
+    let shown = show(&user, &id);
+    assert_eq!(shown["agent"]["native_id"], native);
+    assert_eq!(shown["agent"]["epoch"], 0);
+    assert!(
+        !within_10_s(|| !history.exists()),
+        "the session's history is kept"
+    );
+}
+
+#[test]
 fn through_the_bridge_a_stopped_root_keeps_its_history_and_resumes_on_it() {
     let user = User::with_fake_claude();
     project(&user);

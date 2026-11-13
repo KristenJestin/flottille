@@ -32,6 +32,11 @@ const USAGE_EVERY: Duration = Duration::from_secs(1);
 const NOT_FOUND: i64 = -32601;
 const INVALID: i64 = -32602;
 const INTERNAL: i64 = -32603;
+/// ACP's "resource not found": the session asked for is gone, and only then does the daemon give
+/// the agent a new one (`docs/agents.md`, "A death").
+const GONE: i64 = -32002;
+/// What `codex` answers a `thread/resume` of a thread it has no rollout of.
+const NO_ROLLOUT: &str = "no rollout found";
 
 /// The items of a bare turn: the prompt, the replies and thoughts, the calls of Flottille's
 /// tools and a compaction. Any other is a tool of Codex's own.
@@ -775,10 +780,14 @@ impl Bridge {
             .or_else(|| (!message["error"].is_null()).then(|| "codex refused".to_owned()));
         if let Some(error) = error {
             return match waiting {
+                Waiting::Thread(o) if o.resume.is_some() && error.contains(NO_ROLLOUT) => {
+                    self.refuse_open(o.id, (GONE, format!("session not found: {error}")))
+                        .await
+                }
                 Waiting::Initialize(o)
                 | Waiting::Account(o)
                 | Waiting::Models(o)
-                | Waiting::Thread(o) => self.refuse_open(o.id, error).await,
+                | Waiting::Thread(o) => self.refuse_open(o.id, (INTERNAL, error)).await,
                 Waiting::Turn(prompt) => {
                     if self.turn.as_ref().is_some_and(|t| t.id == prompt) {
                         let turn = self.turn.take().expect("checked");
@@ -800,12 +809,15 @@ impl Bridge {
                     return self
                         .refuse_open(
                             opening.id,
-                            format!("Codex is not signed in: {}", codex::PROVIDER.sign_in),
+                            (
+                                INTERNAL,
+                                format!("Codex is not signed in: {}", codex::PROVIDER.sign_in),
+                            ),
                         )
                         .await;
                 }
                 if let Some(why) = codex::refused_account(account) {
-                    return self.refuse_open(opening.id, why).await;
+                    return self.refuse_open(opening.id, (INTERNAL, why)).await;
                 }
                 self.request("model/list", json!({}), Waiting::Models(opening))
                     .await;
@@ -886,13 +898,13 @@ impl Bridge {
     }
 
     /// The session does not open: `codex` goes, and the bridge waits for the next.
-    async fn refuse_open(&mut self, id: Value, why: String) {
+    async fn refuse_open(&mut self, id: Value, why: Failure) {
         self.from_codex = None;
         self.waiting.clear();
         if let Some(mut codex) = self.codex.take() {
             let _ = codex.child.kill().await;
         }
-        self.fail(id, (INTERNAL, why)).await;
+        self.fail(id, why).await;
     }
 }
 

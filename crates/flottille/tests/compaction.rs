@@ -405,7 +405,7 @@ fn a_session_that_cannot_be_loaded_starts_from_the_summary_and_the_latest_messag
         .into_iter()
         .find(|p| p.contains(SUMMARY))
         .unwrap();
-    assert!(first.contains("could not be loaded"), "{first}");
+    assert!(first.contains("session is gone"), "{first}");
     assert!(first.contains("the session file is corrupt"), "{first}");
     let brief = first
         .find("add the login page HALF")
@@ -421,6 +421,14 @@ fn a_session_that_cannot_be_loaded_starts_from_the_summary_and_the_latest_messag
     let shown = user.call("agent.show", json!({"agent": agent})).unwrap();
     assert_ne!(shown["agent"]["native_id"], native);
     assert_eq!(shown["agent"]["epoch"], 1);
+    // The compactor's work is said as a compaction, which the new session ends.
+    let compacting = events(&user, &agent, "agent.compacting");
+    assert_eq!(compacting.len(), 1, "{compacting:?}");
+    assert_eq!(compacting[0]["source"], "compactor");
+    eventually("the compaction's end", || {
+        !compacted(&user, &agent).is_empty()
+    });
+    assert_eq!(compacted(&user, &agent)[0]["summary"], SUMMARY);
 }
 
 #[test]

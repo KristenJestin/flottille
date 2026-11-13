@@ -583,10 +583,7 @@ fn the_agent_is_never_told_about_a_brief() {
         "agent.replaced",
     );
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !prompts(&user)
-        .iter()
-        .any(|p| p.contains("could not be loaded"))
-    {
+    while !prompts(&user).iter().any(|p| p.contains("session is gone")) {
         assert!(Instant::now() < deadline, "{:?}", prompts(&user));
         std::thread::sleep(Duration::from_millis(50));
     }

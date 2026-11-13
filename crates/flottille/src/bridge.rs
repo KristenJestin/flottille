@@ -46,6 +46,11 @@ const USAGE_EVERY: Duration = Duration::from_secs(1);
 const NOT_FOUND: i64 = -32601;
 const INVALID: i64 = -32602;
 const INTERNAL: i64 = -32603;
+/// ACP's "resource not found": the session asked for is gone, and only then does the daemon give
+/// the agent a new one (`docs/agents.md`, "A death").
+const GONE: i64 = -32002;
+/// What `claude` says on its error output when it has no conversation of the session to resume.
+const NO_CONVERSATION: &str = "No conversation found with session ID";
 
 /// What Claude is told when one of its own permission prompts is refused.
 const REFUSED: &str = "Refused: this agent can use Flottille's tools only.";
@@ -128,6 +133,8 @@ struct Claude {
     /// What each model used in the session so far, as the last result said it; `None` while
     /// unknown (a resumed session the bridge kept no totals of).
     totals: Option<Map<String, Value>>,
+    /// Its error output, passed on: whether it said it has no conversation of the session.
+    errors: tokio::task::JoinHandle<bool>,
 }
 
 impl Claude {
@@ -442,7 +449,7 @@ impl Bridge {
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
@@ -451,6 +458,17 @@ impl Bridge {
             })?;
         let stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
+        let stderr = child.stderr.take().expect("piped");
+        let errors = tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            let mut out = tokio::io::stderr();
+            let mut unknown = false;
+            while let Ok(Some(line)) = lines.next_line().await {
+                unknown |= line.contains(NO_CONVERSATION);
+                let _ = out.write_all(format!("{line}\n").as_bytes()).await;
+            }
+            unknown
+        });
         let (sender, receiver) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             let mut stdout = BufReader::new(stdout);
@@ -489,6 +507,7 @@ impl Bridge {
             open: false,
             window: None,
             totals,
+            errors,
         });
         self.from_claude = Some(receiver);
         self.control(
@@ -621,9 +640,21 @@ impl Bridge {
         if claude.open {
             return Some(status.map_or(1, exit_code));
         }
-        let ended = match status {
-            Some(status) => format!("claude ended as the session opened ({status})"),
-            None => "claude ended as the session opened".to_owned(),
+        // Its error output ends with it; a process it left holding it is not waited for.
+        let unknown = matches!(
+            tokio::time::timeout(Duration::from_secs(1), &mut claude.errors).await,
+            Ok(Ok(true))
+        );
+        let ended = match (unknown, status) {
+            (true, _) => (
+                GONE,
+                format!("session not found: {NO_CONVERSATION} {}", claude.session),
+            ),
+            (false, Some(status)) => (
+                INTERNAL,
+                format!("claude ended as the session opened ({status})"),
+            ),
+            (false, None) => (INTERNAL, "claude ended as the session opened".to_owned()),
         };
         let opening: Vec<Value> = self
             .waiting
@@ -634,7 +665,7 @@ impl Bridge {
             })
             .collect();
         for id in opening {
-            self.fail(id, (INTERNAL, ended.clone())).await;
+            self.fail(id, ended.clone()).await;
         }
         None
     }

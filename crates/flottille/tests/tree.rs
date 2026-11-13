@@ -334,14 +334,19 @@ fn a_lead_that_dies_is_not_given_its_first_message_again() {
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap().to_owned();
 
-    prompted(&user, &["[flottille:resume]"]);
+    let resume = prompted(&user, &["[flottille:resume]"]);
     eventually("its session's next turn", || state(&user, &id) == "idle");
     assert_eq!(show(&user, &id)["agent"]["epoch"], 0);
     assert_eq!(
-        occurrences(&user, "die-once and lead"),
+        occurrences(&user, "[flottille:user]\ndie-once and lead"),
         1,
         "{:?}",
         prompts(&user)
+    );
+    // The words of the turn it died in are quoted, as they may never have reached it.
+    assert!(
+        resume.contains("<cut_message>\ndie-once and lead\n</cut_message>"),
+        "{resume}"
     );
 }
 
