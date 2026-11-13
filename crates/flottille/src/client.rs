@@ -244,8 +244,8 @@ pub enum Stopped {
     Ended(String, usize),
 }
 
-/// Asks the daemon `client` reaches to stop and waits for it. A daemon that does not answer
-/// within `STOP_WAIT` is ended at once; one that answered stops its agents one after another, up
+/// Asks the daemon `client` reaches to stop and waits for it. Its refusal is the error; a daemon
+/// that does not answer within `STOP_WAIT` is ended at once; one that answered stops its agents one after another, up
 /// to `STOPPING_EACH` each, so it is given that much more for each process it runs. Past it, it
 /// and the processes it ran are ended (`end`), its agents' bridges included, which a stuck daemon
 /// leaves unable to end on their own.
@@ -265,6 +265,8 @@ pub fn stop(paths: &Paths, mut client: Client) -> Result<Stopped> {
     drop(client);
     // A daemon that closed the connection as it stopped is waited for all the same.
     let (asked, deadline) = match asked {
+        // It answered and refused (a client an agent started): it runs, and is not to be ended.
+        Err(error) if error.is::<DaemonError>() => return Err(error),
         Err(error) if is_timeout(error.as_ref()) => (
             Err(format!("it did not answer daemon.stop within {} s", wait.as_secs()).into()),
             Instant::now(),
