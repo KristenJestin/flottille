@@ -635,7 +635,6 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 continue;
             }
         };
-        let waiting = daemon.watch.asked();
         if request.method == "workspace.forge"
             && let Ok(asked) = serde_json::from_value::<WorkspaceForge>(request.params.clone())
             && asked.watch
@@ -734,10 +733,12 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     Err(failure) => Message::error(Some(request.id), failure.code, failure.message),
                 };
                 let _ = out.send(answer).await;
-                drop(waiting);
             });
             continue;
         }
+        // Only these count for the watchdog: one answered by a task of its own may wait on work
+        // outside (git, a setup step, an agent) for as long as it takes.
+        let waiting = daemon.watch.asked();
         let (answer, subscription) = handle(&daemon, request);
         let sent = out.send(answer).await;
         drop(waiting);

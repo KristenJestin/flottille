@@ -224,6 +224,15 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
         daemon.hold_store(Duration::from_millis(asked.ms));
         return Ok(json!({}));
     }
+    // A request that waits without holding the runtime, as one on outside work does.
+    if method == "test.wait"
+        && cfg!(debug_assertions)
+        && std::env::var_os("FLOTTILLE_TEST_HOLD").is_some()
+    {
+        let asked: Advance = serde_json::from_value(params)?;
+        tokio::time::sleep(Duration::from_millis(asked.ms)).await;
+        return Ok(json!({}));
+    }
     if std::env::var_os("FLOTTILLE_TEST_CLOCK").is_none() || method != "test.advance" {
         return Err(Failure::new(
             "unknown-method",

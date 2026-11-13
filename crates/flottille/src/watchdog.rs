@@ -11,14 +11,16 @@ use crate::locks;
 
 /// How long the daemon may answer nothing, or its runtime not run, before it is said stuck.
 const LIMIT: Duration = Duration::from_secs(30);
-/// How often the runtime says it runs.
-const BEAT: Duration = Duration::from_millis(500);
+/// The shortest `FLOTTILLE_WATCHDOG_MS` taken: the watchdog looks four times in it.
+const SHORTEST: Duration = Duration::from_millis(100);
 
 /// What the runtime and the connections tell the watchdog, read from its thread.
 pub struct Watch {
     started: Instant,
-    /// When the runtime last ran, in ms after `started`.
-    beat: AtomicU64,
+    /// When the watchdog handed the runtime a probe it has not run yet, in ms after `started`
+    /// plus one; 0 when none waits. A probe, not a beat of the runtime's own: an idle daemon is
+    /// woken once each quarter of the limit, not twice a second.
+    probe: AtomicU64,
     /// The requests read and not answered yet.
     waiting: AtomicUsize,
     /// When a request was last answered, or the first of those waiting came, in ms after
@@ -30,7 +32,7 @@ impl Default for Watch {
     fn default() -> Watch {
         Watch {
             started: Instant::now(),
-            beat: AtomicU64::new(0),
+            probe: AtomicU64::new(0),
             waiting: AtomicUsize::new(0),
             progress: AtomicU64::new(0),
         }
@@ -64,7 +66,10 @@ impl Watch {
     fn stuck(&self, limit: Duration) -> Option<String> {
         let now = self.now();
         let limit_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX);
-        let quiet = now.saturating_sub(self.beat.load(Ordering::SeqCst));
+        let quiet = match self.probe.load(Ordering::SeqCst) {
+            0 => 0,
+            sent => now.saturating_sub(sent - 1),
+        };
         let waiting = self.waiting.load(Ordering::SeqCst);
         let unanswered = now.saturating_sub(self.progress.load(Ordering::SeqCst));
         let ms = |ms: u64| locks::seconds(Duration::from_millis(ms));
@@ -76,9 +81,8 @@ impl Watch {
         } else if waiting > 0 && unanswered > limit_ms {
             Some(format!(
                 "{waiting} request(s) wait and none was answered for {}; the runtime's thread \
-                 ran {} ago",
+                 runs",
                 ms(unanswered),
-                ms(quiet)
             ))
         } else {
             None
@@ -87,23 +91,34 @@ impl Watch {
 }
 
 fn limit() -> Duration {
-    std::env::var("FLOTTILLE_WATCHDOG_MS")
-        .ok()
-        .and_then(|ms| ms.parse().ok())
-        .map_or(LIMIT, Duration::from_millis)
+    limit_of(std::env::var("FLOTTILLE_WATCHDOG_MS").ok())
 }
 
-/// Starts the beat on the runtime and the watchdog's thread, for the daemon's whole life.
+fn limit_of(ms: Option<String>) -> Duration {
+    ms.and_then(|ms| ms.parse().ok())
+        .map_or(LIMIT, Duration::from_millis)
+        .max(SHORTEST)
+}
+
+impl Watch {
+    /// Hands the runtime a probe unless one waits already: the runtime runs it at once when it
+    /// runs at all.
+    fn probe(self: &Arc<Watch>, runtime: &tokio::runtime::Handle) {
+        let sent = self.now() + 1;
+        if self
+            .probe
+            .compare_exchange(0, sent, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let watch = self.clone();
+            runtime.spawn(async move { watch.probe.store(0, Ordering::SeqCst) });
+        }
+    }
+}
+
+/// Starts the watchdog's thread, for the daemon's whole life.
 pub fn start(watch: &Arc<Watch>) -> std::io::Result<()> {
     let limit = limit();
-    let beating = watch.clone();
-    tokio::spawn(async move {
-        let mut beat = tokio::time::interval(BEAT.min(limit / 4));
-        loop {
-            beat.tick().await;
-            beating.beat.store(beating.now(), Ordering::SeqCst);
-        }
-    });
     let runtime = tokio::runtime::Handle::current();
     let watch = watch.clone();
     std::thread::Builder::new()
@@ -112,6 +127,7 @@ pub fn start(watch: &Arc<Watch>) -> std::io::Result<()> {
             let mut said = false;
             loop {
                 std::thread::sleep(limit / 4);
+                watch.probe(&runtime);
                 match watch.stuck(limit) {
                     Some(why) if !said => {
                         said = true;
@@ -154,20 +170,34 @@ mod tests {
     fn a_daemon_that_answers_is_not_stuck_and_one_that_waits_past_the_limit_is() {
         let watch = Arc::new(Watch::default());
         let limit = Duration::from_millis(50);
-        watch.beat.store(watch.now(), Ordering::SeqCst);
         assert_eq!(watch.stuck(limit), None);
 
         let asked = watch.asked();
         std::thread::sleep(limit * 2);
-        watch.beat.store(watch.now(), Ordering::SeqCst);
         let why = watch.stuck(limit).expect("a request waits past the limit");
         assert!(why.starts_with("1 request(s) wait"), "{why}");
 
         drop(asked);
         assert_eq!(watch.stuck(limit), None);
 
+        // A probe the runtime never runs.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        watch.probe(runtime.handle());
         std::thread::sleep(limit * 2);
         let why = watch.stuck(limit).expect("the runtime did not run");
         assert!(why.starts_with("the runtime's thread has not run"), "{why}");
+        // It runs it.
+        runtime.block_on(tokio::task::yield_now());
+        assert_eq!(watch.stuck(limit), None);
+    }
+
+    #[test]
+    fn a_watchdog_limit_too_short_is_taken_as_the_shortest() {
+        assert_eq!(limit_of(Some("0".into())), SHORTEST);
+        assert_eq!(limit_of(Some("3".into())), SHORTEST);
+        assert_eq!(limit_of(Some("500".into())), Duration::from_millis(500));
+        assert_eq!(limit_of(None), LIMIT);
     }
 }

@@ -481,10 +481,15 @@ fn a_daemon_stopping_kills_only_the_processes_it_started_never_another_s_of_the_
 /// Asks the daemon to hold its store's lock for `ms` on its runtime's thread, as a deadlock
 /// would (`test.hold`), without waiting for the answer: the connection is kept open.
 fn hold(user: &User, ms: u64) -> std::os::unix::net::UnixStream {
+    ask(user, "test.hold", ms)
+}
+
+/// Sends `method` with `{"ms": ms}` without waiting for its answer.
+fn ask(user: &User, method: &str, ms: u64) -> std::os::unix::net::UnixStream {
     let mut stream =
         std::os::unix::net::UnixStream::connect(user.path("runtime/flottille/daemon.sock"))
             .unwrap();
-    let request = json!({"id": "hold", "method": "test.hold", "params": {"ms": ms}});
+    let request = json!({"id": "hold", "method": method, "params": {"ms": ms}});
     std::io::Write::write_all(&mut stream, format!("{request}\n").as_bytes()).unwrap();
     stream
 }
@@ -537,6 +542,22 @@ fn a_stuck_daemon_is_reported_by_its_watchdog() {
         "{said:#?}"
     );
     assert!(user.status()["pid"].as_u64() == Some(pid));
+}
+
+#[test]
+fn a_request_that_waits_on_outside_work_is_not_said_stuck() {
+    let user = User::new()
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_WATCHDOG_MS", "500");
+    user.status();
+
+    let mut waiting = ask(&user, "test.wait", 2500);
+    let mut answer = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(&mut waiting), &mut answer).unwrap();
+
+    assert!(answer.contains(r#""id":"hold""#), "{answer}");
+    let log = log_of(&user);
+    assert!(!log.contains("the daemon is stuck"), "{log}");
 }
 
 #[test]
