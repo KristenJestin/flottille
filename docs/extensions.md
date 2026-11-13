@@ -15,7 +15,8 @@ Review (#338) built the agents an extension launches and the depth exception, th
 command, model slots and a subset of values as settings, overridable per project, an extension's
 guidance, and the folded line of the tree. Connections (#560) built its daemon part: an app-wide
 scope, the tables an extension's table declares, tools named at run time, its events in the
-inbox and a block of the judge's prompt; its window is #672. The rest is a proposal. Written from a discussion with the maintainer
+inbox and a block of the judge's prompt; #672 built its window (its page in Features, the form
+and review dialogs, the call's card). The rest is a proposal. Written from a discussion with the maintainer
 (November 2026), and settled with their answers of 2026-11-03 and 2026-11-07 ("Decisions taken"). No
 question is left open but those in "Open questions".
 
@@ -957,7 +958,8 @@ read**:
   (whole), removed, or changed (the old text and the new, line by
   line), the unchanged ones folded away. Texts are shown as plain text, never as Markdown. The user
   accepts, or leaves the connection off. **Accepting keeps the settings of the actions that did
-  not change and puts every new one to judged** (turned on, as the user has just read it).
+  not change and puts every new or changed one to judged** (turned on, as the user has just read
+  it): the review proposes exactly that, so a client that answers it back changes nothing.
 - **A declaration the user edits** (the command, its arguments, the URL, the variables, the limits)
   is a different server as far as trust goes: the connection is awaiting review again, the diff
   against the last pin.
@@ -972,13 +974,38 @@ agents' lists at once ("Activation"), no call reaches the server, and it is stop
 call ends. A call that was running when it was turned off answers `the call failed: the connection
 was turned off while it ran; it may have been performed`.
 
-**In the window.** **Connections** is a row of Settings' Features (decision 23); its page is the
-extension's switch and its sentence and, under them, the list pattern (rule 7 of `reference/gpui.md`): one row per connection, its state
-(awaiting review, ready, cut
-off, signed out, off, failing), its switch, and **Review** where a review is due, which opens the diff in a
-large dialog; adding or editing one is a form dialog with its command or URL, its sentence, its variables (picked among the vault entries every project sees) and its limits. A call held for
-the user is a card as any, naming the connection, the action and its
-arguments. Everything animates as the rest of the window does, and the issue lists it.
+**In the window.** **Connections** is a row of Settings' Features (decision 23), its tag `2 on`
+(the connections ready) or `Off`. Its page follows rule 14: the switch **Use connections**, its
+sentence ("Your MCP servers, each given to every agent as one tool. Their calls go through the
+judge like any other.") and its usage line ("Add a server once; every session of every project
+gets it. A new version stops it until you review it again."), shown while it is off. On, under
+them, **Servers** (a count, **New server**) in the list pattern (rule 7 of `reference/gpui.md`):
+one row per connection, its plug, its name, the version accepted as a tag, one line of its state
+(`On · 12 actions`, `Waiting for its first review`, `Waiting for a review of your edit`,
+`Stopped: new version, review it`, `Signed out: sign in again`, `Failing: …`, `Off`) and a "⋯"
+menu (Edit, Review, Turn off or Turn on, **Sign in** for a URL, Remove…, which asks in a
+confirmation). A click on a row edits it. **Sign in** asks `connection.login` and opens the address
+it answers with the system's default handler; meanwhile the row says `Signing in: finish it in
+your browser`, and a toast says how it ended (`Signed in to notes`, or why not), as it says a
+connection signed out or whose tokens were not saved.
+Adding or editing one is a form dialog: its name (not editable once made), what it is for, how it
+is reached (radios: a program, its command one line split as a task's, shell syntax refused under
+it; or a URL), its variables (headers for a URL), each a name and a vault entry picked among those
+every project sees and no other use is bound to, and its limits (an argument and its values,
+separated by commas). The projects a connection excepts are not in the form yet: the command line
+sets them. **Review** opens the diff in a `Modal::large`: the server and its version (`almanac
+1.0.0 → 2.0.0`), its instructions and each action's description and arguments as plain lines
+(`−` the old one, `+` the new one), a tag `New`, `Changed` or `Removed`, the unchanged actions
+folded under one line, the limits and what they cover, the names never offered. Each action has a
+switch, **Offer it to agents**, and under it **When an agent calls it**: radios `Allowed`, `Judged`
+(the one chosen until the user picks another, and for a changed action too) and `Asked`; the word
+`passes` is not shown. Each variable and limit control has its label.
+**Accept** pins what was read with those settings. Nothing of it is per project. A call held for
+the user is a card as any, titled `Call write on the connection almanac`, its line the
+connection, the action and its arguments. Everything animates as the rest of the window does:
+the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
+when it leaves, a field that a radio or a switch needs unfolds under it, the dialogs rise and
+fade, the review crossfades from its skeleton.
 
 **What it does not protect.** The server has the user's rights, and what an agent reads from one
 connection may go to another place ("Open questions", 3). Flottille sees the name, the
@@ -991,7 +1018,8 @@ powerful can act as the user, and no mode changes that; this is Full mode's limi
 an access token (Atlassian's Rovo is one) signs in once in the user's browser, as the MCP
 specification's authorization says (`reference/mcp-authorization.md`, revision 2026-07-28, what
 is followed and what is left out): `flottille connection login <name>`, or the connection's
-**Sign in** in the window (#672). The daemon reads the server's challenge, its protected resource
+**Sign in** in the window (#672), which opens the sign-in address only when it is `https://`,
+or `http://` on this machine, and says why in a toast otherwise. The daemon reads the server's challenge, its protected resource
 metadata (RFC 9728) and its authorization server's metadata (RFC 8414, OpenID Connect discovery);
 it uses the `client_id` the user declared, or registers itself (RFC 7591) when the authorization
 server lets it; the authorization code comes with PKCE `S256`, `state` and the `resource`
@@ -1029,7 +1057,9 @@ what was accepted does not keep it running: a call compares the server it starts
 already running. Its tools are listed one listing at a time (notices that come during one make one
 more, and a server that starts begins afresh, whatever the stopped one left), within the start's 30 seconds,
 100 pages and 1,000 tools: past them it is cut off, saying why. Every vault secret a connection
-reads is masked from then on, even when the keyring was locked at the daemon's start. A server's
+reads is masked from then on, even when the keyring was locked at the daemon's start, in the
+instructions and the texts of the actions it announces too (a server may echo what it was started
+with): they are masked before they are pinned, stored or shown. A server's
 own words in a failure (an error result, a JSON-RPC error, its first error line) are framed as a
 result is, and a cut-off says its name and version masked and cut at 100 characters. So is why it
 failed to start (its first error line, or the error), in `failing`, `connection.changed` and the

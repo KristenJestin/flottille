@@ -28,6 +28,9 @@ use crate::model::OpenQuestion;
 use crate::runs::{CommandOutput, CommandRow};
 use crate::subscriptions::SubscriptionRow;
 
+/// How the tool of a connection is named: `conn_` and the connection's name.
+const CONNECTION: &str = "conn_";
+
 /// One agent of the session's tree, as `agent.tree` gives it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeAgent {
@@ -259,6 +262,15 @@ impl Request {
     pub fn call_line(&self) -> String {
         match (self.tool.as_str(), self.call["line"].as_str()) {
             ("run", Some(line)) => line.to_owned(),
+            // A connection's call says its server, its action and its arguments.
+            (tool, _) if tool.starts_with(CONNECTION) => {
+                let name = &tool[CONNECTION.len()..];
+                let action = self.call["action"].as_str().unwrap_or("?");
+                match &self.call["arguments"] {
+                    Value::Null => format!("{name} {action}"),
+                    arguments => format!("{name} {action} {}", one_line(arguments)),
+                }
+            }
             (tool, _) => format!("{tool} {}", one_line(&self.call)),
         }
     }
@@ -304,6 +316,11 @@ impl Request {
                     Some("link_ticket") => format!("Link {name} to a ticket"),
                     _ => format!("workspace {}", one_line(&self.call)),
                 }
+            }
+            (tool, _, _) if tool.starts_with(CONNECTION) => {
+                let name = &tool[CONNECTION.len()..];
+                let action = field("action").unwrap_or_else(|| "an action".into());
+                format!("Call {action} on the connection {name}")
             }
             ("web", _, _) => match (field("url"), field("query")) {
                 (Some(url), _) => format!("Read {url}"),

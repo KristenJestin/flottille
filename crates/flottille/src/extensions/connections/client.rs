@@ -149,7 +149,9 @@ async fn listed(peer: &Peer<RoleClient>) -> Result<Vec<Value>, Unlisted> {
             }
             cursor = page.next_cursor;
             if cursor.is_none() {
-                return Ok(tools);
+                // A server may echo what it was started with: the texts of its actions are masked
+                // as they are listed, so that what is pinned, stored, shown and compared is masked.
+                return Ok(tools.iter().map(masked_texts).collect());
             }
         }
         Err(Unlisted::Endless(format!(
@@ -537,7 +539,11 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
     };
     let server = json!({"name": masked(&info["serverInfo"]["name"]),
         "version": masked(&info["serverInfo"]["version"])});
-    let instructions = info["instructions"].as_str().map(str::to_owned);
+    // A server may echo what it was started with, a vault secret among it: its instructions are
+    // masked before they are pinned, stored or shown (its actions' texts are, as they are listed).
+    let instructions = info["instructions"]
+        .as_str()
+        .map(|text| flottille_core::secrets::mask(text, &std::env::vars_os().collect()));
     Ok(Running {
         service,
         leader,
@@ -546,6 +552,23 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
         start,
         expires_at,
     })
+}
+
+/// `value` with every text it holds masked, its keys left as they are.
+fn masked_texts(value: &Value) -> Value {
+    match value {
+        Value::String(text) => json!(flottille_core::secrets::mask(
+            text,
+            &std::env::vars_os().collect()
+        )),
+        Value::Array(items) => Value::Array(items.iter().map(masked_texts).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, item)| (key.clone(), masked_texts(item)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// The server refused the access token of a connection signed in with OAuth: one refresh is tried

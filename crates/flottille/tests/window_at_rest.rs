@@ -1369,3 +1369,57 @@ fn the_window_draws_no_frame_at_rest_on_a_reply_with_code_blocks(cx: &mut TestAp
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_connections_page_and_its_review(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let fake =
+        std::path::Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-mcp");
+    let script = user.path("notes-script.json");
+    std::fs::write(
+        &script,
+        json!({"server": {"name": "notes", "version": "1.0.0"}, "instructions": "Be brief.",
+            "tools": [{"name": "search", "description": "Finds notes.",
+                "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}}],
+            "answers": {"search": {"text": "found"}}})
+        .to_string(),
+    )
+    .unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.",
+            "command": [fake.display().to_string(), "--script", script.display().to_string()]}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the settings page is shown", |cx| {
+        cx.update(|window, _| window.try_find("settings-tabs-features").is_some())
+    });
+    cx.update(|window, cx| window.click("settings-tabs-features", cx));
+    until(&shell, cx, "Connections is a row", |cx| {
+        cx.update(|window, _| window.try_find("features-connections").is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("features-connections", cx));
+    until(&shell, cx, "the server is listed", |cx| {
+        cx.update(|window, _| window.try_find("connection-notes").is_some())
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the list");
+
+    cx.update(|window, cx| window.click("connection-more-notes", cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("review-connection-notes", cx));
+    until(&shell, cx, "the review is read", |cx| {
+        cx.update(|window, _| window.try_find("connection-review-action-search").is_some())
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the review");
+}

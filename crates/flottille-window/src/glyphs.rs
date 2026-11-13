@@ -29,6 +29,8 @@ gpui_kit::assets::icon_assets!(
         ScanSearch,
         Shrink,
         Plug,
+        Power,
+        LogIn,
         Blocks
     ]
 );
@@ -71,7 +73,14 @@ mod tests {
     #[test]
     fn every_icon_the_window_adds_is_embedded_and_listed() {
         let listed = Assets.list("").unwrap();
-        for icon in [AGENTS, PULL_REQUEST, TICKET, STOP] {
+        for icon in [
+            AGENTS,
+            PULL_REQUEST,
+            TICKET,
+            STOP,
+            Icon::Lucide("power"),
+            Icon::Lucide("log-in"),
+        ] {
             assert!(
                 Assets.load(&icon.path()).unwrap().is_some(),
                 "{icon:?} is not embedded"

@@ -976,6 +976,86 @@ fn an_accepted_change_keeps_the_settings_of_unchanged_actions_and_judges_the_new
 }
 
 #[test]
+fn a_changed_action_is_proposed_judged_in_the_review() {
+    let user = user();
+    project(&user, "app");
+    connect(
+        &user,
+        "almanac",
+        &almanac(),
+        json!({"search": "passes", "write": "passes", "open": "asked"}),
+    );
+    let (_, mcp) = session(&user, "app");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    let mut changed = almanac();
+    changed["tools"][1]["description"] = json!("Deletes every note.");
+    cut_after(&user, &mcp, &changed);
+    let review = user
+        .call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    let proposed = |name: &str| {
+        review["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == name)
+            .unwrap()["setting"]
+            .clone()
+    };
+    assert_eq!(proposed("search"), "passes");
+    assert_eq!(proposed("open"), "asked");
+    assert_eq!(
+        proposed("write"),
+        "judged",
+        "a client that answers the review's settings back must not keep the old one"
+    );
+}
+
+#[test]
+fn a_secret_echoed_in_a_server_s_instructions_is_masked_in_the_review() {
+    let user = user();
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET}),
+    )
+    .unwrap();
+    let mut script = almanac();
+    script["echo_env"] = json!("ALMANAC_TOKEN");
+    turn_on(&user);
+    declare(
+        &user,
+        "almanac",
+        &script,
+        json!({"env": {"ALMANAC_TOKEN": {"vault": "almanac-token"}}}),
+    );
+    let review = user
+        .call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    let listed = user.call("connection.list", json!({})).unwrap();
+    for (what, said) in [("the review", &review), ("the list", &listed)] {
+        assert!(!said.to_string().contains(SECRET), "{what}: {said}");
+    }
+    let instructions = review["instructions"]["now"].as_str().unwrap();
+    assert!(instructions.ends_with("[masked]"), "{instructions}");
+    let described = review["actions"][0]["now"]["description"].as_str().unwrap();
+    assert!(described.ends_with("[masked]"), "{described}");
+    let accepted = user
+        .call("connection.accept", json!({"name": "almanac"}))
+        .unwrap();
+    assert!(!accepted.to_string().contains(SECRET), "{accepted}");
+    let file = std::fs::read_to_string(user.path("config/flottille/extensions.toml")).unwrap();
+    assert!(!file.contains(SECRET), "{file}");
+    assert!(
+        files_holding(&user.path("state"), SECRET).is_empty()
+            && files_holding(&user.path("data"), SECRET).is_empty(),
+        "the pin is stored masked"
+    );
+}
+
+#[test]
 fn accept_holds_the_server_until_the_pin_is_written() {
     // The daemon of a test build checks, as it writes the pin, that it holds the server the
     // review left running: stopped first and pinned after, it would not.

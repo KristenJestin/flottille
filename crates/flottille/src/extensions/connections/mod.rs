@@ -35,12 +35,13 @@ pub use oauth::secrets_in;
 pub const EXTENSION: Extension = Extension {
     name: "connections",
     title: "Connections",
-    sentence: "Gives every agent your own MCP servers, each as one tool you reviewed, its calls \
-               judged or asked like any other.",
+    sentence: "Your MCP servers, each given to every agent as one tool. Their calls go through \
+               the judge like any other.",
     scope: Scope::Global,
     on_by_default: false,
     switch: "Use connections",
-    usage: "Given to every agent of every project, each server as one tool behind the gate.",
+    usage: "Add a server once; every session of every project gets it. A new version stops it \
+            until you review it again.",
     place: Place::Row {
         icon: "plug",
         line: "Your MCP servers, given to every agent behind the gate.",
@@ -1544,7 +1545,9 @@ async fn review(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
 }
 
 /// The review: the pin against what the server announces now, each action whole where it is new,
-/// both texts where it changed, and what each limit covers.
+/// both texts where it changed, and what each limit covers. The setting it proposes for an action
+/// is what `accept` pins when nothing is said: kept where the action is unchanged, judged where it
+/// is new or changed, so that a client that answers it back gets what the daemon would have done.
 fn diff(declaration: &Declaration, row: &Row, now: &Listing) -> Value {
     let empty = Listing::default();
     let pin = row.pin.as_ref().unwrap_or(&empty);
@@ -1561,8 +1564,11 @@ fn diff(declaration: &Declaration, row: &Row, now: &Listing) -> Value {
             Some(_) => "unchanged",
         };
         actions.push(json!({"name": action.name, "change": change,
-            "pinned": had.map(whole), "now": whole(action),
-            "setting": had.map(|_| setting_of(row, &action.name)).unwrap_or("judged")}));
+        "pinned": had.map(whole), "now": whole(action),
+        "setting": match change {
+            "unchanged" => setting_of(row, &action.name),
+            _ => "judged",
+        }}));
     }
     for action in &pin.actions {
         if now.action(&action.name).is_none() {

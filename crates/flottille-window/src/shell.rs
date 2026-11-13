@@ -31,6 +31,7 @@ use crate::actions::{Actions, Command, Details, Outcome, Pick, RunFrom};
 use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::extensions::Registry;
+use crate::extensions::connections::ConnectionsSection;
 use crate::extensions::specs::SpecPage;
 use crate::history::{History, Way};
 use crate::link::{self, Connect, Seen, Update};
@@ -289,6 +290,11 @@ impl Shell {
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
         let vault = cx.new(|_| VaultSection::new(this.clone()));
+        let connections = cx.new(|_| ConnectionsSection::new(this.clone(), vault.clone()));
+        {
+            let reading = connections.clone();
+            cx.defer(move |cx| reading.update(cx, |section, cx| section.read(cx)));
+        }
         let settings = cx.new(|_| {
             SettingsPage::new(
                 this.clone(),
@@ -297,6 +303,7 @@ impl Shell {
                 compaction_guidance.clone(),
                 workspaces.clone(),
                 vault.clone(),
+                connections.clone(),
             )
         });
         let services = {
@@ -893,6 +900,12 @@ impl Shell {
             Update::CompactionChanged => self.actions.send(Command::CompactionRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
             Update::VaultChanged => self.actions.send(Command::Vault),
+            Update::SignIn { said, name, why } => {
+                let section = self.settings.read(cx).connections().clone();
+                section.update(cx, |section, cx| {
+                    section.sign_in_said(&said, &name, why, cx)
+                });
+            }
             Update::ServicesChanged => {
                 if self.main.read(cx).services_page().is_some() {
                     self.actions.send(Command::Services);
@@ -919,6 +932,8 @@ impl Shell {
             Update::Extensions => {
                 self.extensions
                     .update(cx, |registry, cx| registry.changed(cx));
+                let connections = self.settings.read(cx).connections().clone();
+                connections.update(cx, |section, cx| section.read(cx));
                 if let Some(page) = self.spec_page.clone() {
                     page.update(cx, |page, cx| page.read(cx));
                 }
@@ -1437,6 +1452,13 @@ impl Shell {
             Outcome::Developer { written, shown } => {
                 self.settings
                     .update(cx, |page, cx| page.developer_answered(shown, written, cx));
+            }
+            Outcome::Asked {
+                then: crate::extensions::Then::Connections(then),
+                answer,
+            } => {
+                let section = self.settings.read(cx).connections().clone();
+                section.update(cx, |section, cx| section.answered(then, answer, window, cx));
             }
             Outcome::Asked { then, answer } => {
                 let page = match &then {

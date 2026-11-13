@@ -1002,6 +1002,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_held_connection_call_names_the_connection_the_action_and_its_arguments() {
+        let request = crate::session_link::Request::of(&json!({"number": 1, "agent": "r1",
+            "tool": "conn_almanac", "call": {"action": "write",
+                "arguments": {"text": "the login decision"}},
+            "reasons": [], "created_at": 1}));
+        assert_eq!(request.asked(), "Call write on the connection almanac");
+        assert_eq!(
+            request.call_line(),
+            r#"almanac write {"text":"the login decision"}"#
+        );
+    }
+
     fn served(tool: &str, arguments: Value, outcome: &str) -> flottille_core::protocol::Event {
         flottille_core::protocol::Event {
             seq: 9,
