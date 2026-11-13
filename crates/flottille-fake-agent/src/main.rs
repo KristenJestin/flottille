@@ -50,6 +50,8 @@
 //!   agent whose process dies before it takes a prompt.
 //! - `open_error`: answer `session/new`, `session/load` and `session/resume` with an error of that
 //!   message: an agent that cannot open a session at all.
+//! - `load_error`: answer `session/load` and `session/resume` with an error of that message, a new
+//!   session opening as usual: an agent whose session is lost or corrupt.
 //! - `models`, `efforts`: the values of the `model` and `thought_level` options, the first one
 //!   current; no effort option without `efforts`.
 //! - `model_rows`: the name and the description a model's row carries, by value (`{"default":
@@ -260,6 +262,11 @@ impl Agent {
             std::process::exit(code as i32);
         }
         if opens && let Some(message) = self.script["open_error"].as_str() {
+            return Err(message.to_owned());
+        }
+        if matches!(method, "session/load" | "session/resume")
+            && let Some(message) = self.script["load_error"].as_str()
+        {
             return Err(message.to_owned());
         }
         if self.script["stall"] == true
