@@ -96,7 +96,9 @@ may serve the user's terminals too, and is spared, even one handed to it as its 
 parent exited, as git's `daemonize()` and glibc's `daemon()` do. The command runs outside the
 daemon, which cannot be asked when it is stuck: the daemon writes the sessions it starts in
 `$XDG_RUNTIME_DIR/flottille/daemon.sessions` as it starts them (each leader's pid and start time,
-so that one whose pid was taken since is not one of them). Each process is signalled through a pidfd,
+so that one whose pid was taken since is not one of them). A session counts while its leader runs
+with that start time, or, once the leader exited, while a process still runs in it: what a run
+left behind it is ended too, and Linux gives the leader's pid to no other process meanwhile. Each process is signalled through a pidfd,
 opened, then checked to be still in one of those sessions, so that a pid taken since by another
 process is never signalled; the daemon's own is opened before it is asked to stop. The command
 says it had to: `The daemon did not stop (why): it was ended, with the N process(es) it ran.` The

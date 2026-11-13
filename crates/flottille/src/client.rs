@@ -368,15 +368,16 @@ impl Daemon {
         Process::open(pid).map(|process| Daemon(process, sessions))
     }
 
-    /// The leaders of the sessions the daemon started that still run: never one that took the
-    /// pid of one since, nor a child of its that leads a session it did not start.
+    /// The leaders of the sessions the daemon started that still run, the leader itself or a
+    /// process it left in it: never one that took the pid of one since, nor a child of its that
+    /// leads a session it did not start.
     fn leaders(&self) -> Vec<u32> {
         let said = std::fs::read_to_string(&self.1).unwrap_or_default();
         said.lines()
             .filter_map(|line| {
                 let (pid, at) = line.split_once(' ')?;
                 let (pid, at) = (pid.parse().ok()?, at.parse().ok()?);
-                (crate::agents::start_time(pid) == Some(at)).then_some(pid)
+                crate::children::session_lives(pid, at).then_some(pid)
             })
             .collect()
     }
@@ -507,5 +508,48 @@ mod tests {
         assert_eq!(program_to_start(deleted.clone()), deleted);
         // Not replaced.
         assert_eq!(program_to_start(path.clone()), path);
+    }
+
+    #[test]
+    fn daemon_stop_ends_a_run_whose_session_leader_exited() {
+        // A run whose command ends and leaves a process in its session.
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 600 & echo $!; read _"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        // SAFETY: setsid is async-signal-safe, which is all a pre_exec closure may call.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let mut leader = command.spawn().unwrap();
+        let mut line = String::new();
+        BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let left: i32 = line.trim().parse().unwrap();
+        let at = crate::agents::start_time(leader.id()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("daemon.sessions");
+        // And a line whose pid another process took since.
+        let own = std::process::id();
+        std::fs::write(&file, format!("{} {at}\n{own} 0\n", leader.id())).unwrap();
+        let daemon = Daemon::open(own, file).unwrap();
+        drop(leader.stdin.take());
+        leader.wait().unwrap();
+
+        let leaders = daemon.leaders();
+        // SAFETY: kill has no memory precondition; the process is the test's own sleep.
+        unsafe { libc::kill(left, libc::SIGKILL) };
+        assert_eq!(leaders, vec![leader.id()]);
+        // Once nothing runs in it, it is gone.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !daemon.leaders().is_empty() {
+            assert!(Instant::now() < deadline, "{:?}", daemon.leaders());
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

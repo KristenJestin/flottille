@@ -79,13 +79,23 @@ fn started_session(pid: u32, at: u64) {
         return;
     };
     // The ones that ended since are forgotten here, the only time the file is written again.
-    sessions.retain(|pid, at| start_time(*pid) == Some(*at));
+    sessions.retain(|pid, at| session_lives(*pid, *at));
     sessions.insert(pid, at);
     if let Err(error) = write_sessions(file, sessions) {
         eprintln!(
             "flottille daemon: cannot write {} ({error}): daemon stop may leave a run running",
             file.display()
         );
+    }
+}
+
+/// Whether the session `leader` started at `at` still runs: its leader, still the same process,
+/// or, once it exited, a process still in it. Linux never gives the pid of a session's leader to
+/// another process while one runs in it, so none of them is in another's session.
+pub fn session_lives(leader: u32, at: u64) -> bool {
+    match start_time(leader) {
+        Some(started) => started == at,
+        None => processes().into_iter().any(|pid| in_session(pid, leader)),
     }
 }
 
