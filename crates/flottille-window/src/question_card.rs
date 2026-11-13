@@ -11,7 +11,9 @@
 //! quoting each question with its answer under it (`agent.answer`). Once the agent took it, the
 //! card folds to its answers: each question on one line, what the user chose and wrote under it.
 
+use std::cell::Cell;
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::time::Duration;
 
 use flottille_core::question::{Answer, Question};
@@ -22,10 +24,10 @@ use gpui_design_system::{
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, TestSupportExt as _,
-    WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle,
+    Focusable as _, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
+    Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    TestSupportExt as _, WeakEntity, Window, canvas, div, px,
 };
 
 use crate::session::{MarkdownText, SessionPage};
@@ -88,6 +90,15 @@ pub struct QuestionCard {
     /// The card was asked for from the conversation: its ring lights once, then fades.
     pulsing: bool,
     _pulse: Option<Task<()>>,
+    /// What the page can still give the dock (`ask_dock::Room`): a question taller than its
+    /// share scrolls inside the card, whose header and footer stay in sight.
+    room: f32,
+    /// The height the questions may take, as the room and their own height made it.
+    free: Option<f32>,
+    /// The height the questions were drawn at, as the last frame measured it, and the one the
+    /// frame was made for.
+    area: Rc<Cell<f32>>,
+    used: Rc<Cell<f32>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -166,6 +177,10 @@ impl QuestionCard {
             current: 0,
             pulsing: false,
             _pulse: None,
+            room: 0.,
+            free: None,
+            area: Rc::default(),
+            used: Rc::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -183,6 +198,57 @@ impl QuestionCard {
     /// of a question with no options.
     pub fn field(&self, n: usize) -> &Entity<TextareaState> {
         &self.fields[n]
+    }
+
+    /// What the page can still give the dock, before it is drawn. The room and the height of
+    /// the questions were measured by the same frame: the cap is made of the two together, and
+    /// is not moved by a height that eases on its own.
+    pub fn set_room(&mut self, room: Option<f32>, cx: &mut Context<Self>) {
+        let area = self.area.get();
+        let free = room
+            .filter(|_| area > 0.)
+            .map(|room| (area + room).max(LEAST));
+        self.room = room.unwrap_or(0.);
+        let moved = match (self.free, free) {
+            (Some(a), Some(b)) => (a - b).abs() > 0.5,
+            (a, b) => a != b,
+        };
+        if moved {
+            self.free = free;
+            cx.notify();
+        }
+    }
+
+    /// The questions, scrolling inside the height the page can give them: the header and the
+    /// footer of the card stay where they are.
+    fn scrolled(&self, id: ElementId, question: impl IntoElement) -> impl IntoElement {
+        self.used.set(self.free.unwrap_or(0.));
+        div()
+            .id(id)
+            .when_some(self.free, |d, cap| d.max_h(px(cap)))
+            .overflow_y_scroll()
+            .child(question)
+            .test_support()
+    }
+
+    /// `content`, whose height as drawn is measured: the cap is that height and the room left
+    /// by the page, which does not move with the height the card eases to. A frame that
+    /// measures what its cap was not made for asks for another.
+    fn measured(&self, content: impl IntoElement) -> impl IntoElement {
+        let (seen, used, room) = (self.area.clone(), self.used.clone(), self.room);
+        let measure = canvas(
+            move |bounds: Bounds<Pixels>, window, _| {
+                let height = f32::from(bounds.size.height);
+                seen.set(height);
+                if used.get() > 0. && ((height + room).max(LEAST) - used.get()).abs() > 0.5 {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        div().relative().child(content).child(measure)
     }
 
     /// A page of the session opened again on the dock: the answers go through it.
@@ -625,10 +691,15 @@ impl Render for QuestionCard {
         let current = self.current;
         let question = self.block(current, !sent, cx);
         // Questions differ in height: the card eases to the one shown.
-        card = card.block(Block::new().child(gpui_design_system::growing(
+        let questions = gpui_design_system::growing(
             id("question-height"),
-            sliding(id("question-page"), current, question),
-        )));
+            sliding(
+                id("question-page"),
+                current,
+                self.scrolled(id(&format!("question-{current}-scroll")), question),
+            ),
+        );
+        card = card.block(Block::new().child(self.measured(questions)));
         let why = if ready {
             "Sent to the agent as one message."
         } else {
@@ -675,10 +746,12 @@ impl Render for QuestionCard {
             .child(ANSWER_WAITS)
             .test_support();
         let footer = div()
+            .id(id("answer-footer"))
             .px(space::LG)
             .py(space::MD)
             .child(presence(id("answer-open"), !sent, send))
-            .child(presence(id("answer-sent"), sent, waits));
+            .child(presence(id("answer-sent"), sent, waits))
+            .test_support();
         card = card.block(Block::new().child(footer));
         let ring = fade(id("question-pulse"), self.pulsing, PULSE, window, cx);
         div()
@@ -719,6 +792,9 @@ impl gpui_kit::Focusable for QuestionCard {
         self.focus.clone()
     }
 }
+
+/// The least height the questions keep when the page has no room left: about one option.
+const LEAST: f32 = 72.;
 
 /// How long the ring of a card asked for from the conversation takes to light and to fade.
 const PULSE: Duration = gpui_design_system::motion::PANEL;

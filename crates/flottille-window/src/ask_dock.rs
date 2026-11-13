@@ -7,16 +7,116 @@
 //! per session, as it keeps the composer): what the user chose and wrote stays while a
 //! sub-agent's conversation is shown, and when the page is left and opened again.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use flottille_core::question::Question;
 use gpui_design_system::{growing, palette, presence, presence_of, sliding, space};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, TestSupportExt as _, WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, Focusable as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, WeakEntity, Window, canvas,
+    div, px,
 };
 
 use crate::question_card::QuestionCard;
 use crate::session::SessionPage;
+
+/// What the conversation keeps while an ask waits: past it, the questions of the card scroll.
+pub const CONVERSATION: f32 = 160.;
+
+/// The room the dock may still take on the page, measured as the page is drawn: its column, its
+/// conversation and its composer, each by a canvas, read by the next frame. Negative when what
+/// the page holds is taller than the page; the card's questions then give up that height.
+#[derive(Clone, Default)]
+pub struct Room {
+    column: Rc<Cell<Bounds<Pixels>>>,
+    conversation: Rc<Cell<Bounds<Pixels>>>,
+    composer: Rc<Cell<Bounds<Pixels>>>,
+    /// The dock's height as it is drawn, easing, and as it will be once it has eased: the page
+    /// has room for the second, whatever the first lags by.
+    shown: Rc<Cell<f32>>,
+    eased: Rc<Cell<f32>>,
+    /// What the last frame handed to the dock, to ask for another when this one measures more.
+    used: Rc<Cell<f32>>,
+}
+
+impl Room {
+    fn spare(&self) -> Option<f32> {
+        let (column, conversation, composer) = (
+            self.column.get(),
+            self.conversation.get(),
+            self.composer.get(),
+        );
+        // Not measured yet: the first frame is drawn whole.
+        if column.size.height <= px(0.) || composer.size.height <= px(0.) {
+            return None;
+        }
+        // The room of the dock at its eased height: what the card asks of it, once it eased,
+        // never depends on how far it has got.
+        let lag = self.eased.get() - self.shown.get();
+        Some(
+            f32::from(column.bottom() - composer.bottom()) + f32::from(conversation.size.height)
+                - CONVERSATION
+                - lag,
+        )
+    }
+
+    /// An element that fills its parent and says where it is, as `part` of the page.
+    pub fn watch(&self, part: Part) -> AnyElement {
+        let room = self.clone();
+        let cell = match part {
+            Part::Column => self.column.clone(),
+            Part::Conversation => self.conversation.clone(),
+            Part::Composer => self.composer.clone(),
+            Part::Shown | Part::Eased => Rc::default(),
+        };
+        let height = match part {
+            Part::Shown => Some(self.shown.clone()),
+            Part::Eased => Some(self.eased.clone()),
+            _ => None,
+        };
+        canvas(
+            move |bounds: Bounds<Pixels>, window, _| {
+                cell.set(bounds);
+                if let Some(height) = &height {
+                    height.set(f32::from(bounds.size.height));
+                }
+                let spare = room.spare().unwrap_or(0.);
+                if (spare - room.used.get()).abs() > 0.5 {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+        .into_any_element()
+    }
+
+    /// The dock is shut: what it will be eased to is nothing, whatever it was.
+    fn shut(&self) {
+        self.eased.set(0.);
+    }
+
+    /// What the dock may take, as the last frame measured it; the frame draws with it.
+    pub fn take(&self) -> Option<f32> {
+        let spare = self.spare();
+        self.used.set(spare.unwrap_or(0.));
+        spare
+    }
+}
+
+/// A part of the page the room is measured from.
+#[derive(Clone, Copy)]
+pub enum Part {
+    Column,
+    Conversation,
+    Composer,
+    /// The dock as it is drawn (easing), then as it will be.
+    Shown,
+    Eased,
+}
 
 /// An ask that waits, as the conversation holds it.
 pub struct Waiting {
@@ -52,6 +152,10 @@ pub struct AskDock {
     /// A page was just opened on the dock: an ask that waited takes the focus once, as the
     /// sidebar's "needs you" leads here. One asked later never takes it from the composer.
     opening: bool,
+    /// What the page can still give the dock.
+    room: Option<f32>,
+    /// What the page is measured by: the page draws with it, the dock too.
+    cells: Room,
 }
 
 impl Default for AskDock {
@@ -67,6 +171,21 @@ impl AskDock {
             cards: Vec::new(),
             last: None,
             opening: true,
+            room: None,
+            cells: Room::default(),
+        }
+    }
+
+    /// What the page measures its room by.
+    pub fn cells(&self) -> Room {
+        self.cells.clone()
+    }
+
+    /// The room the page left, set before it is drawn: the cards size their questions to it.
+    pub fn set_room(&mut self, room: Option<f32>, cx: &mut Context<Self>) {
+        self.room = room;
+        for card in &self.cards {
+            card.update(cx, |card, cx| card.set_room(room, cx));
         }
     }
 
@@ -124,7 +243,9 @@ impl AskDock {
                             })
                         }
                     };
+                    let room = self.room;
                     card.update(cx, |card, cx| {
+                        card.set_room(room, cx);
                         card.set_answered(waiting.answered);
                         card.set_header(&asks.title, waiting.when.clone(), cx);
                     });
@@ -214,6 +335,11 @@ impl AskDock {
 
 impl Render for AskDock {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.cards.is_empty() {
+            self.cells.shut();
+        }
+        let (shown_height, eased_height) =
+            (self.cells.watch(Part::Shown), self.cells.watch(Part::Eased));
         let shown = self.last.clone().map(|card| {
             let seq = card.read(cx).seq();
             growing(
@@ -226,8 +352,13 @@ impl Render for AskDock {
             .pb(space::SM)
             .flex()
             .flex_col()
+            .relative()
             .children(shown)
+            .child(eased_height)
             .test_support();
-        presence("ask-dock-open", !self.cards.is_empty(), content)
+        div()
+            .relative()
+            .child(presence("ask-dock-open", !self.cards.is_empty(), content))
+            .child(shown_height)
     }
 }

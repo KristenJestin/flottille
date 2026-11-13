@@ -1234,10 +1234,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   of its steps says it too; an ask of the root to the user (`ask`, §4.3), while it waits, is
   **docked above the composer**, always in view, never scrolled away with the conversation: its
   card stands a step narrower than the composer on each side (it reads as its own thing standing
-  on the composer, not a part of it), and the conversation keeps at least half of the page's
-  height, the dock scrolling inside itself past that. The card shows **one question at a time**:
+  on the composer, not a part of it). The card and the composer never overlap: the conversation
+  gives up its room to the card first, keeping 160 px when it can, and a card taller than the room
+  scrolls its questions inside itself, its header and its footer (Answer, `n of m answered`)
+  staying in sight and clickable. The card shows **one question at a time**:
   above it, Previous, `2 of 4` and a dot per question (filled once it has a choice or words, the
-  one shown longer), and Next, which stay in sight above the part that scrolls; `←` and `→` move
+  one shown longer), and Next, which stay in sight above the questions; `←` and `→` move
   too while the focus is on the card and not in a field. Picking an option of a single-choice
   question moves to the next question still unanswered; a several-choice question moves on with
   Next. So "+ Add a note" is offered under the options before a choice too (a note alone is no
