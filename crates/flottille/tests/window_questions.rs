@@ -2004,6 +2004,10 @@ fn a_waiting_ask_is_docked_above_the_composer_and_stays_in_view_while_the_conver
     let user = user();
     let (id, shell, page, at, cx) = four_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
+    // The card unfolds, then eases to the room the page has for it.
+    settle(cx);
+    settle(cx);
+    settle(cx);
     let (frame, card, composer, conversation) = (
         bounds("ask-dock-frame".into(), cx),
         bounds(format!("ask-{ask}-question-text"), cx),
@@ -2230,25 +2234,125 @@ fn once_answered_the_dock_folds_and_the_conversation_shows_the_answers(cx: &mut 
 }
 
 #[gpui_kit::test]
-fn the_conversation_keeps_half_the_height_and_the_dock_scrolls_past_it(cx: &mut TestAppContext) {
+fn the_conversation_keeps_its_share_and_the_questions_scroll_past_it(cx: &mut TestAppContext) {
     let user = user();
     let (id, _, page, at, cx) = four_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
-    cx.simulate_resize(size(px(1440.), px(520.)));
+    cx.simulate_resize(size(px(1440.), px(700.)));
     settle(cx);
-    let (page, conversation, frame, card) = (
-        bounds("session-column".into(), cx),
+    let (conversation, frame, scroll, other) = (
         bounds(format!("conversation-{id}"), cx),
         bounds("ask-dock-frame".into(), cx),
-        bounds(format!("ask-{ask}-question-text"), cx),
+        bounds(format!("ask-{ask}-question-0-scroll"), cx),
+        bounds(format!("ask-{ask}-question-0-other"), cx),
     );
     assert!(
-        conversation.size.height >= page.size.height / 2.,
-        "half the page: {conversation:?} {page:?}"
+        conversation.size.height >= px(159.5),
+        "the conversation keeps its share: {conversation:?}"
     );
     assert!(
-        frame.size.height < card.size.height,
-        "the dock scrolls: {frame:?} {card:?}"
+        other.bottom() > scroll.bottom() && scroll.bottom() <= frame.bottom(),
+        "the questions scroll in the dock: {scroll:?} {frame:?} {other:?}"
+    );
+    at_rest(cx);
+}
+
+/// Whether `inner` lies in `outer`, to half a pixel.
+fn lies_in(
+    inner: gpui_kit::Bounds<gpui_kit::Pixels>,
+    outer: gpui_kit::Bounds<gpui_kit::Pixels>,
+) -> bool {
+    inner.top() >= outer.top() - px(0.5) && inner.bottom() <= outer.bottom() + px(0.5)
+}
+
+#[gpui_kit::test]
+fn an_ask_never_hides_under_the_composer(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, page, at, cx) = four_asked(&user, cx);
+    let ask = seq_of(&page, at, cx);
+    for height in [700., 520., 460.] {
+        cx.simulate_resize(size(px(1440.), px(height)));
+        settle(cx);
+        let window =
+            gpui_kit::Bounds::new(gpui_kit::point(px(0.), px(0.)), size(px(1440.), px(height)));
+        let (footer, send, composer) = (
+            bounds(format!("ask-{ask}-answer-footer"), cx),
+            bounds(format!("ask-{ask}-answer-send"), cx),
+            bounds("reply".into(), cx),
+        );
+        assert!(
+            lies_in(send, window) && lies_in(footer, window),
+            "{height}: the footer is in the window: {footer:?} {send:?}"
+        );
+        assert!(
+            footer.bottom() <= composer.top() + px(0.5)
+                && send.bottom() <= composer.top() + px(0.5),
+            "{height}: the footer is above the composer: {footer:?} {send:?} {composer:?}"
+        );
+        // Hit-testable: its centre is the footer's, not under the composer.
+        assert!(
+            !composer.contains(&send.center()),
+            "{height}: the composer is not over Answer: {send:?} {composer:?}"
+        );
+        guard::assert_stays_inside(&shell, cx, format!("ask-{ask}-answer-footer"));
+    }
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_tall_ask_scrolls_inside_its_card(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, page, at, cx) = four_asked(&user, cx);
+    let ask = seq_of(&page, at, cx);
+    cx.simulate_resize(size(px(1440.), px(480.)));
+    settle(cx);
+    let scroll = format!("ask-{ask}-question-0-scroll");
+    let card = bounds(format!("ask-{ask}-question-text"), cx);
+    let frame = bounds("ask-dock-frame".into(), cx);
+    let body = bounds(scroll.clone(), cx);
+    let (head, footer) = (
+        bounds(format!("ask-{ask}-question-title"), cx),
+        bounds(format!("ask-{ask}-answer-footer"), cx),
+    );
+    assert!(
+        lies_in(card, frame),
+        "the card is in the dock: {card:?} {frame:?}"
+    );
+    assert!(
+        lies_in(head, frame) && lies_in(footer, frame),
+        "header and footer in sight: {head:?} {footer:?} {frame:?}"
+    );
+    // The questions are the part that gives way: the last row is below what shows.
+    let last = bounds(format!("ask-{ask}-note-0-add"), cx);
+    assert!(
+        last.bottom() > body.bottom(),
+        "the options scroll: {last:?} {body:?}"
+    );
+
+    let over = body.center();
+    for _ in 0..4 {
+        cx.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: over,
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-400.))),
+            ..Default::default()
+        });
+        settle(cx);
+    }
+    let (body, last) = (
+        bounds(scroll, cx),
+        bounds(format!("ask-{ask}-note-0-add"), cx),
+    );
+    assert!(
+        lies_in(last, body),
+        "scrolled to the last option: {last:?} {body:?}"
+    );
+    let (head, footer) = (
+        bounds(format!("ask-{ask}-question-title"), cx),
+        bounds(format!("ask-{ask}-answer-footer"), cx),
+    );
+    assert!(
+        lies_in(head, frame) && lies_in(footer, frame),
+        "header and footer stayed: {head:?} {footer:?} {frame:?}"
     );
     at_rest(cx);
 }
@@ -2428,7 +2532,7 @@ fn a_draft_answer_stays_when_the_session_is_left_and_opened_again(cx: &mut TestA
 }
 
 #[gpui_kit::test]
-fn the_steps_stay_in_sight_while_the_dock_scrolls(cx: &mut TestAppContext) {
+fn the_steps_stay_in_sight_while_the_questions_scroll(cx: &mut TestAppContext) {
     let user = user();
     let (_, _, page, at, cx) = four_asked(&user, cx);
     let ask = seq_of(&page, at, cx);
@@ -2436,10 +2540,13 @@ fn the_steps_stay_in_sight_while_the_dock_scrolls(cx: &mut TestAppContext) {
     settle(cx);
     let frame = bounds("ask-dock-frame".into(), cx);
     let answer = bounds(format!("ask-{ask}-answer-send"), cx);
-    assert!(answer.bottom() > frame.bottom(), "Answer is out of sight");
+    assert!(
+        lies_in(answer, frame),
+        "Answer is in sight: {answer:?} {frame:?}"
+    );
 
-    // Down to Answer, as the user scrolls the dock.
-    let over = bounds("ask-dock-scroll".into(), cx).center();
+    // Down to the last option, as the user scrolls the questions.
+    let over = bounds(format!("ask-{ask}-question-0-scroll"), cx).center();
     for _ in 0..4 {
         cx.simulate_event(gpui_kit::ScrollWheelEvent {
             position: over,
@@ -2451,8 +2558,8 @@ fn the_steps_stay_in_sight_while_the_dock_scrolls(cx: &mut TestAppContext) {
     let frame = bounds("ask-dock-frame".into(), cx);
     let answer = bounds(format!("ask-{ask}-answer-send"), cx);
     assert!(
-        answer.top() >= frame.top() && answer.bottom() <= frame.bottom(),
-        "scrolled to Answer: {answer:?} in {frame:?}"
+        lies_in(answer, frame),
+        "Answer stayed in sight: {answer:?} in {frame:?}"
     );
     for part in ["question-previous", "question-step", "question-next"] {
         let steps = bounds(format!("ask-{ask}-{part}"), cx);

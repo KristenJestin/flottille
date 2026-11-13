@@ -302,6 +302,8 @@ pub struct SessionPage {
     reply: Entity<Reply>,
     /// The asks that wait for the user, docked above the composer.
     ask_dock: Entity<crate::ask_dock::AskDock>,
+    /// What the dock may still take of the page.
+    room: crate::ask_dock::Room,
     /// What the user wrote to the root while it worked, waiting under the conversation.
     queued: Entity<QueuedMessages>,
     /// The detail of one run, which follows its output.
@@ -440,6 +442,7 @@ impl SessionPage {
             rail,
             drawer,
             reply,
+            room: ask_dock.read(cx).cells(),
             ask_dock,
             queued: cx.new(|_| QueuedMessages::new(shell, opened.id.clone())),
             command_panel,
@@ -1987,8 +1990,11 @@ impl Render for SessionPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let asks = self.asks(cx);
-        self.ask_dock
-            .update(cx, |dock, cx| dock.sync(asks, window, cx));
+        let room = self.room.take();
+        self.ask_dock.update(cx, |dock, cx| {
+            dock.set_room(room, cx);
+            dock.sync(asks, window, cx)
+        });
         let p = palette(cx);
         let narrow = self.layout == Layout::Narrow;
         let wide = self.layout == Layout::Wide;
@@ -2165,21 +2171,28 @@ impl Render for SessionPage {
                 (true, None) => d.child(self.queued.clone()).child(self.reply.clone()),
                 (true, Some(ended)) => d.child(self.ended_bar(ended, cx)),
                 (false, _) => d.child(self.read_only(cx)),
-            });
+            })
+            .relative()
+            .child(self.room.watch(crate::ask_dock::Part::Composer));
         let column = div()
             .id("session-column")
             .flex_1()
             .min_w_0()
             .h_full()
+            .relative()
             .flex()
             .flex_col()
+            .child(self.room.watch(crate::ask_dock::Part::Column))
             .child(header)
-            // The conversation keeps half the page: past that, the dock of the asks scrolls.
+            // The conversation gives up its room to the dock first, down to what it keeps: past
+            // that the questions of the card scroll.
             .child(
                 div()
                     .flex_1()
-                    .min_h(gpui_kit::relative(0.5))
-                    .child(self.conversation.clone()),
+                    .min_h_0()
+                    .relative()
+                    .child(self.conversation.clone())
+                    .child(self.room.watch(crate::ask_dock::Part::Conversation)),
             )
             // A review says what it waits for under its steps, and the line folds away with it.
             .child(presence_of(
@@ -2220,15 +2233,7 @@ impl Render for SessionPage {
                     .mx_auto()
                     .px(if narrow { space::XL } else { space::XXXL })
                     .child(self.ask_dock.update(cx, |dock, cx| dock.header(cx)))
-                    .child(
-                        div()
-                            .id("ask-dock-scroll")
-                            .flex_shrink(1.)
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .child(self.ask_dock.clone())
-                            .test_support(),
-                    )
+                    .child(self.ask_dock.clone())
                     .test_support(),
             )
             .child(dock)
