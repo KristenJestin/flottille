@@ -758,10 +758,36 @@ impl ConnectionsSection {
     fn written(&mut self, writing: Writing, answer: Result<Value, String>, cx: &mut Context<Self>) {
         self.saving = false;
         match answer {
-            Ok(_) => {
+            Ok(saved) => {
+                // The daemon pins what a server announces as it is added or edited: the tool is
+                // given at once, every action judged, and the review is there to change that.
+                let was_ready = |name: &str| {
+                    self.listed
+                        .iter()
+                        .flatten()
+                        .any(|server| server.name == name && server.state == "ready")
+                };
+                let given = |name: &str, cx: &mut Context<Self>| {
+                    let review = cx.weak_entity();
+                    let to_review = name.to_owned();
+                    Toast::success(format!("Server {name} is given to agents"))
+                        .detail("Every action is judged.")
+                        .action("Review", move |_, cx| {
+                            review
+                                .update(cx, |this, cx| this.open_review(&to_review, cx))
+                                .ok();
+                        })
+                };
+                let ready = saved["state"] == "ready";
                 let said = match &writing {
-                    Writing::Added(name) => Toast::success(format!("Server {name} added"))
-                        .detail("Review it to give agents its tool."),
+                    Writing::Added(name) if ready => given(name, cx),
+                    Writing::Edited(name) if ready && !was_ready(name) => given(name, cx),
+                    Writing::Added(name) => Toast::success(format!("Server {name} added")).detail(
+                        match saved["failing"].as_str() {
+                            Some(why) => format!("It waits for its review: {why}"),
+                            None => "Review it to give agents its tool.".to_owned(),
+                        },
+                    ),
                     Writing::Edited(name) => Toast::success(format!("Server {name} saved")),
                     Writing::Switched(name, true) => {
                         Toast::success(format!("Server {name} turned on"))

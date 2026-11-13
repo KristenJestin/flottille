@@ -40,8 +40,8 @@ pub const EXTENSION: Extension = Extension {
     scope: Scope::Global,
     on_by_default: false,
     switch: "Use connections",
-    usage: "Add a server once; every session of every project gets it. A new version stops it \
-            until you review it again.",
+    usage: "Add a server once; every session of every project gets it. A change in what it \
+            gives agents stops it until you review it.",
     place: Place::Row {
         icon: "plug",
         line: "Your MCP servers, given to every agent behind the gate.",
@@ -95,6 +95,7 @@ pub const EXTENSION: Extension = Extension {
     }),
     needs_you: &[
         ("connection.cut_off", cut_off_text),
+        ("connection.version_moved", version_moved_text),
         ("connection.signed_out", signed_out_text),
         ("connection.tokens_unsaved", tokens_unsaved_text),
     ],
@@ -570,6 +571,58 @@ fn changes(pin: &Listing, now: &Listing) -> Vec<String> {
     }
     changed.extend(action_changes(pin, now));
     changed
+}
+
+/// Whether `now` is the pin with another version and nothing else: the same server, the same
+/// instructions, the same actions (name, description, schema, annotations) and the same names
+/// never offered. Strict: a version either side does not say as a string, or any other key of
+/// `serverInfo` that differs, is a change.
+fn version_only(pin: &Listing, now: &Listing) -> bool {
+    let version = |listing: &Listing| listing.server["version"].as_str().map(str::to_owned);
+    let without_version = |listing: &Listing| {
+        let mut server = listing.server.clone();
+        server.as_object_mut()?.remove("version");
+        Some(server)
+    };
+    match (version(pin), version(now)) {
+        (Some(had), Some(is)) if had != is => {}
+        _ => return false,
+    }
+    without_version(pin).is_some_and(|had| Some(had) == without_version(now))
+        && pin.instructions == now.instructions
+        && action_changes(pin, now).is_empty()
+}
+
+/// The pin moves to the version the server announces now, `now` being `version_only` of it: the
+/// settings stay, the connection is not cut off, and the inbox says so.
+fn move_pin(daemon: &Daemon, name: &str, pin: &Listing, now: &Listing) {
+    let said = |listing: &Listing| short(listing.server["version"].as_str().unwrap_or("?"));
+    let event = json!({"name": name, "tool": format!("{PREFIX}{name}"),
+        "from": said(pin), "to": said(now)});
+    let server = now.server.clone();
+    let moved = write_row(
+        daemon,
+        name,
+        |row| {
+            if let Some(held) = row.pin.as_mut().filter(|held| *held == pin) {
+                held.server = server;
+            }
+        },
+        Some(("connection.version_moved", event)),
+    );
+    if let Err(error) = moved {
+        eprintln!("flottille daemon: connection {name}: {error}");
+    }
+    changed_event(daemon, name, None);
+}
+
+fn version_moved_text(data: &Value) -> String {
+    format!(
+        "{} {} → {}, nothing changed in what it gives agents",
+        data["name"].as_str().unwrap_or_default(),
+        data["from"].as_str().unwrap_or_default(),
+        data["to"].as_str().unwrap_or_default()
+    )
 }
 
 /// What changed of the actions alone, as a server that says its tools changed is compared.
@@ -1289,8 +1342,8 @@ fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
         };
         match method.as_str() {
             "connection.list" => list(&daemon),
-            "connection.add" => add(&daemon, params),
-            "connection.edit" => edit(&daemon, params),
+            "connection.add" => add(&daemon, params).await,
+            "connection.edit" => edit(&daemon, params).await,
             "connection.remove" => remove(&daemon, params).await,
             "connection.review" => review(&daemon, params).await,
             "connection.accept" => accept(&daemon, params).await,
@@ -1409,7 +1462,7 @@ fn servers(
         })
 }
 
-fn add(daemon: &Daemon, params: Value) -> std::result::Result<Value, Failure> {
+async fn add(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
     let table = params
         .as_object()
         .ok_or_else(|| Failure::refused("connection.add takes an object"))?;
@@ -1429,7 +1482,33 @@ fn add(daemon: &Daemon, params: Value) -> std::result::Result<Value, Failure> {
     // A connection added under a name that was removed starts from nothing.
     forget_row(daemon, &name)?;
     changed_event(daemon, &name, None);
+    pin_at_once(daemon, &name).await;
     shown(daemon, &name)
+}
+
+/// A connection added or edited is given to agents at once: what its server announces is
+/// reviewed and accepted as the user's own Accept would, every action judged where the pin does
+/// not say otherwise (one path, not a second pin writer). Not for one that is off (no server
+/// starts for it), cut off (the diff is read first), signed out, or whose server does not start:
+/// it waits for its review, and `failing` says why.
+async fn pin_at_once(daemon: &Arc<Daemon>, name: &str) {
+    let Some((declaration, row, _)) = now_of(daemon, name) else {
+        return;
+    };
+    let on = super::is_on(&daemon.paths, &EXTENSION);
+    if !on
+        || !declaration.enabled
+        || row.cut_off.is_some()
+        || row.signed_out.is_some()
+        || state_of(true, &declaration, &row) != State::Awaiting
+    {
+        return;
+    }
+    let named = json!({"name": name});
+    if review(daemon, named.clone()).await.is_ok() {
+        // A refusal leaves it waiting: the user reviews it.
+        let _ = accept(daemon, named).await;
+    }
 }
 
 fn declaration_exists(daemon: &Daemon, name: &str) -> bool {
@@ -1447,7 +1526,7 @@ fn shown(daemon: &Daemon, name: &str) -> std::result::Result<Value, Failure> {
 
 /// `connection.edit {name, …}`: the keys given replace the declaration's; `null` removes one.
 /// A command given drops the URL, and the other way round.
-fn edit(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+async fn edit(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
     let name = named(&params)?;
     let old = declaration(&daemon.paths, &name)?;
     let mut table = old.json().as_object().expect("an object").clone();
@@ -1499,6 +1578,7 @@ fn edit(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failu
         client::stop_soon(daemon, &name);
     }
     changed_event(daemon, &name, None);
+    pin_at_once(daemon, &name).await;
     shown(daemon, &name)
 }
 

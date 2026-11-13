@@ -1386,15 +1386,16 @@ fn the_window_draws_no_frame_at_rest_on_connections_page_and_its_review(cx: &mut
         .to_string(),
     )
     .unwrap();
-    user.call(
-        "extension.set",
-        json!({"name": "connections", "enabled": true}),
-    )
-    .unwrap();
+    // Added while the extension is off, it waits for its first review, which shows its actions.
     user.call(
         "connection.add",
         json!({"name": "notes", "about": "A notes server.",
             "command": [fake.display().to_string(), "--script", script.display().to_string()]}),
+    )
+    .unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
     )
     .unwrap();
     let (shell, cx) = window(&user, cx);

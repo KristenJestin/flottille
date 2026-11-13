@@ -936,17 +936,29 @@ actions it covers and those it does not, so that a gap is seen before it is used
 that changes after the user trusted it is a rug pull. So the user's trust is in **what they
 read**:
 
-- **At the first connection**, Flottille records the server's announced name and version (MCP
-  `serverInfo`), its `instructions` and, for each action, its name, description, argument schema
-  and annotations. The
-  connection is **awaiting review**: no agent has its tool, no call reaches the server, until the
-  user has read that list and those instructions in the window, turned off any action they do not
-  want, set any other
-  than **judged**, and accepted. That acceptance is the pin.
+- **Added = accepted** (decision 16). When a connection is added, or its declaration edited, and
+  it is on, the daemon starts the server, lists what it announces and **pins it at once with every
+  action judged**: Flottille records the server's announced name and version (MCP `serverInfo`),
+  its `instructions` and, for each action, its name, description, argument schema and annotations,
+  and the agents have the tool right away. It is the user's Accept, by the same code (a review,
+  then an accept with nothing said: one pin writer, not two), and the gate is unchanged: judged
+  means the judge in Auto, a card in Ask, and passes in Full. The review stays in the row's menu
+  to read the instructions, turn actions off, and set them **passes** or **asked**; the toast
+  after Save says that the tool is given and offers it. The connection waits **awaiting review**,
+  its tool given to no agent, only where the daemon could not pin it: the extension or the
+  connection is off while it is added, its server does not start (`failing` says why), it is
+  signed out, or it was cut off (an edit does not accept what a cut-off asked the user to read);
+  the user's Accept is then the pin, as it was.
 - **At every start of the server**, and whenever it says its tools changed
   (`notifications/tools/list_changed`), the daemon lists them again and compares with the pin.
-  **Any change cuts the connection off**: another version, other instructions (given, removed or
-  changed), an action added, removed or changed
+  **A new version that changes nothing agents read passes on its own** (decision 16): when the
+  server's `serverInfo` differs in `version` alone and the instructions and every action (name,
+  description, schema, annotations) are the same, the pin moves to the new version, the settings
+  stay, the connection is not cut off and an inbox line says it (`connection.version_moved`:
+  `almanac 1.0.0 → 1.1.0, nothing changed in what it gives agents`). The comparison is exactly the
+  pin's, strict: anything else that differs, a doubt, is a change.
+  **Any other change cuts the connection off**: another server name, other instructions (given,
+  removed or changed), an action added, removed or changed
   in its description, schema or annotations. An action name that is not made of letters, digits,
   `_`, `-` and `.` (48 at most) is never offered and is said in the review.
 - **Cut off**, the tool leaves the lists of every session, as a tool that could only
@@ -959,10 +971,14 @@ read**:
   line), the unchanged ones folded away. Texts are shown as plain text, never as Markdown. The user
   accepts, or leaves the connection off. **Accepting keeps the settings of the actions that did
   not change and puts every new or changed one to judged** (turned on, as the user has just read
-  it): the review proposes exactly that, so a client that answers it back changes nothing.
+  it): the review proposes exactly that, so a client that answers it back changes nothing. The
+  review of a connection that nothing cut off shows no change, its actions folded away, and is the
+  place to set them.
 - **A declaration the user edits** (the command, its arguments, the URL, the variables, the limits)
-  is a different server as far as trust goes: the connection is awaiting review again, the diff
-  against the last pin.
+  is a different server as far as trust goes: what it announces is pinned again at once, as when
+  it was added, against the last pin: the settings of the actions that did not change are kept,
+  each new or changed one is judged. Its sentence, its switch and its excepted projects are no
+  new server.
 
 The pin and what the user decided in a review (which actions are on, which pass or are always
 asked) are kept, once per connection, together in the extension's own space of the store
@@ -978,7 +994,7 @@ was turned off while it ran; it may have been performed`.
 (the connections ready) or `Off`. Its page follows rule 14: the switch **Use connections**, its
 sentence ("Your MCP servers, each given to every agent as one tool. Their calls go through the
 judge like any other.") and its usage line ("Add a server once; every session of every project
-gets it. A new version stops it until you review it again."), shown while it is off. On, under
+gets it. A change in what it gives agents stops it until you review it."), shown while it is off. On, under
 them, **Servers** (a count, **New server**) in the list pattern (rule 7 of `reference/gpui.md`):
 one row per connection, its plug, its name, the version accepted as a tag, one line of its state
 (`On · 12 actions`, `Waiting for its first review`, `Waiting for a review of your edit`,
@@ -1000,7 +1016,10 @@ folded under one line, the limits and what they cover, the names never offered. 
 switch, **Offer it to agents**, and under it **When an agent calls it**: radios `Allowed`, `Judged`
 (the one chosen until the user picks another, and for a changed action too) and `Asked`; the word
 `passes` is not shown. Each variable and limit control has its label.
-**Accept** pins what was read with those settings. Nothing of it is per project. A call held for
+**Accept** pins what was read with those settings. Nothing of it is per project. **Save**, on a
+server that is on, gets it pinned at once ("Pinning"): its toast says `Server almanac is given to
+agents`, `Every action is judged.`, with a **Review** button that opens the review (a server that
+did not start says so instead, and waits for its first review). A call held for
 the user is a card as any, titled `Call write on the connection almanac`, its line the
 connection, the action and its arguments. Everything animates as the rest of the window does:
 the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
@@ -1065,6 +1084,16 @@ result is, and a cut-off says its name and version masked and cut at 100 charact
 failed to start (its first error line, or the error), in `failing`, `connection.changed` and the
 review's error, and why its tools could not be listed, in the daemon's log: masked first, then cut,
 so that no secret is cut in two.
+
+**As built (#851).** `connection.add` and `connection.edit` run `connection.review` and then
+`connection.accept {name}` for a connection that is on, enabled, awaiting review and neither cut
+off nor signed out, and answer once they are done: the server is listed within the review's 30
+seconds, and one that fails leaves the connection awaiting review with `failing`. A version-only
+change is found where a server starts for a call (a server already running is never compared, as
+before) and moves the pin there, under the connection's one-call-at-a-time turn, so that no
+accept writes a pin at the same time. A review the user asks for is not a start of that kind: a
+review that finds a new version shows it in the diff, and Accept pins it. Turning the extension
+or a connection on later does not pin one that was added while it was off.
 
 **Examples.** The first two are invented; the others are public programs, the first cases of
 0.3.
@@ -1199,12 +1228,17 @@ The maintainer's answers on Connections.
     description with the enabled actions' names, `help` for an action's schema, results capped,
     masked and recorded like any other.
 15. **No manual classification.** Every call of a connection is judged (Auto) or asked (Ask) by
-    default. **Passes** is an optional shortcut for an action that only reads; **asked** is for one
+    default, from the moment it is added (decision 16). **Passes** is an optional shortcut for an action that only reads; **asked** is for one
     the judge cannot read.
-16. **Pinning.** The server's version, its actions and their descriptions are recorded when the user
-    reviews them; any change cuts the connection off until the user reviews the diff; the
-    settings of unchanged actions are kept and a new action is judged. Descriptions are third-party
-    text put in the agent's context, which is why they are pinned.
+16. **Pinning.** The server's version, its actions and their descriptions are recorded, and they
+    are third-party text put in the agent's context, which is why they are pinned. Replaced on
+    2026-11-13 by the maintainer (#851): **added = accepted**, the daemon pins what a server
+    announces as the connection is added or its declaration edited, every action judged, and the
+    review stays to set them; **a new version alone passes** (the pin moves, the inbox says it)
+    when the instructions and every action are the same; **anything else agents read changed cuts
+    the connection off** until the user reviews the diff, the settings of unchanged actions kept
+    and a new or changed action judged. Before, the first review was a step the user had to do
+    before an agent had the tool, and each version cut the connection off.
 17. **A server's secrets come from the vault** into its environment; the agent never sees them.
 18. **App-wide, off by default.** A connection is declared once, in the user's configuration, and
     has its own switch; on, it is given to every agent of every project. There is no project-level

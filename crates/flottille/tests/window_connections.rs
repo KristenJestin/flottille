@@ -345,8 +345,8 @@ fn its_page_shows_its_usage_line_while_off(cx: &mut TestAppContext) {
     assert_eq!(
         label(cx, "connections-usage").as_deref(),
         Some(
-            "Add a server once; every session of every project gets it. A new version stops it \
-             until you review it again."
+            "Add a server once; every session of every project gets it. A change in what it \
+             gives agents stops it until you review it."
         )
     );
     // Off, the page is that block alone.
@@ -395,9 +395,10 @@ fn an_empty_list_says_what_to_add(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn each_server_is_a_row_with_its_version_its_state_line_and_its_menu(cx: &mut TestAppContext) {
     let user = user();
+    // Added while the extension is off, no server was listed: it waits for its first review.
+    declare(&user, "jotter", &almanac());
     turn_on(&user);
     connect(&user, "almanac", &almanac(), json!({"open": "off"}));
-    declare(&user, "jotter", &almanac());
     connect(&user, "notes", &almanac(), json!({}));
     user.call(
         "connection.edit",
@@ -464,9 +465,16 @@ fn each_server_is_a_row_with_its_version_its_state_line_and_its_menu(cx: &mut Te
 fn a_cut_off_server_says_it_and_its_review_shows_the_new_version(cx: &mut TestAppContext) {
     let user = user();
     turn_on(&user);
-    connect(&user, "almanac", &almanac(), json!({"search": "passes"}));
+    // Added, it is pinned and its server stopped: no review has left one running.
+    declare(&user, "almanac", &almanac());
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes"}}),
+    )
+    .unwrap();
     let mut changed = almanac();
     changed["server"]["version"] = json!("2.0.0");
+    changed["tools"][0]["description"] = json!("Finds notes, and sends them away.");
     // The server stopped once accepted: its next start, at the next call, finds the change.
     write_script(&user, "almanac", &changed);
     let (shell, cx) = window(&user, cx);
@@ -495,7 +503,8 @@ fn a_cut_off_server_says_it_and_its_review_shows_the_new_version(cx: &mut TestAp
     );
     assert!(answer.error, "{}", answer.text);
     until(&shell, cx, "it says it was stopped", |cx| {
-        label(cx, "connection-almanac-line").as_deref() == Some("Stopped: new version, review it")
+        label(cx, "connection-almanac-line").as_deref()
+            == Some("Stopped: new version, the action search changed (its description), review it")
     });
 
     click(cx, "connection-more-almanac");
@@ -560,13 +569,35 @@ fn new_server_declares_one_from_the_form_dialog(cx: &mut TestAppContext) {
     until(&shell, cx, "its row arrives", |cx| {
         visible(cx, "connection-almanac")
     });
+    // The daemon gave it to agents at once: the toast says so, every action judged, and its
+    // button is the review.
+    let said = toasts(&shell, cx);
     assert!(
-        toasts(&shell, cx)
-            .iter()
-            .any(|t| t == "Server almanac added"),
-        "{:?}",
-        toasts(&shell, cx)
+        said.iter()
+            .any(|t| t == "Server almanac is given to agents"),
+        "{said:?}"
     );
+    assert_eq!(added["state"], "ready");
+    assert_eq!(
+        label(cx, "connection-almanac-line").as_deref(),
+        Some("On · 3 actions")
+    );
+    let second: Vec<Option<String>> = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|t| t.second_line().map(str::to_owned))
+            .collect()
+    });
+    assert!(
+        second.contains(&Some("Every action is judged.".to_owned())),
+        "{second:?}"
+    );
+    assert_eq!(label(cx, "toast-1-action").as_deref(), Some("Review"));
+    click(cx, "toast-1-action");
+    until(&shell, cx, "the review opens", |cx| {
+        present(cx, "connection-review-server")
+    });
 }
 
 #[gpui_kit::test]
@@ -744,7 +775,7 @@ fn every_control_of_the_form_has_a_visible_label(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn editing_the_command_asks_for_a_new_review(cx: &mut TestAppContext) {
+fn editing_the_command_pins_the_server_again_with_no_review(cx: &mut TestAppContext) {
     let user = user();
     turn_on(&user);
     connect(&user, "almanac", &almanac(), json!({}));
@@ -761,9 +792,17 @@ fn editing_the_command_asks_for_a_new_review(cx: &mut TestAppContext) {
     assert!(said.contains("--script"), "the command as a line: {said}");
     type_in(&fields.command, &format!("{said} --quiet"), cx);
     click(cx, "save-connection");
-    until(&shell, cx, "it waits for a review", |cx| {
-        label(cx, "connection-almanac-line").as_deref() == Some("Waiting for a review of your edit")
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-modal")
     });
+    // The daemon listed what the edited server announces and pinned it: no review is asked.
+    let edited = connection(&user, "almanac").unwrap();
+    assert_eq!(edited["state"], "ready");
+    assert!(edited["command"].to_string().contains("--quiet"));
+    assert_eq!(
+        label(cx, "connection-almanac-line").as_deref(),
+        Some("On · 3 actions")
+    );
 }
 
 #[gpui_kit::test]
@@ -812,8 +851,9 @@ fn removing_a_server_asks_in_a_confirmation(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_review_is_a_large_dialog_where_each_action_is_judged_by_default(cx: &mut TestAppContext) {
     let user = user();
-    turn_on(&user);
+    // A first review: the connection was added while the extension was off.
     declare(&user, "almanac", &almanac());
+    turn_on(&user);
     let (shell, cx) = window(&user, cx);
     open_page(&shell, cx);
     until(&shell, cx, "its row", |cx| {
@@ -1258,7 +1298,7 @@ fn a_sign_in_that_cannot_begin_says_why_in_a_toast(cx: &mut TestAppContext) {
             .any(|t| t == "plain was not signed in")
     });
     until(&shell, cx, "the row no longer waits", |cx| {
-        label(cx, "connection-plain-line").as_deref() == Some("Waiting for its first review")
+        label(cx, "connection-plain-line").as_deref() == Some("On · 3 actions")
     });
     let _ = server.kill();
     let _ = server.wait();

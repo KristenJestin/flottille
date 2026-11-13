@@ -524,9 +524,16 @@ setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
   one under `[[connections.server]]` of `extensions.toml`, checked key by key as the file is; `env`
   and `headers` name vault entries (`{"TOKEN": {"vault": "<entry>"}}`), each of every project
   (an entry tied to one project is `refused`); a `url` is `https://`, or `http://` on this machine.
+  With Connections on and the connection enabled, the daemon then starts its server, reviews and
+  accepts what it announces exactly as `connection.review` and `connection.accept` would, every
+  action `judged`, before it answers: the answer's `state` is `ready` and `actions` lists them. A
+  server that does not start leaves it `awaiting review`, `failing` saying why; the answer comes
+  once the server has listed its tools or failed to (30 seconds at most).
 - `connection.edit {name, …}` replaces the keys given (`null` removes one; a command drops the URL
-  and the other way round). An edit of the command, the URL, `env`, `headers` or `only` asks for a
-  new review; `about`, `enabled`, `except` and `client_id` do not.
+  and the other way round). An edit of the command, the URL, `env`, `headers` or `only` is pinned
+  again as `connection.add` pins, the settings of the actions that did not change kept and each new
+  or changed one `judged`, unless the connection is cut off (its diff is read first) or off;
+  `about`, `enabled`, `except` and `client_id` change nothing of the pin.
 - `connection.remove {name}` removes it, stops its server and forgets what was accepted, and its
   sign-in's tokens.
 - `connection.login {name}` begins the OAuth sign-in of a URL connection
