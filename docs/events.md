@@ -212,8 +212,8 @@ version alone is `connection.version_moved`), found as it started or when it sai
 
 The server started as another version, and nothing agents read changed (its `serverInfo` differs
 in `version` alone; the instructions and each action's name, description, schema and annotations
-are the same): the pin moved to the new version, the settings stay, the connection was not cut
-off, and the inbox says so (kind `connections`: `almanac 1.0.0 → 1.1.0, nothing changed in what
+are the same): the pin moved to the new version (the event is stored only if the pin was written),
+the settings stay, the connection was not cut off, and the inbox says so (kind `connections`: `almanac 1.0.0 → 1.1.0, nothing changed in what
 it gives agents`).
 
 | Field | |

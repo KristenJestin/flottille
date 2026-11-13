@@ -528,12 +528,19 @@ setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
   accepts what it announces exactly as `connection.review` and `connection.accept` would, every
   action `judged`, before it answers: the answer's `state` is `ready` and `actions` lists them. A
   server that does not start leaves it `awaiting review`, `failing` saying why; the answer comes
-  once the server has listed its tools or failed to (30 seconds at most).
+  once the server has listed its tools or failed to (30 seconds at most). `given` says whether
+  this very call pinned it. One added while the extension or the connection is off is pinned when
+  it is turned on, by `extension.set {name: "connections", enabled: true}` (whose answer then has
+  `given`, the names of the connections it pinned) or by `connection.edit {enabled: true}`; so is
+  one whose sign-in (`connection.login`) ends well.
 - `connection.edit {name, …}` replaces the keys given (`null` removes one; a command drops the URL
   and the other way round). An edit of the command, the URL, `env`, `headers` or `only` is pinned
-  again as `connection.add` pins, the settings of the actions that did not change kept and each new
-  or changed one `judged`, unless the connection is cut off (its diff is read first) or off;
-  `about`, `enabled`, `except` and `client_id` change nothing of the pin.
+  again as `connection.add` pins, the settings of the actions that did not change kept, with
+  `given` in the answer; but not when the connection is cut off (its diff is read first) or off,
+  and not when it has a pin and its server now announces more than another version (instructions
+  or an action changed): it then waits `awaiting review` with the diff, and `given` is false.
+  `about`, `except` and `client_id` change nothing of the pin; `enabled: true` pins one that was
+  off the same way.
 - `connection.remove {name}` removes it, stops its server and forgets what was accepted, and its
   sign-in's tokens.
 - `connection.login {name}` begins the OAuth sign-in of a URL connection

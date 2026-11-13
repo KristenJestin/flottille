@@ -112,6 +112,18 @@ fn connect(user: &User, name: &str, script: &Value, settings: Value) {
     .unwrap();
 }
 
+/// Declared with the extension on while its server cannot start (its script is not written yet):
+/// nothing was listed, so it waits for its first review. `write_script` lets it start.
+fn declare_waiting(user: &User, name: &str) {
+    user.call(
+        "connection.add",
+        json!({"name": name, "about": format!("The {name} of the user."),
+            "command": command_of(user, name)}),
+    )
+    .unwrap();
+    assert_eq!(connection(user, name).unwrap()["state"], "awaiting review");
+}
+
 fn connection(user: &User, name: &str) -> Option<Value> {
     user.call("connection.list", json!({})).unwrap()["connections"]
         .as_array()
@@ -395,9 +407,9 @@ fn an_empty_list_says_what_to_add(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn each_server_is_a_row_with_its_version_its_state_line_and_its_menu(cx: &mut TestAppContext) {
     let user = user();
-    // Added while the extension is off, no server was listed: it waits for its first review.
-    declare(&user, "jotter", &almanac());
+    // Its server cannot start, so nothing was listed: it waits for its first review.
     turn_on(&user);
+    declare_waiting(&user, "jotter");
     connect(&user, "almanac", &almanac(), json!({"open": "off"}));
     connect(&user, "notes", &almanac(), json!({}));
     user.call(
@@ -851,9 +863,10 @@ fn removing_a_server_asks_in_a_confirmation(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_review_is_a_large_dialog_where_each_action_is_judged_by_default(cx: &mut TestAppContext) {
     let user = user();
-    // A first review: the connection was added while the extension was off.
-    declare(&user, "almanac", &almanac());
+    // A first review: the connection was added while its server could not start.
     turn_on(&user);
+    declare_waiting(&user, "almanac");
+    write_script(&user, "almanac", &almanac());
     let (shell, cx) = window(&user, cx);
     open_page(&shell, cx);
     until(&shell, cx, "its row", |cx| {

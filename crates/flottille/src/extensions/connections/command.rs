@@ -30,7 +30,7 @@ pub enum ConnectionAction {
         #[arg(long)]
         json: bool,
     },
-    /// Change a connection's declaration; a change of what trust is given to pins it again
+    /// Change a connection's declaration; pinned again at once unless its server announces a change
     Edit {
         name: String,
         #[arg(long)]
@@ -186,6 +186,10 @@ pub fn run(paths: &Paths, action: ConnectionAction) -> Result<ExitCode> {
                     Some("ready") => println!(
                         "Declared the connection {name}: it is given to your agents, every \
                          action judged (`flottille connection review {name}` to change that)."
+                    ),
+                    Some("off") => println!(
+                        "Declared the connection {name}: it is off, and given to your agents, \
+                         every action judged, when it is turned on."
                     ),
                     _ => println!(
                         "Declared the connection {name}: review it to give it to your agents \

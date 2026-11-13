@@ -892,7 +892,8 @@ Its cost in the agent's context is about one tool line:
   with one line saying what it was and how big. `isError` is an error.
 - **Every call is recorded** as an `agent.tool_served` event of the agent (the action and its
   arguments in the arguments, cut and masked as all are), and a connection that starts, stops,
-  fails or is cut off says so in `connection.changed` and `connection.cut_off` (`events.md`).
+  fails or is cut off says so in `connection.changed` and `connection.cut_off`, and one whose
+  version alone moved in `connection.version_moved` (`events.md`).
 
 Calls to one connection run one at a time, in order: a browser or a desktop has one state. A call
 has 120 seconds, then it is cancelled and answers `the call failed: …`. The server starts at the
@@ -944,11 +945,14 @@ read**:
   then an accept with nothing said: one pin writer, not two), and the gate is unchanged: judged
   means the judge in Auto, a card in Ask, and passes in Full. The review stays in the row's menu
   to read the instructions, turn actions off, and set them **passes** or **asked**; the toast
-  after Save says that the tool is given and offers it. The connection waits **awaiting review**,
-  its tool given to no agent, only where the daemon could not pin it: the extension or the
-  connection is off while it is added, its server does not start (`failing` says why), it is
-  signed out, or it was cut off (an edit does not accept what a cut-off asked the user to read);
-  the user's Accept is then the pin, as it was.
+  after Save says that the tool is given and offers it. **A connection added while the extension
+  or the connection was off is pinned the same way when it is turned on**, by the extension's
+  switch or the connection's own (the toast of the switch says which tools were given). So is one
+  that needed a sign-in: its first review failed, and it is pinned once the sign-in ends. The
+  connection waits **awaiting review**, its tool given to no agent, only where the daemon could
+  not pin it: its server does not start (`failing` says why), it is signed out, it was cut off
+  (an edit does not accept what a cut-off asked the user to read), or it has a pin and its server
+  now announces more than another version (below); the user's Accept is then the pin, as it was.
 - **At every start of the server**, and whenever it says its tools changed
   (`notifications/tools/list_changed`), the daemon lists them again and compares with the pin.
   **A new version that changes nothing agents read passes on its own** (decision 16): when the
@@ -976,9 +980,14 @@ read**:
   place to set them.
 - **A declaration the user edits** (the command, its arguments, the URL, the variables, the limits)
   is a different server as far as trust goes: what it announces is pinned again at once, as when
-  it was added, against the last pin: the settings of the actions that did not change are kept,
-  each new or changed one is judged. Its sentence, its switch and its excepted projects are no
-  new server.
+  it was added, against the last pin: the settings of the actions that did not change are kept.
+  **But never a change nobody read**: a connection that has a pin is pinned at once only if what
+  the server announces differs from the pin by its version alone (or not at all). A server that
+  changed its instructions or an action since the user read them, and has not restarted since
+  (so nothing cut the connection off yet), would otherwise have that text pinned unread by an
+  edit that has nothing to do with it; the connection then waits for its review, with the diff,
+  and the toast says a review is needed. Its sentence, its switch and its excepted projects are
+  no new server.
 
 The pin and what the user decided in a review (which actions are on, which pass or are always
 asked) are kept, once per connection, together in the extension's own space of the store
@@ -1017,9 +1026,15 @@ switch, **Offer it to agents**, and under it **When an agent calls it**: radios 
 (the one chosen until the user picks another, and for a changed action too) and `Asked`; the word
 `passes` is not shown. Each variable and limit control has its label.
 **Accept** pins what was read with those settings. Nothing of it is per project. **Save**, on a
-server that is on, gets it pinned at once ("Pinning"): its toast says `Server almanac is given to
-agents`, `Every action is judged.`, with a **Review** button that opens the review (a server that
-did not start says so instead, and waits for its first review). A call held for
+server that is on, gets it pinned at once ("Pinning"): the daemon's answer says whether this write
+gave the tool (`given`), and the toast then says `Server almanac is given to agents`, `Every
+action is judged.`, with a **Review** button that opens the review. One that is not given says why
+under its title: its server did not start (`failing`), or it announces a change nobody read (a
+**Review** button); a server added while Connections is off says it is given when it is turned
+on. The form's button reads `Adding…` or `Saving…` while the daemon lists the server's tools (30
+seconds at most) and cannot be pressed again. Turning Connections on, or a server on, gives what
+waited, and its toast says so (`Server almanac is given to agents`, or the number and the names).
+A call held for
 the user is a card as any, titled `Call write on the connection almanac`, its line the
 connection, the action and its arguments. Everything animates as the rest of the window does:
 the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
@@ -1085,15 +1100,22 @@ failed to start (its first error line, or the error), in `failing`, `connection.
 review's error, and why its tools could not be listed, in the daemon's log: masked first, then cut,
 so that no secret is cut in two.
 
-**As built (#851).** `connection.add` and `connection.edit` run `connection.review` and then
+**As built (#851).** One function, `pin_at_once`, runs `connection.review` and then
 `connection.accept {name}` for a connection that is on, enabled, awaiting review and neither cut
-off nor signed out, and answer once they are done: the server is listed within the review's 30
-seconds, and one that fails leaves the connection awaiting review with `failing`. A version-only
-change is found where a server starts for a call (a server already running is never compared, as
-before) and moves the pin there, under the connection's one-call-at-a-time turn, so that no
-accept writes a pin at the same time. A review the user asks for is not a start of that kind: a
-review that finds a new version shows it in the diff, and Accept pins it. Turning the extension
-or a connection on later does not pin one that was added while it was off.
+off nor signed out, and says whether it pinned. It is called by `connection.add` and
+`connection.edit` (which answer once it is done, with `given`: the server is listed within the
+review's 30 seconds, and one that fails leaves the connection awaiting review with `failing`), by
+`extension.set` when Connections is turned on (every declared connection, at the same time, the
+names given in the answer's `given`), by `connection.edit {enabled: true}`, and by the end of a
+sign-in (`connection.signed_in`). Between the review and the accept it compares the pin with what
+the review saw: with a pin, a difference other than the version stops it, and the connection waits
+for its review. A version-only change is found where a server starts for a call (a server already
+running is never compared, as before) and moves the pin there, under the connection's
+one-call-at-a-time turn, so that no accept writes a pin at the same time; the event and the
+`connection.changed` come only if the pin was written. An accept with no review due sets the
+settings alone, under that same turn and from the pin as it is then: a pin moved a moment before
+is never written back. A review the user asks for is not a start of that kind: a review that
+finds a new version shows it in the diff, and Accept pins it.
 
 **Examples.** The first two are invented; the others are public programs, the first cases of
 0.3.
@@ -1238,7 +1260,10 @@ The maintainer's answers on Connections.
     when the instructions and every action are the same; **anything else agents read changed cuts
     the connection off** until the user reviews the diff, the settings of unchanged actions kept
     and a new or changed action judged. Before, the first review was a step the user had to do
-    before an agent had the tool, and each version cut the connection off.
+    before an agent had the tool, and each version cut the connection off. The same day, the
+    maintainer decided that a connection added while the extension or the connection was off is
+    pinned the same way when it is turned on, and that an edit never pins a change the user has
+    not read.
 17. **A server's secrets come from the vault** into its environment; the agent never sees them.
 18. **App-wide, off by default.** A connection is declared once, in the user's configuration, and
     has its own switch; on, it is given to every agent of every project. There is no project-level

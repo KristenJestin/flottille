@@ -600,20 +600,24 @@ fn move_pin(daemon: &Daemon, name: &str, pin: &Listing, now: &Listing) {
     let event = json!({"name": name, "tool": format!("{PREFIX}{name}"),
         "from": said(pin), "to": said(now)});
     let server = now.server.clone();
-    let moved = write_row(
+    let moved = write_row_if(
         daemon,
         name,
-        |row| {
-            if let Some(held) = row.pin.as_mut().filter(|held| *held == pin) {
+        |row| match row.pin.as_mut().filter(|held| *held == pin) {
+            Some(held) => {
                 held.server = server;
+                true
             }
+            // Gone or pinned again since it was read: nothing moves, nothing is said.
+            None => false,
         },
         Some(("connection.version_moved", event)),
     );
-    if let Err(error) = moved {
-        eprintln!("flottille daemon: connection {name}: {error}");
+    match moved {
+        Ok(true) => changed_event(daemon, name, None),
+        Ok(false) => {}
+        Err(error) => eprintln!("flottille daemon: connection {name}: {error}"),
     }
-    changed_event(daemon, name, None);
 }
 
 fn version_moved_text(data: &Value) -> String {
@@ -741,10 +745,32 @@ fn write_row(
     change: impl FnOnce(&mut Row),
     event: Option<(&str, Value)>,
 ) -> Result<()> {
+    write_row_if(
+        daemon,
+        name,
+        |row| {
+            change(row);
+            true
+        },
+        event,
+    )
+    .map(|_| ())
+}
+
+/// `write_row` where `change` says whether it changed the row: nothing is written, and no event
+/// stored, when it did not. Whether it wrote.
+fn write_row_if(
+    daemon: &Daemon,
+    name: &str,
+    change: impl FnOnce(&mut Row) -> bool,
+    event: Option<(&str, Value)>,
+) -> Result<bool> {
     in_space(daemon, |space| {
         let tables = space.tables();
         let mut row = row_in(tables, name)?.unwrap_or_default();
-        change(&mut row);
+        if !change(&mut row) {
+            return Ok((false, None));
+        }
         let text = |listing: &Option<Listing>| {
             listing
                 .as_ref()
@@ -773,7 +799,7 @@ fn write_row(
             Some((name, data)) => Some(space.append_event(name, data)?),
             None => None,
         };
-        Ok(((), event))
+        Ok((true, event))
     })
 }
 
@@ -1289,6 +1315,9 @@ async fn signed_in(daemon: &Arc<Daemon>, name: &str, ended: std::result::Result<
             if was_out {
                 crate::projects::tools_changed(daemon);
             }
+            // A server that needs the sign-in could not list its tools before it: now it is given
+            // to agents, as it would have been if it had not asked.
+            pin_at_once(daemon, name).await;
             changed_event(daemon, name, None);
         }
         Err(why) => {
@@ -1482,18 +1511,22 @@ async fn add(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, 
     // A connection added under a name that was removed starts from nothing.
     forget_row(daemon, &name)?;
     changed_event(daemon, &name, None);
-    pin_at_once(daemon, &name).await;
-    shown(daemon, &name)
+    let given = pin_at_once(daemon, &name).await;
+    shown_given(daemon, &name, given)
 }
 
-/// A connection added or edited is given to agents at once: what its server announces is
-/// reviewed and accepted as the user's own Accept would, every action judged where the pin does
-/// not say otherwise (one path, not a second pin writer). Not for one that is off (no server
-/// starts for it), cut off (the diff is read first), signed out, or whose server does not start:
-/// it waits for its review, and `failing` says why.
-async fn pin_at_once(daemon: &Arc<Daemon>, name: &str) {
+/// A connection is given to agents at once, as it is added, edited, turned on or signed in: what
+/// its server announces is reviewed and accepted as the user's own Accept would, every action
+/// judged where the pin does not say otherwise (one path, not a second pin writer). Whether it
+/// was given.
+///
+/// Not one that is off (no server starts for it), cut off (the diff is read first), signed out,
+/// or whose server does not start: it waits for its review, and `failing` says why. Not either
+/// one that has a pin whose server now announces more than another version: that is a change
+/// nobody read, and it waits for its review with the diff.
+async fn pin_at_once(daemon: &Arc<Daemon>, name: &str) -> bool {
     let Some((declaration, row, _)) = now_of(daemon, name) else {
-        return;
+        return false;
     };
     let on = super::is_on(&daemon.paths, &EXTENSION);
     if !on
@@ -1502,13 +1535,39 @@ async fn pin_at_once(daemon: &Arc<Daemon>, name: &str) {
         || row.signed_out.is_some()
         || state_of(true, &declaration, &row) != State::Awaiting
     {
-        return;
+        return false;
     }
     let named = json!({"name": name});
-    if review(daemon, named.clone()).await.is_ok() {
-        // A refusal leaves it waiting: the user reviews it.
-        let _ = accept(daemon, named).await;
+    // A refusal leaves it waiting: the user reviews it.
+    if review(daemon, named.clone()).await.is_err() {
+        return false;
     }
+    let now = self::row(daemon, name);
+    let unread = match (&now.pin, &now.seen) {
+        (Some(pin), Some(seen)) => !changes(pin, seen).is_empty() && !version_only(pin, seen),
+        _ => false,
+    };
+    !unread && accept(daemon, named).await.is_ok()
+}
+
+/// The connections that were added while the extension was off, or edited since, given to agents
+/// now that it is on, by the rule of `pin_at_once`: the names of those given.
+pub async fn turned_on(daemon: &Arc<Daemon>) -> Vec<String> {
+    let names: Vec<String> = declarations(&daemon.paths)
+        .map(|all| {
+            all.into_iter()
+                .map(|declaration| declaration.name)
+                .collect()
+        })
+        .unwrap_or_default();
+    futures::future::join_all(names.into_iter().map(|name| async move {
+        let given = pin_at_once(daemon, &name).await;
+        given.then_some(name)
+    }))
+    .await
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn declaration_exists(daemon: &Daemon, name: &str) -> bool {
@@ -1522,6 +1581,14 @@ fn shown(daemon: &Daemon, name: &str) -> std::result::Result<Value, Failure> {
         &declaration,
         super::is_on(&daemon.paths, &EXTENSION),
     ))
+}
+
+/// `shown`, with whether this very call gave the connection to agents: the window says so in its
+/// toast, which the state alone cannot (a connection edited while ready is ready before and after).
+fn shown_given(daemon: &Daemon, name: &str, given: bool) -> std::result::Result<Value, Failure> {
+    let mut entry = shown(daemon, name)?;
+    entry["given"] = json!(given);
+    Ok(entry)
 }
 
 /// `connection.edit {name, …}`: the keys given replace the declaration's; `null` removes one.
@@ -1578,8 +1645,8 @@ async fn edit(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value,
         client::stop_soon(daemon, &name);
     }
     changed_event(daemon, &name, None);
-    pin_at_once(daemon, &name).await;
-    shown(daemon, &name)
+    let given = pin_at_once(daemon, &name).await;
+    shown_given(daemon, &name, given)
 }
 
 async fn remove(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
@@ -1688,26 +1755,73 @@ fn diff(declaration: &Declaration, row: &Row, now: &Listing) -> Value {
 /// `connection.accept {name, actions?}`: pins what the last review showed, keeping the settings
 /// of the actions that did not change and judging every new one; `actions` sets some, by name
 /// (judged, passes, asked or off). On a connection already pinned and due no review, it sets
-/// them alone. The server the review started is stopped before the pin, and no other starts until
-/// it is written: a change it announced since is seen when it starts again, against the pin.
+/// them alone, under the connection's turn, from the pin as it is then. The server the review
+/// started is stopped before the pin, and no other starts until it is written: a change it
+/// announced since is seen when it starts again, against the pin.
 async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
     let name = named(&params)?;
     let declaration = declaration(&daemon.paths, &name)?;
     let row = row(daemon, &name);
     let digest = declaration.digest();
     let due = state_of(true, &declaration, &row) != State::Ready;
-    let listing = if due {
-        match (&row.seen, &row.seen_for) {
+    if due {
+        let listing = match (&row.seen, &row.seen_for) {
             (Some(seen), Some(seen_for)) if *seen_for == digest => seen.clone(),
-            _ => {
-                return Err(Failure::refused(format!(
-                    "review the connection {name} first: `flottille connection review {name}`"
-                )));
-            }
-        }
+            _ => return Err(review_first(&name)),
+        };
+        let settings = settings_of_accept(&row, &listing, &params)?;
+        let pin = || {
+            // A review that started a server before the pin is written would be met against the
+            // old one: the server is held while it is written.
+            debug_assert!(
+                client::held(daemon, &name),
+                "the pin of {name} is written while its server is free"
+            );
+            write_row(
+                daemon,
+                &name,
+                |row| pinned(row, listing, digest, settings),
+                None,
+            )
+        };
+        client::stopped(daemon, &name, pin).await?;
     } else {
-        row.pin.clone().expect("a ready connection is pinned")
-    };
+        // The pin is read under the turn: a server that starts moves it (`move_pin`), and what is
+        // written here is the settings, never the pin read before.
+        client::exclusively(daemon, &name, async {
+            let row = self::row(daemon, &name);
+            let pin = row.pin.as_ref().ok_or_else(|| review_first(&name))?;
+            let settings = settings_of_accept(&row, pin, &params)?;
+            write_row(daemon, &name, |row| row.settings = settings, None)?;
+            Ok::<_, Failure>(())
+        })
+        .await?;
+    }
+    in_space(daemon, |space| {
+        space.tables().execute(
+            "UPDATE ext_connections_connections SET accepted_at = ?2 WHERE name = ?1",
+            params![name, now_ms() as i64],
+        )?;
+        Ok(((), None))
+    })?;
+    crate::projects::tools_changed(daemon);
+    changed_event(daemon, &name, None);
+    shown(daemon, &name)
+}
+
+fn review_first(name: &str) -> Failure {
+    Failure::refused(format!(
+        "review the connection {name} first: `flottille connection review {name}`"
+    ))
+}
+
+/// The settings `accept` writes for `listing`: kept where the action did not change from the pin
+/// of `row`, judged where it is new or changed, then those the user named.
+fn settings_of_accept(
+    row: &Row,
+    listing: &Listing,
+    params: &Value,
+) -> std::result::Result<BTreeMap<String, String>, Failure> {
     let mut settings = BTreeMap::new();
     for action in &listing.actions {
         let kept = row
@@ -1715,7 +1829,7 @@ async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
             .as_ref()
             .and_then(|pin| pin.action(&action.name))
             .filter(|had| *had == action)
-            .map(|_| setting_of(&row, &action.name).to_owned());
+            .map(|_| setting_of(row, &action.name).to_owned());
         settings.insert(action.name.clone(), kept.unwrap_or_else(|| "judged".into()));
     }
     for (action, setting) in params["actions"].as_object().into_iter().flatten() {
@@ -1735,51 +1849,16 @@ async fn accept(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
         }
         settings.insert(action.clone(), setting.to_owned());
     }
-    let pin = || {
-        // A review that started a server before the pin is written would be met against the old
-        // one: the server is held while it is written.
-        debug_assert!(
-            !due || client::held(daemon, &name),
-            "the pin of {name} is written while its server is free"
-        );
-        write_row(
-            daemon,
-            &name,
-            |row| pinned(row, listing, digest, settings, due),
-            None,
-        )
-    };
-    match due {
-        true => client::stopped(daemon, &name, pin).await?,
-        false => pin()?,
-    }
-    in_space(daemon, |space| {
-        space.tables().execute(
-            "UPDATE ext_connections_connections SET accepted_at = ?2 WHERE name = ?1",
-            params![name, now_ms() as i64],
-        )?;
-        Ok(((), None))
-    })?;
-    crate::projects::tools_changed(daemon);
-    changed_event(daemon, &name, None);
-    shown(daemon, &name)
+    Ok(settings)
 }
 
-/// The row as `accept` leaves it, read again where it is written: the cut-off is cleared with
-/// what was due, never one written since the row was read.
-fn pinned(
-    row: &mut Row,
-    listing: Listing,
-    digest: String,
-    settings: BTreeMap<String, String>,
-    due: bool,
-) {
+/// The row as `accept` leaves it when a review is due, read again where it is written: what was
+/// due goes with its cut-off.
+fn pinned(row: &mut Row, listing: Listing, digest: String, settings: BTreeMap<String, String>) {
     row.pin = Some(listing);
     row.pinned_for = Some(digest);
     row.settings = settings;
-    if due {
-        row.cut_off = None;
-    }
+    row.cut_off = None;
 }
 
 #[cfg(test)]
@@ -1787,29 +1866,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepting_a_connection_not_due_keeps_a_fresh_cut_off() {
+    fn accepting_what_was_due_clears_its_cut_off() {
         let listing = Listing::default();
-        let fresh = || Row {
+        let mut row = Row {
             pin: Some(listing.clone()),
-            pinned_for: Some("digest".into()),
+            pinned_for: Some("old".into()),
             cut_off: Some("the server is now another".into()),
             ..Row::default()
         };
-        // Ready when it was read, cut off since: the settings are written, the cut-off kept.
-        let mut row = fresh();
         let settings = BTreeMap::from([("search".to_owned(), "passes".to_owned())]);
-        pinned(
-            &mut row,
-            listing.clone(),
-            "digest".into(),
-            settings.clone(),
-            false,
-        );
+        pinned(&mut row, listing, "digest".into(), settings.clone());
         assert_eq!(row.settings, settings);
-        assert_eq!(row.cut_off.as_deref(), Some("the server is now another"));
-        // Due, the reviewed server is what is pinned: its cut-off goes.
-        let mut row = fresh();
-        pinned(&mut row, listing, "digest".into(), settings, true);
+        assert_eq!(row.pinned_for.as_deref(), Some("digest"));
         assert_eq!(row.cut_off, None);
     }
 
