@@ -17,6 +17,11 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/$name"
 install -m 0755 "$binary" "$work/$name/flottille"
+# The line tables a stuck daemon's stacks read (docs/reference/daemon.md), compressed: 164 MB
+# installed rather than 292 MB, against 130 MB without them.
+if readelf -S "$work/$name/flottille" 2>/dev/null | grep -q '\.debug_line'; then
+  objcopy --compress-debug-sections=zlib "$work/$name/flottille"
+fi
 install -m 0644 "$root/LICENSE" "$work/$name/LICENSE"
 install -m 0644 "$root/assets/brand/fonts/OFL.txt" "$work/$name/LICENSE-fonts.txt"
 (cd "$root/packaging/linux" && find flottille.desktop icons -type f | sort) | while read -r file; do
