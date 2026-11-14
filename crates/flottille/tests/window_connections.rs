@@ -2290,22 +2290,23 @@ fn a_call_held_for_the_user_names_the_connection_the_action_and_its_arguments(
 // ── Signing in ───────────────────────────────────────────────────────────────────────────────
 
 /// The fake server over HTTP, behind its OAuth authorization server: its process and its URL.
-fn protected_server(user: &User) -> (std::process::Child, String) {
+fn protected_server(user: &User) -> (common::Spawned, String) {
     let mut script = almanac();
     script["oauth"] = json!({"tokens_file": user.path("notes-tokens")});
     write_script(user, "notes", &script);
     let port_file = user.path("notes-port");
-    let server = std::process::Command::new(fake_mcp())
-        .args([
+    let server = common::Spawned::new({
+        let mut command = std::process::Command::new(fake_mcp());
+        command.args([
             "--script",
             script_file(user, "notes").to_str().unwrap(),
             "--log",
             user.path("notes-log.jsonl").to_str().unwrap(),
             "--http",
             port_file.to_str().unwrap(),
-        ])
-        .spawn()
-        .unwrap();
+        ]);
+        command
+    });
     let deadline = Instant::now() + Duration::from_secs(20);
     while !port_file.exists() || std::fs::read_to_string(&port_file).unwrap().is_empty() {
         assert!(Instant::now() < deadline, "the server never listened");
@@ -2434,15 +2435,16 @@ fn a_sign_in_that_cannot_begin_says_why_in_a_toast(cx: &mut TestAppContext) {
     // A server that asks for no sign-in: there is nothing to sign in to.
     write_script(&user, "plain", &almanac());
     let port_file = user.path("plain-port");
-    let mut server = std::process::Command::new(fake_mcp())
-        .args([
+    let mut server = common::Spawned::new({
+        let mut command = std::process::Command::new(fake_mcp());
+        command.args([
             "--script",
             script_file(&user, "plain").to_str().unwrap(),
             "--http",
             port_file.to_str().unwrap(),
-        ])
-        .spawn()
-        .unwrap();
+        ]);
+        command
+    });
     let deadline = Instant::now() + Duration::from_secs(20);
     while !port_file.exists() || std::fs::read_to_string(&port_file).unwrap().is_empty() {
         assert!(Instant::now() < deadline, "the server never listened");

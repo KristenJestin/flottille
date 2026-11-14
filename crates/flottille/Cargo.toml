@@ -48,6 +48,8 @@ serde_json = "1.0.154"
 # workflows): the maintained fork of serde_yaml.
 serde_norway = "0.9.42"
 sha2 = "0.11.1"
+# Already built under rmcp: the event stream of an HTTP answer to a connection, read within its limit.
+sse-stream = "0.2.6"
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt", "net", "io-util", "sync", "macros", "signal", "time", "process", "fs"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }

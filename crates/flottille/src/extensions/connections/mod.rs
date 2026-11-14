@@ -6,6 +6,7 @@
 //! review it again.
 
 mod adapters;
+mod bounded;
 mod client;
 pub mod command;
 mod oauth;

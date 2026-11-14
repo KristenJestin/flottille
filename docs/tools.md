@@ -1434,11 +1434,17 @@ waiting.
 
 **A led session stays open after its report.** Its pilot reads the report, integrates the work,
 then stops the session (`agent_stop`, its own to end) and removes its workspace (`workspace
-remove`: a branch merged into another local branch is integrated, not lost, "The workspace").
-When a led session has reported, is idle, and its workspace's branch is contained in another
-local branch of one of its repositories, with commits of its own, the pilot is reminded once per
-session, by a delivery `led-integrated` checked at the end of a turn of either: `"Login" (agent
-…) reported and its branch is in main: stop it and remove its workspace?`.
+remove`: a branch held by another local branch is *not lost*, which is no claim that it is
+integrated, "The workspace").
+When a led session has reported, is idle, and its work is integrated, the pilot is reminded once
+per session, by a delivery `led-integrated` checked at the end of a turn of either: `"Login"
+(agent …) reported and its branch is in main: stop it and remove its workspace?`. Integrated means
+in **every** repository that holds commits of its own: its pull request is merged and the branch
+is no further than the commit it merged (the base is the branch the pull request aimed at), or it
+has none and the branch is contained in the base the workspace started from. Another branch
+holding it, a pull request that is open, a draft or closed, commits made after the merge, a forge
+that cannot be read or `gh` missing is no integration, in any one repository. The forge is asked
+at most once every five minutes for a session, since the check runs at the end of every turn.
 
 #### Where a question goes
 

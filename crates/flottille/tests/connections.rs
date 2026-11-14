@@ -2162,17 +2162,18 @@ fn a_local_url_connection_is_reached_with_its_vault_headers() {
     let script = almanac();
     write_script(&user, "jotter", &script);
     let port_file = user.path("jotter-port");
-    let mut server = std::process::Command::new(fake_mcp())
-        .args([
+    let mut server = common::Spawned::new({
+        let mut command = std::process::Command::new(fake_mcp());
+        command.args([
             "--script",
             script_file(&user, "jotter").to_str().unwrap(),
             "--log",
             log_file(&user, "jotter").to_str().unwrap(),
             "--http",
             port_file.to_str().unwrap(),
-        ])
-        .spawn()
-        .unwrap();
+        ]);
+        command
+    });
     eventually("the server listens", || {
         port_file.exists() && !std::fs::read_to_string(&port_file).unwrap().is_empty()
     });
@@ -2362,6 +2363,205 @@ fn a_call_running_when_the_connection_is_turned_off_answers_that_it_failed() {
     });
 }
 
+// ── The size of an answer ────────────────────────────────────────────────────────────────────
+
+/// The limit of one answer of a server, in bytes (`docs/extensions.md`, "A result").
+const ANSWER_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// The `almanac` whose action `write` answers `bytes` bytes of text, a megabyte at a time with
+/// `pause_ms` between.
+fn answering(bytes: u64, pause_ms: u64) -> Value {
+    let mut script = almanac();
+    script["answers"]["write"] =
+        json!({"big": {"bytes": bytes, "chunk": 1 << 20, "pause_ms": pause_ms}});
+    script
+}
+
+/// How much of the text the fake wrote, as it logged it, and whether it saw its reader go.
+fn written(user: &User, name: &str) -> (u64, bool) {
+    let most = logged(user, name, "wrote")
+        .iter()
+        .filter_map(|line| line["bytes"].as_u64())
+        .max()
+        .unwrap_or(0);
+    (most, !logged(user, name, "stopped").is_empty())
+}
+
+/// An answer of 64 MiB, written slowly, is cut as the server's answer passes the limit: the call
+/// fails with the sentence, the fake was not read to its end, and the next call is answered.
+///
+/// `read_to_the_limit`: the cut came as the bytes were read, not before (a length said at the start
+/// is refused at once).
+fn a_response_past_the_limit_is_cut(
+    user: &User,
+    mcp: &Mcp,
+    waits_for_the_reader: bool,
+    read_to_the_limit: bool,
+) {
+    let total = 64 << 20;
+    let started = Instant::now();
+    let answer = mcp.call(
+        "conn_almanac",
+        json!({"action": "write", "arguments": {"text": "a"}}),
+    );
+    let said = refused(answer);
+    assert!(
+        said.contains("the server's answer passed 16 MB and was cut off"),
+        "{said}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "it took {:?}: the call waited for the whole answer",
+        started.elapsed()
+    );
+    if waits_for_the_reader {
+        eventually("the server sees its reader go", || {
+            written(user, "almanac").1
+        });
+    }
+    let (taken, _) = written(user, "almanac");
+    assert!(
+        taken < total && (taken >= ANSWER_LIMIT) == read_to_the_limit,
+        "{taken} of {total} bytes were written before the cut"
+    );
+    let text = done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    assert!(text.contains("found: the login decision"), "{text}");
+    assert_eq!(connection(user, "almanac")["state"], "ready");
+}
+
+#[test]
+fn a_response_past_the_limit_fails_the_call_and_keeps_the_connection() {
+    let user = user();
+    project(&user, "app");
+    connect(
+        &user,
+        "almanac",
+        &answering(64 << 20, 20),
+        json!({"search": "passes", "write": "passes"}),
+    );
+    let (_, mcp) = session(&user, "app");
+    a_response_past_the_limit_is_cut(&user, &mcp, false, true);
+}
+
+/// The same, over HTTP, the answer a JSON body or, with `sse`, an event of a stream, with or
+/// without the length it says it has.
+fn a_response_past_the_limit_over_http(sse: bool, sized: bool) {
+    let user = user();
+    project(&user, "app");
+    let mut script = answering(64 << 20, 20);
+    script["answers"]["write"]["big"]["sse"] = json!(sse);
+    script["answers"]["write"]["big"]["unsized"] = json!(!sized);
+    write_script(&user, "almanac", &script);
+    let (mut server, port) = http_server(&user, "almanac");
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "almanac", "about": "Notes.",
+        "url": format!("http://127.0.0.1:{port}/mcp")}),
+    )
+    .unwrap();
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes", "write": "passes"}}),
+    )
+    .unwrap();
+    let (_, mcp) = session(&user, "app");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        a_response_past_the_limit_is_cut(&user, &mcp, true, !sized)
+    }));
+    let _ = server.kill();
+    let _ = server.wait();
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
+fn a_response_past_the_limit_fails_the_call_and_keeps_the_connection_over_http() {
+    a_response_past_the_limit_over_http(false, false);
+}
+
+#[test]
+fn a_response_that_says_it_is_past_the_limit_is_refused_before_it_is_read() {
+    a_response_past_the_limit_over_http(false, true);
+}
+
+#[test]
+fn a_response_past_the_limit_fails_the_call_and_keeps_the_connection_over_an_event_stream() {
+    a_response_past_the_limit_over_http(true, false);
+}
+
+#[test]
+fn a_header_the_transport_sets_itself_is_refused_in_a_connection() {
+    let user = user();
+    project(&user, "app");
+    write_script(&user, "almanac", &almanac());
+    let (mut server, port) = http_server(&user, "almanac");
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-key", "secret": SECRET}),
+    )
+    .unwrap();
+    turn_on(&user);
+    for header in ["Accept", "mcp-session-id", "Last-Event-ID"] {
+        user.call(
+            "connection.add",
+            json!({"name": "almanac", "about": "Notes.",
+            "url": format!("http://127.0.0.1:{port}/mcp"),
+            "headers": {header: {"vault": "almanac-key"}}}),
+        )
+        .unwrap();
+        let review = user.call_within(
+            "connection.review",
+            json!({"name": "almanac"}),
+            Duration::from_secs(40),
+        );
+        assert!(review.is_err(), "{header} was sent: {review:?}");
+        user.call("connection.remove", json!({"name": "almanac"}))
+            .unwrap();
+    }
+    let sent = logged(&user, "almanac", "http");
+    let _ = server.kill();
+    let _ = server.wait();
+    assert!(sent.is_empty(), "a request went out: {sent:?}");
+}
+
+#[test]
+fn the_answers_of_a_long_lived_server_are_never_counted_together() {
+    let user = user();
+    project(&user, "app");
+    // Four answers of 5 MiB, 20 MiB in all, past the limit together and each far under it.
+    connect(
+        &user,
+        "almanac",
+        &answering(5 << 20, 0),
+        json!({"search": "passes", "write": "passes"}),
+    );
+    let (_, mcp) = session(&user, "app");
+    let mut starts = 0;
+    for call in 0..4 {
+        let text = done(mcp.call(
+            "conn_almanac",
+            json!({"action": "write", "arguments": {"text": "a"}}),
+        ));
+        assert!(
+            !text.contains("was cut off"),
+            "{}",
+            &text[..text.len().min(200)]
+        );
+        // The first call starts the server accepting stopped; the others reuse it.
+        match call {
+            0 => starts = logged(&user, "almanac", "start").len(),
+            _ => assert_eq!(logged(&user, "almanac", "start").len(), starts, "restarted"),
+        }
+    }
+}
+
 // ── The user's door ──────────────────────────────────────────────────────────────────────────
 
 /// An agent proposes a connection through its `connections` family, held for the user
@@ -2430,19 +2630,20 @@ fn the_tools_delivery_names_a_connection_added_or_gone() {
 // ── What a server cannot do to the daemon ─────────────────────────────────────────────────────
 
 /// The fake server of `name` on Streamable HTTP over loopback: the process and its port.
-fn http_server(user: &User, name: &str) -> (std::process::Child, String) {
+fn http_server(user: &User, name: &str) -> (common::Spawned, String) {
     let port_file = user.path(&format!("{name}-port"));
-    let server = std::process::Command::new(fake_mcp())
-        .args([
+    let server = common::Spawned::new({
+        let mut command = std::process::Command::new(fake_mcp());
+        command.args([
             "--script",
             script_file(user, name).to_str().unwrap(),
             "--log",
             log_file(user, name).to_str().unwrap(),
             "--http",
             port_file.to_str().unwrap(),
-        ])
-        .spawn()
-        .unwrap();
+        ]);
+        command
+    });
     eventually("the server listens", || {
         port_file.exists() && !std::fs::read_to_string(&port_file).unwrap().is_empty()
     });
@@ -2939,7 +3140,7 @@ fn an_unreadable_extensions_file_refuses_removing_a_bound_entry() {
 
 /// A protected server `notes` on loopback, its own authorization server (the fake's `oauth`):
 /// the process and the server's URL. `oauth` is what the fake's authorization server does.
-fn protected_server(user: &User, oauth: Value) -> (std::process::Child, String) {
+fn protected_server(user: &User, oauth: Value) -> (common::Spawned, String) {
     let mut script = almanac();
     script["oauth"] = oauth;
     script["oauth"]["tokens_file"] = json!(user.path("notes-tokens"));
@@ -3105,7 +3306,7 @@ fn call_bearer(user: &User) -> u64 {
         .expect("a call with a token")
 }
 
-fn stopped(mut server: std::process::Child) {
+fn stopped(mut server: common::Spawned) {
     let _ = server.kill();
     let _ = server.wait();
 }

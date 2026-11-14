@@ -19,11 +19,13 @@ use rmcp::model::{
 };
 use rmcp::service::{NotificationContext, Peer, RequestContext, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::async_rw::AsyncRwTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{ClientHandler, ClientLifecycleMode, ClientServiceExt, ErrorData, RoleClient};
 use serde_json::{Map, Value, json};
 use tokio::io::AsyncBufReadExt;
 
+use super::bounded::{ANSWER_LIMIT, Bounded, Cut, Lines};
 use super::{Declaration, Listing, Reach, State};
 use crate::daemon::Daemon;
 use crate::mcp::{Grant, Outcome};
@@ -179,6 +181,8 @@ struct Running {
     start: u64,
     /// When the access token it was started with expires, signed in with OAuth.
     expires_at: Option<u64>,
+    /// Set when one of its answers was cut for its size.
+    cut: Cut,
 }
 
 impl Running {
@@ -416,6 +420,7 @@ async fn start_with(
         start,
     };
     let mut expires_at = None;
+    let cut = Cut::default();
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
             let folder = super::adapters::folder(daemon, &declaration.name);
@@ -466,9 +471,13 @@ async fn start_with(
             tokio::spawn(async move {
                 let _ = child.wait().await;
             });
+            // rmcp drops a line past its own limit and the call waits for nothing: the reader fails
+            // first, at the limit, and rmcp's is left a little above it.
+            let transport = AsyncRwTransport::new_client(Lines::new(stdout, cut.clone()), stdin)
+                .with_max_line_length(ANSWER_LIMIT + 2);
             let served = tokio::time::timeout(
                 START_LIMIT,
-                handler.serve_with_lifecycle((stdout, stdin), ClientLifecycleMode::Initialize),
+                handler.serve_with_lifecycle(transport, ClientLifecycleMode::Initialize),
             )
             .await;
             match served {
@@ -502,6 +511,7 @@ async fn start_with(
             let client = http_client(url)?;
             let mut config =
                 StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(headers);
+            config.max_sse_event_size = ANSWER_LIMIT;
             let name = &declaration.name;
             let mut bearing = false;
             match super::oauth::bearer(daemon, declaration).await {
@@ -517,7 +527,10 @@ async fn start_with(
                     return Err(signed_out_said(name, &why));
                 }
             }
-            let transport = StreamableHttpClientTransport::with_client(client, config);
+            let transport = StreamableHttpClientTransport::with_client(
+                Bounded::new(client, cut.clone()),
+                config,
+            );
             let served = tokio::time::timeout(
                 START_LIMIT,
                 handler.serve_with_lifecycle(transport, ClientLifecycleMode::Initialize),
@@ -555,6 +568,7 @@ async fn start_with(
                 listing: Listing::default(),
                 start,
                 expires_at,
+                cut: cut.clone(),
             })
             .await;
             return Err(why);
@@ -582,6 +596,7 @@ async fn start_with(
         listing: Listing::of(server, instructions, &tools),
         start,
         expires_at,
+        cut,
     })
 }
 
@@ -899,6 +914,8 @@ pub async fn call(
     }
     let running = turn.as_ref().expect("started");
     let params = CallToolRequestParams::new(action.to_owned()).with_arguments(arguments);
+    // A cut that ended no call (an event stream that went on after it) is not this call's.
+    running.cut.take();
     let answered = tokio::time::timeout(CALL_LIMIT, running.service.call_tool(params)).await;
     let now = super::now_of(daemon, name).map(|(_, _, state)| state);
     let stopping = !matches!(now, Some(State::Ready));
@@ -913,6 +930,15 @@ pub async fn call(
                  server stopped",
                 CALL_LIMIT.as_secs()
             ));
+        }
+        Ok(Err(_)) if running.cut.take() => {
+            // A stream cut in the middle of a message is not read again; over HTTP too the server
+            // is started afresh, by the next call, as for one that died.
+            if let Some(running) = turn.take() {
+                *server.leader.lock().unwrap() = None;
+                stop_running(running).await;
+            }
+            return Outcome::Failed(super::bounded::said());
         }
         Ok(Err(error)) => {
             let said = match asks_sign_in(&error) {

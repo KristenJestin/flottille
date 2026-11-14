@@ -869,3 +869,299 @@ fn a_lead_is_reminded_once_when_its_led_sessions_work_is_integrated_and_it_is_id
     settle();
     assert_eq!(delivered(&user, &lead, INTEGRATED).len(), 1);
 }
+
+/// A lead (`lead`, its MCP session) and its led session `Login`, which reported and is idle, in
+/// its own workspace: the session and its folder.
+fn reported_session(user: &User, lead: &str, mcp: &Mcp) -> (String, std::path::PathBuf) {
+    let (answer, session) = launch(
+        user,
+        mcp,
+        json!({"kind": "led", "title": "Login", "brief": "Fix the login.",
+            "new_workspace": "login"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let (session, _) = session.unwrap();
+    eventually("the report's wake", || wakes(user, lead).len() == 1);
+    eventually("the lead's turn on the report", || turns(user, lead) >= 2);
+    settle();
+    let folder = std::path::PathBuf::from(shown(user, &session)["folder"].as_str().unwrap());
+    (session, folder)
+}
+
+const LOGIN_FIXED: &str = r#"{"turns": [
+    {"when": "Fix the login.", "do": [
+        {"mcp": {"tool": "report", "arguments": {"text": "Login fixed."}}},
+        {"say": "Reported."}]}
+]}"#;
+
+/// A commit in the repository at `dir`: its full hash.
+fn commit_in(user: &User, dir: &std::path::Path, file: &str) -> String {
+    std::fs::write(dir.join(file), "fn login() {}\n").unwrap();
+    user.git(dir, &["add", "."]);
+    user.git(dir, &["commit", "--quiet", "-m", "fix the login"]);
+    user.git_output(dir, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned()
+}
+
+/// A lead and its led session `Login`, which reported and is idle, in its own workspace with one
+/// commit of its own: the lead, the session, its folder, its branch and the commit.
+fn reported_with_a_commit(user: &User) -> (String, String, std::path::PathBuf, String, String) {
+    user.fake_script(serde_json::from_str(LOGIN_FIXED).unwrap());
+    let (lead, mcp) = lead(user);
+    let (session, folder) = reported_session(user, &lead, &mcp);
+    let commit = commit_in(user, &folder, "login.rs");
+    let branch = user.git_output(&folder, &["branch", "--show-current"]);
+    (lead, session, folder, branch.trim().to_owned(), commit)
+}
+
+/// Ends a turn of the lead, which is when the reminder is checked, and waits for it to be over.
+fn end_a_turn_of(user: &User, lead: &str) {
+    let before = turns(user, lead);
+    user.call("agent.send", json!({"agent": lead, "message": "Go on."}))
+        .unwrap();
+    eventually("the lead's turn", || turns(user, lead) > before);
+    settle();
+}
+
+/// The repository `path` of the project `app` on GitHub as `acme/<path>` (its remote leads there
+/// from now on), and the pull request of its branch, in that state, aiming at `target`, its head
+/// at `head`.
+fn pull_of(user: &User, path: &str, state: &str, target: &str, head: &str) -> Value {
+    let folder = user.path("work/app");
+    let folder = match path {
+        "." => folder,
+        path => folder.join(path),
+    };
+    let url = format!("git@github.com:acme/{path}.git");
+    user.git(&folder, &["remote", "add", "origin", &url]);
+    json!({"number": 7, "title": "Fix the login", "state": state, "baseRefName": target,
+        "headRefOid": head, "url": format!("https://github.com/acme/{path}/pull/7")})
+}
+
+/// The project `app`'s root repository declared on GitHub as `acme/app`, its remote leading there.
+fn declare_on_github(user: &User) {
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("path = \".\""), "{text}");
+    user.write_project_file(
+        "app",
+        &text.replace(
+            "path = \".\"\n",
+            "path = \".\"\nforge = { kind = \"github\", repository = \"acme/app\" }\n",
+        ),
+    );
+    user.git(
+        &user.path("work/app"),
+        &["remote", "add", "origin", "git@github.com:acme/app.git"],
+    );
+}
+
+/// `declare_on_github`, and the pull request of `branch` as the fake `gh` says it.
+fn app_on_github(user: &User, branch: &str, state: &str, target: &str, head: &str) {
+    declare_on_github(user);
+    user.gh_script(json!({"pulls": {"acme/app": {branch: {
+        "number": 7, "title": "Fix the login", "state": state, "baseRefName": target,
+        "headRefOid": head, "url": "https://github.com/acme/app/pull/7"
+    }}}}));
+}
+
+fn reminders(user: &User, lead: &str) -> Vec<String> {
+    delivered(user, lead, INTEGRATED)
+}
+
+#[test]
+fn a_branch_another_branch_started_from_is_not_integrated() {
+    let user = User::with_fake_agent();
+    let (lead, _session, _folder, branch, _) = reported_with_a_commit(&user);
+    // A second session's branch, started from the first one's: it contains it, and it is no
+    // base the first one goes into.
+    user.git(&user.path("work/app"), &["branch", "second", &branch]);
+
+    end_a_turn_of(&user, &lead);
+
+    assert!(reminders(&user, &lead).is_empty());
+}
+
+#[test]
+fn a_branch_with_an_open_pull_request_is_not_integrated() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let (lead, _session, _folder, branch, commit) = reported_with_a_commit(&user);
+    let project = user.path("work/app");
+    // Contained in the integration branch, and in another one, yet its pull request is open.
+    user.git(
+        &project,
+        &["merge", "--quiet", "--no-ff", "-m", "merge", &branch],
+    );
+    user.git(&project, &["branch", "second", &branch]);
+    let main = user.git_output(&project, &["branch", "--show-current"]);
+    app_on_github(&user, &branch, "OPEN", main.trim(), &commit);
+
+    end_a_turn_of(&user, &lead);
+
+    assert!(reminders(&user, &lead).is_empty());
+}
+
+#[test]
+fn a_merged_pull_request_makes_its_session_integrated() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let (lead, session, _folder, branch, commit) = reported_with_a_commit(&user);
+    let main = user.git_output(&user.path("work/app"), &["branch", "--show-current"]);
+    // A squash merge: its commits are in no branch.
+    app_on_github(&user, &branch, "MERGED", main.trim(), &commit);
+
+    end_a_turn_of(&user, &lead);
+
+    assert_eq!(
+        reminders(&user, &lead),
+        vec![format!(
+            "\"Login\" (agent {session}) reported and its branch is in {}: stop it and remove \
+             its workspace?",
+            main.trim()
+        )]
+    );
+}
+
+#[test]
+fn a_merged_pull_request_aimed_at_another_branch_is_integrated_into_its_target() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let (lead, session, _folder, branch, commit) = reported_with_a_commit(&user);
+    app_on_github(&user, &branch, "MERGED", "release", &commit);
+
+    end_a_turn_of(&user, &lead);
+
+    assert_eq!(
+        reminders(&user, &lead),
+        vec![format!(
+            "\"Login\" (agent {session}) reported and its branch is in release: stop it and \
+             remove its workspace?"
+        )]
+    );
+}
+
+#[test]
+fn commits_after_a_merged_pull_request_are_not_integrated() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let (lead, _session, folder, branch, commit) = reported_with_a_commit(&user);
+    let main = user.git_output(&user.path("work/app"), &["branch", "--show-current"]);
+    app_on_github(&user, &branch, "MERGED", main.trim(), &commit);
+    // Work made after the merge, or on a branch name used again: the merged pull request did not
+    // take it.
+    commit_in(&user, &folder, "more.rs");
+
+    end_a_turn_of(&user, &lead);
+
+    assert!(reminders(&user, &lead).is_empty());
+}
+
+#[test]
+fn a_forge_that_cannot_be_read_never_makes_a_session_integrated() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let (lead, _session, _folder, branch, commit) = reported_with_a_commit(&user);
+    let project = user.path("work/app");
+    user.git(
+        &project,
+        &["merge", "--quiet", "--no-ff", "-m", "merge", &branch],
+    );
+    app_on_github(&user, &branch, "MERGED", "main", &commit);
+    user.gh_script(json!({"fail": {"acme/app": "HTTP 502: Bad Gateway"}}));
+
+    end_a_turn_of(&user, &lead);
+
+    assert!(reminders(&user, &lead).is_empty());
+}
+
+#[test]
+fn a_missing_gh_never_makes_a_session_integrated() {
+    // A PATH with git and nothing else: no `gh` at all, the machine's own included.
+    let user = User::with_fake_agent();
+    std::fs::create_dir(user.path("bin")).unwrap();
+    std::os::unix::fs::symlink(common::program("git"), user.path("bin/git")).unwrap();
+    let bin = user.path("bin");
+    let user = user.with_env("PATH", bin.to_str().unwrap());
+    let (lead, _session, _folder, branch, _) = reported_with_a_commit(&user);
+    let project = user.path("work/app");
+    user.git(
+        &project,
+        &["merge", "--quiet", "--no-ff", "-m", "merge", &branch],
+    );
+    declare_on_github(&user);
+
+    end_a_turn_of(&user, &lead);
+
+    assert!(reminders(&user, &lead).is_empty());
+}
+
+#[test]
+fn the_forge_is_asked_at_most_once_in_five_minutes_for_a_session() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let (lead, _session, _folder, branch, commit) = reported_with_a_commit(&user);
+    let main = user.git_output(&user.path("work/app"), &["branch", "--show-current"]);
+    app_on_github(&user, &branch, "OPEN", main.trim(), &commit);
+
+    end_a_turn_of(&user, &lead);
+    end_a_turn_of(&user, &lead);
+    end_a_turn_of(&user, &lead);
+
+    let listed = user
+        .gh_received()
+        .iter()
+        .filter(|call| call["args"][0] == "pr" && call["args"][1] == "list")
+        .count();
+    assert_eq!(listed, 1);
+}
+
+/// A lead over a project `app` of the two repositories `api` and `web`, no root, each declared on
+/// GitHub as `acme/<name>`.
+fn lead_over_two_repositories(user: &User) -> (String, Mcp) {
+    let folder = user.path("work/app");
+    let mut text = format!(
+        "folder = \"{}\"\nworkspaces_root = \"{}\"\n",
+        folder.display(),
+        user.path("work/app-work").display()
+    );
+    for name in ["api", "web"] {
+        let repository = folder.join(name);
+        user.git_init(&repository);
+        std::fs::write(repository.join("README.md"), format!("{name}\n")).unwrap();
+        user.git(&repository, &["add", "."]);
+        user.git(&repository, &["commit", "--quiet", "-m", "start"]);
+        text.push_str(&format!(
+            "[[repositories]]\npath = \"{name}\"\nforge = {{ kind = \"github\", repository = \
+             \"acme/{name}\" }}\n"
+        ));
+    }
+    user.write_project_file("app", &text);
+    let opened = user.received_requests("session/new").len();
+    let answer = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = server_of(user, opened);
+    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
+        .unwrap();
+    eventually("its first turn", || turns(user, &id) == 1);
+    (id, Mcp::initialize(&url, &authorization))
+}
+
+#[test]
+fn a_workspace_is_integrated_only_when_every_repository_is() {
+    let user = User::with_fake_agent().with_fake_gh();
+    user.fake_script(serde_json::from_str(LOGIN_FIXED).unwrap());
+    let (lead, mcp) = lead_over_two_repositories(&user);
+    let (_session, folder) = reported_session(&user, &lead, &mcp);
+    let api = commit_in(&user, &folder.join("api"), "login.rs");
+    let web = commit_in(&user, &folder.join("web"), "login.rs");
+    let branch = user.git_output(&folder.join("api"), &["branch", "--show-current"]);
+    let branch = branch.trim();
+    let merged = pull_of(&user, "api", "MERGED", "main", &api);
+    let open = pull_of(&user, "web", "OPEN", "main", &web);
+    user.gh_script(json!({"pulls": {
+        "acme/api": {branch: merged},
+        "acme/web": {branch: open},
+    }}));
+
+    end_a_turn_of(&user, &lead);
+
+    assert!(reminders(&user, &lead).is_empty());
+}
