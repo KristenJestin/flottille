@@ -40,7 +40,7 @@ An entry made for one precise feature is that feature's alone. `for` names it:
 | `for` | The use |
 |---|---|
 | `worklog:<project>` | The token the project's tracker logs time with (`docs/tickets.md`, "Logging time"). |
-| `connection:<name>` | What the server of a connection is given (`docs/extensions.md`, "Connections"). |
+| `connection:<name>` | What the server of a connection is given (`docs/extensions.md`, "Connections"), and the logins its adapter signs in with (agent-browser's `login`, "Adapters"). |
 
 - **Only its use reads it.** A feature reads an entry bound to it or an unbound one it names. An
   entry bound elsewhere is refused by every other feature and every tool, in the daemon where the

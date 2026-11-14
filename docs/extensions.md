@@ -1052,7 +1052,8 @@ the user is a card as any, titled `Call write on the connection almanac`, its li
 connection, the action and its arguments. Everything animates as the rest of the window does:
 the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
 when it leaves, a field that a radio or a switch needs unfolds under it, the dialogs rise and
-fade, the review crossfades from its skeleton; in it, a row that changes setting folds away in its
+fade, the review crossfades from its skeleton; in it, the server, the adapter's sentence, the bar,
+the search and the chips come one after the other, a row that changes setting folds away in its
 group and unfolds in the other, a group that empties folds away, the bar of the ticked rows, the
 rows, the instructions and the `unchanged` line unfold, and what is off fades.
 
@@ -1134,6 +1135,115 @@ settings alone, under that same turn and from the pin as it is then: a pin moved
 is never written back. A review the user asks for is not a start of that kind: a review that
 finds a new version shows it in the diff, and Accept pins it.
 
+**Adapters** (#852). Every connection stays generic, but Flottille knows some servers and adds
+what is specific to them. An **adapter** is a small piece of Flottille's code for one server,
+recognised by what the server says of itself at `initialize` (its `serverInfo` name, e.g.
+`agent-browser`, and a range of its versions), **never by the command line**. Outside its range,
+or for any other server, the connection is the generic one: nothing breaks, and the review says
+`Flottille has no adapter for this version`. A version is `MAJOR.MINOR.PATCH`; a pre-release or a
+build is outside every range. What an adapter may do, and nothing else:
+
+1. **default settings** of the server's actions at the first pin, which the user may change, and
+   actions it keeps **off while it applies**, which no setting turns on (`connection.accept`
+   refuses one, saying why);
+2. **actions of Flottille's own** added to the connection's tool, served by Flottille, named
+   first in its pinned description and in `help`, described by `help` like the server's (not as a
+   third party's text), and judged as any action is (the user sets no setting on them); a server's
+   action of the same name is not offered;
+3. **options of the server's start**: a trusted file Flottille writes in the connection's folder,
+   passed with the server's own flag. The adapter is known once the server said what it is, so
+   the start takes the adapter of the pin, and a server that turns out to be another (its first
+   review, a version that moved) is started once more with its own options.
+
+A line of Flottille's own (not the server's) is added to what `help` with `for: "@instructions"`
+gives. The review (`connection.review`, its `adapter`) says that the adapter applies, what it
+changed, what Accept would pin, and, for each action it keeps off, why (`locked`); the window
+shows that sentence under the server's version, above the bar of what is left to the judge, so
+that the user reads why `login` is refused before Accept, and what the adapter changed unfolds
+under it. A kept-off action has its pill disabled (`Off`), no box to tick it with, so that the
+bar never sets it, and the line saying why in its unfolded row instead of the four choices. The
+user can still change every other setting.
+
+**agent-browser** is the first adapter, for `agent-browser` **0.43.x** (checked on 0.43.0; a
+version Flottille was not checked on may move its tools or its plugin protocol: the range widens
+by a pull request that checks it). Its MCP `agent_browser_auth_login` takes no credential
+provider; its command line does (`auth login <name> --credential-provider <plugin> --item <ref>
+[--url <url>]`), which resolves the secret just in time from a plugin of capability
+`credential.read` (`agent-browser.plugin.v1` over stdio) declared in a trusted config file
+(`--config`). So **Flottille's vault replaces agent-browser's own logins**, the default and only
+way in:
+
+- **Its own logins are off and stay off**: `agent_browser_auth_save`, `_auth_login`, `_auth_list`,
+  `_auth_show`, `_auth_delete`, `agent_browser_set_credentials` (a password as an argument), its
+  plugins `agent_browser_plugin_add`, `_plugin_list`, `_plugin_run`, `_plugin_show` (they run
+  commands with its credential providers) and `agent_browser_with_login`, whatever the user set.
+- **Only the actions it knows do not read a typed secret directly stay on beside `login`**: an
+  allowlist, not a list of what may leak, which would miss the next one. Every other action, one it does not
+  know included (a 0.43 patch may add one), is **off at the first pin**, and **`login` is refused
+  while one of them is on**; the review says which. A page script can copy a field into what any
+  other action reads (the title, the text), and a component's state, a field's attributes or its
+  HTML follow what is typed, so masking the exact secret is not enough. The 48 actions of the
+  list, read from 0.43.0's own list and descriptions (a why each in the code), all prefixed
+  `agent_browser_`: `back`, `forward`, `reload`; the inputs (`click`, `dblclick`, `fill`, `type`,
+  `press`, `hover`, `focus`, `check`, `uncheck`, `select`, `scroll`, `scroll_into_view`, `drag`,
+  `keydown`, `keyup`, `keyboard_type`, `keyboard_insert_text`, `mouse_move`/`_down`/`_up`/`_wheel`,
+  `find`); the waits (`wait_ms`, `wait_for_selector`, `wait_for_text`, `wait_for_url`,
+  `wait_for_load`); `screenshot`, `get_text`, `get_url`, `get_title`, `get_count`, `get_box`,
+  `is_visible`, `is_enabled`, `is_checked`; `tab_list`, `tab_switch`, `tab_close`,
+  `frame_switch`, `frame_main`, `dialog_status`, `dialog_accept`, `dialog_dismiss`, `close`. Left
+  out among others: whatever runs a script (`eval`, `wait_for_function`, `batch`, `chat`, …),
+  takes a URL (`open`, `tab_new`, `pushstate`: a `javascript:` URL runs in the page) or extra
+  options, reaches another browser (`connect`, `get_cdp_url`), or gives a field's value, its HTML,
+  its attributes, a component's state or a snapshot (`get_value`, `get_attr`, `get_html`,
+  `react_*`, `snapshot`).
+- **What stays possible.** The list narrows the ways to the secret; it does not close them all,
+  and each call of these actions is still judged by the gate, which is what stands against them:
+  - **a selector oracle**: on a site whose framework copies what is typed into the field's `value`
+    attribute (React does), the allowed actions that take a selector (`get_count`, `is_visible`,
+    `wait_for_selector`, `click`…) can test `input[value^=…]`, one guess at a time;
+  - **a show-password toggle**: clicked, the field shows the secret, which `screenshot` or
+    `get_text` then read;
+  - **a login form sent with GET** puts the secret in the address, where `get_url`, `tab_list` and
+    `wait_for_url` read it;
+  - **another tab of the session** that holds a window handle to the login tab could navigate it
+    between its load and its fill.
+- **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
+  written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
+  `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the
+  user's own.
+- **`login {entry}`**, Flottille's own action: the agent names a vault entry **bound to this
+  connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
+  lists, never their values. An entry bound to another use, or to none, is refused, naming its use.
+  **The login always opens the entry's own URL**, and takes no URL of the agent's: a page of its
+  choosing, even on the entry's site, could redirect the fill elsewhere (`/go?to=…`). An entry
+  without a URL, or whose URL is no web address (`http` or `https` with a host), is refused (said
+  in the error and in `help`): without one, agent-browser would fill the page that is open, which
+  the agent chose. Under the connection's turn, the settings and the adapter are read again: a
+  login whose adapter no longer applies (the version moved after the call was
+  routed) is refused. Flottille runs agent-browser's
+  command line itself, without a shell, under the connection's one-call-at-a-time turn: the words
+  of the server's command before its `mcp` (global options kept), then `--config <the file>
+  auth login <entry> --credential-provider flottille --item <entry> --url <url>` (two words, as
+  agent-browser's own help shows them; a web address never starts with `-`), in the
+  server's folder and with its environment, so on the **same browser session and namespace** as
+  the server (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`). A connection reached by a URL,
+  or whose command has no `mcp`, refuses `login`. It has 120 seconds, as a call has. **A login that
+  fails** (or runs out of time) is followed by Flottille's own `open <the entry's URL>`, on the same
+  command line, folder, environment (without the token) and session: the page is loaded afresh, so
+  a secret typed into its form does not stay there (a browser does not restore a password field).
+  It is Flottille's call, not an agent's, so it does not need `open` on. If it fails too, the
+  login's error is still returned, masked, and says that the page could not be loaded again.
+- **The plugin is Flottille.** The daemon refuses every client that descends from it, so the
+  login does not go through its socket: for that run alone the daemon listens on
+  `connections/<name>/vault.sock` (in a folder of the user's alone, removed when the run ends)
+  and gives the run a **one-time token** in `FLOTTILLE_VAULT_TOKEN`. `flottille vault provide` (hidden, needs no
+  folder of Flottille's) reads agent-browser's request on its standard input, sends the token and
+  the item to that socket, and writes the answer on its standard output. The daemon answers
+  **only** the token of the run it started, **once**, and only for the entry that run is for, bound
+  to this connection; without the token the plugin is refused before anything is asked. The
+  secret goes from the keyring to the page's form: never to an agent, an event, a log, an error or
+  the store, and what agent-browser prints is masked and framed as a third party's.
+
 **Examples.** The first two are invented; the others are public programs, the first cases of
 0.3.
 
@@ -1141,8 +1251,10 @@ finds a new version shows it in the diff, and Accept pins it.
   set to **passes**, `write` and `link` stay **judged**. A token is a vault entry, put in the
   server's environment. Given to every project's agents, since they are the user's own.
 - **`agent-browser mcp`** (vercel-labs/agent-browser, a browser for agents): its `eval` runs
-  arbitrary script in the page, which no gate can judge, so it is **off**; a limit on `url` names
-  the addresses its `open` may reach (the exact values listed); the other actions stay **judged**.
+  arbitrary script in the page, which no gate can judge, so it is **off** (its adapter sets it so,
+  "Adapters"); a limit on `url` names
+  the addresses its `open` may reach (the exact values listed), when the user turns `open` on and
+  does without `login`; the other actions stay **judged**.
 - **`agent-desktop mcp`** (vercel-labs/agent-desktop, driving the desktop through AT-SPI on Linux,
   its tools named `desktop_click`, `desktop_snapshot`…): the most powerful kind, since it acts in
   every application the user has open. It is declared without `--headed` (that flag, a global one
