@@ -1070,7 +1070,7 @@ last turn's end with its provider's lifetime, established from each CLI and neve
 - **OpenCode**: its cache is the one of whichever model provider the user signed in to: unknown,
   neither trigger.
 
-What a new session needs is all in the store: its brief (the root's first message, or a child's),
+What a new session needs is all in the store: its brief (the root's first message, or a child's; an extension's session keeps the kind `brief` too: its first message is Flottille's, never the user's, and is delivered as `[flottille:brief]`),
 the summary, and its messages, word for word as they were recorded; its tools and instructions
 come from its role at the start of every session, its children and subscriptions are rows of the
 store keyed by the agent's id, and a session id is all the old session held of its own. Nothing of
