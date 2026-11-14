@@ -869,3 +869,132 @@ fn a_lead_is_reminded_once_when_its_led_sessions_work_is_integrated_and_it_is_id
     settle();
     assert_eq!(delivered(&user, &lead, INTEGRATED).len(), 1);
 }
+
+/// A lead and its led session `Login`, which reported and is idle, in its own workspace with one
+/// commit of its own: the lead, the session, its folder and its branch.
+fn reported_with_a_commit(user: &User) -> (String, String, std::path::PathBuf, String) {
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [
+            {"mcp": {"tool": "report", "arguments": {"text": "Login fixed."}}},
+            {"say": "Reported."}]}
+    ]}));
+    let (lead, mcp) = lead(user);
+    let (answer, session) = launch(
+        user,
+        &mcp,
+        json!({"kind": "led", "title": "Login", "brief": "Fix the login.",
+            "new_workspace": "login"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let (session, _) = session.unwrap();
+    eventually("the report's wake", || wakes(user, &lead).len() == 1);
+    eventually("the lead's turn on the report", || turns(user, &lead) >= 2);
+    settle();
+    let folder = std::path::PathBuf::from(shown(user, &session)["folder"].as_str().unwrap());
+    std::fs::write(folder.join("login.rs"), "fn login() {}\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "fix the login"]);
+    let branch = user.git_output(&folder, &["branch", "--show-current"]);
+    (lead, session, folder, branch.trim().to_owned())
+}
+
+/// Ends a turn of the lead, which is when the reminder is checked, and waits for it to be over.
+fn end_a_turn_of(user: &User, lead: &str) {
+    let before = turns(user, lead);
+    user.call("agent.send", json!({"agent": lead, "message": "Go on."}))
+        .unwrap();
+    eventually("the lead's turn", || turns(user, lead) > before);
+    settle();
+}
+
+/// The project `app` on GitHub as `acme/app`, declared, with the pull request of `branch` in that
+/// state, aiming at `target`.
+fn app_on_github(user: &User, branch: &str, state: &str, target: &str) {
+    user.git(
+        &user.path("work/app"),
+        &["remote", "add", "origin", "git@github.com:acme/app.git"],
+    );
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("path = \".\""), "{text}");
+    user.write_project_file(
+        "app",
+        &text.replace(
+            "path = \".\"\n",
+            "path = \".\"\nforge = { kind = \"github\", repository = \"acme/app\" }\n",
+        ),
+    );
+    user.gh_script(json!({"pulls": {"acme/app": {branch: {
+        "number": 7, "title": "Fix the login", "state": state, "baseRefName": target,
+        "url": "https://github.com/acme/app/pull/7"
+    }}}}));
+}
+
+#[test]
+fn a_branch_another_branch_started_from_is_not_integrated() {
+    let user = User::with_fake_agent();
+    let (lead, _session, _folder, branch) = reported_with_a_commit(&user);
+    // A second session's branch, started from the first one's: it contains it, and it is no
+    // base the first one goes into.
+    user.git(&user.path("work/app"), &["branch", "second", &branch]);
+
+    end_a_turn_of(&user, &lead);
+
+    assert!(delivered(&user, &lead, INTEGRATED).is_empty());
+}
+
+#[test]
+fn a_branch_with_an_open_pull_request_is_not_integrated() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let (lead, _session, _folder, branch) = reported_with_a_commit(&user);
+    let project = user.path("work/app");
+    // Contained in the integration branch, and in another one, yet its pull request is open.
+    user.git(
+        &project,
+        &["merge", "--quiet", "--no-ff", "-m", "merge", &branch],
+    );
+    user.git(&project, &["branch", "second", &branch]);
+    let main = user.git_output(&project, &["branch", "--show-current"]);
+    app_on_github(&user, &branch, "OPEN", main.trim());
+
+    end_a_turn_of(&user, &lead);
+
+    assert!(delivered(&user, &lead, INTEGRATED).is_empty());
+}
+
+#[test]
+fn a_merged_pull_request_makes_its_session_integrated() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let (lead, session, _folder, branch) = reported_with_a_commit(&user);
+    let main = user.git_output(&user.path("work/app"), &["branch", "--show-current"]);
+    // A squash merge: its commits are in no branch.
+    app_on_github(&user, &branch, "MERGED", main.trim());
+
+    end_a_turn_of(&user, &lead);
+
+    assert_eq!(
+        delivered(&user, &lead, INTEGRATED),
+        vec![format!(
+            "\"Login\" (agent {session}) reported and its branch is in {}: stop it and remove \
+             its workspace?",
+            main.trim()
+        )]
+    );
+}
+
+#[test]
+fn a_forge_that_cannot_be_read_never_makes_a_session_integrated() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let (lead, _session, _folder, branch) = reported_with_a_commit(&user);
+    let project = user.path("work/app");
+    user.git(
+        &project,
+        &["merge", "--quiet", "--no-ff", "-m", "merge", &branch],
+    );
+    app_on_github(&user, &branch, "MERGED", "main");
+    user.gh_script(json!({"fail": {"acme/app": "HTTP 502: Bad Gateway"}}));
+
+    end_a_turn_of(&user, &lead);
+
+    assert!(delivered(&user, &lead, INTEGRATED).is_empty());
+}

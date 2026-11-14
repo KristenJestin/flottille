@@ -1431,9 +1431,10 @@ waiting.
 **A led session stays open after its report.** Its pilot reads the report, integrates the work,
 then stops the session (`agent_stop`, its own to end) and removes its workspace (`workspace
 remove`: a branch merged into another local branch is integrated, not lost, "The workspace").
-When a led session has reported, is idle, and its workspace's branch is contained in another
-local branch of one of its repositories, with commits of its own, the pilot is reminded once per
-session, by a delivery `led-integrated` checked at the end of a turn of either: `"Login" (agent
+When a led session has reported, is idle, and its work is integrated in one of its repositories
+(commits of its own, and its pull request merged, or none and the branch contained in the base the
+workspace started from; another branch holding it, an open pull request or a forge that cannot be
+read is no integration), the pilot is reminded once per session, by a delivery `led-integrated` checked at the end of a turn of either: `"Login" (agent
 …) reported and its branch is in main: stop it and remove its workspace?`.
 
 #### Where a question goes
