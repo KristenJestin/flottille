@@ -7,7 +7,7 @@ computer when the computer is on again. Every client (the window, the command li
 app) reads and answers the sessions of every machine of the user. It is the milestone
 `v0.4 - Remote` (`docs/design.md` §12, §13).
 
-**Status: the design of v0.4, decided with the maintainer on 2026-11-12 and 2026-11-13.** Nothing
+**Status: the design of v0.4, decided with the maintainer on 2026-11-12, 2026-11-13 and 2026-11-14.** Nothing
 here is built. What is decided is said as such; the defaults taken are in "Defaults taken, to
 confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
@@ -99,6 +99,12 @@ window, the command line, the tools and the docs.
 15. **Versions are checked at connection**, and a mismatch is said in a sentence.
 16. **One repository** for the daemon, the hub, the mobile core, the Android app and the site, with
     CI split by paths.
+17. **A `controller` may invite and remove devices; a `viewer` may not.** A role is changed by
+    removing the device and adding it again: there is no command that changes a role.
+18. **Presence goes through the hub.** With the hub unreachable, a runner counts the user as away,
+    and the phone is notified.
+19. **The CLI's commands are `flottille remote …`** (`setup`, `invite`, `join`, `accept`, `members`,
+    `rename`, `remove`, `address`), and the key folder is `remote/`.
 
 ## Architecture
 
@@ -613,15 +619,10 @@ on a real phone, by hand, and reported.
 - The verification words are four, from a fixed list of 2048 words.
 - The first member, the one that used the setup code, is the root every device pins; a reset of the
   hub makes every device set up again.
-- A `controller` may invite and remove devices; a `viewer` may not. A role is changed by removing
-  the device and adding it again.
 - Every method is `read` or `drive`; a `controller` may every `drive` method on a runner, a
   `viewer` only `read`.
 - A launch an agent aims at a runner that cannot take it is refused, naming the runners that could;
   the agent's tool description lists no machine.
-- Presence goes through the hub; with the hub unreachable, a runner counts the user as away.
-- The CLI's commands are `flottille remote …` (`setup`, `invite`, `join`, `accept`, `members`,
-  `rename`, `remove`, `address`), and the key folder is `remote/`.
 - A notification waits 30 seconds and is dropped when a client had an input in the last 2 minutes.
 
 ## Open questions
