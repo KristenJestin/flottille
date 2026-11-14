@@ -501,3 +501,174 @@ fn the_user_saves_their_own_values_for_a_request() {
         "The notes of the user."
     );
 }
+
+/// The vault entry `name`, every project's, for the address `url` (none when `None`).
+fn entry(user: &User, name: &str, url: Option<&str>) {
+    let mut params = json!({"name": name, "secret": SECRET});
+    if let Some(url) = url {
+        params["url"] = json!(url);
+    }
+    user.call("vault.set", params).unwrap();
+}
+
+#[test]
+fn an_agent_cannot_send_an_entry_to_another_host() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    entry(&user, "github-token", Some("https://api.github.com"));
+    let (_, mcp) = root(&user);
+
+    let sent = refused(mcp.call(
+        "connections",
+        json!({"action": "add", "name": "notes", "about": "Notes.",
+            "url": "https://notes.example.com/mcp",
+            "headers": {"Authorization": "github-token"}}),
+    ));
+    assert!(
+        sent.contains("api.github.com") && sent.contains("notes.example.com"),
+        "both hosts: {sent}"
+    );
+    assert!(sent.contains("their own form"), "{sent}");
+
+    // Nor by moving a connection the user bound it to: the entry would follow the URL.
+    entry(&user, "notes-token", Some("https://notes.example.com"));
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "Notes.", "url": "https://notes.example.com/mcp",
+            "headers": {"Authorization": {"vault": "notes-token"}}}),
+    )
+    .unwrap();
+    let moved = refused(mcp.call(
+        "connections",
+        json!({"action": "edit", "name": "notes", "url": "https://elsewhere.example.com/mcp"}),
+    ));
+    assert!(
+        moved.contains("notes.example.com") && moved.contains("elsewhere.example.com"),
+        "{moved}"
+    );
+    assert_eq!(pending(&user), 0);
+}
+
+#[test]
+fn an_agent_cannot_bind_an_entry_without_an_address_to_a_header() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    entry(&user, "github-token", None);
+    let (_, mcp) = root(&user);
+
+    let sent = refused(mcp.call(
+        "connections",
+        json!({"action": "add", "name": "notes", "about": "Notes.",
+            "url": "https://notes.example.com/mcp",
+            "headers": {"Authorization": "github-token"}}),
+    ));
+    assert!(
+        sent.contains("no address") && sent.contains("notes.example.com"),
+        "{sent}"
+    );
+    assert!(sent.contains("their own form"), "{sent}");
+    assert_eq!(pending(&user), 0);
+}
+
+#[test]
+fn an_agent_binds_an_entry_of_the_same_host() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    entry(&user, "notes-token", Some("https://NOTES.example.com/api"));
+    entry(&user, "github-token", None);
+    let (_, mcp) = root(&user);
+
+    let number = held(&mcp.call(
+        "connections",
+        json!({"action": "add", "name": "notes", "about": "Notes.",
+            "url": "https://notes.example.com/mcp",
+            "headers": {"Authorization": "notes-token"}}),
+    ));
+    let proposed = user
+        .call("connection.proposed", json!({"number": number}))
+        .unwrap();
+    assert_eq!(
+        proposed["secrets"],
+        json!([{"key": "headers", "name": "Authorization", "entry": "notes-token",
+            "entry_host": "notes.example.com", "host": "notes.example.com", "differs": false}]),
+        "{proposed}"
+    );
+
+    // A command's variables may name any entry: the card says where each goes.
+    let line = line_of(&user, "almanac");
+    let number = held(&mcp.call(
+        "connections",
+        json!({"action": "add", "name": "almanac", "about": "Notes.", "command": line,
+            "env": {"GITHUB_TOKEN": "github-token"}}),
+    ));
+    let proposed = user
+        .call("connection.proposed", json!({"number": number}))
+        .unwrap();
+    assert_eq!(
+        proposed["secrets"],
+        json!([{"key": "env", "name": "GITHUB_TOKEN", "entry": "github-token",
+            "entry_host": null, "host": null, "differs": true}]),
+        "{proposed}"
+    );
+}
+
+#[test]
+fn a_failing_server_never_shows_its_secret() {
+    let user = user();
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET}),
+    )
+    .unwrap();
+    turn_on(&user);
+    let line = line_of(&user, "almanac");
+    let mut script = almanac();
+    script["stderr"] = json!(format!("no login for {SECRET}"));
+    script["exit"] = json!(3);
+    std::fs::write(user.path("almanac-script.json"), script.to_string()).unwrap();
+    user.call(
+        "connection.add",
+        json!({"name": "almanac", "about": "The notes of the user.",
+            "command": flottille_core::command::split_line(&line).unwrap(),
+            "env": {"ALMANAC_TOKEN": {"vault": "almanac-token"}}}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    let listed = done(mcp.call("connections", json!({"action": "list"})));
+    let shown = done(mcp.call("connections", json!({"action": "show", "name": "almanac"})));
+
+    for (what, said) in [("list", &listed), ("show", &shown)] {
+        assert!(said.contains("Failing:"), "{what}: {said}");
+        assert!(!said.contains(SECRET), "{what}: {said}");
+    }
+}
+
+#[test]
+fn a_request_accepted_is_not_answered_again_by_the_users_save() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let line = line_of(&user, "almanac");
+    let number = held(&mcp.call(
+        "connections",
+        json!({"action": "add", "name": "almanac", "about": "Notes.", "command": line.clone()}),
+    ));
+    approve(&user, number);
+
+    let (_, again) = user
+        .call(
+            "connection.add",
+            json!({"name": "jotter", "about": "The notes of the user.",
+                "command": flottille_core::command::split_line(&line).unwrap(),
+                "request": number}),
+        )
+        .unwrap_err();
+    assert!(again.contains("already decided"), "{again}");
+    assert!(connection(&user, "jotter").is_none());
+}

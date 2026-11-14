@@ -189,6 +189,108 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
     Ok(params)
 }
 
+/// The host an address names, as a connection's URL or a vault entry's `url` gives it: over
+/// `https://`, or `http://` on this machine; a bare host is taken as `https://`. Anything else
+/// names no host a secret may be sent to.
+fn host_of(text: &str) -> Option<String> {
+    let text = text.trim();
+    let url = match text.contains("://") {
+        true => url::Url::parse(text),
+        false => url::Url::parse(&format!("https://{text}")),
+    }
+    .ok()?;
+    let local = match url.host()? {
+        url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+    };
+    match url.scheme() {
+        "https" => {}
+        "http" if local => {}
+        _ => return None,
+    }
+    Some(url.host_str()?.to_ascii_lowercase())
+}
+
+/// The host a connection sends its headers to; none for a command.
+fn host_of_reach(declaration: &Declaration) -> Option<String> {
+    match &declaration.reach {
+        Reach::Url(url) => host_of(url),
+        Reach::Command(_) => None,
+    }
+}
+
+/// An agent's URL connection sends a vault entry in a header only to the entry's own host (its
+/// `url`): else an agent could send any token of the user to a server it chose. What the user
+/// bound already to the same host stays; the user's own form binds freely.
+fn headers_checked(
+    daemon: &Daemon,
+    before: Option<&Declaration>,
+    after: &Declaration,
+) -> Result<(), String> {
+    let Reach::Url(url) = &after.reach else {
+        return Ok(());
+    };
+    let host = host_of(url).ok_or_else(|| format!("{url:?}: names no host"))?;
+    let entries = daemon
+        .read(|store| store.vault_entries())
+        .map_err(|error| error.to_string())?;
+    let kept = before.filter(|before| host_of_reach(before).as_deref() == Some(host.as_str()));
+    let theirs = "an agent binds an entry only to a connection on the entry's own host (its url); \
+                  the user can bind it in their own form, in Settings, Connections";
+    for (header, entry) in &after.headers {
+        if kept.is_some_and(|before| before.headers.get(header) == Some(entry)) {
+            continue;
+        }
+        let entry_host = entries
+            .iter()
+            .find(|known| &known.name == entry)
+            .and_then(|known| known.url.as_deref())
+            .and_then(host_of);
+        match entry_host {
+            Some(entry_host) if entry_host == host => {}
+            Some(entry_host) => {
+                return Err(format!(
+                    "headers.{header}: the vault entry {entry} is for {entry_host}, and this \
+                     connection would send it to {host}: {theirs}"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "headers.{header}: the vault entry {entry} has no address (its url, \
+                     https://), so nothing says it is for {host}, where this connection would \
+                     send it: {theirs}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Where each vault entry a declaration names goes, for the card: the entry's host (none for an
+/// entry with no address) and the connection's (none for a command, whose environment holds it),
+/// which differ for every variable of a command.
+fn secrets(daemon: &Daemon, declaration: &Declaration) -> Value {
+    let entries = daemon
+        .read(|store| store.vault_entries())
+        .unwrap_or_default();
+    let host = host_of_reach(declaration);
+    let mut secrets = Vec::new();
+    for (key, named) in [("env", &declaration.env), ("headers", &declaration.headers)] {
+        for (name, entry) in named {
+            let entry_host = entries
+                .iter()
+                .find(|known| &known.name == entry)
+                .and_then(|known| known.url.as_deref())
+                .and_then(host_of);
+            let differs = host.is_none() || entry_host != host;
+            secrets.push(json!({"key": key, "name": name, "entry": entry,
+                "entry_host": entry_host, "host": host, "differs": differs}));
+        }
+    }
+    Value::Array(secrets)
+}
+
 fn proposal(daemon: &Daemon, args: &Value) -> Result<Proposal, String> {
     let action = args["action"].as_str().unwrap_or_default().to_owned();
     let name = args["name"]
@@ -221,6 +323,7 @@ fn proposal(daemon: &Daemon, args: &Value) -> Result<Proposal, String> {
             let params = params_of(daemon, args, false)?;
             let declaration = Declaration::of(&params, "connection")?;
             entries_checked(daemon, &declaration).map_err(|f| f.message)?;
+            headers_checked(daemon, None, &declaration)?;
             (None, Some(declaration))
         }
         "edit" => {
@@ -234,6 +337,7 @@ fn proposal(daemon: &Daemon, args: &Value) -> Result<Proposal, String> {
             }
             let new = super::edited(&old, &Value::Object(params)).map_err(|f| f.message)?;
             entries_checked(daemon, &new).map_err(|f| f.message)?;
+            headers_checked(daemon, Some(&old), &new)?;
             if changed(&old, &new).is_empty() {
                 return Err(format!(
                     "the connection {name} already says so: nothing to change"
@@ -667,7 +771,7 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
                 json!({"number": number, "action": args["action"], "name": args["name"],
                 "before": declaration(&daemon.paths, args["name"].as_str().unwrap_or_default())
                     .ok().map(|d| d.json()),
-                "after": null, "changed": [], "settings": {}, "current": false,
+                "after": null, "changed": [], "settings": {}, "secrets": [], "current": false,
                 "why": why}),
             );
         }
@@ -697,7 +801,33 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
         "after": proposal.after.as_ref().map(Declaration::json),
         "changed": changed,
         "settings": proposal.settings,
+        "secrets": proposal.after.as_ref().or(proposal.before.as_ref())
+            .map_or(json!([]), |shown| secrets(daemon, shown)),
         "current": current,
         "why": null,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_address_names_its_host_over_https_or_on_this_machine() {
+        assert_eq!(
+            host_of("https://NOTES.example.com/mcp").as_deref(),
+            Some("notes.example.com")
+        );
+        assert_eq!(
+            host_of("notes.example.com").as_deref(),
+            Some("notes.example.com")
+        );
+        assert_eq!(
+            host_of("http://127.0.0.1:7000").as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(host_of("http://notes.example.com"), None);
+        assert_eq!(host_of("ftp://notes.example.com"), None);
+        assert_eq!(host_of(""), None);
+    }
 }
