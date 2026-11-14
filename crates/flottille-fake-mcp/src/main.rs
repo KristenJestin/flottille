@@ -64,7 +64,9 @@
 //! of the script's `login`, as a page's login form would be filled. `login` takes `token`
 //! (`"drop"`: the plugin is run without `FLOTTILLE_VAULT_TOKEN`; `"wrong"`: with another one),
 //! `replay` (the plugin is asked once more, with the same token) and `echo` (the password is
-//! written on its output, as a careless command line would). Its log line, `login`, says its
+//! written on its output, as a careless command line would) and `fail` (the password is written
+//! on its error output, and it fails). `--url` and `--item` are read as `--url <url>` or
+//! `--url=<url>`. Its log line, `login`, says its
 //! arguments, its folder and what the plugin answered, never a password.
 //!
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
@@ -721,10 +723,15 @@ fn encoded(text: &str) -> String {
 /// agent-browser's `auth login` with a credential provider: the plugin asked, the form filled.
 fn login(args: &[String], script: &Value, log: &Option<String>) {
     let option = |name: &str| {
+        let joined = format!("{name}=");
         args.iter()
-            .position(|arg| arg == name)
-            .and_then(|at| args.get(at + 1))
-            .cloned()
+            .find_map(|arg| arg.strip_prefix(&joined).map(str::to_owned))
+            .or_else(|| {
+                args.iter()
+                    .position(|arg| arg == name)
+                    .and_then(|at| args.get(at + 1))
+                    .cloned()
+            })
     };
     let behaviour = &script["login"];
     let name = args
@@ -809,6 +816,13 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         std::process::exit(1);
     }
     let credential = &answer["credential"];
+    if behaviour["fail"] == true {
+        eprintln!(
+            "✗ the page refused {}",
+            credential["password"].as_str().unwrap_or_default()
+        );
+        std::process::exit(1);
+    }
     if let Some(form) = behaviour["form"].as_str() {
         std::fs::write(form, credential.to_string()).unwrap();
     }

@@ -3552,6 +3552,29 @@ const OWN_LOGINS: [&str; 6] = [
     "agent_browser_set_credentials",
 ];
 
+/// Actions its adapter keeps off as well: plugins run commands and read agent-browser's config,
+/// and `with_login` is named should a 0.43 patch serve it.
+const LOCKED_TOO: [&str; 5] = [
+    "agent_browser_plugin_add",
+    "agent_browser_plugin_list",
+    "agent_browser_plugin_run",
+    "agent_browser_plugin_show",
+    "agent_browser_with_login",
+];
+
+/// Actions that run a script in the page or read a field, a request, the storage or a trace:
+/// off at the first pin, and `login` is refused while one is offered. One of each kind.
+const PAGE_READERS: [&str; 8] = [
+    "agent_browser_add_init_script",
+    "agent_browser_wait_for_function",
+    "agent_browser_batch",
+    "agent_browser_get_value",
+    "agent_browser_network_requests",
+    "agent_browser_network_har_start",
+    "agent_browser_trace_start",
+    "agent_browser_storage_get",
+];
+
 /// A server that says it is agent-browser `version`, with some of its MCP tools.
 fn agent_browser(version: &str) -> Value {
     let tool = |name: &str, properties: Value| {
@@ -3563,7 +3586,7 @@ fn agent_browser(version: &str) -> Value {
         tool("agent_browser_snapshot", json!({})),
         tool("agent_browser_eval", json!({"script": {"type": "string"}})),
     ];
-    for name in OWN_LOGINS {
+    for name in OWN_LOGINS.iter().chain(&LOCKED_TOO).chain(&PAGE_READERS) {
         tools.push(tool(name, json!({"name": {"type": "string"}})));
     }
     json!({
@@ -3835,7 +3858,7 @@ fn agent_browser_logs_in_with_a_vault_entry() {
         "\"auth\",\"login\",\"shop-test\"",
         "\"--credential-provider\",\"flottille\"",
         "\"--item\",\"shop-test\"",
-        "\"--url\",\"https://shop.example.com/account/login\"",
+        "\"--url=https://shop.example.com/account/login\"",
     ] {
         assert!(args.contains(word), "{word}: {args}");
     }
@@ -3929,7 +3952,7 @@ fn a_plugin_request_without_its_runs_token_is_refused() {
 fn agent_browsers_own_credential_actions_cannot_be_turned_on() {
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));
-    for action in OWN_LOGINS {
+    for &action in OWN_LOGINS.iter().chain(&LOCKED_TOO) {
         let refused = user
             .call(
                 "connection.accept",
@@ -3944,7 +3967,7 @@ fn agent_browsers_own_credential_actions_cannot_be_turned_on() {
     let review = user
         .call("connection.review", json!({"name": "browser"}))
         .unwrap();
-    for action in OWN_LOGINS {
+    for &action in OWN_LOGINS.iter().chain(&LOCKED_TOO) {
         let shown = review["actions"]
             .as_array()
             .unwrap()
@@ -4033,6 +4056,128 @@ fn the_secret_never_reaches_an_agent_nor_the_store() {
     assert!(!review.to_string().contains(PASSWORD));
     // Nothing of Flottille's holds it: its store, its log, the config it wrote, the fake
     // server's log; the page's form alone does.
+    for folder in ["state", "data", "config"] {
+        let found = files_holding(&user.path(folder), PASSWORD);
+        assert!(found.is_empty(), "{folder}: {found:?}");
+    }
+    let log = std::fs::read_to_string(log_file(&user, "browser")).unwrap();
+    assert!(!log.contains(PASSWORD), "{log}");
+}
+
+#[test]
+fn login_is_refused_while_a_page_script_action_is_offered() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    // Off at the first pin, each, and the login works.
+    for action in PAGE_READERS {
+        assert_eq!(setting(&user, action), "off", "{action}");
+    }
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    std::fs::remove_file(form_file(&user)).unwrap();
+    for action in PAGE_READERS {
+        user.call(
+            "connection.accept",
+            json!({"name": "browser", "actions": {action: "judged"}}),
+        )
+        .unwrap();
+        let answer = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        assert!(answer.contains(action), "{action}: {answer}");
+        assert!(form(&user).is_none(), "{action}: the form was filled");
+        let review = user
+            .call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        assert!(
+            review["adapter"]["said"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(action),
+            "{action}: {review}"
+        );
+        user.call(
+            "connection.accept",
+            json!({"name": "browser", "actions": {action: "off"}}),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn login_without_a_url_goes_to_the_entrys_site() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let login = logged(&user, "browser", "login");
+    let args = login.last().unwrap()["args"].to_string();
+    assert!(
+        args.contains("\"--url=https://shop.example.com/login\""),
+        "{args}"
+    );
+}
+
+#[test]
+fn login_with_an_entry_without_a_url_is_refused() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "no-site", "secret": "s3cret-of-no-site", "username": "tester",
+            "for": "connection:browser"}),
+    )
+    .unwrap();
+    for arguments in [
+        json!({"entry": "no-site"}),
+        json!({"entry": "no-site", "url": "https://shop.example.com/login"}),
+    ] {
+        let answer = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": arguments}),
+        ));
+        assert!(answer.contains("has no URL"), "{answer}");
+        assert!(!answer.contains("s3cret"), "{answer}");
+    }
+    assert!(form(&user).is_none());
+    assert!(logged(&user, "browser", "login").is_empty());
+    let help = done(mcp.call("conn_browser", json!({"action": "help", "for": "login"})));
+    assert!(help.contains("an entry without a URL"), "{help}");
+}
+
+#[test]
+fn the_secret_never_reaches_an_agent_when_the_login_fails() {
+    let user = user();
+    let watch = user.watch(&[]);
+    // The fake command line gets the secret, writes it on its error output and fails.
+    browser(&user, &agent_browser("0.43.0"), json!({"fail": true}));
+    let (id, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("failed"), "{said}");
+    assert!(!said.contains(PASSWORD), "{said}");
+    assert_eq!(
+        logged(&user, "browser", "login").last().unwrap()["plugin"]["success"],
+        true
+    );
+    let events = watch.until(|e| e["name"] == "agent.tool_served" && e["data"]["agent"] == id);
+    assert!(!json!(events).to_string().contains(PASSWORD));
+    let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+    assert!(!shown.to_string().contains(PASSWORD));
+    for method in ["connection.list", "vault.list", "inbox.list"] {
+        let answer = user.call(method, json!({})).unwrap();
+        assert!(!answer.to_string().contains(PASSWORD), "{method}");
+    }
     for folder in ["state", "data", "config"] {
         let found = files_holding(&user.path(folder), PASSWORD);
         assert!(found.is_empty(), "{folder}: {found:?}");

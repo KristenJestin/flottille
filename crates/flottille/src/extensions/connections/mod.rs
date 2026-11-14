@@ -1105,9 +1105,11 @@ fn decide<'a>(
             )
         })?;
         limits(declaration, &action, &arguments)?;
-        if let Some(why) =
-            adapter.and_then(|adapter| adapter.refuses(own.name, |a| setting_of(row, a).to_owned()))
-        {
+        if let Some(why) = adapter.and_then(|adapter| {
+            adapter.refuses(own.name, |a| {
+                pin.action(a).map(|_| setting_of(row, a).to_owned())
+            })
+        }) {
             return Err(why);
         }
         // Flottille's own action is judged as any is: it uses a secret on the page the agent
@@ -1868,12 +1870,7 @@ fn adapter_said(
 ) -> Value {
     match adapters::of(&now.server) {
         adapters::Found::Applies(adapter) => {
-            let setting = |action: &str| {
-                proposed
-                    .get(action)
-                    .cloned()
-                    .unwrap_or_else(|| "judged".into())
-            };
+            let setting = |action: &str| proposed.get(action).cloned();
             let mut said = format!(
                 "Flottille's adapter for {} {} applies.",
                 adapter.server, adapter.range

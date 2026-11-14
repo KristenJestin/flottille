@@ -1155,10 +1155,20 @@ provider; its command line does (`auth login <name> --credential-provider <plugi
 way in:
 
 - **Its own logins are off and stay off**: `agent_browser_auth_save`, `_auth_login`, `_auth_list`,
-  `_auth_show`, `_auth_delete` and `agent_browser_set_credentials` (a password as an argument),
-  whatever the user set.
-- **`agent_browser_eval` is off at the first pin**, and **`login` is refused while it is
-  offered** (a page script can read a field a secret was typed into); the review says so.
+  `_auth_show`, `_auth_delete`, `agent_browser_set_credentials` (a password as an argument), its
+  plugins `agent_browser_plugin_add`, `_plugin_list`, `_plugin_run`, `_plugin_show` (they run
+  commands with its credential providers) and `agent_browser_with_login`, whatever the user set.
+- **Every action that could reach a typed secret is off at the first pin**, and **`login` is
+  refused while one of them is offered**; the review says which and why. A page script can copy a
+  field into what any other action reads (the title, the text), so masking the exact secret is
+  not enough: the set is what runs a script in the page (`eval`, `add_init_script`,
+  `wait_for_function`, `batch`, `chat`, `flow_run`, and `inspect`, `get_cdp_url`,
+  `dashboard_start`, which open a way to one), reads a field (`get_value`), or reads the page's
+  requests, storage or traces (`network_route`, `network_requests`, `network_request`,
+  `network_har_start`/`_stop`, `har_start`/`_stop`, `trace_start`/`_stop`, `storage_get`,
+  `state_save`, `state_show`), all prefixed `agent_browser_`. It was read from 0.43.0's own list;
+  names it does not serve are kept should a 0.43 patch serve them, and an action the server does
+  not serve does not stop `login`.
 - **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
   written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the
@@ -1166,11 +1176,16 @@ way in:
 - **`login {entry, url?}`**, Flottille's own action: the agent names a vault entry **bound to this
   connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
   lists, never their values. An entry bound to another use, or to none, is refused, naming its use.
-  A `url` must be on the entry's site (the same scheme, host and port as its `url`, when it has
-  one): the secret is typed into the form of the page it opens. Flottille runs agent-browser's
+  **The login always opens a page of the entry's site**: the agent's `url`, which must have the
+  same scheme, host and port as the entry's `url`, or else the entry's own. An entry without a
+  URL is refused (said in the error and in `help`): without one, agent-browser would fill the page
+  that is open, which the agent chose. Under the connection's turn, the settings and the adapter
+  are read again: a login whose adapter no longer applies (the version moved after the call was
+  routed) is refused. Flottille runs agent-browser's
   command line itself, without a shell, under the connection's one-call-at-a-time turn: the words
   of the server's command before its `mcp` (global options kept), then `--config <the file>
-  auth login <entry> --credential-provider flottille --item <entry> [--url <url>]`, in the
+  auth login <entry> --credential-provider flottille --item <entry> --url=<url>` (one word, so a
+  URL that starts with `-` is never an option), in the
   server's folder and with its environment, so on the **same browser session and namespace** as
   the server (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`). A connection reached by a URL,
   or whose command has no `mcp`, refuses `login`. It has 120 seconds, as a call has.
