@@ -15,6 +15,7 @@ use flottille_window::link::Connect;
 use flottille_window::session::LED_NOTE;
 use flottille_window::tree::{session_id, session_menu_id, session_rename_id};
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::space;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
@@ -241,6 +242,42 @@ fn the_window_renames_a_session_from_its_rows_menu(cx: &mut TestAppContext) {
     });
     assert_eq!(toasts(&shell, cx), ["Session renamed"]);
     assert!(!shell.read_with(cx, |s, cx| s.rename_form().read(cx).is_open()));
+}
+
+#[gpui_kit::test]
+fn an_empty_title_is_refused_in_a_line_under_the_field(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    let id = start(&user, "write the release notes");
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the row", |cx| {
+        label(cx, session_id(&id)).is_some()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.hover(session_id(&id), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_menu_id(&id), cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_rename_id(&id), cx));
+    settle(cx);
+
+    rename_to(&shell, "", cx);
+    settle(cx);
+    assert!(
+        cx.update(|window, _| window.find("rename-error").visible()),
+        "the refusal is said"
+    );
+    // The line is `space::SM` under the field, not against it.
+    let (field, line) = cx.update(|window, _| {
+        // The box and the input inside it carry the id: the box ends last.
+        let field = window
+            .find_all("rename-title")
+            .iter()
+            .map(|found| found.bounds().bottom())
+            .fold(gpui_kit::px(0.), gpui_kit::Pixels::max);
+        (field, window.find("rename-error-block").bounds())
+    });
+    assert_eq!(line.top() - field, space::SM);
 }
 
 #[gpui_kit::test]

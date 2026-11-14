@@ -197,15 +197,12 @@ impl Render for MessageChecks {
             .test_support();
         // The field grows by a line as a check is added, and its height eases there.
         let text = growing(id("text-height"), text);
-        let save = div().flex().justify_end().child(
-            presence(
-                id("save-block"),
-                self.savable(cx),
-                Button::secondary(id("save"), "Save")
-                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-            )
-            .gap(space::SM),
-        );
+        let save = div().flex().justify_end().child(presence(
+            id("save-block"),
+            self.savable(cx),
+            Button::secondary(id("save"), "Save")
+                .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+        ));
         Section::new(
             format!("message-checks-{project}"),
             "Commit and pull request checks",

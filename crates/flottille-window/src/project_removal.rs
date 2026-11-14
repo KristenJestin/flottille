@@ -438,10 +438,14 @@ impl Render for ProjectRemoval {
                 cx,
             ),
         ))
-        .child(enter(
-            id("discard-enter"),
-            2,
-            presence(id("discard-block"), unsaved, switch).gap(space::LG),
-        ))
+        // The block is the column's child, so that its gap folds with it: its entrance is inside.
+        .child(
+            presence(
+                id("discard-block"),
+                unsaved,
+                enter(id("discard-enter"), 2, switch),
+            )
+            .gap(space::LG),
+        )
     }
 }

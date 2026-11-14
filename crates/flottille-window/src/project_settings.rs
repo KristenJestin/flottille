@@ -1758,15 +1758,12 @@ impl ProjectSettingsPage {
         };
         let id = |part: &str| ElementId::Name(format!("branch-prefix-{part}-{}", self.name).into());
         // Save unfolds beside the field once the prefix differs from the kept one (rule 4).
-        let save = div().flex_none().child(
-            presence(
-                id("save-block"),
-                self.branch_prefix_savable(cx),
-                Button::secondary(id("save"), "Save")
-                    .on_click(cx.listener(|this, _, _, cx| this.save_branch_prefix(cx))),
-            )
-            .gap(space::SM),
-        );
+        let save = div().flex_none().child(presence(
+            id("save-block"),
+            self.branch_prefix_savable(cx),
+            Button::secondary(id("save"), "Save")
+                .on_click(cx.listener(|this, _, _, cx| this.save_branch_prefix(cx))),
+        ));
         let said = match self.branch_prefix_typed(cx).trim() {
             "" => "New workspaces get <name>.".to_owned(),
             prefix => format!("New workspaces get {prefix}/<name>."),
@@ -2627,38 +2624,44 @@ impl Render for ProjectSettingsPage {
                     .path(SharedString::from(shown_folder(&self.folder)))
                     .more(self.more.clone()),
             )
-            .child(presence_of(
-                "project-settings-unread-block",
-                (!self.obsolete.is_empty()).then(|| {
-                    SharedString::from(format!(
-                        "Some settings were not read: {}",
-                        self.obsolete.join(", ")
-                    ))
-                }),
-                move |line| {
-                    div()
-                        .id("project-settings-unread")
-                        .aria_label(line.clone())
-                        .text_size(px(12.5))
-                        .text_color(p.wait)
-                        .child(line)
-                        .test_support()
-                        .into_any_element()
-                },
-            ))
-            .child(presence_of(
-                "project-settings-error-block",
-                self.error.clone().map(SharedString::from),
-                move |error| {
-                    div()
-                        .id("project-settings-error")
-                        .text_size(px(12.5))
-                        .text_color(p.fail)
-                        .child(error)
-                        .test_support()
-                        .into_any_element()
-                },
-            ));
+            .child(
+                presence_of(
+                    "project-settings-unread-block",
+                    (!self.obsolete.is_empty()).then(|| {
+                        SharedString::from(format!(
+                            "Some settings were not read: {}",
+                            self.obsolete.join(", ")
+                        ))
+                    }),
+                    move |line| {
+                        div()
+                            .id("project-settings-unread")
+                            .aria_label(line.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.wait)
+                            .child(line)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .gap(space::MD),
+            )
+            .child(
+                presence_of(
+                    "project-settings-error-block",
+                    self.error.clone().map(SharedString::from),
+                    move |error| {
+                        div()
+                            .id("project-settings-error")
+                            .text_size(px(12.5))
+                            .text_color(p.fail)
+                            .child(error)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .gap(space::MD),
+            );
         if let Some((at, until)) = self.scroll_to {
             self.scroll.scroll_to_top_of_item(at);
             if cx.background_executor().now() < until {

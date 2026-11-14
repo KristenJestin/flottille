@@ -5480,32 +5480,38 @@ impl Render for Row {
                                     })),
                                 move |d, t| d.text_color(mix(p.faint, p.mute, t)),
                             ))
-                            .child(presence(
-                                id("relayed-line"),
-                                !self.open,
-                                div()
-                                    .id(id("relayed-first"))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_size(px(13.5))
-                                    .text_color(p.mute)
-                                    .aria_label(first.clone())
-                                    .child(first)
-                                    .test_support(),
-                            ))
-                            .child(presence(
-                                id("relayed-body"),
-                                self.open,
-                                div()
-                                    .id(id("relayed-text"))
-                                    .child(markdown_view(
-                                        id("relayed-region"),
-                                        &self.markdown,
-                                        self.scope,
-                                    ))
-                                    .test_support(),
-                            ))
+                            .child(
+                                presence(
+                                    id("relayed-line"),
+                                    !self.open,
+                                    div()
+                                        .id(id("relayed-first"))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(13.5))
+                                        .text_color(p.mute)
+                                        .aria_label(first.clone())
+                                        .child(first)
+                                        .test_support(),
+                                )
+                                .gap(space::XS),
+                            )
+                            .child(
+                                presence(
+                                    id("relayed-body"),
+                                    self.open,
+                                    div()
+                                        .id(id("relayed-text"))
+                                        .child(markdown_view(
+                                            id("relayed-region"),
+                                            &self.markdown,
+                                            self.scope,
+                                        ))
+                                        .test_support(),
+                                )
+                                .gap(space::XS),
+                            )
                     }
                 };
                 let relayed = div()
@@ -8298,41 +8304,44 @@ impl Render for SessionRail {
                     // Its branch, commits ahead, files not committed and setup played; it
                     // unfolds once the daemon said, and fades back in when it says another
                     // (a branch renamed).
-                    .child(presence(
-                        ElementId::Name(format!("rail-status-{name}-block").into()),
-                        status.is_some(),
-                        {
-                            let said = SharedString::from(
-                                status.as_ref().map(|s| s.line()).unwrap_or_default(),
-                            );
-                            let line = tipped_when_cut(
-                                div()
-                                    .id(ElementId::Name(format!("rail-status-{name}").into()))
-                                    .pl(space::XL)
-                                    .mono(11.5)
-                                    .text_color(p.faint)
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .aria_label(SharedString::from(status.as_ref().map_or(
-                                        String::new(),
-                                        |s| match &s.note {
-                                            Some(note) => format!("{} · {note}", s.line()),
-                                            None => s.line(),
-                                        },
-                                    )))
-                                    .child(said.clone()),
-                                said.clone(),
-                                window,
-                                cx,
-                            );
-                            changing(
-                                ElementId::Name(format!("rail-status-{name}-change").into()),
-                                said,
-                                move |_| line,
-                            )
-                        },
-                    ))
+                    .child(
+                        presence(
+                            ElementId::Name(format!("rail-status-{name}-block").into()),
+                            status.is_some(),
+                            {
+                                let said = SharedString::from(
+                                    status.as_ref().map(|s| s.line()).unwrap_or_default(),
+                                );
+                                let line = tipped_when_cut(
+                                    div()
+                                        .id(ElementId::Name(format!("rail-status-{name}").into()))
+                                        .pl(space::XL)
+                                        .mono(11.5)
+                                        .text_color(p.faint)
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .aria_label(SharedString::from(status.as_ref().map_or(
+                                            String::new(),
+                                            |s| match &s.note {
+                                                Some(note) => format!("{} · {note}", s.line()),
+                                                None => s.line(),
+                                            },
+                                        )))
+                                        .child(said.clone()),
+                                    said.clone(),
+                                    window,
+                                    cx,
+                                );
+                                changing(
+                                    ElementId::Name(format!("rail-status-{name}-change").into()),
+                                    said,
+                                    move |_| line,
+                                )
+                            },
+                        )
+                        .gap(space::XS),
+                    )
                     .test_support()
                     .into_any_element(),
             );

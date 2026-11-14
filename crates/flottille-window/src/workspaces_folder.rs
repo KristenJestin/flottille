@@ -404,7 +404,7 @@ impl Render for WorkspacesFolder {
         // wide as its parent: the button keeps its own width.
         let save = div()
             .flex_none()
-            .child(presence(id("save-block"), self.savable(cx), save).gap(space::SM));
+            .child(presence(id("save-block"), self.savable(cx), save));
         // The field unfolds and fades in when "a folder of my own" is chosen, and folds away when
         // another is.
         let path = presence(

@@ -17,6 +17,7 @@ use flottille_window::extensions::specs::SpecPage;
 use flottille_window::shell::Selection;
 use flottille_window::tree::session_id;
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::space;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
@@ -164,6 +165,11 @@ fn step(cx: &mut VisualTestContext) -> usize {
     let drawn = cx.update(|window, cx| window.simulate_next_frame(cx));
     cx.run_until_parked();
     drawn
+}
+
+fn bounds(cx: &mut VisualTestContext, id: &str) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    let id = id.to_owned();
+    cx.update(|window, _| window.find(id).bounds())
 }
 
 fn found(cx: &mut VisualTestContext, id: &str) -> bool {
@@ -553,6 +559,11 @@ fn ready_is_disabled_with_an_open_question_and_says_why(cx: &mut TestAppContext)
         label(cx, "spec-ready-why").as_deref(),
         Some("1 question is open: answer it first.")
     );
+    // The line is `space::SM` under the buttons, not against them.
+    assert_eq!(
+        bounds(cx, "spec-ready-why-block").top() - bounds(cx, "spec-ready").bottom(),
+        space::SM
+    );
     // A click does nothing.
     click(cx, "spec-ready");
     settle(cx);
@@ -864,6 +875,12 @@ fn a_changed_ticket_offers_take_and_overwrite_on_the_spec_page(cx: &mut TestAppC
     let said = label(cx, "spec-ticket-said").unwrap_or_default();
     assert!(said.contains("has not read #5 yet"), "{said}");
     assert!(found(cx, "spec-ticket-take") && found(cx, "spec-ticket-overwrite"));
+    // What the user may choose is `space::SM` under what the ticket said.
+    assert_eq!(
+        bounds(cx, "spec-ticket-choice-block").top()
+            - bounds(cx, "spec-ticket-said-block").bottom(),
+        space::SM
+    );
 
     // Overwrite asks first: a person's change is lost on the tracker.
     click(cx, "spec-ticket-overwrite");
@@ -951,6 +968,12 @@ fn the_departures_are_offered_at_done_and_posted_with_one_click(cx: &mut TestApp
         settle(cx);
         found(cx, "spec-departures-post")
     });
+    // The button is `space::MD` under the text it posts.
+    assert_eq!(
+        bounds(cx, "spec-departures-post-block").top()
+            - bounds(cx, "spec-departures-text").bottom(),
+        space::MD
+    );
     assert_eq!(
         gh_calls(&user, &["issue", "comment"]),
         0,

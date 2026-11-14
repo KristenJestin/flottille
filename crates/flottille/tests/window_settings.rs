@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_window::Shell;
 use flottille_window::settings::SettingsPage;
+use gpui_design_system::motion::PANEL;
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::space;
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -633,6 +635,14 @@ fn the_log_path_unfolds_only_with_developer_mode(cx: &mut TestAppContext) {
     });
     settle(cx);
     assert!(visible(cx, "developer-file"), "on: the path unfolds");
+    // The path is `space::MD` under the switch, not against it.
+    let (switch, line) = cx.update(|window, _| {
+        (
+            window.find("developer-switch").bounds(),
+            window.find("developer-file-line").bounds(),
+        )
+    });
+    assert_eq!(line.top() - switch.bottom(), space::MD);
     assert_eq!(
         label(cx, "developer-file").as_deref(),
         Some(user.path("state/flottille/developer.log").to_str().unwrap())
@@ -644,6 +654,73 @@ fn the_log_path_unfolds_only_with_developer_mode(cx: &mut TestAppContext) {
     });
     settle(cx);
     assert!(!present(cx, "developer-file"), "off again: it folds away");
+}
+
+/// A third of a panel's motion later: a motion that moves is neither at its start nor at its end.
+fn a_third_later(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.executor().advance_clock(PANEL / 3);
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
+
+/// How far the log line's block is under the switch of its card.
+fn log_line_under_the_switch(cx: &mut VisualTestContext) -> gpui_kit::Pixels {
+    cx.update(|window, _| {
+        window.find("developer-file-line").bounds().top()
+            - window.find("developer-switch").bounds().bottom()
+    })
+}
+
+#[gpui_kit::test]
+fn the_log_line_brings_its_gap_as_it_unfolds_and_takes_it_as_it_folds(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = window(&user, cx);
+    let page = open_settings(&shell, cx);
+    tab(&shell, cx, "general");
+    until(&shell, cx, "the developer mode is read", |cx| {
+        page.read_with(cx, |p, _| p.developer().is_some())
+    });
+    settle(cx);
+    let one_frame = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    };
+
+    // Turned on: the card's gap is not there at once, it unfolds with the line. (`click` settles
+    // every motion, and this test looks at them: the daemon's answer starts the unfolding.)
+    cx.update(|window, cx| window.click("developer-switch", cx));
+    until(&shell, cx, "the daemon says it is on", |cx| {
+        page.read_with(cx, |p, _| p.developer().is_some_and(|d| d.log))
+    });
+    one_frame(cx);
+    let start = log_line_under_the_switch(cx);
+    assert!(
+        start < space::MD,
+        "the gap is there before the line is: {start:?}"
+    );
+    a_third_later(cx);
+    let part = log_line_under_the_switch(cx);
+    assert!(part > px(0.) && part < space::MD, "unfolding: {part:?}");
+    settle(cx);
+    assert_eq!(log_line_under_the_switch(cx), space::MD);
+
+    // Turned off: the gap folds with the line, and the card does not jump when it ends.
+    cx.update(|window, cx| window.click("developer-switch", cx));
+    until(&shell, cx, "the daemon says it is off", |cx| {
+        page.read_with(cx, |p, _| p.developer().is_some_and(|d| !d.log))
+    });
+    one_frame(cx);
+    let start = log_line_under_the_switch(cx);
+    assert!(
+        start > space::MD / 2.,
+        "the gap goes only as the line does: {start:?}"
+    );
+    a_third_later(cx);
+    let part = log_line_under_the_switch(cx);
+    assert!(part > px(0.) && part < space::MD, "folding: {part:?}");
+    settle(cx);
+    assert!(!present(cx, "developer-file-line"), "folded away");
 }
 
 /// `connect` as a window's connection, except that a request for the providers waits for `open`:

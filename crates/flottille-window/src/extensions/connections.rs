@@ -1846,16 +1846,15 @@ impl ConnectionsSection {
                 "How it is reached",
                 reach,
             ))
-            .child(presence(
-                "connection-command-block",
-                self.reach == Reach::Command,
-                command,
-            ))
-            .child(presence(
-                "connection-url-block",
-                self.reach == Reach::Url,
-                url,
-            ))
+            .child(
+                presence(
+                    "connection-command-block",
+                    self.reach == Reach::Command,
+                    command,
+                )
+                .gap(space::LG),
+            )
+            .child(presence("connection-url-block", self.reach == Reach::Url, url).gap(space::LG))
             .child(
                 Field::new(
                     "connection-variables-field",
@@ -1885,7 +1884,8 @@ impl ConnectionsSection {
                 .hint(LIMITS_HINT),
             )
             .test_support();
-        let error = problem_line("connection-error", self.form_error.clone(), space::LG, cx);
+        // What a modal keeps in sight is a column without a gap: nothing to fold but the line.
+        let error = problem_line("connection-error", self.form_error.clone(), px(0.), cx);
         modal
             .sentence(FORM_SENTENCE)
             .child(body)
@@ -2785,6 +2785,7 @@ impl ConnectionsSection {
             .w_full()
             .flex()
             .flex_col()
+            .gap(space::MD)
             .child(awaiting(
                 "connection-review-waiting",
                 pending,

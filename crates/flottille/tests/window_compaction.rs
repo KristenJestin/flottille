@@ -15,6 +15,7 @@ use flottille_window::session::SessionPage;
 use flottille_window::settings::SettingsPage;
 use flottille_window::tree::session_id;
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::space;
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
@@ -121,6 +122,11 @@ fn height(cx: &mut VisualTestContext, id: &str) -> f32 {
     cx.update(|window, _| f32::from(window.find(id).bounds().size.height))
 }
 
+fn bounds(cx: &mut VisualTestContext, id: &str) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    let id = id.to_owned();
+    cx.update(|window, _| window.find(id).bounds())
+}
+
 fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
     cx.update(|window, _| {
         window
@@ -215,6 +221,20 @@ fn the_compaction_page_shows_the_compactor_its_settings_and_its_guidance(cx: &mu
     settle(cx);
     assert!(!present(cx, "compaction-threshold"));
     assert_eq!(shown(&user)["compactor"], Value::Null);
+}
+
+#[gpui_kit::test]
+fn the_guidance_is_space_xxl_under_the_compaction_card(cx: &mut TestAppContext) {
+    let user = user("");
+    let (shell, cx) = window(&user, cx);
+    open_compaction_tab(&shell, cx);
+
+    // A block of the page like the others: the card of the switch, then the guidance, `XXL`
+    // under it (its gap is the page column's, which was none: the guidance was drawn at 0).
+    assert_eq!(
+        bounds(cx, "compaction-guidance-block").top() - bounds(cx, "compaction").bottom(),
+        space::XXL
+    );
 }
 
 #[gpui_kit::test]

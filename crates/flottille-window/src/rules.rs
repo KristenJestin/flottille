@@ -555,23 +555,22 @@ impl Render for RulesEditor {
             .items_center()
             .gap(space::SM)
             // The line comes and goes with the project's own rules: it folds and fades, never pops.
-            .child(
-                div().flex_1().min_w_0().child(
-                    presence_of(id("reach-block"), self.footer().map(SharedString::from), {
-                        let reach = id("reach");
-                        move |line| {
-                            div()
-                                .id(reach)
-                                .text_size(px(12.))
-                                .text_color(p.faint)
-                                .child(line)
-                                .test_support()
-                                .into_any_element()
-                        }
-                    })
-                    .gap(space::XS),
-                ),
-            )
+            .child(div().flex_1().min_w_0().child(presence_of(
+                id("reach-block"),
+                self.footer().map(SharedString::from),
+                {
+                    let reach = id("reach");
+                    move |line| {
+                        div()
+                            .id(reach)
+                            .text_size(px(12.))
+                            .text_color(p.faint)
+                            .child(line)
+                            .test_support()
+                            .into_any_element()
+                    }
+                },
+            )))
             .child(
                 Button::quiet(id("reset"), "Reset to default")
                     .disabled(!self.is_own() || self.waiting)
@@ -584,19 +583,16 @@ impl Render for RulesEditor {
             .child(
                 // A presence is as wide as its parent: the button keeps its own width beside the
                 // line.
-                div().flex_none().child(
-                    presence(
-                        id("save-block"),
-                        self.save_shown(cx),
-                        match (&self.project, &self.check) {
-                            (None, None) => Button::primary(id("save"), "Save"),
-                            _ => Button::secondary(id("save"), "Save"),
-                        }
-                        .disabled(self.waiting)
-                        .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                    )
-                    .gap(space::SM),
-                ),
+                div().flex_none().child(presence(
+                    id("save-block"),
+                    self.save_shown(cx),
+                    match (&self.project, &self.check) {
+                        (None, None) => Button::primary(id("save"), "Save"),
+                        _ => Button::secondary(id("save"), "Save"),
+                    }
+                    .disabled(self.waiting)
+                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                )),
             );
         let text = div()
             .id(id("text"))

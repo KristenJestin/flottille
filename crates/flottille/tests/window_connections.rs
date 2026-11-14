@@ -1145,6 +1145,33 @@ fn removing_a_server_asks_in_a_confirmation(cx: &mut TestAppContext) {
 // ── The review ───────────────────────────────────────────────────────────────────────────────
 
 #[gpui_kit::test]
+fn a_refused_accept_is_said_under_the_review(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "almanac");
+    write_script(&user, "almanac", &almanac());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(&shell, cx, "almanac", "connection-review-row-3-search");
+    // The server is removed under the open review: the daemon refuses what is accepted.
+    user.call("connection.remove", json!({"name": "almanac"}))
+        .unwrap();
+    click(cx, "accept-connection");
+    until(&shell, cx, "the refusal is said", |cx| {
+        visible(cx, "connection-accept-error")
+    });
+    settle(cx);
+
+    // The line is `space::MD` under what the review shows: the body is a column that gaps it.
+    let (content, line) = cx.update(|window, _| {
+        (
+            window.find("connection-review-waiting").bounds(),
+            window.find("connection-accept-error-block").bounds(),
+        )
+    });
+    assert_eq!(line.top() - content.bottom(), space::MD);
+}
+
+#[gpui_kit::test]
 fn the_review_is_a_dialog_where_each_action_is_judged_by_default(cx: &mut TestAppContext) {
     let user = user();
     // A first review: the connection was added while its server could not start.
