@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use flottille_core::agent::Agent;
 use flottille_core::approval::{self, Decision, Judgement, Kind, Request, RequestState};
 use flottille_core::store::Store;
 use serde::Deserialize;
@@ -321,6 +322,27 @@ async fn settle(daemon: Arc<Daemon>, request: Request, discard: bool) {
     store_answer(&daemon, &request, outcome, &body);
 }
 
+/// The agent of an allowed request, while it may still be performed: why not otherwise.
+fn still_to_perform(daemon: &Daemon, request: &Request) -> Result<Agent, String> {
+    let agent = match daemon.read(|store| store.agent(&request.agent)) {
+        Ok(Some(agent)) => agent,
+        Ok(None) => return Err("the agent that asked no longer exists.".into()),
+        Err(error) => return Err(format!("{error}.")),
+    };
+    if agent.state.is_final() {
+        return Err("the agent that asked has ended.".into());
+    }
+    if let Some(place) = &request.place
+        && *place != place_of(agent.workspace.as_deref())
+    {
+        return Err(format!("{}.", left(place)));
+    }
+    if let Some(why) = crate::workspaces::being_removed(daemon, &agent.id, &request.tool) {
+        return Err(format!("{why}."));
+    }
+    Ok(agent)
+}
+
 /// What became of an allowed request: its outcome's word and the answer's text, masked.
 async fn performed(
     daemon: &Arc<Daemon>,
@@ -334,22 +356,10 @@ async fn performed(
             format!("Request #{number} ({tool}) was not executed: {why}"),
         )
     };
-    let agent = match daemon.read(|store| store.agent(&request.agent)) {
-        Ok(Some(agent)) => agent,
-        Ok(None) => return not_executed("the agent that asked no longer exists.".into()),
-        Err(error) => return not_executed(format!("{error}.")),
+    let agent = match still_to_perform(daemon, request) {
+        Ok(agent) => agent,
+        Err(why) => return not_executed(why),
     };
-    if agent.state.is_final() {
-        return not_executed("the agent that asked has ended.".into());
-    }
-    if let Some(place) = &request.place
-        && *place != place_of(agent.workspace.as_deref())
-    {
-        return not_executed(format!("{}.", left(place)));
-    }
-    if let Some(why) = crate::workspaces::being_removed(daemon, &agent.id, tool) {
-        return not_executed(format!("{why}."));
-    }
     let grant = match mcp::grant_of(daemon, &agent) {
         Ok(grant) => Arc::new(grant),
         Err(why) => return not_executed(format!("{why}.")),
@@ -358,7 +368,7 @@ async fn performed(
         return not_executed(format!("the agent has no tool {tool}."));
     }
     // The situation may have changed since the request was made.
-    let (verdict, first) = mcp::judged(daemon, &grant, tool, &request.arguments);
+    let (verdict, first) = mcp::judged_off(daemon, &grant, tool, &request.arguments).await;
     let changed = match verdict {
         Verdict::Deny(why) => Some(why),
         Verdict::Ask(ask) => {
@@ -449,6 +459,10 @@ async fn performed(
     } else {
         gate::Class::Judge
     };
+    // The agent may have ended, or its workspace begun to go, while the call was judged again.
+    if let Err(why) = still_to_perform(daemon, request) {
+        return not_executed(why);
+    }
     let outcome = mcp::performed(
         daemon,
         &grant,

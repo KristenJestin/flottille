@@ -211,9 +211,28 @@ struct Advance {
     ms: u64,
 }
 
-/// The `test.*` methods: only when the daemon runs with `FLOTTILLE_TEST_CLOCK` set, so that a
-/// test sees minutes pass without waiting for them (`docs/agents.md`).
+/// The `test.*` methods: `test.advance` only when the daemon runs with `FLOTTILLE_TEST_CLOCK`
+/// set, so that a test sees minutes pass without waiting for them (`docs/agents.md`); `test.hold`
+/// only in a test build run with `FLOTTILLE_TEST_HOLD` set, for the tests of a daemon that does
+/// not answer (`docs/reference/daemon.md`).
 pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Value, Failure> {
+    if method == "test.hold"
+        && cfg!(debug_assertions)
+        && std::env::var_os("FLOTTILLE_TEST_HOLD").is_some()
+    {
+        let asked: Advance = serde_json::from_value(params)?;
+        daemon.hold_store(Duration::from_millis(asked.ms));
+        return Ok(json!({}));
+    }
+    // A request that waits without holding the runtime, as one on outside work does.
+    if method == "test.wait"
+        && cfg!(debug_assertions)
+        && std::env::var_os("FLOTTILLE_TEST_HOLD").is_some()
+    {
+        let asked: Advance = serde_json::from_value(params)?;
+        tokio::time::sleep(Duration::from_millis(asked.ms)).await;
+        return Ok(json!({}));
+    }
     if std::env::var_os("FLOTTILLE_TEST_CLOCK").is_none() || method != "test.advance" {
         return Err(Failure::new(
             "unknown-method",

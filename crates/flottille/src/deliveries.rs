@@ -8,7 +8,7 @@
 //! marker.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use flottille_core::agent::{AgentState, new_id};
 use flottille_core::approval::{self, Delivery};
@@ -58,7 +58,7 @@ fn note(delivery: &Delivery) -> String {
 /// The notes pinned for each agent mid-turn, appended to its next tool result.
 #[derive(Default)]
 pub struct Notes {
-    pinned: Mutex<HashMap<String, Vec<Pinned>>>,
+    pinned: crate::locks::Lock<HashMap<String, Vec<Pinned>>>,
 }
 
 #[derive(Clone)]

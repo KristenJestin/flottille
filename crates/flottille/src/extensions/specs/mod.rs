@@ -3160,7 +3160,8 @@ fn running(daemon: &Daemon, developments: &[Development]) -> Option<String> {
 }
 
 /// Held while a development of the spec is launched: a second launch meanwhile is refused.
-static LAUNCHING: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+static LAUNCHING: crate::locks::Lock<Vec<u64>> =
+    crate::locks::Lock::named("specs::LAUNCHING", Vec::new());
 
 struct Launching(u64);
 

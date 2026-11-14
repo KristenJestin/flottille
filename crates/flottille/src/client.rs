@@ -17,6 +17,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(25);
+/// How long `daemon stop` waits for the daemon to answer, then to stop, before it ends it.
+const STOP_WAIT: Duration = Duration::from_secs(30);
 
 /// An error the daemon answered a request with: its code (`docs/protocol.md`) and its sentence.
 #[derive(Debug)]
@@ -234,15 +236,245 @@ pub fn locked_by(paths: &Paths) -> String {
         .to_owned()
 }
 
+/// How `daemon stop` ended the daemon.
+pub enum Stopped {
+    /// It stopped as it was asked.
+    Asked,
+    /// It did not, for the reason said: it was ended, with the processes it ran, counted.
+    Ended(String, usize),
+}
+
+/// Asks the daemon `client` reaches to stop and waits for it. Its refusal is the error; a daemon
+/// that does not answer within `STOP_WAIT` is ended at once; one that answered stops its agents one after another, up
+/// to `STOPPING_EACH` each, so it is given that much more for each process it runs. Past it, it
+/// and the processes it ran are ended (`end`), its agents' bridges included, which a stuck daemon
+/// leaves unable to end on their own.
+pub fn stop(paths: &Paths, mut client: Client) -> Result<Stopped> {
+    let pid = locked_by(paths);
+    // Opened before it is asked: the pid it held may be taken by another process once it ends.
+    let daemon = pid
+        .parse()
+        .ok()
+        .and_then(|pid| Daemon::open(pid, paths.sessions()));
+    let wait = std::env::var("FLOTTILLE_STOP_WAIT_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(STOP_WAIT, Duration::from_millis);
+    client.writer.set_read_timeout(Some(wait))?;
+    let asked = client.request("daemon.stop", Value::Null);
+    drop(client);
+    // A daemon that closed the connection as it stopped is waited for all the same.
+    let (asked, deadline) = match asked {
+        // It answered and refused (a client an agent started): it runs, and is not to be ended.
+        Err(error) if error.is::<DaemonError>() => return Err(error),
+        // A stuck daemon cannot refuse a client an agent started: the client refuses itself. One
+        // whose ancestry cannot be read counts as one (`descends_from`).
+        Err(error) if is_timeout(error.as_ref()) => {
+            if daemon.as_ref().is_some_and(|daemon| {
+                crate::children::descends_from(std::process::id(), daemon.0.pid)
+            }) {
+                return Err(STARTED_BY_AN_AGENT.into());
+            }
+            (
+                Err(format!("it did not answer daemon.stop within {} s", wait.as_secs()).into()),
+                Instant::now(),
+            )
+        }
+        asked => {
+            let running = daemon.as_ref().map_or(0, |daemon| daemon.tree().len());
+            let running = u32::try_from(running).unwrap_or(u32::MAX);
+            (asked, Instant::now() + wait + STOPPING_EACH * running)
+        }
+    };
+    let why = match wait_until(paths, &pid, deadline) {
+        Ok(()) => return Ok(Stopped::Asked),
+        Err(still) => asked.err().unwrap_or(still),
+    };
+    let Some(daemon) = daemon else {
+        return Err(
+            format!("the daemon's lock names no process ({pid:?}): it was not ended").into(),
+        );
+    };
+    let ended = daemon.end();
+    wait_until(paths, &pid, Instant::now() + START_TIMEOUT)?;
+    Ok(Stopped::Ended(why.to_string(), ended))
+}
+
+/// Why `daemon stop` does not end a daemon that does not answer, from a client an agent started.
+const STARTED_BY_AN_AGENT: &str =
+    "refused: this client was started by an agent; it does not end the daemon";
+
+/// How long a stopping daemon may take for each process it runs: an agent's task is waited for
+/// twice its grace (`agents::stop_all`), a run's for its grace (`runs`).
+const STOPPING_EACH: Duration = Duration::from_secs(5);
+/// How long the processes of a daemon being ended have to go on `SIGTERM` before `SIGKILL`: a git
+/// killed outright leaves its `index.lock`.
+const TERM_GRACE: Duration = Duration::from_secs(2);
+
+/// A process, through a pidfd: signalled through it, never one that took its pid since.
+struct Process {
+    pid: u32,
+    fd: libc::c_int,
+}
+
+impl Process {
+    fn open(pid: u32) -> Option<Process> {
+        // SAFETY: pidfd_open takes a pid and flags and returns a descriptor or -1.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+        (fd >= 0).then_some(Process {
+            pid,
+            fd: fd as libc::c_int,
+        })
+    }
+
+    fn signal(&self, signal: libc::c_int) {
+        // SAFETY: the descriptor is a pidfd of ours; no siginfo is passed.
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.fd,
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+    }
+
+    /// Whether it ended: its pidfd reads as ready then.
+    fn ended(&self) -> bool {
+        let mut poll = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd, valid for the call.
+        unsafe { libc::poll(&mut poll, 1, 0) == 1 }
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor is ours and closed once.
+        unsafe { libc::close(self.fd) };
+    }
+}
+
+/// The daemon being stopped, and the file where it says the sessions it started
+/// (`Paths::sessions`).
+struct Daemon(Process, PathBuf);
+
+impl Daemon {
+    fn open(pid: u32, sessions: PathBuf) -> Option<Daemon> {
+        Process::open(pid).map(|process| Daemon(process, sessions))
+    }
+
+    /// The leaders of the sessions the daemon started that still run, the leader itself or a
+    /// process it left in it: never one that took the pid of one since, nor a child of its that
+    /// leads a session it did not start.
+    fn leaders(&self) -> Vec<u32> {
+        let said = std::fs::read_to_string(&self.1).unwrap_or_default();
+        said.lines()
+            .filter_map(|line| {
+                let (pid, at) = line.split_once(' ')?;
+                let (pid, at) = (pid.parse().ok()?, at.parse().ok()?);
+                crate::children::session_lives(pid, at).then_some(pid)
+            })
+            .collect()
+    }
+
+    /// The processes below the daemon that are its own: those of its session (its agents and
+    /// their groups) and of the sessions it started (runs, setup steps, probes). As their
+    /// subreaper it holds more: a helper something it ran left detached in a session of its own
+    /// (an ssh control master, an agent of gpg, git's credential cache), even one handed to it as
+    /// its child, may serve the user's terminals too, and is never its to end.
+    fn tree(&self) -> Vec<u32> {
+        let daemon = self.0.pid;
+        let leaders = self.leaders();
+        let mut tree = Vec::new();
+        let mut next = vec![daemon];
+        while let Some(pid) = next.pop() {
+            // A detached helper's own children are left with it.
+            for child in children_of(pid) {
+                if session(child).is_some_and(|session| owned(daemon, &leaders, session)) {
+                    tree.push(child);
+                    next.push(child);
+                }
+            }
+        }
+        tree
+    }
+
+    /// Ends the daemon and its processes (`tree`): `SIGTERM`, then `SIGKILL` to those left after
+    /// `TERM_GRACE`, each through a pidfd opened, then checked to name a process still in one of
+    /// its sessions, so that a pid taken since by another process is never signalled. How many
+    /// processes it ran.
+    fn end(self) -> usize {
+        let daemon = self.0.pid;
+        let leaders = self.leaders();
+        let processes: Vec<Process> = self
+            .tree()
+            .into_iter()
+            .filter_map(Process::open)
+            .filter(|process| {
+                session(process.pid).is_some_and(|session| owned(daemon, &leaders, session))
+            })
+            .collect();
+        let all: Vec<&Process> = std::iter::once(&self.0).chain(&processes).collect();
+        for process in &all {
+            process.signal(libc::SIGTERM);
+        }
+        let deadline = Instant::now() + TERM_GRACE;
+        while Instant::now() < deadline && !all.iter().all(|process| process.ended()) {
+            std::thread::sleep(POLL);
+        }
+        for process in all.iter().filter(|process| !process.ended()) {
+            process.signal(libc::SIGKILL);
+        }
+        processes.len()
+    }
+}
+
+/// Whether a process of `session` is the daemon's own: its session, or one it started.
+fn owned(daemon: u32, leaders: &[u32], session: u32) -> bool {
+    session == daemon || leaders.contains(&session)
+}
+
+/// The session of `pid`, while it runs.
+fn session(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name, field 2, is in parentheses and may hold spaces.
+    let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+    if matches!(fields.first()?.chars().next()?, 'Z' | 'X') {
+        return None;
+    }
+    fields.get(3)?.parse().ok()
+}
+
+/// The children of `pid`, of every thread of it.
+fn children_of(pid: u32) -> Vec<u32> {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return Vec::new();
+    };
+    tasks
+        .flatten()
+        .filter_map(|task| std::fs::read_to_string(task.path().join("children")).ok())
+        .flat_map(|children| {
+            children
+                .split_whitespace()
+                .filter_map(|child| child.parse().ok())
+                .collect::<Vec<u32>>()
+        })
+        .collect()
+}
+
 /// Waits until the daemon `pid` (`locked_by`, read before it was asked to stop) has let go of its
-/// lock, so that the next command starts a new one.
-pub fn wait_until_stopped(paths: &Paths, pid: &str) -> Result<()> {
+/// lock, so that the next command starts a new one; an error past `deadline`.
+fn wait_until(paths: &Paths, pid: &str, deadline: Instant) -> Result<()> {
     let lock = match File::open(paths.lock()) {
         Ok(lock) => lock,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let deadline = Instant::now() + START_TIMEOUT;
     while lock.try_lock().is_err() {
         // A client that connected meanwhile (a window reconnecting) may have started a daemon,
         // which took the lock as soon as it was free: the stopped one is gone.
@@ -250,7 +482,7 @@ pub fn wait_until_stopped(paths: &Paths, pid: &str) -> Result<()> {
             return Ok(());
         }
         if Instant::now() > deadline {
-            return Err("the daemon was asked to stop but is still running".into());
+            return Err("it is still running".into());
         }
         std::thread::sleep(POLL);
     }
@@ -276,5 +508,48 @@ mod tests {
         assert_eq!(program_to_start(deleted.clone()), deleted);
         // Not replaced.
         assert_eq!(program_to_start(path.clone()), path);
+    }
+
+    #[test]
+    fn daemon_stop_ends_a_run_whose_session_leader_exited() {
+        // A run whose command ends and leaves a process in its session.
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 600 & echo $!; read _"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        // SAFETY: setsid is async-signal-safe, which is all a pre_exec closure may call.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let mut leader = command.spawn().unwrap();
+        let mut line = String::new();
+        BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let left: i32 = line.trim().parse().unwrap();
+        let at = crate::agents::start_time(leader.id()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("daemon.sessions");
+        // And a line whose pid another process took since.
+        let own = std::process::id();
+        std::fs::write(&file, format!("{} {at}\n{own} 0\n", leader.id())).unwrap();
+        let daemon = Daemon::open(own, file).unwrap();
+        drop(leader.stdin.take());
+        leader.wait().unwrap();
+
+        let leaders = daemon.leaders();
+        // SAFETY: kill has no memory precondition; the process is the test's own sleep.
+        unsafe { libc::kill(left, libc::SIGKILL) };
+        assert_eq!(leaders, vec![leader.id()]);
+        // Once nothing runs in it, it is gone.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !daemon.leaders().is_empty() {
+            assert!(Instant::now() < deadline, "{:?}", daemon.leaders());
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

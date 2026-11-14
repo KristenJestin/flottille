@@ -26,6 +26,8 @@
 //!   "resume": true,
 //!   "linger": false,
 //!   "child": false,
+//!   "detached": false,
+//!   "daemonized": false,
 //!   "stall": false,
 //!   "models": ["fake-small", "fake-large"],
 //!   "efforts": ["low", "high"],
@@ -44,6 +46,12 @@
 //!   the daemon does not know yet (none by default).
 //! - `linger`: keep running once standard input closes, as an orphan would (false by default).
 //! - `child`: start a `sleep` in the process group at startup, recording its pid (`{"child": <pid>}`).
+//! - `detached`: start a `sleep` in a session of its own at startup, as a helper that detaches
+//!   (an ssh control master, an agent of gpg), recording its pid (`{"detached": <pid>}`).
+//! - `daemonized`: start a `sleep` that detaches the usual way at startup (a fork whose parent
+//!   exits, and whose child starts a session of its own: git's `credential-cache--daemon`, glibc's
+//!   `daemon()`), so that it is handed to the daemon as their subreaper, recording its pid
+//!   (`{"daemonized": <pid>}`).
 //! - `stall`: never answer `session/new`, `session/load` or `session/resume`: an agent stuck while
 //!   it opens.
 //! - `die_on_open`: exit with that code on `session/new`, `session/load` or `session/resume`: an
@@ -155,6 +163,12 @@ fn main() {
     agent.record.write(json!({"started": true, "env": env}));
     if agent.script["child"] == true {
         agent.start_child();
+    }
+    if agent.script["detached"] == true {
+        agent.start_detached();
+    }
+    if agent.script["daemonized"] == true {
+        agent.start_daemonized();
     }
     let linger = agent.script["linger"] == true;
 
@@ -587,6 +601,75 @@ impl Agent {
             .spawn()
             .expect("sleep starts");
         self.record.write(json!({"child": child.id()}));
+    }
+
+    /// A `sleep` in a session of its own, never waited for.
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the helper is meant to outlive its parent"
+    )]
+    fn start_detached(&self) {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("sleep");
+        command.arg("600");
+        // SAFETY: setsid is async-signal-safe, which is all a pre_exec closure may call.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let helper = command.spawn().expect("sleep starts");
+        self.record.write(json!({"detached": helper.id()}));
+    }
+
+    /// A `sleep` whose parent, a fork of this process, exits as soon as it started it: the
+    /// `sleep` is orphaned, and handed to the nearest subreaper.
+    fn start_daemonized(&self) {
+        let sleep = std::ffi::CString::new("sleep").unwrap();
+        let seconds = std::ffi::CString::new("600").unwrap();
+        let argv = [sleep.as_ptr(), seconds.as_ptr(), std::ptr::null()];
+        let mut pipe = [0; 2];
+        // SAFETY: fork, setsid, execvp, write and _exit are async-signal-safe, which is all a
+        // fork of a process with threads may call; the buffers outlive the calls.
+        let helper = unsafe {
+            assert_eq!(libc::pipe(pipe.as_mut_ptr()), 0);
+            let parent = libc::fork();
+            if parent == 0 {
+                let first = libc::getpid();
+                let helper = libc::fork();
+                if helper == 0 {
+                    // After its parent exited, as git's `daemonize()` does.
+                    while libc::getppid() == first {
+                        libc::sched_yield();
+                    }
+                    libc::setsid();
+                    libc::close(pipe[0]);
+                    libc::close(pipe[1]);
+                    libc::execvp(sleep.as_ptr(), argv.as_ptr());
+                    libc::_exit(127);
+                }
+                libc::write(
+                    pipe[1],
+                    std::ptr::from_ref(&helper).cast(),
+                    size_of::<libc::pid_t>(),
+                );
+                libc::_exit(0);
+            }
+            libc::close(pipe[1]);
+            libc::waitpid(parent, std::ptr::null_mut(), 0);
+            let mut helper: libc::pid_t = 0;
+            libc::read(
+                pipe[0],
+                std::ptr::from_mut(&mut helper).cast(),
+                size_of::<libc::pid_t>(),
+            );
+            libc::close(pipe[0]);
+            helper
+        };
+        self.record.write(json!({"daemonized": helper}));
     }
 
     fn ask_permission(

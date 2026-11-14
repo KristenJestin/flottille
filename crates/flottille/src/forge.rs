@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use flottille_core::declared::{self, RepositoryForge};
@@ -887,7 +887,7 @@ pub fn repositories_of(workspace: &Workspace, project: Option<&Project>) -> Vec<
 /// it, and when it is read again.
 #[derive(Default)]
 pub struct Forges {
-    entries: Mutex<HashMap<i64, Entry>>,
+    entries: crate::locks::Lock<HashMap<i64, Entry>>,
     /// The pull requests `forge show` read in the last 30 s, by `kept_key` (`reads`).
     pulls: Kept<Pull>,
 }

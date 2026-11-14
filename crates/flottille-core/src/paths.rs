@@ -68,6 +68,13 @@ impl Paths {
         self.runtime.join("daemon.lock")
     }
 
+    /// The sessions the daemon started, one a line (`<pid> <start time>`): those of its runs,
+    /// setup steps and probes, which `daemon stop` ends with it, and no other session it was
+    /// handed as their subreaper.
+    pub fn sessions(&self) -> PathBuf {
+        self.runtime.join("daemon.sessions")
+    }
+
     /// Held by the open window for its whole life (`docs/cli.md`, `flottille window`).
     pub fn window_lock(&self) -> PathBuf {
         self.runtime.join("window.lock")

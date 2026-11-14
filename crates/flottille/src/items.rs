@@ -7,8 +7,8 @@
 //! nothing is read of a project that declares nothing.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_core::declared::ProjectTracker;
@@ -192,21 +192,21 @@ type Rhythm = (Option<std::time::SystemTime>, (u64, u64));
 pub struct Items {
     /// One round of a project at a time, each holding the count of what wrote under it (rounds,
     /// live reads): a live read taken without it knows whether one wrote since.
-    rounds: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
+    rounds: crate::locks::Lock<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
     windows: AtomicUsize,
     /// Whom a forge says the user is, by host, once it said it.
-    me: Mutex<HashMap<String, String>>,
+    me: crate::locks::Lock<HashMap<String, String>>,
     /// The sources of each project at the last poll: their items are forgotten once they go.
-    sources: Mutex<Option<Declared>>,
+    sources: crate::locks::Lock<Option<Declared>>,
     /// `daemon.toml`'s rhythm, with the time its file was changed: read again when it changes.
-    rhythm: Mutex<Option<Rhythm>>,
+    rhythm: crate::locks::Lock<Option<Rhythm>>,
     /// When each source's open items were last compared with its open list (`SWEEP_MS`).
-    swept: Mutex<HashMap<String, u64>>,
+    swept: crate::locks::Lock<HashMap<String, u64>>,
     /// The pull requests whose checks could not be read again, said once each.
-    unread_checks: Mutex<std::collections::HashSet<String>>,
+    unread_checks: crate::locks::Lock<std::collections::HashSet<String>>,
     /// Why a source cannot tell which of its items are the user's, by source (`source_key`), as
     /// its last round found: `items.list` says it of each source.
-    mine_unknown: Mutex<HashMap<String, String>>,
+    mine_unknown: crate::locks::Lock<HashMap<String, String>>,
 }
 
 /// A source of a project, as the maps of [`Items`] know it.

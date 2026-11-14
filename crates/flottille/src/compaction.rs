@@ -765,14 +765,14 @@ impl Asked {
 /// Where each agent's compaction stands.
 #[derive(Default)]
 pub struct Live {
-    phases: Mutex<HashMap<String, Phase>>,
+    phases: crate::locks::Lock<HashMap<String, Phase>>,
     /// What the user chose for the message they sent, by agent: compact first or not, whatever
     /// the setting, when the agent's cache expired.
-    choices: Mutex<HashMap<String, bool>>,
+    choices: crate::locks::Lock<HashMap<String, bool>>,
     /// The handoffs asked, by agent.
-    handoffs: Mutex<HashMap<String, Handoff>>,
+    handoffs: crate::locks::Lock<HashMap<String, Handoff>>,
     /// The agents whose turn Flottille cut to ask for their handoff.
-    cut: Mutex<std::collections::HashSet<String>>,
+    cut: crate::locks::Lock<std::collections::HashSet<String>>,
 }
 
 /// A handoff asked of an agent: the message that asks it, and the context it had then.

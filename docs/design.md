@@ -13,8 +13,9 @@ mechanisms it reuses from an earlier, larger project are written out in full in
 agents that it must build in is in [`reference/orchestration.md`](reference/orchestration.md),
 what the MCP protocol and its main client do today, and the rules Flottille's two MCP doors follow
 because of it, are in [`reference/mcp.md`](reference/mcp.md), how the daemon waits for and ends
-its children is in [`reference/processes.md`](reference/processes.md), and what is known about the
-window toolkit is in [`reference/gpui.md`](reference/gpui.md).
+its children is in [`reference/processes.md`](reference/processes.md), what the daemon says and
+does when it stops answering is in [`reference/daemon.md`](reference/daemon.md), and what is known
+about the window toolkit is in [`reference/gpui.md`](reference/gpui.md).
 
 ## 1. What Flottille is, and what it is not
 

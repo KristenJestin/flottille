@@ -5,7 +5,8 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Mutex, Once};
+use std::path::{Path, PathBuf};
+use std::sync::Once;
 use std::time::Duration;
 
 use crate::agents::start_time;
@@ -13,7 +14,34 @@ use crate::agents::start_time;
 /// The children the daemon started, by pid, with when each started: what tells one from a
 /// process that took its pid since. Held while a child is spawned and recorded, and while the
 /// sweep runs, so the sweep never sees a child of the daemon's that is not recorded yet.
-static STARTED: Mutex<Option<HashMap<u32, u64>>> = Mutex::new(None);
+static STARTED: crate::locks::Lock<Option<HashMap<u32, u64>>> =
+    crate::locks::Lock::named("STARTED", None);
+
+/// The children the daemon started in a session of their own (`in_own_session`), by pid, with
+/// when each started, and the file that says them (`Paths::sessions`): what `daemon stop` ends
+/// with the daemon, read by another process, which cannot tell them from a helper that detached
+/// in a session of its own and was handed to the daemon. Taken only while `STARTED` is held.
+static SESSIONS: crate::locks::Lock<Option<(PathBuf, HashMap<u32, u64>)>> =
+    crate::locks::Lock::named("SESSIONS", None);
+
+/// At the daemon's start: the sessions it starts are said in `file`, none yet.
+pub fn say_sessions_in(file: PathBuf) -> io::Result<()> {
+    let _started = STARTED.lock().unwrap();
+    write_sessions(&file, &HashMap::new())?;
+    *SESSIONS.lock().unwrap() = Some((file, HashMap::new()));
+    Ok(())
+}
+
+fn write_sessions(file: &Path, sessions: &HashMap<u32, u64>) -> io::Result<()> {
+    let text: String = sessions
+        .iter()
+        .map(|(pid, at)| format!("{pid} {at}\n"))
+        .collect();
+    // Whole or not at all, for a `daemon stop` reading it meanwhile.
+    let next = file.with_extension("sessions.next");
+    std::fs::write(&next, text)?;
+    std::fs::rename(&next, file)
+}
 
 /// Spawns a child its caller waits for itself, recorded as the daemon's own.
 pub fn spawn(command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
@@ -33,11 +61,42 @@ fn recorded<C>(
     let child = spawn()?;
     // Not waited for until it is handed out: it is still there, a zombie at worst.
     if let Some(pid) = pid(&child)
-        && let Some(at) = start_time(pid)
+        && let Some(child) = stat(pid)
     {
-        started.get_or_insert_default().insert(pid, at);
+        started.get_or_insert_default().insert(pid, child.started);
+        // The spawn returns once the child ran its `pre_exec`: one started in a session of
+        // its own leads it already.
+        if child.session == pid {
+            started_session(pid, child.started);
+        }
     }
     Ok(child)
+}
+
+fn started_session(pid: u32, at: u64) {
+    let mut guard = SESSIONS.lock().unwrap();
+    let Some((file, sessions)) = guard.as_mut() else {
+        return;
+    };
+    // The ones that ended since are forgotten here, the only time the file is written again.
+    sessions.retain(|pid, at| session_lives(*pid, *at));
+    sessions.insert(pid, at);
+    if let Err(error) = write_sessions(file, sessions) {
+        eprintln!(
+            "flottille daemon: cannot write {} ({error}): daemon stop may leave a run running",
+            file.display()
+        );
+    }
+}
+
+/// Whether the session `leader` started at `at` still runs: its leader, still the same process,
+/// or, once it exited, a process still in it. Linux never gives the pid of a session's leader to
+/// another process while one runs in it, so none of them is in another's session.
+pub fn session_lives(leader: u32, at: u64) -> bool {
+    match start_time(leader) {
+        Some(started) => started == at,
+        None => processes().into_iter().any(|pid| in_session(pid, leader)),
+    }
 }
 
 /// The command starts a session of its own, which it leads: what it starts stays in it, even in
@@ -168,6 +227,7 @@ pub fn reap_strays() {
 /// The fields of `/proc/<pid>/stat` read here.
 struct Stat {
     state: char,
+    parent: u32,
     session: u32,
     /// In clock ticks after boot.
     started: u64,
@@ -179,13 +239,58 @@ fn stat(pid: u32) -> Option<Stat> {
     let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
     Some(Stat {
         state: fields.first()?.chars().next()?,
+        parent: fields.get(1)?.parse().ok()?,
         session: fields.get(3)?.parse().ok()?,
         started: fields.get(19)?.parse().ok()?,
     })
 }
 
+/// Whether `pid` is `ancestor` or one of its descendants, walking up the parents; a process that
+/// cannot be read (gone already, or out of sight) counts as one.
+pub fn descends_from(pid: u32, ancestor: u32) -> bool {
+    let mut pid = pid;
+    let Some(mut process) = stat(pid) else {
+        return true;
+    };
+    loop {
+        if pid == ancestor {
+            return true;
+        }
+        // Up to init, or to a process with no parent in sight.
+        if process.parent == 0 {
+            return false;
+        }
+        let Some(parent) = stat(process.parent) else {
+            return true;
+        };
+        // A parent that started after its child is another process under the pid of one that
+        // ended: the child was taken in since, and its ancestry is not known.
+        if parent.started > process.started {
+            return true;
+        }
+        pid = process.parent;
+        process = parent;
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_process_descends_from_its_parents_not_from_its_children_and_one_gone_counts_as_one() {
+        let own = std::process::id();
+        let parent = stat(own).unwrap().parent;
+
+        assert!(descends_from(own, own));
+        assert!(descends_from(own, parent));
+        assert!(!descends_from(parent, own));
+        assert!(!descends_from(1, own));
+        // No such process: refused rather than guessed.
+        assert!(descends_from(u32::MAX, own));
+        assert!(descends_from(0, own));
+    }
+
     /// The code of the daemon's, before its tests: what the daemon runs.
     fn daemon_code(text: &str) -> &str {
         text.split("#[cfg(test)]\nmod tests").next().unwrap()

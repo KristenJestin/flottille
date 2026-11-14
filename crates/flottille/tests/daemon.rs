@@ -477,3 +477,212 @@ fn a_daemon_stopping_kills_only_the_processes_it_started_never_another_s_of_the_
     let _ = other.wait();
     assert!(survived, "the daemon killed a process it did not start");
 }
+
+/// Asks the daemon to hold its store's lock for `ms` on its runtime's thread, as a deadlock
+/// would (`test.hold`), without waiting for the answer: the connection is kept open.
+fn hold(user: &User, ms: u64) -> std::os::unix::net::UnixStream {
+    ask(user, "test.hold", ms)
+}
+
+/// Sends `method` with `{"ms": ms}` without waiting for its answer.
+fn ask(user: &User, method: &str, ms: u64) -> std::os::unix::net::UnixStream {
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(user.path("runtime/flottille/daemon.sock"))
+            .unwrap();
+    let request = json!({"id": "hold", "method": method, "params": {"ms": ms}});
+    std::io::Write::write_all(&mut stream, format!("{request}\n").as_bytes()).unwrap();
+    stream
+}
+
+/// Whether the process ended: no longer there, or a zombie its new parent has not waited for yet.
+fn gone(pid: u64) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| rest.starts_with('Z'))
+    })
+}
+
+fn log_of(user: &User) -> String {
+    std::fs::read_to_string(user.path("state/flottille/daemon.log")).unwrap_or_default()
+}
+
+#[test]
+fn a_stuck_daemon_is_reported_by_its_watchdog() {
+    let user = User::new()
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_WATCHDOG_MS", "500");
+    let pid = user.status()["pid"].as_u64().unwrap();
+
+    let _held = hold(&user, 3000);
+
+    within(10, "the watchdog says the daemon answers again", || {
+        log_of(&user).contains("watchdog: the daemon answers again")
+    });
+    let log = log_of(&user);
+    let said: Vec<&str> = log.lines().filter(|l| l.contains("watchdog:")).collect();
+    let line = |start: &str| {
+        said.iter()
+            .find(|l| l.contains(start))
+            .unwrap_or_else(|| panic!("no line {start:?} in {said:#?}"))
+            .to_string()
+    };
+    line("watchdog: the daemon is stuck: the runtime's thread has not run for");
+    // The lock, the line that took it, the thread that holds it, and since when.
+    let held = line("watchdog: held: store at ");
+    assert!(held.contains("src/daemon.rs:"), "{held}");
+    assert!(held.contains("by the thread main"), "{held}");
+    assert!(held.contains(", for "), "{held}");
+    line(&format!("`sudo eu-stack -p {pid}`"));
+    // Once for the whole time it was stuck.
+    assert_eq!(
+        said.iter()
+            .filter(|l| l.contains("the daemon is stuck"))
+            .count(),
+        1,
+        "{said:#?}"
+    );
+    assert!(user.status()["pid"].as_u64() == Some(pid));
+}
+
+#[test]
+fn a_request_that_waits_on_outside_work_is_not_said_stuck() {
+    let user = User::new()
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_WATCHDOG_MS", "500");
+    user.status();
+
+    let mut waiting = ask(&user, "test.wait", 2500);
+    let mut answer = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(&mut waiting), &mut answer).unwrap();
+
+    assert!(answer.contains(r#""id":"hold""#), "{answer}");
+    let log = log_of(&user);
+    assert!(!log.contains("the daemon is stuck"), "{log}");
+}
+
+#[test]
+fn daemon_stop_ends_a_daemon_that_does_not_answer() {
+    let user = User::with_fake_agent()
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
+    app(&user);
+    let pid = user.status()["pid"].as_u64().unwrap();
+    let (_, agent) = held_agent(&user);
+    let _held = hold(&user, 600_000);
+
+    let asked = std::time::Instant::now();
+    let stop = user.run(&["daemon", "stop"]);
+
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    assert!(
+        asked.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        asked.elapsed()
+    );
+    let said = String::from_utf8_lossy(&stop.stdout);
+    assert!(
+        said.contains("The daemon did not stop (it did not answer daemon.stop within 1 s): it was ended, with the"),
+        "{said}"
+    );
+    // The daemon and what it ran: its agent's process with it.
+    within(5, "the daemon is gone", || gone(pid));
+    within(5, "its agent's process is gone", || gone(agent));
+    assert!(
+        !user.path("runtime/flottille/daemon.lock").exists() || {
+            let lock = std::fs::File::open(user.path("runtime/flottille/daemon.lock")).unwrap();
+            lock.try_lock().is_ok()
+        }
+    );
+}
+
+/// The first pid the fake agent recorded under `key`.
+fn recorded(user: &User, key: &str) -> u64 {
+    let pid = || user.received().iter().find_map(|e| e[key].as_u64());
+    within(10, "the fake agent records its process", || pid().is_some());
+    pid().unwrap()
+}
+
+#[test]
+fn daemon_stop_spares_a_detached_helper() {
+    let user = User::with_fake_agent()
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
+    app(&user);
+    let pid = user.status()["pid"].as_u64().unwrap();
+    // An agent that starts a process in its group, and a helper that detaches in a session of
+    // its own, as an ssh control master does.
+    user.fake_script(json!({"stall": true, "child": true, "detached": true}));
+    user.call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let child = recorded(&user, "child");
+    let helper = recorded(&user, "detached");
+    let _held = hold(&user, 600_000);
+
+    let stop = user.run(&["daemon", "stop"]);
+
+    let said = String::from_utf8_lossy(&stop.stdout);
+    assert!(said.contains("The daemon did not stop"), "{said}");
+    within(5, "the daemon is gone", || gone(pid));
+    within(5, "the agent's child is gone", || gone(child));
+    let spared = !gone(helper);
+    // SAFETY: kill has no memory precondition; the helper is the test's own sleep.
+    unsafe { libc::kill(helper as libc::pid_t, libc::SIGKILL) };
+    assert!(spared, "daemon stop killed a helper that had detached");
+}
+
+#[test]
+fn daemon_stop_spares_a_helper_that_daemonized() {
+    let user = User::with_fake_agent()
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
+    app(&user);
+    let pid = user.status()["pid"].as_u64().unwrap();
+    // A helper that detaches the usual way, as git's credential cache does: its parent exits, so
+    // it is handed to the daemon, their subreaper, as a child leading a session of its own.
+    user.fake_script(json!({"stall": true, "daemonized": true}));
+    user.call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let helper = recorded(&user, "daemonized");
+    within(5, "the helper is handed to the daemon", || {
+        std::fs::read_to_string(format!("/proc/{helper}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')').unwrap().1.split_whitespace().nth(1) == Some(&pid.to_string())
+        })
+    });
+    let _held = hold(&user, 600_000);
+
+    let stop = user.run(&["daemon", "stop"]);
+
+    let said = String::from_utf8_lossy(&stop.stdout);
+    assert!(said.contains("The daemon did not stop"), "{said}");
+    within(5, "the daemon is gone", || gone(pid));
+    let spared = !gone(helper);
+    // SAFETY: kill has no memory precondition; the helper is the test's own sleep.
+    unsafe { libc::kill(helper as libc::pid_t, libc::SIGKILL) };
+    assert!(spared, "daemon stop killed a helper that daemonized");
+}
+
+#[test]
+fn daemon_stop_waits_for_a_daemon_that_is_stopping() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
+    app(&user);
+    let pid = user.status()["pid"].as_u64().unwrap();
+    // Stuck while it opens its session: the daemon gives it four seconds to stop.
+    let (_, agent) = held_agent(&user);
+
+    let asked = std::time::Instant::now();
+    let stop = user.run(&["daemon", "stop"]);
+
+    let said = String::from_utf8_lossy(&stop.stdout);
+    assert!(said.contains("The daemon stopped."), "{said}");
+    assert!(
+        asked.elapsed() > Duration::from_secs(2),
+        "{:?}",
+        asked.elapsed()
+    );
+    assert!(gone(pid));
+    within(5, "its agent's process is gone", || gone(agent));
+}

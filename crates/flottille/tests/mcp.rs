@@ -1400,6 +1400,53 @@ fn a_client_that_outlives_its_command_and_its_parent_is_still_refused() {
 }
 
 #[test]
+fn daemon_stop_from_a_run_never_ends_a_stuck_daemon() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_HOLD", "1");
+    project(&user);
+    let folder = workspace(&user);
+    let (_, url, authorization) = agent(&user, json!({"workspace": "w"}));
+    let pid = user.status()["pid"].as_u64().unwrap();
+    // It asks once the daemon is stuck: then nothing in the daemon can refuse it.
+    std::fs::write(
+        folder.join("client.sh"),
+        format!(
+            "touch started\n\
+             for i in $(seq 200); do [ -e go ] && break; sleep 0.05; done\n\
+             export FLOTTILLE_STOP_WAIT_MS=1000\n{}",
+            stop_script(&user, "client.out")
+        ),
+    )
+    .unwrap();
+    // Its answer comes once the daemon answers again, after the test.
+    std::thread::spawn(move || {
+        let mcp = Mcp::initialize(&url, &authorization);
+        let _ = mcp.call("run", json!({"line": "sh client.sh"}));
+    });
+    eventually("the run starts", || folder.join("started").exists());
+    let mut held =
+        std::os::unix::net::UnixStream::connect(user.path("runtime/flottille/daemon.sock"))
+            .unwrap();
+    let hold = json!({"id": "hold", "method": "test.hold", "params": {"ms": 600_000}});
+    std::io::Write::write_all(&mut held, format!("{hold}\n").as_bytes()).unwrap();
+    std::fs::write(folder.join("go"), "").unwrap();
+
+    // Ended, the daemon takes the client with it, in its run's session, before it says a word.
+    let alive = || std::path::Path::new(&format!("/proc/{pid}")).exists();
+    eventually("the client is done or the daemon gone", || {
+        std::fs::metadata(folder.join("client.out")).is_ok_and(|out| out.len() > 0) || !alive()
+    });
+    let said = read_when_done(&folder.join("client.out"));
+
+    assert!(alive(), "the daemon was ended");
+    assert!(
+        said.contains("refused: this client was started by an agent; it does not end the daemon"),
+        "{said}"
+    );
+}
+
+#[test]
 fn run_flottille_project_list_is_refused_by_the_gate() {
     let user = User::with_fake_agent();
     let (mcp, _) = session(&user);

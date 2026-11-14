@@ -8,6 +8,17 @@ edition = "2024"
 license = "AGPL-3.0-only"
 repository = "https://github.com/KristenJestin/flottille"
 
+# A stuck daemon's stacks (`eu-stack`, `gdb`) say each frame's function, and the file and line of
+# Flottille's own (`docs/reference/daemon.md`): the symbols kept, and the line tables of the
+# workspace's crates only: 292 MB against 130 MB without, 164 MB once `tools/package.sh`
+# compresses them; those of every dependency too (GPUI's above all) would make it 718 MB.
+[profile.release]
+debug = "line-tables-only"
+strip = "none"
+
+[profile.release.package."*"]
+debug = false
+
 # The release tests sum a 1.4 GB debug binary: unoptimised, that takes 25 s a sum.
 [profile.dev.package.sha2]
 opt-level = 3

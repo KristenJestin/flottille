@@ -287,6 +287,30 @@ fn an_allowed_request_is_checked_again_before_it_is_performed() {
 }
 
 #[test]
+fn an_allowed_request_of_an_agent_that_ended_while_it_was_judged_is_not_performed() {
+    // The gate judges an allowed request again off the runtime: it takes that long here.
+    let user = User::with_fake_agent()
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_TEST_JUDGE_MS", "2000");
+    let (id, mcp, _) = session(&user);
+    let elsewhere = user.path("elsewhere/note.txt");
+    let number = held(mcp.call(
+        "fs_write",
+        json!({"path": elsewhere.to_str().unwrap(), "content": "written\n"}),
+    ));
+
+    cli(&user, &["approve", &number.to_string()]).unwrap();
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+
+    let body = settled(&user, number).body;
+    assert_eq!(
+        body,
+        format!("Request #{number} (fs_write) was not executed: the agent that asked has ended.")
+    );
+    assert!(!elsewhere.exists());
+}
+
+#[test]
 fn a_request_held_by_an_agent_is_not_the_user_s_until_it_is_forwarded_to_them() {
     let user = User::with_fake_agent();
     let (id, _, workspace) = session(&user);

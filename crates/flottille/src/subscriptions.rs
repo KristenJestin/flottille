@@ -14,7 +14,7 @@
 //! ends, it is cancelled, or the deadline the agent gave passes.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use flottille_core::agent::{Agent, new_id};
 use flottille_core::approval;
@@ -210,7 +210,7 @@ fn followers(daemon: &Daemon, session: &str) -> Vec<Subscription> {
 
 /// A session that follows are read and written one at a time: its count of exchanges is read,
 /// changed and stored again.
-static COUNTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static COUNTING: crate::locks::Lock<()> = crate::locks::Lock::named("COUNTING", ());
 
 fn store_seen(daemon: &Daemon, subscription: &Subscription, seen: Value) {
     let kept = Subscription {
@@ -456,7 +456,8 @@ pub fn end(daemon: &Daemon, subscription: &Subscription, why: &str) -> bool {
 
 /// The projects whose round of the items runs, with the agents a delivery was queued for meanwhile:
 /// rung once, at the round's end.
-static ROUNDS: Mutex<BTreeMap<String, BTreeSet<String>>> = Mutex::new(BTreeMap::new());
+static ROUNDS: crate::locks::Lock<BTreeMap<String, BTreeSet<String>>> =
+    crate::locks::Lock::named("ROUNDS", BTreeMap::new());
 
 /// A round of a project's items that runs: the agents its events are delivered to are rung when it
 /// is dropped, once each.
