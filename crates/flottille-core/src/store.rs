@@ -2145,13 +2145,20 @@ impl Store {
         request: &Request,
         outcome: &str,
         body: &str,
+        images: &[String],
     ) -> Result<Option<Event>> {
         let transaction = self.connection.transaction()?;
         let id = format!("approval-{}", request.number);
         let stored = transaction.execute(
-            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at) \
-             VALUES (?1, ?2, 'approval', ?3, 'urgent', 'queued', ?4)",
-            params![id, request.agent, body, now_ms()],
+            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at, \
+             images) VALUES (?1, ?2, 'approval', ?3, 'urgent', 'queued', ?4, ?5)",
+            params![
+                id,
+                request.agent,
+                body,
+                now_ms(),
+                serde_json::to_string(images)?
+            ],
         )?;
         if stored == 0 {
             return Ok(None);
@@ -6131,10 +6138,10 @@ mod tests {
         );
 
         let event = store
-            .settle(&request, "done", "the result")
+            .settle(&request, "done", "the result", &[])
             .unwrap()
             .unwrap();
-        let again = store.settle(&request, "done", "another").unwrap();
+        let again = store.settle(&request, "done", "another", &[]).unwrap();
 
         assert_eq!(event.name, "approval.settled");
         assert_eq!(event.data["outcome"], "done");

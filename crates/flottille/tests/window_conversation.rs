@@ -1030,6 +1030,82 @@ fn a_step_whose_result_was_cut_says_so_with_the_characters_left_out(cx: &mut Tes
     );
 }
 
+#[gpui_kit::test]
+fn the_picture_a_connection_gave_the_agent_is_shown_on_the_step_of_its_call(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "take a screenshot", "do": [{"mcp": {"tool": "conn_almanac", "keyed": true,
+            "arguments": {"action": "search", "arguments": {"query": "a"}}}}]}
+    ]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let lead = lead(&user);
+    // A server of the user's that answers its search with a picture.
+    let script = json!({"server": {"name": "almanac", "version": "1.0.0"},
+        "tools": [{"name": "search", "description": "Finds notes by words.",
+            "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}}],
+        "answers": {"search": {"text": "a screenshot", "image": true}}});
+    let fake =
+        std::path::Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-mcp");
+    std::fs::write(user.path("almanac-script.json"), script.to_string()).unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    user.call(
+        "connection.add",
+        json!({"name": "almanac", "about": "The almanac of the user.",
+            "command": [fake, "--script", user.path("almanac-script.json")]}),
+    )
+    .unwrap();
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes"}}),
+    )
+    .unwrap();
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "take a screenshot"}),
+    )
+    .unwrap();
+    let step = |cx: &mut VisualTestContext| {
+        blocks(&page, cx)
+            .iter()
+            .enumerate()
+            .find_map(|(at, block)| match block {
+                Block::Steps { calls } => calls
+                    .iter()
+                    .position(|call| call.name == "conn_almanac" && !call.pictures.is_empty())
+                    .map(|n| (at, n)),
+                _ => None,
+            })
+    };
+    until(&shell, cx, "the step names the picture", |cx| {
+        step(cx).is_some()
+    });
+    until(&shell, cx, "the picture is read", |cx| {
+        page.read_with(cx, |page, _| page.pictures_read() == 1)
+    });
+    let (at, n) = step(cx).unwrap();
+    unfold(&page, at, cx);
+    cx.update(|window, cx| window.click(format!("row-{at}-steps-toggle"), cx));
+    at_rest(cx);
+    let tile = cx
+        .update(|window, _| window.try_find(format!("step-{at}-{n}-image-0")))
+        .map(|found| found.bounds());
+    let tile = tile.expect("the picture is on the step of its call");
+    assert!(
+        f32::from(tile.size.width) > 0. && f32::from(tile.size.height) > 0.,
+        "{tile:?}"
+    );
+}
+
 /// The width of an element, or `None` while it is not drawn.
 fn width_of(id: impl Into<gpui_kit::ElementId>, cx: &mut VisualTestContext) -> Option<f32> {
     let id = id.into();

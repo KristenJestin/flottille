@@ -318,8 +318,8 @@ fn already(request: &Request) -> Failure {
 
 /// Checks an allowed request again, performs it, and stores its answer.
 async fn settle(daemon: Arc<Daemon>, request: Request, discard: bool) {
-    let (outcome, body) = performed(&daemon, &request, discard).await;
-    store_answer(&daemon, &request, outcome, &body);
+    let (outcome, body, pictures) = performed(&daemon, &request, discard).await;
+    store_answer_with(&daemon, &request, outcome, &body, &pictures);
 }
 
 /// The agent of an allowed request, while it may still be performed: why not otherwise.
@@ -343,17 +343,19 @@ fn still_to_perform(daemon: &Daemon, request: &Request) -> Result<Agent, String>
     Ok(agent)
 }
 
-/// What became of an allowed request: its outcome's word and the answer's text, masked.
+/// What became of an allowed request: its outcome's word, the answer's text, masked, and the
+/// pictures the answer carries (files of the agent's folder of images).
 async fn performed(
     daemon: &Arc<Daemon>,
     request: &Request,
     discard: bool,
-) -> (&'static str, String) {
+) -> (&'static str, String, Vec<String>) {
     let (number, tool) = (request.number, request.tool.as_str());
     let not_executed = |why: String| {
         (
             "not_executed",
             format!("Request #{number} ({tool}) was not executed: {why}"),
+            Vec::new(),
         )
     };
     let agent = match still_to_perform(daemon, request) {
@@ -463,7 +465,9 @@ async fn performed(
     if let Err(why) = still_to_perform(daemon, request) {
         return not_executed(why);
     }
-    let outcome = mcp::performed(
+    // A connection's result may carry images: the answer is a message of the agent's, which
+    // carries them as any message does.
+    let (outcome, pictures) = mcp::with_pictures(mcp::performed(
         daemon,
         &grant,
         tool,
@@ -472,7 +476,7 @@ async fn performed(
         class,
         &first,
         discarding,
-    )
+    ))
     .await;
     // The user allowed the first message of a pair: the leave is the pair's from now on.
     if matches!(outcome, Outcome::Done(_))
@@ -497,14 +501,32 @@ async fn performed(
                 "Request #{number} ({tool}) was approved by the user, but nothing was done: {why}"
             ),
         ),
-        Outcome::Refused(why) | Outcome::Invalid(why) | Outcome::Held(why) => not_executed(why),
+        Outcome::Refused(why) | Outcome::Invalid(why) | Outcome::Held(why) => {
+            let (word, body, _) = not_executed(why);
+            (word, body)
+        }
     };
-    (word, mcp::masked(&body, &grant.place))
+    let pictures = if word == "done" { pictures } else { Vec::new() };
+    (word, mcp::masked(&body, &grant.place), pictures)
 }
 
 /// Stores the answer as the agent's `approval` delivery, once, and rings the agent.
 pub fn store_answer(daemon: &Arc<Daemon>, request: &Request, outcome: &str, body: &str) {
-    if let Err(error) = daemon.write(|store| Ok(((), store.settle(request, outcome, body)?))) {
+    store_answer_with(daemon, request, outcome, body, &[]);
+}
+
+/// [`store_answer`] with the pictures the answer carries: names of files in the agent's folder
+/// of images, which the delivery sends with the text.
+fn store_answer_with(
+    daemon: &Arc<Daemon>,
+    request: &Request,
+    outcome: &str,
+    body: &str,
+    pictures: &[String],
+) {
+    if let Err(error) =
+        daemon.write(|store| Ok(((), store.settle(request, outcome, body, pictures)?)))
+    {
         eprintln!(
             "flottille daemon: request #{}: its answer cannot be stored: {error}",
             request.number
@@ -647,7 +669,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(asking_leave(&store, &again).unwrap(), Some(first.number));
-        store.settle(&allowed, "done", "Sent.").unwrap();
+        store.settle(&allowed, "done", "Sent.", &[]).unwrap();
         assert_eq!(asking_leave(&store, &again).unwrap(), None);
     }
 }

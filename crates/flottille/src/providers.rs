@@ -65,6 +65,10 @@ pub struct Provider {
     /// "When the tools change"): told the list changed, it lists them again and may call them.
     /// When it cannot, the tools its process was started with are the only ones it can call.
     pub takes_new_tools: bool,
+    /// Whether its agent reads an image in the result of a tool, as MCP `image` content
+    /// (`docs/extensions.md`, "Connections", "A result"). When it cannot, the result's image is
+    /// left out with a line.
+    pub takes_tool_images: bool,
     /// Whether its agent lists its tools again when told they changed during a session
     /// (`docs/tools.md`, "When the tools change"). When it does not, a new build's tools are said
     /// to it in a delivery.

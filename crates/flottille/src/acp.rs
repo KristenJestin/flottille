@@ -843,6 +843,11 @@ fn event_of(update: &Value) -> Option<(&'static str, Map<String, Value>)> {
                         call[to] = value.clone();
                     }
                 }
+                // A tool's image is a file of the agent's folder, never base64 in an event: the
+                // providers' own report of the call holds the bytes the tool answered.
+                for key in ["content", "raw_output"] {
+                    without_picture_bytes(&mut call[key]);
+                }
                 ("agent.tool_call", call)
             }
         }
@@ -877,6 +882,29 @@ fn event_of(update: &Value) -> Option<(&'static str, Map<String, Value>)> {
     match data {
         Value::Object(map) => Some((name, map)),
         _ => None,
+    }
+}
+
+/// The bytes of every image in `value` (MCP `image` content, ACP's, Claude's `source`) replaced by
+/// a note: what a reader of the event needs is that there was one.
+fn without_picture_bytes(value: &mut Value) {
+    const LEFT_OUT: &str = "[image bytes left out]";
+    match value {
+        Value::Object(object) => {
+            if object.get("type").is_some_and(|kind| kind == "image") {
+                if object.contains_key("data") {
+                    object.insert("data".into(), LEFT_OUT.into());
+                }
+                if let Some(Value::Object(source)) = object.get_mut("source")
+                    && source.contains_key("data")
+                {
+                    source.insert("data".into(), LEFT_OUT.into());
+                }
+            }
+            object.values_mut().for_each(without_picture_bytes);
+        }
+        Value::Array(items) => items.iter_mut().for_each(without_picture_bytes),
+        _ => {}
     }
 }
 
@@ -926,6 +954,33 @@ mod tests {
         };
         assert_eq!(chunk(json!({"messageId": "m1"}))["message_id"], "m1");
         assert!(!chunk(json!({})).contains_key("message_id"));
+    }
+
+    #[test]
+    fn an_image_in_the_output_of_a_tool_never_reaches_an_event() {
+        let bytes = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+        // Codex gives MCP content as it came, Claude a tool result's own blocks, ACP its content.
+        for output in [
+            json!([{"type": "text", "text": "shot"},
+                {"type": "image", "mimeType": "image/png", "data": bytes}]),
+            json!([{"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                "data": bytes}}]),
+        ] {
+            let update = json!({"sessionUpdate": "tool_call_update", "toolCallId": "c",
+                "status": "completed", "rawOutput": output,
+                "content": [{"type": "content",
+                    "content": {"type": "image", "mimeType": "image/png", "data": bytes}}]});
+            let (_, data) = event_of(&update).unwrap();
+            let event = Value::Object(data).to_string();
+            assert!(!event.contains("iVBOR"), "{event}");
+        }
+        let text = json!({"sessionUpdate": "tool_call_update", "toolCallId": "c",
+            "rawOutput": [{"type": "text", "text": "kept"}]});
+        assert!(
+            Value::Object(event_of(&text).unwrap().1)
+                .to_string()
+                .contains("kept")
+        );
     }
 
     #[test]
