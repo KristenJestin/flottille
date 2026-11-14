@@ -707,6 +707,7 @@ impl SkillsSection {
                         .mono(12.5)
                         .text_color(p.mute)
                         .child("..")
+                        .cursor_pointer()
                         .on_click(cx.listener(|this, _, window, cx| this.up(window, cx))),
                     move |d, t| d.bg(p.hover.opacity(t)),
                 ))
@@ -739,6 +740,7 @@ impl SkillsSection {
                     } else {
                         entry.name.clone()
                     }))
+                    .cursor_pointer()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.pick(&name, entry.folder, window, cx)
                     }));
