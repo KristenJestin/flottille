@@ -1231,24 +1231,27 @@ impl SettingsPage {
             .border_color(p.line)
             .gap(space::MD)
             .child(switch)
-            .child(presence_of("developer-file-line", file, move |file| {
-                div()
-                    .id("developer-file")
-                    .aria_label(file.clone())
-                    .flex()
-                    .gap(space::SM)
-                    .text_size(px(12.5))
-                    .child(div().flex_none().text_color(p.mute).child("Log"))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .font_family(gpui_design_system::typography::MONO)
-                            .text_color(p.faint)
-                            .child(file),
-                    )
-                    .test_support()
-                    .into_any_element()
-            }))
+            .child(
+                presence_of("developer-file-line", file, move |file| {
+                    div()
+                        .id("developer-file")
+                        .aria_label(file.clone())
+                        .flex()
+                        .gap(space::SM)
+                        .text_size(px(12.5))
+                        .child(div().flex_none().text_color(p.mute).child("Log"))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .font_family(gpui_design_system::typography::MONO)
+                                .text_color(p.faint)
+                                .child(file),
+                        )
+                        .test_support()
+                        .into_any_element()
+                })
+                .gap(space::MD),
+            )
             .test_support();
         Section::new("developer", "Developer mode").child(card)
     }
@@ -2010,19 +2013,22 @@ impl SettingsPage {
             .when(known, |section| section.count(count.to_string()))
             .sentence("The agent programs Flottille can start. Each signs in with its own login.")
             .action(check)
-            .child(presence_of(
-                "providers-error-line",
-                self.providers.error.clone().map(SharedString::from),
-                move |error| {
-                    div()
-                        .id("providers-error")
-                        .text_size(px(12.5))
-                        .text_color(p.fail)
-                        .child(error)
-                        .test_support()
-                        .into_any_element()
-                },
-            ))
+            .child(
+                presence_of(
+                    "providers-error-line",
+                    self.providers.error.clone().map(SharedString::from),
+                    move |error| {
+                        div()
+                            .id("providers-error")
+                            .text_size(px(12.5))
+                            .text_color(p.fail)
+                            .child(error)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .gap(space::MD),
+            )
             .child(awaiting(
                 "providers-waiting",
                 !known,

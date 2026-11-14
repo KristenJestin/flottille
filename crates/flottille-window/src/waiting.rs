@@ -399,7 +399,7 @@ impl Waiting {
                             .test_support(),
                     ),
             )
-            .child(presence(id("approval-more-block"), open, details))
+            .child(presence(id("approval-more-block"), open, details).gap(space::XS))
             .children(self.errors.get(&number).cloned().map(|error| {
                 div()
                     .id(id("approval-error"))

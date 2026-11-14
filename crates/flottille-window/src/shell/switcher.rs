@@ -900,15 +900,18 @@ impl Render for Switcher {
                 field_frame("switcher-input", &self.field, cx),
             ))
             .children(rows)
-            .child(presence(
-                "switcher-nothing",
-                nothing,
-                EmptyLine::new(
-                    "switcher-none",
-                    Icon::Search,
-                    "Nothing matches what is typed.",
-                ),
-            ))
+            .child(
+                presence(
+                    "switcher-nothing",
+                    nothing,
+                    EmptyLine::new(
+                        "switcher-none",
+                        Icon::Search,
+                        "Nothing matches what is typed.",
+                    ),
+                )
+                .gap(space::LG),
+            )
             .kept(
                 div()
                     .id("switcher-keys")

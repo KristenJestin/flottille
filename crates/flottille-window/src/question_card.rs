@@ -642,7 +642,7 @@ impl QuestionCard {
             .flex_col()
             .gap(space::SM)
             .child(top)
-            .child(presence(id(format!("question-{n}-inputs")), open, inputs))
+            .child(presence(id(format!("question-{n}-inputs")), open, inputs).gap(space::SM))
             .test_support()
     }
 

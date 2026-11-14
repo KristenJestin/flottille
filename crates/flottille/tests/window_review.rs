@@ -817,6 +817,26 @@ fn the_usage_line_shows_while_review_is_off(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_file_the_daemon_cannot_use_is_said_under_the_usage_line(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let file = user.path("config/flottille/extensions.toml");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "[review]\nenabled = true\nbogus = 1\n").unwrap();
+    let (shell, cx) = review_page(&user, false, cx);
+    until(&shell, cx, "the refusal is said", |cx| {
+        present(cx, "review-error")
+    });
+    settle(cx);
+
+    // The line is `space::MD` under the usage line of the card (the card asked for it with a gap
+    // its column did not have): the block is the usage line's, the words are inside it.
+    assert_eq!(
+        bounds(cx, "review-error").top() - bounds(cx, "review-usage").bottom(),
+        space::MD
+    );
+}
+
+#[gpui_kit::test]
 fn review_s_page_shows_what_it_checks_as_one_card(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     let (shell, cx) = review_page(&user, true, cx);

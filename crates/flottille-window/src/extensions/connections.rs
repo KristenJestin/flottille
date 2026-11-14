@@ -1821,16 +1821,15 @@ impl ConnectionsSection {
                 "How it is reached",
                 reach,
             ))
-            .child(presence(
-                "connection-command-block",
-                self.reach == Reach::Command,
-                command,
-            ))
-            .child(presence(
-                "connection-url-block",
-                self.reach == Reach::Url,
-                url,
-            ))
+            .child(
+                presence(
+                    "connection-command-block",
+                    self.reach == Reach::Command,
+                    command,
+                )
+                .gap(space::LG),
+            )
+            .child(presence("connection-url-block", self.reach == Reach::Url, url).gap(space::LG))
             .child(
                 Field::new(
                     "connection-variables-field",
