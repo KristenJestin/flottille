@@ -1098,6 +1098,74 @@ fn the_review_is_a_large_dialog_where_each_action_is_judged_by_default(cx: &mut 
 }
 
 #[gpui_kit::test]
+fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let tool = |name: &str| {
+        json!({"name": name, "description": format!("{name} of the browser."),
+            "inputSchema": {"type": "object", "properties": {}}})
+    };
+    write_script(
+        &user,
+        "browser",
+        &json!({"server": {"name": "agent-browser", "version": "0.43.0"},
+            "tools": [tool("agent_browser_open"), tool("agent_browser_eval"),
+                tool("agent_browser_auth_save")]}),
+    );
+    let mut command = command_of(&user, "browser");
+    command.push("mcp".into());
+    user.call(
+        "connection.add",
+        json!({"name": "browser", "about": "A browser.", "command": command}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| {
+        visible(cx, "connection-browser")
+    });
+    click(cx, "connection-more-browser");
+    click(cx, "review-connection-browser");
+    until(&shell, cx, "what the server announces", |cx| {
+        present(cx, "connection-review-adapter")
+    });
+    settle(cx);
+    // That it applies, and what it changed.
+    let said = label(cx, "connection-review-adapter").unwrap();
+    assert!(
+        said.contains("Flottille's adapter for agent-browser 0.43.x applies"),
+        "{said}"
+    );
+    let changed = everything_said(cx);
+    assert!(
+        changed.contains("login is Flottille's own action"),
+        "{changed}"
+    );
+    assert!(changed.contains("--config"), "{changed}");
+    // Why its own logins cannot be turned on: no switch, a line saying why.
+    click(cx, "connection-review-unchanged");
+    let locked = label(
+        cx,
+        "connection-review-action-agent_browser_auth_save-locked",
+    )
+    .unwrap();
+    assert!(locked.contains("vault"), "{locked}");
+    assert!(!present(
+        cx,
+        "connection-review-action-agent_browser_auth_save-offer"
+    ));
+    // Eval is off at its first pin, and the user's to turn on.
+    assert!(present(
+        cx,
+        "connection-review-action-agent_browser_eval-offer"
+    ));
+    assert!(!present(
+        cx,
+        "connection-review-action-agent_browser_eval-locked"
+    ));
+}
+
+#[gpui_kit::test]
 fn the_review_shows_changed_instructions_line_by_line(cx: &mut TestAppContext) {
     let user = user();
     turn_on(&user);

@@ -326,6 +326,16 @@ pub struct Diff {
     pub actions: Vec<ActionDiff>,
     pub refused: Vec<String>,
     pub limits: Vec<LimitCover>,
+    /// What Flottille's adapter for this server is to it: that it applies, or that this version
+    /// has none; nothing for a server no adapter knows.
+    pub adapter: Option<AdapterSaid>,
+}
+
+/// The review's sentence on the server's adapter, and what it changes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdapterSaid {
+    pub said: String,
+    pub changed: Vec<String>,
 }
 
 /// A limit of the declaration, and the actions it covers and does not.
@@ -345,6 +355,8 @@ pub struct ActionDiff {
     pub pinned: Option<String>,
     pub now: Option<String>,
     pub setting: Option<String>,
+    /// Why no setting turns it on, while the adapter that applies keeps it off.
+    pub locked: Option<String>,
 }
 
 impl Diff {
@@ -395,6 +407,7 @@ impl Diff {
                         .as_object()
                         .map(|_| action_text(&action["now"])),
                     setting: text(&action["setting"]),
+                    locked: text(&action["locked"]),
                 })
                 .collect(),
             refused: words(&value["refused"]),
@@ -409,6 +422,10 @@ impl Diff {
                     not: words(&limit["not"]),
                 })
                 .collect(),
+            adapter: value["adapter"]["said"].as_str().map(|said| AdapterSaid {
+                said: said.to_owned(),
+                changed: words(&value["adapter"]["changed"]),
+            }),
         }
     }
 
@@ -1796,7 +1813,18 @@ impl ConnectionsSection {
             .border_color(p.line)
             .child(head)
             .child(self.lines(&format!("{id}-text"), &text, cx));
-        if action.change != "removed" {
+        if let Some(why) = &action.locked {
+            let said = format!("Off while Flottille's adapter applies: {why}.");
+            block = block.child(
+                div()
+                    .id(SharedString::from(format!("{id}-locked")))
+                    .aria_label(SharedString::from(said.clone()))
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(SharedString::from(said))
+                    .test_support(),
+            );
+        } else if action.change != "removed" {
             let setting = review
                 .settings
                 .get(&action.name)
@@ -1967,6 +1995,33 @@ impl ConnectionsSection {
                 .child(SharedString::from(said))
                 .test_support()
         });
+        let adapter = diff.adapter.as_ref().map(|adapter| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::XS)
+                .child(
+                    div()
+                        .id("connection-review-adapter")
+                        .aria_label(SharedString::from(adapter.said.clone()))
+                        .text_size(px(13.))
+                        .text_color(p.text)
+                        .child(SharedString::from(adapter.said.clone()))
+                        .test_support(),
+                )
+                .children(adapter.changed.iter().enumerate().map(|(at, line)| {
+                    let line = format!("· {line}.");
+                    div()
+                        .id(SharedString::from(format!(
+                            "connection-review-adapter-change-{at}"
+                        )))
+                        .aria_label(SharedString::from(line.clone()))
+                        .text_size(px(12.5))
+                        .text_color(p.mute)
+                        .child(SharedString::from(line))
+                        .test_support()
+                }))
+        });
         div()
             .flex()
             .flex_col()
@@ -1980,6 +2035,7 @@ impl ConnectionsSection {
                     .child(SharedString::from(server))
                     .test_support(),
             )
+            .children(adapter)
             .child(
                 div()
                     .flex()
