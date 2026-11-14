@@ -15,6 +15,7 @@ use common::User;
 use flottille_window::Shell;
 use flottille_window::settings::SettingsPage;
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::space;
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -633,6 +634,14 @@ fn the_log_path_unfolds_only_with_developer_mode(cx: &mut TestAppContext) {
     });
     settle(cx);
     assert!(visible(cx, "developer-file"), "on: the path unfolds");
+    // The path is `space::MD` under the switch, not against it.
+    let (switch, line) = cx.update(|window, _| {
+        (
+            window.find("developer-switch").bounds(),
+            window.find("developer-file-line").bounds(),
+        )
+    });
+    assert_eq!(line.top() - switch.bottom(), space::MD);
     assert_eq!(
         label(cx, "developer-file").as_deref(),
         Some(user.path("state/flottille/developer.log").to_str().unwrap())

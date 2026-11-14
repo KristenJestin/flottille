@@ -2130,6 +2130,7 @@ impl Render for SpecPage {
         let gestures = div()
             .flex()
             .flex_col()
+            .gap(space::SM)
             .child(
                 div()
                     .flex()
@@ -2190,6 +2191,7 @@ impl Render for SpecPage {
         let ticket = div()
             .flex()
             .flex_col()
+            .gap(space::SM)
             .child(
                 presence_of(
                     "spec-ticket-said-block",
@@ -2508,6 +2510,7 @@ impl Render for SpecPage {
                 div()
                     .flex()
                     .flex_col()
+                    .gap(space::MD)
                     .child(paragraph("spec-departures-text", &departures_text, cx))
                     .child(presence("spec-departures-post-block", offered, post).gap(space::MD))
                     .child(

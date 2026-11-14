@@ -285,15 +285,12 @@ impl Render for Convention {
         let id = |part: &str| ElementId::Name(format!("{}-{part}-{project}", kind.id()).into());
         // Save unfolds beside the field once what is typed differs from what is kept (rule 4); a
         // presence is as wide as its parent, so the button keeps its own width.
-        let save = div().flex_none().child(
-            presence(
-                id("save-block"),
-                self.savable(cx),
-                Button::secondary(id("save"), "Save")
-                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-            )
-            .gap(space::SM),
-        );
+        let save = div().flex_none().child(presence(
+            id("save-block"),
+            self.savable(cx),
+            Button::secondary(id("save"), "Save")
+                .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+        ));
         let control = match field {
             Text::Line(field) => div()
                 .flex()

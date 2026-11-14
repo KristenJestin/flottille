@@ -11191,6 +11191,17 @@ fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
     cx.update(|window, _| {
         assert!(window.find("task-ready-line-block").visible());
         assert!(window.find("task-url-command-block").visible());
+        // Each field is `space::MD` under the choice that asks for it, not against it.
+        for (choice, field) in [
+            ("task-ready-command", "task-ready-line-block"),
+            ("task-url-field-hint", "task-url-command-block"),
+        ] {
+            assert_eq!(
+                window.find(field).bounds().top() - window.find(choice).bounds().bottom(),
+                gpui_design_system::space::MD,
+                "{field}"
+            );
+        }
     });
     let (ready, url) = section.read_with(cx, |s, _| {
         (

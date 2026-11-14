@@ -395,7 +395,7 @@ impl RenderOnce for StateLine {
             p.fail
         };
         let ink = tint(self.id.clone(), target, PANEL, window, cx);
-        div().flex().flex_col().children(
+        div().flex().flex_col().gap(space::XS).children(
             Phase::ALL
                 .into_iter()
                 .filter(|at| *at != Phase::Ready)
@@ -617,6 +617,7 @@ pub fn program_block(
                 .min_w_0()
                 .flex()
                 .flex_col()
+                .gap(space::XS)
                 .child(state_line)
                 .child(install_page)
                 .child(install_command)

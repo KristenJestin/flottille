@@ -1115,34 +1115,33 @@ fn card(
         .border_color(p.line)
         .child(switch)
         .children(usage.map(|usage| div().pt(space::SM).child(usage)))
-        .child(
-            presence_of(
-                SharedString::from(format!("{id}-error-block")),
-                error.map(SharedString::from),
-                {
-                    let id = format!("{id}-error");
-                    move |error| {
-                        div()
-                            .id(SharedString::from(id))
-                            .aria_label(error.clone())
-                            .text_size(px(12.5))
-                            .text_color(p.fail)
-                            .child(error)
-                            .test_support()
-                            .into_any_element()
-                    }
-                },
-            )
-            .gap(space::MD),
-        )
-        .child(
-            presence(
-                SharedString::from(format!("{id}-settings-block")),
-                on,
-                settings,
-            )
-            .gap(space::LG),
-        )
+        .child(presence_of(
+            SharedString::from(format!("{id}-error-block")),
+            error.map(SharedString::from),
+            {
+                let id = format!("{id}-error");
+                // The space above a block that comes and goes is its own: it folds with it.
+                move |error| {
+                    div()
+                        .pt(space::MD)
+                        .child(
+                            div()
+                                .id(SharedString::from(id))
+                                .aria_label(error.clone())
+                                .text_size(px(12.5))
+                                .text_color(p.fail)
+                                .child(error)
+                                .test_support(),
+                        )
+                        .into_any_element()
+                }
+            },
+        ))
+        .child(presence(
+            SharedString::from(format!("{id}-settings-block")),
+            on,
+            div().pt(space::LG).child(settings),
+        ))
         .test_support()
 }
 

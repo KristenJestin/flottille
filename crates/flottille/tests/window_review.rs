@@ -824,6 +824,13 @@ fn review_s_page_shows_what_it_checks_as_one_card(cx: &mut TestAppContext) {
     // A line per check, inside the one card: its switch, its name, its line, its model on the
     // right.
     let card = bounds(cx, "review-checks");
+    // The settings unfold `space::LG` under the usage line of the switch's card (the card asked
+    // for it with a gap its column did not have): the first is the card of the doors, whose own
+    // border is 1 px.
+    assert_eq!(
+        bounds(cx, "review-doors").top() - bounds(cx, "review-usage").bottom(),
+        space::LG + gpui_kit::px(1.)
+    );
     let mut above = card.top();
     for (key, name, line) in CHECKS {
         let switch = format!("review-check-{key}-switch");

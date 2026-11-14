@@ -639,44 +639,39 @@ impl SettingsPage {
                 COMPACTION_USAGE,
                 cx,
             )))
-            .child(
-                presence(
-                    "compaction-summary-block",
-                    some,
-                    div().pt(space::MD).child(summary),
-                )
-                .gap(space::MD),
-            )
-            .child(
-                presence(
-                    "compaction-settings-block",
-                    some,
-                    div()
-                        .pt(space::MD)
-                        .flex()
-                        .flex_col()
-                        .gap(space::MD)
-                        .child(automatic)
-                        .child(
-                            presence(
-                                "compaction-threshold-block",
-                                shown.automatic,
-                                Field::new(
-                                    "compaction-threshold-field",
-                                    "When the context reaches",
-                                    threshold,
-                                ),
-                            )
-                            .gap(space::MD),
+            .child(presence(
+                "compaction-summary-block",
+                some,
+                div().pt(space::MD).child(summary),
+            ))
+            .child(presence(
+                "compaction-settings-block",
+                some,
+                div()
+                    .pt(space::MD)
+                    .flex()
+                    .flex_col()
+                    .gap(space::MD)
+                    .child(automatic)
+                    .child(
+                        presence(
+                            "compaction-threshold-block",
+                            shown.automatic,
+                            Field::new(
+                                "compaction-threshold-field",
+                                "When the context reaches",
+                                threshold,
+                            ),
                         )
-                        .child(more),
-                )
-                .gap(space::MD),
-            )
+                        .gap(space::MD),
+                    )
+                    .child(more),
+            ))
             .test_support();
         div()
             .flex()
             .flex_col()
+            .gap(space::XXL)
             .child(enter("compaction-page-enter", 0, card))
             .child(
                 presence(
@@ -1234,28 +1229,26 @@ impl SettingsPage {
             .bg(p.card)
             .border_1()
             .border_color(p.line)
+            .gap(space::MD)
             .child(switch)
-            .child(
-                presence_of("developer-file-line", file, move |file| {
-                    div()
-                        .id("developer-file")
-                        .aria_label(file.clone())
-                        .flex()
-                        .gap(space::SM)
-                        .text_size(px(12.5))
-                        .child(div().flex_none().text_color(p.mute).child("Log"))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .font_family(gpui_design_system::typography::MONO)
-                                .text_color(p.faint)
-                                .child(file),
-                        )
-                        .test_support()
-                        .into_any_element()
-                })
-                .gap(space::MD),
-            )
+            .child(presence_of("developer-file-line", file, move |file| {
+                div()
+                    .id("developer-file")
+                    .aria_label(file.clone())
+                    .flex()
+                    .gap(space::SM)
+                    .text_size(px(12.5))
+                    .child(div().flex_none().text_color(p.mute).child("Log"))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .font_family(gpui_design_system::typography::MONO)
+                            .text_color(p.faint)
+                            .child(file),
+                    )
+                    .test_support()
+                    .into_any_element()
+            }))
             .test_support();
         Section::new("developer", "Developer mode").child(card)
     }
@@ -1478,16 +1471,13 @@ impl SettingsPage {
             .border_1()
             .border_color(p.line)
             .child(switch)
-            .child(
-                presence(
-                    "sessions-days-block",
-                    shown.is_some(),
-                    div()
-                        .pt(space::MD)
-                        .child(Field::new("sessions-days-field", "After", select)),
-                )
-                .gap(space::MD),
-            )
+            .child(presence(
+                "sessions-days-block",
+                shown.is_some(),
+                div()
+                    .pt(space::MD)
+                    .child(Field::new("sessions-days-field", "After", select)),
+            ))
             .test_support();
         let resume = Switch::new(
             "sessions-resume-switch",
@@ -1753,9 +1743,11 @@ impl SettingsPage {
                 JUDGE_USAGE,
                 cx,
             )))
-            .child(
-                presence("judge-model-block", on, div().pt(space::MD).child(model)).gap(space::MD),
-            )
+            .child(presence(
+                "judge-model-block",
+                on,
+                div().pt(space::MD).child(model),
+            ))
             .test_support();
         // Its models are the providers': the card crossfades in from a skeleton once they are known.
         Section::new("judge", "Auto judge").child(awaiting(

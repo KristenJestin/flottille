@@ -1251,6 +1251,7 @@ pub(crate) fn ready_and_url<V: 'static>(
             div()
                 .flex()
                 .flex_col()
+                .gap(space::MD)
                 .child(
                     Field::new(
                         ElementId::Name(format!("{prefix}-ready-field").into()),
@@ -1265,6 +1266,7 @@ pub(crate) fn ready_and_url<V: 'static>(
             div()
                 .flex()
                 .flex_col()
+                .gap(space::MD)
                 .child(
                     Field::new(
                         ElementId::Name(format!("{prefix}-url-field").into()),

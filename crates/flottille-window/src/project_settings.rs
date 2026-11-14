@@ -1758,15 +1758,12 @@ impl ProjectSettingsPage {
         };
         let id = |part: &str| ElementId::Name(format!("branch-prefix-{part}-{}", self.name).into());
         // Save unfolds beside the field once the prefix differs from the kept one (rule 4).
-        let save = div().flex_none().child(
-            presence(
-                id("save-block"),
-                self.branch_prefix_savable(cx),
-                Button::secondary(id("save"), "Save")
-                    .on_click(cx.listener(|this, _, _, cx| this.save_branch_prefix(cx))),
-            )
-            .gap(space::SM),
-        );
+        let save = div().flex_none().child(presence(
+            id("save-block"),
+            self.branch_prefix_savable(cx),
+            Button::secondary(id("save"), "Save")
+                .on_click(cx.listener(|this, _, _, cx| this.save_branch_prefix(cx))),
+        ));
         let said = match self.branch_prefix_typed(cx).trim() {
             "" => "New workspaces get <name>.".to_owned(),
             prefix => format!("New workspaces get {prefix}/<name>."),

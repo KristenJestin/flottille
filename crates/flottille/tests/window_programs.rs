@@ -18,6 +18,7 @@ use flottille_window::programs::ProgramChecks;
 use flottille_window::project_settings::{ProjectSettingsPage, Reveal};
 use flottille_window::shell::Selection;
 use gpui_design_system::omarchy::Environment;
+use gpui_design_system::space;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -183,6 +184,12 @@ fn label_of(id: &str, cx: &mut VisualTestContext) -> Option<String> {
     })
 }
 
+/// How far the top of `below` is under the bottom of `above`.
+fn under(above: &str, below: &str, cx: &mut VisualTestContext) -> gpui_kit::Pixels {
+    let (above, below) = (above.to_owned(), below.to_owned());
+    cx.update(|window, _| window.find(below).bounds().top() - window.find(above).bounds().bottom())
+}
+
 fn has(id: &str, cx: &mut VisualTestContext) -> bool {
     let id = id.to_owned();
     cx.update(|window, _| window.try_find(id).is_some_and(|found| found.visible()))
@@ -228,6 +235,11 @@ fn a_tracker_whose_program_is_missing_says_how_to_install_it(cx: &mut TestAppCon
     assert_eq!(
         label_of("tracker-program-install", cx).as_deref(),
         Some(ACLI_PAGE)
+    );
+    // The link is `space::XS` under what the state says, not against it.
+    assert_eq!(
+        under("tracker-program-state", "tracker-program-install-block", cx),
+        space::XS
     );
     cx.update(|window, cx| window.click("tracker-program-install", cx));
     assert_eq!(*opened.lock().unwrap(), [ACLI_PAGE]);
@@ -888,6 +900,15 @@ fn bkt_signed_out_gives_both_sign_in_commands_with_a_copy_button_each(cx: &mut T
     assert_eq!(
         label_of("repository-program-api-sign-in-1", cx).as_deref(),
         Some(second)
+    );
+    // The second command is `space::XS` under the first.
+    assert_eq!(
+        under(
+            "repository-program-api-sign-in-0-block",
+            "repository-program-api-sign-in-1-block",
+            cx
+        ),
+        space::XS
     );
     for (at, command) in [(0, first), (1, second)] {
         cx.update(|window, cx| {
