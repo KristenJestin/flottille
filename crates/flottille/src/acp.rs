@@ -885,7 +885,6 @@ fn event_of(update: &Value) -> Option<(&'static str, Map<String, Value>)> {
     }
 }
 
-/// A text cut at the limit, saying how much was left out.
 /// The bytes of every image in `value` (MCP `image` content, ACP's, Claude's `source`) replaced by
 /// a note: what a reader of the event needs is that there was one.
 fn without_picture_bytes(value: &mut Value) {
@@ -909,6 +908,7 @@ fn without_picture_bytes(value: &mut Value) {
     }
 }
 
+/// A text cut at the limit, saying how much was left out.
 fn cut(text: &str) -> String {
     if text.len() <= TEXT_LIMIT {
         return text.to_owned();
