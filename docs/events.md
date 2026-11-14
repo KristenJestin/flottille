@@ -188,7 +188,7 @@ project: `extension.list` says what it is now.
 
 ### `connection.changed`
 
-A connection was declared, edited, removed, reviewed or accepted, or its server started, stopped
+A connection was declared (and pinned at once), edited, removed, reviewed or accepted, or its server started, stopped
 or failed to start (`docs/extensions.md`, "Connections"): `connection.list` says what it is now.
 
 | Field | |
@@ -200,13 +200,26 @@ or failed to start (`docs/extensions.md`, "Connections"): `connection.list` says
 
 ### `connection.cut_off`
 
-The connection's server is no longer what the user accepted, found as it started or when it said
-its tools changed: its tool left every session, and the inbox lists it (kind `connections`).
+The connection's server is no longer what the user accepted (anything agents read changed; a new
+version alone is `connection.version_moved`), found as it started or when it said its tools changed: its tool left every session, and the inbox lists it (kind `connections`).
 
 | Field | |
 |---|---|
 | `name`, `tool` | The connection's name and its tool (`conn_almanac`). |
 | `changed` | What changed, a sentence each (`the server is now almanac 1.1.0, not almanac 1.0.0`). |
+
+### `connection.version_moved`
+
+The server started as another version, and nothing agents read changed (its `serverInfo` differs
+in `version` alone; the instructions and each action's name, description, schema and annotations
+are the same): the pin moved to the new version (the event is stored only if the pin was written),
+the settings stay, the connection was not cut off, and the inbox says so (kind `connections`: `almanac 1.0.0 → 1.1.0, nothing changed in what
+it gives agents`).
+
+| Field | |
+|---|---|
+| `name`, `tool` | The connection's name and its tool (`conn_almanac`). |
+| `from`, `to` | The version accepted before and the one pinned now, masked and cut. |
 
 ### `connection.signed_in`
 

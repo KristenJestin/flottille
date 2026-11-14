@@ -1377,15 +1377,8 @@ fn the_window_draws_no_frame_at_rest_on_connections_page_and_its_review(cx: &mut
     let fake =
         std::path::Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-mcp");
     let script = user.path("notes-script.json");
-    std::fs::write(
-        &script,
-        json!({"server": {"name": "notes", "version": "1.0.0"}, "instructions": "Be brief.",
-            "tools": [{"name": "search", "description": "Finds notes.",
-                "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}}],
-            "answers": {"search": {"text": "found"}}})
-        .to_string(),
-    )
-    .unwrap();
+    // Added while its server cannot start (its script is not written yet), it waits for its
+    // first review, which shows its actions.
     user.call(
         "extension.set",
         json!({"name": "connections", "enabled": true}),
@@ -1395,6 +1388,15 @@ fn the_window_draws_no_frame_at_rest_on_connections_page_and_its_review(cx: &mut
         "connection.add",
         json!({"name": "notes", "about": "A notes server.",
             "command": [fake.display().to_string(), "--script", script.display().to_string()]}),
+    )
+    .unwrap();
+    std::fs::write(
+        &script,
+        json!({"server": {"name": "notes", "version": "1.0.0"}, "instructions": "Be brief.",
+            "tools": [{"name": "search", "description": "Finds notes.",
+                "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}}],
+            "answers": {"search": {"text": "found"}}})
+        .to_string(),
     )
     .unwrap();
     let (shell, cx) = window(&user, cx);

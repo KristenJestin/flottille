@@ -851,7 +851,9 @@ pub async fn call(
             }
         };
         let changed = super::changes(&pin, &running.listing);
-        if !changed.is_empty() {
+        if !changed.is_empty() && super::version_only(&pin, &running.listing) {
+            super::move_pin(daemon, name, &pin, &running.listing);
+        } else if !changed.is_empty() {
             stop_running(running).await;
             drop(turn);
             super::cut_off(daemon, name, &changed);

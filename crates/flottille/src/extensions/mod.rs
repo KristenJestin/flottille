@@ -1124,7 +1124,18 @@ fn owner(method: &str) -> Option<&'static Extension> {
 pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Value, Failure> {
     match method {
         "extension.list" => Ok(list(&daemon)),
-        "extension.set" => set(&daemon, serde_json::from_value(params)?),
+        "extension.set" => {
+            let asked: Set = serde_json::from_value(params)?;
+            // Connections added while it was off, or edited since, are given to agents now.
+            let turned_on = asked.name == connections::EXTENSION.name
+                && asked.project.is_none()
+                && asked.enabled == Some(true);
+            let mut answer = set(&daemon, asked)?;
+            if turned_on {
+                answer["given"] = json!(connections::turned_on(&daemon).await);
+            }
+            Ok(answer)
+        }
         "extension.act" => act(daemon, params).await,
         method => match owner(method) {
             Some(extension) if guidance::answers(extension, method) => {

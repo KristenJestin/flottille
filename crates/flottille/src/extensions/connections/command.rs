@@ -17,7 +17,7 @@ pub enum ConnectionAction {
         #[arg(long)]
         json: bool,
     },
-    /// Declare a connection: a command spawned without a shell, or a URL; review it next
+    /// Declare a connection: a command spawned without a shell, or a URL; given to agents at once
     Add {
         name: String,
         /// One sentence on what it is for, which agents read
@@ -30,7 +30,7 @@ pub enum ConnectionAction {
         #[arg(long)]
         json: bool,
     },
-    /// Change a connection's declaration: what trust is given to asks for a new review
+    /// Change a connection's declaration; pinned again at once unless its server announces a change
     Edit {
         name: String,
         #[arg(long)]
@@ -182,10 +182,20 @@ pub fn run(paths: &Paths, action: ConnectionAction) -> Result<ExitCode> {
             declared(&mut params, reach, given)?;
             let answer = client.request("connection.add", Value::Object(params))?;
             if !json {
-                println!(
-                    "Declared the connection {name}: review it to give it to your agents \
-                     (`flottille connection review {name}`)."
-                );
+                match answer["state"].as_str() {
+                    Some("ready") => println!(
+                        "Declared the connection {name}: it is given to your agents, every \
+                         action judged (`flottille connection review {name}` to change that)."
+                    ),
+                    Some("off") => println!(
+                        "Declared the connection {name}: it is off, and given to your agents, \
+                         every action judged, when it is turned on."
+                    ),
+                    _ => println!(
+                        "Declared the connection {name}: review it to give it to your agents \
+                         (`flottille connection review {name}`)."
+                    ),
+                }
             }
             (answer, json)
         }

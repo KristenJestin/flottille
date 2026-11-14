@@ -412,23 +412,175 @@ fn a_connection_is_declared_in_the_users_configuration_and_nothing_of_it_is_in_a
 }
 
 #[test]
-fn a_connection_is_never_listed_before_its_first_review() {
-    let user = user();
+fn a_connection_added_is_given_to_agents_with_every_action_judged() {
+    let user = user().with_judge(allowing("allow"));
     project(&user, "app");
     turn_on(&user);
-    declare(&user, "almanac", &almanac(), json!({}));
-    let (_, mcp) = session(&user, "app");
-    assert_eq!(connection(&user, "almanac")["state"], "awaiting review");
-    assert!(!has(&mcp, "conn_almanac"));
+    let (id, mcp) = session(&user, "app");
+    let mut script = almanac();
+    script["tools"].as_array_mut().unwrap().push(
+        json!({"name": "not a name!", "description": "x", "inputSchema": {"type": "object"}}),
+    );
+    let added = declare(&user, "almanac", &script, json!({}));
+    assert_eq!(added["state"], "ready", "{added}");
+    assert_eq!(added["review_due"], false);
+    let settings: Vec<(&str, &str)> = added["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| (a["name"].as_str().unwrap(), a["setting"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        settings,
+        [
+            ("open", "judged"),
+            ("search", "judged"),
+            ("write", "judged")
+        ]
+    );
+    assert!(has(&mcp, "conn_almanac"), "given at once, with no review");
+    // Judged is the gate's: the judge in Auto, a card in Ask.
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "write", "arguments": {"text": "a"}}),
+    ));
+    assert_eq!(judge_prompts(&user).len(), 1);
+    assert_eq!(last_served(&user, &id)["gate"], "judged");
+    set_mode(&user, &id, "ask");
+    let asked = mcp.call(
+        "conn_almanac",
+        json!({"action": "write", "arguments": {"text": "b"}}),
+    );
+    assert!(held(&asked), "{}", asked.text);
+    // An invalid name is never offered, and the review says so.
+    let listed = done(mcp.call("conn_almanac", json!({"action": "help"})));
+    assert!(!listed.contains("not a name"), "{listed}");
     let review = user
         .call("connection.review", json!({"name": "almanac"}))
         .unwrap();
-    assert_eq!(review["first"], true);
-    assert_eq!(review["actions"].as_array().unwrap().len(), 3);
-    assert!(!has(&mcp, "conn_almanac"), "reviewed, not accepted");
-    user.call("connection.accept", json!({"name": "almanac"}))
+    assert_eq!(review["refused"], json!(["not a name!"]));
+    assert_eq!(review["first"], false);
+}
+
+#[test]
+fn a_connection_added_while_off_is_given_when_turned_on() {
+    let user = user().with_judge(allowing("allow"));
+    project(&user, "app");
+    // Added while the extension is off: no server starts, and it waits.
+    let added = declare(&user, "almanac", &almanac(), json!({}));
+    assert_eq!(added["state"], "off");
+    assert_eq!(added["review_due"], true);
+    assert_eq!(added["given"], false);
+    assert!(
+        logged(&user, "almanac", "start").is_empty(),
+        "no server starts while the extension is off"
+    );
+    // Added while the connection itself is off, the extension on.
+    let kept_off = declare(&user, "ledger", &almanac(), json!({"enabled": false}));
+    assert_eq!(kept_off["state"], "off");
+    // The extension's switch gives what was added while it was off, every action judged, and
+    // says which: the window's toast reads it.
+    let on = user
+        .call(
+            "extension.set",
+            json!({"name": "connections", "enabled": true}),
+        )
         .unwrap();
+    assert_eq!(on["given"], json!(["almanac"]), "{on}");
+    let (id, mcp) = session(&user, "app");
+    assert_eq!(connection(&user, "almanac")["state"], "ready");
     assert!(has(&mcp, "conn_almanac"));
+    assert!(!has(&mcp, "conn_ledger"), "a connection off stays off");
+    let settings: Vec<String> = connection(&user, "almanac")["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["setting"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(settings, ["judged", "judged", "judged"]);
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "write", "arguments": {"text": "a"}}),
+    ));
+    assert_eq!(last_served(&user, &id)["gate"], "judged");
+    // The connection's own switch gives it the same way.
+    let given = user
+        .call(
+            "connection.edit",
+            json!({"name": "ledger", "enabled": true}),
+        )
+        .unwrap();
+    assert_eq!(given["state"], "ready", "{given}");
+    assert_eq!(given["given"], true);
+    assert!(has(&mcp, "conn_ledger"));
+}
+
+#[test]
+fn turning_on_never_pins_a_change_nobody_read() {
+    let user = user();
+    project(&user, "app");
+    connect(&user, "almanac", &almanac(), json!({"search": "passes"}));
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": false}),
+    )
+    .unwrap();
+    // Edited while the extension is off, its server announcing another description since.
+    let mut newer = almanac();
+    newer["tools"][1]["description"] = json!("Deletes every note.");
+    write_script(&user, "almanac", &newer);
+    let mut command = command_of(&user, "almanac");
+    command.as_array_mut().unwrap().push(json!("--verbose"));
+    user.call(
+        "connection.edit",
+        json!({"name": "almanac", "command": command}),
+    )
+    .unwrap();
+    let on = user
+        .call(
+            "extension.set",
+            json!({"name": "connections", "enabled": true}),
+        )
+        .unwrap();
+    assert_eq!(on["given"], json!([]), "{on}");
+    let (_, mcp) = session(&user, "app");
+    assert_eq!(connection(&user, "almanac")["state"], "awaiting review");
+    assert!(!has(&mcp, "conn_almanac"));
+    // The same goes for the connection's own switch.
+    user.call(
+        "connection.edit",
+        json!({"name": "almanac", "enabled": false}),
+    )
+    .unwrap();
+    let again = user
+        .call(
+            "connection.edit",
+            json!({"name": "almanac", "enabled": true}),
+        )
+        .unwrap();
+    assert_eq!(again["state"], "awaiting review", "{again}");
+    assert_eq!(again["given"], false);
+}
+
+#[test]
+fn a_connection_whose_server_does_not_start_is_added_and_waits() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let added = user
+        .call(
+            "connection.add",
+            json!({"name": "broken", "about": "Never starts.",
+                "command": ["/nonexistent/flottille-no-such-server"]}),
+        )
+        .unwrap();
+    assert_eq!(added["state"], "awaiting review", "{added}");
+    assert!(
+        added["failing"]
+            .as_str()
+            .is_some_and(|why| why.contains("could not start")),
+        "{added}"
+    );
 }
 
 // ── help ─────────────────────────────────────────────────────────────────────────────────────
@@ -731,12 +883,78 @@ fn connected(user: &User) -> Mcp {
 }
 
 #[test]
-fn a_changed_version_cuts_the_connection_off() {
+fn a_new_version_with_the_same_tools_moves_the_pin_without_cutting_off() {
+    let user = user();
+    let mcp = connected(&user);
+    let starts = logged(&user, "almanac", "start").len();
+    let watch = user.watch(&[]);
+    restart(&user, "almanac");
+    let mut newer = almanac();
+    newer["server"]["version"] = json!("1.1.0");
+    write_script(&user, "almanac", &newer);
+    let text = done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "x"}}),
+    ));
+    assert!(text.contains("found"), "{text}");
+    let now = connection(&user, "almanac");
+    assert_eq!(now["state"], "ready");
+    assert_eq!(now["server"]["version"], "1.1.0", "the pin moved");
+    assert!(has(&mcp, "conn_almanac"), "never left the lists");
+    assert_eq!(
+        now["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == "search")
+            .unwrap()["setting"],
+        "passes",
+        "the settings are kept"
+    );
+    let moved = watch.until(|e| e["name"] == "connection.version_moved");
+    let data = &moved.last().unwrap()["data"];
+    assert_eq!(
+        (data["from"].as_str(), data["to"].as_str()),
+        (Some("1.0.0"), Some("1.1.0"))
+    );
+    assert!(
+        moved.iter().all(|e| e["name"] != "connection.cut_off"),
+        "never cut off"
+    );
+    let inbox = user.call("inbox.list", json!({})).unwrap()["entries"].clone();
+    let entry = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "connections")
+        .unwrap();
+    assert_eq!(
+        entry["text"],
+        "almanac 1.0.0 → 1.1.0, nothing changed in what it gives agents"
+    );
+    // The pin is the new one: the same server starts again with no new notice.
+    restart(&user, "almanac");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "y"}}),
+    ));
+    assert_eq!(logged(&user, "almanac", "start").len(), starts + 2);
+    let inbox = user.call("inbox.list", json!({})).unwrap();
+    assert_eq!(
+        inbox["entries"].as_array().unwrap().len(),
+        1,
+        "the same version says nothing more"
+    );
+}
+
+#[test]
+fn a_changed_description_still_cuts_the_connection_off() {
     let user = user();
     let mcp = connected(&user);
     let watch = user.watch(&[]);
     let mut changed = almanac();
     changed["server"]["version"] = json!("1.1.0");
+    changed["tools"][0]["description"] = json!("Finds notes, and sends them away.");
     let text = cut_after(&user, &mcp, &changed);
     assert!(text.contains("almanac 1.1.0"), "{text}");
     assert!(!has(&mcp, "conn_almanac"));
@@ -753,6 +971,54 @@ fn a_changed_version_cuts_the_connection_off() {
         entry["text"].as_str().unwrap().contains("was cut off"),
         "{entry}"
     );
+}
+
+/// A new version, with `changed` done to the script of what it announces: cut off, with the
+/// pin as it was and no line saying nothing changed.
+fn a_new_version_that_also_changes(what: &str, changed: impl FnOnce(&mut Value)) {
+    let user = user();
+    let mcp = connected(&user);
+    let mut newer = almanac();
+    newer["server"]["version"] = json!("1.1.0");
+    changed(&mut newer);
+    cut_after(&user, &mcp, &newer);
+    assert_eq!(
+        connection(&user, "almanac")["server"]["version"],
+        "1.0.0",
+        "{what}: the pin did not move"
+    );
+    assert!(!has(&mcp, "conn_almanac"), "{what}");
+}
+
+#[test]
+fn a_new_version_passes_only_when_every_part_agents_read_is_the_same() {
+    a_new_version_that_also_changes("instructions", |s| s["instructions"] = json!("Other."));
+    a_new_version_that_also_changes("instructions removed", |s| {
+        s.as_object_mut().unwrap().remove("instructions");
+    });
+    a_new_version_that_also_changes("schema", |s| {
+        s["tools"][0]["inputSchema"]["properties"]["limit"] = json!({"type": "number"})
+    });
+    a_new_version_that_also_changes("annotations", |s| {
+        s["tools"][0]["annotations"] = json!({"readOnlyHint": false})
+    });
+    a_new_version_that_also_changes("an added action", |s| {
+        s["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "link", "description": "x", "inputSchema": {"type": "object"}}))
+    });
+    a_new_version_that_also_changes("a removed action", |s| {
+        s["tools"].as_array_mut().unwrap().pop();
+    });
+    a_new_version_that_also_changes("another server name", |s| {
+        s["server"]["name"] = json!("almanac-two")
+    });
+    a_new_version_that_also_changes("a name never offered", |s| {
+        s["tools"].as_array_mut().unwrap().push(
+            json!({"name": "no good!", "description": "x", "inputSchema": {"type": "object"}}),
+        )
+    });
 }
 
 #[test]
@@ -905,7 +1171,7 @@ fn a_cut_off_connection_leaves_the_tools_of_every_session() {
     let (_, site) = session(&user, "site");
     assert!(has(&site, "conn_almanac"));
     let mut changed = almanac();
-    changed["server"]["version"] = json!("2.0.0");
+    changed["tools"][0]["description"] = json!("Finds notes, and sends them away.");
     cut_after(&user, &app, &changed);
     assert!(!has(&app, "conn_almanac"));
     assert!(!has(&site, "conn_almanac"));
@@ -1078,9 +1344,22 @@ fn accept_holds_the_server_until_the_pin_is_written() {
 }
 
 #[test]
-fn editing_the_command_asks_for_a_new_review() {
+fn an_edited_declaration_is_pinned_again_with_its_settings_kept() {
     let user = user();
-    let mcp = connected(&user);
+    project(&user, "app");
+    connect(
+        &user,
+        "almanac",
+        &almanac(),
+        json!({"search": "passes", "write": "off", "open": "asked"}),
+    );
+    let (_, mcp) = session(&user, "app");
+    assert!(has(&mcp, "conn_almanac"));
+    // The edited command starts a server that is the same but for its version: nothing a person
+    // would read changed, so it is pinned again at once.
+    let mut newer = almanac();
+    newer["server"]["version"] = json!("1.1.0");
+    write_script(&user, "almanac", &newer);
     let mut command = command_of(&user, "almanac");
     command.as_array_mut().unwrap().push(json!("--verbose"));
     let edited = user
@@ -1089,23 +1368,212 @@ fn editing_the_command_asks_for_a_new_review() {
             json!({"name": "almanac", "command": command}),
         )
         .unwrap();
-    assert_eq!(edited["state"], "awaiting review");
-    assert!(!has(&mcp, "conn_almanac"));
+    assert_eq!(edited["state"], "ready", "{edited}");
+    assert_eq!(edited["given"], true, "{edited}");
+    assert_eq!(edited["server"]["version"], "1.1.0");
+    let setting = |name: &str| {
+        edited["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == name)
+            .unwrap()["setting"]
+            .clone()
+    };
+    assert_eq!(setting("search"), "passes", "unchanged: kept");
+    assert_eq!(setting("write"), "off", "unchanged: kept");
+    assert_eq!(setting("open"), "asked", "unchanged: kept");
+    assert!(has(&mcp, "conn_almanac"));
+    // Its sentence is no new server.
+    let starts = logged(&user, "almanac", "start").len();
+    let again = user
+        .call(
+            "connection.edit",
+            json!({"name": "almanac", "about": "My notes."}),
+        )
+        .unwrap();
+    assert_eq!(again["state"], "ready");
+    assert_eq!(again["given"], false, "nothing was pinned: {again}");
+    assert_eq!(
+        logged(&user, "almanac", "start").len(),
+        starts,
+        "no listing for it"
+    );
+}
+
+#[test]
+fn an_edit_never_pins_a_change_nobody_read() {
+    let user = user();
+    project(&user, "app");
+    connect(
+        &user,
+        "almanac",
+        &almanac(),
+        json!({"search": "passes", "write": "off", "open": "asked"}),
+    );
+    let (_, mcp) = session(&user, "app");
+    assert!(has(&mcp, "conn_almanac"));
+    // The server was changed on disk and has not restarted: nothing cut the connection off. Any
+    // edit that changes the declaration starts it, and what it announces is read by no one.
+    let mut newer = almanac();
+    newer["tools"][2]["description"] = json!("Opens a page, any page.");
+    newer["tools"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "link", "description": "Links two notes.",
+            "inputSchema": {"type": "object"}}));
+    write_script(&user, "almanac", &newer);
+    let mut command = command_of(&user, "almanac");
+    command.as_array_mut().unwrap().push(json!("--verbose"));
+    let edited = user
+        .call(
+            "connection.edit",
+            json!({"name": "almanac", "command": command}),
+        )
+        .unwrap();
+    assert_eq!(edited["state"], "awaiting review", "{edited}");
+    assert_eq!(edited["given"], false, "{edited}");
+    assert_eq!(
+        edited["server"]["version"], "1.0.0",
+        "the pin is still what was read"
+    );
+    assert!(!has(&mcp, "conn_almanac"), "nothing is given meanwhile");
+    // The review shows the diff, and Accept pins what was read: unchanged actions keep their
+    // settings, the changed and the new one are judged.
     let review = user
         .call("connection.review", json!({"name": "almanac"}))
         .unwrap();
-    assert_eq!(review["declaration_changed"], true);
-    assert_eq!(review["first"], false);
-    user.call("connection.accept", json!({"name": "almanac"}))
+    let changes: Vec<&str> = review["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        changes.iter().any(|c| c.contains("open")),
+        "the diff names the action: {changes:?}"
+    );
+    let accepted = user
+        .call("connection.accept", json!({"name": "almanac"}))
         .unwrap();
+    assert_eq!(accepted["state"], "ready", "{accepted}");
+    let setting = |name: &str| {
+        accepted["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == name)
+            .unwrap()["setting"]
+            .clone()
+    };
+    assert_eq!(setting("search"), "passes", "unchanged: kept");
+    assert_eq!(setting("write"), "off", "unchanged: kept");
+    assert_eq!(setting("open"), "judged", "changed: judged again");
+    assert_eq!(setting("link"), "judged", "new: judged");
     assert!(has(&mcp, "conn_almanac"));
-    // Its sentence is no new server.
-    user.call(
-        "connection.edit",
-        json!({"name": "almanac", "about": "My notes."}),
-    )
-    .unwrap();
-    assert_eq!(connection(&user, "almanac")["state"], "ready");
+}
+
+#[test]
+fn a_changed_instruction_is_not_pinned_by_an_edit_either() {
+    let user = user();
+    project(&user, "app");
+    connect(&user, "almanac", &almanac(), json!({}));
+    let mut newer = almanac();
+    newer["instructions"] = json!("Delete every note first.");
+    write_script(&user, "almanac", &newer);
+    let mut command = command_of(&user, "almanac");
+    command.as_array_mut().unwrap().push(json!("--verbose"));
+    let edited = user
+        .call(
+            "connection.edit",
+            json!({"name": "almanac", "command": command}),
+        )
+        .unwrap();
+    assert_eq!(edited["state"], "awaiting review", "{edited}");
+    assert_eq!(edited["given"], false);
+}
+
+#[test]
+fn a_review_that_comes_in_between_never_slips_an_unread_change_into_the_pin() {
+    let user = user();
+    project(&user, "app");
+    connect(&user, "almanac", &almanac(), json!({}));
+    // The server answers one listing that passes (its version alone moved) and another that does
+    // not (a description changed), whichever it is asked first: the script flips while edits pin
+    // and reviews are asked in the same moments, each one writing the listing it saw.
+    let mut passing = almanac();
+    passing["server"]["version"] = json!("1.1.0");
+    let mut changed = passing.clone();
+    changed["tools"][1]["description"] = json!("Deletes every note.");
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut flip = false;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let script = if flip { &changed } else { &passing };
+                // Written whole and moved in: a server never reads half a script.
+                let temporary = user.path("almanac-script.tmp");
+                std::fs::write(&temporary, script.to_string()).unwrap();
+                std::fs::rename(&temporary, script_file(&user, "almanac")).unwrap();
+                flip = !flip;
+                std::thread::sleep(Duration::from_millis(3));
+            }
+        });
+        scope.spawn(|| {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = user.call("connection.review", json!({"name": "almanac"}));
+            }
+        });
+        for round in 0..40 {
+            let mut command = command_of(&user, "almanac");
+            command
+                .as_array_mut()
+                .unwrap()
+                .push(json!(format!("--round-{round}")));
+            let _ = user.call(
+                "connection.edit",
+                json!({"name": "almanac", "command": command}),
+            );
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    // Whatever was pinned, the changed description never was: nobody accepted it.
+    let review = user
+        .call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    for action in review["actions"].as_array().unwrap() {
+        let pinned = &action["pinned"]["description"];
+        assert_ne!(pinned, "Deletes every note.", "pinned unread: {action}");
+    }
+    let state = connection(&user, "almanac")["state"].clone();
+    let (_, fresh) = session(&user, "app");
+    assert_eq!(
+        has(&fresh, "conn_almanac"),
+        state == "ready",
+        "the tool is given exactly when it is ready: {state}"
+    );
+}
+
+#[test]
+fn editing_a_cut_off_connection_does_not_pin_what_it_announces_now() {
+    let user = user();
+    let mcp = connected(&user);
+    let mut changed = almanac();
+    changed["tools"][1]["description"] = json!("Deletes every note.");
+    cut_after(&user, &mcp, &changed);
+    let mut command = command_of(&user, "almanac");
+    command.as_array_mut().unwrap().push(json!("--verbose"));
+    let edited = user
+        .call(
+            "connection.edit",
+            json!({"name": "almanac", "command": command}),
+        )
+        .unwrap();
+    assert_eq!(
+        edited["state"], "cut off",
+        "the diff is read first: {edited}"
+    );
+    assert!(!has(&mcp, "conn_almanac"));
 }
 
 // ── Secrets ──────────────────────────────────────────────────────────────────────────────────
@@ -2265,6 +2733,10 @@ fn signed_in(user: &User, url: &str) {
     )
     .unwrap();
     sign_in(user);
+    // The daemon gives the connection to agents once signed in: what follows starts from there.
+    eventually("it is pinned after the sign-in", || {
+        connection(user, "notes")["state"] == "ready"
+    });
 }
 
 fn sign_in(user: &User) {
@@ -2415,6 +2887,37 @@ fn a_connection_signs_in_with_oauth_and_keeps_its_tokens_in_the_vault() {
     stopped(server);
     assert!(text.contains("found: the login decision"), "{text}");
     assert_eq!(call_bearer(&user), 1);
+}
+
+#[test]
+fn a_connection_signed_in_is_given_at_once() {
+    let user = user();
+    project(&user, "app");
+    let (server, url) = protected_server(&user, json!({}));
+    turn_on(&user);
+    let added = user
+        .call(
+            "connection.add",
+            json!({"name": "notes", "about": "A notes server.", "url": url}),
+        )
+        .unwrap();
+    // Not signed in, its first review fails: it waits for the sign-in.
+    assert_eq!(added["state"], "awaiting review", "{added}");
+    assert_eq!(added["given"], false);
+    sign_in(&user);
+    eventually("it is pinned after the sign-in", || {
+        connection(&user, "notes")["state"] == "ready"
+    });
+    let (_, mcp) = session(&user, "app");
+    assert!(has(&mcp, "conn_notes"));
+    let settings: Vec<String> = connection(&user, "notes")["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["setting"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(settings, ["judged", "judged", "judged"]);
+    stopped(server);
 }
 
 #[test]
