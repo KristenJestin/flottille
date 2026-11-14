@@ -3926,12 +3926,21 @@ fn form_file(user: &User) -> PathBuf {
 /// The connection `browser` declared on the fake server, run as `agent-browser mcp` is, and given
 /// to agents at once; with `login` (the fake command line's behaviour) in its script.
 fn browser(user: &User, script: &Value, login: Value) -> Value {
+    browser_run_with(user, script, login, &[])
+}
+
+/// `browser`, its command carrying `options` (agent-browser's global options) before `mcp`.
+fn browser_run_with(user: &User, script: &Value, login: Value, options: &[&str]) -> Value {
     turn_on(user);
     let mut script = script.clone();
     script["login"] = login;
     script["login"]["form"] = json!(form_file(user));
     write_script(user, "browser", &script);
     let mut command = command_of(user, "browser");
+    command
+        .as_array_mut()
+        .unwrap()
+        .extend(options.iter().map(|o| json!(o)));
     command.as_array_mut().unwrap().push(json!("mcp"));
     user.call(
         "connection.add",
@@ -4660,4 +4669,111 @@ fn a_failed_login_reloads_the_entrys_page() {
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
     assert!(logged(&user, "browser", "open").is_empty());
+}
+
+/// The words of a logged command line.
+fn words(line: &Value) -> Vec<String> {
+    line["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|word| word.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// What follows `--allowed-domains` in a logged command line, if it is there.
+fn allowed(line: &Value) -> Option<String> {
+    let words = words(line);
+    let at = words.iter().position(|word| word == "--allowed-domains")?;
+    words.get(at + 1).cloned()
+}
+
+#[test]
+fn the_browser_is_kept_to_the_entries_sites() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({"fail": true}));
+    // No entry is bound yet: nothing to keep the session to, the server starts as it did.
+    assert_eq!(allowed(&logged(&user, "browser", "start")[0]), None);
+    let (_, mcp) = signed_up(&user);
+    // A second entry of the connection, with a port and a path; one bound to another connection
+    // and one bound to none, whose sites are not this connection's.
+    for (name, url, to) in [
+        (
+            "portal-test",
+            "https://portal.example.net:8443/signin",
+            "connection:browser",
+        ),
+        (
+            "notes-test",
+            "https://notes.example.org/login",
+            "connection:notes",
+        ),
+        ("loose-test", "https://loose.example.io/login", ""),
+    ] {
+        let mut params = json!({"name": name, "secret": "s3cret-of-the-site", "url": url});
+        if !to.is_empty() {
+            params["for"] = json!(to);
+        }
+        user.call("vault.set", params).unwrap();
+    }
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    // A call of the server's own starts it again.
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    // The server's start, the login and the page's reload after its failure: the hosts of the
+    // entries bound to the connection, exactly, and no others.
+    let sites = Some("portal.example.net,shop.example.com".to_owned());
+    assert_eq!(
+        allowed(logged(&user, "browser", "start").last().unwrap()),
+        sites
+    );
+    assert_eq!(allowed(&logged(&user, "browser", "login")[0]), sites);
+    assert_eq!(allowed(&logged(&user, "browser", "open")[0]), sites);
+}
+
+#[test]
+fn login_is_refused_when_the_command_uses_a_flag_that_drops_the_allowlist() {
+    for options in [
+        vec!["--cdp", "9222"],
+        vec!["--cdp=ws://127.0.0.1:9222"],
+        vec!["--auto-connect"],
+        vec!["--profile", "Default"],
+        vec!["--state=auth.json"],
+        vec!["--restore"],
+        vec!["--session-name", "work"],
+    ] {
+        let user = user();
+        browser_run_with(&user, &agent_browser("0.43.0"), json!({}), &options);
+        let (_, mcp) = signed_up(&user);
+        let said = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        assert!(said.contains("--allowed-domains"), "{options:?}: {said}");
+        assert!(
+            said.contains(options[0].split('=').next().unwrap()),
+            "{options:?}: {said}"
+        );
+        assert!(logged(&user, "browser", "login").is_empty(), "{options:?}");
+        assert!(form(&user).is_none(), "{options:?}");
+        // The server still starts as the user's command says: only login is refused.
+        let started = logged(&user, "browser", "start");
+        assert_eq!(allowed(started.last().unwrap()), None, "{options:?}");
+        let review = user
+            .call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        let said = review["adapter"]["said"].as_str().unwrap();
+        assert!(said.contains("--allowed-domains"), "{options:?}: {review}");
+    }
 }

@@ -260,8 +260,9 @@ impl Adapter {
         })
     }
 
-    /// What it changes, a sentence each, as the review says it.
-    pub fn changed(&self, config: &Path) -> Vec<String> {
+    /// What it changes, a sentence each, as the review says it; `sites` are those the browser is
+    /// kept to (`sites`).
+    pub fn changed(&self, config: &Path, sites: &[String]) -> Vec<String> {
         let mut said = vec![format!(
             "its actions outside these {}, which cannot reach a secret typed into a page, are off \
              at the first review, and login is refused while one of them is on, an action it \
@@ -289,9 +290,48 @@ impl Adapter {
              names Flottille as its credential provider",
             config.display()
         ));
+        said.push(match sites {
+            [] => "its browser is kept to the sites of the vault entries bound to this connection \
+                   with --allowed-domains once one is bound with a web address: none is yet"
+                .to_owned(),
+            sites => format!(
+                "its browser is kept to the sites of the vault entries bound to this connection \
+                 with --allowed-domains: {}. The session cannot load, nor send a request or \
+                 open a socket to, any other domain, and WebRTC is off; it is not an operating \
+                 system firewall",
+                sites.join(", ")
+            ),
+        });
         said
     }
+
+    /// Why login is refused when the server's own command uses an option agent-browser refuses
+    /// together with `--allowed-domains`: the session would not be kept to the entries' sites.
+    pub fn drops_allowlist(&self, words: &[String]) -> Option<String> {
+        let option = words.iter().find_map(|word| {
+            let name = word.split('=').next().unwrap_or(word);
+            DROPS_ALLOWLIST.contains(&name).then_some(name)
+        })?;
+        Some(format!(
+            "login is refused while the server's command uses {option}: agent-browser refuses it \
+             together with --allowed-domains, which keeps the browser to the sites of the vault \
+             entries bound to this connection, and a session that is not kept to them could be \
+             sent elsewhere. The user takes {option} out of the connection's command"
+        ))
+    }
 }
+
+/// The options of agent-browser that it refuses together with `--allowed-domains` (its documented
+/// ones: a browser it did not start, a profile or a state that is replayed), `--session-name`
+/// being the legacy name of `--restore`'s key.
+const DROPS_ALLOWLIST: &[&str] = &[
+    "--cdp",
+    "--auto-connect",
+    "--profile",
+    "--state",
+    "--restore",
+    "--session-name",
+];
 
 // ── The start ────────────────────────────────────────────────────────────────────────────────
 
@@ -313,10 +353,41 @@ pub fn config_of(daemon: &Daemon, name: &str) -> PathBuf {
     config_file(&folder(daemon, name))
 }
 
+/// The hosts of the vault entries bound to the connection `name`, whatever the project: the
+/// sites its browser is kept to, each as the entry's URL gives it, sorted. An entry without a web
+/// address has none.
+pub fn sites(daemon: &Daemon, name: &str) -> Vec<String> {
+    let this = uses::connection(name);
+    let mut hosts: Vec<String> = daemon
+        .read(|store| store.vault_entries())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry.bound.as_deref() == Some(&this))
+        .filter_map(|entry| entry.url)
+        .filter_map(|text| url::Url::parse(&text).ok())
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .filter_map(|url| url.host_str().map(str::to_owned))
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+/// The sites the server's start and Flottille's own runs keep the browser to: those of the
+/// entries, unless the server's command uses an option that agent-browser refuses with them, in
+/// which case the server starts as the user wrote it and `login` is refused.
+pub fn kept_to(daemon: &Daemon, adapter: &Adapter, name: &str, words: &[String]) -> Vec<String> {
+    match adapter.drops_allowlist(words) {
+        Some(_) => Vec::new(),
+        None => sites(daemon, name),
+    }
+}
+
 /// The options the adapter adds to the server's start, the file they name written first: the
 /// configuration that names Flottille as agent-browser's credential provider, and only it (an
-/// explicit one replaces agent-browser's discovery of the user's own).
-pub fn start_options(folder: &Path) -> Result<Vec<String>, String> {
+/// explicit one replaces agent-browser's discovery of the user's own), and the sites the browser
+/// is kept to, as the flag agent-browser documents (its help shows no key for the file).
+pub fn start_options(folder: &Path, sites: &[String]) -> Result<Vec<String>, String> {
     let program = std::env::current_exe()
         .map_err(|error| format!("cannot find Flottille itself: {error}"))?;
     let config = json!({"plugins": [{
@@ -328,7 +399,11 @@ pub fn start_options(folder: &Path) -> Result<Vec<String>, String> {
     let file = config_file(folder);
     written(&file, config.to_string().as_bytes())
         .map_err(|error| format!("{}: {error}", file.display()))?;
-    Ok(vec!["--config".into(), file.display().to_string()])
+    let mut options = vec!["--config".into(), file.display().to_string()];
+    if !sites.is_empty() {
+        options.extend(["--allowed-domains".into(), sites.join(",")]);
+    }
+    Ok(options)
 }
 
 /// `bytes` in `file`, the user's alone, written whole or not at all.
@@ -431,6 +506,9 @@ pub async fn perform(
         if let Err(why) = at_turn(row.pin.as_ref(), |action| super::setting_of(&row, action)) {
             return Outcome::Refused(format!("refused: {why}"));
         }
+        if let Some(why) = AGENT_BROWSER.drops_allowlist(&program) {
+            return Outcome::Refused(format!("refused: {why}"));
+        }
         let login = Login {
             connection: name.clone(),
             entry: entry_of.name.clone(),
@@ -513,7 +591,8 @@ async fn run(
 ) -> Result<String, String> {
     let folder = folder(daemon, &declaration.name);
     flottille_core::paths::ensure_private_dir(&folder).map_err(|error| error.to_string())?;
-    let options = start_options(&folder)?;
+    let sites = sites(daemon, &declaration.name);
+    let options = start_options(&folder, &sites)?;
     let token = super::oauth::random(32)?;
     let socket = socket_file(&folder);
     // Left by a login that was killed: the folder is the user's alone (0700) and a connection runs

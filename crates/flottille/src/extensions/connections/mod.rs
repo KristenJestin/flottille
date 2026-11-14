@@ -1796,14 +1796,21 @@ async fn review(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
     changed_event(daemon, &name, None);
     let row = row(daemon, &name);
     let config = adapters::config_of(daemon, &name);
-    Ok(diff(&declaration, &row, &listing, &config))
+    let sites = adapters::sites(daemon, &name);
+    Ok(diff(&declaration, &row, &listing, &config, &sites))
 }
 
 /// The review: the pin against what the server announces now, each action whole where it is new,
 /// both texts where it changed, and what each limit covers. The setting it proposes for an action
 /// is what `accept` pins when nothing is said: kept where the action is unchanged, judged where it
 /// is new or changed, so that a client that answers it back gets what the daemon would have done.
-fn diff(declaration: &Declaration, row: &Row, now: &Listing, config: &std::path::Path) -> Value {
+fn diff(
+    declaration: &Declaration,
+    row: &Row,
+    now: &Listing,
+    config: &std::path::Path,
+    sites: &[String],
+) -> Value {
     let empty = Listing::default();
     let pin = row.pin.as_ref().unwrap_or(&empty);
     let proposed = settings_of_accept(row, now, &json!({})).unwrap_or_default();
@@ -1859,7 +1866,7 @@ fn diff(declaration: &Declaration, row: &Row, now: &Listing, config: &std::path:
         "actions": actions,
         "refused": now.refused,
         "limits": limits,
-        "adapter": adapter_said(now, &proposed, config),
+        "adapter": adapter_said(declaration, now, &proposed, config, sites),
     })
 }
 
@@ -1867,9 +1874,11 @@ fn diff(declaration: &Declaration, row: &Row, now: &Listing, config: &std::path:
 /// changes, with what Accept would pin; that this version has none; or nothing, for a server no
 /// adapter knows.
 fn adapter_said(
+    declaration: &Declaration,
     now: &Listing,
     proposed: &BTreeMap<String, String>,
     config: &std::path::Path,
+    sites: &[String],
 ) -> Value {
     match adapters::of(&now.server) {
         adapters::Found::Applies(adapter) => {
@@ -1887,9 +1896,14 @@ fn adapter_said(
                     said.push_str(&format!(" {why}."));
                 }
             }
+            if let Reach::Command(words) = &declaration.reach
+                && let Some(why) = adapter.drops_allowlist(words)
+            {
+                said.push_str(&format!(" {why}."));
+            }
             json!({"name": adapter.server, "range": adapter.range, "applies": true,
                 "actions": adapter.actions.iter().map(|own| own.name).collect::<Vec<_>>(),
-                "changed": adapter.changed(config), "said": said})
+                "changed": adapter.changed(config, sites), "said": said})
         }
         adapters::Found::OtherVersion(adapter) => json!({"name": adapter.server,
         "range": adapter.range, "applies": false,

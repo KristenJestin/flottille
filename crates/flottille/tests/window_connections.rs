@@ -2042,6 +2042,25 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+fn the_review_says_the_browser_is_kept_to_the_entries_sites(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "shop-test", "secret": "s3cret-of-the-shop", "username": "tester",
+            "url": "https://shop.example.com/login", "for": "connection:browser"}),
+    )
+    .unwrap();
+    agent_browser(&user, &["agent_browser_click"], false);
+    let (shell, cx) = window(&user, cx);
+    open_the_review(&shell, cx, "browser", "connection-review-adapter");
+    click(cx, "connection-review-adapter-changes");
+    let changed = everything_said(cx);
+    assert!(changed.contains("--allowed-domains"), "{changed}");
+    assert!(changed.contains("shop.example.com"), "{changed}");
+}
+
+#[gpui_kit::test]
 fn a_locked_action_is_not_set_by_the_bulk_bar(cx: &mut TestAppContext) {
     let user = user();
     turn_on(&user);

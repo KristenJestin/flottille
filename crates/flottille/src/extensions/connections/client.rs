@@ -422,7 +422,10 @@ async fn start_with(
             flottille_core::paths::ensure_private_dir(&folder)
                 .map_err(|error| error.to_string())?;
             let options = match adapter {
-                Some(_) => super::adapters::start_options(&folder)?,
+                Some(adapter) => {
+                    let sites = super::adapters::kept_to(daemon, adapter, &declaration.name, words);
+                    super::adapters::start_options(&folder, &sites)?
+                }
                 None => Vec::new(),
             };
             let mut env = crate::runs::beside(daemon)?;
