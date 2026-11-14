@@ -26,7 +26,8 @@ use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 use syn::{Expr, ExprMethodCall};
 
-/// The components of the kit that are a column with a gap of their own.
+/// The components of the kit that are a column with a gap of their own (a `Modal` with `.search()`
+/// is one without: see `chain_of`).
 const KIT_COLUMNS: &[(&str, &str)] = &[
     ("Section::new", "space::MD"),
     ("Modal::new", "space::LG"),
@@ -237,6 +238,9 @@ impl Finder {
             match call.method.to_string().as_str() {
                 "flex_col" => chain.column = true,
                 "gap" | "gap_y" => chain.gap = call.args.first().map(describe),
+                // A search modal's results are a column without a gap, each child in a wrapper
+                // of its own (the kit's `modal.rs`); `large` and `wide` keep the body's `LG`.
+                "search" if chain.start == "Modal::new" => chain.gap = None,
                 _ => {}
             }
         }
@@ -646,6 +650,24 @@ fn a_section_and_a_modal_carry_the_gap_of_their_own() {
     // A block of a section without the gap is refused as well.
     let bare = "fn f() { Section::new(\"s\", \"S\").child(presence(\"x\", true, b)); }";
     assert_eq!(refused(bare).len(), 1);
+}
+
+#[test]
+fn a_search_modal_s_results_have_no_gap_but_a_large_one_keeps_it() {
+    let search = "fn f() { Modal::new(\"m\", \"M\").search().child(presence(\"x\", true, b).gap(space::LG)); }";
+    let found = refused(search);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("has no `.gap(space::LG)`"), "{found:?}");
+    let held = "fn f() { let modal = Modal::new(\"m\", \"M\").search(); modal.child(presence(\"x\", true, b).gap(space::LG)); }";
+    assert_eq!(refused(held).len(), 1);
+    let bare = "fn f() { Modal::new(\"m\", \"M\").search().child(presence(\"x\", true, b)); }";
+    assert!(refused(bare).is_empty(), "{:?}", refused(bare));
+    for variant in ["large", "wide"] {
+        let kept = format!(
+            "fn f() {{ Modal::new(\"m\", \"M\").{variant}().child(presence(\"x\", true, b).gap(space::LG)); }}"
+        );
+        assert!(refused(&kept).is_empty(), "{variant}: {:?}", refused(&kept));
+    }
 }
 
 #[test]
