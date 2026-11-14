@@ -1028,13 +1028,26 @@ is reached (radios: a program, its command one line split as a task's, shell syn
 it; or a URL), its variables (headers for a URL), each a name and a vault entry picked among those
 every project sees and no other use is bound to, and its limits (an argument and its values,
 separated by commas). The projects a connection excepts are not in the form yet: the command line
-sets them. **Review** opens the diff in a `Modal::large`: the server and its version (`almanac
-1.0.0 → 2.0.0`), its instructions and each action's description and arguments as plain lines
-(`−` the old one, `+` the new one), a tag `New`, `Changed` or `Removed`, the unchanged actions
-folded under one line, the limits and what they cover, the names never offered. Each action has a
-switch, **Offer it to agents**, and under it **When an agent calls it**: radios `Allowed`, `Judged`
-(the one chosen until the user picks another, and for a changed action too) and `Asked`; the word
-`passes` is not shown. Each variable and limit control has its label.
+sets them. **Review** opens the diff in a wide dialog (640 px, `Modal::wide`), its server and its
+version (`almanac 1.0.0 → 2.0.0`), a search field and filter chips under the title, a bar and the
+count of each setting above its buttons, so that a server with dozens of actions is read without
+scrolling a page of cards (#850). The actions are **triaged by setting**: one compact row each
+(a checkbox, its name, the first line of what it does, and one pill, a compact select of `Off`,
+`Allowed`, `Judged` and `Asked`, each with its sentence), in groups `Asked`, `Allowed`, `Off` and
+`Judged`, each folding, a group drawn only while it holds a row; a row set to another setting
+folds away in its group and unfolds in the new one. A row unfolds on a click into the whole
+description and arguments as plain lines (`−` the old one, `+` the new one), the server's hints
+(shown, never used) and the four choices, each with its sentence (`passes` is the word of the
+daemon, never shown). Everything is `Judged` until the user picks another, and a changed action
+too. The search filters by name and description; the chips filter by setting and, in a re-review,
+by `New`, `Changed` or `Removed`, each counting what it would show. Ticking rows unfolds a bar
+(`2 selected`, `Off`, `Allowed`, `Judged`, `Asked`, `Clear`); the pill of a ticked row sets every
+ticked row. The server's instructions are one row, folded to their first line (`Changed` and a
+count of lines in a re-review), unfolding into their lines. A re-review starts with **What
+changed** (the new, changed and removed actions, with their tags), then one dashed line, `31
+unchanged` and what they are set to (`3 allowed · 1 asked · 1 off · 26 judged`), which unfolds the
+same groups, and unfolds by itself while a search or a chip finds one of them. The limits and what
+they cover, the names never offered, come last. Each variable and limit control has its label.
 **Accept** pins what was read with those settings. Nothing of it is per project. **Save**, on a
 server that is on, gets it pinned at once ("Pinning"): the daemon's answer says whether this write
 gave the tool (`given`), and the toast then says `Server almanac is given to agents`, `Every
@@ -1056,7 +1069,9 @@ its Save writes the user's values and answers the request (`connection.add`/`.ed
 offered. Everything animates as the rest of the window does:
 the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
 when it leaves, a field that a radio or a switch needs unfolds under it, the dialogs rise and
-fade, the review crossfades from its skeleton.
+fade, the review crossfades from its skeleton; in it, a row that changes setting folds away in its
+group and unfolds in the other, a group that empties folds away, the bar of the ticked rows, the
+rows, the instructions and the `unchanged` line unfold, and what is off fades.
 
 **What it does not protect.** The server has the user's rights, and what an agent reads from one
 connection may go to another place ("Open questions", 3). Flottille sees the name, the
