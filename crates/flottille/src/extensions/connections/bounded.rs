@@ -126,11 +126,18 @@ impl Bounded {
         StreamableHttpError::UnexpectedServerResponse(Cow::Owned(said()))
     }
 
-    /// The body of `response`, failing at the first byte past the limit.
+    /// The body of `response`: refused at once when it says it is past the limit, and otherwise
+    /// failing at the first byte past it, whatever it said.
     async fn body(
         &self,
         response: &mut reqwest::Response,
     ) -> Result<Vec<u8>, StreamableHttpError<reqwest::Error>> {
+        if response
+            .content_length()
+            .is_some_and(|length| length > ANSWER_LIMIT as u64)
+        {
+            return Err(self.too_big());
+        }
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await? {
             if body.len() + chunk.len() > ANSWER_LIMIT {
@@ -142,7 +149,8 @@ impl Bounded {
     }
 }
 
-/// The bytes of `response`, as many as the limit lets through, then an error.
+/// The bytes of `response`, as many in all as the limit lets through (the events of an answer are
+/// counted together, not one by one), then an error.
 fn chunks(response: reqwest::Response, cut: Cut) -> impl Stream<Item = io::Result<Bytes>> {
     futures::stream::unfold(
         (response, 0usize, false),
@@ -244,9 +252,10 @@ impl StreamableHttpClient for Bounded {
         .await
     }
 
-    /// What rmcp's own client does of a message, but for its limits on the answer: a connection's
-    /// server is never sent a header of its own, and rmcp's legacy discovery is never used (the
-    /// daemon starts a server with `initialize`).
+    /// What rmcp's own client does of a message, written again because rmcp has no hook on the
+    /// answer's size: the same requests, checks and errors, but for the limit on what is read, and
+    /// for rmcp's legacy discovery, which is not used (the daemon starts a server with
+    /// `initialize`).
     async fn post_message_with_max_sse_event_size(
         &self,
         uri: Arc<str>,
@@ -266,6 +275,16 @@ impl StreamableHttpClient for Bounded {
             request = request.bearer_auth(token);
         }
         for (name, value) in custom_headers {
+            // The headers the transport sets itself are not the user's to set, as in rmcp's client
+            // (its check is not public).
+            if ["accept", "mcp-session-id", "last-event-id"]
+                .iter()
+                .any(|reserved| name.as_str().eq_ignore_ascii_case(reserved))
+            {
+                return Err(StreamableHttpError::ReservedHeaderConflict(
+                    name.to_string(),
+                ));
+            }
             request = request.header(name, value);
         }
         let attached = session_id.is_some();
@@ -392,5 +411,14 @@ mod tests {
             .read_to_end(&mut Vec::new())
             .await;
         assert!(read.is_err() && cut.take());
+    }
+
+    #[test]
+    fn a_cut_is_told_once() {
+        let cut = Cut::default();
+        assert!(!cut.take());
+        cut.mark();
+        assert!(cut.take());
+        assert!(!cut.take(), "a cut that was told is forgotten");
     }
 }

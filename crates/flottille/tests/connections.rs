@@ -2388,7 +2388,15 @@ fn written(user: &User, name: &str) -> (u64, bool) {
 
 /// An answer of 64 MiB, written slowly, is cut as the server's answer passes the limit: the call
 /// fails with the sentence, the fake was not read to its end, and the next call is answered.
-fn a_response_past_the_limit_is_cut(user: &User, mcp: &Mcp, waits_for_the_reader: bool) {
+///
+/// `read_to_the_limit`: the cut came as the bytes were read, not before (a length said at the start
+/// is refused at once).
+fn a_response_past_the_limit_is_cut(
+    user: &User,
+    mcp: &Mcp,
+    waits_for_the_reader: bool,
+    read_to_the_limit: bool,
+) {
     let total = 64 << 20;
     let started = Instant::now();
     let answer = mcp.call(
@@ -2412,7 +2420,7 @@ fn a_response_past_the_limit_is_cut(user: &User, mcp: &Mcp, waits_for_the_reader
     }
     let (taken, _) = written(user, "almanac");
     assert!(
-        taken >= ANSWER_LIMIT && taken < total,
+        taken < total && (taken >= ANSWER_LIMIT) == read_to_the_limit,
         "{taken} of {total} bytes were written before the cut"
     );
     let text = done(mcp.call(
@@ -2434,15 +2442,17 @@ fn a_response_past_the_limit_fails_the_call_and_keeps_the_connection() {
         json!({"search": "passes", "write": "passes"}),
     );
     let (_, mcp) = session(&user, "app");
-    a_response_past_the_limit_is_cut(&user, &mcp, false);
+    a_response_past_the_limit_is_cut(&user, &mcp, false, true);
 }
 
-/// The same, over HTTP, the answer a JSON body or, with `sse`, an event of a stream.
-fn a_response_past_the_limit_over_http(sse: bool) {
+/// The same, over HTTP, the answer a JSON body or, with `sse`, an event of a stream, with or
+/// without the length it says it has.
+fn a_response_past_the_limit_over_http(sse: bool, sized: bool) {
     let user = user();
     project(&user, "app");
     let mut script = answering(64 << 20, 20);
     script["answers"]["write"]["big"]["sse"] = json!(sse);
+    script["answers"]["write"]["big"]["unsized"] = json!(!sized);
     write_script(&user, "almanac", &script);
     let (mut server, port) = http_server(&user, "almanac");
     turn_on(&user);
@@ -2461,7 +2471,7 @@ fn a_response_past_the_limit_over_http(sse: bool) {
     .unwrap();
     let (_, mcp) = session(&user, "app");
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        a_response_past_the_limit_is_cut(&user, &mcp, true)
+        a_response_past_the_limit_is_cut(&user, &mcp, true, !sized)
     }));
     let _ = server.kill();
     let _ = server.wait();
@@ -2472,12 +2482,52 @@ fn a_response_past_the_limit_over_http(sse: bool) {
 
 #[test]
 fn a_response_past_the_limit_fails_the_call_and_keeps_the_connection_over_http() {
-    a_response_past_the_limit_over_http(false);
+    a_response_past_the_limit_over_http(false, false);
+}
+
+#[test]
+fn a_response_that_says_it_is_past_the_limit_is_refused_before_it_is_read() {
+    a_response_past_the_limit_over_http(false, true);
 }
 
 #[test]
 fn a_response_past_the_limit_fails_the_call_and_keeps_the_connection_over_an_event_stream() {
-    a_response_past_the_limit_over_http(true);
+    a_response_past_the_limit_over_http(true, false);
+}
+
+#[test]
+fn a_header_the_transport_sets_itself_is_refused_in_a_connection() {
+    let user = user();
+    project(&user, "app");
+    write_script(&user, "almanac", &almanac());
+    let (mut server, port) = http_server(&user, "almanac");
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-key", "secret": SECRET}),
+    )
+    .unwrap();
+    turn_on(&user);
+    for header in ["Accept", "mcp-session-id", "Last-Event-ID"] {
+        user.call(
+            "connection.add",
+            json!({"name": "almanac", "about": "Notes.",
+            "url": format!("http://127.0.0.1:{port}/mcp"),
+            "headers": {header: {"vault": "almanac-key"}}}),
+        )
+        .unwrap();
+        let review = user.call_within(
+            "connection.review",
+            json!({"name": "almanac"}),
+            Duration::from_secs(40),
+        );
+        assert!(review.is_err(), "{header} was sent: {review:?}");
+        user.call("connection.remove", json!({"name": "almanac"}))
+            .unwrap();
+    }
+    let sent = logged(&user, "almanac", "http");
+    let _ = server.kill();
+    let _ = server.wait();
+    assert!(sent.is_empty(), "a request went out: {sent:?}");
 }
 
 #[test]

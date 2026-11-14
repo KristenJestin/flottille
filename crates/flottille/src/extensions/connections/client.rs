@@ -883,6 +883,8 @@ pub async fn call(
     }
     let running = turn.as_ref().expect("started");
     let params = CallToolRequestParams::new(action.to_owned()).with_arguments(arguments);
+    // A cut that ended no call (an event stream that went on after it) is not this call's.
+    running.cut.take();
     let answered = tokio::time::timeout(CALL_LIMIT, running.service.call_tool(params)).await;
     let now = super::now_of(daemon, name).map(|(_, _, state)| state);
     let stopping = !matches!(now, Some(State::Ready));

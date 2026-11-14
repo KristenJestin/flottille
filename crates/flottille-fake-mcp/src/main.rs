@@ -58,7 +58,11 @@
 //! zeros), `image_data` one picture of those base64 bytes, of the type `image_mime` (png by
 //! default), `audio` a sound and `resource` a resource link after it, `error` answers that text as
 //! an error. `rpc_error` answers that text as a JSON-RPC
-//! error instead, on stdio. With no answer, `ok`.
+//! error instead, on stdio. `big` (`{"bytes": 1000, "chunk": 100, "pause_ms": 5}`) answers a text of
+//! that many bytes as one message, written `chunk` bytes at a time with a pause after each, and
+//! logs `wrote` (the bytes of the text written so far) after every piece and `stopped` when the
+//! reader is gone before the end; over HTTP, `"sse": true` makes it one event of an event stream
+//! and `"unsized": true` sends no length. With no answer, `ok`.
 //!
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
 //! the child's pid with `--child`), `initialize` (the client's capabilities), `list` (the cursor
@@ -538,10 +542,14 @@ fn serve(
                         let length = head.len()
                             + answer["big"]["bytes"].as_u64().unwrap_or(0) as usize
                             + tail.len();
+                        // `unsized`: no length, the body ends where the connection does.
+                        let length = match answer["big"]["unsized"] == true {
+                            true => String::new(),
+                            false => format!("Content-Length: {length}\r\n"),
+                        };
                         let head = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\n\
-                             Mcp-Session-Id: fake\r\nContent-Length: {length}\r\n\
-                             Connection: close\r\n\r\n{head}"
+                             Mcp-Session-Id: fake\r\n{length}Connection: close\r\n\r\n{head}"
                         );
                         slowly(&mut stream, &head, &answer["big"], &tail, log);
                         return;
