@@ -205,9 +205,32 @@ impl Mcp {
         tool: &str,
         arguments: Value,
     ) -> (Answer, Vec<(String, String)>) {
+        self.call_with_images_meta(tool, arguments, None)
+    }
+
+    /// [`Mcp::call_with_images`] as the call of that key, which a retry carries again.
+    pub fn call_keyed_with_images(
+        &self,
+        tool: &str,
+        arguments: Value,
+        key: &str,
+    ) -> (Answer, Vec<(String, String)>) {
+        let meta = json!({"claudecode/toolUseId": key});
+        self.call_with_images_meta(tool, arguments, Some(meta))
+    }
+
+    fn call_with_images_meta(
+        &self,
+        tool: &str,
+        arguments: Value,
+        meta: Option<Value>,
+    ) -> (Answer, Vec<(String, String)>) {
         let client = self.client.as_ref().unwrap();
-        let params = CallToolRequestParams::new(tool.to_owned())
+        let mut params = CallToolRequestParams::new(tool.to_owned())
             .with_arguments(arguments.as_object().cloned().unwrap_or_default());
+        if let Some(meta) = meta {
+            params.meta = Some(serde_json::from_value(meta).unwrap());
+        }
         let result = self
             .runtime
             .block_on(client.call_tool(params))

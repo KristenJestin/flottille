@@ -2030,8 +2030,12 @@ impl ServerHandler for Handler {
         // The pictures of a result are files in the agent's folder: read as the call answers, so
         // that what a retry is given again is never base64 held in memory.
         for name in &pictures {
-            if let Some((mime, data)) = deliveries::read_image(&self.daemon, &grant.agent, name) {
-                content.push(ContentBlock::image(data, mime));
+            match deliveries::read_image(&self.daemon, &grant.agent, name) {
+                Some((mime, data)) => content.push(ContentBlock::image(data, mime)),
+                // A retry is given the text it was first told: that the image is attached.
+                None => content.push(ContentBlock::text(
+                    "[an image of this answer is left out: its file is gone]",
+                )),
             }
         }
         Ok(if error {

@@ -1934,6 +1934,28 @@ fn an_image_of_a_call_allowed_later_reaches_the_agent() {
 }
 
 #[test]
+fn a_retry_whose_image_file_is_gone_says_the_image_is_left_out() {
+    let user = user();
+    project(&user, "app");
+    let mut script = almanac();
+    script["answers"]["search"] = json!({"text": "a screenshot", "image": true});
+    connect(&user, "almanac", &script, json!({"search": "passes"}));
+    let (id, mcp) = session(&user, "app");
+    let call = json!({"action": "search", "arguments": {"query": "a"}});
+    let (first, images) = mcp.call_keyed_with_images("conn_almanac", call.clone(), "toolu_1");
+    assert_eq!(images.len(), 1);
+    assert!(done(first).contains("is attached"));
+    std::fs::remove_dir_all(user.path(&format!("data/flottille/images/{id}"))).unwrap();
+    let (again, images) = mcp.call_keyed_with_images("conn_almanac", call, "toolu_1");
+    assert!(images.is_empty(), "the file is gone");
+    let text = done(again);
+    assert!(
+        text.contains("an image of this answer is left out: its file is gone"),
+        "{text}"
+    );
+}
+
+#[test]
 fn the_images_of_a_result_past_its_total_are_left_out_with_their_line() {
     let user = user();
     // Three of 1.9 MiB: two make 3.8 MiB, the third would make 5.7, over the 5 MiB of a result.
