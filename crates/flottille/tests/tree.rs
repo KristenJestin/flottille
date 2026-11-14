@@ -609,13 +609,20 @@ fn a_lead_lists_the_agent_tools_ask_and_approval_answer_and_a_worker_none_of_the
     assert!(names.iter().any(|n| n == "workspace"));
     // A root also reads and asks for changes to its project's skills, commands, setup,
     // settings and workspaces.
-    for family in ["skills", "commands", "setup", "project", "workspace"] {
+    for family in [
+        "skills",
+        "commands",
+        "setup",
+        "project",
+        "workspace",
+        "connections",
+    ] {
         assert!(names.iter().any(|n| n == family), "{family}");
     }
-    assert_eq!(names.len(), 27);
+    assert_eq!(names.len(), 28);
 
     let names = worker.names();
-    assert_eq!(names.len(), 15, "{names:?}");
+    assert_eq!(names.len(), 16, "{names:?}");
     assert!(!names.iter().any(|n| n.starts_with("agent_")));
     assert!(!names.iter().any(|n| n == "approval_answer"));
     assert!(!names.iter().any(|n| n == "ask_user"));
