@@ -234,6 +234,9 @@ pub struct Call {
     /// How many characters of its result Flottille left out when it cut it at the source
     /// (`docs/tools.md`, "Long results").
     pub cut: Option<u64>,
+    /// The pictures its result carried to the agent: names the daemon gives back as pictures
+    /// (`pictures` of `agent.tool_served`), drawn on its step.
+    pub pictures: Vec<String>,
     /// It is a `web` `show_link`: the card of links is what the user sees of it.
     pub shows: bool,
     /// Its arguments are known: an agent may send them in an update after the call is first said.
@@ -511,6 +514,8 @@ pub struct Conversation {
     /// The calls whose result was cut at the source, by their id: how many characters were left
     /// out.
     cuts: HashMap<String, u64>,
+    /// The pictures each call's result carried, by call.
+    pictured: HashMap<String, Vec<String>>,
     /// The calls the daemon refused for their input, by their id.
     input_refused: HashSet<String>,
     /// The calls of the turn running, in order: a refusal is retried by a later one of its turn.
@@ -551,6 +556,7 @@ impl Conversation {
             pending_approvals: VecDeque::new(),
             judged: HashMap::new(),
             cuts: HashMap::new(),
+            pictured: HashMap::new(),
             input_refused: HashSet::new(),
             turn: Vec::new(),
             sends: HashMap::new(),
@@ -792,6 +798,7 @@ impl Conversation {
                     until: None,
                     allowed_by: self.judged.get(&text("id")).map(|by| (*by).into()),
                     cut: self.cuts.get(&text("id")).copied(),
+                    pictures: self.pictured.get(&text("id")).cloned().unwrap_or_default(),
                     input_refused: self.input_refused.contains(&text("id")),
                     retried: false,
                     reason: None,
@@ -904,11 +911,20 @@ impl Conversation {
                 };
                 let cut = data["cut"]["left_out"].as_u64();
                 let refused = data["input_refused"] == true;
+                let pictures: Vec<String> = data["pictures"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|name| name.as_str().map(str::to_owned))
+                    .collect();
                 let Some(key) = data["call_key"].as_str() else {
                     return Vec::new();
                 };
-                if by.is_none() && cut.is_none() && !refused {
+                if by.is_none() && cut.is_none() && !refused && pictures.is_empty() {
                     return Vec::new();
+                }
+                if !pictures.is_empty() {
+                    self.pictured.insert(key.to_owned(), pictures.clone());
                 }
                 if let Some(by) = by {
                     self.judged.insert(key.to_owned(), by);
@@ -933,6 +949,9 @@ impl Conversation {
                             call.allowed_by = Some(by.into());
                         }
                         call.cut = cut.or(call.cut);
+                        if !pictures.is_empty() {
+                            call.pictures = pictures;
+                        }
                         call.input_refused |= refused;
                         vec![Change::Changed(at)]
                     }
@@ -3577,6 +3596,47 @@ mod tests {
             .map(|card| card.allowed_by.as_deref())
             .collect();
         assert_eq!(allowed, [Some("the judge"), None]);
+    }
+
+    fn pictured(seq: u64, key: &str) -> Event {
+        event(
+            seq,
+            "agent.tool_served",
+            json!({"tool": "conn_almanac", "call_key": key, "gate": "allow",
+                "pictures": ["one.png", "two.png"]}),
+        )
+    }
+
+    #[test]
+    fn a_step_names_the_pictures_its_result_carried_whichever_event_comes_first() {
+        let mut c = root();
+        // The server records the call before the agent sees it done.
+        let [call, done] = answered("a", "conn_almanac", "found");
+        c.apply(&call);
+        c.apply(&pictured(5, "a"));
+        c.apply(&Event { seq: 6, ..done });
+        // And for a call whose record came before the call was shown.
+        c.apply(&pictured(20, "b"));
+        let [call, done] = answered("b", "conn_almanac", "found");
+        c.apply(&Event { seq: 21, ..call });
+        c.apply(&Event { seq: 22, ..done });
+
+        let pictures: Vec<Vec<String>> = cards_or_steps(&c)
+            .iter()
+            .map(|call| call.pictures.clone())
+            .collect();
+        assert_eq!(pictures, [["one.png", "two.png"], ["one.png", "two.png"]]);
+    }
+
+    /// Every call of the steps, in order.
+    fn cards_or_steps(c: &Conversation) -> Vec<Call> {
+        c.blocks()
+            .iter()
+            .flat_map(|block| match block {
+                Block::Steps { calls } => calls.clone(),
+                _ => Vec::new(),
+            })
+            .collect()
     }
 
     fn judged_step(seq: u64, id: &str, tool: &str, gate: &str) -> [Event; 3] {
