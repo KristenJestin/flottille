@@ -1539,6 +1539,132 @@ fn a_row_set_to_another_setting_moves_to_its_group(cx: &mut TestAppContext) {
     assert_eq!(height(cx, "connection-review-group-passes-body"), 0.);
 }
 
+#[gpui_kit::test]
+fn a_ticked_row_hidden_by_the_search_is_not_set(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    for name in ["browser_cookies", "browser_storage", "browser_pdf"] {
+        let row = row_of(cx, name);
+        click(cx, &format!("{row}-pick"));
+    }
+    let field = search_field(&shell, cx);
+    type_in(&field, "cookie", cx);
+    settle(cx);
+    // Only what is shown is selected: "browser_pdf" is hidden, and stays ticked.
+    assert_eq!(
+        label(cx, "connection-review-bulk-count").as_deref(),
+        Some("2 selected")
+    );
+    click(cx, "connection-review-bulk-asked");
+    assert_eq!(group_of(cx, "browser_cookies"), Some("asked"));
+    assert_eq!(group_of(cx, "browser_storage"), Some("asked"));
+
+    type_in(&field, "", cx);
+    settle(cx);
+    assert_eq!(
+        group_of(cx, "browser_pdf"),
+        Some("judged"),
+        "the hidden row was not set"
+    );
+    assert_eq!(
+        label(cx, "connection-review-bulk-count").as_deref(),
+        Some("1 selected"),
+        "it counts again once it is shown"
+    );
+
+    // The pill of a ticked row sets the ticked rows that are shown, and no other.
+    for name in ["browser_open", "browser_back"] {
+        let row = row_of(cx, name);
+        click(cx, &format!("{row}-pick"));
+    }
+    type_in(&field, "browser_open", cx);
+    settle(cx);
+    choose(cx, "browser_open", "off");
+    type_in(&field, "", cx);
+    settle(cx);
+    assert_eq!(group_of(cx, "browser_open"), Some("off"));
+    assert_eq!(group_of(cx, "browser_back"), Some("judged"));
+    assert_eq!(group_of(cx, "browser_pdf"), Some("judged"));
+    assert_eq!(
+        label(cx, "connection-review-bulk-count").as_deref(),
+        Some("2 selected")
+    );
+}
+
+/// A server with `n` actions, `tool_000` to `tool_{n-1}`, each with a sentence of its own.
+fn many_tools(n: usize) -> Value {
+    let tools: Vec<Value> = (0..n)
+        .map(|at| {
+            json!({"name": format!("tool_{at:03}"),
+                "description": format!("Does the job number {at} on the page."),
+                "inputSchema": {"type": "object", "properties": {}}})
+        })
+        .collect();
+    let answers: serde_json::Map<String, Value> = (0..n)
+        .map(|at| (format!("tool_{at:03}"), json!({"text": "ok"})))
+        .collect();
+    json!({"server": {"name": "sprawl", "version": "1.0.0"},
+        "instructions": "Many small things.", "tools": tools, "answers": answers})
+}
+
+#[gpui_kit::test]
+fn a_frame_of_a_long_review_does_not_match_every_action_again(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "sprawl");
+    write_script(&user, "sprawl", &many_tools(160));
+    let (shell, cx) = window(&user, cx);
+    open_the_review(&shell, cx, "sprawl", "connection-review-row-3-tool_000");
+    let review = section(&shell, cx);
+    let matched = |cx: &mut VisualTestContext| review.read_with(cx, |s, _| s.review_matches());
+    assert_eq!(matched(cx), 0, "no word typed is nothing to match");
+
+    // A text is matched with the 160 actions once, however many frames follow.
+    let field = search_field(&shell, cx);
+    type_in(&field, "tool_01", cx);
+    settle(cx);
+    assert_eq!(matched(cx), 160);
+    settle(cx);
+    click_pill(cx, "connection-review-row-3-tool_010", "asked");
+    settle(cx);
+    click(cx, "connection-review-filter-asked");
+    click(cx, "connection-review-filter-all");
+    assert_eq!(
+        matched(cx),
+        160,
+        "a pill, a chip and every frame of their motion use what was found"
+    );
+    type_in(&field, "tool_02", cx);
+    settle(cx);
+    assert_eq!(matched(cx), 320, "another text is matched again, once");
+
+    // A row draws its text and its choices while it is open and while it folds away only.
+    let row = row_of(cx, "tool_020");
+    assert!(!present(cx, &format!("{row}-choose-judged")), "folded");
+    click(cx, &format!("{row}-row"));
+    assert!(visible(cx, &format!("{row}-choose-judged")), "open");
+    press(cx, &format!("{row}-row"));
+    a_third_later(cx);
+    assert!(
+        height(cx, &format!("{row}-row-body")) > 0.,
+        "it still shows while it folds away"
+    );
+    settle(cx);
+    assert!(
+        !present(cx, &format!("{row}-choose-judged")),
+        "folded again"
+    );
+}
+
 /// Opens the pill of the row `id` and picks `setting`, leaving the clock where it is.
 fn click_pill(cx: &mut VisualTestContext, id: &str, setting: &str) {
     click(cx, &format!("{id}-setting"));
