@@ -430,6 +430,9 @@ pub async fn prepared(
     if tool == "services" {
         return crate::services::says(daemon, &grant.place, is_root(daemon, grant), args);
     }
+    if tool == "connections" {
+        return crate::extensions::family_says(daemon, is_root(daemon, grant), args);
+    }
     if tool == "run" {
         return Ok(crate::services::starts_said(
             daemon,

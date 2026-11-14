@@ -160,6 +160,7 @@ fn the_exact_claude_code_options_are_sent() {
         "workspace",
         "web",
         "services",
+        "connections",
         "agent_launch",
         "agent_send",
         "agent_status",

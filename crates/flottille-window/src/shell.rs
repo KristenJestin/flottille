@@ -32,6 +32,7 @@ use crate::actions::{Actions, Command, Details, Outcome, Pick, RunFrom};
 use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::extensions::Registry;
+use crate::extensions::connection_request::ConnectionRequest;
 use crate::extensions::connections::ConnectionsSection;
 use crate::extensions::specs::SpecPage;
 use crate::history::{History, Way};
@@ -138,6 +139,8 @@ pub struct Shell {
     bell: Entity<BellList>,
     /// The results of the user's actions, at the bottom right, above everything.
     toasts: Entity<ToastStack>,
+    /// The dialog of an agent's request to write a connection, opened from its card.
+    connection_request: Entity<ConnectionRequest>,
     bell_open: bool,
     /// How far the bell's list is in view: it rises in and fades out, and stays drawn until then.
     bell_shown: Motion,
@@ -321,6 +324,7 @@ impl Shell {
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
         let toasts = cx.new(ToastStack::new);
+        let connection_request = cx.new(|_| ConnectionRequest::new(this.clone()));
         let add_project = {
             let this = this.clone();
             cx.new(|cx| AddProject::new(this, window, cx))
@@ -367,6 +371,7 @@ impl Shell {
             left,
             bell,
             toasts,
+            connection_request,
             bell_open: false,
             bell_shown: Motion::settled(0.0),
             projects: HashMap::new(),
@@ -1468,6 +1473,13 @@ impl Shell {
             } => {
                 let section = self.settings.read(cx).connections().clone();
                 section.update(cx, |section, cx| section.answered(then, answer, window, cx));
+            }
+            Outcome::Asked {
+                then: crate::extensions::Then::ConnectionRequest(then),
+                answer,
+            } => {
+                self.connection_request
+                    .update(cx, |dialog, cx| dialog.answered(then, answer, cx));
             }
             Outcome::Asked { then, answer } => {
                 let page = match &then {
@@ -2696,6 +2708,35 @@ impl Shell {
         vault.update(cx, |vault, cx| vault.add_for(project, window, cx));
     }
 
+    /// Opens the dialog of an agent's request to write a connection.
+    pub fn open_connection_request(&mut self, number: u64, cx: &mut Context<Self>) {
+        self.connection_request
+            .update(cx, |dialog, cx| dialog.open(number, cx));
+    }
+
+    /// The dialog of an agent's request to write a connection.
+    pub fn connection_request(&self) -> &Entity<ConnectionRequest> {
+        &self.connection_request
+    }
+
+    /// "Edit" on a request's dialog: Connections' page, the server's form filled with the agent's
+    /// values, whose Save answers the request `number`.
+    pub fn answer_connection_request(
+        &mut self,
+        number: u64,
+        server: &crate::extensions::connections::Server,
+        adding: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let at = crate::settings::Reveal::Feature(crate::extensions::connections::NAME.into());
+        self.open_settings_at(at, window, cx);
+        let section = self.settings.read(cx).connections().clone();
+        section.update(cx, |section, cx| {
+            section.answer_request(number, server, adding, window, cx)
+        });
+    }
+
     /// Opens Settings at a section: its tab is the one chosen.
     pub fn open_settings_at(
         &mut self,
@@ -3089,6 +3130,7 @@ impl Render for Shell {
                         .child(self.bell.clone()),
                 )
             })
+            .child(self.connection_request.clone())
             .child(self.toasts.clone())
     }
 }

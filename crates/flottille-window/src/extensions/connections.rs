@@ -722,6 +722,8 @@ pub struct ConnectionsSection {
     signing: std::collections::HashSet<String>,
     /// The server the confirmation names, kept while it fades away.
     asked_name: String,
+    /// The agent's request the form answers, when it was opened from its dialog's Edit.
+    request: Option<u64>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -751,6 +753,7 @@ impl ConnectionsSection {
             confirming: None,
             signing: Default::default(),
             asked_name: String::new(),
+            request: None,
             _subscriptions: Vec::new(),
         }
     }
@@ -1151,6 +1154,7 @@ impl ConnectionsSection {
         self.form = Form::Editing(server.map(|s| s.name.clone()));
         self.form_error = None;
         self.saving = false;
+        self.request = None;
         self.vault.update(cx, |vault, cx| vault.read(cx));
         let focus = match server {
             Some(_) => &fields.about,
@@ -1159,6 +1163,24 @@ impl ConnectionsSection {
         .read(cx)
         .focus_handle(cx);
         window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// "Edit" on the dialog of an agent's request: the form on the declaration it proposes, a new
+    /// server for an add; its Save writes the user's values and answers the request `number`.
+    pub fn answer_request(
+        &mut self,
+        number: u64,
+        server: &Server,
+        adding: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fill(Some(server), window, cx);
+        if adding {
+            self.form = Form::Editing(None);
+        }
+        self.request = Some(number);
         cx.notify();
     }
 
@@ -1222,7 +1244,10 @@ impl ConnectionsSection {
             return;
         }
         match self.declaration(original.as_deref(), cx) {
-            Ok((params, writing)) => {
+            Ok((mut params, writing)) => {
+                if let Some(number) = self.request {
+                    params["request"] = json!(number);
+                }
                 let method = match original {
                     Some(_) => "connection.edit",
                     None => "connection.add",

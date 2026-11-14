@@ -30,6 +30,33 @@ use crate::providers::{self, Provider};
 
 pub use command::run;
 
+/// The agents' `connections` family (`docs/tools.md`, "Connections"): whether a call writes a
+/// connection, held for the user in every mode.
+pub fn held_for_the_user(tool: &str, args: &Value) -> bool {
+    connections::requests::writes(tool, args)
+}
+
+/// Why the gate holds a connection's write.
+pub fn held_reason(args: &Value) -> String {
+    connections::requests::reason(args)
+}
+
+/// A `connections` call checked before the gate is asked: what a write changes, or its refusal.
+pub fn family_says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<String>, Outcome> {
+    connections::requests::says(daemon, root, args)
+}
+
+/// A `connections` call performed: a read, or a write the user accepted, `approved` being the
+/// words the user read on its card, masked for `place`.
+pub async fn family_call(
+    daemon: &Arc<Daemon>,
+    args: Value,
+    approved: &[String],
+    place: &crate::place::Place,
+) -> Outcome {
+    connections::requests::tool(daemon, args, approved, place).await
+}
+
 /// Every extension, in the order of their settings' tabs.
 pub const ALL: &[&Extension] = &[
     &specs::EXTENSION,
