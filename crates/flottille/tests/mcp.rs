@@ -2109,7 +2109,8 @@ const REPLACED: &str = "this session has been replaced";
 /// the authorization of its session's MCP server.
 fn dying_root(user: &User) -> (String, String, String) {
     project(user);
-    user.fake_script(json!({"turns": [
+    // Its session is lost with its process: a new one replaces it.
+    user.fake_script(json!({"load_error": "the session is lost", "turns": [
         {"when": "hello", "times": 1, "do": [{"hold": "die-now"}, {"die": 3}]}
     ]}));
     agent(user, json!({}))

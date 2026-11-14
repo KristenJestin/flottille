@@ -2908,7 +2908,7 @@ mod tests {
         c.apply(&event(
             1,
             "agent.prompted",
-            json!({"text": "[flottille:brief]\nadd the page", "deliveries": ["brief-a-0"]}),
+            json!({"text": "[flottille:user]\nadd the page", "deliveries": ["brief-a-0"]}),
         ));
         c.apply(&event(
             2,
@@ -2921,7 +2921,7 @@ mod tests {
             3,
             "agent.prompted",
             json!({
-                "text": "[flottille:brief]\nadd the page\n\n[flottille:resume]\nS\n\n[flottille:user]\nand a footer",
+                "text": "[flottille:user]\nadd the page\n\n[flottille:resume]\nS\n\n[flottille:user]\nand a footer",
                 "deliveries": ["brief-a-1-replay", "resume-a-1-replay", "d7"],
                 "images": ["kept.png"],
             }),
@@ -2936,7 +2936,8 @@ mod tests {
                 commands: None,
             }]
         );
-        // A prompt that is only the replay adds nothing.
+        // A prompt that is only the replay adds nothing, a root's first message stored as a
+        // brief by an older daemon too.
         c.apply(&event(
             4,
             "agent.prompted",

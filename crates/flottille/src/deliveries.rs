@@ -463,13 +463,15 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     if queued.is_empty() {
         return None;
     }
-    let rank = |kind: &str| match kind {
+    // The first message by its id: a root's is the user's (`user`), as any message of theirs.
+    let first = format!("brief-{agent}-");
+    let rank = |d: &Delivery| match d.kind.as_str() {
         "instructions" => 0,
-        "brief" | "launched" => 1,
+        _ if d.id.starts_with(&first) => 1,
         "resume" => 2,
         _ => 3,
     };
-    queued.sort_by_key(|d| rank(&d.kind));
+    queued.sort_by_key(rank);
     // Asked for its handoff: that message is the whole prompt, and the others wait for the new
     // session.
     if crate::compaction::handing(daemon, agent) {
@@ -478,7 +480,7 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     // A message sent now is the whole prompt (after what starts a session): the others wait for
     // the next one, in their order.
     if queued.iter().any(|d| d.urgency == approval::REDIRECT) {
-        queued.retain(|d| d.urgency == approval::REDIRECT || rank(&d.kind) < 3);
+        queued.retain(|d| d.urgency == approval::REDIRECT || rank(d) < 3);
     }
     daemon.notes.unpin(agent);
     queued.truncate(fitting_images(daemon, agent, &queued));

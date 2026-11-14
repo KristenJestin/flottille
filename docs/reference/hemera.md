@@ -782,7 +782,10 @@ Further entry points:
 - `resume(sessionId)` restarts a failed or ended session that has no live successor.
 - `deliverOrStart` opens a session of the role if none is live, then delivers.
 - `settled` waits until the session is idle with nothing queued.
-- A death replaces the session with the reason "its agent stopped".
+- A death replaces the session with the reason "its agent stopped". Flottille does not: a dead
+  process's agent goes on in its own session, loaded again by the next process, and a new session
+  starts only when loading it fails or the agent is stuck, from its first message, a summary and
+  its latest messages (`docs/design.md` §5.5).
 
 ### Probes: an example of a child session
 

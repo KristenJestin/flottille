@@ -296,8 +296,9 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
 - **Idle release**: a process with no turn running and nothing waiting for 5 minutes is let go
   (stopped: `SIGTERM` to its group, `SIGKILL` 2 s later); the next prompt starts it again and
   resumes or loads its session.
-- **A death**: a process that ends without being let go is published (`agent.died`) and its
-  session replaced ("Replacement", below).
+- **A death**: a process that ends without being let go is published (`agent.died`) and the
+  agent goes on in its own session, as after a restart: the next process resumes or loads it
+  ("A death", below).
 - **Orphans**: each process's pid and start time are kept in the store while it runs. A daemon
   starting kills the process groups a previous one left behind (a crash), only when the group's
   leader is alive with the start time recorded: never a stranger that took the pid since, and not
@@ -640,7 +641,8 @@ bridge runs one session.
 - **The system prompt**, split at the cache boundary, goes in Claude Code's own `initialize`
   control request (`systemPrompt: [before, boundary, after]`, `systemPromptSnapshot: true`), as
   the official Agent SDK sends it. The session opens once `claude` answered it; a `claude` that
-  ends before (a resume of a session it does not know) fails the open.
+  ends before fails the open: with "resource not found" (`-32002`) when its error output said it
+  has no conversation of the session it resumes, else with the end of `claude`.
 - **What `claude` says**, mapped to ACP updates: stream deltas of text and thinking become
   `agent_message_chunk` and `agent_thought_chunk` (the whole message that follows does not repeat
   them), each with the `messageId` of the API message it comes from: `message.id` of the
@@ -728,7 +730,8 @@ servers are Flottille's HTTP one alone). One bridge runs one session.
   API, which `environments` needs), `initialized`, `account/read` (not signed in, or signed in to a
   workspace's plan: the open fails, saying why), `model/list`, then `thread/start` for
   `session/new` or `thread/resume` for `session/resume`. The session id is Codex's thread id; there
-  is no `session/load`. A `codex` that ends before fails the open.
+  is no `session/load`. A `codex` that ends before fails the open; a `thread/resume` answered "no
+  rollout found" fails it with "resource not found" (`-32002`).
 - **What `codex` says**, mapped to ACP updates: `item/agentMessage/delta` becomes
   `agent_message_chunk`, as does the text of an `agentMessage` item that completes without a
   delta (a question of `request_user_input_async`, above), each with the id of its item as
@@ -906,8 +909,9 @@ ends; a handed one is the user's.
 
 ### Deliveries
 
-Everything Flottille hands to an agent is a delivery: the user's messages (`user`), a brief
-(`brief`), the first message of a session an agent started for the user (`launched`, under a first
+Everything Flottille hands to an agent is a delivery: the user's messages (`user`, a root's first
+message included, sent again to a new session), a brief (`brief`: a parent's to its child, or an
+extension's first message to its session), the first message of a session an agent started for the user (`launched`, under a first
 line naming that agent: it is the agent's words, never the user's), a message another session
 wrote with `session_send` (`session`, under a first line naming its sender, never the user's), the end of a turn of a session
 the agent leads, when it asked or reported (`session-turn-ended`, `docs/tools.md`, "Following a
@@ -924,8 +928,9 @@ is the only thing that wakes an agent.
   are written `&lt;flottille-note` and `&lt;/flottille-note`, so that no text forges a delivery
   nor opens or closes a note. Every tool's result is escaped the same way (`docs/tools.md`).
   Bodies are masked of the daemon's secrets.
-- **Between turns**, the agent's queued deliveries are sent together as one prompt: a `brief` (or
-  a `launched`) first, then a `resume`, then the others in their order.
+- **Between turns**, the agent's queued deliveries are sent together as one prompt: its first
+  message (known by its id, `brief-<agent>-…`, whatever its kind) first, then a `resume`, then the
+  others in their order.
 - **During a turn**, an urgent one (`child-report`, `child-failed`, `child-asks`, `parent`,
   `approval`) is pinned as a note on the agent's next tool result:
   `<flottille-note id="…">`, the delivery, `</flottille-note>`. A note rides only in the room its
@@ -954,15 +959,50 @@ child then waits on its parent, a led session on its pilot (`session_send`), any
 user, who sees it in
 `flottille status` and under the window's bell (`waiting_on_answer`, `docs/protocol.md`).
 
+### A death
+
+An agent whose process died keeps its session and its conversation (`agent.released`, reason
+`died`): the next process resumes or loads it, as after a restart of Flottille, even when it died
+as it opened the session: a death says nothing of the session, which a new one would throw away.
+When a turn was running, its prompt is in the session's history: its deliveries are taken as
+sent, and the agent is sent a `resume` saying its process died and its last turn was cut, which
+quotes the user's words of that prompt (they may never have reached it); the parent is told
+(`child-replaced`: its process stopped during a turn, it goes on in its session). Otherwise what
+was taken for it is given back, and the parent is told nothing. Each death counts against the
+limit of new starts (below).
+
+A resume or a load that fails is read for what it says (`acp::not_reopened`):
+
+- the agent says the session is gone, with ACP's "resource not found" (`-32002`): a new session
+  replaces it ("Replacement", below). The Claude bridge answers it when `claude` said "No
+  conversation found with session ID" on its error output (passed on to the bridge's), the Codex
+  bridge when `thread/resume` answered "no rollout found";
+- its process died: a death, as above;
+- its login is gone (`turn_failures`): said as a turn's is, the session kept;
+- anything else (`claude` missing or broken, the network, an error of the service) fails the
+  agent with its session kept, to be resumed once the cause is gone. Nothing else ever throws a
+  session away.
+
 ### Replacement
 
-A session that cannot go on is replaced: its process dies, or it is stuck (below). The agent
-keeps its id; its epoch counts the sessions. The new session starts from scratch, without the
-old one's session id, and is sent its brief (a root's first message is its brief) and a `resume`
-saying it starts again, once: the briefs and resumes of the old sessions not sent yet are
-superseded. What else the old session was sent and had not finished is given back. The old session's token stays known,
-so that its late calls are refused, saying it was replaced. The parent is told (`child-replaced`).
-Two replacements within 30 minutes are allowed: the third failure fails the agent and its tree.
+A session that cannot go on is replaced: the agent says it is gone ("A death", above), the agent
+can neither resume nor load one (counted, as every process would start anew), or it is stuck
+(below). The agent keeps its id; its epoch counts the sessions. The new
+session starts without the old one's session id, and is sent its first message again and a
+`resume` after it, once: the first messages and resumes of the old sessions not sent yet are
+superseded. The `resume` says why it starts again, then gives a summary of its conversation
+when a compactor is set (the compaction's, `docs/design.md` §5.8; none when it fails) and its
+latest messages word for word: never the first message alone. It never calls that message a
+brief. The compactor's work is said as a compaction (`agent.compacting`, then `agent.compacted`
+once the new session started, or `agent.compaction_failed`); a compaction already at work for the
+agent is waited for and its summary used, never a second compactor call, and a handoff it was
+asked for is dropped. What else the old session was sent and had not finished is given back. The old session's
+token stays known, so that its late calls are refused, saying it was replaced. The parent is
+told (`child-replaced`) what the new session starts from.
+
+Two new starts within 30 minutes are allowed, a death or a replacement that a stuck turn or an
+agent that cannot reopen a session caused (a session the agent says is gone is not one: its
+replacement cannot recur): the third failure fails the agent and its tree.
 
 A child whose context is compacted by its CLI is sent its brief again.
 

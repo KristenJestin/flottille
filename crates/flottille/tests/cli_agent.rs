@@ -29,6 +29,8 @@ fn user() -> User {
         {"when": "REPORT-NOW", "do": [
             {"mcp": {"tool": "report", "arguments": {"text": "all done, tests pass"}}}]},
         {"when": "die-always", "do": [{"die": 4}]},
+        // A dead agent goes on in its session, told its turn was cut: it dies there too.
+        {"when": "your last turn was cut", "do": [{"die": 4}]},
         {"when": "GREET", "do": [{"say": "hello from the fake"}]},
         {"when": "SLOWLY", "do": [{"wait": 800}, {"say": "mine"}]},
         {"when": "RECALL", "do": [{"recall": true}]},
@@ -256,10 +258,7 @@ fn the_inbox_lists_a_root_s_report_its_question_and_its_failure_and_nothing_of_a
     assert_eq!(of(&asker)["text"], "which database?");
     assert_eq!(of(&doomed)["kind"], "failure");
     assert!(
-        of(&doomed)["text"]
-            .as_str()
-            .unwrap()
-            .contains("replacements"),
+        of(&doomed)["text"].as_str().unwrap().contains("new starts"),
         "{entries:?}"
     );
     for entry in &entries {

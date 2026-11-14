@@ -3222,6 +3222,17 @@ impl Store {
         Ok(count as usize)
     }
 
+    /// The agent starts again on its own session after its process died: counted against its
+    /// limit as a replacement is, its epoch kept.
+    pub fn count_new_start(&self, agent: &str, reason: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO agent_replacements (agent, at, epoch, reason, counted) \
+             SELECT id, ?2, epoch, ?3, 1 FROM agents WHERE id = ?1",
+            params![agent, now_ms(), reason],
+        )?;
+        Ok(())
+    }
+
     /// A new session of the agent replaces the one it had, with its `agent.replaced` event: its
     /// epoch grows, its ACP session is forgotten (the next process opens a new one), and it
     /// starts again. `counted` says the replacement counts against its limit.

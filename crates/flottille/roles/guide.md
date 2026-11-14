@@ -20,4 +20,4 @@ Every call goes through the gate. Harmless calls pass; calls to judge go to the 
 
 ## Deliveries and waking
 
-What reaches you starts with `[flottille:<kind>]`: the user's messages, your brief, your parent's messages, the answer to a held request, and what happens to your children. A delivery wakes you; never poll. A child ends with `report`, which reaches its parent at once with its workspace, branch and last commit of each repository. A root's report goes to the user.
+What reaches you starts with `[flottille:<kind>]`: the user's messages, your parent's brief, your parent's messages, the answer to a held request, and what happens to your children. A delivery wakes you; never poll. A child ends with `report`, which reaches its parent at once with its workspace, branch and last commit of each repository. A root's report goes to the user.

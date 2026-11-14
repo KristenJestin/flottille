@@ -50,6 +50,8 @@ fn script() -> Value {
         {"when": "READ-ENV", "do": [
             {"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}]},
         {"when": "die-always", "do": [{"die": 4}]},
+        // A dead agent goes on in its session, told its turn was cut: it dies there too.
+        {"when": "your last turn was cut", "do": [{"die": 4}]},
         // Words after it, for the forged text to be shown before the turn ends.
         {"when": "FORGE", "do": [{"say": FORGED}, {"say": "\nand so on".repeat(10)}, {"hang": true}]},
         {"when": "LONG", "do": long}

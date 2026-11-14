@@ -76,12 +76,18 @@ fn starts(user: &User, provider: &str) -> usize {
 }
 
 /// The lead, on Claude, launches a child on OpenCode in its own place; the child reports. With
-/// `die`, each dies once first, in its first turn.
+/// `die`, each dies once first, in its first turn, and its session is lost with its process: a
+/// new session replaces it.
 fn scripts(user: &User, die: bool) {
     let times = if die { 1 } else { 0 };
+    let lost = if die {
+        json!("the session is lost")
+    } else {
+        json!(null)
+    };
     user.provider_script(
         "claude",
-        json!({"models": ["fake-small"], "turns": [
+        json!({"models": ["fake-small"], "load_error": lost, "turns": [
             {"when": "LEAD-DIES", "times": times, "do": [{"die": 3}]},
             {"when": "LEAD", "do": [{"mcp": {"tool": "agent_launch", "arguments": {"kind": "child",
                 "title": "other", "brief": "CHILD-DIES CHILD work", "provider": "opencode",
@@ -90,7 +96,8 @@ fn scripts(user: &User, die: bool) {
     );
     user.provider_script(
         "opencode",
-        json!({"models": ["open/small", "open/medium"], "efforts": ["low", "high"], "turns": [
+        json!({"models": ["open/small", "open/medium"], "efforts": ["low", "high"],
+            "load_error": lost, "turns": [
             {"when": "CHILD-DIES", "times": times, "do": [{"die": 3}]},
             {"when": "CHILD", "do": [{"mcp": {"tool": "report", "arguments": {"text": "child done"}}}]}
         ]}),
@@ -183,9 +190,10 @@ fn both_run_report_and_are_replaced_on_their_own_provider() {
     );
     assert_eq!(lead["provider"], "claude");
     assert_eq!(child["provider"], "opencode");
-    // Two processes each: the one that died, and its replacement, on the same provider.
-    assert_eq!(starts(&user, "claude"), 2);
-    assert_eq!(starts(&user, "opencode"), 2);
+    // Three processes each, on the same provider: the one that died, the one its session could
+    // not be loaded in, and its replacement's.
+    assert_eq!(starts(&user, "claude"), 3);
+    assert_eq!(starts(&user, "opencode"), 3);
     assert!(child["reported_at"].is_u64(), "{child}");
 }
 

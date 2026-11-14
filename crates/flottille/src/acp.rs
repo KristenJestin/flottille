@@ -63,6 +63,9 @@ pub enum Exit {
     Died(ExitStatus),
     /// Its session is to be replaced, for this reason.
     Replace(String),
+    /// The agent said its session is gone (lost or unreadable), in these words: a new one
+    /// replaces it.
+    Unloaded(String),
     /// Its conversation was summarised: a new session goes on from the summary.
     Compact(Box<crate::compaction::Compacted>),
     /// The user reloads its tools: let go between turns, to be started again on its session with
@@ -227,6 +230,30 @@ pub async fn session(
     }
 }
 
+/// Why the agent's session did not open again, as the session loop goes on with it. Only an
+/// agent that says the session is gone (ACP's "resource not found", which both bridges answer for
+/// a session their CLI no longer has) gets a new one: anything else keeps it, since a new session
+/// throws the old one away. A process that died is a death; a login gone is said as a turn's; the
+/// rest fails the agent, its session kept to be resumed.
+async fn not_reopened(
+    child: &mut Child,
+    provider: &Provider,
+    error: agent_client_protocol::Error,
+    verb: &str,
+) -> Result<Exit, String> {
+    if error.code == ErrorCode::ResourceNotFound {
+        return Ok(Exit::Unloaded(error.message));
+    }
+    if let Ok(Ok(status)) = tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
+        return Ok(Exit::Died(status));
+    }
+    let code = error.data.as_ref().and_then(|data| data["code"].as_str());
+    match crate::turn_failures::recognise(provider.name, code, &error.message) {
+        Some(said) => Ok(Exit::TurnFailed(said)),
+        None => Err(format!("the agent could not {verb} its session: {error}")),
+    }
+}
+
 type Turn<'a> =
     Pin<Box<dyn Future<Output = Result<PromptResponse, agent_client_protocol::Error>> + Send + 'a>>;
 
@@ -282,9 +309,11 @@ async fn drive(
                         .meta(meta),
                 )
                 .block_task()
-                .await
-                .map_err(|e| format!("the agent could not resume its session: {e}"))?;
-            let answer = serde_json::to_value(&answer).unwrap_or_default();
+                .await;
+            let answer = match answer {
+                Ok(answer) => serde_json::to_value(&answer).unwrap_or_default(),
+                Err(e) => return not_reopened(child, provider, e, "resume").await,
+            };
             ("resumed", native.clone(), answer["configOptions"].clone())
         }
         Some(native) if loads => {
@@ -298,13 +327,21 @@ async fn drive(
                 .block_task()
                 .await;
             replay.store(false, Ordering::SeqCst);
-            let answer = serde_json::to_value(
-                &answer.map_err(|e| format!("the agent could not load its session: {e}"))?,
-            )
-            .unwrap_or_default();
+            let answer = match answer {
+                Ok(answer) => serde_json::to_value(&answer).unwrap_or_default(),
+                Err(e) => return not_reopened(child, provider, e, "load").await,
+            };
             ("loaded", native.clone(), answer["configOptions"].clone())
         }
-        _ => {
+        // Opening a new one would leave the agent without what it said.
+        // Counted, as a replacement: an agent that never reopens would otherwise start anew,
+        // with a compactor call, at each process.
+        Some(_) => {
+            return Ok(Exit::Replace(
+                "the agent can neither resume nor load a session".to_owned(),
+            ));
+        }
+        None => {
             let answer = cx
                 .send_request(
                     NewSessionRequest::new(folder)

@@ -25,7 +25,8 @@
 //! `when` is in its text; a prompt matching none is answered `ok`. A turn whose `error` is given
 //! (`{"message", "codexErrorInfo"}`) ends `failed` with it. A turn's `then` is the steps of a
 //! turn Codex starts on its own once that one completed (its id `own-<n>`). With `answer_late`,
-//! the answer to `turn/start` comes after the turn completed, as Codex may send it.
+//! the answer to `turn/start` comes after the turn completed, as Codex may send it. With
+//! `resume_error`, every `thread/resume` fails as one of a thread that has none does.
 //!
 //! | Step | What the fake does |
 //! |---|---|
@@ -198,7 +199,7 @@ impl Reader {
                 }
                 "thread/resume" => {
                     let thread = params["threadId"].as_str().unwrap_or_default();
-                    if self.threads.join(thread).exists() {
+                    if self.threads.join(thread).exists() && self.script["resume_error"] != true {
                         Ok(json!({"thread": {"id": thread}, "model": "gpt-fake",
                             "modelProvider": "openai", "cwd": params["cwd"],
                             "reasoningEffort": "medium"}))

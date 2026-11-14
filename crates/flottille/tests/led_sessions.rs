@@ -408,7 +408,9 @@ fn a_led_session_s_report_and_end_wake_its_pilot() {
 fn a_led_session_that_fails_wakes_its_pilot() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
-        {"when": "Fix the login.", "do": [{"die": 4}]}
+        {"when": "Fix the login.", "do": [{"die": 4}]},
+        // It goes on in its session, told its turn was cut: it dies there too.
+        {"when": "your last turn was cut", "do": [{"die": 4}]}
     ]}));
     let (lead, mcp) = lead(&user);
 

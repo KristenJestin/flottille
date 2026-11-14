@@ -381,6 +381,57 @@ fn the_new_session_gets_the_brief_the_summary_and_the_latest_messages() {
 }
 
 #[test]
+fn a_session_that_cannot_be_loaded_starts_from_the_summary_and_the_latest_messages() {
+    let user = user();
+    // Its session is lost once its process is gone: it cannot be loaded again.
+    let mut lost = script();
+    lost["load_error"] = "the session file is corrupt".into();
+    lost["turns"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, json!({"when": "DIE", "times": 1, "do": [{"die": 0}]}));
+    user.fake_script(lost);
+    let agent = session(&user, "add the login page HALF");
+    eventually("the first turn", || turns_ended(&user, &agent) == 1);
+    let native =
+        user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["native_id"].clone();
+
+    send(&user, &agent, "DIE now");
+    eventually("the new session's first prompt", || {
+        prompts(&user).iter().any(|p| p.contains(SUMMARY))
+    });
+
+    let first = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains(SUMMARY))
+        .unwrap();
+    assert!(first.contains("session is gone"), "{first}");
+    assert!(first.contains("the session file is corrupt"), "{first}");
+    let brief = first
+        .find("add the login page HALF")
+        .expect("the first message");
+    let summary = first.find(SUMMARY).unwrap();
+    let kept = first
+        .rfind("the form posts to the API")
+        .expect("the latest messages, word for word");
+    assert!(brief < summary && summary < kept, "{first}");
+    assert!(first.contains("DIE now"), "the message it died on: {first}");
+    assert_eq!(compactor_prompts(&user).len(), 1);
+    assert_eq!(user.received_requests("session/new").len(), 2);
+    let shown = user.call("agent.show", json!({"agent": agent})).unwrap();
+    assert_ne!(shown["agent"]["native_id"], native);
+    assert_eq!(shown["agent"]["epoch"], 1);
+    // The compactor's work is said as a compaction, which the new session ends.
+    let compacting = events(&user, &agent, "agent.compacting");
+    assert_eq!(compacting.len(), 1, "{compacting:?}");
+    assert_eq!(compacting[0]["source"], "compactor");
+    eventually("the compaction's end", || {
+        !compacted(&user, &agent).is_empty()
+    });
+    assert_eq!(compacted(&user, &agent)[0]["summary"], SUMMARY);
+}
+
+#[test]
 fn a_failed_compaction_leaves_the_agent_in_its_session() {
     let user = user_with(json!([{"die": 3}]), "");
     let agent = session(&user, "add the login page FULL");

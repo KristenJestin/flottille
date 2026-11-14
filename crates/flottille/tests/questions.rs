@@ -347,7 +347,8 @@ fn a_question_answered_before_a_replacement_is_not_open() {
     let user = User::with_fake_agent();
     let (id, _) = root(
         &user,
-        json!({"turns": [
+        // Its session is lost with its process: a new one replaces it.
+        json!({"load_error": "the session is lost", "turns": [
             {"when": "ask then die", "times": 1, "do": [ask("Q1: which chart?"), {"die": 3}]},
             {"when": "ask again", "do": [ask("Q2: which colour?"), {"hold": "release"}]}
         ]}),
