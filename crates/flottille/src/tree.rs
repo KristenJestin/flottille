@@ -2297,7 +2297,7 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
 pub const LED_INTEGRATED: &str = "led-integrated";
 
 /// At the end of a turn of a led session or of its pilot: each led session among them that
-/// reported, is idle, and whose workspace's branch is contained in another branch reminds its
+/// reported, is idle, and whose work is integrated in its base reminds its
 /// pilot once to stop it and remove its workspace (`docs/tools.md`, "Following a session").
 fn remind_integrated(daemon: &Arc<Daemon>, agent: &Agent) {
     let sessions: Vec<Agent> = daemon
