@@ -749,29 +749,50 @@ pub(super) fn answerable(
     Ok(())
 }
 
-/// The request the user answered by writing their own values: decided, and the agent told what
-/// was written instead. One decided meanwhile is left as it is.
-pub(super) fn answered(daemon: &Arc<Daemon>, number: u64, written: &Declaration) {
-    let decided = daemon.write(|store| {
-        Ok(
-            match store.decide(number, Decision::Once, approval::USER)? {
-                Some((request, event)) => (Some(request), Some(event)),
-                None => (None, None),
-            },
-        )
-    });
-    let Ok(Some(request)) = decided else {
-        return;
+/// The request the user answers by writing their own values, decided before it is written; one
+/// decided meanwhile (an Accept of it) is refused, and the Save writes nothing.
+pub(super) fn claimed(daemon: &Daemon, number: u64) -> Result<approval::Request, Failure> {
+    daemon
+        .write(|store| {
+            Ok(
+                match store.decide(number, Decision::Once, approval::USER)? {
+                    Some((request, event)) => (Some(request), Some(event)),
+                    None => (None, None),
+                },
+            )
+        })?
+        .ok_or_else(|| {
+            Failure::refused(format!(
+                "request #{number} is already decided: nothing was written"
+            ))
+        })
+}
+
+/// The agent told what the user wrote instead of its request, or that their write failed.
+pub(super) fn told(
+    daemon: &Arc<Daemon>,
+    request: &approval::Request,
+    written: Result<&Declaration, &str>,
+) {
+    let number = request.number;
+    let body = match written {
+        Ok(written) => {
+            let mut body = format!(
+                "Request #{number} (connections) was not done as you asked: the user wrote the \
+                 connection {} themselves, with changes of their own. It now says:",
+                written.name
+            );
+            for (_, label, value) in fields(written) {
+                body.push_str(&format!("\n{label}: {value}"));
+            }
+            body
+        }
+        Err(why) => format!(
+            "Request #{number} (connections) was not done: the user wrote the connection \
+             themselves, and their write failed: {why}"
+        ),
     };
-    let mut body = format!(
-        "Request #{number} (connections) was not done as you asked: the user wrote the \
-         connection {} themselves, with changes of their own. It now says:",
-        written.name
-    );
-    for (_, label, value) in fields(written) {
-        body.push_str(&format!("\n{label}: {value}"));
-    }
-    crate::approvals::store_answer(daemon, &request, "done", &body);
+    crate::approvals::store_answer(daemon, request, "done", &body);
 }
 
 /// `connection.proposed {number}`: what an agent's request would write, for its card: the

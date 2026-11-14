@@ -1516,17 +1516,27 @@ async fn add(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, 
         requests::answerable(daemon, number, "add", &name)?;
     }
     let new = table_of(&declaration)?;
-    super::rewrite(daemon, &EXTENSION, |table| {
+    let mut claimed = None;
+    let written = super::rewrite(daemon, &EXTENSION, |table| {
+        // Decided under the file's lock, before it is written: an Accept of the same request
+        // that decided it first is the one that writes, and this Save writes nothing.
+        if let Some(number) = request {
+            claimed = Some(requests::claimed(daemon, number)?);
+        }
         servers(table)?.push(new);
         Ok(())
-    })?;
+    });
+    if let (Some(claimed), Err(failure)) = (&claimed, &written) {
+        requests::told(daemon, claimed, Err(&failure.message));
+    }
+    written?;
     // A connection added under a name that was removed starts from nothing.
     forget_row(daemon, &name)?;
     changed_event(daemon, &name, None);
     let given = pin_at_once(daemon, &name).await;
     let shown = shown_given(daemon, &name, given);
-    if let Some(number) = request {
-        requests::answered(daemon, number, &declaration);
+    if let Some(claimed) = &claimed {
+        requests::told(daemon, claimed, Ok(&declaration));
     }
     shown
 }
@@ -1616,7 +1626,8 @@ async fn edit(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value,
     let new = edited(&old, &params)?;
     entries_checked(daemon, &new)?;
     let written = table_of(&new)?;
-    super::rewrite(daemon, &EXTENSION, |table| {
+    let mut claimed = None;
+    let rewritten = super::rewrite(daemon, &EXTENSION, |table| {
         let servers = servers(table)?;
         let at = (0..servers.len())
             .find(|at| {
@@ -1626,17 +1637,25 @@ async fn edit(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value,
                     == Some(name.as_str())
             })
             .ok_or_else(|| Failure::new("not-found", format!("no connection {name}")))?;
+        // Decided under the file's lock, as an add's.
+        if let Some(number) = request {
+            claimed = Some(requests::claimed(daemon, number)?);
+        }
         *servers.get_mut(at).expect("found") = written;
         Ok(())
-    })?;
+    });
+    if let (Some(claimed), Err(failure)) = (&claimed, &rewritten) {
+        requests::told(daemon, claimed, Err(&failure.message));
+    }
+    rewritten?;
     if new.digest() != old.digest() || !new.enabled {
         client::stop_soon(daemon, &name);
     }
     changed_event(daemon, &name, None);
     let given = pin_at_once(daemon, &name).await;
     let shown = shown_given(daemon, &name, given);
-    if let Some(number) = request {
-        requests::answered(daemon, number, &new);
+    if let Some(claimed) = &claimed {
+        requests::told(daemon, claimed, Ok(&new));
     }
     shown
 }
