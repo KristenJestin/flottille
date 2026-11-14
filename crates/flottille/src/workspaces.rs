@@ -2789,12 +2789,37 @@ pub async fn integrated_into(dir: &Path, commit: &str, own: &str) -> Option<Stri
     None
 }
 
-/// The base a workspace's own work is integrated into, said by its branch: the first repository
-/// whose branch holds commits beyond where it started and either has a merged pull request (the
-/// branch the pull request aimed at), or has none and is contained in the base it started from.
-/// Never any other branch that happens to hold it: a second session's branch started from this
-/// one holds it too. Closed on doubt: a pull request open, a draft or closed, or a forge that
-/// cannot be read, is no integration. `None` when no repository is, or the workspace is gone.
+/// How often the forge is asked whether a workspace's work is integrated: the reminder checks at
+/// the end of every turn, and each check is a call to `gh` or `bkt`.
+const INTEGRATION_READ_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// When the forge was last asked for each workspace (project, name).
+static INTEGRATION_READS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Whether the forge may be asked for this workspace now, noting it when it may.
+fn may_read_integration(project: &str, name: &str) -> bool {
+    let mut reads = INTEGRATION_READS.lock().unwrap_or_else(|e| e.into_inner());
+    let key = (project.to_owned(), name.to_owned());
+    let now = std::time::Instant::now();
+    match reads.get(&key) {
+        Some(at) if now.duration_since(*at) < INTEGRATION_READ_EVERY => false,
+        _ => {
+            reads.insert(key, now);
+            true
+        }
+    }
+}
+
+/// The base a workspace's own work is integrated into, when it is in **every** repository that
+/// holds commits of its own: the one a repository's pull request aimed at when the forge says it
+/// is merged and the branch is no further than the commit it merged, or, with no pull request,
+/// the base the workspace started from that holds the branch. Never any other branch that
+/// happens to hold it: a second session's branch started from this one holds it too. Closed on
+/// doubt: one repository whose pull request is open, a draft or closed, merged but with commits
+/// made after, or whose forge cannot be read, is no integration. `None` when no repository has
+/// work of its own, the workspace is gone, or the forge was asked less than five minutes ago.
 pub async fn integrated(daemon: &Daemon, project: &str, name: &str) -> Option<String> {
     let workspace = daemon.read(|store| store.workspace(project, name)).ok()??;
     let local = format!("refs/heads/{}", workspace.branch);
@@ -2812,28 +2837,35 @@ pub async fn integrated(daemon: &Daemon, project: &str, name: &str) -> Option<St
             own.push((worktree, dir));
         }
     }
-    if own.is_empty() {
+    if own.is_empty() || !may_read_integration(project, name) {
         return None;
     }
     let read = forge_read(daemon, &workspace).await;
+    let mut into = None;
     for (worktree, dir) in own {
-        let Some(said) = read.repositories.iter().find(|r| r.path == worktree.path) else {
-            continue;
-        };
+        let said = read.repositories.iter().find(|r| r.path == worktree.path)?;
         if said.error.is_some() || said.blocked {
-            continue;
+            return None;
         }
-        match &said.pull {
-            Some(pull) if pull.state == "merged" => return Some(pull.base.clone()),
-            Some(_) => {}
-            None => {
-                if let Some(base) = contained_in_base(&dir, &local, &worktree.base).await {
-                    return Some(base);
-                }
+        let base = match &said.pull {
+            Some(pull) if pull.state == "merged" => {
+                let head = pull.head_commit.as_deref()?;
+                let in_head = [
+                    "merge-base",
+                    "--is-ancestor",
+                    "--end-of-options",
+                    &local,
+                    head,
+                ];
+                git::output(&dir, &in_head, Class::Read).await.ok()?;
+                pull.base.clone()
             }
-        }
+            Some(_) => return None,
+            None => contained_in_base(&dir, &local, &worktree.base).await?,
+        };
+        into.get_or_insert(base);
     }
-    None
+    into
 }
 
 /// The branch `base` names when `commit` is in it: the commit the workspace started from's

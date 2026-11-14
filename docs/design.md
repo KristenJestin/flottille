@@ -363,10 +363,12 @@ removes its workspace. When a led session reported, is idle and its work is inte
 pilot is reminded once, by `led-integrated` (`"Login" (agent …) reported and its branch is in
 main: stop it and remove its workspace?`), checked at the end of a turn of either. Integrated
 means in the **base** the work goes into, never in any other branch (a second session's branch
-started from this one holds it too): the forge says its pull request is merged (the branch it
-aimed at is the base), or it has none and the branch is contained in the base the workspace
-started from. A pull request open, a draft or closed, or a forge that cannot be read, is not
-integrated.
+started from this one holds it too): in every repository that holds commits of its own, the forge
+says its pull request is merged and the branch is no further than the commit it merged (the
+branch it aimed at is the base), or it has none and the branch is contained in the base the
+workspace started from. A pull request open, a draft or closed, commits made after the merge, or
+a forge that cannot be read, is not integrated; the forge is asked at most once every five
+minutes for a session.
 
 ### 5.3 What the parent is told
 
