@@ -563,14 +563,19 @@ setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
   `refused` before a review.
 - `connection.proposed {number}` answers what an agent's held `connections` write (`docs/tools.md`,
   "Connections") would leave, for its card: `{"number", "action", "name", "before", "after",
-  "changed", "settings", "current", "why"}`, `before` and `after` being declarations as
+  "changed", "settings", "secrets", "current", "why"}`, `before` and `after` being declarations as
   `connection.list` gives them (`null` for an add's `before` and a removal's `after`), `changed` the
-  keys an edit changes, `settings` those a `set` gives, and `current` whether it is still what the
+  keys an edit changes, `settings` those a `set` gives, `secrets` where each vault entry of the
+  declaration shown goes (`{"key": "env" | "headers", "name", "entry", "entry_host", "host",
+  "differs"}`: the entry's host, `null` without a `url`; the connection's, `null` for a command;
+  `differs` when they differ or it goes to a program), and `current` whether it is still what the
   request says: one that is not is not done once allowed (`why` says why, when it can no longer be
   done at all).
 - `connection.add` and `connection.edit` take `request`, the number of a pending `add` or `edit`
   of that very connection an agent asked: the user's own values are written instead of the
-  agent's (the card's **Edit**), and the request is answered, the agent told what was written.
+  agent's (the card's **Edit**), and the request is answered, the agent told what was written. It
+  is decided under the file's lock before the write: one decided meanwhile (accepted) is
+  `refused`, and nothing is written.
 
 Each emits `connection.changed`; accepting, turning one on or off and a cut-off give every running
 session the tools it has now before the answer (`docs/tools.md`, "When the tools change").
