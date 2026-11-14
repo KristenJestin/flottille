@@ -58,7 +58,11 @@
 //! zeros), `image_data` one picture of those base64 bytes, of the type `image_mime` (png by
 //! default), `audio` a sound and `resource` a resource link after it, `error` answers that text as
 //! an error. `rpc_error` answers that text as a JSON-RPC
-//! error instead, on stdio. With no answer, `ok`.
+//! error instead, on stdio. `big` (`{"bytes": 1000, "chunk": 100, "pause_ms": 5}`) answers a text of
+//! that many bytes as one message, written `chunk` bytes at a time with a pause after each, and
+//! logs `wrote` (the bytes of the text written so far) after every piece and `stopped` when the
+//! reader is gone before the end; over HTTP, `"sse": true` makes it one event of an event stream
+//! and `"unsized": true` sends no length. With no answer, `ok`.
 //!
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
 //! the child's pid with `--child`), `initialize` (the client's capabilities), `list` (the cursor
@@ -185,6 +189,14 @@ fn main() {
                 if let Some(message) = answer["rpc_error"].as_str() {
                     send(&json!({"jsonrpc": "2.0", "id": id,
                         "error": {"code": -32000, "message": message}}));
+                    continue;
+                }
+                if answer["big"].is_object() {
+                    let head = format!(
+                        r#"{{"jsonrpc":"2.0","id":{id},"result":{{"content":[{{"type":"text","text":""#
+                    );
+                    let mut out = std::io::stdout().lock();
+                    slowly(&mut out, &head, &answer["big"], "\"}]}}\n", &log);
                     continue;
                 }
                 let result = call(&answer, &params["arguments"], &mut lines, &mut asked);
@@ -336,6 +348,31 @@ fn call(
         }
     }
     json!({"content": content})
+}
+
+/// `head`, `big.bytes` bytes of filler and `tail`, written `big.chunk` bytes at a time with
+/// `big.pause_ms` between: slow enough that a reader which stops taking it is seen to stop. What
+/// was written is logged after each piece, and `stopped` where the reader was gone.
+fn slowly(out: &mut impl Write, head: &str, big: &Value, tail: &str, log: &Option<String>) {
+    let bytes = big["bytes"].as_u64().unwrap_or(0) as usize;
+    let chunk = (big["chunk"].as_u64().unwrap_or(1 << 20) as usize).max(1);
+    let pause = Duration::from_millis(big["pause_ms"].as_u64().unwrap_or(0));
+    let mut written = 0;
+    let mut put = |data: &[u8]| out.write_all(data).and_then(|_| out.flush()).is_ok();
+    let mut alive = put(head.as_bytes());
+    while alive && written < bytes {
+        let piece = chunk.min(bytes - written);
+        alive = put(&vec![b'x'; piece]);
+        if alive {
+            written += piece;
+            write_log(log, json!({"event": "wrote", "bytes": written}));
+            std::thread::sleep(pause);
+        }
+    }
+    alive = alive && put(tail.as_bytes());
+    if !alive {
+        write_log(log, json!({"event": "stopped", "bytes": written}));
+    }
 }
 
 /// Streamable HTTP, one request a connection, each on its own thread: a request the script holds
@@ -491,6 +528,32 @@ fn serve(
                 "tools/call" => {
                     let tool = params["name"].as_str().unwrap_or_default();
                     let answer = &script["answers"][tool];
+                    if answer["big"].is_object() {
+                        // `sse`: the message is one event of a stream, not a JSON body.
+                        let sse = answer["big"]["sse"] == true;
+                        let (kind, data, end) = match sse {
+                            true => ("text/event-stream", "data: ", "\n\n"),
+                            false => ("application/json", "", ""),
+                        };
+                        let head = format!(
+                            r#"{data}{{"jsonrpc":"2.0","id":{id},"result":{{"content":[{{"type":"text","text":""#
+                        );
+                        let tail = format!(r#""}}]}}}}{end}"#);
+                        let length = head.len()
+                            + answer["big"]["bytes"].as_u64().unwrap_or(0) as usize
+                            + tail.len();
+                        // `unsized`: no length, the body ends where the connection does.
+                        let length = match answer["big"]["unsized"] == true {
+                            true => String::new(),
+                            false => format!("Content-Length: {length}\r\n"),
+                        };
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\n\
+                             Mcp-Session-Id: fake\r\n{length}Connection: close\r\n\r\n{head}"
+                        );
+                        slowly(&mut stream, &head, &answer["big"], &tail, log);
+                        return;
+                    }
                     Some(call(
                         answer,
                         &params["arguments"],
