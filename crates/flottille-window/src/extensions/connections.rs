@@ -5,18 +5,23 @@
 //! read again when a `connection.*` event says one changed; a result is a toast. A server's
 //! secrets are vault entries: the window names them and never holds a value.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Instant;
 
+use gpui_design_system::motion::{HOVER, Motion, PANEL};
 use gpui_design_system::{
-    Button, Confirm, Disclosure, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal,
-    RadioChoices, Section, Select, SelectOption, Skeleton, Switch, Tag, Toast, Type as _, awaiting,
-    icon, palette, presence, space, toast,
+    BulkBar, Button, CheckState, Checkbox, ChoiceRow, Confirm, DiffLine, DiffLines, EmptyLine,
+    Field, FilterChip, FilterChips, Group, Grouped, Icon, Item, ListCard, ListRow, Listing, Menu,
+    Modal, RadioChoices, SearchField, Section, Select, SelectOption, Skeleton, Summary, Tag, Toast,
+    Tone, Type as _, Unfolding, awaiting, changing, fade, fuzzy, icon, palette, presence,
+    presence_of, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     AnyElement, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
     IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    Subscription, TestSupportExt as _, WeakEntity, Window, div, px, relative,
 };
 use serde_json::{Map, Value, json};
 
@@ -51,23 +56,46 @@ pub const LIMITS_HINT: &str = "An argument of that name may take only these valu
 /// The radio's label of what happens when an agent calls an action.
 pub const WHEN_CALLED: &str = "When an agent calls it";
 
-/// The three answers to it, in their order, by the daemon's word for each.
-const SETTINGS: [(&str, &str, &str); 3] = [
+/// Where the setting `word` stands in [`SETTINGS`]: a word it does not name is read as Judged,
+/// what the daemon makes of an action it was not told about.
+fn slot_of(word: &str) -> usize {
+    let find = |word: &str| SETTINGS.iter().position(|(key, ..)| *key == word);
+    find(word)
+        .or_else(|| find("judged"))
+        .expect("Judged is one of the four settings")
+}
+
+/// The four answers to it, in the order of the pill's list: the daemon's word, the word said,
+/// the sentence under it, and how the pill is drawn while it is the one chosen.
+const SETTINGS: [(&str, &str, &str, Tone); 4] = [
+    ("off", "Off", "Agents never see it.", Tone::Outline),
     (
         "passes",
         "Allowed",
         "It runs in every mode, without asking.",
+        Tone::Ok,
     ),
     (
         "judged",
         "Judged",
         "The judge decides in Auto; you are asked in Ask.",
+        Tone::Quiet,
     ),
     (
         "asked",
         "Asked",
         "It always comes to you, never to the judge.",
+        Tone::Strong,
     ),
+];
+
+/// The groups the review sorts its actions into, in the order they are drawn: what comes to the
+/// user first, what is left to the judge last.
+const GROUPS: [(&str, &str, &str); 4] = [
+    ("asked", "Asked", "Always a card for you."),
+    ("passes", "Allowed", "Run without asking."),
+    ("off", "Off", "Agents never see them."),
+    ("judged", "Judged", "The judge decides in Auto, you in Ask."),
 ];
 
 /// A connection, as `connection.list` says it.
@@ -214,11 +242,11 @@ pub enum Line {
 }
 
 impl Line {
-    fn said(&self) -> String {
+    fn diff_line(&self) -> DiffLine {
         match self {
-            Line::Same(text) => text.clone(),
-            Line::Removed(text) => format!("− {text}"),
-            Line::Added(text) => format!("+ {text}"),
+            Line::Same(text) => DiffLine::kept(text.clone()),
+            Line::Removed(text) => DiffLine::removed(text.clone()),
+            Line::Added(text) => DiffLine::added(text.clone()),
         }
     }
 }
@@ -326,16 +354,6 @@ pub struct Diff {
     pub actions: Vec<ActionDiff>,
     pub refused: Vec<String>,
     pub limits: Vec<LimitCover>,
-    /// What Flottille's adapter for this server is to it: that it applies, or that this version
-    /// has none; nothing for a server no adapter knows.
-    pub adapter: Option<AdapterSaid>,
-}
-
-/// The review's sentence on the server's adapter, and what it changes.
-#[derive(Clone, Debug, PartialEq)]
-pub struct AdapterSaid {
-    pub said: String,
-    pub changed: Vec<String>,
 }
 
 /// A limit of the declaration, and the actions it covers and does not.
@@ -355,8 +373,6 @@ pub struct ActionDiff {
     pub pinned: Option<String>,
     pub now: Option<String>,
     pub setting: Option<String>,
-    /// Why no setting turns it on, while the adapter that applies keeps it off.
-    pub locked: Option<String>,
 }
 
 impl Diff {
@@ -407,7 +423,6 @@ impl Diff {
                         .as_object()
                         .map(|_| action_text(&action["now"])),
                     setting: text(&action["setting"]),
-                    locked: text(&action["locked"]),
                 })
                 .collect(),
             refused: words(&value["refused"]),
@@ -422,10 +437,6 @@ impl Diff {
                     not: words(&limit["not"]),
                 })
                 .collect(),
-            adapter: value["adapter"]["said"].as_str().map(|said| AdapterSaid {
-                said: said.to_owned(),
-                changed: words(&value["adapter"]["changed"]),
-            }),
         }
     }
 
@@ -559,8 +570,129 @@ struct Review {
     /// What each action will be, by its name.
     settings: BTreeMap<String, String>,
     unchanged_open: bool,
+    instructions_open: bool,
     accepting: bool,
     error: Option<SharedString>,
+    /// The field that filters the actions, made with the first frame of the dialog.
+    search: Option<Entity<InputState>>,
+    /// The chip chosen: `all`, a change (`new`, `changed`, `removed`) or a setting's word.
+    filter: String,
+    /// The actions ticked, which a pill or the bar sets together.
+    picked: BTreeSet<String>,
+    /// The actions whose row is unfolded, whichever group they are in.
+    opened: HashSet<String>,
+    /// The groups folded by a click on their header.
+    folded: HashSet<&'static str>,
+    /// The actions of the groups, a row that changes setting leaving one and arriving in another.
+    rows: Grouped<&'static str, usize>,
+    /// The actions of "What changed" in a re-review.
+    changes: Listing<usize>,
+    /// What the text typed found among the actions, made once for each text.
+    found: Found,
+    /// The rows folded by a click, with when: their body is still drawn while they fold away.
+    folding: HashMap<String, Instant>,
+}
+
+/// Which actions a query finds, by their place in the review: matching them is the costly part of
+/// a frame, so it is done when the text changes and not on each frame.
+#[derive(Default)]
+struct Found {
+    query: Option<String>,
+    hits: Vec<bool>,
+    /// How many times an action was matched against a query.
+    matched: usize,
+}
+
+impl Found {
+    /// Matches the actions with `query` unless it is the text they were matched with already.
+    fn of(&mut self, diff: &Diff, query: &str) {
+        if self.query.as_deref() == Some(query) && self.hits.len() == diff.actions.len() {
+            return;
+        }
+        // No word typed is every action, with nothing to match.
+        self.hits = match query.split_whitespace().next() {
+            None => vec![true; diff.actions.len()],
+            Some(_) => diff
+                .actions
+                .iter()
+                .map(|action| {
+                    self.matched += 1;
+                    let text = action.now.as_deref().or(action.pinned.as_deref());
+                    fuzzy::find(query, &action.name, text.unwrap_or_default()).is_some()
+                })
+                .collect(),
+        };
+        self.query = Some(query.to_owned());
+    }
+}
+
+impl Review {
+    /// Whether the query finds the action at `at`.
+    fn found(&self, at: usize) -> bool {
+        self.found.hits.get(at).copied().unwrap_or(true)
+    }
+
+    /// Whether the action at `at` shows under what is searched and the chip chosen.
+    fn shows(&self, at: usize, action: &ActionDiff) -> bool {
+        self.found(at) && self.counts_for(action, &self.filter)
+    }
+
+    /// Whether the action is one the chip `key` counts: a change, or a setting.
+    fn counts_for(&self, action: &ActionDiff, key: &str) -> bool {
+        match key {
+            "all" => true,
+            "new" => action.change == "added",
+            "changed" => action.change == "changed",
+            "removed" => action.change == "removed",
+            setting => action.change != "removed" && self.setting_of(&action.name) == setting,
+        }
+    }
+
+    /// [`picked_shown`](Self::picked_shown) of the answer the review holds, for what a click sets.
+    fn shown_picks(&mut self) -> Vec<String> {
+        let answer = self.answer.take();
+        let shown = match &answer {
+            Some(Ok(diff)) => self.picked_shown(diff),
+            _ => Vec::new(),
+        };
+        self.answer = answer;
+        shown
+    }
+
+    /// The names of the rows ticked that show now: what the bar and a pill set. A ticked row the
+    /// search or a chip hides stays ticked, and is set once it shows again.
+    fn picked_shown(&self, diff: &Diff) -> Vec<String> {
+        diff.actions
+            .iter()
+            .enumerate()
+            .filter(|(at, action)| self.shows(*at, action) && self.picked.contains(&action.name))
+            .map(|(_, action)| action.name.clone())
+            .collect()
+    }
+
+    /// What the action will be: what was chosen, else what the daemon proposes.
+    fn setting_of(&self, name: &str) -> &str {
+        self.settings.get(name).map_or("judged", String::as_str)
+    }
+}
+
+/// A number that moves to `target` over a panel's time whenever it changes, as the kit's `fade`
+/// moves a state between 0 and 1: `id` keeps it, and a first value is simply there.
+fn eased(id: ElementId, target: f32, window: &mut Window, cx: &mut gpui_kit::App) -> f32 {
+    let key = ElementId::NamedChild(Arc::new(id), "eased".into());
+    let state = window.use_keyed_state(key, cx, move |_, _| Motion::settled(target));
+    let now = cx.background_executor().now();
+    let reduce = cx.reduce_motion();
+    let motion = state.update(cx, |motion, _| {
+        if motion.target() != target {
+            motion.animate(target, PANEL, now, reduce);
+        }
+        *motion
+    });
+    if motion.is_running(now) {
+        window.request_animation_frame();
+    }
+    motion.value(now)
 }
 
 pub struct ConnectionsSection {
@@ -651,6 +783,19 @@ impl ConnectionsSection {
             .map(|l| (l.argument.clone(), l.values.clone()))
     }
 
+    /// The review's search field, once the dialog has drawn it.
+    pub fn review_search(&self) -> Option<Entity<InputState>> {
+        self.review
+            .as_ref()
+            .and_then(|review| review.search.clone())
+    }
+
+    /// How many times an action was matched with what is typed in the review's search: once per
+    /// action when the text changes, never on a frame that draws the same text again.
+    pub fn review_matches(&self) -> usize {
+        self.review.as_ref().map_or(0, |r| r.found.matched)
+    }
+
     fn ask(&self, method: &str, params: Value, then: Then, cx: &mut Context<Self>) {
         let command = Command::Ask {
             method: method.into(),
@@ -719,6 +864,7 @@ impl ConnectionsSection {
                             .collect();
                     }
                     review.answer = Some(answer);
+                    review.found.query = None;
                 }
             }
             Then::SignIn { name } => match answer {
@@ -1218,8 +1364,18 @@ impl ConnectionsSection {
             answer: None,
             settings: BTreeMap::new(),
             unchanged_open: false,
+            instructions_open: false,
             accepting: false,
             error: None,
+            search: None,
+            filter: "all".into(),
+            picked: BTreeSet::new(),
+            opened: HashSet::new(),
+            folded: HashSet::new(),
+            rows: Grouped::new("connection-review-row"),
+            changes: Listing::default(),
+            found: Found::default(),
+            folding: HashMap::new(),
         });
         self.review_open = true;
         self.ask(
@@ -1247,15 +1403,6 @@ impl ConnectionsSection {
             cx,
         );
         cx.notify();
-    }
-
-    fn set_action(&mut self, action: &str, setting: &str, cx: &mut Context<Self>) {
-        if let Some(review) = self.review.as_mut() {
-            review
-                .settings
-                .insert(action.to_owned(), setting.to_owned());
-            cx.notify();
-        }
     }
 
     fn menu(&mut self, server: &Server, cx: &mut Context<Self>) -> Entity<Menu> {
@@ -1735,229 +1882,463 @@ impl ConnectionsSection {
 
     // ── The review dialog ────────────────────────────────────────────────────────────────────
 
-    fn lines(&self, id: &str, lines: &[Line], cx: &Context<Self>) -> AnyElement {
-        let p = palette(cx);
-        div()
-            .flex()
-            .flex_col()
-            .mono(12.)
-            .children(lines.iter().enumerate().map(|(at, line)| {
-                let said = line.said();
-                let (ink, fill) = match line {
-                    Line::Same(_) => (p.mute, None),
-                    Line::Removed(_) => (p.fail, Some(p.fail_bg)),
-                    Line::Added(_) => (p.ok, Some(p.ok_bg)),
-                };
-                let mut row = div()
-                    .id(SharedString::from(format!("{id}-line-{at}")))
-                    .aria_label(SharedString::from(said.clone()))
-                    .px(space::SM)
-                    .text_color(ink)
-                    .whitespace_normal()
-                    .child(SharedString::from(said));
-                if let Some(fill) = fill {
-                    row = row.bg(fill);
+    /// Takes the rows the review shows now into its lists, so that a row that left folds away and
+    /// one that arrived unfolds: a changed one goes to "What changed" (a re-review), the others to
+    /// the group of their setting.
+    fn sync_review(review: &mut Review, diff: &Diff, now: Instant, reduce: bool) {
+        let (mut grouped, mut changes) = (Vec::new(), Vec::new());
+        for (at, action) in diff.actions.iter().enumerate() {
+            if !review.shows(at, action) {
+                continue;
+            }
+            match !diff.first && action.change != "unchanged" {
+                true => changes.push((action.name.clone(), at)),
+                false => {
+                    let group = GROUPS
+                        .iter()
+                        .find(|(key, ..)| *key == review.setting_of(&action.name))
+                        .map_or("judged", |(key, ..)| *key);
+                    grouped.push((action.name.clone(), group, at));
                 }
-                row.test_support()
-            }))
-            .into_any_element()
+            }
+        }
+        review
+            .rows
+            .sync(GROUPS.map(|(key, ..)| key), grouped, now, reduce);
+        review.changes.sync(changes, now, reduce);
     }
 
-    fn action_block(
+    /// The description, arguments and hints of an action as the lines it shows: both texts where it
+    /// changed, the removed one alone where it went.
+    fn action_lines(action: &ActionDiff) -> Vec<Line> {
+        match (action.pinned.as_deref(), action.now.as_deref()) {
+            (Some(old), Some(new)) if old != new => line_diff(old, new),
+            (_, Some(now)) => now.lines().map(|l| Line::Same(l.to_owned())).collect(),
+            (Some(old), None) => old.lines().map(|l| Line::Removed(l.to_owned())).collect(),
+            (None, None) => Vec::new(),
+        }
+    }
+
+    /// One row of the review: a checkbox, the name, the first line of what it does and a pill with
+    /// its setting; it unfolds into its whole text and the four choices. `part` names what the row
+    /// holds: a row of a group and a row of "What changed" have ids of their own.
+    fn action_row(
         &self,
-        action: &ActionDiff,
         review: &Review,
+        diff: &Diff,
+        at: usize,
+        part: &dyn Fn(&str) -> ElementId,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = palette(cx);
-        let first = review
-            .answer
-            .as_ref()
-            .is_some_and(|a| a.as_ref().is_ok_and(|d| d.first));
-        let id = format!("connection-review-action-{}", action.name);
-        let change = match (first, action.change.as_str()) {
+        let action = &diff.actions[at];
+        let removed = action.change == "removed";
+        let setting = review.setting_of(&action.name).to_owned();
+        let change = match (diff.first, action.change.as_str()) {
             (true, _) | (_, "unchanged") => None,
             (_, "added") => Some("New"),
             (_, "removed") => Some("Removed"),
             _ => Some("Changed"),
         };
-        let text = match (action.pinned.as_deref(), action.now.as_deref()) {
-            (Some(old), Some(new)) if old != new => line_diff(old, new),
-            (_, Some(now)) => now.lines().map(|l| Line::Same(l.to_owned())).collect(),
-            (Some(old), None) => old.lines().map(|l| Line::Removed(l.to_owned())).collect(),
-            (None, None) => Vec::new(),
+        let about = match removed {
+            true => "Leaves the pin.".to_owned(),
+            false => action
+                .now
+                .as_deref()
+                .and_then(|text| text.lines().next())
+                .unwrap_or_default()
+                .to_owned(),
         };
-        let head = div()
+        // What is off is dimmed, over a hover's time when its setting changes.
+        let dim = fade(part("dim"), removed || setting == "off", HOVER, window, cx);
+        let name = div()
+            .id(part("name"))
+            .aria_label(SharedString::from(action.name.clone()))
+            // One width for every name, so that the pills and the sentences line up.
+            .w(space::XL * 7.)
+            .flex_none()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .mono(12.)
+            .medium()
+            .text_color(p.text)
+            .child(SharedString::from(action.name.clone()));
+        let name = match removed {
+            true => name.line_through(),
+            false => name,
+        };
+        let said = div()
+            .id(part("about"))
+            .aria_label(SharedString::from(about.clone()))
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(p.mute)
+            .child(SharedString::from(about.clone()));
+        let line = div()
             .flex()
             .items_center()
             .gap(space::SM)
-            .child(
-                div()
-                    .id(SharedString::from(format!("{id}-name")))
-                    .mono(13.)
-                    .medium()
-                    .text_color(p.text)
-                    .child(SharedString::from(action.name.clone())),
-            )
-            .children(
-                change.map(|change| Tag::new(SharedString::from(format!("{id}-change")), change)),
-            );
-        let mut block = div()
-            .id(SharedString::from(id.clone()))
-            .flex()
-            .flex_col()
-            .gap(space::SM)
-            .p(space::LG)
-            .rounded(px(10.))
-            .border_1()
-            .border_color(p.line)
-            .child(head)
-            .child(self.lines(&format!("{id}-text"), &text, cx));
-        if let Some(why) = &action.locked {
-            let said = format!("Off while Flottille's adapter applies: {why}.");
-            block = block.child(
-                div()
-                    .id(SharedString::from(format!("{id}-locked")))
-                    .aria_label(SharedString::from(said.clone()))
-                    .text_size(px(12.5))
-                    .text_color(p.mute)
-                    .child(SharedString::from(said))
-                    .test_support(),
-            );
-        } else if action.change != "removed" {
-            let setting = review
-                .settings
-                .get(&action.name)
-                .cloned()
-                .unwrap_or_else(|| "judged".into());
-            let offered = setting != "off";
-            let name = action.name.clone();
-            let offer = Switch::new(
-                SharedString::from(format!("{id}-offer")),
-                offered,
-                "Offer it to agents",
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let to = if offered { "off" } else { "judged" };
-                this.set_action(&name, to, cx);
-            }));
-            let name = action.name.clone();
-            let mut radios =
-                RadioChoices::new(SharedString::from(format!("{id}-setting")), WHEN_CALLED);
-            for (key, title, line) in SETTINGS {
-                radios = radios.choice(key, title, line);
-            }
-            let chosen = SETTINGS
-                .iter()
-                .position(|(key, _, _)| *key == setting)
-                .unwrap_or(1);
-            let this = cx.entity().downgrade();
-            let radios = radios.chosen(chosen).on_choose(move |index, _, cx| {
-                this.update(cx, |this, cx| this.set_action(&name, SETTINGS[index].0, cx))
+            .opacity(1.0 - 0.45 * dim)
+            .child(tipped_when_cut(
+                name,
+                SharedString::from(action.name.clone()),
+                window,
+                cx,
+            ))
+            .children(change.map(|change| Tag::new(part("change"), change)))
+            .child(tipped_when_cut(said, SharedString::from(about), window, cx));
+
+        let this = cx.entity().downgrade();
+        let key = action.name.clone();
+        let opened = review.opened.contains(&action.name);
+        let mut row =
+            Unfolding::new(part("row"), opened)
+                .line(line)
+                .on_toggle(move |open, _, cx| {
+                    let now = cx.background_executor().now();
+                    this.update(cx, |this, cx| {
+                        if let Some(review) = this.review.as_mut() {
+                            match open {
+                                true => {
+                                    review.folding.remove(&key);
+                                    review.opened.insert(key.clone())
+                                }
+                                false => {
+                                    review.folding.insert(key.clone(), now);
+                                    review.opened.remove(&key)
+                                }
+                            };
+                        }
+                        cx.notify();
+                    })
                     .ok();
-            });
-            block = block.child(offer).child(
-                presence(
-                    SharedString::from(format!("{id}-when-block")),
-                    offered,
-                    Field::new(
-                        SharedString::from(format!("{id}-when")),
-                        WHEN_CALLED,
-                        radios,
-                    ),
-                )
-                .gap(space::SM),
-            );
+                });
+
+        // A row's text and choices are drawn while it is open and while it folds away, not on
+        // every frame of a long list.
+        let now = cx.background_executor().now();
+        let folding = !cx.reduce_motion()
+            && review
+                .folding
+                .get(&action.name)
+                .is_some_and(|since| now.saturating_duration_since(*since) < PANEL + HOVER);
+        let drawn = opened || folding;
+        let mut body = div().flex().flex_col().gap(space::SM);
+        if drawn {
+            body = body.child(DiffLines::new(
+                part("text"),
+                Self::action_lines(action).iter().map(Line::diff_line),
+            ));
         }
-        block.test_support().into_any_element()
+        if !removed {
+            // Ticked, it is one of the rows a pill or the bar sets together.
+            let state = match review.picked.contains(&action.name) {
+                true => CheckState::Checked,
+                false => CheckState::Empty,
+            };
+            let this = cx.entity().downgrade();
+            let key = action.name.clone();
+            row = row.leading(
+                Checkbox::new(part("pick"), state, format!("Select {}", action.name)).on_change(
+                    move |state, _, cx| {
+                        this.update(cx, |this, cx| {
+                            if let Some(review) = this.review.as_mut() {
+                                match state {
+                                    CheckState::Checked => review.picked.insert(key.clone()),
+                                    _ => review.picked.remove(&key),
+                                };
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    },
+                ),
+            );
+            let chosen = slot_of(&setting);
+            let (this, key) = (cx.entity().downgrade(), action.name.clone());
+            row = row.trailing(
+                Select::new(
+                    part("setting"),
+                    SETTINGS.map(|(key, title, line, tone)| {
+                        SelectOption::new(key, title).line(line).tone(tone)
+                    }),
+                    chosen,
+                )
+                .compact()
+                .on_choose(move |index, _, cx| {
+                    this.update(cx, |this, cx| this.set_actions(&key, SETTINGS[index].0, cx))
+                        .ok();
+                }),
+            );
+            if drawn {
+                let choose = part("choose");
+                let choices = SETTINGS
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (key, title, line, _))| {
+                        let (this, name) = (cx.entity().downgrade(), action.name.clone());
+                        let id = match &choose {
+                            ElementId::Name(id) => ElementId::Name(format!("{id}-{key}").into()),
+                            other => ElementId::NamedChild(Arc::new(other.clone()), (*key).into()),
+                        };
+                        ChoiceRow::new(id, *title)
+                            .description(*line)
+                            .chosen(index == chosen)
+                            .on_click(move |_, cx| {
+                                this.update(cx, |this, cx| this.set_actions(&name, key, cx))
+                                    .ok();
+                            })
+                    });
+                body = body.child(Field::new(
+                    part("when"),
+                    WHEN_CALLED,
+                    div().flex().flex_col().gap(space::XS).children(choices),
+                ));
+            }
+        }
+        row.body(body).into_any_element()
     }
 
-    fn review_body(&self, diff: &Diff, review: &Review, cx: &mut Context<Self>) -> AnyElement {
+    /// The instructions as one row that unfolds into their lines: what the server says to agents
+    /// about itself, third-party text.
+    fn instructions_row(&self, diff: &Diff, review: &Review, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
-        let server = match &diff.pinned {
-            Some(pinned) if *pinned != diff.now => {
-                let version = diff.now.rsplit(' ').next().unwrap_or_default();
-                format!("{pinned} → {version}")
-            }
-            _ => diff.now.clone(),
-        };
-        let heading = |id: &str, title: &str, sentence: Option<&str>| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::XS)
-                .child(
-                    div()
-                        .id(SharedString::from(id.to_owned()))
-                        .text_size(px(13.))
-                        .medium()
-                        .text_color(p.text)
-                        .child(SharedString::from(title.to_owned())),
-                )
-                .children(sentence.map(|s| {
-                    div()
-                        .text_size(px(12.))
-                        .text_color(p.mute)
-                        .child(SharedString::from(s.to_owned()))
-                }))
-        };
-        let instructions = match (&diff.instructions_pinned, &diff.instructions_now) {
+        let now = diff.instructions_now.as_deref();
+        let changed = !diff.first && diff.instructions_pinned.as_deref() != now;
+        let lines = match (&diff.instructions_pinned, &diff.instructions_now) {
             (None, None) => vec![Line::Same("It gives no instructions.".into())],
-            (_, _) if diff.first => diff
-                .instructions_now
-                .as_deref()
+            (old, new) if !diff.first => line_diff(
+                old.as_deref().unwrap_or_default(),
+                new.as_deref().unwrap_or_default(),
+            ),
+            _ => now
                 .unwrap_or_default()
                 .lines()
                 .map(|l| Line::Same(l.to_owned()))
                 .collect(),
-            (old, new) => line_diff(
-                old.as_deref().unwrap_or_default(),
-                new.as_deref().unwrap_or_default(),
-            ),
         };
-        let folds = !diff.first;
-        let (shown, unchanged): (Vec<&ActionDiff>, Vec<&ActionDiff>) = diff
-            .actions
-            .iter()
-            .partition(|a| !folds || a.change != "unchanged");
-        let mut actions = div().flex().flex_col().gap(space::MD);
-        for action in &shown {
-            actions = actions.child(self.action_block(action, review, cx));
-        }
-        let unchanged_blocks: Vec<AnyElement> = unchanged
-            .iter()
-            .map(|action| self.action_block(action, review, cx))
-            .collect();
-        let count = unchanged_blocks.len();
-        let fold = (count > 0).then(|| {
-            let this = cx.entity().downgrade();
-            Disclosure::new(
-                "connection-review-unchanged",
-                match count {
-                    1 => "1 unchanged action".to_owned(),
-                    n => format!("{n} unchanged actions"),
-                },
-                review.unchanged_open,
+        let about = match changed {
+            true => {
+                let n = lines.iter().filter(|l| !matches!(l, Line::Same(_))).count();
+                format!("{n} lines changed")
+            }
+            false => match now {
+                Some(text) => text.lines().next().unwrap_or_default().to_owned(),
+                None => "It gives no instructions.".to_owned(),
+            },
+        };
+        let this = cx.entity().downgrade();
+        Unfolding::new("connection-review-instructions", review.instructions_open)
+            .line(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .child(
+                        div()
+                            .id("connection-review-instructions-title")
+                            .aria_label("Instructions")
+                            .flex_none()
+                            .medium()
+                            .text_color(p.text)
+                            .child("Instructions")
+                            .test_support(),
+                    )
+                    .children(
+                        changed
+                            .then(|| Tag::new("connection-review-instructions-change", "Changed")),
+                    )
+                    .child(
+                        div()
+                            .id("connection-review-instructions-about")
+                            .aria_label(SharedString::from(about.clone()))
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_color(p.mute)
+                            .child(SharedString::from(about))
+                            .test_support(),
+                    ),
             )
-            .summary("Their settings are kept.")
             .body(
                 div()
-                    .pt(space::SM)
                     .flex()
                     .flex_col()
-                    .gap(space::MD)
-                    .children(unchanged_blocks),
+                    .gap(space::SM)
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(p.faint)
+                            .child("Third-party text, given to an agent only when it asks for it."),
+                    )
+                    .child(DiffLines::new(
+                        "connection-review-instructions-text",
+                        lines.iter().map(Line::diff_line),
+                    )),
             )
             .on_toggle(move |open, _, cx| {
                 this.update(cx, |this, cx| {
                     if let Some(review) = this.review.as_mut() {
-                        review.unchanged_open = open;
+                        review.instructions_open = open;
                     }
                     cx.notify();
                 })
                 .ok();
             })
+            .into_any_element()
+    }
+
+    /// What the review lists: the instructions, the rows (of "What changed" and of the groups, or
+    /// of the groups alone in a first review), the limits and the names refused.
+    fn review_body(
+        &self,
+        diff: &Diff,
+        review: &Review,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette(cx);
+        let heading = |id: &str, title: &str| {
+            div()
+                .id(SharedString::from(id.to_owned()))
+                .text_size(px(13.))
+                .medium()
+                .text_color(p.text)
+                .child(SharedString::from(title.to_owned()))
+        };
+
+        // "What changed": the rows that are new, changed or gone, flat, before anything else.
+        let changes = (!diff.first).then(|| {
+            let items: Vec<AnyElement> = review
+                .changes
+                .rows()
+                .map(|row| {
+                    let (name, at) = (row.key.to_owned(), *row.value);
+                    let part = move |part: &str| -> ElementId {
+                        ElementId::Name(format!("connection-review-change-{name}-{part}").into())
+                    };
+                    let content = self.action_row(review, diff, at, &part, window, cx);
+                    Item::new(
+                        ElementId::Name(format!("connection-review-change-{}", row.key).into()),
+                        row.placement,
+                        content,
+                    )
+                    .into_any_element()
+                })
+                .collect();
+            let this = cx.entity().downgrade();
+            let since = diff
+                .pinned
+                .as_deref()
+                .map(|pinned| format!("since {}", pinned.rsplit(' ').next().unwrap_or(pinned)));
+            let mut group = Group::new(
+                "connection-review-changes",
+                "What changed",
+                review.changes.len(),
+            )
+            .open(!review.folded.contains("changes"))
+            .on_toggle(move |open, _, cx| {
+                this.update(cx, |this, cx| this.fold_group("changes", !open, cx))
+                    .ok();
+            })
+            .children(items);
+            if let Some(since) = since {
+                group = group.sentence(since);
+            }
+            group.gap(space::SM)
         });
+
+        // The groups, one per setting: all the rows of a first review, the unchanged ones of a
+        // re-review under their line.
+        let mut groups = Vec::new();
+        for (rows, (key, title, sentence)) in review.rows.groups().zip(GROUPS) {
+            let items: Vec<AnyElement> = rows
+                .rows()
+                .map(|row| {
+                    let part = |name: &str| row.part(name);
+                    let content = self.action_row(review, diff, *row.value, &part, window, cx);
+                    Item::new(row.id(), row.placement, content).into_any_element()
+                })
+                .collect();
+            let this = cx.entity().downgrade();
+            groups.push(
+                Group::new(format!("connection-review-group-{key}"), title, rows.len())
+                    .sentence(sentence)
+                    .open(!review.folded.contains(key))
+                    .on_toggle(move |open, _, cx| {
+                        this.update(cx, |this, cx| this.fold_group(key, !open, cx))
+                            .ok();
+                    })
+                    .children(items)
+                    .gap(space::SM),
+            );
+        }
+        let in_groups: usize = review.rows.groups().map(|g| g.len()).sum();
+        let unchanged = diff
+            .actions
+            .iter()
+            .filter(|a| a.change == "unchanged")
+            .collect::<Vec<_>>();
+        // A first review lists its groups as they are; a re-review holds them under one line.
+        let listed = match diff.first || unchanged.is_empty() {
+            true => div()
+                .flex()
+                .flex_col()
+                .children(groups.into_iter().map(IntoElement::into_any_element))
+                .into_any_element(),
+            false => {
+                let this = cx.entity().downgrade();
+                let finding = (!query.is_empty() || review.filter != "all") && in_groups > 0;
+                Summary::new(
+                    "connection-review-unchanged",
+                    format!("{} unchanged", unchanged.len()),
+                    review.unchanged_open,
+                )
+                .detail(Self::tally(review, &unchanged))
+                .unfolded_by(finding)
+                .on_toggle(move |open, _, cx| {
+                    this.update(cx, |this, cx| {
+                        if let Some(review) = this.review.as_mut() {
+                            review.unchanged_open = open;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .children(groups.into_iter().map(IntoElement::into_any_element))
+                .into_any_element()
+            }
+        };
+        // What no row shows says so, with what was asked for, folding as the rows come back.
+        let nothing =
+            (in_groups == 0 && review.changes.is_empty()).then(|| match query.is_empty() {
+                true => "No action here.".to_owned(),
+                false => format!("No action matches \u{201c}{query}\u{201d}."),
+            });
+        let none = presence_of(
+            "connection-review-none-block",
+            nothing.map(SharedString::from),
+            move |said| {
+                div()
+                    .id("connection-review-none")
+                    .aria_label(said.clone())
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(said)
+                    .test_support()
+                    .into_any_element()
+            },
+        )
+        .gap(space::MD);
+
         let limits = diff.limits.iter().map(|limit| {
             let LimitCover {
                 argument,
@@ -1995,92 +2376,290 @@ impl ConnectionsSection {
                 .child(SharedString::from(said))
                 .test_support()
         });
-        let adapter = diff.adapter.as_ref().map(|adapter| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::XS)
-                .child(
-                    div()
-                        .id("connection-review-adapter")
-                        .aria_label(SharedString::from(adapter.said.clone()))
-                        .text_size(px(13.))
-                        .text_color(p.text)
-                        .child(SharedString::from(adapter.said.clone()))
-                        .test_support(),
-                )
-                .children(adapter.changed.iter().enumerate().map(|(at, line)| {
-                    let line = format!("· {line}.");
-                    div()
-                        .id(SharedString::from(format!(
-                            "connection-review-adapter-change-{at}"
-                        )))
-                        .aria_label(SharedString::from(line.clone()))
-                        .text_size(px(12.5))
-                        .text_color(p.mute)
-                        .child(SharedString::from(line))
-                        .test_support()
-                }))
-        });
         div()
             .flex()
             .flex_col()
-            .gap(space::XL)
-            .child(
-                div()
-                    .id("connection-review-server")
-                    .aria_label(SharedString::from(server.clone()))
-                    .mono(13.)
-                    .text_color(p.text)
-                    .child(SharedString::from(server))
-                    .test_support(),
-            )
-            .children(adapter)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .child(heading(
-                        "connection-review-instructions-title",
-                        "Its instructions",
-                        Some("Third-party text, given to an agent only when it asks for it."),
-                    ))
-                    .child(self.lines("connection-review-instructions", &instructions, cx)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .child(heading(
-                        "connection-review-actions-title",
-                        "Its actions",
-                        Some("Its descriptions are third-party text, given to an agent when it asks."),
-                    ))
-                    .child(actions)
-                    .children(fold),
-            )
+            .gap(space::MD)
+            .child(self.instructions_row(diff, review, cx))
+            .children(changes)
+            .child(listed)
+            .child(none)
             .children((!diff.limits.is_empty()).then(|| {
                 div()
                     .flex()
                     .flex_col()
                     .gap(space::SM)
-                    .child(heading("connection-review-limits-title", "Its limits", None))
+                    .child(heading("connection-review-limits-title", "Its limits"))
                     .children(limits)
             }))
             .children(refused)
             .into_any_element()
     }
 
-    fn review_modal(&mut self, cx: &mut Context<Self>) -> Modal {
+    /// What the actions are set to, said in words: `1 allowed · 1 asked · 7 judged`.
+    fn tally(review: &Review, actions: &[&ActionDiff]) -> String {
+        [
+            ("passes", "allowed"),
+            ("asked", "asked"),
+            ("off", "off"),
+            ("judged", "judged"),
+        ]
+        .iter()
+        .filter_map(|(key, word)| {
+            let n = actions
+                .iter()
+                .filter(|a| a.change != "removed" && review.setting_of(&a.name) == *key)
+                .count();
+            (n > 0).then(|| format!("{n} {word}"))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+    }
+
+    /// The chips that filter the review: every action, what changed (a re-review), then each
+    /// setting. Each counts what it would show under what is searched.
+    fn review_chips(&self, diff: &Diff, review: &Review, cx: &mut Context<Self>) -> FilterChips {
+        let count = |key: &str| {
+            diff.actions
+                .iter()
+                .enumerate()
+                .filter(|(at, a)| review.found(*at) && review.counts_for(a, key))
+                .count()
+        };
+        let mut keys: Vec<(&str, &str)> = vec![("all", "All")];
+        if !diff.first {
+            keys.extend([
+                ("new", "New"),
+                ("changed", "Changed"),
+                ("removed", "Removed"),
+            ]);
+        }
+        keys.extend([
+            ("passes", "Allowed"),
+            ("judged", "Judged"),
+            ("asked", "Asked"),
+            ("off", "Off"),
+        ]);
+        let chosen = keys
+            .iter()
+            .position(|(key, _)| *key == review.filter)
+            .unwrap_or(0);
+        let order: Vec<String> = keys.iter().map(|(key, _)| (*key).to_owned()).collect();
+        let this = cx.entity().downgrade();
+        FilterChips::new(
+            "connection-review-filter",
+            "Filter the actions",
+            keys.iter()
+                .map(|(key, title)| FilterChip::new(*key, *title, count(key))),
+            chosen,
+        )
+        .on_choose(move |index, _, cx| {
+            this.update(cx, |this, cx| {
+                if let Some(review) = this.review.as_mut() {
+                    review.filter = order[index].clone();
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+    }
+
+    /// What the review leaves to the judge and where it does not, over every action it holds
+    /// (not the ones the search shows): a sentence and a thin bar split by setting. The numbers
+    /// change as the text does, the split over a panel's time.
+    fn review_split(
+        diff: &Diff,
+        review: &Review,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette(cx);
+        let held: Vec<&ActionDiff> = diff
+            .actions
+            .iter()
+            .filter(|a| a.change != "removed")
+            .collect();
+        let count = |key: &str| {
+            held.iter()
+                .filter(|a| review.setting_of(&a.name) == key)
+                .count()
+        };
+        let (judged, exceptions) = (
+            count("judged"),
+            [("passes", "allowed"), ("asked", "asked"), ("off", "off")]
+                .map(|(key, word)| (key, count(key), word)),
+        );
+        let said: Vec<String> = exceptions
+            .iter()
+            .filter(|(_, n, _)| *n > 0)
+            .map(|(_, n, word)| format!("{n} {word}"))
+            .collect();
+        let sentence = match said.is_empty() {
+            true => format!("All {judged} left to the judge"),
+            false => format!(
+                "{judged} left to the judge \u{b7} your exceptions: {}",
+                said.join(", ")
+            ),
+        };
+        let total = held.len().max(1) as f32;
+        let segments = [
+            ("judged", judged, p.line2),
+            ("passes", exceptions[0].1, p.ok),
+            ("asked", exceptions[1].1, p.text),
+            ("off", exceptions[2].1, p.faint),
+        ]
+        .map(|(key, n, color)| {
+            let id = ElementId::Name(format!("connection-review-bar-{key}").into());
+            let share = eased(id.clone(), n as f32 / total, window, cx);
+            div()
+                .id(id)
+                .h_full()
+                .w(relative(share))
+                .bg(color)
+                .test_support()
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::XS)
+            .child(
+                div()
+                    .id("connection-review-left")
+                    .aria_label(SharedString::from(sentence.clone()))
+                    .text_size(px(12.5))
+                    .child(changing(
+                        "connection-review-left-words",
+                        sentence,
+                        move |said| {
+                            let (lead, rest) = said
+                                .split_once(" \u{b7} ")
+                                .map_or((said.as_ref(), ""), |(a, b)| (a, b));
+                            div()
+                                .flex()
+                                .gap(space::XS)
+                                .text_color(p.mute)
+                                .child(
+                                    div()
+                                        .medium()
+                                        .text_color(p.text)
+                                        .child(SharedString::from(lead.to_owned())),
+                                )
+                                .children(
+                                    (!rest.is_empty())
+                                        .then(|| SharedString::from(format!("\u{b7} {rest}"))),
+                                )
+                                .into_any_element()
+                        },
+                    ))
+                    .test_support(),
+            )
+            .child(
+                div()
+                    .id("connection-review-bar")
+                    .w_full()
+                    .h(px(7.))
+                    .flex()
+                    .rounded(px(7.))
+                    .overflow_hidden()
+                    .bg(p.line)
+                    .children(segments)
+                    .test_support(),
+            )
+            .into_any_element()
+    }
+
+    /// The bar of the rows ticked, and what the review is set to, which stay in sight.
+    fn review_kept(&self, diff: &Diff, review: &Review, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let mut bar =
+            BulkBar::new("connection-review-bulk", review.picked_shown(diff).len()).gap(space::SM);
+        for (key, title, ..) in SETTINGS {
+            let this = cx.entity().downgrade();
+            bar = bar.action(
+                Button::secondary(format!("connection-review-bulk-{key}"), title).on_click(
+                    move |_, _, cx| {
+                        this.update(cx, |this, cx| this.set_picked(key, cx)).ok();
+                    },
+                ),
+            );
+        }
+        let this = cx.entity().downgrade();
+        let bar = bar.on_clear(move |_, cx| {
+            this.update(cx, |this, cx| {
+                if let Some(review) = this.review.as_mut() {
+                    review.picked.clear();
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        let all: Vec<&ActionDiff> = diff.actions.iter().collect();
+        let tally = Self::tally(review, &all);
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .child(bar)
+            .child(
+                div()
+                    .id("connection-review-tally")
+                    .aria_label(SharedString::from(tally.clone()))
+                    .mono(11.)
+                    .text_color(p.faint)
+                    .child(SharedString::from(tally))
+                    .test_support(),
+            )
+            .into_any_element()
+    }
+
+    /// Sets the action `from`, and with it every row ticked when it is one of them.
+    fn set_actions(&mut self, from: &str, setting: &str, cx: &mut Context<Self>) {
+        let Some(review) = self.review.as_mut() else {
+            return;
+        };
+        let shown = review.shown_picks();
+        let names = match shown.iter().any(|name| name == from) {
+            true => shown,
+            false => vec![from.to_owned()],
+        };
+        for name in names {
+            review.picked.remove(&name);
+            review.settings.insert(name, setting.to_owned());
+        }
+        cx.notify();
+    }
+
+    /// Sets every row ticked, and unticks them.
+    fn set_picked(&mut self, setting: &str, cx: &mut Context<Self>) {
+        let Some(review) = self.review.as_mut() else {
+            return;
+        };
+        for name in review.shown_picks() {
+            review.picked.remove(&name);
+            review.settings.insert(name, setting.to_owned());
+        }
+        cx.notify();
+    }
+
+    /// Folds a group of rows, or unfolds it.
+    fn fold_group(&mut self, group: &'static str, folded: bool, cx: &mut Context<Self>) {
+        if let Some(review) = self.review.as_mut() {
+            match folded {
+                true => review.folded.insert(group),
+                false => review.folded.remove(group),
+            };
+            cx.notify();
+        }
+    }
+
+    fn review_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Modal {
         let this = cx.entity().downgrade();
         let title = self
             .review
             .as_ref()
             .map_or_else(String::new, |r| format!("Review {}", r.name));
         let modal = Modal::new("connection-review", title)
-            .large()
+            .wide()
             .takes_focus()
             .open(self.review_open)
             .on_close(move |_, cx| {
@@ -2090,16 +2669,66 @@ impl ConnectionsSection {
                 })
                 .ok();
             });
-        let Some(review) = self.review.take() else {
+        let Some(mut review) = self.review.take() else {
             return modal;
         };
         let p = palette(cx);
-        let (sentence, content, ready) = match &review.answer {
-            Some(Ok(diff)) => (
-                Some(diff.sentence()),
-                self.review_body(diff, &review, cx),
-                true,
-            ),
+        if review.search.is_none() {
+            review.search = Some(line_field("Search the actions", window, cx));
+        }
+        let search = review.search.clone().expect("made above");
+        let query = search.read(cx).value().to_string();
+        // The answer is out of the review while the frame is drawn, so that it is borrowed and
+        // not copied on every frame.
+        let answer = review.answer.take();
+        let (sentence, content, under, kept, ready) = match &answer {
+            Some(Ok(diff)) => {
+                review.found.of(diff, &query);
+                let now = cx.background_executor().now();
+                review
+                    .folding
+                    .retain(|_, since| now.saturating_duration_since(*since) < PANEL + HOVER);
+                Self::sync_review(&mut review, diff, now, cx.reduce_motion());
+                let server = match &diff.pinned {
+                    Some(pinned) if *pinned != diff.now => {
+                        let version = diff.now.rsplit(' ').next().unwrap_or_default();
+                        format!("{pinned} → {version}")
+                    }
+                    _ => diff.now.clone(),
+                };
+                let total = diff
+                    .actions
+                    .iter()
+                    .filter(|a| a.change != "removed")
+                    .count();
+                let under = div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::SM)
+                    .child(
+                        div()
+                            .id("connection-review-server")
+                            .aria_label(SharedString::from(server.clone()))
+                            .mono(13.)
+                            .text_color(p.text)
+                            .child(SharedString::from(server))
+                            .test_support(),
+                    )
+                    .child(Self::review_split(diff, &review, window, cx))
+                    .child(
+                        SearchField::new("connection-review-search", &search, "Search the actions")
+                            .placeholder(format!("Search {total} actions by name or description")),
+                    )
+                    .child(self.review_chips(diff, &review, cx))
+                    .into_any_element();
+                (
+                    Some(diff.sentence()),
+                    self.review_body(diff, &review, &query, window, cx),
+                    Some(under),
+                    Some(self.review_kept(diff, &review, cx)),
+                    true,
+                )
+            }
             Some(Err(why)) => (
                 Some("Its server did not start, so there is nothing to read yet.".to_owned()),
                 div()
@@ -2110,11 +2739,13 @@ impl ConnectionsSection {
                     .child(SharedString::from(why.clone()))
                     .test_support()
                     .into_any_element(),
+                None,
+                None,
                 false,
             ),
-            None => (None, div().into_any_element(), false),
+            None => (None, div().into_any_element(), None, None, false),
         };
-        let pending = review.answer.is_none();
+        let pending = answer.is_none();
         let error = problem_line(
             "connection-accept-error",
             review.error.clone(),
@@ -2122,31 +2753,30 @@ impl ConnectionsSection {
             cx,
         );
         let accepting = review.accepting;
+        review.answer = answer;
         self.review = Some(review);
         let body = div()
             .id("connection-review-body")
-            .size_full()
-            .overflow_y_scroll()
-            .child(
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(awaiting(
+                "connection-review-waiting",
+                pending,
                 div()
-                    .max_w(px(880.))
                     .flex()
                     .flex_col()
-                    .child(awaiting(
-                        "connection-review-waiting",
-                        pending,
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(space::MD)
-                            .child(Skeleton::new("connection-review-skeleton-0").w(px(220.)))
-                            .child(Skeleton::new("connection-review-skeleton-1").h(px(80.)))
-                            .child(Skeleton::new("connection-review-skeleton-2").h(px(120.))),
-                        content,
-                    ))
-                    .child(error),
-            );
-        let mut modal = modal.child(body);
+                    .gap(space::MD)
+                    .child(Skeleton::new("connection-review-skeleton-0").w(px(220.)))
+                    .child(Skeleton::new("connection-review-skeleton-1").h(px(80.)))
+                    .child(Skeleton::new("connection-review-skeleton-2").h(px(120.))),
+                content,
+            ))
+            .child(error);
+        let mut modal = modal.under_title(under).child(body);
+        if let Some(kept) = kept {
+            modal = modal.kept(kept);
+        }
         if let Some(sentence) = sentence {
             modal = modal.sentence(sentence);
         }
@@ -2187,7 +2817,7 @@ impl Render for ConnectionsSection {
         let count = self.rows.len();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
         let modal = self.modal(window, cx);
-        let review = self.review_modal(cx);
+        let review = self.review_modal(window, cx);
         let section = Section::new("connection-servers", "Servers")
             .count(count.to_string())
             .sentence(SENTENCE)
