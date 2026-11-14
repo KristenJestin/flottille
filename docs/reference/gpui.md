@@ -98,7 +98,7 @@ The kit has one helper for each thing that moves; a screen uses them and invents
 | a one-line text cut with an ellipsis (a title, a row's line, a fact, a diff line) | `tipped_when_cut(element, text, window, cx)`: the same tooltip, shown only when the text really is wider than its frame (a probe shapes the whole text in the element's font and compares it with the width less its padding; the answer comes one frame late), `<id>-tooltip`; the element needs an id, `overflow_hidden` and `text_ellipsis`. `ListRow`, `TreeRow`, `CardHead`, `FlatRow`, `LabelledLine`, `StepRow`, `PageHeader` and `path_line` do it for their own texts |
 | a chevron | `turning(id, open, window, cx)` |
 | a page's blocks, a card, anything that shows once | `enter(id, index, element)` |
-| a block that comes and goes while its view stays (an empty-list line, the fields a choice needs, a body that unfolds) | `presence(id, present, element).gap(..)`: build it on every frame, outside a `when`; `.gap` is the gap the parent flex puts between its children, which folds with the block |
+| a block that comes and goes while its view stays (an empty-list line, the fields a choice needs, a body that unfolds) | `presence(id, present, element).gap(..)`: build it on every frame, outside a `when`; `.gap` is the gap the parent flex puts between its children, which folds with the block, so the parent column must have that `.gap(..)` itself (rule 9); a space the block asks of itself alone is a `.pt(..)` inside it |
 | a line that goes away with its text (an error, a refusal) | `presence_of(id, Option<line>, build)`: it still shows the last line while it folds |
 | a line whose text changes while its view stays (the folder a setting results in) | `changing(id, text, build)`: it fades back in over `HOVER` when the text differs from the last frame's; build it on every frame |
 | a block whose height follows its content (a field that wraps its text and grows by a line) | `growing(id, element)`: it eases to the new height over `PANEL`, also when it shrinks; build it on every frame; `<id>` is the animated frame, so its bounds are the height drawn |
@@ -208,6 +208,16 @@ the wrong code first).
    constants, and a scan refusing any other gap or padding literal in the window crate. A page's
    column is 880 px at most with 32 px between its sections; a dialog is 520 px (640 wide) with
    24 px of padding.
+   **A gap given to a block that comes and goes is not a margin**: `presence(..).gap(g)` (and
+   `presence_of`, and `problem_line`'s gap) only tells the block how much of the parent's gap to
+   fold away with itself, so the column it is a child of has the same `.gap(g)` (a kit `Section`
+   has `MD`, a `Modal`'s body `LG`); a column without one draws the space nowhere. Where one gap
+   does not fit all the children, the block holds its space itself, a `.pt(..)` that folds with
+   it, and asks for no gap. **[test]** `a_presence_gap_needs_a_parent_gap`
+   (`crates/flottille-window/tests/`) reads the window's sources as syntax trees and refuses a
+   block whose column has no gap, or another one; a block it cannot follow (one a helper
+   returns) is on its `UNSEEN` list with who checks it, and each screen that lost a space is
+   measured in its own window test.
 10. **Motion**, as above: everything that appears, leaves, opens, folds or changes state moves
     with the shared durations; a drawer slides from the right; a select's list fades in; a
     radio's dot scales in. **[test]** each component's scenario.

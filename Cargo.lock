@@ -2283,6 +2283,7 @@ dependencies = [
  "libc",
  "lyon_tessellation",
  "serde_json",
+ "syn 2.0.119",
 ]
 
 [[package]]

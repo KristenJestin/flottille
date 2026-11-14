@@ -25,3 +25,8 @@ libc = "0.2.191"
 # Already built for GPUI's paths; only its `LineJoin` and `LineCap`, which the mark's strokes round.
 lyon_tessellation = "1.0.23"
 serde_json = "1.0.154"
+
+[dev-dependencies]
+# Already built for the derive macros; the guard of `presence` gaps reads the window's sources
+# as a syntax tree (`tests/a_presence_gap_needs_a_parent_gap.rs`).
+syn = { version = "2", features = ["full", "visit"] }
