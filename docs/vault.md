@@ -148,7 +148,10 @@ answered the same. The first users: `tickets log_time` (`docs/tickets.md`, "Logg
 Connections (`docs/extensions.md`, "Connections"): a connection's `env` and `headers` name entries
 of every project, read when its server starts and put in its environment or on its requests,
 never shown to an agent; an entry tied to one project, or bound to another use, is refused for
-it. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
+it. A connection an agent proposes (`docs/extensions.md`, "Connections") puts an entry in a header
+only when the entry's `url` has the connection's host: the `url` is where the secret may go, and
+an entry without one goes in no header an agent chose; the user's own form binds freely, and the
+card of the request says where each entry goes. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
 another.
 
 ## The tests' keyring

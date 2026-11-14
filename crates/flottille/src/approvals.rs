@@ -371,6 +371,12 @@ async fn performed(
     }
     // The situation may have changed since the request was made.
     let (verdict, first) = mcp::judged_off(daemon, &grant, tool, &request.arguments).await;
+    // A connection's write compares once more, where it writes, what it does with what the user
+    // read: the words go with it.
+    let first = match tool {
+        "connections" => request.says.clone(),
+        _ => first,
+    };
     let changed = match verdict {
         Verdict::Deny(why) => Some(why),
         Verdict::Ask(ask) => {
