@@ -65,7 +65,10 @@
 //! (`"drop"`: the plugin is run without `FLOTTILLE_VAULT_TOKEN`; `"wrong"`: with another one),
 //! `replay` (the plugin is asked once more, with the same token) and `echo` (the password is
 //! written on its output, as a careless command line would) and `fail` (the password is written
-//! on its error output, and it fails). `--url` and `--item` are read as `--url <url>` or
+//! on its error output, and it fails; the form is filled first, as a page that refused it keeps it).
+//! With `open` among its arguments (and no `mcp`), it plays `agent-browser open <url>`: its log line
+//! `open` says its arguments and folder, and it empties the form, as a page loaded afresh does;
+//! `open_fail` in `login` makes it fail instead. `--url` and `--item` are read as `--url <url>` or
 //! `--url=<url>`. Its log line, `login`, says its
 //! arguments, its folder and what the plugin answered, never a password.
 //!
@@ -95,6 +98,9 @@ fn main() {
         .any(|pair| pair[0] == "auth" && pair[1] == "login")
     {
         return login(&args, &script, &log);
+    }
+    if !args.iter().any(|arg| arg == "mcp") && args.iter().any(|arg| arg == "open") {
+        return open(&args, &script, &log);
     }
     let child = args.iter().any(|arg| arg == "--child").then(|| {
         std::process::Command::new("sleep")
@@ -817,6 +823,10 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
     }
     let credential = &answer["credential"];
     if behaviour["fail"] == true {
+        // Filled, then refused: the secret stays in the form until the page is loaded again.
+        if let Some(form) = behaviour["form"].as_str() {
+            std::fs::write(form, credential.to_string()).unwrap();
+        }
         eprintln!(
             "✗ the page refused {}",
             credential["password"].as_str().unwrap_or_default()
@@ -836,4 +846,22 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         "✓ Logged in as {}",
         credential["username"].as_str().unwrap_or_default()
     );
+}
+
+/// `agent-browser open <url>`: loads the page afresh, which empties the form `login` filled;
+/// `open_fail` in the script's `login` makes it fail instead.
+fn open(args: &[String], script: &Value, log: &Option<String>) {
+    write_log(
+        log,
+        json!({"event": "open", "args": args, "cwd": std::env::current_dir().ok()}),
+    );
+    let behaviour = &script["login"];
+    if behaviour["open_fail"] == true {
+        eprintln!("✗ the browser could not open the page");
+        std::process::exit(1);
+    }
+    if let Some(form) = behaviour["form"].as_str() {
+        let _ = std::fs::remove_file(form);
+    }
+    println!("✓ opened");
 }

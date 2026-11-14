@@ -4304,3 +4304,56 @@ fn the_secret_never_reaches_an_agent_when_the_login_fails() {
     let log = std::fs::read_to_string(log_file(&user, "browser")).unwrap();
     assert!(!log.contains(PASSWORD), "{log}");
 }
+
+#[test]
+fn a_failed_login_reloads_the_entrys_page() {
+    let user = user();
+    // The fake command line fills the form, the page refuses it, and it fails.
+    browser(&user, &agent_browser("0.43.0"), json!({"fail": true}));
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("failed"), "{said}");
+    // Flottille loaded the entry's page afresh on the same session: the secret left in the form
+    // is gone.
+    let opened = logged(&user, "browser", "open");
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    let args = opened[0]["args"].to_string();
+    assert!(
+        args.contains("\"open\",\"https://shop.example.com/login\""),
+        "{args}"
+    );
+    assert!(args.contains("\"--config\""), "{args}");
+    let login = logged(&user, "browser", "login");
+    assert_eq!(opened[0]["cwd"], login[0]["cwd"], "not the login's folder");
+    assert!(form(&user).is_none(), "the secret stayed in the form");
+
+    // A load that fails too: the login's error is still said, masked, and why the page stays.
+    let user = self::user();
+    browser(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"fail": true, "open_fail": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("failed"), "{said}");
+    assert!(said.contains("could not load"), "{said}");
+    assert!(!said.contains(PASSWORD), "{said}");
+    assert_eq!(logged(&user, "browser", "open").len(), 1);
+
+    // A login that succeeds loads nothing again.
+    let user = self::user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(logged(&user, "browser", "open").is_empty());
+}

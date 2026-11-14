@@ -526,6 +526,8 @@ async fn run(
     {
         env.insert(OsString::from(variable), OsString::from(secret));
     }
+    // The page's reload after a failure needs no token: it asks for no secret.
+    let without_token = env.clone();
     env.insert(TOKEN_VARIABLE.into(), token.clone().into());
     let mut command = tokio::process::Command::new(&program[0]);
     command
@@ -577,10 +579,12 @@ async fn run(
             if let Some(leader) = leader {
                 crate::children::end_session(leader).await;
             }
-            return Err(format!(
+            let mut why = format!(
                 "agent-browser did not sign in within {} seconds: it was stopped",
                 LOGIN_LIMIT.as_secs()
-            ));
+            );
+            reloaded(program, &options, &without_token, &folder, url, &mut why).await;
+            return Err(why);
         }
     };
     // Not its session once it ended: the browser it may have started serves the server too.
@@ -597,7 +601,72 @@ async fn run(
     if let Some(line) = first {
         why.push_str(&format!("; it said: {line}"));
     }
+    reloaded(program, &options, &without_token, &folder, url, &mut why).await;
     Err(why)
+}
+
+/// After a login that failed, the entry's page loaded afresh on the same session, by Flottille
+/// and not by an agent: a secret typed into its form does not stay there (a browser does not
+/// restore a password field). `why` says it when that fails too.
+async fn reloaded(
+    program: &[String],
+    options: &[String],
+    env: &BTreeMap<OsString, OsString>,
+    folder: &Path,
+    url: &str,
+    why: &mut String,
+) {
+    if let Err(failed) = reload(program, options, env, folder, url).await {
+        why.push_str(&format!(
+            "; Flottille could not load {url} again to clear the form: {failed}"
+        ));
+    }
+}
+
+async fn reload(
+    program: &[String],
+    options: &[String],
+    env: &BTreeMap<OsString, OsString>,
+    folder: &Path,
+    url: &str,
+) -> Result<(), String> {
+    let mut command = tokio::process::Command::new(&program[0]);
+    command
+        .args(&program[1..])
+        .args(options)
+        .args(["open", url])
+        .env_clear()
+        .envs(env)
+        .current_dir(folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = crate::children::spawn(crate::children::in_own_session(&mut command))
+        .map_err(|error| format!("{}: {error}", program[0]))?;
+    let leader = child.id();
+    let stderr = tokio::spawn(kept(child.stderr.take()));
+    let status = match tokio::time::timeout(LOGIN_LIMIT, child.wait()).await {
+        Ok(status) => status.map_err(|error| error.to_string())?,
+        Err(_) => {
+            if let Some(leader) = leader {
+                crate::children::end_session(leader).await;
+            }
+            return Err(format!(
+                "it did not end within {} seconds",
+                LOGIN_LIMIT.as_secs()
+            ));
+        }
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let error = stderr.await.unwrap_or_default();
+    Err(error
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("it failed")
+        .to_owned())
 }
 
 /// Removes the plugin's socket once the login ends, however it ends.
