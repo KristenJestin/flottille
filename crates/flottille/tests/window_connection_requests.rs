@@ -372,6 +372,70 @@ fn refuse_writes_nothing_without_a_confirmation(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_card_shows_where_each_secret_goes(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    for (name, url) in [
+        ("github-token", Some("https://api.github.com")),
+        ("notes-token", Some("https://notes.example.com")),
+        ("plain-token", None),
+    ] {
+        let mut params = json!({"name": name, "secret": "s3cret-t0ken-value"});
+        if let Some(url) = url {
+            params["url"] = json!(url);
+        }
+        user.call("vault.set", params).unwrap();
+    }
+    let line = line_of(&user, "almanac");
+    let command = held(
+        &mcp,
+        json!({"action": "add", "name": "almanac", "about": "Notes.", "command": line,
+            "env": {"GITHUB_TOKEN": "github-token", "PLAIN": "plain-token"}}),
+    );
+    let url = held(
+        &mcp,
+        json!({"action": "add", "name": "notes", "about": "Notes.",
+            "url": "https://notes.example.com/mcp", "headers": {"Authorization": "notes-token"}}),
+    );
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, command);
+    open_dialog(&shell, cx, command);
+    // A command's variables are its program's: each is said loudly, with the entry's address.
+    let github = label(cx, "connection-request-secret-env-GITHUB_TOKEN").unwrap_or_default();
+    assert!(
+        github.contains("github-token") && github.contains("api.github.com"),
+        "{github}"
+    );
+    assert!(github.contains("environment"), "{github}");
+    let plain = label(cx, "connection-request-secret-env-PLAIN").unwrap_or_default();
+    assert!(plain.contains("no address"), "{plain}");
+    assert!(visible(
+        cx,
+        "connection-request-secret-env-GITHUB_TOKEN-elsewhere"
+    ));
+    assert!(visible(cx, "connection-request-secret-env-PLAIN-elsewhere"));
+    assert!(visible(cx, "connection-request-secrets-field-warning"));
+
+    shell.update(cx, |shell, cx| shell.open_connection_request(url, cx));
+    until(&shell, cx, "the other request is read", |cx| {
+        label(cx, "connection-request-name").as_deref() == Some("notes")
+    });
+    settle(cx);
+    // A header of the entry's own host is said plainly.
+    let header = label(cx, "connection-request-secret-headers-Authorization").unwrap_or_default();
+    assert!(
+        header.contains("notes-token") && header.contains("sent to notes.example.com"),
+        "{header}"
+    );
+    assert!(!present(
+        cx,
+        "connection-request-secret-headers-Authorization-elsewhere"
+    ));
+    assert!(!visible(cx, "connection-request-secrets-field-warning"));
+}
+
+#[gpui_kit::test]
 fn edit_opens_the_servers_form_with_the_agents_values(cx: &mut TestAppContext) {
     let user = user();
     let (lead, mcp) = a_root(&user);

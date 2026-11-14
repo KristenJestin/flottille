@@ -2,10 +2,10 @@
 //! waits in the rail as every held request does, and opens this dialog instead of being allowed
 //! from there. The dialog shows what the daemon says the request would write
 //! (`connection.proposed`): the fields of "New server", filled and read-only, an edit's changed
-//! fields with their old value, a `set`'s settings, then Accept, Edit and Refuse. Accept and
-//! Refuse answer the request (Refuse writes nothing, and asks nothing more, as the rail's Deny);
-//! Edit opens the server's own
-//! form with the agent's values, whose Save answers it. The results are toasts.
+//! fields with their old value, a `set`'s settings, where each vault entry it names goes, then
+//! Accept, Edit and Refuse. Accept and Refuse answer the request (Refuse writes nothing, and asks
+//! nothing more, as the rail's Deny); Edit opens the server's own form with the agent's values,
+//! whose Save answers it. The results are toasts.
 
 use gpui_design_system::{
     Button, Field, Modal, Skeleton, Tag, Toast, awaiting, palette, space, toast,
@@ -43,9 +43,54 @@ pub struct Proposal {
     pub changed: Vec<String>,
     /// A `set`'s settings, by action.
     pub settings: Vec<(String, String)>,
+    /// Where each vault entry the declaration names goes.
+    pub secrets: Vec<Secret>,
     /// Still what the request says: one that is not would not be done.
     pub current: bool,
     pub why: Option<String>,
+}
+
+/// A vault entry a declaration names, as `connection.proposed` says where it goes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Secret {
+    /// `env` or `headers`.
+    pub key: String,
+    /// The variable or the header.
+    pub name: String,
+    pub entry: String,
+    /// The host of the entry's `url`; none when it has no address.
+    pub entry_host: Option<String>,
+    /// The host the connection sends it to; none for a command, whose environment holds it.
+    pub host: Option<String>,
+    /// Sent elsewhere than the entry's address says, or given to a program.
+    pub differs: bool,
+}
+
+impl Secret {
+    fn of(value: &Value) -> Self {
+        let text = |key: &str| value[key].as_str().unwrap_or_default().to_owned();
+        Self {
+            key: text("key"),
+            name: text("name"),
+            entry: text("entry"),
+            entry_host: value["entry_host"].as_str().map(str::to_owned),
+            host: value["host"].as_str().map(str::to_owned),
+            differs: value["differs"] != false,
+        }
+    }
+
+    /// Its line on the card: the entry, its address, and where it goes.
+    pub fn said(&self) -> String {
+        let address = self.entry_host.as_deref().unwrap_or("no address");
+        let goes = match &self.host {
+            Some(host) => format!("sent to {host}"),
+            None => "given to the program in its environment".to_owned(),
+        };
+        format!(
+            "{}: the vault entry {} ({address}), {goes}",
+            self.name, self.entry
+        )
+    }
 }
 
 impl Proposal {
@@ -69,6 +114,12 @@ impl Proposal {
                 .map(|(action, setting)| {
                     (action.clone(), setting.as_str().unwrap_or_default().into())
                 })
+                .collect(),
+            secrets: value["secrets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(Secret::of)
                 .collect(),
             current: value["current"] == true,
             why: value["why"].as_str().map(str::to_owned),
@@ -417,6 +468,9 @@ impl ConnectionRequest {
             was(key, &entries),
             cx,
         ));
+        if !proposal.secrets.is_empty() {
+            body = body.child(self.secrets(proposal, cx));
+        }
         let limits_changed = proposal.changed.iter().any(|k| k == "only");
         let limits = div()
             .flex()
@@ -501,6 +555,58 @@ impl ConnectionRequest {
             ));
         }
         body.into_any_element()
+    }
+
+    /// Where each vault entry goes, one line each: in the warning colour, tagged, when it goes
+    /// elsewhere than the entry's address says, or to a program's environment.
+    fn secrets(&self, proposal: &Proposal, cx: &Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let lines = div()
+            .flex()
+            .flex_col()
+            .gap(space::XS)
+            .children(proposal.secrets.iter().map(|secret| {
+                let id = format!("connection-request-secret-{}-{}", secret.key, secret.name);
+                let said = secret.said();
+                let elsewhere = match &secret.host {
+                    Some(_) => "Another host",
+                    None => "A program",
+                };
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(space::SM)
+                    .child(
+                        div()
+                            .id(SharedString::from(id.clone()))
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_color(match secret.differs {
+                                true => p.wait,
+                                false => p.text,
+                            })
+                            .aria_label(SharedString::from(said.clone()))
+                            .child(SharedString::from(said))
+                            .test_support(),
+                    )
+                    .children(secret.differs.then(|| {
+                        Tag::new(SharedString::from(format!("{id}-elsewhere")), elsewhere)
+                    }))
+            }));
+        let warning = proposal.secrets.iter().any(|s| s.differs).then(|| {
+            SharedString::from(
+                "A secret here goes elsewhere than the address its vault entry names: accept only \
+                 if you meant to give it there.",
+            )
+        });
+        Field::new(
+            "connection-request-secrets-field",
+            "Where its secrets go",
+            lines,
+        )
+        .warning(warning)
+        .into_any_element()
     }
 
     /// What the request does that the fields do not say: a removal, a switch.
