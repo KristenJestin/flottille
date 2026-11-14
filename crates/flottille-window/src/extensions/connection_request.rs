@@ -692,22 +692,18 @@ impl Render for ConnectionRequest {
                     .to_owned(),
             })
         });
+        // What a modal keeps in sight is a column without a gap: nothing to fold but the lines.
         let stale_line = div()
             .id("connection-request-stale")
             .aria_label(stale.clone().unwrap_or_default())
             .child(problem_line(
                 "connection-request-stale-line",
                 stale.clone(),
-                space::LG,
+                px(0.),
                 cx,
             ))
             .test_support();
-        let error = problem_line(
-            "connection-request-error",
-            self.error.clone(),
-            space::LG,
-            cx,
-        );
+        let error = problem_line("connection-request-error", self.error.clone(), px(0.), cx);
         modal = modal.child(body).kept(stale_line).kept(error);
         let decided = self.deciding;
         modal = modal.action(
