@@ -1052,7 +1052,8 @@ the user is a card as any, titled `Call write on the connection almanac`, its li
 connection, the action and its arguments. Everything animates as the rest of the window does:
 the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
 when it leaves, a field that a radio or a switch needs unfolds under it, the dialogs rise and
-fade, the review crossfades from its skeleton; in it, a row that changes setting folds away in its
+fade, the review crossfades from its skeleton; in it, the server, the adapter's sentence, the bar,
+the search and the chips come one after the other, a row that changes setting folds away in its
 group and unfolds in the other, a group that empties folds away, the bar of the ticked rows, the
 rows, the instructions and the `unchanged` line unfold, and what is off fades.
 
@@ -1157,8 +1158,11 @@ build is outside every range. What an adapter may do, and nothing else:
 A line of Flottille's own (not the server's) is added to what `help` with `for: "@instructions"`
 gives. The review (`connection.review`, its `adapter`) says that the adapter applies, what it
 changed, what Accept would pin, and, for each action it keeps off, why (`locked`); the window
-shows that sentence and those lines under the server's version, and a kept-off action has a line
-saying why instead of its switch and radios. The user can still change every other setting.
+shows that sentence under the server's version, above the bar of what is left to the judge, so
+that the user reads why `login` is refused before Accept, and what the adapter changed unfolds
+under it. A kept-off action has its pill disabled (`Off`), no box to tick it with, so that the
+bar never sets it, and the line saying why in its unfolded row instead of the four choices. The
+user can still change every other setting.
 
 **agent-browser** is the first adapter, for `agent-browser` **0.43.x** (checked on 0.43.0; a
 version Flottille was not checked on may move its tools or its plugin protocol: the range widens
