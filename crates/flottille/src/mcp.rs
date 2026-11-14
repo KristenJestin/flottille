@@ -109,7 +109,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 32] = [
+const SERVED: [Definition; 33] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -606,6 +606,34 @@ const SERVED: [Definition; 32] = [
                     {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
                 ]},
                 "ask_before_running": {"type": "boolean", "description": "add, edit: held for approval each time an agent starts it, itself or as a need."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "connections",
+        title: "The user's connections",
+        description: "The MCP servers the user gives every agent, each as one tool conn_<name>. \
+            list: each with its state and actions; show: one, its command or URL, its variables \
+            by vault entry name (never a secret), its limits and each action's setting. add, \
+            edit, remove, set (an action's setting: judged, passes, asked or off), on and off \
+            are always held for the user, whatever the mode: you are answered at once, the \
+            result comes later; the user reads the declaration whole before it is written. \
+            {\"action\": \"add\", \"name\": \"notes\", \"about\": \"The user's notes.\", \
+            \"command\": \"notes-server mcp\", \"env\": {\"NOTES_TOKEN\": \"notes-token\"}}.",
+        read_only: false,
+        idempotent: false,
+        destructive: true,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list", "show", "add", "edit", "remove", "set", "on", "off"]},
+                "name": {"type": "string", "description": "lower-case letters, digits and _, 24 at most."},
+                "about": {"type": "string", "description": "add, edit: one sentence on what it is for."},
+                "command": {"type": "string", "description": "add, edit: one line, the program and its arguments, never run by a shell."},
+                "url": {"type": "string", "description": "add, edit: https://, or http:// on this machine; instead of a command."},
+                "env": {"type": ["object", "null"], "additionalProperties": {"type": "string"}, "description": "add, edit, for a command: each variable to the name of a vault entry (vault list); null removes them."},
+                "headers": {"type": ["object", "null"], "additionalProperties": {"type": "string"}, "description": "add, edit, for a URL: each header to the name of a vault entry; null removes them."},
+                "only": {"type": ["object", "null"], "additionalProperties": {"type": "array", "items": {"type": "string"}}, "description": "add, edit: an argument's name to the only values it may take; null removes them."},
+                "settings": {"type": "object", "additionalProperties": {"type": "string", "enum": ["judged", "passes", "asked", "off"]}, "description": "set: an action's name to its setting."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -2332,12 +2360,14 @@ async fn played_in(
                             // Its own workspace is removed only with the user's word, and so is
                             // a session written to for the first time; so are a service stopped
                             // and a pull request approved or blocked, by `forge` or by a line,
-                            // and the worklog's token sent to another site or entry.
+                            // and the worklog's token sent to another site or entry, and a
+                            // connection written.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
                                 && !gate::asks_end(&ask)
                                 && !crate::services::stops(tool, &args)
+                                && !crate::extensions::held_for_the_user(tool, &args)
                                 && !gate::asks_review(&ask)
                                 && !crate::actions::sends_a_worklog_token(
                                     daemon, grant, tool, &args,
@@ -3214,6 +3244,7 @@ async fn performed_once(
         "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
         "web" => crate::web::web(args).await,
         "services" => crate::services::tool(daemon, grant, args, first).await,
+        "connections" => crate::extensions::family_call(daemon, args).await,
         "run" => {
             runs::run(
                 daemon,
@@ -3456,7 +3487,7 @@ mod tests {
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::PROVIDER.tools(false, true, true, true, false);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 17);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 18);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -3464,7 +3495,7 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 16);
+        assert_eq!(served.len(), 17);
     }
 
     #[test]

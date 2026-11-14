@@ -852,10 +852,20 @@ project has a switch for it: the list is the declaration's, the user's alone. Ex
 does not ask for a new review: the server is the same. A connection for one project only is an
 open question ("Open questions").
 
-**The user's door only**, as `extension.set` is: the window, `flottille connection …` and the
-methods `connection.list`, `.add`, `.edit`, `.remove`, `.review`, `.accept` and `.login`. No tool of an agent
-declares or edits a connection: a command is run with the
-user's rights, where no gate looks. The file is in Flottille's own folders, which no tool writes.
+**The user's door, or an agent's request the user accepts** (#854): the window, `flottille
+connection …` and the methods `connection.list`, `.add`, `.edit`, `.remove`, `.review`, `.accept`
+and `.login`; and the agents' `connections` family (`tools.md`, "Connections"), whose every write
+(add, edit, remove, an action's setting, on or off) is **held for the user in every mode, Full
+included**: a command is run with the user's rights, where no gate looks, and the tool reaches
+every agent of every project. Nothing an agent sends is written before the user accepts it, and
+what is written is what the card showed: the request's words are made again from the declaration
+as it is then and compared with those the user read, and one that differs is not done. Once
+accepted it goes through the path of the user's own Save (added = given at once, every action
+judged). An agent's declaration is checked as the form's fields are (a command is one line split
+without a shell, shell syntax refused; a variable or a header names a vault entry that exists); its
+excepted projects, its OAuth client id and its switch (but through `on` and `off`) are the user's.
+A child reads the connections and writes none. The file is in Flottille's own folders, which no
+file tool writes.
 A connection's name is lower-case letters, digits and `_`, 24 at most; the tool is `conn_<name>`,
 so that no core tool, now or later, can take its name, and the gate's card says plainly that the
 tool is a third party's.
@@ -1036,7 +1046,14 @@ seconds at most) and cannot be pressed again. Turning Connections on, or a serve
 waited, and its toast says so (`Server almanac is given to agents`, or the number and the names).
 A call held for
 the user is a card as any, titled `Call write on the connection almanac`, its line the
-connection, the action and its arguments. Everything animates as the rest of the window does:
+connection, the action and its arguments. **An agent's request to write a connection** is a held
+request, where held requests appear, as a card of its own (#854): the same fields as **New
+server**, filled with what it would write and read-only, an edit's changed fields with their old
+value struck above the new one, a `set` its settings, and **Accept**, **Edit** and **Refuse**
+(Refuse asks in the confirmation dialog). **Edit** opens the server's form with the agent's values;
+its Save writes the user's values and answers the request (`connection.add`/`.edit` with
+`request`). A request whose declaration changed since it was asked says so, and Accept is not
+offered. Everything animates as the rest of the window does:
 the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
 when it leaves, a field that a radio or a switch needs unfolds under it, the dialogs rise and
 fade, the review crossfades from its skeleton.

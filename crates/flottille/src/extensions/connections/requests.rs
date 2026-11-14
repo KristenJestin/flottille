@@ -1,0 +1,703 @@
+//! The `connections` family of the agents (`docs/tools.md`, "Connections"): `list` and `show` read
+//! the declarations, never a secret (a variable is its vault entry's name); `add`, `edit`,
+//! `remove`, `set`, `on` and `off` are held for the user in every mode, Full included, since a
+//! connection's command runs with the user's rights and its tool reaches every agent of every
+//! project. What the user accepts is written by the path of their own Save, and only if it is
+//! still what the card showed: the request's words are made again and compared before it is done.
+
+use std::sync::Arc;
+
+use flottille_core::approval::{self, Decision, RequestState};
+use serde_json::{Map, Value, json};
+
+use super::{
+    Declaration, EXTENSION, KEYS, Reach, SETTINGS, State, client, declaration, declarations,
+    entries_checked, row, setting_of, settings_only, state_of,
+};
+use crate::daemon::Daemon;
+use crate::mcp::{self, Outcome};
+use crate::projects::Failure;
+
+const ACTIONS: [&str; 8] = ["list", "show", "add", "edit", "remove", "set", "on", "off"];
+const WRITES: [&str; 6] = ["add", "edit", "remove", "set", "on", "off"];
+/// What an agent may declare; the projects a connection leaves out, its OAuth client and its
+/// switch are the user's (the switch through `on` and `off`).
+const AGENT_KEYS: [&str; 7] = ["name", "about", "command", "url", "env", "headers", "only"];
+
+/// Whether a call writes a connection: held for the user every time, in every mode.
+pub fn writes(tool: &str, args: &Value) -> bool {
+    tool == "connections" && args["action"].as_str().is_some_and(|a| WRITES.contains(&a))
+}
+
+/// Why the gate holds it, for the card.
+pub fn reason(args: &Value) -> String {
+    match args["action"].as_str() {
+        Some("remove" | "off") => {
+            "it takes a connection away from every agent of every project: only the user decides it"
+        }
+        Some("set") => {
+            "it changes how the gate treats a connection's actions for every agent: only the user \
+             decides it"
+        }
+        _ => {
+            "a connection's command runs with the user's rights and its tool is given to every \
+             agent of every project: only the user decides it"
+        }
+    }
+    .into()
+}
+
+fn refused(why: impl Into<String>) -> Outcome {
+    Outcome::Refused(format!("refused: {}", why.into()))
+}
+
+fn actions() -> String {
+    format!("{} and {}", ACTIONS[..7].join(", "), ACTIONS[7])
+}
+
+/// The words of a declaration's command, as one line a reader can split again.
+fn line(words: &[String]) -> String {
+    words
+        .iter()
+        .map(
+            |word| match word.chars().any(char::is_whitespace) || word.is_empty() {
+                true => format!("'{word}'"),
+                false => word.clone(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A declaration, field by field, as the card reads it: `(key, label, value)`.
+fn fields(declaration: &Declaration) -> Vec<(&'static str, &'static str, String)> {
+    let entries = |entries: &std::collections::BTreeMap<String, String>| match entries.is_empty() {
+        true => "none".to_owned(),
+        false => entries
+            .iter()
+            .map(|(name, entry)| format!("{name} from the vault entry {entry}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    };
+    let mut fields = vec![("about", "Its sentence", declaration.about.clone())];
+    match &declaration.reach {
+        Reach::Command(words) => {
+            fields.push((
+                "command",
+                "Its command, run with the user's rights and without a shell",
+                line(words),
+            ));
+            fields.push(("env", "Its variables", entries(&declaration.env)));
+        }
+        Reach::Url(url) => {
+            fields.push(("url", "Its URL", url.clone()));
+            fields.push(("headers", "Its headers", entries(&declaration.headers)));
+        }
+    }
+    let only = match declaration.only.is_empty() {
+        true => "none".to_owned(),
+        false => declaration
+            .only
+            .iter()
+            .map(|(argument, values)| format!("{argument} may only be {}", values.join(", ")))
+            .collect::<Vec<_>>()
+            .join("; "),
+    };
+    fields.push(("only", "Its limits", only));
+    if !declaration.except.is_empty() {
+        fields.push((
+            "except",
+            "The projects whose agents do not get it",
+            declaration.except.join(", "),
+        ));
+    }
+    fields
+}
+
+/// The keys whose values differ between two declarations, in the order of the declaration.
+fn changed(before: &Declaration, after: &Declaration) -> Vec<&'static str> {
+    let (before, after) = (before.json(), after.json());
+    KEYS.iter()
+        .copied()
+        .filter(|key| !matches!(*key, "name" | "enabled") && before.get(key) != after.get(key))
+        .collect()
+}
+
+/// What a call proposes: the declaration before (none for an add) and after (none for a
+/// removal), and the settings a `set` gives. The refusal of a call that does not fit, before the
+/// user is asked anything.
+struct Proposal {
+    action: String,
+    name: String,
+    before: Option<Declaration>,
+    after: Option<Declaration>,
+    settings: Map<String, Value>,
+}
+
+/// The method params of the user's door an agent's declaration is, checked as the form checks
+/// its fields: a command is one line split without a shell, shell syntax refused; a variable or a
+/// header names a vault entry every project sees.
+fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String, Value>, String> {
+    let given = args.as_object().ok_or("connections takes an object")?;
+    let entries = daemon
+        .read(|store| store.vault_entries())
+        .map_err(|error| error.to_string())?;
+    let mut params = Map::new();
+    for (key, value) in given {
+        if matches!(key.as_str(), "action" | "settings") {
+            continue;
+        }
+        if !AGENT_KEYS.contains(&key.as_str()) {
+            return Err(format!(
+                "{key}: not a key an agent sets; the keys are {}: the user sets the rest in the \
+                 window",
+                AGENT_KEYS.join(", ")
+            ));
+        }
+        let value = match (key.as_str(), value) {
+            ("env" | "headers" | "only", Value::Null) if editing => Value::Null,
+            ("command", Value::String(text)) => json!(flottille_core::command::split_line(text)?),
+            ("command", _) => {
+                return Err("command: one line, the program and its arguments, as a task's".into());
+            }
+            ("env" | "headers", Value::Object(map)) => {
+                let mut named = Map::new();
+                for (variable, entry) in map {
+                    let entry = entry.as_str().ok_or_else(|| {
+                        format!("{key}.{variable}: must name a vault entry, a text")
+                    })?;
+                    if !entries.iter().any(|known| known.name == entry) {
+                        // The value is not said back: it may be a secret written where a name goes.
+                        return Err(format!(
+                            "{key}.{variable}: names no vault entry: a secret is never written \
+                             here, only the name of an entry the vault list gives"
+                        ));
+                    }
+                    named.insert(variable.clone(), json!({"vault": entry}));
+                }
+                Value::Object(named)
+            }
+            ("env" | "headers", _) => {
+                return Err(format!(
+                    "{key}: must be an object, each name to its vault entry's name"
+                ));
+            }
+            (_, value) => value.clone(),
+        };
+        params.insert(key.clone(), value);
+    }
+    Ok(params)
+}
+
+fn proposal(daemon: &Daemon, args: &Value) -> Result<Proposal, String> {
+    let action = args["action"].as_str().unwrap_or_default().to_owned();
+    let name = args["name"]
+        .as_str()
+        .ok_or_else(|| {
+            format!("{action} needs name: {{\"action\": \"{action}\", \"name\": \"almanac\"}}")
+        })?
+        .to_owned();
+    let all = declarations(&daemon.paths)?;
+    let current = all.iter().find(|d| d.name == name).cloned();
+    let unknown = || {
+        let names: Vec<&str> = all.iter().map(|d| d.name.as_str()).collect();
+        match names.is_empty() {
+            true => format!("there is no connection {name}: none is declared"),
+            false => format!(
+                "there is no connection {name}: the connections are {}",
+                names.join(", ")
+            ),
+        }
+    };
+    let mut settings = Map::new();
+    let (before, after) = match action.as_str() {
+        "show" => (Some(current.ok_or_else(unknown)?), None),
+        "add" => {
+            if current.is_some() {
+                return Err(format!(
+                    "a connection {name} is declared already: edit it, or name this one otherwise"
+                ));
+            }
+            let params = params_of(daemon, args, false)?;
+            let declaration = Declaration::of(&params, "connection")?;
+            entries_checked(daemon, &declaration).map_err(|f| f.message)?;
+            (None, Some(declaration))
+        }
+        "edit" => {
+            let old = current.ok_or_else(unknown)?;
+            let params = params_of(daemon, args, true)?;
+            if params.len() < 2 {
+                return Err(format!(
+                    "edit needs what it changes: {}",
+                    AGENT_KEYS[1..].join(", ")
+                ));
+            }
+            let new = super::edited(&old, &Value::Object(params)).map_err(|f| f.message)?;
+            entries_checked(daemon, &new).map_err(|f| f.message)?;
+            if changed(&old, &new).is_empty() {
+                return Err(format!(
+                    "the connection {name} already says so: nothing to change"
+                ));
+            }
+            (Some(old), Some(new))
+        }
+        "remove" => (Some(current.ok_or_else(unknown)?), None),
+        "on" | "off" => {
+            let old = current.ok_or_else(unknown)?;
+            let on = action == "on";
+            if old.enabled == on {
+                return Err(format!("the connection {name} is {action} already"));
+            }
+            let mut new = old.clone();
+            new.enabled = on;
+            (Some(old), Some(new))
+        }
+        "set" => {
+            let old = current.ok_or_else(unknown)?;
+            let row = row(daemon, &name);
+            // Settings are given to what the user read: never to a server waiting for its review.
+            let Some(pin) = row
+                .pin
+                .as_ref()
+                .filter(|_| state_of(true, &old, &row) == State::Ready)
+            else {
+                return Err(format!(
+                    "the connection {name} waits for the user's review, where its actions are set"
+                ));
+            };
+            settings = args["settings"]
+                .as_object()
+                .filter(|settings| !settings.is_empty())
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "set needs settings: {{\"action\": \"set\", \"name\": \"{name}\", \
+                         \"settings\": {{\"search\": \"passes\"}}}}, each one of {}",
+                        SETTINGS.join(", ")
+                    )
+                })?;
+            for (action, setting) in &settings {
+                if !setting.as_str().is_some_and(|s| SETTINGS.contains(&s)) {
+                    return Err(format!(
+                        "settings.{action}: must be one of {}, not {setting}",
+                        SETTINGS.join(", ")
+                    ));
+                }
+                if pin.action(action).is_none() {
+                    let names: Vec<&str> = pin.actions.iter().map(|a| a.name.as_str()).collect();
+                    return Err(format!(
+                        "settings.{action}: {name} has no such action: its actions are {}",
+                        names.join(", ")
+                    ));
+                }
+            }
+            (Some(old.clone()), Some(old))
+        }
+        _ => return Err(format!("{action} is not an action of connections")),
+    };
+    Ok(Proposal {
+        action,
+        name,
+        before,
+        after,
+        settings,
+    })
+}
+
+/// What a write proposes, in words, for the card and for the comparison made before it is done:
+/// every field of what it leaves, with the old value where it changes one.
+fn words(daemon: &Daemon, proposal: &Proposal) -> Vec<String> {
+    let name = &proposal.name;
+    let tool = format!("{}{name}", super::PREFIX);
+    let mut says = Vec::new();
+    match (&proposal.before, &proposal.after) {
+        (None, Some(after)) => {
+            says.push(format!(
+                "Add the connection {name}: its tool {tool} is given to every agent of every \
+                 project, every action judged"
+            ));
+            says.extend(
+                fields(after)
+                    .into_iter()
+                    .map(|(_, label, value)| format!("{label}: {value}")),
+            );
+        }
+        (Some(before), None) => {
+            says.push(format!(
+                "Remove the connection {name}: its server is stopped and its tool {tool} leaves \
+                 every agent"
+            ));
+            says.extend(
+                fields(before)
+                    .into_iter()
+                    .map(|(_, label, value)| format!("{label}: {value}")),
+            );
+        }
+        (Some(before), Some(after)) if proposal.action == "edit" => {
+            says.push(format!(
+                "Edit the connection {name}: {}",
+                changed(before, after).join(", ")
+            ));
+            let old = fields(before);
+            for (key, label, value) in fields(after) {
+                match old.iter().find(|(k, _, _)| *k == key) {
+                    Some((_, _, was)) if *was != value => {
+                        says.push(format!("{label}: {was} → {value}"));
+                    }
+                    Some(_) => says.push(format!("{label}: {value}")),
+                    None => says.push(format!("{label}: {value} (new)")),
+                }
+            }
+            for (key, label, was) in &old {
+                if !fields(after).iter().any(|(k, _, _)| k == key) {
+                    says.push(format!("{label}: {was} → removed"));
+                }
+            }
+        }
+        (Some(before), Some(_)) if proposal.action == "set" => {
+            let row = row(daemon, name);
+            for (action, setting) in &proposal.settings {
+                says.push(format!(
+                    "Set the action {action} of the connection {name} to {}, from {}",
+                    setting.as_str().unwrap_or_default(),
+                    setting_of(&row, action)
+                ));
+            }
+            says.extend(
+                fields(before)
+                    .into_iter()
+                    .map(|(_, label, value)| format!("{label}: {value}")),
+            );
+        }
+        (Some(before), Some(_)) => {
+            says.push(match proposal.action.as_str() {
+                "on" => format!(
+                    "Turn the connection {name} on: its tool {tool} is given to every agent of \
+                     every project"
+                ),
+                _ => format!("Turn the connection {name} off: its tool {tool} leaves every agent"),
+            });
+            says.extend(
+                fields(before)
+                    .into_iter()
+                    .map(|(_, label, value)| format!("{label}: {value}")),
+            );
+        }
+        (None, None) => {}
+    }
+    says
+}
+
+/// A call checked before the gate is asked: what a write changes, in words, or the tool's
+/// refusal. A child reads the connections and changes none.
+pub fn says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<String>, Outcome> {
+    let action = args["action"].as_str().unwrap_or_default();
+    if !ACTIONS.contains(&action) {
+        return Err(refused(format!(
+            "connections has no action {action:?}: its actions are {}",
+            actions()
+        )));
+    }
+    if writes("connections", args) && !root {
+        return Err(refused(
+            "a child reads the connections; the agent the user talks to proposes a change of \
+             them: ask your parent (ask)",
+        ));
+    }
+    if !WRITES.contains(&action) {
+        return Ok(Vec::new());
+    }
+    let proposal = proposal(daemon, args).map_err(refused)?;
+    Ok(words(daemon, &proposal))
+}
+
+/// The connection's lines, as `list` gives them: never a secret, its state and its actions.
+fn listed(daemon: &Daemon, declaration: &Declaration, on: bool) -> String {
+    let row = row(daemon, &declaration.name);
+    let state = state_of(on, declaration, &row).word();
+    let actions = row.pin.as_ref().map_or(0, |pin| pin.actions.len());
+    let mut line = format!(
+        "- {} ({}{}): {state}, {actions} actions. {}",
+        declaration.name,
+        super::PREFIX,
+        declaration.name,
+        declaration.about
+    );
+    if let Some(failing) = client::failing(daemon, &declaration.name) {
+        line.push_str(&format!(" Failing: {failing}"));
+    }
+    line
+}
+
+/// `list` and `show`, and a write the user accepted, done by the path of their own Save.
+pub async fn tool(daemon: &Arc<Daemon>, args: Value) -> Outcome {
+    let on = super::super::is_on(&daemon.paths, &EXTENSION);
+    match args["action"].as_str().unwrap_or_default() {
+        "list" => match declarations(&daemon.paths) {
+            Err(why) => Outcome::Failed(why),
+            Ok(all) if all.is_empty() => Outcome::Done(format!(
+                "No connection is declared. Connections are {}.",
+                if on { "on" } else { "off" }
+            )),
+            Ok(all) => {
+                let mut text = format!(
+                    "Connections are {}.\n",
+                    if on {
+                        "on"
+                    } else {
+                        "off: no connection is given to agents"
+                    }
+                );
+                for declaration in &all {
+                    text.push_str(&listed(daemon, declaration, on));
+                    text.push('\n');
+                }
+                Outcome::Done(text)
+            }
+        },
+        "show" => match proposal(daemon, &args) {
+            Err(why) => refused(why),
+            Ok(Proposal {
+                before: Some(declaration),
+                ..
+            }) => {
+                let row = row(daemon, &declaration.name);
+                let mut text = listed(daemon, &declaration, on);
+                for (_, label, value) in fields(&declaration) {
+                    text.push_str(&format!("\n{label}: {value}"));
+                }
+                if let Some(pin) = &row.pin {
+                    let server = &pin.server;
+                    text.push_str(&format!(
+                        "\nIts server, as the user accepted it: {} {}",
+                        server["name"].as_str().unwrap_or_default(),
+                        server["version"].as_str().unwrap_or_default()
+                    ));
+                    for action in &pin.actions {
+                        text.push_str(&format!(
+                            "\n- {}: {}",
+                            action.name,
+                            setting_of(&row, &action.name)
+                        ));
+                    }
+                }
+                Outcome::Done(text)
+            }
+            Ok(_) => refused("nothing to show"),
+        },
+        _ => write(daemon, args).await,
+    }
+}
+
+/// A write the user accepted: what it says was compared with what they read before this is
+/// called (the request's words, made again).
+async fn write(daemon: &Arc<Daemon>, args: Value) -> Outcome {
+    let proposal = match proposal(daemon, &args) {
+        Ok(proposal) => proposal,
+        Err(why) => return refused(why),
+    };
+    let name = proposal.name.clone();
+    let answered = match proposal.action.as_str() {
+        "add" => match params_of(daemon, &args, false) {
+            Ok(params) => super::add(daemon, Value::Object(params)).await,
+            Err(why) => return refused(why),
+        },
+        // The whole declaration the card showed, not the agent's keys merged on what is there
+        // by then: a key it does not hold is removed.
+        "edit" => match &proposal.after {
+            Some(after) => {
+                let mut params = after.json();
+                // A command given drops the URL and the other way round: neither is nulled.
+                for key in KEYS
+                    .iter()
+                    .filter(|key| !matches!(**key, "command" | "url"))
+                {
+                    if params.get(*key).is_none() {
+                        params[*key] = Value::Null;
+                    }
+                }
+                super::edit(daemon, params).await
+            }
+            None => return refused("nothing to write"),
+        },
+        "remove" => super::remove(daemon, json!({"name": name})).await,
+        "on" | "off" => {
+            super::edit(
+                daemon,
+                json!({"name": name, "enabled": proposal.action == "on"}),
+            )
+            .await
+        }
+        "set" => settings_only(daemon, &name, &json!({"actions": proposal.settings}))
+            .await
+            .map(|()| {
+                crate::projects::tools_changed(daemon);
+                super::changed_event(daemon, &name, None);
+                Value::Null
+            }),
+        _ => return refused("not a write"),
+    };
+    match answered {
+        Err(failure) => Outcome::Failed(failure.message),
+        Ok(shown) => Outcome::Done(match proposal.action.as_str() {
+            "add" | "edit" => given_said(&name, &shown),
+            "remove" => format!("Removed the connection {name}: its tool left every agent."),
+            "on" => format!(
+                "Turned the connection {name} on. {}",
+                given_said(&name, &shown)
+            ),
+            "off" => format!("Turned the connection {name} off: its tool left every agent."),
+            _ => format!("Set the actions of the connection {name} as asked."),
+        }),
+    }
+}
+
+/// Whether the write gave the connection to agents, and why not.
+fn given_said(name: &str, shown: &Value) -> String {
+    if shown["given"] == true {
+        return format!(
+            "The connection {name} is written and given to agents: its tool {}{name}, every \
+             action judged.",
+            super::PREFIX
+        );
+    }
+    let why = match (shown["state"].as_str(), shown["failing"].as_str()) {
+        (_, Some(failing)) => format!("its server did not start: {failing}"),
+        (Some("off"), _) => "it is off, or Connections are".to_owned(),
+        (Some("ready"), _) => {
+            return format!("The connection {name} is written; it was given already.");
+        }
+        _ => "its server announces a change the user reviews first".to_owned(),
+    };
+    format!("The connection {name} is written, not given to agents yet: {why}.")
+}
+
+// ── The user's door ──────────────────────────────────────────────────────────────────────────
+
+/// `connection.add` and `.edit` take the number of an agent's request the user answers with
+/// values of their own ("Edit" on its card): the params without it, and the number.
+pub(super) fn taken(mut params: Value) -> Result<(Value, Option<u64>), Failure> {
+    let Some(map) = params.as_object_mut() else {
+        return Ok((params, None));
+    };
+    match map.remove("request") {
+        None | Some(Value::Null) => Ok((params, None)),
+        Some(number) => number
+            .as_u64()
+            .map(|number| (params, Some(number)))
+            .ok_or_else(|| Failure::refused("request: the number of an agent's request")),
+    }
+}
+
+/// Refuses a request the user's own Save cannot answer: another tool's, another action's, an
+/// edit of another connection, or one already decided.
+pub(super) fn answerable(
+    daemon: &Daemon,
+    number: u64,
+    action: &str,
+    name: &str,
+) -> Result<(), Failure> {
+    let request = daemon
+        .read(|store| store.request(number))?
+        .ok_or_else(|| Failure::new("not-found", format!("there is no request #{number}")))?;
+    // The user may name the server they add otherwise; an edit is of the connection it names.
+    if request.tool != "connections"
+        || request.arguments["action"] != action
+        || (action == "edit" && request.arguments["name"] != name)
+        || request.held_by != approval::USER
+    {
+        return Err(Failure::refused(format!(
+            "request #{number} is not an agent's {action} of the connection {name}"
+        )));
+    }
+    if request.state != RequestState::Pending {
+        return Err(Failure::refused(format!(
+            "request #{number} is already decided: it was {}",
+            request.state.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// The request the user answered by writing their own values: decided, and the agent told what
+/// was written instead. One decided meanwhile is left as it is.
+pub(super) fn answered(daemon: &Arc<Daemon>, number: u64, written: &Declaration) {
+    let decided = daemon.write(|store| {
+        Ok(
+            match store.decide(number, Decision::Once, approval::USER)? {
+                Some((request, event)) => (Some(request), Some(event)),
+                None => (None, None),
+            },
+        )
+    });
+    let Ok(Some(request)) = decided else {
+        return;
+    };
+    let mut body = format!(
+        "Request #{number} (connections) was not done as you asked: the user wrote the \
+         connection {} themselves, with changes of their own. It now says:",
+        written.name
+    );
+    for (_, label, value) in fields(written) {
+        body.push_str(&format!("\n{label}: {value}"));
+    }
+    crate::approvals::store_answer(daemon, &request, "done", &body);
+}
+
+/// `connection.proposed {number}`: what an agent's request would write, for its card: the
+/// declaration before and after, the keys it changes, the settings of a `set`, and whether it is
+/// still what the request said (`current`): one that is not would not be done.
+pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure> {
+    let number = params["number"]
+        .as_u64()
+        .ok_or_else(|| Failure::refused("the request's `number` is required"))?;
+    let request = daemon
+        .read(|store| store.request(number))?
+        .ok_or_else(|| Failure::new("not-found", format!("there is no request #{number}")))?;
+    if request.tool != "connections" || !writes("connections", &request.arguments) {
+        return Err(Failure::refused(format!(
+            "request #{number} proposes no connection"
+        )));
+    }
+    let args = &request.arguments;
+    let proposal = match proposal(daemon, args) {
+        Ok(proposal) => proposal,
+        Err(why) => {
+            return Ok(
+                json!({"number": number, "action": args["action"], "name": args["name"],
+                "before": declaration(&daemon.paths, args["name"].as_str().unwrap_or_default())
+                    .ok().map(|d| d.json()),
+                "after": null, "changed": [], "settings": {}, "current": false,
+                "why": why}),
+            );
+        }
+    };
+    let place = daemon
+        .read(|store| store.agent(&request.agent))
+        .ok()
+        .flatten()
+        .and_then(|agent| mcp::grant_of(daemon, &agent).ok())
+        .map(|grant| grant.place);
+    let current = place.is_some_and(|place| {
+        let now: Vec<String> = words(daemon, &proposal)
+            .iter()
+            .map(|said| mcp::masked(said, &place))
+            .collect();
+        crate::actions::compared(&now) == crate::actions::compared(&request.says)
+    });
+    let changed = match (&proposal.before, &proposal.after) {
+        (Some(before), Some(after)) => changed(before, after),
+        _ => Vec::new(),
+    };
+    Ok(json!({
+        "number": number,
+        "action": proposal.action,
+        "name": proposal.name,
+        "before": proposal.before.as_ref().map(Declaration::json),
+        "after": proposal.after.as_ref().map(Declaration::json),
+        "changed": changed,
+        "settings": proposal.settings,
+        "current": current,
+        "why": null,
+    }))
+}

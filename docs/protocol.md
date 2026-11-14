@@ -561,6 +561,16 @@ setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
   it is, keeping the settings of the actions that did not change and putting each new or changed
   one to `judged`; `actions` sets some by name. On a connection already ready, it sets them alone.
   `refused` before a review.
+- `connection.proposed {number}` answers what an agent's held `connections` write (`docs/tools.md`,
+  "Connections") would leave, for its card: `{"number", "action", "name", "before", "after",
+  "changed", "settings", "current", "why"}`, `before` and `after` being declarations as
+  `connection.list` gives them (`null` for an add's `before` and a removal's `after`), `changed` the
+  keys an edit changes, `settings` those a `set` gives, and `current` whether it is still what the
+  request says: one that is not is not done once allowed (`why` says why, when it can no longer be
+  done at all).
+- `connection.add` and `connection.edit` take `request`, the number of a pending `add` or `edit`
+  of that very connection an agent asked: the user's own values are written instead of the
+  agent's (the card's **Edit**), and the request is answered, the agent told what was written.
 
 Each emits `connection.changed`; accepting, turning one on or off and a cut-off give every running
 session the tools it has now before the answer (`docs/tools.md`, "When the tools change").
