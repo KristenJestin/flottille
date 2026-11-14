@@ -2364,8 +2364,10 @@ fn a_call_running_when_the_connection_is_turned_off_answers_that_it_failed() {
 
 // ── The user's door ──────────────────────────────────────────────────────────────────────────
 
+/// An agent proposes a connection through its `connections` family, held for the user
+/// (`connection_requests.rs`); the user's door itself, its methods and the file, is not its.
 #[test]
-fn an_agent_cannot_declare_or_edit_a_connection() {
+fn an_agent_reaches_neither_the_users_methods_nor_the_file() {
     let user = user();
     project(&user, "app");
     connect(&user, "almanac", &almanac(), json!({}));
@@ -2375,7 +2377,8 @@ fn an_agent_cannot_declare_or_edit_a_connection() {
     assert!(
         !names
             .iter()
-            .any(|n| n.starts_with("connection") || n.starts_with("extension")),
+            .any(|n| (n.starts_with("connection") && n != "connections")
+                || n.starts_with("extension")),
         "{names:?}"
     );
     let answer = mcp.call("connection.add", json!({"name": "x"}));

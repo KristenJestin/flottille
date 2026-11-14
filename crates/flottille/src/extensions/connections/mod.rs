@@ -8,6 +8,7 @@
 mod client;
 pub mod command;
 mod oauth;
+pub mod requests;
 mod schema;
 
 use std::collections::BTreeMap;
@@ -1383,6 +1384,7 @@ fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
             "connection.review" => review(&daemon, params).await,
             "connection.accept" => accept(&daemon, params).await,
             "connection.login" => login(&daemon, params).await,
+            "connection.proposed" => requests::proposed(&daemon, &params),
             method => Err(Failure::new(
                 "unknown-method",
                 format!("unknown method `{method}`"),
@@ -1497,7 +1499,20 @@ fn servers(
         })
 }
 
+/// What a write checks once more where it writes, under the file's lock or the server's turn: an
+/// agent's request the user accepted is still what they read (`requests::write`).
+pub(super) type Still<'a> = &'a (dyn Fn() -> std::result::Result<(), Failure> + Sync);
+
 async fn add(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    add_if(daemon, params, &|| Ok(())).await
+}
+
+async fn add_if(
+    daemon: &Arc<Daemon>,
+    params: Value,
+    still: Still<'_>,
+) -> std::result::Result<Value, Failure> {
+    let (params, request) = requests::taken(params)?;
     let table = params
         .as_object()
         .ok_or_else(|| Failure::refused("connection.add takes an object"))?;
@@ -1509,16 +1524,34 @@ async fn add(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, 
             "a connection {name} is declared already: edit it, or name this one otherwise"
         )));
     }
+    if let Some(number) = request {
+        requests::answerable(daemon, number, "add", &name)?;
+    }
     let new = table_of(&declaration)?;
-    super::rewrite(daemon, &EXTENSION, |table| {
+    let mut claimed = None;
+    let written = super::rewrite(daemon, &EXTENSION, |table| {
+        // Decided under the file's lock, before it is written: an Accept of the same request
+        // that decided it first is the one that writes, and this Save writes nothing.
+        still()?;
+        if let Some(number) = request {
+            claimed = Some(requests::claimed(daemon, number)?);
+        }
         servers(table)?.push(new);
         Ok(())
-    })?;
+    });
+    if let (Some(claimed), Err(failure)) = (&claimed, &written) {
+        requests::told(daemon, claimed, Err(&failure.message));
+    }
+    written?;
     // A connection added under a name that was removed starts from nothing.
     forget_row(daemon, &name)?;
     changed_event(daemon, &name, None);
     let given = pin_at_once(daemon, &name).await;
-    shown_given(daemon, &name, given)
+    let shown = shown_given(daemon, &name, given);
+    if let Some(claimed) = &claimed {
+        requests::told(daemon, claimed, Ok(&declaration));
+    }
+    shown
 }
 
 /// A connection is given to agents at once, as it is added, edited, turned on or signed in: what
@@ -1597,8 +1630,61 @@ fn shown_given(daemon: &Daemon, name: &str, given: bool) -> std::result::Result<
 /// `connection.edit {name, …}`: the keys given replace the declaration's; `null` removes one.
 /// A command given drops the URL, and the other way round.
 async fn edit(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    edit_if(daemon, params, &|| Ok(())).await
+}
+
+async fn edit_if(
+    daemon: &Arc<Daemon>,
+    params: Value,
+    still: Still<'_>,
+) -> std::result::Result<Value, Failure> {
+    let (params, request) = requests::taken(params)?;
     let name = named(&params)?;
     let old = declaration(&daemon.paths, &name)?;
+    if let Some(number) = request {
+        requests::answerable(daemon, number, "edit", &name)?;
+    }
+    let new = edited(&old, &params)?;
+    entries_checked(daemon, &new)?;
+    let written = table_of(&new)?;
+    let mut claimed = None;
+    let rewritten = super::rewrite(daemon, &EXTENSION, |table| {
+        let servers = servers(table)?;
+        let at = (0..servers.len())
+            .find(|at| {
+                servers
+                    .get(*at)
+                    .and_then(|table| table.get("name")?.as_str())
+                    == Some(name.as_str())
+            })
+            .ok_or_else(|| Failure::new("not-found", format!("no connection {name}")))?;
+        still()?;
+        // Decided under the file's lock, as an add's.
+        if let Some(number) = request {
+            claimed = Some(requests::claimed(daemon, number)?);
+        }
+        *servers.get_mut(at).expect("found") = written;
+        Ok(())
+    });
+    if let (Some(claimed), Err(failure)) = (&claimed, &rewritten) {
+        requests::told(daemon, claimed, Err(&failure.message));
+    }
+    rewritten?;
+    if new.digest() != old.digest() || !new.enabled {
+        client::stop_soon(daemon, &name);
+    }
+    changed_event(daemon, &name, None);
+    let given = pin_at_once(daemon, &name).await;
+    let shown = shown_given(daemon, &name, given);
+    if let Some(claimed) = &claimed {
+        requests::told(daemon, claimed, Ok(&new));
+    }
+    shown
+}
+
+/// The declaration `old` with the keys `params` gives replacing its own, `null` removing one; a
+/// command given drops the URL, and the other way round.
+fn edited(old: &Declaration, params: &Value) -> std::result::Result<Declaration, Failure> {
     let mut table = old.json().as_object().expect("an object").clone();
     for (key, value) in params.as_object().into_iter().flatten() {
         if key == "name" {
@@ -1628,34 +1714,22 @@ async fn edit(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value,
             }
         }
     }
-    let new = Declaration::of(&table, "connection").map_err(Failure::refused)?;
-    entries_checked(daemon, &new)?;
-    let written = table_of(&new)?;
-    super::rewrite(daemon, &EXTENSION, |table| {
-        let servers = servers(table)?;
-        let at = (0..servers.len())
-            .find(|at| {
-                servers
-                    .get(*at)
-                    .and_then(|table| table.get("name")?.as_str())
-                    == Some(name.as_str())
-            })
-            .ok_or_else(|| Failure::new("not-found", format!("no connection {name}")))?;
-        *servers.get_mut(at).expect("found") = written;
-        Ok(())
-    })?;
-    if new.digest() != old.digest() || !new.enabled {
-        client::stop_soon(daemon, &name);
-    }
-    changed_event(daemon, &name, None);
-    let given = pin_at_once(daemon, &name).await;
-    shown_given(daemon, &name, given)
+    Declaration::of(&table, "connection").map_err(Failure::refused)
 }
 
 async fn remove(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    remove_if(daemon, params, &|| Ok(())).await
+}
+
+async fn remove_if(
+    daemon: &Arc<Daemon>,
+    params: Value,
+    still: Still<'_>,
+) -> std::result::Result<Value, Failure> {
     let name = named(&params)?;
     declaration(&daemon.paths, &name)?;
     super::rewrite(daemon, &EXTENSION, |table| {
+        still()?;
         let servers = servers(table)?;
         servers.retain(|table| table.get("name").and_then(|name| name.as_str()) != Some(&name));
         Ok(())
@@ -1810,16 +1884,7 @@ async fn accept_checked(
             )));
         }
     } else {
-        // The pin is read under the turn: a server that starts moves it (`move_pin`), and what is
-        // written here is the settings, never the pin read before.
-        client::exclusively(daemon, &name, async {
-            let row = self::row(daemon, &name);
-            let pin = row.pin.as_ref().ok_or_else(|| review_first(&name))?;
-            let settings = settings_of_accept(&row, pin, &params)?;
-            write_row(daemon, &name, |row| row.settings = settings, None)?;
-            Ok::<_, Failure>(())
-        })
-        .await?;
+        settings_only(daemon, &name, &params, &|| Ok(())).await?;
     }
     in_space(daemon, |space| {
         space.tables().execute(
@@ -1831,6 +1896,26 @@ async fn accept_checked(
     crate::projects::tools_changed(daemon);
     changed_event(daemon, &name, None);
     shown(daemon, &name)
+}
+
+/// The settings of `params["actions"]` written alone, never the pin: it is read under the turn,
+/// where a server that starts moves it (`move_pin`), and what is written is the settings, never
+/// the pin read before.
+async fn settings_only(
+    daemon: &Daemon,
+    name: &str,
+    params: &Value,
+    still: Still<'_>,
+) -> std::result::Result<(), Failure> {
+    client::exclusively(daemon, name, async {
+        still()?;
+        let row = self::row(daemon, name);
+        let pin = row.pin.as_ref().ok_or_else(|| review_first(name))?;
+        let settings = settings_of_accept(&row, pin, params)?;
+        write_row(daemon, name, |row| row.settings = settings, None)?;
+        Ok::<_, Failure>(())
+    })
+    .await
 }
 
 fn review_first(name: &str) -> Failure {
