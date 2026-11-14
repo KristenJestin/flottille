@@ -2192,6 +2192,7 @@ dependencies = [
 name = "flottille-core"
 version = "0.1.0"
 dependencies = [
+ "flottille-protocol",
  "image",
  "libc",
  "regex",
@@ -2270,6 +2271,14 @@ version = "0.1.0"
 [[package]]
 name = "flottille-fake-server"
 version = "0.1.0"
+
+[[package]]
+name = "flottille-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "flottille-window"
