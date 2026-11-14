@@ -344,7 +344,7 @@ fn an_edit_shows_its_differences_in_the_dialog(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn refuse_asks_in_the_confirmation_dialog_and_writes_nothing(cx: &mut TestAppContext) {
+fn refuse_writes_nothing_without_a_confirmation(cx: &mut TestAppContext) {
     let user = user();
     let (lead, mcp) = a_root(&user);
     let line = line_of(&user, "almanac");
@@ -356,10 +356,9 @@ fn refuse_asks_in_the_confirmation_dialog_and_writes_nothing(cx: &mut TestAppCon
     let (shell, cx) = window(&user, cx);
     open_card(&shell, cx, &lead, number);
     open_dialog(&shell, cx, number);
+    // Refusing writes nothing, as the rail's Deny: it is not confirmed.
     click(cx, "connection-request-refuse");
-    assert!(visible(cx, "connection-request-refusal"));
-    assert_eq!(pending(&user), 1, "asked first");
-    click(cx, "connection-request-refusal-action");
+    assert!(!present(cx, "connection-request-refusal"));
     until(&shell, cx, "the toast", |cx| {
         toasts(&shell, cx)
             .iter()

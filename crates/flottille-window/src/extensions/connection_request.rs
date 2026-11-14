@@ -3,11 +3,12 @@
 //! from there. The dialog shows what the daemon says the request would write
 //! (`connection.proposed`): the fields of "New server", filled and read-only, an edit's changed
 //! fields with their old value, a `set`'s settings, then Accept, Edit and Refuse. Accept and
-//! Refuse answer the request (Refuse after the confirmation dialog); Edit opens the server's own
+//! Refuse answer the request (Refuse writes nothing, and asks nothing more, as the rail's Deny);
+//! Edit opens the server's own
 //! form with the agent's values, whose Save answers it. The results are toasts.
 
 use gpui_design_system::{
-    Button, Confirm, Field, Modal, Skeleton, Tag, Toast, awaiting, palette, space, toast,
+    Button, Field, Modal, Skeleton, Tag, Toast, awaiting, palette, space, toast,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -115,7 +116,6 @@ pub struct ConnectionRequest {
     open: bool,
     proposal: Option<Result<Proposal, String>>,
     deciding: bool,
-    refusing: bool,
     error: Option<SharedString>,
 }
 
@@ -127,7 +127,6 @@ impl ConnectionRequest {
             open: false,
             proposal: None,
             deciding: false,
-            refusing: false,
             error: None,
         }
     }
@@ -151,7 +150,6 @@ impl ConnectionRequest {
         self.open = true;
         self.proposal = None;
         self.deciding = false;
-        self.refusing = false;
         self.error = None;
         self.ask(
             "connection.proposed",
@@ -164,7 +162,6 @@ impl ConnectionRequest {
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
-        self.refusing = false;
         cx.notify();
     }
 
@@ -248,7 +245,6 @@ impl ConnectionRequest {
         let Some(number) = self.number.filter(|_| !self.deciding) else {
             return;
         };
-        self.refusing = false;
         self.deciding = true;
         self.error = None;
         self.ask(
@@ -609,12 +605,9 @@ impl Render for ConnectionRequest {
         modal = modal.child(body).kept(stale_line).kept(error);
         let decided = self.deciding;
         modal = modal.action(
-            Button::secondary("connection-request-refuse", "Refuse")
+            Button::quiet("connection-request-refuse", "Refuse")
                 .disabled(decided || self.number.is_none())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.refusing = true;
-                    cx.notify();
-                })),
+                .on_click(cx.listener(|this, _, _, cx| this.refuse(cx))),
         );
         if ready.is_some_and(Proposal::editable) {
             modal = modal.action(
@@ -636,26 +629,6 @@ impl Render for ConnectionRequest {
                 .on_click(cx.listener(|this, _, _, cx| this.accept(cx))),
             );
         }
-        let name = ready.map(|p| p.name.clone()).unwrap_or_default();
-        let (confirm, cancel) = (cx.entity().downgrade(), cx.entity().downgrade());
-        let refusal = Confirm::new(
-            "connection-request-refusal",
-            format!("Refuse the agent's request for {name}?"),
-        )
-        .sentence("Nothing is written, and the agent is told you refused it.")
-        .action("Refuse request")
-        .open(self.refusing)
-        .on_confirm(move |_, cx| {
-            confirm.update(cx, |this, cx| this.refuse(cx)).ok();
-        })
-        .on_cancel(move |_, cx| {
-            cancel
-                .update(cx, |this, cx| {
-                    this.refusing = false;
-                    cx.notify();
-                })
-                .ok();
-        });
-        div().child(modal).child(refusal)
+        modal
     }
 }
