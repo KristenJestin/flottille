@@ -9,19 +9,19 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use gpui_design_system::motion::{HOVER, PANEL};
+use gpui_design_system::motion::{HOVER, Motion, PANEL};
 use gpui_design_system::{
     BulkBar, Button, CheckState, Checkbox, ChoiceRow, Confirm, DiffLine, DiffLines, EmptyLine,
     Field, FilterChip, FilterChips, Group, Grouped, Icon, Item, ListCard, ListRow, Listing, Menu,
     Modal, RadioChoices, SearchField, Section, Select, SelectOption, Skeleton, Summary, Tag, Toast,
-    Tone, Type as _, Unfolding, awaiting, fade, fuzzy, icon, palette, presence, presence_of, space,
-    tipped_when_cut, toast,
+    Tone, Type as _, Unfolding, awaiting, changing, fade, fuzzy, icon, palette, presence,
+    presence_of, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     AnyElement, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
     IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    Subscription, TestSupportExt as _, WeakEntity, Window, div, px, relative,
 };
 use serde_json::{Map, Value, json};
 
@@ -674,6 +674,25 @@ impl Review {
     fn setting_of(&self, name: &str) -> &str {
         self.settings.get(name).map_or("judged", String::as_str)
     }
+}
+
+/// A number that moves to `target` over a panel's time whenever it changes, as the kit's `fade`
+/// moves a state between 0 and 1: `id` keeps it, and a first value is simply there.
+fn eased(id: ElementId, target: f32, window: &mut Window, cx: &mut gpui_kit::App) -> f32 {
+    let key = ElementId::NamedChild(Arc::new(id), "eased".into());
+    let state = window.use_keyed_state(key, cx, move |_, _| Motion::settled(target));
+    let now = cx.background_executor().now();
+    let reduce = cx.reduce_motion();
+    let motion = state.update(cx, |motion, _| {
+        if motion.target() != target {
+            motion.animate(target, PANEL, now, reduce);
+        }
+        *motion
+    });
+    if motion.is_running(now) {
+        window.request_animation_frame();
+    }
+    motion.value(now)
 }
 
 pub struct ConnectionsSection {
@@ -2445,6 +2464,110 @@ impl ConnectionsSection {
         })
     }
 
+    /// What the review leaves to the judge and where it does not, over every action it holds
+    /// (not the ones the search shows): a sentence and a thin bar split by setting. The numbers
+    /// change as the text does, the split over a panel's time.
+    fn review_split(
+        diff: &Diff,
+        review: &Review,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette(cx);
+        let held: Vec<&ActionDiff> = diff
+            .actions
+            .iter()
+            .filter(|a| a.change != "removed")
+            .collect();
+        let count = |key: &str| {
+            held.iter()
+                .filter(|a| review.setting_of(&a.name) == key)
+                .count()
+        };
+        let (judged, exceptions) = (
+            count("judged"),
+            [("passes", "allowed"), ("asked", "asked"), ("off", "off")]
+                .map(|(key, word)| (key, count(key), word)),
+        );
+        let said: Vec<String> = exceptions
+            .iter()
+            .filter(|(_, n, _)| *n > 0)
+            .map(|(_, n, word)| format!("{n} {word}"))
+            .collect();
+        let sentence = match said.is_empty() {
+            true => format!("All {judged} left to the judge"),
+            false => format!(
+                "{judged} left to the judge \u{b7} your exceptions: {}",
+                said.join(", ")
+            ),
+        };
+        let total = held.len().max(1) as f32;
+        let segments = [
+            ("judged", judged, p.line2),
+            ("passes", exceptions[0].1, p.ok),
+            ("asked", exceptions[1].1, p.text),
+            ("off", exceptions[2].1, p.faint),
+        ]
+        .map(|(key, n, color)| {
+            let id = ElementId::Name(format!("connection-review-bar-{key}").into());
+            let share = eased(id.clone(), n as f32 / total, window, cx);
+            div()
+                .id(id)
+                .h_full()
+                .w(relative(share))
+                .bg(color)
+                .test_support()
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::XS)
+            .child(
+                div()
+                    .id("connection-review-left")
+                    .aria_label(SharedString::from(sentence.clone()))
+                    .text_size(px(12.5))
+                    .child(changing(
+                        "connection-review-left-words",
+                        sentence,
+                        move |said| {
+                            let (lead, rest) = said
+                                .split_once(" \u{b7} ")
+                                .map_or((said.as_ref(), ""), |(a, b)| (a, b));
+                            div()
+                                .flex()
+                                .gap(space::XS)
+                                .text_color(p.mute)
+                                .child(
+                                    div()
+                                        .medium()
+                                        .text_color(p.text)
+                                        .child(SharedString::from(lead.to_owned())),
+                                )
+                                .children(
+                                    (!rest.is_empty())
+                                        .then(|| SharedString::from(format!("\u{b7} {rest}"))),
+                                )
+                                .into_any_element()
+                        },
+                    ))
+                    .test_support(),
+            )
+            .child(
+                div()
+                    .id("connection-review-bar")
+                    .w_full()
+                    .h(px(7.))
+                    .flex()
+                    .rounded(px(7.))
+                    .overflow_hidden()
+                    .bg(p.line)
+                    .children(segments)
+                    .test_support(),
+            )
+            .into_any_element()
+    }
+
     /// The bar of the rows ticked, and what the review is set to, which stay in sight.
     fn review_kept(&self, diff: &Diff, review: &Review, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
@@ -2591,6 +2714,7 @@ impl ConnectionsSection {
                             .child(SharedString::from(server))
                             .test_support(),
                     )
+                    .child(Self::review_split(diff, &review, window, cx))
                     .child(
                         SearchField::new("connection-review-search", &search, "Search the actions")
                             .placeholder(format!("Search {total} actions by name or description")),

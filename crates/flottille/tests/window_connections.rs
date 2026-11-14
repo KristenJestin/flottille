@@ -1539,6 +1539,87 @@ fn a_row_set_to_another_setting_moves_to_its_group(cx: &mut TestAppContext) {
     assert_eq!(height(cx, "connection-review-group-passes-body"), 0.);
 }
 
+/// The width drawn now of the element `id`, 0 where it is not there.
+fn width(cx: &mut VisualTestContext, id: &str) -> f32 {
+    let id = id.to_owned();
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .map_or(0., |found| f32::from(found.bounds().size.width))
+    })
+}
+
+#[gpui_kit::test]
+fn the_review_says_how_many_are_left_to_the_judge_and_the_exceptions(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    // With no exception, all of them are left to the judge, and the bar is one piece.
+    assert_eq!(
+        label(cx, "connection-review-left").as_deref(),
+        Some("All 14 left to the judge")
+    );
+    let whole = width(cx, "connection-review-bar");
+    assert!(whole > 0.);
+    assert!((width(cx, "connection-review-bar-judged") - whole).abs() < 1.);
+    assert_eq!(width(cx, "connection-review-bar-passes"), 0.);
+
+    // A pill changes it: the number at once, the split over a panel's time.
+    let id = "connection-review-row-3-browser_click";
+    click_pill(cx, id, "passes");
+    a_third_later(cx);
+    assert_eq!(
+        label(cx, "connection-review-left").as_deref(),
+        Some("13 left to the judge \u{b7} your exceptions: 1 allowed")
+    );
+    let (going, rest) = (
+        width(cx, "connection-review-bar-passes"),
+        width(cx, "connection-review-bar-judged"),
+    );
+    assert!(
+        0. < going && going < whole / 14. - 1.,
+        "the split moves: {going} of {}",
+        whole / 14.
+    );
+    assert!(rest < whole, "{rest}");
+    settle(cx);
+    assert!((width(cx, "connection-review-bar-passes") - whole / 14.).abs() < 1.);
+    assert!((width(cx, "connection-review-bar-judged") - whole * 13. / 14.).abs() < 1.);
+
+    // Each setting counts, also what a bulk sets; what is searched does not change it.
+    choose(cx, "browser_open", "asked");
+    choose(cx, "browser_back", "off");
+    assert_eq!(
+        label(cx, "connection-review-left").as_deref(),
+        Some("11 left to the judge \u{b7} your exceptions: 1 allowed, 1 asked, 1 off")
+    );
+    for name in ["browser_type", "browser_fill"] {
+        let row = row_of(cx, name);
+        click(cx, &format!("{row}-pick"));
+    }
+    click(cx, "connection-review-bulk-off");
+    assert_eq!(
+        label(cx, "connection-review-left").as_deref(),
+        Some("9 left to the judge \u{b7} your exceptions: 1 allowed, 1 asked, 3 off")
+    );
+    let field = search_field(&shell, cx);
+    type_in(&field, "cookie", cx);
+    settle(cx);
+    assert_eq!(
+        label(cx, "connection-review-left").as_deref(),
+        Some("9 left to the judge \u{b7} your exceptions: 1 allowed, 1 asked, 3 off"),
+        "all the actions, not the ones shown"
+    );
+}
+
 #[gpui_kit::test]
 fn a_ticked_row_hidden_by_the_search_is_not_set(cx: &mut TestAppContext) {
     let user = user();
