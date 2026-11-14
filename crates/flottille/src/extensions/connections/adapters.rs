@@ -109,14 +109,16 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_is_enabled", // a yes or a no
         "agent_browser_is_checked", // a yes or a no
         "agent_browser_tab_list", // the tabs' addresses and titles
-        "agent_browser_tab_switch", // a tab of the session
-        "agent_browser_tab_close", // a tab of the session
-        "agent_browser_frame_switch", // a frame of the page
-        "agent_browser_frame_main", // the main frame
-        "agent_browser_dialog_status", // the page's dialog, said by the page
-        "agent_browser_dialog_accept", // answers it
+        // a tab of the session; it also takes a CDP target id, and whether a target that is no
+        // page can be bound that way was not checked
+        "agent_browser_tab_switch",
+        "agent_browser_tab_close",      // a tab of the session
+        "agent_browser_frame_switch",   // a frame of the page
+        "agent_browser_frame_main",     // the main frame
+        "agent_browser_dialog_status",  // the page's dialog, said by the page
+        "agent_browser_dialog_accept",  // answers it
         "agent_browser_dialog_dismiss", // dismisses it
-        "agent_browser_close",    // ends the session
+        "agent_browser_close",          // ends the session
     ],
     locked: &[
         "agent_browser_auth_delete",
