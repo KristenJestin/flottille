@@ -1399,10 +1399,13 @@ to the front.
 
 ## 12. Later: remote
 
-Designed for, not built before the milestone "Remote": the daemon's protocol over an authenticated network
-transport (for example on a private network such as Tailscale), a light client on a phone, and
-sending work to another machine running Flottille (its daemon owns the agents there; the tree
-spans machines through deliveries).
+Designed for, not built before the milestone "Remote": the user's machines and devices, members
+of their own hub (the signed member list, invitations, presence, and a relay for what cannot go
+direct), linked peer to peer by their own keys over an end-to-end encrypted transport, each with a
+role (`runner`, `controller`, `viewer`); sessions started on another machine through the same
+`agent_launch`, the code sent over Flottille's own link and the new commits brought back, with the
+tree spanning machines through deliveries; a native Android app, tunnels to a run's port, and
+sharing vault entries and remote connections. The design is [`remote.md`](remote.md).
 
 ## 13. Milestones
 
