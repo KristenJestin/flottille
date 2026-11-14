@@ -1420,7 +1420,7 @@ fn the_window_draws_no_frame_at_rest_on_connections_page_and_its_review(cx: &mut
     settle(&shell, cx);
     cx.update(|window, cx| window.click("review-connection-notes", cx));
     until(&shell, cx, "the review is read", |cx| {
-        cx.update(|window, _| window.try_find("connection-review-action-search").is_some())
+        cx.update(|window, _| window.try_find("connection-review-row-3-search").is_some())
     });
     settle(&shell, cx);
     assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the review");
