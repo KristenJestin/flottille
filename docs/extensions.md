@@ -1158,8 +1158,8 @@ way in:
   `_auth_show`, `_auth_delete`, `agent_browser_set_credentials` (a password as an argument), its
   plugins `agent_browser_plugin_add`, `_plugin_list`, `_plugin_run`, `_plugin_show` (they run
   commands with its credential providers) and `agent_browser_with_login`, whatever the user set.
-- **Only the actions it knows cannot reach a typed secret stay on beside `login`**: an allowlist,
-  not a list of what may leak, which would miss the next one. Every other action, one it does not
+- **Only the actions it knows do not read a typed secret directly stay on beside `login`**: an
+  allowlist, not a list of what may leak, which would miss the next one. Every other action, one it does not
   know included (a 0.43 patch may add one), is **off at the first pin**, and **`login` is refused
   while one of them is on**; the review says which. A page script can copy a field into what any
   other action reads (the title, the text), and a component's state, a field's attributes or its
@@ -1177,6 +1177,17 @@ way in:
   options, reaches another browser (`connect`, `get_cdp_url`), or gives a field's value, its HTML,
   its attributes, a component's state or a snapshot (`get_value`, `get_attr`, `get_html`,
   `react_*`, `snapshot`).
+- **What stays possible.** The list narrows the ways to the secret; it does not close them all,
+  and each call of these actions is still judged by the gate, which is what stands against them:
+  - **a selector oracle**: on a site whose framework copies what is typed into the field's `value`
+    attribute (React does), the allowed actions that take a selector (`get_count`, `is_visible`,
+    `wait_for_selector`, `click`…) can test `input[value^=…]`, one guess at a time;
+  - **a show-password toggle**: clicked, the field shows the secret, which `screenshot` or
+    `get_text` then read;
+  - **a login form sent with GET** puts the secret in the address, where `get_url`, `tab_list` and
+    `wait_for_url` read it;
+  - **another tab of the session** that holds a window handle to the login tab could navigate it
+    between its load and its fill.
 - **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
   written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the
@@ -1197,7 +1208,12 @@ way in:
   agent-browser's own help shows them; a web address never starts with `-`), in the
   server's folder and with its environment, so on the **same browser session and namespace** as
   the server (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`). A connection reached by a URL,
-  or whose command has no `mcp`, refuses `login`. It has 120 seconds, as a call has.
+  or whose command has no `mcp`, refuses `login`. It has 120 seconds, as a call has. **A login that
+  fails** (or runs out of time) is followed by Flottille's own `open <the entry's URL>`, on the same
+  command line, folder, environment (without the token) and session: the page is loaded afresh, so
+  a secret typed into its form does not stay there (a browser does not restore a password field).
+  It is Flottille's call, not an agent's, so it does not need `open` on. If it fails too, the
+  login's error is still returned, masked, and says that the page could not be loaded again.
 - **The plugin is Flottille.** The daemon refuses every client that descends from it, so the
   login does not go through its socket: for that run alone the daemon listens on
   `connections/<name>/vault.sock` (in a folder of the user's alone, removed when the run ends)
