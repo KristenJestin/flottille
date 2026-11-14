@@ -69,8 +69,13 @@ jobs:
           fi
 
   # No real agent, no real configuration: the suites run against a fake ACP agent and throwaway
-  # repositories (see AGENTS.md, Testing). Skipped until the Cargo workspace exists.
-  verify:
+  # repositories (see AGENTS.md, Testing).
+  #
+  # The suite is split so that a pull request does not wait for every test binary one after the
+  # other on one runner: `check` builds the tests once into a nextest archive, the matrix `test`
+  # runs a sixth of them each on its own runner (`--partition count:k/6`), and `verify`, the
+  # required check, reports what they all said.
+  check:
     needs: verified-on-dev
     # `verified-on-dev` is skipped off main: `!cancelled()` keeps that from skipping this job.
     if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' }}
@@ -80,36 +85,98 @@ jobs:
       CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v4
-      - name: Is there a Cargo workspace yet
-        id: cargo
-        run: if [ -f Cargo.toml ]; then echo "present=true" >> "$GITHUB_OUTPUT"; fi
-      - if: steps.cargo.outputs.present == 'true'
-        run: rustup component add rustfmt clippy
-      - if: steps.cargo.outputs.present == 'true'
-        uses: Swatinem/rust-cache@v2
+      - run: rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
         with:
           # The key does not follow Cargo.toml: bump this one when a profile changes, or the
           # cache keeps the artefacts of the old profiles and never saves the new ones.
           prefix-key: v1-rust
+          # The name of the job that wrote the cache before the suite was split: the
+          # dependencies already cached are kept.
+          shared-key: verify
       # The window links against fontconfig and freetype; GPUI loads Wayland and Vulkan at run
       # time and opens no window here: its tests use GPUI's own test platform.
       - name: Have the window's system libraries
-        if: steps.cargo.outputs.present == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
-      - if: steps.cargo.outputs.present == 'true'
-        run: cargo fmt --check
-      - if: steps.cargo.outputs.present == 'true'
-        run: cargo clippy --all-targets --locked -- -D warnings
-      - if: steps.cargo.outputs.present == 'true'
-        run: cargo test --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      # Every test binary and the binaries they run (the fake agents, `flottille`), at the paths
+      # they were built for: the runners of `test` check out at the same place.
+      - run: cargo nextest archive --locked --archive-file "$RUNNER_TEMP/tests.tar.zst"
+      # nextest does not run doc tests.
+      - run: cargo test --doc --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tests
+          path: ${{ runner.temp }}/tests.tar.zst
+          # zstd already: zipping it again only takes time.
+          compression-level: 0
+          retention-days: 1
       # The margin left on the runner, read even when a step above failed.
       - name: Disk left
         if: always()
         run: df -h /
         # A failure to print it must not hide the verdict above.
         continue-on-error: true
+
+  test:
+    needs: check
+    # Not `success()`: it counts `verified-on-dev`, skipped off main, and would skip this job.
+    if: ${{ !cancelled() && needs.check.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Every partition says what fails in it, not only the first one to fail.
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6]
+    steps:
+      # The tests read the sources and fixtures of the workspace, and run its tools.
+      - uses: actions/checkout@v4
+      - name: Have the window's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+      - uses: actions/download-artifact@v4
+        with:
+          name: tests
+          path: ${{ runner.temp }}
+      # Extracted into the checkout, `target/` lands where `check` built it: a test finds the
+      # fake agents beside `CARGO_BIN_EXE_flottille`, a path written into it at build time.
+      - run: >-
+          cargo nextest run --archive-file "$RUNNER_TEMP/tests.tar.zst"
+          --workspace-remap "$GITHUB_WORKSPACE" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite
+          --partition count:${{ matrix.partition }}/6 --no-fail-fast
+      - name: Disk left
+        if: always()
+        run: df -h /
+        continue-on-error: true
+
+  # The required check: one job that always ends, success or failure, whatever happened to the
+  # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
+  verify:
+    needs: [verified-on-dev, check, test]
+    # Skipped only when this commit passed it on dev (on main, see `verified-on-dev`).
+    if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Did the checks and every partition pass
+        id: verdict
+        env:
+          CHECK: ${{ needs.check.result }}
+          TEST: ${{ needs.test.result }}
+        run: |
+          if [ "$CHECK" != success ] || [ "$TEST" != success ]; then
+            echo "::error::check: $CHECK, test: $TEST."
+            exit 1
+          fi
 
   # The packages (docs/releases.md): main is stable, dev beta, a feature branch its own alpha.
   # `build` runs the branch's code with a token that can only read; `publish`, once `verify`

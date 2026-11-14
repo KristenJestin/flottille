@@ -3138,11 +3138,12 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     };
     // `verify` is skipped only when the commit passed it on dev.
     let verify = job("verify");
-    assert!(verify.contains("needs: verified-on-dev"), "{verify}");
     assert!(
-        verify.contains(
-            "if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' }}"
-        ),
+        verify.contains("needs: [verified-on-dev, check, test]"),
+        "{verify}"
+    );
+    assert!(
+        verify.contains("if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}"),
         "{verify}"
     );
     // `publish` needs `verify` to have passed, or to have been skipped for that reason.
@@ -3169,6 +3170,27 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
         asks.contains("if: github.ref == 'refs/heads/main' &&"),
         "{asks}"
     );
+}
+
+#[test]
+fn verify_fails_unless_the_checks_and_every_partition_passed() {
+    // `verify` is the required check: a partition that failed, was cancelled or never ran fails
+    // it, as a failed `check` does.
+    let script = step_script(".github/workflows/ci.yml", "verdict");
+    let run = |check: &str, test: &str| {
+        Fake::new()
+            .run(&script, &[("CHECK", check), ("TEST", test)])
+            .status
+            .success()
+    };
+
+    assert!(run("success", "success"));
+    for test in ["failure", "cancelled", "skipped"] {
+        assert!(!run("success", test), "test: {test}");
+    }
+    for check in ["failure", "cancelled"] {
+        assert!(!run(check, "skipped"), "check: {check}");
+    }
 }
 
 #[test]
