@@ -3841,25 +3841,9 @@ fn agent_browser_logs_in_with_a_vault_entry() {
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));
     let (_, mcp) = signed_up(&user);
-    // Never on another site than the entry's: the secret would be typed into its form.
-    for url in [
-        "https://elsewhere.example.net/login",
-        "http://shop.example.com/login",
-    ] {
-        let answer = refused(mcp.call(
-            "conn_browser",
-            json!({"action": "login", "arguments": {"entry": "shop-test", "url": url}}),
-        ));
-        assert!(
-            answer.contains("not on the site of the vault entry"),
-            "{answer}"
-        );
-    }
-    assert!(form(&user).is_none());
     let said = done(mcp.call(
         "conn_browser",
-        json!({"action": "login", "arguments": {"entry": "shop-test",
-            "url": "https://shop.example.com/account/login"}}),
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
     assert!(said.contains("shop-test"), "{said}");
     // The secret went from the keyring to the page's form, through the plugin protocol.
@@ -3875,7 +3859,7 @@ fn agent_browser_logs_in_with_a_vault_entry() {
         "\"auth\",\"login\",\"shop-test\"",
         "\"--credential-provider\",\"flottille\"",
         "\"--item\",\"shop-test\"",
-        "\"--url=https://shop.example.com/account/login\"",
+        "\"--url\",\"https://shop.example.com/login\"",
     ] {
         assert!(args.contains(word), "{word}: {args}");
     }
@@ -4149,7 +4133,7 @@ fn login_is_refused_while_an_action_outside_the_allowlist_is_on() {
 }
 
 #[test]
-fn login_without_a_url_goes_to_the_entrys_site() {
+fn login_goes_to_the_entrys_own_url() {
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));
     let (_, mcp) = signed_up(&user);
@@ -4159,10 +4143,64 @@ fn login_without_a_url_goes_to_the_entrys_site() {
     ));
     let login = logged(&user, "browser", "login");
     let args = login.last().unwrap()["args"].to_string();
+    // Two words, as agent-browser's own help shows `--url <url>`.
     assert!(
-        args.contains("\"--url=https://shop.example.com/login\""),
+        args.contains("\"--url\",\"https://shop.example.com/login\""),
         "{args}"
     );
+}
+
+#[test]
+fn an_url_argument_is_refused() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    // Even on the entry's own site: an open redirect there would land the fill elsewhere.
+    for url in [
+        "https://shop.example.com/go?to=https://elsewhere.example.net/login",
+        "https://shop.example.com/login",
+    ] {
+        let answer = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test", "url": url}}),
+        ));
+        assert!(answer.contains("url"), "{answer}");
+    }
+    assert!(form(&user).is_none());
+    assert!(logged(&user, "browser", "login").is_empty());
+    let help = done(mcp.call("conn_browser", json!({"action": "help", "for": "login"})));
+    assert!(!help.contains("\"url\""), "{help}");
+}
+
+#[test]
+fn login_with_an_entry_whose_url_is_no_web_address_is_refused() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    for (n, url) in [
+        "javascript:alert(1)",
+        "-x",
+        "file:///etc/hosts",
+        "shop.example.com",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let entry = format!("odd-{n}");
+        user.call(
+            "vault.set",
+            json!({"name": entry, "secret": "s3cret-of-an-odd-site", "username": "tester",
+                "url": url, "for": "connection:browser"}),
+        )
+        .unwrap();
+        let answer = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": entry}}),
+        ));
+        assert!(answer.contains("http"), "{url}: {answer}");
+    }
+    assert!(form(&user).is_none());
+    assert!(logged(&user, "browser", "login").is_empty());
 }
 
 #[test]
@@ -4222,17 +4260,12 @@ fn login_with_an_entry_without_a_url_is_refused() {
             "for": "connection:browser"}),
     )
     .unwrap();
-    for arguments in [
-        json!({"entry": "no-site"}),
-        json!({"entry": "no-site", "url": "https://shop.example.com/login"}),
-    ] {
-        let answer = refused(mcp.call(
-            "conn_browser",
-            json!({"action": "login", "arguments": arguments}),
-        ));
-        assert!(answer.contains("has no URL"), "{answer}");
-        assert!(!answer.contains("s3cret"), "{answer}");
-    }
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "no-site"}}),
+    ));
+    assert!(answer.contains("has no URL"), "{answer}");
+    assert!(!answer.contains("s3cret"), "{answer}");
     assert!(form(&user).is_none());
     assert!(logged(&user, "browser", "login").is_empty());
     let help = done(mcp.call("conn_browser", json!({"action": "help", "for": "login"})));

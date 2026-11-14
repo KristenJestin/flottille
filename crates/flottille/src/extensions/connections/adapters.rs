@@ -141,9 +141,8 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         description: "Signs in to a site in the browser with a vault entry of the user's: \
                       Flottille has agent-browser type the entry's username and secret into the \
                       page's login form, and you never see the secret. entry is the name of a \
-                      vault entry bound to this connection, with the URL of its site (an entry \
-                      without a URL cannot be used); url is the login page, on that site, when \
-                      it is not the entry's own.",
+                      vault entry bound to this connection, with the URL of its site: login \
+                      opens that URL, and an entry without a URL cannot be used.",
         schema: login_schema,
     }],
     line: "To sign in to a site, use the action login with the name of a vault entry; \
@@ -168,7 +167,6 @@ const OUTPUT_BYTES: usize = 64 * 1024;
 fn login_schema() -> Value {
     json!({"type": "object", "properties": {
         "entry": {"type": "string", "description": "The name of a vault entry bound to this connection."},
-        "url": {"type": "string", "description": "The login page, when it is not the entry's own URL."},
     }, "required": ["entry"], "additionalProperties": false})
 }
 
@@ -370,10 +368,6 @@ pub async fn perform(
 ) -> Outcome {
     let name = &declaration.name;
     let entry = arguments["entry"].as_str().unwrap_or_default().to_owned();
-    let url = arguments
-        .get("url")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
     let found = daemon
         .read(|store| store.vault_entries())
         .ok()
@@ -406,20 +400,22 @@ pub async fn perform(
             ));
         }
     };
-    // Always a URL: without one, agent-browser fills whatever page is open, which the agent
-    // chose.
+    // Always the entry's own URL: without one, agent-browser fills whatever page is open, which
+    // the agent chose; and a page of the agent's, even on the entry's site, may redirect the
+    // fill elsewhere.
     let Some(own) = entry_of.url.clone() else {
         return Outcome::Refused(format!(
             "refused: the vault entry {entry} has no URL: login signs in on the entry's own site \
              alone, which the user sets in Settings, Vault"
         ));
     };
-    let url = url.unwrap_or_else(|| own.clone());
-    if let Err(why) = same_site(&url, &own) {
+    let Some(url) = web_address(&own) else {
         return Outcome::Refused(format!(
-            "refused: {url} is not on the site of the vault entry {entry}: {why}"
+            "refused: the URL of the vault entry {entry} is no web address (http or https with a \
+             host): login opens the entry's own site alone, which the user sets in Settings, \
+             Vault"
         ));
-    }
+    };
     let Some(program) = command_line(declaration) else {
         return Outcome::Refused(format!(
             "refused: login runs agent-browser's command line, and the connection {name} does \
@@ -480,17 +476,11 @@ fn at_turn<'s>(pin: Option<&Listing>, setting_of: impl Fn(&str) -> &'s str) -> R
     adapter.refuses(LOGIN, on).map_or(Ok(()), Err)
 }
 
-/// Whether the page is on the site of the entry (the same scheme, host and port): the secret is
-/// typed into the form of the page it opens.
-fn same_site(url: &str, own: &str) -> Result<(), String> {
-    let origin = |text: &str| url::Url::parse(text).ok().map(|url| url.origin());
-    match (origin(url), origin(own)) {
-        (Some(asked), Some(own_site)) if asked == own_site && asked.is_tuple() => Ok(()),
-        (_, None) => Err(format!(
-            "its address, {own}, is no URL to compare with: the login takes the entry's own"
-        )),
-        _ => Err(format!("its site is {own}, and login signs in there alone")),
-    }
+/// `text` as a web address (`http` or `https`, with a host), written as the URL parser writes
+/// it: never a word agent-browser reads as an option, nor a scheme the page runs.
+fn web_address(text: &str) -> Option<String> {
+    let url = url::Url::parse(text).ok()?;
+    (matches!(url.scheme(), "http" | "https") && url.host().is_some()).then(|| url.to_string())
 }
 
 /// The words of agent-browser's command line in the server's own command: those before its
@@ -549,8 +539,9 @@ async fn run(
             PLUGIN,
         ])
         .args(["--item", &login.entry])
-        // One word: a URL that starts with `-` is never read as an option.
-        .arg(format!("--url={url}"));
+        // Two words, as agent-browser's own help shows them: the URL is a web address, which
+        // never starts with `-`.
+        .args(["--url", url]);
     command
         .env_clear()
         .envs(&env)
