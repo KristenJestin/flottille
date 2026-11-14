@@ -484,6 +484,12 @@ and removes its workspace as today, through `call`.
   pictures, the ask card, the requests with Allow and Deny, the mode, Stop, the tree read only. A
   phone is a `controller` by default; as a `viewer`, the composer, the answers and the controls are
   not drawn. A project's settings come later.
+- **The navigation, decided**: a bottom bar with three destinations. **Needs you**: each request
+  and question as a card answered in place (Allow and Deny on the card, the whole call in sight).
+  **Sessions**: the window's sidebar, each machine, its projects folded or not, their sessions in one
+  list ordered by last exchange, led sessions indented under their pilot; the state is the row's
+  mark, so rows never jump between groups. **Machines**: their state, their agents, their slots.
+  The app opens on Needs you; a notification opens its session.
 - **The link lives only while the app is in the foreground** (Android limits background sync to a few
   hours a day); a push wakes it otherwise. On the phone, segmentation offload is turned off if the
   transport has it (the iroh issue above).
