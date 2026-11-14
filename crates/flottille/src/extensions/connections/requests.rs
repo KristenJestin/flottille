@@ -55,16 +55,42 @@ fn actions() -> String {
     format!("{} and {}", ACTIONS[..7].join(", "), ACTIONS[7])
 }
 
-/// The words of a declaration's command, as one line a reader can split again.
+/// The words of a declaration's command, as one line that says them unambiguously: a word that is
+/// empty or holds a space, a quote, a backslash, a control or a bidirectional character is
+/// written between double quotes, its quotes and backslashes escaped and its control and bidi
+/// characters as `\u{..}`, so that no word can pass for two nor hide what it holds.
 fn line(words: &[String]) -> String {
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}')
+    };
+    let plain = |word: &String| {
+        !word.is_empty()
+            && !word
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\') || hidden(c))
+    };
     words
         .iter()
-        .map(
-            |word| match word.chars().any(char::is_whitespace) || word.is_empty() {
-                true => format!("'{word}'"),
-                false => word.clone(),
-            },
-        )
+        .map(|word| match plain(word) {
+            true => word.clone(),
+            false => {
+                let mut quoted = String::from('"');
+                for c in word.chars() {
+                    match c {
+                        '"' | '\\' => {
+                            quoted.push('\\');
+                            quoted.push(c);
+                        }
+                        c if hidden(c) => quoted.push_str(&format!("\\u{{{:x}}}", c as u32)),
+                        c => quoted.push(c),
+                    }
+                }
+                quoted.push('"');
+                quoted
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -811,6 +837,21 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn said(words: &[&str]) -> String {
+        line(&words.iter().map(|w| w.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_command_line_is_shown_unambiguously() {
+        assert_ne!(said(&["'x", "y'"]), said(&["x y"]));
+        assert_eq!(said(&["notes", "--dir", "a b"]), r#"notes --dir "a b""#);
+        assert_eq!(said(&["say \"hi\" \\ there"]), r#""say \"hi\" \\ there""#);
+        assert_eq!(said(&["it's"]), r#""it's""#);
+        assert_eq!(said(&[""]), r#""""#);
+        assert_eq!(said(&["a\u{202e}b"]), r#""a\u{202e}b""#);
+        assert_eq!(said(&["x\ny"]), r#""x\u{a}y""#);
+    }
 
     #[test]
     fn an_address_names_its_host_over_https_or_on_this_machine() {
