@@ -11,8 +11,8 @@ use flottille_core::approval::{self, Decision, RequestState};
 use serde_json::{Map, Value, json};
 
 use super::{
-    Declaration, EXTENSION, KEYS, Reach, SETTINGS, State, Still, client, declaration,
-    declarations, entries_checked, row, setting_of, settings_only, state_of,
+    Declaration, EXTENSION, KEYS, Reach, SETTINGS, State, Still, client, declaration, declarations,
+    entries_checked, row, setting_of, settings_only, state_of,
 };
 use crate::daemon::Daemon;
 use crate::mcp::{self, Outcome};
@@ -628,7 +628,12 @@ pub async fn tool(
 /// A write the user accepted: what it says was compared with what they read before this is
 /// called (the request's words, made again), and is compared once more where it is written,
 /// under the file's lock or the server's turn, so that no write of the user's lands between.
-async fn write(daemon: &Arc<Daemon>, args: Value, approved: &[String], place: &crate::place::Place) -> Outcome {
+async fn write(
+    daemon: &Arc<Daemon>,
+    args: Value,
+    approved: &[String],
+    place: &crate::place::Place,
+) -> Outcome {
     let proposal = match proposal(daemon, &args) {
         Ok(proposal) => proposal,
         Err(why) => return refused(why),
