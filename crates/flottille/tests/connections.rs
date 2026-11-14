@@ -1870,6 +1870,70 @@ fn a_large_image_of_a_result_is_scaled_like_a_message_picture() {
 }
 
 #[test]
+fn an_image_of_a_call_allowed_later_reaches_the_agent() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true, "turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    project(&user, "app");
+    let mut script = almanac();
+    script["answers"]["write"] = json!({"text": "a screenshot", "image": true});
+    connect(&user, "almanac", &script, json!({}));
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "ask");
+    let asked = mcp.call(
+        "conn_almanac",
+        json!({"action": "write", "arguments": {"text": "a"}}),
+    );
+    assert!(held(&asked), "{}", asked.text);
+    let number: u64 = asked
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap();
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    let delivery = format!("approval-{number}");
+    // The agent is given the answer as a message, with the picture the call carried.
+    eventually("the answer reaches the agent with its image", || {
+        user.received_requests("session/prompt")
+            .iter()
+            .any(|prompt| {
+                let blocks = prompt["params"]["prompt"].as_array().unwrap();
+                blocks.iter().any(|b| {
+                    b["type"] == "text" && b["text"].as_str().unwrap_or("").contains("a screenshot")
+                }) && blocks.iter().any(|b| {
+                    b["type"] == "image" && b["data"] == PNG && b["mimeType"] == "image/png"
+                })
+            })
+    });
+    let text = user
+        .received_requests("session/prompt")
+        .iter()
+        .flat_map(|prompt| prompt["params"]["prompt"].as_array().unwrap().clone())
+        .filter_map(|b| b["text"].as_str().map(str::to_owned))
+        .collect::<String>();
+    assert!(
+        !text.contains("left out"),
+        "the image is not left out: {text}"
+    );
+    assert!(
+        text.contains(&delivery) || text.contains(&format!("#{number}")),
+        "{text}"
+    );
+    // The bytes are not in the store: the delivery names a file.
+    for file in ["flottille.db", "flottille.db-wal"] {
+        let bytes =
+            std::fs::read(user.path(&format!("state/flottille/{file}"))).unwrap_or_default();
+        assert!(
+            !bytes
+                .windows(15)
+                .any(|window| window == &PNG.as_bytes()[..15]),
+            "the store {file} holds the picture's base64"
+        );
+    }
+}
+
+#[test]
 fn the_images_of_a_result_past_its_total_are_left_out_with_their_line() {
     let user = user();
     // Three of 1.9 MiB: two make 3.8 MiB, the third would make 5.7, over the 5 MiB of a result.

@@ -2198,13 +2198,24 @@ tokio::task_local! {
     static PICTURES: Mutex<Vec<String>>;
 }
 
-/// Gives the call in progress a picture to carry in its result, a file of the agent's folder of
-/// images. False when no call waits for it (a call the user allowed later is answered as a
-/// message, which carries none): the caller leaves the picture out.
-pub fn picture_served(name: &str) -> bool {
+/// Runs `call`, a call whose result may carry pictures, and gives them with its own result: names
+/// of files in the agent's folder of images.
+pub async fn with_pictures<T>(call: impl Future<Output = T>) -> (T, Vec<String>) {
     PICTURES
-        .try_with(|pictures| pictures.lock().unwrap().push(name.to_owned()))
-        .is_ok()
+        .scope(Mutex::default(), async {
+            let result = call.await;
+            let pictures = PICTURES.with(|pictures| pictures.lock().unwrap().clone());
+            (result, pictures)
+        })
+        .await
+}
+
+/// Gives the call in progress a picture to carry in its result, a file of the agent's folder of
+/// images. Every call runs in a scope that carries them (`played`, or `with_pictures` for a call
+/// the user allowed later, whose answer is a message with its images).
+pub fn picture_served(name: &str) {
+    let given = PICTURES.try_with(|pictures| pictures.lock().unwrap().push(name.to_owned()));
+    debug_assert!(given.is_ok(), "a call without a place for its pictures");
 }
 
 /// Says that the call in progress started, or joined, this run.
@@ -2221,14 +2232,11 @@ async fn played(
     cancelled: CancellationToken,
 ) -> Answer {
     RUN_STARTED
-        .scope(
-            Mutex::default(),
-            PICTURES.scope(Mutex::default(), async {
-                let (text, error) = played_in(daemon, grant, tool, args, key, cancelled).await;
-                let pictures = PICTURES.with(|pictures| pictures.lock().unwrap().clone());
-                (text, error, pictures)
-            }),
-        )
+        .scope(Mutex::default(), async {
+            let ((text, error), pictures) =
+                with_pictures(played_in(daemon, grant, tool, args, key, cancelled)).await;
+            (text, error, pictures)
+        })
         .await
 }
 
