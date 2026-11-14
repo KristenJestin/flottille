@@ -73,7 +73,8 @@
 //! `open` says its arguments and folder, and it empties the form, as a page loaded afresh does;
 //! `open_fail` in `login` makes it fail instead. `--url` and `--item` are read as `--url <url>` or
 //! `--url=<url>`. Its log line, `login`, says its
-//! arguments, its folder and what the plugin answered, never a password.
+//! arguments, its folder and what the plugin answered, never a password. The lines `start`, `login`
+//! and `open` carry `config`, the JSON of the file `--config` names when the line was written.
 //!
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
 //! the child's pid with `--child`), `initialize` (the client's capabilities), `list` (the cursor
@@ -84,6 +85,17 @@ use std::io::{BufRead, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+
+/// The file `--config` names, as JSON, at the moment the command line runs: what agent-browser
+/// would load (and, for its MCP server's tool calls, the only file its child processes load).
+fn loaded_config(args: &[String]) -> Value {
+    args.iter()
+        .position(|arg| arg == "--config")
+        .and_then(|at| args.get(at + 1))
+        .and_then(|file| std::fs::read_to_string(file).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null)
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -122,7 +134,8 @@ fn main() {
         json!({"event": "start", "pid": std::process::id(),
             "pgid": fields.get(2).and_then(|f| f.parse::<u32>().ok()),
             "sid": fields.get(3).and_then(|f| f.parse::<u32>().ok()),
-            "cwd": std::env::current_dir().ok(), "args": args, "child": child}),
+            "cwd": std::env::current_dir().ok(), "args": args, "child": child,
+            "config": loaded_config(&args)}),
     );
     if let Some(line) = script["stderr"].as_str() {
         eprintln!("{line}");
@@ -826,7 +839,7 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
     let Some(plugin) = plugin else {
         write_log(
             log,
-            json!({"event": "login", "args": args,
+            json!({"event": "login", "args": args, "config": loaded_config(args),
             "cwd": std::env::current_dir().ok(), "plugin": {"success": false,
                 "error": format!("no plugin {provider} with credential.read")}}),
         );
@@ -835,7 +848,8 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
     };
     let answer = ask(&plugin);
     let success = answer["success"] == true && answer["protocol"] == "agent-browser.plugin.v1";
-    let mut line = json!({"event": "login", "args": args, "cwd": std::env::current_dir().ok(),
+    let mut line = json!({"event": "login", "args": args, "config": loaded_config(args),
+        "cwd": std::env::current_dir().ok(),
         "plugin": {"success": success, "error": answer["error"]}});
     if behaviour["replay"] == true {
         let again = ask(&plugin);
@@ -878,7 +892,8 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
 fn open(args: &[String], script: &Value, log: &Option<String>) {
     write_log(
         log,
-        json!({"event": "open", "args": args, "cwd": std::env::current_dir().ok()}),
+        json!({"event": "open", "args": args, "config": loaded_config(args),
+            "cwd": std::env::current_dir().ok()}),
     );
     let behaviour = &script["login"];
     if behaviour["open_fail"] == true {

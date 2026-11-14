@@ -2056,7 +2056,7 @@ fn the_review_says_the_browser_is_kept_to_the_entries_sites(cx: &mut TestAppCont
     open_the_review(&shell, cx, "browser", "connection-review-adapter");
     click(cx, "connection-review-adapter-changes");
     let changed = everything_said(cx);
-    assert!(changed.contains("--allowed-domains"), "{changed}");
+    assert!(changed.contains("allowedDomains"), "{changed}");
     assert!(changed.contains("shop.example.com"), "{changed}");
 }
 

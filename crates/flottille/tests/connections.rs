@@ -4681,11 +4681,10 @@ fn words(line: &Value) -> Vec<String> {
         .collect()
 }
 
-/// What follows `--allowed-domains` in a logged command line, if it is there.
-fn allowed(line: &Value) -> Option<String> {
-    let words = words(line);
-    let at = words.iter().position(|word| word == "--allowed-domains")?;
-    words.get(at + 1).cloned()
+/// The sites the `--config` file held when a command line of the fake ran: agent-browser's
+/// `allowedDomains`, which its MCP tool calls read from that file alone.
+fn allowed(line: &Value) -> Option<Value> {
+    line["config"].get("allowedDomains").cloned()
 }
 
 #[test]
@@ -4733,13 +4732,25 @@ fn the_browser_is_kept_to_the_entries_sites() {
     ));
     // The server's start, the login and the page's reload after its failure: the hosts of the
     // entries bound to the connection, exactly, and no others.
-    let sites = Some("portal.example.net,shop.example.com".to_owned());
+    let sites = Some(json!(["portal.example.net", "shop.example.com"]));
     assert_eq!(
         allowed(logged(&user, "browser", "start").last().unwrap()),
         sites
     );
     assert_eq!(allowed(&logged(&user, "browser", "login")[0]), sites);
     assert_eq!(allowed(&logged(&user, "browser", "open")[0]), sites);
+    // In the file and never as a flag: the tool calls of the server do not read the flags after
+    // `mcp`, and a flag that differed from the file would relaunch the browser.
+    for event in ["start", "login", "open"] {
+        for line in logged(&user, "browser", event) {
+            assert!(
+                !words(&line)
+                    .iter()
+                    .any(|word| word.contains("allowed-domains")),
+                "{event}: {line}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -4752,6 +4763,9 @@ fn login_is_refused_when_the_command_uses_a_flag_that_drops_the_allowlist() {
         vec!["--state=auth.json"],
         vec!["--restore"],
         vec!["--session-name", "work"],
+        vec!["-p", "ios"],
+        vec!["--provider=browserbase"],
+        vec!["--args", "--no-sandbox"],
     ] {
         let user = user();
         browser_run_with(&user, &agent_browser("0.43.0"), json!({}), &options);
@@ -4760,7 +4774,7 @@ fn login_is_refused_when_the_command_uses_a_flag_that_drops_the_allowlist() {
             "conn_browser",
             json!({"action": "login", "arguments": {"entry": "shop-test"}}),
         ));
-        assert!(said.contains("--allowed-domains"), "{options:?}: {said}");
+        assert!(said.contains("allowed domains"), "{options:?}: {said}");
         assert!(
             said.contains(options[0].split('=').next().unwrap()),
             "{options:?}: {said}"
@@ -4774,6 +4788,77 @@ fn login_is_refused_when_the_command_uses_a_flag_that_drops_the_allowlist() {
             .call("connection.review", json!({"name": "browser"}))
             .unwrap();
         let said = review["adapter"]["said"].as_str().unwrap();
-        assert!(said.contains("--allowed-domains"), "{options:?}: {review}");
+        assert!(said.contains("allowed domains"), "{options:?}: {review}");
+    }
+}
+
+#[test]
+fn login_is_refused_when_the_command_already_sets_the_browsers_sites() {
+    for options in [
+        vec!["--allowed-domains", "example.com"],
+        vec!["--allowed-domains=example.com"],
+    ] {
+        let user = user();
+        browser_run_with(&user, &agent_browser("0.43.0"), json!({}), &options);
+        let (_, mcp) = signed_up(&user);
+        let said = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        assert!(
+            said.contains("already sets the browser's sites"),
+            "{options:?}: {said}"
+        );
+        assert!(logged(&user, "browser", "login").is_empty(), "{options:?}");
+        // Flottille sets nothing of its own beside the user's list.
+        let started = logged(&user, "browser", "start");
+        assert_eq!(allowed(started.last().unwrap()), None, "{options:?}");
+        let review = user
+            .call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        let said = review["adapter"]["said"].as_str().unwrap();
+        assert!(
+            said.contains("already sets the browser's sites"),
+            "{options:?}: {review}"
+        );
+    }
+}
+
+#[test]
+fn an_entry_whose_host_is_no_usable_site_is_refused() {
+    for url in [
+        "https://shop.example.com,evil.example.net/login",
+        "https://*.example.com/login",
+        "https://-shop.example.com/login",
+    ] {
+        let user = user();
+        browser(&user, &agent_browser("0.43.0"), json!({}));
+        let (_, mcp) = signed_up(&user);
+        user.call(
+            "vault.set",
+            json!({"name": "odd-test", "secret": "s3cret-of-the-odd-site", "url": url,
+                "for": "connection:browser"}),
+        )
+        .unwrap();
+        let said = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "odd-test"}}),
+        ));
+        assert!(
+            said.contains("cannot be one of the browser's sites"),
+            "{url}: {said}"
+        );
+        assert!(logged(&user, "browser", "login").is_empty(), "{url}");
+        // The other entry still signs in, and the list holds its host alone.
+        done(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        let login = logged(&user, "browser", "login");
+        assert_eq!(
+            allowed(&login[0]),
+            Some(json!(["shop.example.com"])),
+            "{url}"
+        );
     }
 }
