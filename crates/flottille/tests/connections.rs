@@ -3536,3 +3536,507 @@ fn a_revoked_token_refused_as_the_server_starts_signs_out() {
     assert_eq!(grants(&user, "refresh_token").len(), 1);
     assert_eq!(connection(&user, "notes")["state"], "signed out");
 }
+
+// ── Adapters ─────────────────────────────────────────────────────────────────────────────────
+
+/// The password of the vault entry `shop-test`, which reaches the page's form alone.
+const PASSWORD: &str = "pa55-of-the-test-acc0unt";
+
+/// The credential actions of agent-browser's own, which its adapter keeps off.
+const OWN_LOGINS: [&str; 6] = [
+    "agent_browser_auth_delete",
+    "agent_browser_auth_list",
+    "agent_browser_auth_login",
+    "agent_browser_auth_save",
+    "agent_browser_auth_show",
+    "agent_browser_set_credentials",
+];
+
+/// A server that says it is agent-browser `version`, with some of its MCP tools.
+fn agent_browser(version: &str) -> Value {
+    let tool = |name: &str, properties: Value| {
+        json!({"name": name, "description": format!("{name} of the browser."),
+            "inputSchema": {"type": "object", "properties": properties}})
+    };
+    let mut tools = vec![
+        tool("agent_browser_open", json!({"url": {"type": "string"}})),
+        tool("agent_browser_snapshot", json!({})),
+        tool("agent_browser_eval", json!({"script": {"type": "string"}})),
+    ];
+    for name in OWN_LOGINS {
+        tools.push(tool(name, json!({"name": {"type": "string"}})));
+    }
+    json!({
+        "server": {"name": "agent-browser", "version": version},
+        "instructions": "Open a page, then snapshot it.",
+        "tools": tools,
+        "answers": {"agent_browser_open": {"text": "opened"}},
+    })
+}
+
+/// The file the fake agent-browser's command line fills as a page's login form.
+fn form_file(user: &User) -> PathBuf {
+    user.path("browser-form.json")
+}
+
+/// The connection `browser` declared on the fake server, run as `agent-browser mcp` is, and given
+/// to agents at once; with `login` (the fake command line's behaviour) in its script.
+fn browser(user: &User, script: &Value, login: Value) -> Value {
+    turn_on(user);
+    let mut script = script.clone();
+    script["login"] = login;
+    script["login"]["form"] = json!(form_file(user));
+    write_script(user, "browser", &script);
+    let mut command = command_of(user, "browser");
+    command.as_array_mut().unwrap().push(json!("mcp"));
+    user.call(
+        "connection.add",
+        json!({"name": "browser", "about": "A browser for the tests.", "command": command}),
+    )
+    .unwrap()
+}
+
+/// The vault entry `shop-test`, bound to the connection `browser`, and the agent's session in
+/// Full mode.
+fn signed_up(user: &User) -> (String, Mcp) {
+    project(user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "shop-test", "secret": PASSWORD, "username": "tester@example.com",
+            "url": "https://shop.example.com/login", "for": "connection:browser",
+            "description": "The test account of the shop."}),
+    )
+    .unwrap();
+    let (id, mcp) = session(user, "app");
+    set_mode(user, &id, "full");
+    (id, mcp)
+}
+
+fn form(user: &User) -> Option<Value> {
+    std::fs::read_to_string(form_file(user))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+}
+
+fn setting(user: &User, action: &str) -> Value {
+    connection(user, "browser")["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == action)
+        .map(|a| a["setting"].clone())
+        .unwrap_or(Value::Null)
+}
+
+#[test]
+fn an_adapter_applies_to_its_server_by_name_and_version() {
+    let user = user();
+    let added = browser(&user, &agent_browser("0.43.0"), json!({}));
+    assert_eq!(added["given"], true, "{added}");
+    // Its defaults at the first pin: eval and its own logins off, the rest judged.
+    assert_eq!(setting(&user, "agent_browser_eval"), "off");
+    for action in OWN_LOGINS {
+        assert_eq!(setting(&user, action), "off", "{action}");
+    }
+    assert_eq!(setting(&user, "agent_browser_open"), "judged");
+    // Its start option: the trusted config Flottille writes, which declares it as the plugin.
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let adapter = &review["adapter"];
+    assert_eq!(adapter["applies"], true, "{review}");
+    assert_eq!(adapter["name"], "agent-browser", "{review}");
+    assert_eq!(adapter["actions"], json!(["login"]), "{review}");
+    let said = adapter["changed"].to_string();
+    assert!(said.contains("agent_browser_eval"), "{said}");
+    assert!(said.contains("--config"), "{said}");
+    let started = logged(&user, "browser", "start");
+    let args = started.last().unwrap()["args"].clone();
+    let words: Vec<&str> = args
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let at = words
+        .iter()
+        .position(|w| *w == "--config")
+        .expect("--config");
+    let config: Value =
+        serde_json::from_str(&std::fs::read_to_string(words[at + 1]).unwrap()).unwrap();
+    let plugin = &config["plugins"][0];
+    assert_eq!(plugin["name"], "flottille", "{config}");
+    assert_eq!(
+        plugin["capabilities"],
+        json!(["credential.read"]),
+        "{config}"
+    );
+    assert_eq!(plugin["args"][0], "vault", "{config}");
+    assert_eq!(plugin["args"][1], "provide", "{config}");
+
+    // Another server with the same tools, run by a command named agent-browser or not, is a
+    // generic connection: the name it says of itself decides, never the command line.
+    let mut other = agent_browser("0.43.0");
+    other["server"]["name"] = json!("browsy");
+    write_script(&user, "browsy", &other);
+    let mut command = command_of(&user, "browsy");
+    command.as_array_mut().unwrap().push(json!("mcp"));
+    user.call(
+        "connection.add",
+        json!({"name": "browsy", "about": "agent-browser, renamed.", "command": command}),
+    )
+    .unwrap();
+    let review = user
+        .call("connection.review", json!({"name": "browsy"}))
+        .unwrap();
+    assert_eq!(review["adapter"], Value::Null, "{review}");
+    let browsy = connection(&user, "browsy");
+    assert!(
+        browsy["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["setting"] == "judged"),
+        "{browsy}"
+    );
+}
+
+#[test]
+fn an_unknown_version_gets_the_generic_connection() {
+    let user = user();
+    browser(&user, &agent_browser("0.50.0"), json!({}));
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    assert_eq!(review["adapter"]["applies"], false, "{review}");
+    assert!(
+        review["adapter"]["said"]
+            .as_str()
+            .unwrap()
+            .contains("no adapter for this version"),
+        "{review}"
+    );
+    // Nothing breaks: every action is judged, nothing is added nor locked.
+    assert_eq!(setting(&user, "agent_browser_eval"), "judged");
+    assert_eq!(setting(&user, "agent_browser_auth_save"), "judged");
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_auth_save": "passes"}}),
+    )
+    .unwrap();
+    project(&user, "app");
+    let (_, mcp) = session(&user, "app");
+    let tool = mcp
+        .tools()
+        .into_iter()
+        .find(|t| t["name"] == "conn_browser")
+        .unwrap();
+    let description = tool["description"].as_str().unwrap();
+    assert!(!description.contains("Its actions: login"), "{tool}");
+    assert!(description.contains("agent_browser_eval"), "{tool}");
+    let no_login = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(no_login.contains("has no action \"login\""), "{no_login}");
+    let started = logged(&user, "browser", "start");
+    assert!(
+        !started.last().unwrap()["args"]
+            .to_string()
+            .contains("--config"),
+        "{started:?}"
+    );
+}
+
+#[test]
+fn the_agent_sees_login_as_an_action_of_the_connection() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    let tool = mcp
+        .tools()
+        .into_iter()
+        .find(|t| t["name"] == "conn_browser")
+        .unwrap();
+    let description = tool["description"].as_str().unwrap();
+    let actions = description.split("Its actions: ").nth(1).unwrap();
+    assert!(actions.starts_with("login, "), "{description}");
+    assert!(!actions.contains("agent_browser_eval"), "{description}");
+    assert!(
+        !actions.contains("agent_browser_auth_login"),
+        "{description}"
+    );
+
+    let help = done(mcp.call("conn_browser", json!({"action": "help"})));
+    let first = help
+        .lines()
+        .find(|line| line.starts_with("- "))
+        .unwrap_or_default();
+    assert!(first.starts_with("- login: "), "{help}");
+    let login = done(mcp.call("conn_browser", json!({"action": "help", "for": "login"})));
+    assert!(login.contains("vault"), "{login}");
+    assert!(login.contains("\"entry\""), "{login}");
+    // The names of the entries bound to the connection, never their values.
+    assert!(login.contains("shop-test"), "{login}");
+    assert!(!login.contains(PASSWORD), "{login}");
+    let instructions = done(mcp.call(
+        "conn_browser",
+        json!({"action": "help", "for": "@instructions"}),
+    ));
+    assert!(
+        instructions.contains("Open a page, then snapshot it."),
+        "{instructions}"
+    );
+    assert!(
+        instructions.contains(
+            "To sign in to a site, use the action login with the name of a vault entry; \
+             agent-browser's own logins are off."
+        ),
+        "{instructions}"
+    );
+}
+
+#[test]
+fn agent_browser_logs_in_with_a_vault_entry() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    // Never on another site than the entry's: the secret would be typed into its form.
+    for url in [
+        "https://elsewhere.example.net/login",
+        "http://shop.example.com/login",
+    ] {
+        let answer = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test", "url": url}}),
+        ));
+        assert!(
+            answer.contains("not on the site of the vault entry"),
+            "{answer}"
+        );
+    }
+    assert!(form(&user).is_none());
+    let said = done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test",
+            "url": "https://shop.example.com/account/login"}}),
+    ));
+    assert!(said.contains("shop-test"), "{said}");
+    // The secret went from the keyring to the page's form, through the plugin protocol.
+    let filled = form(&user).expect("the form was filled");
+    assert_eq!(filled["password"], PASSWORD);
+    assert_eq!(filled["username"], "tester@example.com");
+    // Run by Flottille, without a shell, on the server's own command line and browser session.
+    let login = logged(&user, "browser", "login");
+    assert_eq!(login.len(), 1, "{login:?}");
+    let args = login[0]["args"].to_string();
+    for word in [
+        "\"--config\"",
+        "\"auth\",\"login\",\"shop-test\"",
+        "\"--credential-provider\",\"flottille\"",
+        "\"--item\",\"shop-test\"",
+        "\"--url\",\"https://shop.example.com/account/login\"",
+    ] {
+        assert!(args.contains(word), "{word}: {args}");
+    }
+    let started = logged(&user, "browser", "start");
+    assert_eq!(
+        login[0]["cwd"],
+        started.last().unwrap()["cwd"],
+        "not the server's folder"
+    );
+}
+
+#[test]
+fn a_login_entry_of_another_use_is_refused() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": "s3cret-of-the-worklog", "for": "worklog:app"}),
+    )
+    .unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "loose", "secret": "s3cret-of-no-use-at-all"}),
+    )
+    .unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "notes-token", "secret": "s3cret-of-the-notes", "for": "connection:notes"}),
+    )
+    .unwrap();
+    for (entry, says) in [
+        ("jira-time", "the worklog of the project app"),
+        ("notes-token", "the connection notes"),
+        ("loose", "bound to no use"),
+        ("missing", "no entry missing"),
+    ] {
+        let answer = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": entry}}),
+        ));
+        assert!(answer.contains(says), "{entry}: {answer}");
+        assert!(!answer.contains("s3cret"), "{answer}");
+    }
+    assert!(form(&user).is_none());
+    assert!(logged(&user, "browser", "login").is_empty());
+}
+
+#[test]
+fn a_plugin_request_without_its_runs_token_is_refused() {
+    // The fake command line asks the plugin without the token Flottille gave the run, or with
+    // another one.
+    for token in ["drop", "wrong"] {
+        let user = user();
+        browser(&user, &agent_browser("0.43.0"), json!({"token": token}));
+        let (_, mcp) = signed_up(&user);
+        let answer = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        assert!(!answer.contains(PASSWORD), "{answer}");
+        assert!(form(&user).is_none(), "{token}: the form was filled");
+        let login = logged(&user, "browser", "login");
+        let plugin = &login.last().unwrap()["plugin"];
+        assert_eq!(plugin["success"], false, "{login:?}");
+        assert!(plugin["error"].to_string().contains("refused"), "{plugin}");
+    }
+    // A token is for one request: asked again with it, the plugin is refused.
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({"replay": true}));
+    let (_, mcp) = signed_up(&user);
+    mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    );
+    let login = logged(&user, "browser", "login");
+    assert_eq!(
+        login.last().unwrap()["plugin"]["success"],
+        true,
+        "{login:?}"
+    );
+    let replayed = &login.last().unwrap()["replayed"];
+    assert_eq!(replayed["success"], false, "{login:?}");
+    assert!(
+        replayed["error"].to_string().contains("refused"),
+        "{replayed}"
+    );
+}
+
+#[test]
+fn agent_browsers_own_credential_actions_cannot_be_turned_on() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    for action in OWN_LOGINS {
+        let refused = user
+            .call(
+                "connection.accept",
+                json!({"name": "browser", "actions": {action: "judged"}}),
+            )
+            .unwrap_err();
+        assert!(refused.1.contains(action), "{refused:?}");
+        assert!(refused.1.contains("vault"), "{refused:?}");
+        assert_eq!(setting(&user, action), "off");
+    }
+    // The review says why, on each of them.
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    for action in OWN_LOGINS {
+        let shown = review["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == action)
+            .unwrap();
+        assert_eq!(shown["setting"], "off", "{shown}");
+        assert!(
+            shown["locked"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("vault"),
+            "{shown}"
+        );
+    }
+    // Eval is the user's to turn on; a call of a locked one is refused, the server sees nothing.
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_eval": "judged"}}),
+    )
+    .unwrap();
+    let (_, mcp) = signed_up(&user);
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_auth_save", "arguments": {"name": "x"}}),
+    ));
+    assert!(answer.contains("off"), "{answer}");
+    assert!(logged(&user, "browser", "call").is_empty());
+}
+
+#[test]
+fn login_is_refused_while_eval_is_offered() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_eval": "asked"}}),
+    )
+    .unwrap();
+    let (_, mcp) = signed_up(&user);
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(answer.contains("agent_browser_eval"), "{answer}");
+    assert!(form(&user).is_none());
+    // The review says it too.
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    assert!(
+        review["adapter"]["said"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("agent_browser_eval"),
+        "{review}"
+    );
+}
+
+#[test]
+fn the_secret_never_reaches_an_agent_nor_the_store() {
+    let user = user();
+    let watch = user.watch(&[]);
+    browser(&user, &agent_browser("0.43.0"), json!({"echo": true}));
+    let (id, mcp) = signed_up(&user);
+    let said = done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert_eq!(form(&user).unwrap()["password"], PASSWORD);
+    // The fake command line echoes the secret on its output, as a careless one would.
+    assert!(!said.contains(PASSWORD), "{said}");
+    let help = done(mcp.call("conn_browser", json!({"action": "help", "for": "login"})));
+    assert!(!help.contains(PASSWORD));
+    let events = watch.until(|e| e["name"] == "agent.tool_served" && e["data"]["agent"] == id);
+    assert!(!json!(events).to_string().contains(PASSWORD));
+    let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+    assert!(!shown.to_string().contains(PASSWORD));
+    for method in ["connection.list", "vault.list", "inbox.list"] {
+        let answer = user.call(method, json!({})).unwrap();
+        assert!(!answer.to_string().contains(PASSWORD), "{method}");
+    }
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    assert!(!review.to_string().contains(PASSWORD));
+    // Nothing of Flottille's holds it: its store, its log, the config it wrote, the fake
+    // server's log; the page's form alone does.
+    for folder in ["state", "data", "config"] {
+        let found = files_holding(&user.path(folder), PASSWORD);
+        assert!(found.is_empty(), "{folder}: {found:?}");
+    }
+    let log = std::fs::read_to_string(log_file(&user, "browser")).unwrap();
+    assert!(!log.contains(PASSWORD), "{log}");
+}

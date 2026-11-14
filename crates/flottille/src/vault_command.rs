@@ -46,6 +46,13 @@ pub enum VaultAction {
         #[arg(long)]
         json: bool,
     },
+    /// agent-browser's credential provider, for the logins Flottille runs: one request on the
+    /// standard input, one answer on the standard output (`agent-browser.plugin.v1`)
+    #[command(hide = true)]
+    Provide {
+        /// The socket of the login that runs
+        socket: std::path::PathBuf,
+    },
     /// Remove an entry and its secret from the keyring
     Remove {
         name: String,
@@ -104,6 +111,7 @@ pub fn run(paths: &Paths, action: VaultAction) -> Result<ExitCode> {
             let text = format!("Removed {name} and its secret.");
             (removed, json, text)
         }
+        VaultAction::Provide { .. } => unreachable!("answered before any folder is read"),
     };
     if json {
         println!("{answer}");

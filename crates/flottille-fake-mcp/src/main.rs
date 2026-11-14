@@ -57,6 +57,16 @@
 //! the text, `error` answers that text as an error. `rpc_error` answers that text as a JSON-RPC
 //! error instead, on stdio. With no answer, `ok`.
 //!
+//! With `auth login <name>` among its arguments, it plays agent-browser's command line instead
+//! (`agent-browser auth login <name> --credential-provider <plugin> --item <ref> [--url <url>]`,
+//! with `--config <file>`): it runs the plugin that file declares with `credential.read`, asks it
+//! for the credential over `agent-browser.plugin.v1`, and writes what it got to the file `form`
+//! of the script's `login`, as a page's login form would be filled. `login` takes `token`
+//! (`"drop"`: the plugin is run without `FLOTTILLE_VAULT_TOKEN`; `"wrong"`: with another one),
+//! `replay` (the plugin is asked once more, with the same token) and `echo` (the password is
+//! written on its output, as a careless command line would). Its log line, `login`, says its
+//! arguments, its folder and what the plugin answered, never a password.
+//!
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
 //! the child's pid with `--child`), `initialize` (the client's capabilities), `list` (the cursor
 //! asked), `call` (the tool, the arguments, when it started and ended, in milliseconds since the
@@ -78,6 +88,12 @@ fn main() {
     let script_path = option("--script").expect("--script <file>");
     let log = option("--log");
     let mut script = read(&script_path);
+    if args
+        .windows(2)
+        .any(|pair| pair[0] == "auth" && pair[1] == "login")
+    {
+        return login(&args, &script, &log);
+    }
     let child = args.iter().any(|arg| arg == "--child").then(|| {
         std::process::Command::new("sleep")
             .arg("1000")
@@ -700,4 +716,110 @@ fn encoded(text: &str) -> String {
             byte => format!("%{byte:02X}"),
         })
         .collect()
+}
+
+/// agent-browser's `auth login` with a credential provider: the plugin asked, the form filled.
+fn login(args: &[String], script: &Value, log: &Option<String>) {
+    let option = |name: &str| {
+        args.iter()
+            .position(|arg| arg == name)
+            .and_then(|at| args.get(at + 1))
+            .cloned()
+    };
+    let behaviour = &script["login"];
+    let name = args
+        .windows(3)
+        .find(|words| words[0] == "auth" && words[1] == "login")
+        .map(|words| words[2].clone())
+        .unwrap_or_default();
+    let config: Value = option("--config")
+        .and_then(|file| std::fs::read_to_string(file).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let provider = option("--credential-provider").unwrap_or_default();
+    let plugin = config["plugins"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|plugin| {
+            plugin["name"] == provider.as_str()
+                && plugin["capabilities"]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|c| c == "credential.read"))
+        })
+        .cloned();
+    let request = json!({"protocol": "agent-browser.plugin.v1", "type": "credential.resolve",
+        "capability": "credential.read", "request": {"profileName": name,
+            "itemRef": option("--item"), "url": option("--url")}});
+    let token = std::env::var("FLOTTILLE_VAULT_TOKEN").ok();
+    let ask = |plugin: &Value| -> Value {
+        let mut command = std::process::Command::new(plugin["command"].as_str().unwrap_or("?"));
+        for arg in plugin["args"].as_array().into_iter().flatten() {
+            command.arg(arg.as_str().unwrap_or_default());
+        }
+        match behaviour["token"].as_str() {
+            Some("drop") => {
+                command.env_remove("FLOTTILLE_VAULT_TOKEN");
+            }
+            Some("wrong") => {
+                command.env("FLOTTILLE_VAULT_TOKEN", "not-the-token-of-this-run");
+            }
+            _ => {
+                if let Some(token) = &token {
+                    command.env("FLOTTILLE_VAULT_TOKEN", token);
+                }
+            }
+        }
+        let child = command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let Ok(mut child) = child else {
+            return json!({"success": false, "error": "the plugin did not start"});
+        };
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "{request}").ok();
+        drop(stdin);
+        let output = child.wait_with_output().unwrap();
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| json!({"success": false, "error": "no JSON on its output"}))
+    };
+    let Some(plugin) = plugin else {
+        write_log(
+            log,
+            json!({"event": "login", "args": args,
+            "cwd": std::env::current_dir().ok(), "plugin": {"success": false,
+                "error": format!("no plugin {provider} with credential.read")}}),
+        );
+        eprintln!("✗ no credential provider {provider}");
+        std::process::exit(1);
+    };
+    let answer = ask(&plugin);
+    let success = answer["success"] == true && answer["protocol"] == "agent-browser.plugin.v1";
+    let mut line = json!({"event": "login", "args": args, "cwd": std::env::current_dir().ok(),
+        "plugin": {"success": success, "error": answer["error"]}});
+    if behaviour["replay"] == true {
+        let again = ask(&plugin);
+        line["replayed"] = json!({"success": again["success"] == true, "error": again["error"]});
+    }
+    write_log(log, line);
+    if !success {
+        eprintln!("✗ the credential provider failed");
+        std::process::exit(1);
+    }
+    let credential = &answer["credential"];
+    if let Some(form) = behaviour["form"].as_str() {
+        std::fs::write(form, credential.to_string()).unwrap();
+    }
+    if behaviour["echo"] == true {
+        println!(
+            "typed {}",
+            credential["password"].as_str().unwrap_or_default()
+        );
+    }
+    println!(
+        "✓ Logged in as {}",
+        credential["username"].as_str().unwrap_or_default()
+    );
 }

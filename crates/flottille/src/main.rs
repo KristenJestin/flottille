@@ -333,6 +333,14 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     if let Command::ReadPage { kind, url } = &cli.command {
         return Ok(web::read_page(kind, url));
     }
+    // agent-browser runs it with the environment of a connection's server, which names no socket
+    // of the daemon's: it reaches the login that runs at the socket it is given.
+    if let Command::Vault {
+        action: VaultAction::Provide { socket },
+    } = &cli.command
+    {
+        return Ok(extensions::vault_provide(socket));
+    }
     let paths = Paths::from_env()?;
     match cli.command {
         Command::Daemon { action: None } => daemon::run(&paths)?,

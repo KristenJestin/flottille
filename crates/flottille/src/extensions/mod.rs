@@ -646,6 +646,12 @@ pub fn secrets_in(value: &str) -> Vec<String> {
     connections::secrets_in(value)
 }
 
+/// `flottille vault provide <socket>`: the credential provider a connection's adapter names to
+/// its server (agent-browser's plugin protocol), which asks the daemon's login that runs.
+pub fn vault_provide(socket: &std::path::Path) -> std::process::ExitCode {
+    connections::provide(socket)
+}
+
 /// Whether the use of an extension's feature a vault entry would be bound to (`bound`,
 /// `connection:<name>`) can exist: a connection's name is checked as connections check theirs.
 pub fn bound_possible(bound: &str) -> bool {

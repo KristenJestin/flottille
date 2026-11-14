@@ -360,7 +360,7 @@ async fn compare(daemon: &Weak<Daemon>, name: &str, peer: &Peer<RoleClient>) {
 
 /// The secrets the declaration names, read from the vault: only an entry every project sees, and
 /// bound to no other use than this connection.
-async fn secrets(
+pub(super) async fn secrets(
     daemon: &Daemon,
     connection: &str,
     entries: &BTreeMap<String, String>,
@@ -375,9 +375,36 @@ async fn secrets(
     Ok(read)
 }
 
-/// Starts the server as declared, and reads what it announces; why it could not, in its own words
-/// when it said them, neither masked nor cut.
+/// Starts the server as declared, with the options of the adapter that applies to it, and reads
+/// what it announces; why it could not, in its own words when it said them, neither masked nor
+/// cut. The adapter is known only once the server said what it is: it is taken from the pin, and
+/// a server that turns out to be another (its first review, a version that moved) is started
+/// once more with the options of its own.
 async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Running, String> {
+    let pinned = super::row(daemon, &declaration.name)
+        .pin
+        .as_ref()
+        .and_then(super::adapters::applying);
+    let running = start_with(daemon, declaration, pinned).await?;
+    let found = super::adapters::applying(&running.listing);
+    let same = match (pinned, found) {
+        (Some(a), Some(b)) => std::ptr::eq(a, b),
+        (None, None) => true,
+        _ => false,
+    };
+    if same || !matches!(declaration.reach, Reach::Command(_)) {
+        return Ok(running);
+    }
+    stop_running(running).await;
+    start_with(daemon, declaration, found).await
+}
+
+/// `start`, with the options of `adapter`.
+async fn start_with(
+    daemon: &Arc<Daemon>,
+    declaration: &Declaration,
+    adapter: Option<&'static super::adapters::Adapter>,
+) -> Result<Running, String> {
     let start = daemon
         .extensions
         .connections
@@ -391,13 +418,13 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
     let mut expires_at = None;
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
-            let folder = daemon
-                .paths
-                .state
-                .join("connections")
-                .join(&declaration.name);
+            let folder = super::adapters::folder(daemon, &declaration.name);
             flottille_core::paths::ensure_private_dir(&folder)
                 .map_err(|error| error.to_string())?;
+            let options = match adapter {
+                Some(_) => super::adapters::start_options(&folder)?,
+                None => Vec::new(),
+            };
             let mut env = crate::runs::beside(daemon)?;
             for (name, secret) in secrets(daemon, &declaration.name, &declaration.env).await? {
                 env.insert(OsString::from(name), OsString::from(secret));
@@ -405,6 +432,7 @@ async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Runnin
             let mut command = tokio::process::Command::new(&words[0]);
             command
                 .args(&words[1..])
+                .args(&options)
                 .env_clear()
                 .envs(&env)
                 .current_dir(&folder)
