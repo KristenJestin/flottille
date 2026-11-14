@@ -986,13 +986,18 @@ impl Pictures<'_> {
         if bytes.is_empty() {
             return left_out("it is empty");
         }
+        // The type a server says is not checked by the provider's API, which refuses an image
+        // whose bytes are not its type and keeps it in the history, breaking every later turn.
+        if !flottille_core::images::is_picture(mime, &bytes) {
+            let kind = mime.strip_prefix("image/").unwrap_or(mime);
+            return left_out(&format!("its bytes are not those of a {kind}"));
+        }
+        // As the pictures of a message are, before they are stored.
+        let bytes = flottille_core::images::scaled_down(mime, bytes);
         let Some(name) = self.store(extension, &bytes) else {
             return left_out("it could not be stored");
         };
-        if !crate::mcp::picture_served(&name) {
-            let _ = std::fs::remove_file(self.daemon.paths.images(self.agent).join(&name));
-            return left_out("this answer reaches you as a message, which carries no image");
-        }
+        crate::mcp::picture_served(&name);
         self.taken += 1;
         self.bytes += bytes.len();
         format!("[an image ({mime}, {} bytes) is attached]", bytes.len())

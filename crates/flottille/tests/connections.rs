@@ -1815,6 +1815,61 @@ fn an_image_past_the_cap_is_left_out_with_its_line() {
 }
 
 #[test]
+fn an_image_whose_bytes_are_not_its_type_is_left_out_with_its_line() {
+    // A page labelled png, and a jpeg labelled png: a provider rejects an image whose bytes
+    // are not its type, and keeps it in the history.
+    for data in ["PGh0bWw+PC9odG1sPg==", "/9j/4AAQSkZJRgABAQ=="] {
+        let user = user();
+        let (id, text, images) = pictured(
+            &user,
+            json!({"text": "a screenshot", "image_data": data, "image_mime": "image/png"}),
+        );
+        assert!(images.is_empty(), "no image goes: {text}");
+        assert!(text.contains("a screenshot"), "{text}");
+        assert!(
+            text.contains("left out: its bytes are not those of a png"),
+            "{text}"
+        );
+        assert!(
+            last_served(&user, &id).get("pictures").is_none(),
+            "nothing is stored"
+        );
+        assert!(
+            !user.path(&format!("data/flottille/images/{id}")).exists()
+                || std::fs::read_dir(user.path(&format!("data/flottille/images/{id}")))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "no file is written"
+        );
+    }
+}
+
+#[test]
+fn a_large_image_of_a_result_is_scaled_like_a_message_picture() {
+    use base64::Engine as _;
+    let user = user();
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_fn(3000, 1500, |x, y| {
+        image::Rgb([(x / 12) as u8, (y / 12) as u8, ((x + y) / 24) as u8])
+    })
+    .write_to(&mut out, image::ImageFormat::Png)
+    .unwrap();
+    let big = base64::engine::general_purpose::STANDARD.encode(out.into_inner());
+    let (_, text, images) = pictured(&user, json!({"text": "wide", "image_data": big}));
+    assert_eq!(images.len(), 1, "{text}");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&images[0].1)
+        .unwrap();
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap();
+    assert_eq!((width, height), (2000, 1000), "scaled to 2000 px a side");
+}
+
+#[test]
 fn the_images_of_a_result_past_its_total_are_left_out_with_their_line() {
     let user = user();
     // Three of 1.9 MiB: two make 3.8 MiB, the third would make 5.7, over the 5 MiB of a result.

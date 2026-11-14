@@ -55,7 +55,8 @@
 //! what it got back), `reload` (reads the script again and says its tools changed), `env` (the
 //! value of that variable), `echo` (the arguments, as JSON), `text`; `image` adds a picture after
 //! the text, `images` that many pictures of `image_bytes` bytes each (a PNG's signature, then
-//! zeros), `audio` a sound and `resource` a resource link after it, `error` answers that text as
+//! zeros), `image_data` one picture of those base64 bytes, of the type `image_mime` (png by
+//! default), `audio` a sound and `resource` a resource link after it, `error` answers that text as
 //! an error. `rpc_error` answers that text as a JSON-RPC
 //! error instead, on stdio. With no answer, `ok`.
 //!
@@ -311,6 +312,10 @@ fn call(
     if answer["image"] == true {
         content.push(json!({"type": "image", "mimeType": "image/png",
             "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="}));
+    }
+    if let Some(data) = answer["image_data"].as_str() {
+        let mime = answer["image_mime"].as_str().unwrap_or("image/png");
+        content.push(json!({"type": "image", "mimeType": mime, "data": data}));
     }
     if answer["audio"] == true {
         content.push(json!({"type": "audio", "mimeType": "audio/wav", "data": "UklGRgAAAAA="}));
