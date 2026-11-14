@@ -621,7 +621,8 @@ fn a_login_refused_by_an_agent_that_exits_says_sign_in() {
         "open_error": "Failed to authenticate: OAuth session expired and could not be refreshed",
         "exit_after_open_error": 1,
         "turns": [{"when": "die", "do": [{"die": 0}]}]}));
-    user.call("agent.send", json!({"agent": id, "message": "die now"}))
+    let died = user
+        .call("agent.send", json!({"agent": id, "message": "die now"}))
         .unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -651,6 +652,58 @@ fn a_login_refused_by_an_agent_that_exits_says_sign_in() {
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(user.received_requests("session/load").len(), 1);
     assert_eq!(show(&user, &id)["agent"]["state"], "idle");
+
+    // What it was given, the note of the death, goes back to the queue instead of being lost.
+    let events = user
+        .call(
+            "agent.show",
+            json!({"agent": id, "after": died["after"].as_u64().unwrap()}),
+        )
+        .unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let resume = events
+        .iter()
+        .find(|e| e["name"] == "delivery.queued" && e["data"]["kind"] == "resume")
+        .unwrap_or_else(|| panic!("the death is told to it: {events:?}"))["data"]["delivery"]
+        .clone();
+    let given_back = events
+        .iter()
+        .find(|e| e["name"] == "delivery.given_back")
+        .unwrap_or_else(|| panic!("given back: {events:?}"));
+    assert!(
+        given_back["data"]["deliveries"]
+            .as_array()
+            .unwrap()
+            .contains(&resume),
+        "{given_back}"
+    );
+    let cut = |prompts: &[String]| {
+        prompts
+            .iter()
+            .filter(|p| p.contains("your last turn was cut"))
+            .count()
+    };
+    assert_eq!(cut(&prompts(&user)), 0, "it was refused, not sent");
+
+    // The user writes: the login works again, and the note comes in one prompt, with the message.
+    user.fake_script(json!({"resume": false,
+        "turns": [{"when": "signed in", "do": [{"say": "Back"}]}]}));
+    let before = prompts(&user).len();
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "signed in"}))
+        .unwrap();
+    events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+    let later = prompts(&user)[before..].to_vec();
+    assert_eq!(later.len(), 1, "{later:?}");
+    assert_eq!(cut(&later), 1, "{later:?}");
+    assert!(later[0].contains("signed in"), "{later:?}");
 }
 
 #[test]
