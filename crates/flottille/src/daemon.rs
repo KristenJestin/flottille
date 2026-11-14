@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use flottille_core::paths::{Paths, ensure_private_dir};
 use flottille_core::protocol::{Event, Message, Request, WatchParams, WorkspaceForge};
 use flottille_core::store::Store;
-use flottille_protocol::code;
+use flottille_protocol::{PROTOCOL, code};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
@@ -905,6 +905,7 @@ fn status(daemon: &Daemon) -> flottille_core::Result<Value> {
     let count = |states: &[AgentState]| agents.iter().filter(|a| states.contains(&a.state)).count();
     Ok(json!({
         "version": VERSION,
+        "protocol": PROTOCOL,
         "pid": std::process::id(),
         "uptime_s": daemon.started.elapsed().as_secs(),
         "agents": {

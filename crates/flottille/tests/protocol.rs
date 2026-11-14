@@ -1,10 +1,18 @@
-//! The catalogue of methods (`docs/protocol.md`), against the real binary.
+//! The protocol's version and its catalogue of methods (`docs/protocol.md`), against the real
+//! binary.
 
 mod common;
 
 use common::User;
-use flottille_protocol::METHODS;
+use flottille_protocol::{METHODS, PROTOCOL};
 use serde_json::json;
+
+#[test]
+fn daemon_status_says_the_protocol_version() {
+    let user = User::new();
+
+    assert_eq!(user.status()["protocol"], PROTOCOL);
+}
 
 /// The other way, a method answered and not catalogued, cannot happen: the daemon calls a method
 /// unknown before anything reads it when the catalogue does not name it.

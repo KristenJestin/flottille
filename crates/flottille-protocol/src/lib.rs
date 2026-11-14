@@ -10,6 +10,11 @@ use serde_json::Value;
 
 pub use catalogue::{Class, METHODS, class};
 
+/// The protocol's version, `protocol` in `daemon.status`. Raised by any change of a method, an
+/// answer or an event that an older client would misread (`docs/remote.md`, "The version"); one
+/// it reads right, such as a new method, leaves it.
+pub const PROTOCOL: u32 = 1;
+
 /// A client's request. The id is the client's, opaque to the daemon, and comes back on the answer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
