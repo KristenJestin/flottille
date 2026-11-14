@@ -1157,8 +1157,9 @@ struct Tokens {
     notices: HashMap<String, Notice>,
 }
 
-/// A call's answer: its text, and whether it is an error.
-type Answer = (String, bool);
+/// A call's answer: its text, whether it is an error, and the pictures it carries, names of files
+/// in the agent's folder of images.
+type Answer = (String, bool, Vec<String>);
 
 /// The answers of the calls made with a call key, by agent and key, kept for their retries.
 #[derive(Default)]
@@ -2016,16 +2017,23 @@ impl ServerHandler for Handler {
         {
             self.daemon.mcp.told(&digest, change);
         }
-        let (text, error) = call(
+        let (text, error, pictures) = call(
             &self.daemon,
-            grant,
+            grant.clone(),
             &request.name,
             args,
             key,
             context.ct.clone(),
         )
         .await;
-        let content = vec![ContentBlock::text(text)];
+        let mut content = vec![ContentBlock::text(text)];
+        // The pictures of a result are files in the agent's folder: read as the call answers, so
+        // that what a retry is given again is never base64 held in memory.
+        for name in &pictures {
+            if let Some((mime, data)) = deliveries::read_image(&self.daemon, &grant.agent, name) {
+                content.push(ContentBlock::image(data, mime));
+            }
+        }
         Ok(if error {
             CallToolResult::error(content)
         } else {
@@ -2096,7 +2104,7 @@ async fn call(
     args: Value,
     key: Option<String>,
     cancelled: CancellationToken,
-) -> (String, bool) {
+) -> Answer {
     let tool = providers::PROVIDERS
         .iter()
         .find_map(|provider| provider.tool_of(name))
@@ -2148,6 +2156,7 @@ async fn call(
             Err(_) => (
                 "the call failed: its first attempt was lost".to_owned(),
                 true,
+                Vec::new(),
             ),
         },
     }
@@ -2183,6 +2192,21 @@ tokio::task_local! {
     static RUN_STARTED: Mutex<Option<String>>;
 }
 
+tokio::task_local! {
+    /// The pictures the call in progress gives the agent with its text, as names of files in the
+    /// agent's folder of images.
+    static PICTURES: Mutex<Vec<String>>;
+}
+
+/// Gives the call in progress a picture to carry in its result, a file of the agent's folder of
+/// images. False when no call waits for it (a call the user allowed later is answered as a
+/// message, which carries none): the caller leaves the picture out.
+pub fn picture_served(name: &str) -> bool {
+    PICTURES
+        .try_with(|pictures| pictures.lock().unwrap().push(name.to_owned()))
+        .is_ok()
+}
+
 /// Says that the call in progress started, or joined, this run.
 pub fn started_run(id: &str) {
     let _ = RUN_STARTED.try_with(|run| *run.lock().unwrap() = Some(id.to_owned()));
@@ -2195,11 +2219,15 @@ async fn played(
     args: Value,
     key: Option<&str>,
     cancelled: CancellationToken,
-) -> (String, bool) {
+) -> Answer {
     RUN_STARTED
         .scope(
             Mutex::default(),
-            played_in(daemon, grant, tool, args, key, cancelled),
+            PICTURES.scope(Mutex::default(), async {
+                let (text, error) = played_in(daemon, grant, tool, args, key, cancelled).await;
+                let pictures = PICTURES.with(|pictures| pictures.lock().unwrap().clone());
+                (text, error, pictures)
+            }),
         )
         .await
 }
@@ -3094,6 +3122,12 @@ fn record(
         "duration_ms": duration, "request": request});
     if let Some(cut) = cut {
         data["cut"] = cut.to_json();
+    }
+    let pictures = PICTURES
+        .try_with(|pictures| pictures.lock().unwrap().clone())
+        .unwrap_or_default();
+    if !pictures.is_empty() {
+        data["pictures"] = json!(pictures);
     }
     // A call that broke the tool's own rule on its input: the window does not count it as a
     // failure when the agent then calls again right.

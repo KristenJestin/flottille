@@ -54,7 +54,9 @@
 //! (`"sampling"`, `"elicitation"` or `"roots"`: sends that request to the client and answers with
 //! what it got back), `reload` (reads the script again and says its tools changed), `env` (the
 //! value of that variable), `echo` (the arguments, as JSON), `text`; `image` adds a picture after
-//! the text, `error` answers that text as an error. `rpc_error` answers that text as a JSON-RPC
+//! the text, `images` that many pictures of `image_bytes` bytes each (a PNG's signature, then
+//! zeros), `audio` a sound and `resource` a resource link after it, `error` answers that text as
+//! an error. `rpc_error` answers that text as a JSON-RPC
 //! error instead, on stdio. With no answer, `ok`.
 //!
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
@@ -309,6 +311,24 @@ fn call(
     if answer["image"] == true {
         content.push(json!({"type": "image", "mimeType": "image/png",
             "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="}));
+    }
+    if answer["audio"] == true {
+        content.push(json!({"type": "audio", "mimeType": "audio/wav", "data": "UklGRgAAAAA="}));
+    }
+    if answer["resource"] == true {
+        content.push(json!({"type": "resource_link", "name": "notes",
+            "uri": "file:///notes/today.md"}));
+    }
+    if let Some(count) = answer["images"].as_u64() {
+        use base64::Engine as _;
+        let mut bytes = vec![0u8; answer["image_bytes"].as_u64().unwrap_or(64) as usize];
+        let signature = b"\x89PNG\r\n\x1a\n";
+        let kept = signature.len().min(bytes.len());
+        bytes[..kept].copy_from_slice(&signature[..kept]);
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        for _ in 0..count {
+            content.push(json!({"type": "image", "mimeType": "image/png", "data": data}));
+        }
     }
     json!({"content": content})
 }
