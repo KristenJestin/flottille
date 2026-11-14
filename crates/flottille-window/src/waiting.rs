@@ -416,7 +416,17 @@ impl Waiting {
                     .gap(space::SM)
                     .child(div().flex_1().child(toggle))
                     .child(button("deny", "Deny", Answer::Deny, false))
-                    .child(button("allow", "Allow", Answer::Once, true)),
+                    .child(match card.proposes_a_connection() {
+                        // What it would write is read in its dialog before it is accepted.
+                        true => Button::primary(id("open-request"), "Open")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.page
+                                    .update(cx, |page, cx| page.open_connection_request(number, cx))
+                                    .ok();
+                            })),
+                        false => button("allow", "Allow", Answer::Once, true),
+                    }),
             );
         // A glow round the card the user was sent to, which fades in and out.
         div()

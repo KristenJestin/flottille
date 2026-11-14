@@ -418,6 +418,13 @@ pub fn decide(call: &Call) -> Verdict {
         }
         .verdict(Kind::Action),
         "services" if call.args["action"] == "start" => run(call),
+        // A connection's command runs with the user's rights and its tool reaches every agent of
+        // every project: only the user writes one, in every mode.
+        tool if crate::extensions::held_for_the_user(tool, call.args) => Found {
+            base: vec![crate::extensions::held_reason(call.args)],
+            judge: Vec::new(),
+        }
+        .verdict(Kind::Action),
         tool if FILES.contains(&tool) => files(call),
         // Reads, the tree's tools, the outputs of the agent's own runs.
         _ => Verdict::Allow,
