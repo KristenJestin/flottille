@@ -72,9 +72,11 @@ jobs:
   # repositories (see AGENTS.md, Testing).
   #
   # The suite is split so that a pull request does not wait for every test binary one after the
-  # other on one runner: `check` builds the tests once into a nextest archive, the matrix `test`
-  # runs a sixth of them each on its own runner (`--partition count:k/6`), and `verify`, the
-  # required check, reports what they all said.
+  # other on one runner: the matrix `test` builds the tests on six runners at once and each runs
+  # a sixth of them (`cargo nextest run --partition count:k/6`), `check` runs the formatting and
+  # clippy beside them, and `verify`, the required check, reports what they all said. Each
+  # partition builds the tests itself, from the cache: about four minutes, when an archive built
+  # once (6 GB, 37 GB extracted) took longer to pack, upload, download and extract.
   check:
     needs: verified-on-dev
     # `verified-on-dev` is skipped off main: `!cancelled()` keeps that from skipping this job.
@@ -91,32 +93,16 @@ jobs:
           # The key does not follow Cargo.toml: bump this one when a profile changes, or the
           # cache keeps the artefacts of the old profiles and never saves the new ones.
           prefix-key: v1-rust
-          # The name of the job that wrote the cache before the suite was split: the
-          # dependencies already cached are kept.
-          shared-key: verify
+          # Clippy's own artefacts, apart from the tests' (`test`).
+          shared-key: check
       # The window links against fontconfig and freetype; GPUI loads Wayland and Vulkan at run
       # time and opens no window here: its tests use GPUI's own test platform.
       - name: Have the window's system libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.152
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      # Every test binary and the binaries they run (the fake agents, `flottille`), at the paths
-      # they were built for: the runners of `test` check out at the same place.
-      - run: cargo nextest archive --locked --archive-file "$RUNNER_TEMP/tests.tar.zst"
-      # nextest does not run doc tests.
-      - run: cargo test --doc --locked
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tests
-          path: ${{ runner.temp }}/tests.tar.zst
-          # zstd already: zipping it again only takes time.
-          compression-level: 0
-          retention-days: 1
       # The margin left on the runner, read even when a step above failed.
       - name: Disk left
         if: always()
@@ -125,18 +111,25 @@ jobs:
         continue-on-error: true
 
   test:
-    needs: check
-    # Not `success()`: it counts `verified-on-dev`, skipped off main, and would skip this job.
-    if: ${{ !cancelled() && needs.check.result == 'success' }}
+    needs: verified-on-dev
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' }}
     runs-on: ubuntu-latest
     strategy:
       # Every partition says what fails in it, not only the first one to fail.
       fail-fast: false
       matrix:
         partition: [1, 2, 3, 4, 5, 6]
+    env:
+      CARGO_INCREMENTAL: 0
     steps:
-      # The tests read the sources and fixtures of the workspace, and run its tools.
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          # The name of the job that wrote the cache before the suite was split: the
+          # dependencies already cached are kept. The partitions build the same thing: one saves.
+          shared-key: verify
+          save-if: ${{ matrix.partition == 1 }}
       - name: Have the window's system libraries
         run: |
           sudo apt-get update
@@ -144,16 +137,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.152
-      - uses: actions/download-artifact@v4
-        with:
-          name: tests
-          path: ${{ runner.temp }}
-      # Extracted into the checkout, `target/` lands where `check` built it: a test finds the
-      # fake agents beside `CARGO_BIN_EXE_flottille`, a path written into it at build time.
-      - run: >-
-          cargo nextest run --archive-file "$RUNNER_TEMP/tests.tar.zst"
-          --workspace-remap "$GITHUB_WORKSPACE" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite
-          --partition count:${{ matrix.partition }}/6 --no-fail-fast
+      - run: cargo nextest run --locked --partition count:${{ matrix.partition }}/6 --no-fail-fast
+      # nextest does not run doc tests: one partition runs them, whatever its tests said.
+      - if: ${{ !cancelled() && matrix.partition == 1 }}
+        run: cargo test --doc --locked
       - name: Disk left
         if: always()
         run: df -h /
