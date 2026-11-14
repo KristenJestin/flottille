@@ -2362,6 +2362,155 @@ fn a_call_running_when_the_connection_is_turned_off_answers_that_it_failed() {
     });
 }
 
+// ── The size of an answer ────────────────────────────────────────────────────────────────────
+
+/// The limit of one answer of a server, in bytes (`docs/extensions.md`, "A result").
+const ANSWER_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// The `almanac` whose action `write` answers `bytes` bytes of text, a megabyte at a time with
+/// `pause_ms` between.
+fn answering(bytes: u64, pause_ms: u64) -> Value {
+    let mut script = almanac();
+    script["answers"]["write"] =
+        json!({"big": {"bytes": bytes, "chunk": 1 << 20, "pause_ms": pause_ms}});
+    script
+}
+
+/// How much of the text the fake wrote, as it logged it, and whether it saw its reader go.
+fn written(user: &User, name: &str) -> (u64, bool) {
+    let most = logged(user, name, "wrote")
+        .iter()
+        .filter_map(|line| line["bytes"].as_u64())
+        .max()
+        .unwrap_or(0);
+    (most, !logged(user, name, "stopped").is_empty())
+}
+
+/// An answer of 64 MiB, written slowly, is cut as the server's answer passes the limit: the call
+/// fails with the sentence, the fake was not read to its end, and the next call is answered.
+fn a_response_past_the_limit_is_cut(user: &User, mcp: &Mcp, waits_for_the_reader: bool) {
+    let total = 64 << 20;
+    let started = Instant::now();
+    let answer = mcp.call(
+        "conn_almanac",
+        json!({"action": "write", "arguments": {"text": "a"}}),
+    );
+    let said = refused(answer);
+    assert!(
+        said.contains("the server's answer passed 16 MB and was cut off"),
+        "{said}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "it took {:?}: the call waited for the whole answer",
+        started.elapsed()
+    );
+    if waits_for_the_reader {
+        eventually("the server sees its reader go", || {
+            written(user, "almanac").1
+        });
+    }
+    let (taken, _) = written(user, "almanac");
+    assert!(
+        taken >= ANSWER_LIMIT && taken < total,
+        "{taken} of {total} bytes were written before the cut"
+    );
+    let text = done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    assert!(text.contains("found: the login decision"), "{text}");
+    assert_eq!(connection(user, "almanac")["state"], "ready");
+}
+
+#[test]
+fn a_response_past_the_limit_fails_the_call_and_keeps_the_connection() {
+    let user = user();
+    project(&user, "app");
+    connect(
+        &user,
+        "almanac",
+        &answering(64 << 20, 20),
+        json!({"search": "passes", "write": "passes"}),
+    );
+    let (_, mcp) = session(&user, "app");
+    a_response_past_the_limit_is_cut(&user, &mcp, false);
+}
+
+/// The same, over HTTP, the answer a JSON body or, with `sse`, an event of a stream.
+fn a_response_past_the_limit_over_http(sse: bool) {
+    let user = user();
+    project(&user, "app");
+    let mut script = answering(64 << 20, 20);
+    script["answers"]["write"]["big"]["sse"] = json!(sse);
+    write_script(&user, "almanac", &script);
+    let (mut server, port) = http_server(&user, "almanac");
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "almanac", "about": "Notes.",
+        "url": format!("http://127.0.0.1:{port}/mcp")}),
+    )
+    .unwrap();
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes", "write": "passes"}}),
+    )
+    .unwrap();
+    let (_, mcp) = session(&user, "app");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        a_response_past_the_limit_is_cut(&user, &mcp, true)
+    }));
+    let _ = server.kill();
+    let _ = server.wait();
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
+fn a_response_past_the_limit_fails_the_call_and_keeps_the_connection_over_http() {
+    a_response_past_the_limit_over_http(false);
+}
+
+#[test]
+fn a_response_past_the_limit_fails_the_call_and_keeps_the_connection_over_an_event_stream() {
+    a_response_past_the_limit_over_http(true);
+}
+
+#[test]
+fn the_answers_of_a_long_lived_server_are_never_counted_together() {
+    let user = user();
+    project(&user, "app");
+    // Four answers of 5 MiB, 20 MiB in all, past the limit together and each far under it.
+    connect(
+        &user,
+        "almanac",
+        &answering(5 << 20, 0),
+        json!({"search": "passes", "write": "passes"}),
+    );
+    let (_, mcp) = session(&user, "app");
+    let mut starts = 0;
+    for call in 0..4 {
+        let text = done(mcp.call(
+            "conn_almanac",
+            json!({"action": "write", "arguments": {"text": "a"}}),
+        ));
+        assert!(
+            !text.contains("was cut off"),
+            "{}",
+            &text[..text.len().min(200)]
+        );
+        // The first call starts the server accepting stopped; the others reuse it.
+        match call {
+            0 => starts = logged(&user, "almanac", "start").len(),
+            _ => assert_eq!(logged(&user, "almanac", "start").len(), starts, "restarted"),
+        }
+    }
+}
+
 // ── The user's door ──────────────────────────────────────────────────────────────────────────
 
 #[test]

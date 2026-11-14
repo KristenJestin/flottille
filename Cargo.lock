@@ -2179,6 +2179,7 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "sha2 0.11.1",
+ "sse-stream",
  "tempfile",
  "tokio",
  "tokio-rustls",

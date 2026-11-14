@@ -5,6 +5,7 @@
 //! actions) is pinned when they accept it, and any change cuts the connection off until they
 //! review it again.
 
+mod bounded;
 mod client;
 pub mod command;
 mod oauth;

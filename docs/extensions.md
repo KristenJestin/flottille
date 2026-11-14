@@ -889,6 +889,14 @@ Its cost in the agent's context is about one tool line:
 - **A result** is the server's text blocks, masked, escaped as every result is, framed as a third
   party's data, and cut at the user's limit with the rest read through `run_status` (`tools.md`,
   "Long results"). `isError` is an error.
+- **An answer has a size limit**, applied while it is read, before any of the caps below: 16 MiB
+  (`ANSWER_LIMIT`), above the largest result that is kept (4 images of 2 MiB and 5 MiB in all, then
+  the text). It is the size of one message of the server (a line of its output on stdio; the body
+  or the event stream of one answer over HTTP), never what a long-lived server has said in all.
+  One past it fails the call with `the server's answer passed 16 MB and was cut off`, the rest is
+  never read, and the connection goes on: the server is stopped, as one that died, and the next call
+  starts it again (a stream cut in the middle of a message cannot be read on). The stream a server
+  keeps open over HTTP for what it says of itself is limited to 16 MiB for one event of it.
 - **An image** of a result (`image` content: a screenshot a browser took, a chart) reaches the
   agent as an image, in the same tool result, after the masked text, which says it is attached.
   Flottille serves it as MCP `image` content: Claude and Codex read it themselves, as they read an
