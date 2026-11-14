@@ -1446,6 +1446,13 @@ impl SessionPage {
         self.refresh_conversation(cx);
     }
 
+    /// Opens the dialog of an agent's request to write a connection.
+    pub fn open_connection_request(&mut self, number: u64, cx: &mut Context<Self>) {
+        self.shell
+            .update(cx, |shell, cx| shell.open_connection_request(number, cx))
+            .ok();
+    }
+
     /// The conversation's line about a request was clicked: the rail shows its card, at its top.
     pub fn reveal_waiting(&mut self, number: u64, cx: &mut Context<Self>) {
         if self.layout != Layout::Wide {
@@ -1949,6 +1956,7 @@ impl SessionPage {
         }
         Some(ApprovalCard {
             number,
+            tool: request.map(|r| r.tool.clone()).unwrap_or_default(),
             base: request.is_some_and(|r| r.base),
             judgement: request
                 .and_then(|r| r.judgement.as_ref())
@@ -3959,6 +3967,8 @@ pub struct SubAgent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApprovalCard {
     pub number: u64,
+    /// The tool the agent called.
+    pub tool: String,
     /// In the base: it always comes back to the user, whatever the mode.
     pub base: bool,
     /// What the Auto judge said, in one line, when it was judged.
@@ -3978,6 +3988,12 @@ pub struct ApprovalCard {
 }
 
 impl ApprovalCard {
+    /// An agent's request to write a connection: never allowed from its card, which opens the
+    /// dialog that shows what it would write.
+    pub fn proposes_a_connection(&self) -> bool {
+        self.tool == "connections" && self.kind == "action"
+    }
+
     /// Why a base card always comes back: a session's first message to another asks a leave,
     /// which the daemon's reason names.
     pub fn always_says(&self) -> &'static str {
@@ -10680,6 +10696,7 @@ mod tests {
     fn a_decided_card_folds_into_one_line() {
         let card = ApprovalCard {
             number: 4,
+            tool: "fs_read".into(),
             base: false,
             judgement: None,
             kind: "call".into(),
