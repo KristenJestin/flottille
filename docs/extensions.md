@@ -894,16 +894,18 @@ Its cost in the agent's context is about one tool line:
   Flottille serves it as MCP `image` content: Claude and Codex read it themselves, as they read an
   image of any tool, so nothing goes through the bridge. Four images at most, 2 MiB each and 5 MiB
   for the result; a PNG, a JPEG, a GIF or a WebP. One past a limit, of another type, or whose data
-  is not base64, is left out with one line saying what it was, how big and why. Nothing is
-  scaled. The image is kept as a message's picture is: a file in the agent's folder of images in
+  is not base64 or whose bytes are not the type it says (a page labelled png: a provider
+  refuses such an image, and it stays in the history), is left out with one line saying what it
+  was, how big and why. One larger than 2000 px on its long side is scaled down, as a message's
+  picture is. The image is kept as a message's picture is: a file in the agent's folder of images in
   the data folder (`images/<agent>/`, gone with the agent's session as the pictures of its
   messages are), and its name in `pictures` of the call's `agent.tool_served` (`events.md`); never
   base64 in the store or in an event (what the agent's own provider reports of the call, which
   holds the bytes, is stripped of them before it becomes an event). The call's card in the window
   shows it. **An image is not scanned**: masking reads text, and it cannot read a picture, so a
   secret a screenshot shows reaches the agent as it is. A provider that cannot take an image in a
-  tool result (OpenCode) gets the line. So does an answer that reaches the agent as a message, a
-  call the user allowed later (`tools.md`, "The gate"): its image is left out with its line.
+  tool result (OpenCode) gets the line. A call the user allowed later (`tools.md`, "The gate")
+  is answered by a message: its image goes with it, as the pictures of any message of the agent.
   A **sound** and a **resource** have no place in a result: each is left out with one line saying
   what it was and how big.
 - **Every call is recorded** as an `agent.tool_served` event of the agent (the action and its
