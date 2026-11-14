@@ -2237,8 +2237,11 @@ async fn played(
 ) -> Answer {
     RUN_STARTED
         .scope(Mutex::default(), async {
-            let ((text, error), pictures) =
-                with_pictures(played_in(daemon, grant, tool, args, key, cancelled)).await;
+            // Boxed: the call's future is deep, and a debug build runs it on a small stack.
+            let ((text, error), pictures) = with_pictures(Box::pin(played_in(
+                daemon, grant, tool, args, key, cancelled,
+            )))
+            .await;
             (text, error, pictures)
         })
         .await
