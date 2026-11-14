@@ -1763,23 +1763,327 @@ fn a_result_is_masked_cut_and_escaped_like_any_other() {
     );
 }
 
+/// The 1x1 PNG the fake server returns for `"image": true`.
+const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+const MIB: u64 = 1024 * 1024;
+
+/// A session whose `almanac` answers its `search` with `answer`, and what the call gave: the
+/// agent's id, the text and the images.
+fn pictured(user: &User, answer: Value) -> (String, String, Vec<(String, String)>) {
+    project(user, "app");
+    let mut script = almanac();
+    script["answers"]["search"] = answer;
+    connect(user, "almanac", &script, json!({"search": "passes"}));
+    let (id, mcp) = session(user, "app");
+    let (answer, images) = mcp.call_with_images(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    );
+    (id, done(answer), images)
+}
+
 #[test]
-fn an_image_in_a_result_is_left_out_with_a_line_saying_so() {
+fn an_image_of_a_connection_result_reaches_the_agent() {
+    let user = user();
+    let (_, text, images) = pictured(&user, json!({"text": "a screenshot", "image": true}));
+    assert!(text.contains("a screenshot"), "{text}");
+    assert_eq!(images, vec![("image/png".to_owned(), PNG.to_owned())]);
+    assert!(!text.contains("left out"), "{text}");
+    assert!(
+        !text.contains("iVBOR"),
+        "the bytes are not in the text: {text}"
+    );
+}
+
+#[test]
+fn an_image_past_the_cap_is_left_out_with_its_line() {
+    let user = user();
+    let (_, text, images) = pictured(
+        &user,
+        json!({"text": "a screenshot", "images": 1, "image_bytes": 3 * MIB}),
+    );
+    assert!(images.is_empty(), "no image goes");
+    assert!(text.contains("a screenshot"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "[an image (image/png, about {} bytes) left out: over 2 MiB]",
+            3 * MIB
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_image_whose_bytes_are_not_its_type_is_left_out_with_its_line() {
+    // A page labelled png, and a jpeg labelled png: a provider rejects an image whose bytes
+    // are not its type, and keeps it in the history.
+    for data in ["PGh0bWw+PC9odG1sPg==", "/9j/4AAQSkZJRgABAQ=="] {
+        let user = user();
+        let (id, text, images) = pictured(
+            &user,
+            json!({"text": "a screenshot", "image_data": data, "image_mime": "image/png"}),
+        );
+        assert!(images.is_empty(), "no image goes: {text}");
+        assert!(text.contains("a screenshot"), "{text}");
+        assert!(
+            text.contains("left out: its bytes are not those of a png"),
+            "{text}"
+        );
+        assert!(
+            last_served(&user, &id).get("pictures").is_none(),
+            "nothing is stored"
+        );
+        assert!(
+            !user.path(&format!("data/flottille/images/{id}")).exists()
+                || std::fs::read_dir(user.path(&format!("data/flottille/images/{id}")))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "no file is written"
+        );
+    }
+}
+
+#[test]
+fn a_large_image_of_a_result_is_scaled_like_a_message_picture() {
+    use base64::Engine as _;
+    let user = user();
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_fn(3000, 1500, |x, y| {
+        image::Rgb([(x / 12) as u8, (y / 12) as u8, ((x + y) / 24) as u8])
+    })
+    .write_to(&mut out, image::ImageFormat::Png)
+    .unwrap();
+    let big = base64::engine::general_purpose::STANDARD.encode(out.into_inner());
+    let (_, text, images) = pictured(&user, json!({"text": "wide", "image_data": big}));
+    assert_eq!(images.len(), 1, "{text}");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&images[0].1)
+        .unwrap();
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap();
+    assert_eq!((width, height), (2000, 1000), "scaled to 2000 px a side");
+}
+
+#[test]
+fn an_image_of_a_call_allowed_later_reaches_the_agent() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true, "turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    project(&user, "app");
+    let mut script = almanac();
+    script["answers"]["write"] = json!({"text": "a screenshot", "image": true});
+    connect(&user, "almanac", &script, json!({}));
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "ask");
+    let asked = mcp.call(
+        "conn_almanac",
+        json!({"action": "write", "arguments": {"text": "a"}}),
+    );
+    assert!(held(&asked), "{}", asked.text);
+    let number: u64 = asked
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap();
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    let delivery = format!("approval-{number}");
+    // The agent is given the answer as a message, with the picture the call carried.
+    eventually("the answer reaches the agent with its image", || {
+        user.received_requests("session/prompt")
+            .iter()
+            .any(|prompt| {
+                let blocks = prompt["params"]["prompt"].as_array().unwrap();
+                blocks.iter().any(|b| {
+                    b["type"] == "text" && b["text"].as_str().unwrap_or("").contains("a screenshot")
+                }) && blocks.iter().any(|b| {
+                    b["type"] == "image" && b["data"] == PNG && b["mimeType"] == "image/png"
+                })
+            })
+    });
+    let text = user
+        .received_requests("session/prompt")
+        .iter()
+        .flat_map(|prompt| prompt["params"]["prompt"].as_array().unwrap().clone())
+        .filter_map(|b| b["text"].as_str().map(str::to_owned))
+        .collect::<String>();
+    assert!(
+        !text.contains("left out"),
+        "the image is not left out: {text}"
+    );
+    assert!(
+        text.contains(&delivery) || text.contains(&format!("#{number}")),
+        "{text}"
+    );
+    // The bytes are not in the store: the delivery names a file.
+    for file in ["flottille.db", "flottille.db-wal"] {
+        let bytes =
+            std::fs::read(user.path(&format!("state/flottille/{file}"))).unwrap_or_default();
+        assert!(
+            !bytes
+                .windows(15)
+                .any(|window| window == &PNG.as_bytes()[..15]),
+            "the store {file} holds the picture's base64"
+        );
+    }
+}
+
+#[test]
+fn a_retry_whose_image_file_is_gone_says_the_image_is_left_out() {
     let user = user();
     project(&user, "app");
     let mut script = almanac();
     script["answers"]["search"] = json!({"text": "a screenshot", "image": true});
     connect(&user, "almanac", &script, json!({"search": "passes"}));
-    let (_, mcp) = session(&user, "app");
-    let text = done(mcp.call(
+    let (id, mcp) = session(&user, "app");
+    let call = json!({"action": "search", "arguments": {"query": "a"}});
+    let (first, images) = mcp.call_keyed_with_images("conn_almanac", call.clone(), "toolu_1");
+    assert_eq!(images.len(), 1);
+    assert!(done(first).contains("is attached"));
+    std::fs::remove_dir_all(user.path(&format!("data/flottille/images/{id}"))).unwrap();
+    let (again, images) = mcp.call_keyed_with_images("conn_almanac", call, "toolu_1");
+    assert!(images.is_empty(), "the file is gone");
+    let text = done(again);
+    assert!(
+        text.contains("an image of this answer is left out: its file is gone"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_images_of_a_result_past_its_total_are_left_out_with_their_line() {
+    let user = user();
+    // Three of 1.9 MiB: two make 3.8 MiB, the third would make 5.7, over the 5 MiB of a result.
+    let (_, text, images) = pictured(
+        &user,
+        json!({"text": "shots", "images": 3, "image_bytes": 19 * MIB / 10}),
+    );
+    assert_eq!(images.len(), 2, "{text}");
+    assert_eq!(text.matches("left out").count(), 1, "{text}");
+    assert!(
+        text.contains("over 5 MiB for the images of one result"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_images_of_a_result_past_their_count_are_left_out_with_their_line() {
+    let user = user();
+    let (_, text, images) = pictured(&user, json!({"text": "shots", "images": 6}));
+    assert_eq!(images.len(), 4, "{text}");
+    assert_eq!(text.matches("left out").count(), 2, "{text}");
+    assert!(text.contains("a result carries 4 images at most"), "{text}");
+}
+
+#[test]
+fn the_image_is_stored_as_a_file_not_in_the_store() {
+    let user = user();
+    let (id, text, images) = pictured(&user, json!({"text": "a screenshot", "image": true}));
+    assert_eq!(images.len(), 1, "{text}");
+    let served = last_served(&user, &id);
+    let names = served["pictures"]
+        .as_array()
+        .expect("the event names its pictures");
+    assert_eq!(names.len(), 1, "{served}");
+    let name = names[0].as_str().unwrap();
+    let file = user.path(&format!("data/flottille/images/{id}/{name}"));
+    use base64::Engine as _;
+    assert_eq!(
+        std::fs::read(&file).expect("the picture is a file in the agent's folder"),
+        base64::engine::general_purpose::STANDARD
+            .decode(PNG)
+            .unwrap()
+    );
+    // Neither the event nor the store holds the bytes.
+    assert!(!served.to_string().contains("iVBOR"), "{served}");
+    let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+    assert!(
+        !shown.to_string().contains("iVBOR"),
+        "the events do not hold it"
+    );
+    for file in ["flottille.db", "flottille.db-wal"] {
+        let bytes =
+            std::fs::read(user.path(&format!("state/flottille/{file}"))).unwrap_or_default();
+        assert!(
+            !bytes
+                .windows(15)
+                .any(|window| window == &PNG.as_bytes()[..15]),
+            "the store {file} holds the picture's base64"
+        );
+    }
+    // The window reads it back as it reads a message's picture.
+    let read = user
+        .call("agent.image", json!({"agent": id, "name": name}))
+        .unwrap();
+    assert_eq!(read["data"], PNG);
+}
+
+#[test]
+fn an_image_for_a_provider_that_cannot_take_it_is_left_out_with_its_line() {
+    let user = User::with_fake_providers();
+    user.provider_script(
+        "opencode",
+        json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}),
+    );
+    project(&user, "app");
+    let mut script = almanac();
+    script["answers"]["search"] = json!({"text": "a screenshot", "image": true});
+    connect(&user, "almanac", &script, json!({"search": "passes"}));
+    user.call(
+        "agent.run",
+        json!({"project": "app", "message": "start", "provider": "opencode"}),
+    )
+    .unwrap();
+    let mut opened = None;
+    eventually("its session opens", || {
+        opened = user
+            .provider_received("opencode")
+            .into_iter()
+            .find(|entry| entry["received"]["method"] == "session/new");
+        opened.is_some()
+    });
+    let server = &opened.unwrap()["received"]["params"]["mcpServers"][0];
+    let authorization = server["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "Authorization")
+        .unwrap()["value"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mcp = Mcp::initialize(server["url"].as_str().unwrap(), &authorization);
+    let (answer, images) = mcp.call_with_images(
         "conn_almanac",
-        json!({"action": "search",
-        "arguments": {"query": "a"}}),
-    ));
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    );
+    let text = done(answer);
+    assert!(images.is_empty(), "no image goes");
     assert!(text.contains("a screenshot"), "{text}");
-    assert!(text.contains("[an image (image/png, about"), "{text}");
-    assert!(text.contains("left out"), "{text}");
-    assert!(!text.contains("iVBOR"), "{text}");
+    assert!(
+        text.contains("[an image (image/png, about") && text.contains("reads no image"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_sound_and_a_resource_stay_out_with_their_line() {
+    let user = user();
+    let (_, text, images) = pictured(
+        &user,
+        json!({"text": "found", "audio": true, "resource": true}),
+    );
+    assert!(images.is_empty());
+    assert!(text.contains("[a sound (audio/wav, about"), "{text}");
+    assert!(
+        text.contains("[a resource (file:///notes/today.md) left out"),
+        "{text}"
+    );
 }
 
 #[test]

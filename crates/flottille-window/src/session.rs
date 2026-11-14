@@ -1370,7 +1370,10 @@ impl SessionPage {
                     self.sync_command_cards(cx);
                 }
                 self.note_activity(cx);
-                if event.name == "agent.prompted" {
+                if matches!(
+                    event.name.as_str(),
+                    "agent.prompted" | "agent.tool_served" | "agent.tool_call"
+                ) {
                     self.fetch_pictures(cx);
                 }
             }
@@ -1492,6 +1495,13 @@ impl SessionPage {
             .iter()
             .filter_map(|block| match block {
                 Block::Message { images, .. } => Some(images.clone()),
+                // What a connection's result carried is kept as a message's pictures are.
+                Block::Steps { calls } => Some(
+                    calls
+                        .iter()
+                        .flat_map(|call| call.pictures.iter().cloned())
+                        .collect(),
+                ),
                 _ => None,
             })
             .flatten()
@@ -1536,8 +1546,12 @@ impl SessionPage {
             .update(cx, |queued, cx| queued.picture_read(&name, picture, cx));
         let rows = self.conversation.read(cx).rows.clone();
         for row in rows {
-            if matches!(&*row.read(cx).block, Block::Message { images, .. } if images.contains(&name))
-            {
+            let shows = match &*row.read(cx).block {
+                Block::Message { images, .. } => images.contains(&name),
+                Block::Steps { calls } => calls.iter().any(|call| call.pictures.contains(&name)),
+                _ => false,
+            };
+            if shows {
                 row.update(cx, |_, cx| cx.notify());
             }
         }
@@ -4009,6 +4023,61 @@ impl ApprovalCard {
     }
 }
 
+/// The pictures of a row as thumbnails, one tile each (empty while the picture is not read): a
+/// click opens them large among those read, and the border of a tile fades in on the hover.
+fn thumbnails(
+    id: &dyn Fn(&str) -> ElementId,
+    name: &str,
+    pictures: &[Option<Arc<gpui_kit::Image>>],
+    page: Option<&Entity<SessionPage>>,
+    (width, height, opacity): (Pixels, Pixels, f32),
+    p: &Palette,
+    cx: &App,
+) -> AnyElement {
+    let p = *p;
+    div()
+        .id(id(name))
+        .flex()
+        .flex_wrap()
+        .gap(space::SM)
+        .when(opacity < 1.0, |d| d.opacity(opacity))
+        .children(pictures.iter().enumerate().map(|(n, picture)| {
+            let thumb = div()
+                .id(id(&format!("image-{n}")))
+                .flex_none()
+                .w(width)
+                .h(height)
+                .rounded(px(9.))
+                .border_1()
+                .border_color(p.line2)
+                .bg(p.card)
+                .overflow_hidden();
+            let (Some(picture), Some(page)) = (picture, page) else {
+                return thumb.test_support().into_any_element();
+            };
+            let viewer = page.read(cx).viewer.clone();
+            let loaded: Vec<Arc<gpui_kit::Image>> = pictures.iter().flatten().cloned().collect();
+            let place = pictures[..n].iter().flatten().count();
+            hoverable(
+                thumb
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        viewer.update(cx, |viewer, cx| viewer.show(loaded.clone(), place, cx));
+                    })
+                    .child(
+                        gpui_kit::img(picture.clone())
+                            .size_full()
+                            .rounded(px(9.))
+                            .object_fit(gpui_kit::ObjectFit::Cover),
+                    ),
+                move |d, t| d.border_color(mix(p.line2, p.mute, t)),
+            )
+            .into_any_element()
+        }))
+        .test_support()
+        .into_any_element()
+}
+
 /// One row of the conversation: a block, and what the row keeps of its own (a fold, the
 /// thinking timer, the call marks, the card's answer in flight).
 pub struct Row {
@@ -5170,51 +5239,15 @@ impl Render for Row {
                 let quiet = QUIET + (1.0 - QUIET) * ink;
                 // The pictures sit inside the bubble, above its text.
                 let thumbs = (!pictures.is_empty()).then(|| {
-                    div()
-                        .id(id("images"))
-                        .flex()
-                        .flex_wrap()
-                        .gap(space::SM)
-                        .when(quiet < 1.0, |d| d.opacity(quiet))
-                        .children(pictures.iter().enumerate().map(|(n, picture)| {
-                            let thumb = div()
-                                .id(id(&format!("image-{n}")))
-                                .flex_none()
-                                .w(px(220.))
-                                .h(px(132.))
-                                .rounded(px(9.))
-                                .border_1()
-                                .border_color(p.line2)
-                                .bg(p.card)
-                                .overflow_hidden();
-                            let (Some(picture), Some(page)) = (picture, &page) else {
-                                return thumb.test_support().into_any_element();
-                            };
-                            // A click opens it large, among the pictures of the message that are
-                            // read; its border fades in on the hover.
-                            let viewer = page.read(cx).viewer.clone();
-                            let loaded: Vec<Arc<gpui_kit::Image>> =
-                                pictures.iter().flatten().cloned().collect();
-                            let place = pictures[..n].iter().flatten().count();
-                            hoverable(
-                                thumb
-                                    .cursor_pointer()
-                                    .on_click(move |_, _, cx| {
-                                        viewer.update(cx, |viewer, cx| {
-                                            viewer.show(loaded.clone(), place, cx)
-                                        });
-                                    })
-                                    .child(
-                                        gpui_kit::img(picture.clone())
-                                            .size_full()
-                                            .rounded(px(9.))
-                                            .object_fit(gpui_kit::ObjectFit::Cover),
-                                    ),
-                                move |d, t| d.border_color(mix(p.line2, p.mute, t)),
-                            )
-                            .into_any_element()
-                        }))
-                        .test_support()
+                    thumbnails(
+                        &id,
+                        "images",
+                        &pictures,
+                        page.as_ref(),
+                        (px(220.), px(132.), quiet),
+                        &p,
+                        cx,
+                    )
                 });
                 let lines = self.sent_lines(window, cx);
                 let message = div()
@@ -5736,7 +5769,39 @@ impl Render for Row {
                                             call.cut,
                                             p.faint,
                                         ),
-                                    )),
+                                    ))
+                                    // The pictures its result carried to the agent unfold under
+                                    // the call once the first is read.
+                                    .child({
+                                        let page = self.page.upgrade();
+                                        let pictures: Vec<Option<Arc<gpui_kit::Image>>> = call
+                                            .pictures
+                                            .iter()
+                                            .map(|name| {
+                                                page.as_ref()?.read(cx).pictures.get(name).cloned()
+                                            })
+                                            .collect();
+                                        let row = self.at;
+                                        presence(
+                                            ElementId::Name(
+                                                format!("step-{row}-{at}-pictures-line").into(),
+                                            ),
+                                            pictures.iter().any(Option::is_some),
+                                            div().pt(space::SM).child(thumbnails(
+                                                &|part| {
+                                                    ElementId::Name(
+                                                        format!("step-{row}-{at}-{part}").into(),
+                                                    )
+                                                },
+                                                "pictures",
+                                                &pictures,
+                                                page.as_ref(),
+                                                (px(120.), px(72.), 1.0),
+                                                &p,
+                                                cx,
+                                            )),
+                                        )
+                                    }),
                             )
                             .children(call.path.as_ref().map(|path| {
                                 copy_path(
@@ -10318,6 +10383,7 @@ mod tests {
             until: Some(1),
             allowed_by: by.map(str::to_owned),
             cut: None,
+            pictures: Vec::new(),
             shows: false,
             asked: true,
             input_refused: false,

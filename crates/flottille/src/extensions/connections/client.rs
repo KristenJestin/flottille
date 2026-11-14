@@ -907,6 +907,7 @@ pub async fn call(
             "the connection was turned off while it ran; it may have been performed".into(),
         ),
         Ok(Ok(result)) => answer(
+            daemon,
             &format!("conn_{name}"),
             name,
             action,
@@ -921,23 +922,129 @@ pub async fn call(
     outcome
 }
 
+/// The most images of one result that reach the agent, the biggest one of them and all of them
+/// together, in bytes (`docs/extensions.md`, "Connections", "A result").
+const MAX_PICTURES: usize = 4;
+const MAX_PICTURE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PICTURES_BYTES: usize = 5 * 1024 * 1024;
+
+/// Whether the agent's provider reads an image in the result of a tool.
+fn reads_tool_images(daemon: &Daemon, agent: &str) -> bool {
+    daemon
+        .read(|store| store.agent(agent))
+        .ok()
+        .flatten()
+        .and_then(|agent| crate::providers::of(&agent).ok())
+        .is_some_and(|provider| provider.takes_tool_images)
+}
+
+/// The images of one result, taken or left out, as the agent's folder and the caps say.
+struct Pictures<'a> {
+    daemon: &'a Daemon,
+    agent: &'a str,
+    /// Whether any image may be taken: not for an error, nor for an agent that cannot read one.
+    refused: Option<&'static str>,
+    taken: usize,
+    bytes: usize,
+}
+
+impl Pictures<'_> {
+    /// The line the text says of an image block: that it is attached, or why it is left out. The
+    /// image is stored as a message's picture is (a file of the agent's folder, never base64 in
+    /// the store or an event) and given to the call in progress.
+    fn line(&mut self, block: &Value) -> String {
+        use base64::Engine as _;
+        let mime = block["mimeType"].as_str().unwrap_or("of no type said");
+        let data = block["data"].as_str().unwrap_or_default();
+        let about = data.len() / 4 * 3;
+        let left_out =
+            |why: &str| format!("[an image ({mime}, about {about} bytes) left out: {why}]");
+        if let Some(why) = self.refused {
+            return left_out(why);
+        }
+        let Some((_, extension)) = crate::deliveries::IMAGE_TYPES
+            .iter()
+            .find(|(m, _)| *m == mime)
+        else {
+            return left_out("only png, jpeg, gif and webp are taken");
+        };
+        if self.taken >= MAX_PICTURES {
+            return left_out(&format!("a result carries {MAX_PICTURES} images at most"));
+        }
+        if about > MAX_PICTURE_BYTES {
+            return left_out(&format!("over {} MiB", MAX_PICTURE_BYTES >> 20));
+        }
+        if self.bytes + about > MAX_PICTURES_BYTES {
+            return left_out(&format!(
+                "over {} MiB for the images of one result",
+                MAX_PICTURES_BYTES >> 20
+            ));
+        }
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+            return left_out("its data is not base64");
+        };
+        if bytes.is_empty() {
+            return left_out("it is empty");
+        }
+        // The type a server says is not checked by the provider's API, which refuses an image
+        // whose bytes are not its type and keeps it in the history, breaking every later turn.
+        if !flottille_core::images::is_picture(mime, &bytes) {
+            let kind = mime.strip_prefix("image/").unwrap_or(mime);
+            return left_out(&format!("its bytes are not those of a {kind}"));
+        }
+        // As the pictures of a message are, before they are stored.
+        let bytes = flottille_core::images::scaled_down(mime, bytes);
+        let Some(name) = self.store(extension, &bytes) else {
+            return left_out("it could not be stored");
+        };
+        crate::mcp::picture_served(&name);
+        self.taken += 1;
+        self.bytes += bytes.len();
+        format!("[an image ({mime}, {} bytes) is attached]", bytes.len())
+    }
+
+    fn store(&self, extension: &str, bytes: &[u8]) -> Option<String> {
+        let folder = self.daemon.paths.images(self.agent);
+        flottille_core::paths::ensure_private_dir(&folder).ok()?;
+        let name = format!("{}.{extension}", flottille_core::agent::new_id().ok()?);
+        std::fs::write(folder.join(&name), bytes).ok()?;
+        Some(name)
+    }
+}
+
 /// A server's result as the agent reads it: its text blocks, masked, framed as a third party's
-/// data; what is not text left out with a line saying so.
-fn answer(tool: &str, name: &str, action: &str, result: &Value, grant: &Grant) -> Outcome {
+/// data, and its images as images within the caps; what is neither left out with a line saying
+/// so. An image is not scanned for secrets: masking reads text.
+fn answer(
+    daemon: &Daemon,
+    tool: &str,
+    name: &str,
+    action: &str,
+    result: &Value,
+    grant: &Grant,
+) -> Outcome {
+    let failed = result["isError"] == true;
+    let mut pictures = Pictures {
+        daemon,
+        agent: &grant.agent,
+        refused: match failed {
+            true => Some("an error carries no image"),
+            false => (!reads_tool_images(daemon, &grant.agent))
+                .then_some("this agent's provider reads no image in the result of a tool"),
+        },
+        taken: 0,
+        bytes: 0,
+    };
     let mut parts = Vec::new();
     for block in result["content"].as_array().into_iter().flatten() {
         let kind = block["type"].as_str().unwrap_or("unknown");
         match kind {
             "text" => parts.push(block["text"].as_str().unwrap_or_default().to_owned()),
-            "image" | "audio" => {
+            "image" => parts.push(pictures.line(block)),
+            "audio" => {
                 let bytes = block["data"].as_str().map_or(0, |data| data.len() / 4 * 3);
                 parts.push(format!(
-                    "[{} ({}, about {bytes} bytes) left out: a text result has no place for it]",
-                    if kind == "image" {
-                        "an image"
-                    } else {
-                        "a sound"
-                    },
+                    "[a sound ({}, about {bytes} bytes) left out: a text result has no place for it]",
                     block["mimeType"].as_str().unwrap_or("of no type said")
                 ));
             }
@@ -952,7 +1059,7 @@ fn answer(tool: &str, name: &str, action: &str, result: &Value, grant: &Grant) -
         }
     }
     let text = crate::mcp::masked(&parts.join("\n"), &grant.place);
-    if result["isError"] == true {
+    if failed {
         return failed_framed(
             &format!("the server of {tool} answered an error ({action})"),
             &crate::mcp::cut(&text, 1_500),

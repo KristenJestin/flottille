@@ -198,6 +198,69 @@ impl Mcp {
             .block_on(async { tokio::time::sleep(Duration::from_millis(300)).await });
     }
 
+    /// A call, with the images its answer carries as well, each as its MIME type and its bytes in
+    /// base64.
+    pub fn call_with_images(
+        &self,
+        tool: &str,
+        arguments: Value,
+    ) -> (Answer, Vec<(String, String)>) {
+        self.call_with_images_meta(tool, arguments, None)
+    }
+
+    /// [`Mcp::call_with_images`] as the call of that key, which a retry carries again.
+    pub fn call_keyed_with_images(
+        &self,
+        tool: &str,
+        arguments: Value,
+        key: &str,
+    ) -> (Answer, Vec<(String, String)>) {
+        let meta = json!({"claudecode/toolUseId": key});
+        self.call_with_images_meta(tool, arguments, Some(meta))
+    }
+
+    fn call_with_images_meta(
+        &self,
+        tool: &str,
+        arguments: Value,
+        meta: Option<Value>,
+    ) -> (Answer, Vec<(String, String)>) {
+        let client = self.client.as_ref().unwrap();
+        let mut params = CallToolRequestParams::new(tool.to_owned())
+            .with_arguments(arguments.as_object().cloned().unwrap_or_default());
+        if let Some(meta) = meta {
+            params.meta = Some(serde_json::from_value(meta).unwrap());
+        }
+        let result = self
+            .runtime
+            .block_on(client.call_tool(params))
+            .unwrap_or_else(|e| panic!("{tool} answers: {e}"));
+        let result = serde_json::to_value(result).unwrap();
+        let blocks = result["content"].as_array().unwrap();
+        let text = blocks
+            .iter()
+            .filter_map(|c| c["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        let images = blocks
+            .iter()
+            .filter(|c| c["type"] == "image")
+            .map(|c| {
+                (
+                    c["mimeType"].as_str().unwrap().to_owned(),
+                    c["data"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        (
+            Answer {
+                text,
+                error: result["isError"] == true,
+            },
+            images,
+        )
+    }
+
     fn call_with_meta(&self, tool: &str, arguments: Value, meta: Option<Value>) -> Answer {
         let client = self.client.as_ref().unwrap();
         let mut params = CallToolRequestParams::new(tool.to_owned())

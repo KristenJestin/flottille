@@ -853,9 +853,10 @@ agent never talks to the server.
   server sees anything: an unknown action, one turned off, arguments that do not fit or a value
   outside a limit are refused, naming what is wrong.
 - **A result** is the server's text blocks, masked, framed in a `<connection_answer>` block as a
-  third party's data, escaped as every result is and cut as "Long results" says. An image, a
-  sound or a resource is left out with one line saying what it was and how big. `isError` is a
-  failure.
+  third party's data, escaped as every result is and cut as "Long results" says. A sound or a
+  resource is left out with one line saying what it was and how big; an image reaches the agent as
+  an image within its limits (`extensions.md`, "Connections", "A result"). `isError`
+  is a failure.
 - **One call at a time** per connection, whatever the project, 120 seconds each, then cancelled
   (the server stopped). The server starts at the first call, stays while a session of any project
   runs and ten minutes after, and is stopped with its whole session of processes then, when the
