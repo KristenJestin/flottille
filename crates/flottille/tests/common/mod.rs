@@ -8,6 +8,7 @@ pub mod mcp;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
@@ -102,6 +103,58 @@ pub fn names_in(dir: &Path) -> Vec<String> {
     names
 }
 
+/// A process a test started (a fake server): killed and reaped when this is dropped, whether the
+/// test passed, failed or panicked, and killed by the kernel when the test's thread ends or the
+/// test binary is killed (`PR_SET_PDEATHSIG`), so that nothing outlives its test (#809).
+///
+/// The death signal follows the thread that started the process, which is the test's own: start
+/// it from the test's thread, not from a scoped one that ends before the test.
+pub struct Spawned(Child);
+
+impl Spawned {
+    pub fn new(mut command: Command) -> Spawned {
+        let parent = std::process::id();
+        // SAFETY: the closure runs in the forked child before `exec` and calls only `prctl` and
+        // `getppid`, which are system calls and async-signal-safe; it allocates nothing and takes
+        // no lock. `getppid` catches a parent that died between the fork and the `prctl`, whose
+        // death signal would never come.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() as u32 != parent {
+                    return Err(std::io::Error::other(
+                        "the test ended as its process started",
+                    ));
+                }
+                Ok(())
+            });
+        }
+        Spawned(command.spawn().unwrap())
+    }
+}
+
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl std::ops::Deref for Spawned {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Spawned {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
 /// A throwaway user: its own home and XDG folders, and the daemon it starts, stopped on drop.
 pub struct User {
     dir: TempDir,
@@ -112,6 +165,9 @@ pub struct User {
     /// daemon again in a folder that is removed (issue #54). Held by a connector for as long as
     /// it connects, so that the drop waits for it.
     closed: Arc<Mutex<bool>>,
+    /// Stops this user's daemon when the test's binary ends without dropping the user (killed by
+    /// a timeout): `flottille-fake-agent --after-eof`, run once the pipe the user holds closes.
+    reaper: Option<Child>,
 }
 
 impl User {
@@ -126,11 +182,30 @@ impl User {
                 .create(dir.path().join(sub))
                 .unwrap();
         }
-        let user = User {
+        let mut user = User {
             dir,
             env: Vec::new(),
             closed: Arc::new(Mutex::new(false)),
+            reaper: None,
         };
+        // The reaper holds nothing of the daemon's: it only waits for this end of its pipe to
+        // close. It stops the daemon by the user's own folders, which is all `daemon stop` needs.
+        let mut reaper = command_for(
+            &fake_agent(),
+            user.dir.path(),
+            &[],
+            &[
+                "--after-eof",
+                env!("CARGO_BIN_EXE_flottille"),
+                "daemon",
+                "stop",
+            ],
+        );
+        reaper
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        user.reaper = Some(reaper.spawn().unwrap());
         // Long tool results are cut by default (`docs/tools.md`, "Long results"): only the tests
         // of that opt in, so that no other test's result is cut under it. The user's own setting,
         // in the daemon's temporary configuration folder: no switch of the daemon's environment.
@@ -885,6 +960,12 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
 impl Drop for User {
     fn drop(&mut self) {
         *self.closed.lock().unwrap() = true;
+        // Ended first: the stop below is this drop's, and the reaper's own is for a test that
+        // never got here.
+        if let Some(mut reaper) = self.reaper.take() {
+            let _ = reaper.kill();
+            let _ = reaper.wait();
+        }
         let _ = self.run(&["daemon", "stop"]);
     }
 }

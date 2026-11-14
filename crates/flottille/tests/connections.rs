@@ -2162,17 +2162,18 @@ fn a_local_url_connection_is_reached_with_its_vault_headers() {
     let script = almanac();
     write_script(&user, "jotter", &script);
     let port_file = user.path("jotter-port");
-    let mut server = std::process::Command::new(fake_mcp())
-        .args([
+    let mut server = common::Spawned::new({
+        let mut command = std::process::Command::new(fake_mcp());
+        command.args([
             "--script",
             script_file(&user, "jotter").to_str().unwrap(),
             "--log",
             log_file(&user, "jotter").to_str().unwrap(),
             "--http",
             port_file.to_str().unwrap(),
-        ])
-        .spawn()
-        .unwrap();
+        ]);
+        command
+    });
     eventually("the server listens", || {
         port_file.exists() && !std::fs::read_to_string(&port_file).unwrap().is_empty()
     });
@@ -2430,19 +2431,20 @@ fn the_tools_delivery_names_a_connection_added_or_gone() {
 // ── What a server cannot do to the daemon ─────────────────────────────────────────────────────
 
 /// The fake server of `name` on Streamable HTTP over loopback: the process and its port.
-fn http_server(user: &User, name: &str) -> (std::process::Child, String) {
+fn http_server(user: &User, name: &str) -> (common::Spawned, String) {
     let port_file = user.path(&format!("{name}-port"));
-    let server = std::process::Command::new(fake_mcp())
-        .args([
+    let server = common::Spawned::new({
+        let mut command = std::process::Command::new(fake_mcp());
+        command.args([
             "--script",
             script_file(user, name).to_str().unwrap(),
             "--log",
             log_file(user, name).to_str().unwrap(),
             "--http",
             port_file.to_str().unwrap(),
-        ])
-        .spawn()
-        .unwrap();
+        ]);
+        command
+    });
     eventually("the server listens", || {
         port_file.exists() && !std::fs::read_to_string(&port_file).unwrap().is_empty()
     });
@@ -2939,7 +2941,7 @@ fn an_unreadable_extensions_file_refuses_removing_a_bound_entry() {
 
 /// A protected server `notes` on loopback, its own authorization server (the fake's `oauth`):
 /// the process and the server's URL. `oauth` is what the fake's authorization server does.
-fn protected_server(user: &User, oauth: Value) -> (std::process::Child, String) {
+fn protected_server(user: &User, oauth: Value) -> (common::Spawned, String) {
     let mut script = almanac();
     script["oauth"] = oauth;
     script["oauth"]["tokens_file"] = json!(user.path("notes-tokens"));
@@ -3105,7 +3107,7 @@ fn call_bearer(user: &User) -> u64 {
         .expect("a call with a token")
 }
 
-fn stopped(mut server: std::process::Child) {
+fn stopped(mut server: common::Spawned) {
     let _ = server.kill();
     let _ = server.wait();
 }

@@ -127,7 +127,23 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
+/// `--after-eof <program> [args..]`: waits until its standard input is closed, then becomes the
+/// program. A test holds the other end of the pipe, so that the program runs when the test's
+/// binary ends however it ended, a kill included (#809): the test harness's way to end the daemon
+/// a killed test left, which no `Drop` could.
+fn after_eof(mut args: impl Iterator<Item = std::ffi::OsString>) -> ! {
+    use std::os::unix::process::CommandExt;
+    let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+    let program = args.next().expect("--after-eof <program> [args..]");
+    let error = std::process::Command::new(program).args(args).exec();
+    panic!("the program did not start: {error}");
+}
+
 fn main() {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|first| first == "--after-eof") {
+        after_eof(args);
+    }
     let dir = match std::env::var_os("FLOTTILLE_FAKE_AGENT_DIR") {
         Some(dir) => PathBuf::from(dir),
         None => PathBuf::from(std::env::args_os().next().expect("a program name"))
