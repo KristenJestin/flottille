@@ -627,6 +627,9 @@ on a real phone, by hand, and reported.
   hub makes every device set up again.
 - Every method is `read` or `drive`; a `controller` may every `drive` method on a runner, a
   `viewer` only `read`.
+- In the preparation, `flottille-protocol` types the framing and the parameters; answers and events
+  stay `serde_json::Value`, and each later ticket types in Rust the ones it reads (the mobile core,
+  the link).
 - A launch an agent aims at a runner that cannot take it is refused, naming the runners that could;
   the agent's tool description lists no machine.
 - A notification waits 30 seconds and is dropped when a client had an input in the last 2 minutes.
