@@ -1664,7 +1664,10 @@ fn revive(daemon: &Arc<Daemon>, id: &str, how: &str, cut: bool) -> bool {
     if agent.state.is_final() {
         return false;
     }
-    let _ = daemon.read(|store| store.count_new_start(id, &reason));
+    let _ = daemon.write(|store| {
+        store.count_new_start(id, &reason)?;
+        Ok(((), None::<flottille_core::protocol::Event>))
+    });
     match cut {
         true => {
             let _ = daemon.read(|store| store.deliveries_taken(id));
