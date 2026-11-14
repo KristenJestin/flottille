@@ -211,13 +211,17 @@ the wrong code first).
    **A gap given to a block that comes and goes is not a margin**: `presence(..).gap(g)` (and
    `presence_of`, and `problem_line`'s gap) only tells the block how much of the parent's gap to
    fold away with itself, so the column it is a child of has the same `.gap(g)` (a kit `Section`
-   has `MD`, a `Modal`'s body `LG`); a column without one draws the space nowhere. Where one gap
+   has `MD`, a `Modal`'s body `LG`); a column without one draws the space nowhere, and a block
+   without the gap of a column that has one makes that gap appear at once when it comes and the
+   column jump when it goes: every block of a column has the column's gap, the same value, and is
+   the column's child itself (not inside an `enter`, whose own box would keep the gap). Where one gap
    does not fit all the children, the block holds its space itself, a `.pt(..)` that folds with
    it, and asks for no gap. **[test]** `a_presence_gap_needs_a_parent_gap`
    (`crates/flottille-window/tests/`) reads the window's sources as syntax trees and refuses a
-   block whose column has no gap, or another one; a block it cannot follow (one a helper
-   returns) is on its `UNSEEN` list with who checks it, and each screen that lost a space is
-   measured in its own window test.
+   block whose parent is no column, has no gap, has another one, or has one the block does
+   not have, and a gapped block wrapped in a call; a block it cannot follow (one a helper
+   returns) is on its `UNSEEN` list, one entry per block, with who checks it, and each screen
+   that lost a space is measured in its own window test.
 10. **Motion**, as above: everything that appears, leaves, opens, folds or changes state moves
     with the shared durations; a drawer slides from the right; a select's list fades in; a
     radio's dot scales in. **[test]** each component's scenario.
