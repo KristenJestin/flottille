@@ -35,9 +35,10 @@ pub struct Adapter {
     below: (u64, u64, u64),
     /// The range as the review says it.
     pub range: &'static str,
-    /// Actions that could reach a secret its own actions type into a page, and how: off at the
-    /// first pin, and its own actions are refused while one is offered. The user may turn them on.
-    readers: &'static [(&'static str, &'static str)],
+    /// The server's actions that may stay on while its own actions are offered. Every other one,
+    /// one it does not know included, is off at the first pin, and its own actions are refused
+    /// while one is on: a list of what may reach a secret typed into a page would miss the next.
+    beside: &'static [&'static str],
     /// Actions off while it applies, which no setting turns on.
     locked: &'static [&'static str],
     /// Why they are.
@@ -62,93 +63,60 @@ pub static AGENT_BROWSER: Adapter = Adapter {
     from: (0, 43, 0),
     below: (0, 44, 0),
     range: "0.43.x",
-    // Read from 0.43.0's own list (`tools/list` with `--tools all`). A page script can copy a
-    // field into what any other action reads (the title, the text), so masking the exact secret
-    // is not enough: whatever runs a script in the page or reads a field, a request, the storage
-    // or a trace is here. Names 0.43.0 does not serve are kept should a 0.43 patch serve them.
-    readers: &[
-        (EVAL, "it runs a script in the page"),
-        (
-            "agent_browser_add_init_script",
-            "it runs a script in every page it opens",
-        ),
-        (
-            "agent_browser_wait_for_function",
-            "it runs a script in the page until it is true",
-        ),
-        (
-            "agent_browser_batch",
-            "it runs any of agent-browser's commands, eval and get value among them",
-        ),
-        (
-            "agent_browser_chat",
-            "it runs any of agent-browser's commands from an instruction",
-        ),
-        (
-            "agent_browser_flow_run",
-            "it replays recorded commands, which may run a script or read a field",
-        ),
-        (
-            "agent_browser_inspect",
-            "it opens DevTools, whose console runs scripts in the page",
-        ),
-        (
-            "agent_browser_get_cdp_url",
-            "it gives the browser's debugging address, whose DevTools run scripts in the page",
-        ),
-        (
-            "agent_browser_dashboard_start",
-            "its dashboard, which the browser can open, drives the session",
-        ),
-        ("agent_browser_get_value", "it reads a field's value"),
-        (
-            "agent_browser_network_route",
-            "it can answer the login page with a page of its own",
-        ),
-        (
-            "agent_browser_network_requests",
-            "it reads the page's requests, the login form's among them",
-        ),
-        (
-            "agent_browser_network_request",
-            "it reads a request, the login form's among them",
-        ),
-        (
-            "agent_browser_network_har_start",
-            "it records the page's requests, the login form's among them",
-        ),
-        (
-            "agent_browser_network_har_stop",
-            "it gives the recorded requests, the login form's among them",
-        ),
-        (
-            "agent_browser_har_start",
-            "it records the page's requests, the login form's among them",
-        ),
-        (
-            "agent_browser_har_stop",
-            "it gives the recorded requests, the login form's among them",
-        ),
-        (
-            "agent_browser_trace_start",
-            "a trace holds the page's requests, the login form's among them",
-        ),
-        (
-            "agent_browser_trace_stop",
-            "it gives a trace, which holds the login form's request",
-        ),
-        (
-            "agent_browser_storage_get",
-            "it reads the page's storage, where a page may keep what was typed",
-        ),
-        (
-            "agent_browser_state_save",
-            "it saves the page's storage, where a page may keep what was typed",
-        ),
-        (
-            "agent_browser_state_show",
-            "it reads a saved state, the page's storage among it",
-        ),
+    // Read from 0.43.0's own list and descriptions (`tools/list` with `--tools all`). None runs a
+    // script in the page, takes a URL (a `javascript:` one runs in the page), an init script,
+    // extra options or a browser's debugging address, or gives a field's value, its HTML, its
+    // attributes or a snapshot with values. Left out among others: open, tab_new and pushstate
+    // (a URL, and extra options), snapshot, get_value, get_attr, get_html, react_*, connect.
+    beside: &[
+        "agent_browser_back",     // history the session made: no URL of the agent's
+        "agent_browser_forward",  // the same
+        "agent_browser_reload",   // the page that is open, again
+        "agent_browser_click",    // an input: gives nothing of the page
+        "agent_browser_dblclick", // an input
+        "agent_browser_fill",     // writes a field, never reads one
+        "agent_browser_type",     // the same
+        "agent_browser_press",    // a key
+        "agent_browser_hover",    // an input
+        "agent_browser_focus",    // an input
+        "agent_browser_check",    // an input
+        "agent_browser_uncheck",  // an input
+        "agent_browser_select",   // an input
+        "agent_browser_scroll",   // an input
+        "agent_browser_scroll_into_view", // an input
+        "agent_browser_drag",     // an input: a password field's text cannot be dragged
+        "agent_browser_keydown",  // a key
+        "agent_browser_keyup",    // a key
+        "agent_browser_keyboard_type", // writes at the focus
+        "agent_browser_keyboard_insert_text", // writes at the focus
+        "agent_browser_mouse_move", // an input
+        "agent_browser_mouse_down", // an input
+        "agent_browser_mouse_up", // an input
+        "agent_browser_mouse_wheel", // an input
+        "agent_browser_find",     // locates by role or text; acts, or gives visible text
+        "agent_browser_wait_ms",  // time alone
+        "agent_browser_wait_for_selector", // a selector's state, no value
+        "agent_browser_wait_for_text", // visible text, never a field's value
+        "agent_browser_wait_for_url", // a pattern matched against the URL, never opened
+        "agent_browser_wait_for_load", // a load state
+        "agent_browser_screenshot", // pixels: a password field shows bullets
+        "agent_browser_get_text", // visible text, never a field's value
+        "agent_browser_get_url",  // the address
+        "agent_browser_get_title", // the title
+        "agent_browser_get_count", // a number of elements
+        "agent_browser_get_box",  // a position and a size
+        "agent_browser_is_visible", // a yes or a no
+        "agent_browser_is_enabled", // a yes or a no
+        "agent_browser_is_checked", // a yes or a no
+        "agent_browser_tab_list", // the tabs' addresses and titles
+        "agent_browser_tab_switch", // a tab of the session
+        "agent_browser_tab_close", // a tab of the session
+        "agent_browser_frame_switch", // a frame of the page
+        "agent_browser_frame_main", // the main frame
+        "agent_browser_dialog_status", // the page's dialog, said by the page
+        "agent_browser_dialog_accept", // answers it
+        "agent_browser_dialog_dismiss", // dismisses it
+        "agent_browser_close",    // ends the session
     ],
     locked: &[
         "agent_browser_auth_delete",
@@ -161,6 +129,8 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_plugin_run",
         "agent_browser_plugin_show",
         "agent_browser_set_credentials",
+        // Not served by 0.43.0: named should a 0.43 patch serve it, since off alone the user could
+        // turn agent-browser's own login on beside Flottille's.
         "agent_browser_with_login",
     ],
     locked_why: "agent-browser's own logins keep passwords in its own store or take them as \
@@ -182,8 +152,6 @@ pub static AGENT_BROWSER: Adapter = Adapter {
 
 const ALL: &[&Adapter] = &[&AGENT_BROWSER];
 
-/// agent-browser's action that runs a script in the page, its first reader.
-const EVAL: &str = "agent_browser_eval";
 const LOGIN: &str = "login";
 /// What Flottille is called in the configuration it writes for agent-browser.
 const PLUGIN: &str = "flottille";
@@ -256,7 +224,7 @@ impl Adapter {
 
     /// The setting of a new action at the first pin, if the adapter sets one.
     pub fn first(&self, action: &str) -> Option<&'static str> {
-        if self.locks(action) || self.readers.iter().any(|(name, _)| *name == action) {
+        if self.locks(action) || !self.beside.contains(&action) {
             return Some("off");
         }
         None
@@ -266,44 +234,41 @@ impl Adapter {
         self.actions.iter().find(|own| own.name == action)
     }
 
-    /// Why an action of its own is refused with the settings `setting_of` gives (`None` for an
-    /// action the server does not serve), if it is.
-    pub fn refuses(
+    /// Why an action of its own is refused while the server's actions `on` are not off, if it is.
+    pub fn refuses<'a>(
         &self,
         action: &str,
-        setting_of: impl Fn(&str) -> Option<String>,
+        on: impl IntoIterator<Item = &'a str>,
     ) -> Option<String> {
         if action != LOGIN {
             return None;
         }
-        let offered: Vec<&str> = self
-            .readers
-            .iter()
-            .map(|(name, _)| *name)
-            .filter(|name| setting_of(name).is_some_and(|setting| setting != "off"))
+        let outside: Vec<&str> = on
+            .into_iter()
+            .filter(|name| !self.beside.contains(name) && self.own(name).is_none())
             .collect();
-        (!offered.is_empty()).then(|| {
-            let offered = offered.join(", ");
+        (!outside.is_empty()).then(|| {
+            let verb = if outside.len() == 1 { "is" } else { "are" };
             format!(
-                "login is refused while {offered} is offered: it runs a script in the page or \
-                 reads its fields, requests, storage or traces, where a secret typed into the \
-                 form can be read. The user turns it off in the connection's review"
+                "login is refused while {} {verb} on: Flottille's adapter lets on beside it only \
+                 the actions it knows cannot reach a secret typed into the page's form, and one \
+                 outside them may run a script in the page, read a field, a request or the \
+                 storage, or reach another browser. The user turns it off in the connection's \
+                 review",
+                outside.join(", ")
             )
         })
     }
 
     /// What it changes, a sentence each, as the review says it.
     pub fn changed(&self, config: &Path) -> Vec<String> {
-        let mut said: Vec<String> = self
-            .readers
-            .iter()
-            .map(|(action, why)| {
-                format!(
-                    "{action} is off at the first review, and login is refused while it is \
-                     offered: {why}"
-                )
-            })
-            .collect();
+        let mut said = vec![format!(
+            "its actions outside these {}, which cannot reach a secret typed into a page, are off \
+             at the first review, and login is refused while one of them is on, an action it \
+             does not know among them: {}",
+            self.beside.len(),
+            self.beside.join(", ")
+        )];
         said.push(format!(
             "{} are off and stay off: {}",
             self.locked.join(", "),
@@ -465,11 +430,7 @@ pub async fn perform(
         // Read again under the connection's turn: the user may have changed a setting since the
         // gate let the call through.
         let row = super::row(daemon, name);
-        if let Err(why) = at_turn(row.pin.as_ref(), |action| {
-            let pin = row.pin.as_ref()?;
-            pin.action(action)
-                .map(|_| super::setting_of(&row, action).to_owned())
-        }) {
+        if let Err(why) = at_turn(row.pin.as_ref(), |action| super::setting_of(&row, action)) {
             return Outcome::Refused(format!("refused: {why}"));
         }
         let login = Login {
@@ -502,19 +463,21 @@ pub async fn perform(
 
 /// Whether login may still run under the connection's turn, with the pin it has then and the
 /// settings `setting_of` gives: the adapter may have stopped applying (the version moved after
-/// the call was routed), or a reader been turned on.
-fn at_turn(
-    pin: Option<&Listing>,
-    setting_of: impl Fn(&str) -> Option<String>,
-) -> Result<(), String> {
-    let Some(adapter) = pin.and_then(applying) else {
+/// the call was routed), or an action outside what it lets on beside login been turned on.
+fn at_turn<'s>(pin: Option<&Listing>, setting_of: impl Fn(&str) -> &'s str) -> Result<(), String> {
+    let Some((pin, adapter)) = pin.and_then(|pin| Some((pin, applying(pin)?))) else {
         return Err(
             "Flottille's adapter no longer applies to this connection's server: login \
                     waits for the user's review"
                 .to_owned(),
         );
     };
-    adapter.refuses(LOGIN, setting_of).map_or(Ok(()), Err)
+    let on = pin
+        .actions
+        .iter()
+        .map(|action| action.name.as_str())
+        .filter(|action| setting_of(action) != "off");
+    adapter.refuses(LOGIN, on).map_or(Ok(()), Err)
 }
 
 /// Whether the page is on the site of the entry (the same scheme, host and port): the secret is
@@ -850,18 +813,24 @@ mod tests {
     fn login_is_refused_when_the_adapter_no_longer_applies() {
         let pin = |version: &str| Listing {
             server: json!({"name": "agent-browser", "version": version}),
+            actions: vec![super::super::Action {
+                name: "agent_browser_eval".into(),
+                description: String::new(),
+                schema: json!({}),
+                annotations: Value::Null,
+            }],
             ..Listing::default()
         };
-        let nothing_offered = |_: &str| None;
+        let nothing_offered = |_: &str| "off";
         assert_eq!(at_turn(Some(&pin("0.43.0")), nothing_offered), Ok(()));
         // The version moved after the call was routed: no adapter vouches for the login.
         for moved in [Some(pin("0.44.0")), None] {
             let why = at_turn(moved.as_ref(), nothing_offered).unwrap_err();
             assert!(why.contains("no longer applies"), "{why}");
         }
-        let eval_offered = |action: &str| (action == EVAL).then(|| "judged".to_owned());
-        let why = at_turn(Some(&pin("0.43.0")), eval_offered).unwrap_err();
-        assert!(why.contains(EVAL), "{why}");
+        let eval_on = |_: &str| "judged";
+        let why = at_turn(Some(&pin("0.43.0")), eval_on).unwrap_err();
+        assert!(why.contains("agent_browser_eval"), "{why}");
     }
 
     #[test]

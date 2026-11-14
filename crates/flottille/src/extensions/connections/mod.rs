@@ -1106,9 +1106,12 @@ fn decide<'a>(
         })?;
         limits(declaration, &action, &arguments)?;
         if let Some(why) = adapter.and_then(|adapter| {
-            adapter.refuses(own.name, |a| {
-                pin.action(a).map(|_| setting_of(row, a).to_owned())
-            })
+            let on = pin
+                .actions
+                .iter()
+                .map(|a| a.name.as_str())
+                .filter(|a| setting_of(row, a) != "off");
+            adapter.refuses(own.name, on)
         }) {
             return Err(why);
         }
@@ -1870,13 +1873,17 @@ fn adapter_said(
 ) -> Value {
     match adapters::of(&now.server) {
         adapters::Found::Applies(adapter) => {
-            let setting = |action: &str| proposed.get(action).cloned();
             let mut said = format!(
                 "Flottille's adapter for {} {} applies.",
                 adapter.server, adapter.range
             );
             for own in adapter.actions {
-                if let Some(why) = adapter.refuses(own.name, setting) {
+                let on = now
+                    .actions
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .filter(|a| proposed.get(*a).is_some_and(|setting| setting != "off"));
+                if let Some(why) = adapter.refuses(own.name, on) {
                     said.push_str(&format!(" {why}."));
                 }
             }

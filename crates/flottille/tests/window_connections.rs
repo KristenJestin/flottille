@@ -1110,13 +1110,19 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
         "browser",
         &json!({"server": {"name": "agent-browser", "version": "0.43.0"},
             "tools": [tool("agent_browser_open"), tool("agent_browser_eval"),
-                tool("agent_browser_auth_save")]}),
+                tool("agent_browser_auth_save"), tool("agent_browser_get_attr")]}),
     );
     let mut command = command_of(&user, "browser");
     command.push("mcp".into());
     user.call(
         "connection.add",
         json!({"name": "browser", "about": "A browser.", "command": command}),
+    )
+    .unwrap();
+    // An action outside the list the adapter lets stay on beside login, turned on.
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_get_attr": "judged"}}),
     )
     .unwrap();
     let (shell, cx) = window(&user, cx);
@@ -1134,6 +1140,11 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
     let said = label(cx, "connection-review-adapter").unwrap();
     assert!(
         said.contains("Flottille's adapter for agent-browser 0.43.x applies"),
+        "{said}"
+    );
+    // And why login is refused.
+    assert!(
+        said.contains("login is refused while agent_browser_get_attr is on"),
         "{said}"
     );
     let changed = everything_said(cx);
