@@ -1224,11 +1224,30 @@ way in:
   - **a login form sent with GET** puts the secret in the address, where `get_url`, `tab_list` and
     `wait_for_url` read it;
   - **another tab of the session** that holds a window handle to the login tab could navigate it
-    between its load and its fill.
+    between its load and its fill, to another page of the entry's own sites (to another domain,
+    the allowlist below closes it).
+- **The session is kept to the entries' sites.** While the adapter applies and the connection has
+  an entry bound with a web address, the server's start and every command line of Flottille's
+  own (`auth login`, the reload after a failed login) carry `--allowed-domains <hosts>`: the exact
+  hosts of the entries bound to this connection, sorted, from their URLs (a port and a path are
+  left out; a wildcard only if an entry's URL writes one). agent-browser then blocks page loads,
+  sub-resources, WebSocket, EventSource and `sendBeacon` to any other domain and turns WebRTC off,
+  and keeps the restriction on the navigation of `auth login`. So a page that redirects the login
+  elsewhere, or another tab that navigates the login tab to another domain, no longer reaches a
+  form of another site. It is the flag, not a key of Flottille's file: agent-browser's help shows
+  none. It is **not an operating system firewall**, and agent-browser calls its blocking of
+  WebSocket and EventSource best effort. A login that redirects to another domain to sign in (a
+  single sign-on) fails: the other domain is not one of the entries'. The hosts are read when the
+  server starts and when a login runs: an entry bound after the server started is in the login's
+  runs, and in the server's from its next start. agent-browser refuses the flag together with
+  `--cdp`, `--auto-connect`, `--profile`, `--state` and `--restore` (and `--session-name`, the
+  legacy name of its key): **if the server's own command uses one, `login` is refused**, saying
+  why, and the server starts as the user wrote it. The review says it, in its sentence and in
+  what the adapter changed.
 - **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
   written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the
-  user's own.
+  user's own, and `--allowed-domains` (below).
 - **`login {entry}`**, Flottille's own action: the agent names a vault entry **bound to this
   connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
   lists, never their values. An entry bound to another use, or to none, is refused, naming its use.
@@ -1241,7 +1260,7 @@ way in:
   routed) is refused. Flottille runs agent-browser's
   command line itself, without a shell, under the connection's one-call-at-a-time turn: the words
   of the server's command before its `mcp` (global options kept), then `--config <the file>
-  auth login <entry> --credential-provider flottille --item <entry> --url <url>` (two words, as
+  [--allowed-domains <hosts>] auth login <entry> --credential-provider flottille --item <entry> --url <url>` (two words, as
   agent-browser's own help shows them; a web address never starts with `-`), in the
   server's folder and with its environment, so on the **same browser session and namespace** as
   the server (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`). A connection reached by a URL,
