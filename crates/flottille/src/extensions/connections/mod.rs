@@ -1499,7 +1499,19 @@ fn servers(
         })
 }
 
+/// What a write checks once more where it writes, under the file's lock or the server's turn: an
+/// agent's request the user accepted is still what they read (`requests::write`).
+pub(super) type Still<'a> = &'a (dyn Fn() -> std::result::Result<(), Failure> + Sync);
+
 async fn add(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    add_if(daemon, params, &|| Ok(())).await
+}
+
+async fn add_if(
+    daemon: &Arc<Daemon>,
+    params: Value,
+    still: Still<'_>,
+) -> std::result::Result<Value, Failure> {
     let (params, request) = requests::taken(params)?;
     let table = params
         .as_object()
@@ -1520,6 +1532,7 @@ async fn add(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, 
     let written = super::rewrite(daemon, &EXTENSION, |table| {
         // Decided under the file's lock, before it is written: an Accept of the same request
         // that decided it first is the one that writes, and this Save writes nothing.
+        still()?;
         if let Some(number) = request {
             claimed = Some(requests::claimed(daemon, number)?);
         }
@@ -1617,6 +1630,14 @@ fn shown_given(daemon: &Daemon, name: &str, given: bool) -> std::result::Result<
 /// `connection.edit {name, …}`: the keys given replace the declaration's; `null` removes one.
 /// A command given drops the URL, and the other way round.
 async fn edit(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    edit_if(daemon, params, &|| Ok(())).await
+}
+
+async fn edit_if(
+    daemon: &Arc<Daemon>,
+    params: Value,
+    still: Still<'_>,
+) -> std::result::Result<Value, Failure> {
     let (params, request) = requests::taken(params)?;
     let name = named(&params)?;
     let old = declaration(&daemon.paths, &name)?;
@@ -1637,6 +1658,7 @@ async fn edit(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value,
                     == Some(name.as_str())
             })
             .ok_or_else(|| Failure::new("not-found", format!("no connection {name}")))?;
+        still()?;
         // Decided under the file's lock, as an add's.
         if let Some(number) = request {
             claimed = Some(requests::claimed(daemon, number)?);
@@ -1696,9 +1718,18 @@ fn edited(old: &Declaration, params: &Value) -> std::result::Result<Declaration,
 }
 
 async fn remove(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    remove_if(daemon, params, &|| Ok(())).await
+}
+
+async fn remove_if(
+    daemon: &Arc<Daemon>,
+    params: Value,
+    still: Still<'_>,
+) -> std::result::Result<Value, Failure> {
     let name = named(&params)?;
     declaration(&daemon.paths, &name)?;
     super::rewrite(daemon, &EXTENSION, |table| {
+        still()?;
         let servers = servers(table)?;
         servers.retain(|table| table.get("name").and_then(|name| name.as_str()) != Some(&name));
         Ok(())
@@ -1853,7 +1884,7 @@ async fn accept_checked(
             )));
         }
     } else {
-        settings_only(daemon, &name, &params).await?;
+        settings_only(daemon, &name, &params, &|| Ok(())).await?;
     }
     in_space(daemon, |space| {
         space.tables().execute(
@@ -1874,8 +1905,10 @@ async fn settings_only(
     daemon: &Daemon,
     name: &str,
     params: &Value,
+    still: Still<'_>,
 ) -> std::result::Result<(), Failure> {
     client::exclusively(daemon, name, async {
+        still()?;
         let row = self::row(daemon, name);
         let pin = row.pin.as_ref().ok_or_else(|| review_first(name))?;
         let settings = settings_of_accept(&row, pin, params)?;

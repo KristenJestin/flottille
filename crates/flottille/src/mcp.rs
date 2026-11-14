@@ -3244,7 +3244,8 @@ async fn performed_once(
         "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
         "web" => crate::web::web(args).await,
         "services" => crate::services::tool(daemon, grant, args, first).await,
-        "connections" => crate::extensions::family_call(daemon, args).await,
+        // An accepted request's `first` is the words the user read (`approvals`).
+        "connections" => crate::extensions::family_call(daemon, args, first, &grant.place).await,
         "run" => {
             runs::run(
                 daemon,

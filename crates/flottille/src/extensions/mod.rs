@@ -46,9 +46,15 @@ pub fn family_says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<Stri
     connections::requests::says(daemon, root, args)
 }
 
-/// A `connections` call performed: a read, or a write the user accepted.
-pub async fn family_call(daemon: &Arc<Daemon>, args: Value) -> Outcome {
-    connections::requests::tool(daemon, args).await
+/// A `connections` call performed: a read, or a write the user accepted, `approved` being the
+/// words the user read on its card, masked for `place`.
+pub async fn family_call(
+    daemon: &Arc<Daemon>,
+    args: Value,
+    approved: &[String],
+    place: &crate::place::Place,
+) -> Outcome {
+    connections::requests::tool(daemon, args, approved, place).await
 }
 
 /// Every extension, in the order of their settings' tabs.

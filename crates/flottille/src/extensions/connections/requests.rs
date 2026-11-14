@@ -11,8 +11,8 @@ use flottille_core::approval::{self, Decision, RequestState};
 use serde_json::{Map, Value, json};
 
 use super::{
-    Declaration, EXTENSION, KEYS, Reach, SETTINGS, State, client, declaration, declarations,
-    entries_checked, row, setting_of, settings_only, state_of,
+    Declaration, EXTENSION, KEYS, Reach, SETTINGS, State, Still, client, declaration,
+    declarations, entries_checked, row, setting_of, settings_only, state_of,
 };
 use crate::daemon::Daemon;
 use crate::mcp::{self, Outcome};
@@ -559,8 +559,14 @@ fn listed(daemon: &Daemon, declaration: &Declaration, on: bool) -> String {
     line
 }
 
-/// `list` and `show`, and a write the user accepted, done by the path of their own Save.
-pub async fn tool(daemon: &Arc<Daemon>, args: Value) -> Outcome {
+/// `list` and `show`, and a write the user accepted, done by the path of their own Save:
+/// `approved` is what the user read on its card, masked for the agent's `place`.
+pub async fn tool(
+    daemon: &Arc<Daemon>,
+    args: Value,
+    approved: &[String],
+    place: &crate::place::Place,
+) -> Outcome {
     let on = super::super::is_on(&daemon.paths, &EXTENSION);
     match args["action"].as_str().unwrap_or_default() {
         "list" => match declarations(&daemon.paths) {
@@ -615,21 +621,39 @@ pub async fn tool(daemon: &Arc<Daemon>, args: Value) -> Outcome {
             }
             Ok(_) => refused("nothing to show"),
         },
-        _ => write(daemon, args).await,
+        _ => write(daemon, args, approved, place).await,
     }
 }
 
 /// A write the user accepted: what it says was compared with what they read before this is
-/// called (the request's words, made again).
-async fn write(daemon: &Arc<Daemon>, args: Value) -> Outcome {
+/// called (the request's words, made again), and is compared once more where it is written,
+/// under the file's lock or the server's turn, so that no write of the user's lands between.
+async fn write(daemon: &Arc<Daemon>, args: Value, approved: &[String], place: &crate::place::Place) -> Outcome {
     let proposal = match proposal(daemon, &args) {
         Ok(proposal) => proposal,
         Err(why) => return refused(why),
     };
+    let still = || {
+        let now = self::proposal(daemon, &args).map_err(Failure::refused)?;
+        let said: Vec<String> = words(daemon, &now)
+            .iter()
+            .map(|said| mcp::masked(said, place))
+            .collect();
+        match !approved.is_empty()
+            && crate::actions::compared(&said) == crate::actions::compared(approved)
+        {
+            true => Ok(()),
+            false => Err(Failure::refused(format!(
+                "what it does changed since the user allowed it; it would now: {}",
+                said.join("; ")
+            ))),
+        }
+    };
+    let still: Still<'_> = &still;
     let name = proposal.name.clone();
     let answered = match proposal.action.as_str() {
         "add" => match params_of(daemon, &args, false) {
-            Ok(params) => super::add(daemon, Value::Object(params)).await,
+            Ok(params) => super::add_if(daemon, Value::Object(params), still).await,
             Err(why) => return refused(why),
         },
         // The whole declaration the card showed, not the agent's keys merged on what is there
@@ -646,19 +670,20 @@ async fn write(daemon: &Arc<Daemon>, args: Value) -> Outcome {
                         params[*key] = Value::Null;
                     }
                 }
-                super::edit(daemon, params).await
+                super::edit_if(daemon, params, still).await
             }
             None => return refused("nothing to write"),
         },
-        "remove" => super::remove(daemon, json!({"name": name})).await,
+        "remove" => super::remove_if(daemon, json!({"name": name}), still).await,
         "on" | "off" => {
-            super::edit(
+            super::edit_if(
                 daemon,
                 json!({"name": name, "enabled": proposal.action == "on"}),
+                still,
             )
             .await
         }
-        "set" => settings_only(daemon, &name, &json!({"actions": proposal.settings}))
+        "set" => settings_only(daemon, &name, &json!({"actions": proposal.settings}), still)
             .await
             .map(|()| {
                 crate::projects::tools_changed(daemon);
@@ -872,6 +897,60 @@ mod tests {
         assert_eq!(said(&[""]), r#""""#);
         assert_eq!(said(&["a\u{202e}b"]), r#""a\u{202e}b""#);
         assert_eq!(said(&["x\ny"]), r#""x\u{a}y""#);
+    }
+
+    /// A daemon on temporary folders whose `extensions.toml` declares the connection almanac.
+    fn a_daemon(dir: &std::path::Path) -> Arc<Daemon> {
+        let paths = flottille_core::paths::Paths {
+            runtime: dir.join("runtime"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        };
+        std::fs::create_dir_all(&paths.config).unwrap();
+        std::fs::write(
+            paths.config.join("extensions.toml"),
+            "[[connections.server]]\nname = \"almanac\"\nabout = \"Notes.\"\n\
+             command = [\"notes\"]\n",
+        )
+        .unwrap();
+        let store = flottille_core::store::Store::open_in_memory().unwrap();
+        let projects = crate::projects::Projects::open(&paths).unwrap();
+        Arc::new(Daemon::new(&paths, store, projects, 0, None))
+    }
+
+    #[tokio::test]
+    async fn an_accepted_write_whose_words_changed_where_it_writes_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let place = crate::place::Place {
+            project: "app".into(),
+            workspace: None,
+            root: dir.path().into(),
+            repositories: Vec::new(),
+            branch: String::new(),
+            variables: Default::default(),
+            home: None,
+        };
+        let file = || std::fs::read_to_string(dir.path().join("config/extensions.toml")).unwrap();
+        let before = file();
+        let args = json!({"action": "edit", "name": "almanac", "about": "Decisions."});
+        // The user read another declaration than the one there by the time it is written.
+        let read = vec!["Edit the connection almanac: about".to_owned()];
+
+        let outcome = tool(&daemon, args.clone(), &read, &place).await;
+        assert!(
+            matches!(&outcome, Outcome::Refused(why) | Outcome::Failed(why)
+                if why.contains("changed since")),
+            "refused"
+        );
+        // Nor without the words the user read.
+        let outcome = tool(&daemon, args, &[], &place).await;
+        assert!(
+            matches!(outcome, Outcome::Refused(_) | Outcome::Failed(_)),
+            "refused"
+        );
+        assert_eq!(file(), before);
     }
 
     #[test]
