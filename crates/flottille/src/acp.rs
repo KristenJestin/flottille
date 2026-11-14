@@ -233,8 +233,9 @@ pub async fn session(
 /// Why the agent's session did not open again, as the session loop goes on with it. Only an
 /// agent that says the session is gone (ACP's "resource not found", which both bridges answer for
 /// a session their CLI no longer has) gets a new one: anything else keeps it, since a new session
-/// throws the old one away. A process that died is a death; a login gone is said as a turn's; the
-/// rest fails the agent, its session kept to be resumed.
+/// throws the old one away. A login gone is said as a turn's, whether or not the process exited
+/// after it; a process that died is a death; the rest fails the agent, its session kept to be
+/// resumed.
 async fn not_reopened(
     child: &mut Child,
     provider: &Provider,
@@ -244,14 +245,16 @@ async fn not_reopened(
     if error.code == ErrorCode::ResourceNotFound {
         return Ok(Exit::Unloaded(error.message));
     }
+    // Before the death check: an agent that refuses the login and then exits is a login to say,
+    // not a death to count and bring back until it keeps failing.
+    let code = error.data.as_ref().and_then(|data| data["code"].as_str());
+    if let Some(said) = crate::turn_failures::recognise(provider.name, code, &error.message) {
+        return Ok(Exit::TurnFailed(said));
+    }
     if let Ok(Ok(status)) = tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
         return Ok(Exit::Died(status));
     }
-    let code = error.data.as_ref().and_then(|data| data["code"].as_str());
-    match crate::turn_failures::recognise(provider.name, code, &error.message) {
-        Some(said) => Ok(Exit::TurnFailed(said)),
-        None => Err(format!("the agent could not {verb} its session: {error}")),
-    }
+    Err(format!("the agent could not {verb} its session: {error}"))
 }
 
 type Turn<'a> =

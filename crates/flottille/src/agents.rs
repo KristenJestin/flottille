@@ -1520,6 +1520,12 @@ async fn process(
         // state line says why until the next prompt starts it again.
         Ok(Exit::TurnFailed(said)) => {
             stop(&mut child, pid).await;
+            // A prompt the session never took (a login refused when it opened) waits for the
+            // user with the line: queued, the loop would start the process for it at once.
+            if !turns.queued.is_empty() {
+                turns.queued.clear();
+                let _ = daemon.write(|store| Ok(((), store.give_back(&agent.id)?)));
+            }
             change(
                 daemon,
                 &agent.id,

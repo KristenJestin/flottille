@@ -607,6 +607,53 @@ fn the_agent_is_never_told_about_a_brief() {
 }
 
 #[test]
+fn a_login_refused_by_an_agent_that_exits_says_sign_in() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"resume": false, "turns": [
+        {"when": "hello", "do": [{"say": "Hi"}]},
+        {"when": "die", "do": [{"die": 0}]}
+    ]}));
+    project(&user);
+    let (id, after) = run(&user, json!({"message": "hello"}));
+    events_until(&user, &id, after, "agent.turn_ended");
+    // Its process dies; the next one refuses the login on `session/load`, then exits.
+    user.fake_script(json!({"resume": false,
+        "open_error": "Failed to authenticate: OAuth session expired and could not be refreshed",
+        "exit_after_open_error": 1,
+        "turns": [{"when": "die", "do": [{"die": 0}]}]}));
+    user.call("agent.send", json!({"agent": id, "message": "die now"}))
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while show(&user, &id)["agent"]["state_reason"]
+        .as_str()
+        .is_none_or(|reason| !reason.contains("sign in again"))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "{:?} {}",
+            show(&user, &id)["agent"]["state"],
+            user.received_requests("session/load").len()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let agent = &show(&user, &id)["agent"];
+    assert_eq!(agent["state"], "idle", "the session stays: {agent}");
+    assert!(
+        agent["state_reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("Claude's login expired"),
+        "{agent}"
+    );
+    // The refused login is no death, and nothing starts the agent again before the user writes.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(user.received_requests("session/load").len(), 1);
+    assert_eq!(show(&user, &id)["agent"]["state"], "idle");
+}
+
+#[test]
 fn a_child_left_by_an_adapter_that_died_does_not_outlive_it() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [{"when": "die", "do": [{"child": true}, {"die": 3}]}]}));
