@@ -1,10 +1,14 @@
 //! The socket protocol: one JSON object per line (`docs/protocol.md`). Serde only, so that a
 //! client speaks it without the store or the daemon.
 
+mod catalogue;
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+pub use catalogue::{Class, METHODS, class};
 
 /// A client's request. The id is the client's, opaque to the daemon, and comes back on the answer.
 #[derive(Clone, Debug, Serialize, Deserialize)]

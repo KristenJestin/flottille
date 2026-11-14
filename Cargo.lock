@@ -2153,6 +2153,7 @@ dependencies = [
  "dom_smoothie",
  "flate2",
  "flottille-core",
+ "flottille-protocol",
  "flottille-window",
  "futures",
  "gpui-design-system",
