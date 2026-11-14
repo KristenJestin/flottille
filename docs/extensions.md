@@ -1158,34 +1158,43 @@ way in:
   `_auth_show`, `_auth_delete`, `agent_browser_set_credentials` (a password as an argument), its
   plugins `agent_browser_plugin_add`, `_plugin_list`, `_plugin_run`, `_plugin_show` (they run
   commands with its credential providers) and `agent_browser_with_login`, whatever the user set.
-- **Every action that could reach a typed secret is off at the first pin**, and **`login` is
-  refused while one of them is offered**; the review says which and why. A page script can copy a
-  field into what any other action reads (the title, the text), so masking the exact secret is
-  not enough: the set is what runs a script in the page (`eval`, `add_init_script`,
-  `wait_for_function`, `batch`, `chat`, `flow_run`, and `inspect`, `get_cdp_url`,
-  `dashboard_start`, which open a way to one), reads a field (`get_value`), or reads the page's
-  requests, storage or traces (`network_route`, `network_requests`, `network_request`,
-  `network_har_start`/`_stop`, `har_start`/`_stop`, `trace_start`/`_stop`, `storage_get`,
-  `state_save`, `state_show`), all prefixed `agent_browser_`. It was read from 0.43.0's own list;
-  names it does not serve are kept should a 0.43 patch serve them, and an action the server does
-  not serve does not stop `login`.
+- **Only the actions it knows cannot reach a typed secret stay on beside `login`**: an allowlist,
+  not a list of what may leak, which would miss the next one. Every other action, one it does not
+  know included (a 0.43 patch may add one), is **off at the first pin**, and **`login` is refused
+  while one of them is on**; the review says which. A page script can copy a field into what any
+  other action reads (the title, the text), and a component's state, a field's attributes or its
+  HTML follow what is typed, so masking the exact secret is not enough. The 48 actions of the
+  list, read from 0.43.0's own list and descriptions (a why each in the code), all prefixed
+  `agent_browser_`: `back`, `forward`, `reload`; the inputs (`click`, `dblclick`, `fill`, `type`,
+  `press`, `hover`, `focus`, `check`, `uncheck`, `select`, `scroll`, `scroll_into_view`, `drag`,
+  `keydown`, `keyup`, `keyboard_type`, `keyboard_insert_text`, `mouse_move`/`_down`/`_up`/`_wheel`,
+  `find`); the waits (`wait_ms`, `wait_for_selector`, `wait_for_text`, `wait_for_url`,
+  `wait_for_load`); `screenshot`, `get_text`, `get_url`, `get_title`, `get_count`, `get_box`,
+  `is_visible`, `is_enabled`, `is_checked`; `tab_list`, `tab_switch`, `tab_close`,
+  `frame_switch`, `frame_main`, `dialog_status`, `dialog_accept`, `dialog_dismiss`, `close`. Left
+  out among others: whatever runs a script (`eval`, `wait_for_function`, `batch`, `chat`, …),
+  takes a URL (`open`, `tab_new`, `pushstate`: a `javascript:` URL runs in the page) or extra
+  options, reaches another browser (`connect`, `get_cdp_url`), or gives a field's value, its HTML,
+  its attributes, a component's state or a snapshot (`get_value`, `get_attr`, `get_html`,
+  `react_*`, `snapshot`).
 - **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
   written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the
   user's own.
-- **`login {entry, url?}`**, Flottille's own action: the agent names a vault entry **bound to this
+- **`login {entry}`**, Flottille's own action: the agent names a vault entry **bound to this
   connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
   lists, never their values. An entry bound to another use, or to none, is refused, naming its use.
-  **The login always opens a page of the entry's site**: the agent's `url`, which must have the
-  same scheme, host and port as the entry's `url`, or else the entry's own. An entry without a
-  URL is refused (said in the error and in `help`): without one, agent-browser would fill the page
-  that is open, which the agent chose. Under the connection's turn, the settings and the adapter
-  are read again: a login whose adapter no longer applies (the version moved after the call was
+  **The login always opens the entry's own URL**, and takes no URL of the agent's: a page of its
+  choosing, even on the entry's site, could redirect the fill elsewhere (`/go?to=…`). An entry
+  without a URL, or whose URL is no web address (`http` or `https` with a host), is refused (said
+  in the error and in `help`): without one, agent-browser would fill the page that is open, which
+  the agent chose. Under the connection's turn, the settings and the adapter are read again: a
+  login whose adapter no longer applies (the version moved after the call was
   routed) is refused. Flottille runs agent-browser's
   command line itself, without a shell, under the connection's one-call-at-a-time turn: the words
   of the server's command before its `mcp` (global options kept), then `--config <the file>
-  auth login <entry> --credential-provider flottille --item <entry> --url=<url>` (one word, so a
-  URL that starts with `-` is never an option), in the
+  auth login <entry> --credential-provider flottille --item <entry> --url <url>` (two words, as
+  agent-browser's own help shows them; a web address never starts with `-`), in the
   server's folder and with its environment, so on the **same browser session and namespace** as
   the server (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`). A connection reached by a URL,
   or whose command has no `mcp`, refuses `login`. It has 120 seconds, as a call has.
@@ -1209,7 +1218,8 @@ way in:
 - **`agent-browser mcp`** (vercel-labs/agent-browser, a browser for agents): its `eval` runs
   arbitrary script in the page, which no gate can judge, so it is **off** (its adapter sets it so,
   "Adapters"); a limit on `url` names
-  the addresses its `open` may reach (the exact values listed); the other actions stay **judged**.
+  the addresses its `open` may reach (the exact values listed), when the user turns `open` on and
+  does without `login`; the other actions stay **judged**.
 - **`agent-desktop mcp`** (vercel-labs/agent-desktop, driving the desktop through AT-SPI on Linux,
   its tools named `desktop_click`, `desktop_snapshot`…): the most powerful kind, since it acts in
   every application the user has open. It is declared without `--headed` (that flag, a global one
