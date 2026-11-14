@@ -1,11 +1,12 @@
 //! Connections in the window (#672, `docs/extensions.md`, "Connections"): a row of Settings ›
 //! Features opening its page, its switch and usage line, the servers in the list pattern, the form
-//! dialog that declares or edits one, the review of what a server announces in a large dialog, and
+//! dialog that declares or edits one, the review of what a server announces in a dialog of a readable width, and
 //! a call held for the user naming the connection. On GPUI's test platform in front of a real
 //! daemon with the fake ACP agent and the fake MCP server (`crates/flottille-fake-mcp`): no real
 //! server, the in-memory keyring, temporary folders, no window on a screen.
 
 mod common;
+mod guard;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -292,6 +293,133 @@ fn section(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<Connecti
 fn type_in(field: &Entity<InputState>, text: &str, cx: &mut VisualTestContext) {
     let text = text.to_owned();
     cx.update(|window, cx| field.update(cx, |f, cx| f.set_value(text, window, cx)));
+}
+
+/// A browser's server: fourteen actions, one with a description of two lines and arguments, two
+/// that speak of cookies, and instructions of two lines.
+fn driftbrowser() -> Value {
+    let plain = |name: &str, description: &str| {
+        json!({"name": name, "description": description,
+            "inputSchema": {"type": "object", "properties": {}}})
+    };
+    let mut tools = vec![
+        plain("browser_open", "Open a URL in the active tab."),
+        plain("browser_back", "Go back one page in the active tab."),
+        plain("browser_click", "Click an element."),
+        plain("browser_type", "Type text into an element, key by key."),
+        plain("browser_fill", "Replace the value of a field."),
+        plain("browser_press", "Press a key or a chord."),
+        plain("browser_snapshot", "Describe the page as a tree of roles."),
+        json!({"name": "browser_eval",
+            "description": "Evaluate JavaScript in the page.\nThe script can read anything the page can read.",
+            "inputSchema": {"type": "object",
+                "properties": {"script": {"type": "string", "description": "A function body."}},
+                "required": ["script"]},
+            "annotations": {"destructiveHint": true}}),
+        plain("browser_screenshot", "Save a screenshot as a PNG file."),
+        plain("browser_upload", "Attach a file to a file input."),
+        plain("browser_cookies", "Read and set the cookies of the page."),
+        plain(
+            "browser_storage",
+            "Read the local storage and the cookie jar of the page.",
+        ),
+        plain("browser_pdf", "Save the page as a PDF file."),
+        plain("browser_download", "Download a file the page links to."),
+    ];
+    let answers: serde_json::Map<String, Value> = tools
+        .iter_mut()
+        .map(|tool| {
+            (
+                tool["name"].as_str().unwrap().to_owned(),
+                json!({"text": "ok"}),
+            )
+        })
+        .collect();
+    json!({
+        "server": {"name": "driftbrowser", "version": "0.9.2"},
+        "instructions": "Drives one real browser window.\nCall a snapshot after a page changes.",
+        "tools": tools,
+        "answers": answers,
+    })
+}
+
+/// The groups of the review, in the order they are drawn: each setting's word and its index.
+const GROUPS: [&str; 4] = ["asked", "passes", "off", "judged"];
+
+/// The ids of the row of the action `name` as drawn now: one, or two while it moves between
+/// groups, or the row of "What changed".
+fn rows_of(cx: &mut VisualTestContext, name: &str) -> Vec<String> {
+    let mut ids: Vec<String> = (0..GROUPS.len())
+        .map(|at| format!("connection-review-row-{at}-{name}"))
+        .collect();
+    ids.push(format!("connection-review-change-{name}"));
+    ids.into_iter().filter(|id| present(cx, id)).collect()
+}
+
+/// The id of the row of `name`, once it stands in one place.
+fn row_of(cx: &mut VisualTestContext, name: &str) -> String {
+    let mut ids = rows_of(cx, name);
+    assert_eq!(ids.len(), 1, "{name} has one row: {ids:?}");
+    ids.remove(0)
+}
+
+/// The setting a row sits in: the group it is drawn in, "changes" for "What changed".
+fn group_of(cx: &mut VisualTestContext, name: &str) -> Option<&'static str> {
+    (0..GROUPS.len())
+        .find(|at| present(cx, &format!("connection-review-row-{at}-{name}")))
+        .map(|at| GROUPS[at])
+        .or_else(|| present(cx, &format!("connection-review-change-{name}")).then_some("changes"))
+}
+
+/// The names of the rows drawn now, the ones folding away left out.
+fn names_drawn(cx: &mut VisualTestContext, of: &[&str]) -> Vec<String> {
+    of.iter()
+        .filter(|name| !rows_of(cx, name).is_empty())
+        .map(|name| (*name).to_owned())
+        .collect()
+}
+
+/// What a row's pill says it is set to.
+fn pill(cx: &mut VisualTestContext, name: &str) -> Option<String> {
+    let id = row_of(cx, name);
+    label(cx, &format!("{id}-setting"))
+}
+
+/// Sets a row through its pill: opens it, picks the option of the daemon's word `setting`.
+fn choose(cx: &mut VisualTestContext, name: &str, setting: &str) {
+    let id = row_of(cx, name);
+    click(cx, &format!("{id}-setting"));
+    click(cx, &format!("{id}-setting-{setting}"));
+}
+
+fn open_the_review(shell: &Entity<Shell>, cx: &mut VisualTestContext, name: &str, ready: &str) {
+    open_page(shell, cx);
+    until(shell, cx, "its row", |cx| {
+        visible(cx, &format!("connection-{name}"))
+    });
+    click(cx, &format!("connection-more-{name}"));
+    click(cx, &format!("review-connection-{name}"));
+    until(shell, cx, "what the server announces", |cx| {
+        present(cx, ready)
+    });
+    settle(cx);
+}
+
+fn search_field(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<InputState> {
+    section(shell, cx)
+        .read_with(cx, |s, _| s.review_search())
+        .expect("the review has a search field")
+}
+
+/// What the daemon pinned for the action `name` of `connection`.
+fn pinned(user: &User, connection_name: &str, name: &str) -> Value {
+    connection(user, connection_name).unwrap()["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == name)
+        .unwrap_or_else(|| panic!("{name} is not pinned"))["setting"]
+        .clone()
 }
 
 // ── Its place ────────────────────────────────────────────────────────────────────────────────
@@ -1017,84 +1145,588 @@ fn removing_a_server_asks_in_a_confirmation(cx: &mut TestAppContext) {
 // ── The review ───────────────────────────────────────────────────────────────────────────────
 
 #[gpui_kit::test]
-fn the_review_is_a_large_dialog_where_each_action_is_judged_by_default(cx: &mut TestAppContext) {
+fn the_review_is_a_dialog_where_each_action_is_judged_by_default(cx: &mut TestAppContext) {
     let user = user();
     // A first review: the connection was added while its server could not start.
     turn_on(&user);
     declare_waiting(&user, "almanac");
     write_script(&user, "almanac", &almanac());
     let (shell, cx) = window(&user, cx);
-    open_page(&shell, cx);
-    until(&shell, cx, "its row", |cx| {
-        visible(cx, "connection-almanac")
-    });
-    click(cx, "connection-more-almanac");
-    click(cx, "review-connection-almanac");
+    open_the_review(&shell, cx, "almanac", "connection-review-row-3-search");
     assert!(visible(cx, "connection-review"));
-    until(&shell, cx, "what the server announces", |cx| {
-        present(cx, "connection-review-action-search")
-    });
-    settle(cx);
-    assert!(visible(cx, "connection-review-close"), "a large dialog");
+    assert!(
+        visible(cx, "connection-review-cancel"),
+        "a dialog with a Cancel"
+    );
     assert_eq!(
         label(cx, "connection-review-server").as_deref(),
         Some("almanac 1.0.0")
     );
-    // Its instructions, as plain lines.
+    // Its instructions are folded to their first line; they unfold on a click, as plain lines.
     assert_eq!(
-        label(cx, "connection-review-instructions-line-0").as_deref(),
+        label(cx, "connection-review-instructions-about").as_deref(),
         Some("Search before you write.")
     );
+    assert!(!present(cx, "connection-review-instructions-text-line-0"));
+    click(cx, "connection-review-instructions");
+    assert_eq!(
+        label(cx, "connection-review-instructions-text-line-0")
+            .as_deref()
+            .map(str::trim),
+        Some("Search before you write.")
+    );
+    assert_eq!(
+        label(cx, "connection-review-instructions-text-line-1")
+            .as_deref()
+            .map(str::trim),
+        Some("Keep notes short.")
+    );
     for action in ["search", "write", "open"] {
-        let radios = format!("connection-review-action-{action}-setting");
-        assert!(selected(cx, &format!("{radios}-judged")), "{action}");
-        assert!(visible(cx, &format!("{radios}-passes")));
-        assert!(visible(cx, &format!("{radios}-asked")));
-        assert_eq!(
-            label(cx, &format!("connection-review-action-{action}-when-label")).as_deref(),
-            Some("When an agent calls it")
-        );
+        assert_eq!(group_of(cx, action), Some("judged"), "{action}");
+        assert_eq!(pill(cx, action).as_deref(), Some("Judged"), "{action}");
     }
     let said = everything_said(cx);
-    assert!(said.contains("Allowed") && said.contains("Judged") && said.contains("Asked"));
-    assert!(!said.contains("passes"), "the word passes is not shown");
     assert!(said.contains("Finds notes by words."));
+    assert!(!said.contains("passes"), "the word passes is not shown");
 
-    // Search is allowed, open is turned off, write stays judged.
-    click(cx, "connection-review-action-search-setting-passes");
-    let open = height(cx, "connection-review-action-open-when-block");
-    assert!(open > 0.);
-    press(cx, "connection-review-action-open-offer");
-    a_third_later(cx);
-    let folding = height(cx, "connection-review-action-open-when-block");
-    assert!(
-        0. < folding && folding < open,
-        "its choices fold, over a panel's time: {folding} of {open}"
-    );
-    until(&shell, cx, "its choices fold away", |cx| {
-        !visible(cx, "connection-review-action-open-setting-judged")
-    });
+    // Search is allowed from its unfolded row, open is turned off by its pill, write stays judged.
+    let search = row_of(cx, "search");
+    click(cx, &format!("{search}-row"));
+    for key in ["off", "passes", "judged", "asked"] {
+        assert!(visible(cx, &format!("{search}-choose-{key}")), "{key}");
+    }
+    assert!(selected(cx, &format!("{search}-choose-judged")));
+    click(cx, &format!("{search}-choose-passes"));
+    assert_eq!(group_of(cx, "search"), Some("passes"));
+    choose(cx, "open", "off");
+    assert_eq!(group_of(cx, "open"), Some("off"));
     click(cx, "accept-connection");
     until(&shell, cx, "the dialog closes", |cx| {
         !visible(cx, "connection-review")
     });
     let accepted = connection(&user, "almanac").unwrap();
     assert_eq!(accepted["state"], "ready");
-    let setting = |name: &str| {
-        accepted["actions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|a| a["name"] == name)
-            .unwrap()["setting"]
-            .clone()
-    };
-    assert_eq!(setting("search"), "passes");
-    assert_eq!(setting("write"), "judged");
-    assert_eq!(setting("open"), "off");
+    assert_eq!(pinned(&user, "almanac", "search"), "passes");
+    assert_eq!(pinned(&user, "almanac", "write"), "judged");
+    assert_eq!(pinned(&user, "almanac", "open"), "off");
     until(&shell, cx, "its row says it is on", |cx| {
         label(cx, "connection-almanac-line").as_deref() == Some("On · 2 actions")
     });
+}
+
+#[gpui_kit::test]
+fn the_review_lists_one_row_per_action(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+
+    let names: Vec<String> = driftbrowser()["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(names.len(), 14);
+    let mut tops = Vec::new();
+    for name in &names {
+        let row = row_of(cx, name);
+        assert_eq!(group_of(cx, name), Some("judged"), "{name}");
+        assert_eq!(
+            label(cx, &format!("{row}-name")).as_deref(),
+            Some(name.as_str())
+        );
+        let h = height(cx, &row);
+        assert!(
+            0. < h && h <= 40.,
+            "{name} is one compact row, not a card: {h}"
+        );
+        tops.push(cx.update(|window, _| f32::from(window.find(row).bounds().origin.y)));
+    }
+    tops.sort_by(f32::total_cmp);
+    assert!(
+        tops.windows(2).all(|w| w[1] - w[0] >= 28.),
+        "one under the other, none over another: {tops:?}"
+    );
+    // Its group says how many it holds, and the empty groups are not drawn.
+    assert_eq!(
+        label(cx, "connection-review-group-judged-count").as_deref(),
+        Some("14")
+    );
+    for empty in ["asked", "passes", "off"] {
+        assert!(
+            !present(cx, &format!("connection-review-group-{empty}")),
+            "{empty}"
+        );
+    }
+    // The row says the first line of the description and the full text waits for a click.
+    let eval = row_of(cx, "browser_eval");
+    assert_eq!(
+        label(cx, &format!("{eval}-about")).as_deref(),
+        Some("Evaluate JavaScript in the page.")
+    );
+    assert_eq!(height(cx, &format!("{eval}-row-body")), 0.);
+    let said = everything_said(cx);
+    assert!(!said.contains("The script can read anything"), "{said}");
+    let folded = height(cx, &eval);
+    click(cx, &format!("{eval}-row"));
+    let said = everything_said(cx);
+    assert!(
+        said.contains("The script can read anything the page can read."),
+        "{said}"
+    );
+    assert!(
+        said.contains("script (string, required): A function body."),
+        "{said}"
+    );
+    assert!(said.contains("The server says it may destroy."), "{said}");
+    assert!(height(cx, &eval) > folded, "the row grew to hold its text");
+    // The four choices, each with its sentence, the one it has chosen.
+    for (key, sentence) in [
+        ("off", "Agents never see it."),
+        ("passes", "It runs in every mode, without asking."),
+        ("judged", "The judge decides in Auto; you are asked in Ask."),
+        ("asked", "It always comes to you, never to the judge."),
+    ] {
+        assert!(visible(cx, &format!("{eval}-choose-{key}")), "{key}");
+        assert!(said.contains(sentence), "{sentence}");
+    }
+    assert!(selected(cx, &format!("{eval}-choose-judged")));
+    // A click on it again folds it.
+    click(cx, &format!("{eval}-row"));
+    assert_eq!(height(cx, &format!("{eval}-row-body")), 0.);
+    assert!(height(cx, &eval) <= folded + 0.5);
+}
+
+#[gpui_kit::test]
+fn the_review_search_filters_actions(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    let all = [
+        "browser_open",
+        "browser_cookies",
+        "browser_storage",
+        "browser_upload",
+        "browser_eval",
+    ];
+    assert_eq!(names_drawn(cx, &all).len(), all.len());
+    assert_eq!(
+        label(cx, "connection-review-filter-all").as_deref(),
+        Some("All 14")
+    );
+    let field = search_field(&shell, cx);
+
+    // By name and by description: "cookie" is in two names and in one description.
+    type_in(&field, "cookie", cx);
+    settle(cx);
+    assert_eq!(
+        names_drawn(cx, &all),
+        ["browser_cookies", "browser_storage"],
+        "the others are gone"
+    );
+    assert_eq!(
+        label(cx, "connection-review-filter-all").as_deref(),
+        Some("All 2")
+    );
+    assert_eq!(
+        label(cx, "connection-review-filter-asked").as_deref(),
+        Some("Asked 0")
+    );
+    assert_eq!(
+        label(cx, "connection-review-group-judged-count").as_deref(),
+        Some("2")
+    );
+    type_in(&field, "cookie jar", cx);
+    settle(cx);
+    assert_eq!(names_drawn(cx, &all), ["browser_storage"]);
+    type_in(&field, "zzz", cx);
+    settle(cx);
+    assert!(names_drawn(cx, &all).is_empty());
+    assert!(
+        label(cx, "connection-review-none").is_some_and(|said| said.contains("zzz")),
+        "a line says nothing matches"
+    );
+    // The field's clear button brings every row back.
+    click(cx, "connection-review-search-clear");
+    assert_eq!(field.read_with(cx, |f, _| f.value().to_string()), "");
+    assert_eq!(names_drawn(cx, &all).len(), all.len());
+    assert!(!visible(cx, "connection-review-none"));
+
+    // By setting: the chips filter, and the chosen one clicked again goes back to all.
+    choose(cx, "browser_upload", "asked");
+    assert_eq!(
+        label(cx, "connection-review-filter-asked").as_deref(),
+        Some("Asked 1")
+    );
+    assert_eq!(
+        label(cx, "connection-review-filter-judged").as_deref(),
+        Some("Judged 13")
+    );
+    click(cx, "connection-review-filter-asked");
+    assert!(selected(cx, "connection-review-filter-asked"));
+    assert_eq!(names_drawn(cx, &all), ["browser_upload"]);
+    click(cx, "connection-review-filter-asked");
+    assert!(selected(cx, "connection-review-filter-all"));
+    assert_eq!(names_drawn(cx, &all).len(), all.len());
+}
+
+#[gpui_kit::test]
+fn several_actions_are_set_at_once(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    assert!(
+        !present(cx, "connection-review-bulk"),
+        "no bar before a row is ticked"
+    );
+
+    // Two rows ticked: a bar unfolds saying so, and sets them both.
+    for name in ["browser_click", "browser_type"] {
+        let row = row_of(cx, name);
+        click(cx, &format!("{row}-pick"));
+        assert!(selected(cx, &format!("{row}-pick")), "{name}");
+    }
+    assert_eq!(
+        label(cx, "connection-review-bulk-count").as_deref(),
+        Some("2 selected")
+    );
+    for key in ["off", "passes", "judged", "asked"] {
+        assert!(
+            visible(cx, &format!("connection-review-bulk-{key}")),
+            "{key}"
+        );
+    }
+    click(cx, "connection-review-bulk-asked");
+    for name in ["browser_click", "browser_type"] {
+        assert_eq!(group_of(cx, name), Some("asked"), "{name}");
+        assert_eq!(pill(cx, name).as_deref(), Some("Asked"));
+    }
+    assert_eq!(
+        group_of(cx, "browser_open"),
+        Some("judged"),
+        "what was not ticked stays"
+    );
+    assert!(
+        !present(cx, "connection-review-bulk"),
+        "the bar folds away once it has done"
+    );
+
+    // The pill of a ticked row sets every ticked row; the pill of one that is not ticked, itself.
+    for name in ["browser_fill", "browser_press"] {
+        let row = row_of(cx, name);
+        click(cx, &format!("{row}-pick"));
+    }
+    choose(cx, "browser_fill", "off");
+    assert_eq!(group_of(cx, "browser_fill"), Some("off"));
+    assert_eq!(group_of(cx, "browser_press"), Some("off"));
+    choose(cx, "browser_open", "passes");
+    assert_eq!(group_of(cx, "browser_open"), Some("passes"));
+    assert_eq!(group_of(cx, "browser_back"), Some("judged"));
+    // Clear empties a selection without setting anything.
+    let row = row_of(cx, "browser_back");
+    click(cx, &format!("{row}-pick"));
+    assert_eq!(
+        label(cx, "connection-review-bulk-count").as_deref(),
+        Some("1 selected")
+    );
+    click(cx, "connection-review-bulk-clear");
+    assert!(!present(cx, "connection-review-bulk"));
+    assert_eq!(group_of(cx, "browser_back"), Some("judged"));
+
+    click(cx, "accept-connection");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-review")
+    });
+    for (name, setting) in [
+        ("browser_click", "asked"),
+        ("browser_type", "asked"),
+        ("browser_fill", "off"),
+        ("browser_press", "off"),
+        ("browser_open", "passes"),
+        ("browser_back", "judged"),
+        ("browser_eval", "judged"),
+    ] {
+        assert_eq!(pinned(&user, "driftbrowser", name), setting, "{name}");
+    }
+}
+
+#[gpui_kit::test]
+fn a_row_set_to_another_setting_moves_to_its_group(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "almanac");
+    write_script(&user, "almanac", &almanac());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(&shell, cx, "almanac", "connection-review-row-3-search");
+    let whole = height(cx, "connection-review-row-3-search");
+    assert!(whole > 0.);
+
+    // It folds away in the group it leaves and unfolds in the one it reaches.
+    let id = "connection-review-row-3-search";
+    click_pill(cx, id, "passes");
+    a_third_later(cx);
+    let (leaving, arriving) = (height(cx, id), height(cx, "connection-review-row-1-search"));
+    assert!(
+        0. < leaving && leaving < whole,
+        "it folds away over a panel's time: {leaving} of {whole}"
+    );
+    assert!(
+        0. < arriving && arriving < whole,
+        "it unfolds over a panel's time: {arriving} of {whole}"
+    );
+    assert!(
+        present(cx, "connection-review-group-passes"),
+        "its new group unfolds"
+    );
+    settle(cx);
+    assert_eq!(rows_of(cx, "search"), ["connection-review-row-1-search"]);
+    assert_eq!(
+        label(cx, "connection-review-group-passes-count").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        label(cx, "connection-review-group-judged-count").as_deref(),
+        Some("2")
+    );
+
+    // The last row to leave a group takes the group away with it, folding.
+    choose(cx, "write", "passes");
+    click_pill(cx, "connection-review-row-3-open", "off");
+    a_third_later(cx);
+    assert!(
+        present(cx, "connection-review-group-judged"),
+        "it folds, it does not vanish"
+    );
+    assert!(height(cx, "connection-review-group-judged-group") > 0.);
+    settle(cx);
+    assert!(!present(cx, "connection-review-group-judged"));
+    assert_eq!(
+        label(cx, "connection-review-group-passes-count").as_deref(),
+        Some("2")
+    );
+    assert_eq!(
+        label(cx, "connection-review-group-off-count").as_deref(),
+        Some("1")
+    );
+    // Its group folds on a click on its header, and its rows with it.
+    let open = height(cx, "connection-review-group-passes-body");
+    assert!(open > 0.);
+    click(cx, "connection-review-group-passes");
+    assert_eq!(height(cx, "connection-review-group-passes-body"), 0.);
+}
+
+/// Opens the pill of the row `id` and picks `setting`, leaving the clock where it is.
+fn click_pill(cx: &mut VisualTestContext, id: &str, setting: &str) {
+    click(cx, &format!("{id}-setting"));
+    press(cx, &format!("{id}-setting-{setting}"));
+}
+
+#[gpui_kit::test]
+fn a_rereview_shows_the_changes_first(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    connect(
+        &user,
+        "driftbrowser",
+        &driftbrowser(),
+        json!({"browser_snapshot": "passes", "browser_upload": "asked",
+            "browser_cookies": "off", "browser_eval": "off"}),
+    );
+    let mut now = driftbrowser();
+    now["server"]["version"] = json!("0.10.0");
+    now["instructions"] =
+        json!("Drives one real browser window.\nAlways call a snapshot after a page changes.");
+    let tools = now["tools"].as_array_mut().unwrap();
+    tools.retain(|t| t["name"] != "browser_pdf");
+    for tool in tools.iter_mut() {
+        match tool["name"].as_str().unwrap() {
+            "browser_click" => tool["description"] = json!("Click an element, then snapshot."),
+            "browser_eval" => tool["description"] = json!("Evaluate JavaScript in the main world."),
+            "browser_download" => tool["description"] = json!("Download a file to a path."),
+            _ => {}
+        }
+    }
+    tools.push(
+        json!({"name": "browser_wait_for_text", "description": "Wait until a text appears.",
+        "inputSchema": {"type": "object", "properties": {}}}),
+    );
+    write_script(&user, "driftbrowser", &now);
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-change-browser_click",
+    );
+
+    // What changed comes first, saying how many and since when; the removed one is in it.
+    assert_eq!(
+        label(cx, "connection-review-changes-title").as_deref(),
+        Some("What changed")
+    );
+    assert_eq!(
+        label(cx, "connection-review-changes-count").as_deref(),
+        Some("5")
+    );
+    let y = |cx: &mut VisualTestContext, id: &str| {
+        let id = id.to_owned();
+        cx.update(|window, _| f32::from(window.find(id).bounds().origin.y))
+    };
+    for (name, tag) in [
+        ("browser_wait_for_text", "New"),
+        ("browser_click", "Changed"),
+        ("browser_eval", "Changed"),
+        ("browser_download", "Changed"),
+        ("browser_pdf", "Removed"),
+    ] {
+        let row = format!("connection-review-change-{name}");
+        assert!(present(cx, &row), "{name}");
+        assert_eq!(
+            label(cx, &format!("{row}-change")).as_deref(),
+            Some(tag),
+            "{name}"
+        );
+    }
+    // A changed action is judged again, a removed one has no setting to give.
+    assert_eq!(pill(cx, "browser_eval").as_deref(), Some("Judged"));
+    assert!(!present(cx, "connection-review-change-browser_pdf-setting"));
+    // The unchanged ones are one line, saying what they hold, and their settings are kept.
+    assert_eq!(
+        label(cx, "connection-review-unchanged-title").as_deref(),
+        Some("10 unchanged")
+    );
+    assert_eq!(
+        label(cx, "connection-review-unchanged-detail").as_deref(),
+        Some("1 allowed · 1 asked · 1 off · 7 judged")
+    );
+    assert!(
+        y(cx, "connection-review-changes") < y(cx, "connection-review-unchanged"),
+        "the changes first"
+    );
+    assert!(!visible(cx, "connection-review-row-1-browser_snapshot"));
+    // The instructions changed too: a line says so, and the diff unfolds under it.
+    assert_eq!(
+        label(cx, "connection-review-instructions-change").as_deref(),
+        Some("Changed")
+    );
+    assert!(!present(cx, "connection-review-instructions-text-line-0"));
+    click(cx, "connection-review-instructions");
+    let line = |cx: &mut VisualTestContext, at: usize| {
+        label(
+            cx,
+            &format!("connection-review-instructions-text-line-{at}"),
+        )
+    };
+    assert_eq!(
+        line(cx, 0).as_deref().map(str::trim),
+        Some("Drives one real browser window.")
+    );
+    assert_eq!(
+        line(cx, 1).as_deref(),
+        Some("− Call a snapshot after a page changes.")
+    );
+    assert_eq!(
+        line(cx, 2).as_deref(),
+        Some("+ Always call a snapshot after a page changes.")
+    );
+    // A changed action shows its old text and its new one.
+    let row = "connection-review-change-browser_eval";
+    click(cx, &format!("{row}-row"));
+    let said = everything_said(cx);
+    assert!(
+        said.contains("− Evaluate JavaScript in the page."),
+        "{said}"
+    );
+    assert!(
+        said.contains("+ Evaluate JavaScript in the main world."),
+        "{said}"
+    );
+
+    // The unchanged unfold into the same groups.
+    click(cx, "connection-review-unchanged");
+    assert_eq!(group_of(cx, "browser_snapshot"), Some("passes"));
+    assert_eq!(group_of(cx, "browser_upload"), Some("asked"));
+    assert_eq!(group_of(cx, "browser_cookies"), Some("off"));
+    assert_eq!(group_of(cx, "browser_open"), Some("judged"));
+    // A search that finds one of them unfolds the line by itself, and folds it back.
+    click(cx, "connection-review-unchanged");
+    assert!(!visible(cx, "connection-review-row-1-browser_snapshot"));
+    let field = search_field(&shell, cx);
+    type_in(&field, "snapshot", cx);
+    settle(cx);
+    assert!(visible(cx, "connection-review-row-1-browser_snapshot"));
+    type_in(&field, "", cx);
+    settle(cx);
+    assert!(!visible(cx, "connection-review-row-1-browser_snapshot"));
+    // The changed filter is a chip of a re-review.
+    click(cx, "connection-review-filter-changed");
+    assert!(selected(cx, "connection-review-filter-changed"));
+    assert!(present(cx, "connection-review-change-browser_click"));
+    assert!(!present(
+        cx,
+        "connection-review-change-browser_wait_for_text"
+    ));
+    click(cx, "connection-review-filter-changed");
+    assert!(selected(cx, "connection-review-filter-all"));
+}
+
+#[gpui_kit::test]
+fn the_review_dialog_keeps_a_readable_width(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "almanac");
+    let mut script = almanac();
+    script["tools"][0]["description"] = json!(format!("{}\n{}", guard::UNBROKEN, guard::SPACED));
+    write_script(&user, "almanac", &script);
+    let (shell, cx) = window(&user, cx);
+    open_the_review(&shell, cx, "almanac", "connection-review-row-3-search");
+    let frame = cx.update(|window, _| window.find("connection-review").bounds());
+    let (width, height) = (f32::from(frame.size.width), f32::from(frame.size.height));
+    assert!(
+        width <= 640.,
+        "a dialog of a readable width, not the window's: {width}"
+    );
+    assert!(width >= 480., "and not a strip: {width}");
+    assert!(height < 2400., "it fits its window");
+    // Its header and its footer stay in sight: Accept and Cancel are inside it.
+    for id in ["accept-connection", "connection-review-cancel"] {
+        let at = cx.update(|window, _| window.find(id).bounds());
+        assert!(
+            frame.contains(&at.origin) && frame.contains(&at.bottom_right()),
+            "{id}"
+        );
+    }
+    // A long word and a long sentence wrap inside the rows and the unfolded text.
+    let row = row_of(cx, "search");
+    click(cx, &format!("{row}-row"));
+    guard::assert_stays_inside(&shell, cx, "connection-review");
+    guard::narrow(cx);
+    settle(cx);
+    guard::assert_stays_inside(&shell, cx, "connection-review");
 }
 
 #[gpui_kit::test]
@@ -1112,21 +1744,19 @@ fn the_review_shows_changed_instructions_line_by_line(cx: &mut TestAppContext) {
             "inputSchema": {"type": "object", "properties": {}}}));
     write_script(&user, "almanac", &changed);
     let (shell, cx) = window(&user, cx);
-    open_page(&shell, cx);
-    until(&shell, cx, "its row", |cx| {
-        visible(cx, "connection-almanac")
-    });
-    click(cx, "connection-more-almanac");
-    click(cx, "review-connection-almanac");
-    until(&shell, cx, "the diff", |cx| {
-        present(cx, "connection-review-instructions-line-0")
-    });
-    settle(cx);
+    open_the_review(&shell, cx, "almanac", "connection-review-instructions");
+    click(cx, "connection-review-instructions");
 
     let line = |cx: &mut VisualTestContext, at: usize| {
-        label(cx, &format!("connection-review-instructions-line-{at}"))
+        label(
+            cx,
+            &format!("connection-review-instructions-text-line-{at}"),
+        )
     };
-    assert_eq!(line(cx, 0).as_deref(), Some("Search before you write."));
+    assert_eq!(
+        line(cx, 0).as_deref().map(str::trim),
+        Some("Search before you write.")
+    );
     assert_eq!(line(cx, 1).as_deref(), Some("− Keep notes short."));
     assert_eq!(
         line(cx, 2).as_deref(),
@@ -1134,22 +1764,23 @@ fn the_review_shows_changed_instructions_line_by_line(cx: &mut TestAppContext) {
     );
     // A changed action shows its old text and its new; a new one is whole and judged.
     assert_eq!(
-        label(cx, "connection-review-action-write-change").as_deref(),
+        label(cx, "connection-review-change-write-change").as_deref(),
         Some("Changed")
     );
+    click(cx, "connection-review-change-write-row");
     let said = everything_said(cx);
     assert!(said.contains("− Writes a note."), "{said}");
     assert!(said.contains("+ Writes a note, or many."), "{said}");
     assert_eq!(
-        label(cx, "connection-review-action-link-change").as_deref(),
+        label(cx, "connection-review-change-link-change").as_deref(),
         Some("New")
     );
-    assert!(selected(cx, "connection-review-action-link-setting-judged"));
+    assert_eq!(pill(cx, "link").as_deref(), Some("Judged"));
     // The unchanged ones are folded away, their setting kept.
-    assert!(!visible(cx, "connection-review-action-search"));
+    assert!(!visible(cx, "connection-review-row-1-search"));
     click(cx, "connection-review-unchanged");
     until(&shell, cx, "the unchanged unfold", |cx| {
-        visible(cx, "connection-review-action-search")
+        visible(cx, "connection-review-row-1-search")
     });
 }
 
@@ -1167,43 +1798,21 @@ fn accepting_a_changed_action_without_touching_it_makes_it_judged(cx: &mut TestA
     changed["tools"][1]["description"] = json!("Deletes every note.");
     write_script(&user, "almanac", &changed);
     let (shell, cx) = window(&user, cx);
-    open_page(&shell, cx);
-    until(&shell, cx, "its row", |cx| {
-        visible(cx, "connection-almanac")
-    });
-    click(cx, "connection-more-almanac");
-    click(cx, "review-connection-almanac");
-    until(&shell, cx, "the review is read", |cx| {
-        present(cx, "connection-review-action-write")
-    });
-    settle(cx);
+    open_the_review(&shell, cx, "almanac", "connection-review-change-write");
     // What the user did not touch is what the daemon proposes: judged for the changed action.
-    assert!(selected(
-        cx,
-        "connection-review-action-write-setting-judged"
-    ));
+    assert_eq!(pill(cx, "write").as_deref(), Some("Judged"));
 
     click(cx, "accept-connection");
     until(&shell, cx, "the dialog closes", |cx| {
         !visible(cx, "connection-review")
     });
-    let accepted = connection(&user, "almanac").unwrap();
-    let setting = |name: &str| {
-        accepted["actions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|a| a["name"] == name)
-            .unwrap()["setting"]
-            .clone()
-    };
     assert_eq!(
-        setting("write"),
+        pinned(&user, "almanac", "write"),
         "judged",
         "a changed action is judged again"
     );
     assert_eq!(
-        setting("search"),
+        pinned(&user, "almanac", "search"),
         "passes",
         "an unchanged one keeps its setting"
     );
