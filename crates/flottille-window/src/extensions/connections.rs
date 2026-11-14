@@ -14,7 +14,7 @@ use gpui_design_system::{
     BulkBar, Button, CheckState, Checkbox, ChoiceRow, Confirm, DiffLine, DiffLines, EmptyLine,
     Field, FilterChip, FilterChips, Group, Grouped, Icon, Item, ListCard, ListRow, Listing, Menu,
     Modal, RadioChoices, SearchField, Section, Select, SelectOption, Skeleton, Summary, Tag, Toast,
-    Tone, Type as _, Unfolding, awaiting, changing, fade, fuzzy, icon, palette, presence,
+    Tone, Type as _, Unfolding, awaiting, changing, enter, fade, fuzzy, icon, palette, presence,
     presence_of, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
@@ -354,6 +354,16 @@ pub struct Diff {
     pub actions: Vec<ActionDiff>,
     pub refused: Vec<String>,
     pub limits: Vec<LimitCover>,
+    /// What Flottille's adapter for this server is to it: that it applies, or that this version
+    /// has none; nothing for a server no adapter knows.
+    pub adapter: Option<AdapterSaid>,
+}
+
+/// The review's sentence on the server's adapter, and what it changes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdapterSaid {
+    pub said: String,
+    pub changed: Vec<String>,
 }
 
 /// A limit of the declaration, and the actions it covers and does not.
@@ -373,6 +383,8 @@ pub struct ActionDiff {
     pub pinned: Option<String>,
     pub now: Option<String>,
     pub setting: Option<String>,
+    /// Why no setting turns it on, while the adapter that applies keeps it off.
+    pub locked: Option<String>,
 }
 
 impl Diff {
@@ -423,6 +435,7 @@ impl Diff {
                         .as_object()
                         .map(|_| action_text(&action["now"])),
                     setting: text(&action["setting"]),
+                    locked: text(&action["locked"]),
                 })
                 .collect(),
             refused: words(&value["refused"]),
@@ -437,6 +450,10 @@ impl Diff {
                     not: words(&limit["not"]),
                 })
                 .collect(),
+            adapter: value["adapter"]["said"].as_str().map(|said| AdapterSaid {
+                said: said.to_owned(),
+                changed: words(&value["adapter"]["changed"]),
+            }),
         }
     }
 
@@ -571,6 +588,8 @@ struct Review {
     settings: BTreeMap<String, String>,
     unchanged_open: bool,
     instructions_open: bool,
+    /// Whether what the adapter changed is unfolded under the sentence that says it applies.
+    adapter_open: bool,
     accepting: bool,
     error: Option<SharedString>,
     /// The field that filters the actions, made with the first frame of the dialog.
@@ -665,7 +684,11 @@ impl Review {
         diff.actions
             .iter()
             .enumerate()
-            .filter(|(at, action)| self.shows(*at, action) && self.picked.contains(&action.name))
+            .filter(|(at, action)| {
+                self.shows(*at, action)
+                    && action.locked.is_none()
+                    && self.picked.contains(&action.name)
+            })
             .map(|(_, action)| action.name.clone())
             .collect()
     }
@@ -1365,6 +1388,7 @@ impl ConnectionsSection {
             settings: BTreeMap::new(),
             unchanged_open: false,
             instructions_open: false,
+            adapter_open: false,
             accepting: false,
             error: None,
             search: None,
@@ -1934,7 +1958,12 @@ impl ConnectionsSection {
         let p = palette(cx);
         let action = &diff.actions[at];
         let removed = action.change == "removed";
-        let setting = review.setting_of(&action.name).to_owned();
+        // An action the adapter locks is off whatever was chosen, and no setting turns it on.
+        let locked = action.locked.as_deref();
+        let setting = match locked {
+            Some(_) => "off".to_owned(),
+            None => review.setting_of(&action.name).to_owned(),
+        };
         let change = match (diff.first, action.change.as_str()) {
             (true, _) | (_, "unchanged") => None,
             (_, "added") => Some("New"),
@@ -2036,29 +2065,31 @@ impl ConnectionsSection {
             ));
         }
         if !removed {
-            // Ticked, it is one of the rows a pill or the bar sets together.
-            let state = match review.picked.contains(&action.name) {
-                true => CheckState::Checked,
-                false => CheckState::Empty,
-            };
-            let this = cx.entity().downgrade();
-            let key = action.name.clone();
-            row = row.leading(
-                Checkbox::new(part("pick"), state, format!("Select {}", action.name)).on_change(
-                    move |state, _, cx| {
-                        this.update(cx, |this, cx| {
-                            if let Some(review) = this.review.as_mut() {
-                                match state {
-                                    CheckState::Checked => review.picked.insert(key.clone()),
-                                    _ => review.picked.remove(&key),
-                                };
-                            }
-                            cx.notify();
-                        })
-                        .ok();
-                    },
-                ),
-            );
+            // Ticked, it is one of the rows a pill or the bar sets together; a locked row is
+            // never one of them, so it has no box.
+            if locked.is_none() {
+                let state = match review.picked.contains(&action.name) {
+                    true => CheckState::Checked,
+                    false => CheckState::Empty,
+                };
+                let this = cx.entity().downgrade();
+                let key = action.name.clone();
+                row = row.leading(
+                    Checkbox::new(part("pick"), state, format!("Select {}", action.name))
+                        .on_change(move |state, _, cx| {
+                            this.update(cx, |this, cx| {
+                                if let Some(review) = this.review.as_mut() {
+                                    match state {
+                                        CheckState::Checked => review.picked.insert(key.clone()),
+                                        _ => review.picked.remove(&key),
+                                    };
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        }),
+                );
+            }
             let chosen = slot_of(&setting);
             let (this, key) = (cx.entity().downgrade(), action.name.clone());
             row = row.trailing(
@@ -2070,12 +2101,24 @@ impl ConnectionsSection {
                     chosen,
                 )
                 .compact()
+                .disabled(locked.is_some())
                 .on_choose(move |index, _, cx| {
                     this.update(cx, |this, cx| this.set_actions(&key, SETTINGS[index].0, cx))
                         .ok();
                 }),
             );
-            if drawn {
+            if let (true, Some(why)) = (drawn, locked) {
+                let said = format!("Off while Flottille's adapter applies: {why}.");
+                body = body.child(
+                    div()
+                        .id(part("locked"))
+                        .aria_label(SharedString::from(said.clone()))
+                        .text_size(px(12.5))
+                        .text_color(p.mute)
+                        .child(SharedString::from(said))
+                        .test_support(),
+                );
+            } else if drawn {
                 let choose = part("choose");
                 let choices = SETTINGS
                     .iter()
@@ -2568,6 +2611,67 @@ impl ConnectionsSection {
             .into_any_element()
     }
 
+    /// What Flottille's adapter is to this server, in sight above the bar: that it applies (its
+    /// name and range), and why `login` is refused while an action outside its list is on, which
+    /// the user reads before Accept. What it changed unfolds under it.
+    fn adapter_block(
+        &self,
+        adapter: &AdapterSaid,
+        review: &Review,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette(cx);
+        let this = cx.entity().downgrade();
+        let said = div()
+            .id("connection-review-adapter")
+            .aria_label(SharedString::from(adapter.said.clone()))
+            .text_size(px(13.))
+            .text_color(p.text)
+            .child(SharedString::from(adapter.said.clone()))
+            .test_support();
+        let changed = Unfolding::new("connection-review-adapter-changes", review.adapter_open)
+            .line(
+                div()
+                    .id("connection-review-adapter-changes-title")
+                    .aria_label("What it changed")
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child("What it changed")
+                    .test_support(),
+            )
+            .body(div().flex().flex_col().gap(space::XS).children(
+                adapter.changed.iter().enumerate().map(|(at, line)| {
+                    let line = format!("\u{b7} {line}.");
+                    div()
+                        .id(SharedString::from(format!(
+                            "connection-review-adapter-change-{at}"
+                        )))
+                        .aria_label(SharedString::from(line.clone()))
+                        .text_size(px(12.5))
+                        .text_color(p.mute)
+                        .child(SharedString::from(line))
+                        .test_support()
+                }),
+            ))
+            .on_toggle(move |open, _, cx| {
+                this.update(cx, |this, cx| {
+                    if let Some(review) = this.review.as_mut() {
+                        review.adapter_open = open;
+                    }
+                    cx.notify();
+                })
+                .ok();
+            });
+        let changed = (!adapter.changed.is_empty()).then_some(changed);
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::XS)
+            .child(said)
+            .children(changed)
+            .into_any_element()
+    }
+
     /// The bar of the rows ticked, and what the review is set to, which stay in sight.
     fn review_kept(&self, diff: &Diff, review: &Review, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
@@ -2701,25 +2805,49 @@ impl ConnectionsSection {
                     .iter()
                     .filter(|a| a.change != "removed")
                     .count();
-                let under = div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .child(
+                // The sections come one after the other, the adapter's among them.
+                let sections: Vec<(&str, AnyElement)> = [
+                    Some((
+                        "server",
                         div()
                             .id("connection-review-server")
                             .aria_label(SharedString::from(server.clone()))
                             .mono(13.)
                             .text_color(p.text)
                             .child(SharedString::from(server))
-                            .test_support(),
-                    )
-                    .child(Self::review_split(diff, &review, window, cx))
-                    .child(
+                            .test_support()
+                            .into_any_element(),
+                    )),
+                    diff.adapter
+                        .as_ref()
+                        .map(|adapter| ("adapter", self.adapter_block(adapter, &review, cx))),
+                    Some(("split", Self::review_split(diff, &review, window, cx))),
+                    Some((
+                        "search",
                         SearchField::new("connection-review-search", &search, "Search the actions")
-                            .placeholder(format!("Search {total} actions by name or description")),
+                            .placeholder(format!("Search {total} actions by name or description"))
+                            .into_any_element(),
+                    )),
+                    Some((
+                        "chips",
+                        self.review_chips(diff, &review, cx).into_any_element(),
+                    )),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                let under = div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::SM)
+                    .children(
+                        sections
+                            .into_iter()
+                            .enumerate()
+                            .map(|(at, (key, section))| {
+                                enter(format!("connection-review-section-{key}"), at, section)
+                            }),
                     )
-                    .child(self.review_chips(diff, &review, cx))
                     .into_any_element();
                 (
                     Some(diff.sentence()),

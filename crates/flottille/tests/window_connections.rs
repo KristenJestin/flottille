@@ -1936,6 +1936,172 @@ fn the_review_dialog_keeps_a_readable_width(cx: &mut TestAppContext) {
     guard::assert_stays_inside(&shell, cx, "connection-review");
 }
 
+/// A connection `browser` to a server that says it is agent-browser 0.43.0 and serves `names`:
+/// pinned on its first start, or, with `waiting`, added before its script is written, so that it
+/// waits for its first review.
+fn agent_browser(user: &User, names: &[&str], waiting: bool) {
+    let tool = |name: &str| {
+        json!({"name": name, "description": format!("{name} of the browser."),
+            "inputSchema": {"type": "object", "properties": {}}})
+    };
+    let script = json!({"server": {"name": "agent-browser", "version": "0.43.0"},
+        "tools": names.iter().map(|name| tool(name)).collect::<Vec<_>>()});
+    if !waiting {
+        write_script(user, "browser", &script);
+    }
+    let mut command = command_of(user, "browser");
+    command.push("mcp".into());
+    user.call(
+        "connection.add",
+        json!({"name": "browser", "about": "A browser.", "command": command}),
+    )
+    .unwrap();
+    if waiting {
+        write_script(user, "browser", &script);
+    }
+}
+
+#[gpui_kit::test]
+fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    agent_browser(
+        &user,
+        &[
+            "agent_browser_open",
+            "agent_browser_eval",
+            "agent_browser_auth_save",
+            "agent_browser_get_attr",
+        ],
+        false,
+    );
+    // An action outside the list the adapter lets stay on beside login, turned on.
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_get_attr": "judged"}}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_the_review(&shell, cx, "browser", "connection-review-adapter");
+
+    // That it applies, and why login is refused: said above the bar, before Accept.
+    let said = label(cx, "connection-review-adapter").unwrap();
+    assert!(
+        said.contains("Flottille's adapter for agent-browser 0.43.x applies"),
+        "{said}"
+    );
+    assert!(
+        said.contains("login is refused while agent_browser_get_attr is on"),
+        "{said}"
+    );
+    assert!(
+        visible(cx, "connection-review-left"),
+        "the bar is under the adapter's sentence"
+    );
+    // What it changed unfolds under the sentence.
+    assert_eq!(height(cx, "connection-review-adapter-changes-body"), 0.);
+    click(cx, "connection-review-adapter-changes");
+    assert!(height(cx, "connection-review-adapter-changes-body") > 0.);
+    let changed = everything_said(cx);
+    assert!(
+        changed.contains("login is Flottille's own action"),
+        "{changed}"
+    );
+    assert!(changed.contains("--config"), "{changed}");
+
+    // Its own logins cannot be turned on: the pill is disabled, and the unfolded row says why.
+    click(cx, "connection-review-unchanged");
+    let locked = row_of(cx, "agent_browser_auth_save");
+    assert_eq!(pill(cx, "agent_browser_auth_save").as_deref(), Some("Off"));
+    assert!(
+        !present(cx, &format!("{locked}-locked")),
+        "the reason waits for the row to unfold"
+    );
+    click(cx, &format!("{locked}-row"));
+    let why = label(cx, &format!("{locked}-locked")).unwrap();
+    assert!(why.contains("vault"), "{why}");
+    assert!(
+        !present(cx, &format!("{locked}-choose-passes")),
+        "no choice turns it on"
+    );
+    click(cx, &format!("{locked}-setting"));
+    assert!(
+        !present(cx, &format!("{locked}-setting-passes")),
+        "its list does not open"
+    );
+    assert!(
+        !present(cx, &format!("{locked}-pick")),
+        "no box to tick it with"
+    );
+    // Eval is off at its first pin, and the user's to turn on: its row has all four choices.
+    let eval = row_of(cx, "agent_browser_eval");
+    click(cx, &format!("{eval}-row"));
+    assert!(present(cx, &format!("{eval}-choose-passes")));
+    assert!(!present(cx, &format!("{eval}-locked")));
+    assert!(present(cx, &format!("{eval}-pick")));
+}
+
+#[gpui_kit::test]
+fn a_locked_action_is_not_set_by_the_bulk_bar(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    agent_browser(
+        &user,
+        &[
+            "agent_browser_click",
+            "agent_browser_fill",
+            "agent_browser_auth_save",
+            "agent_browser_eval",
+        ],
+        true,
+    );
+    let (shell, cx) = window(&user, cx);
+    open_the_review(&shell, cx, "browser", "connection-review-adapter");
+
+    // Every row that has a box is ticked: the locked one has none.
+    for name in [
+        "agent_browser_click",
+        "agent_browser_fill",
+        "agent_browser_eval",
+    ] {
+        let row = row_of(cx, name);
+        click(cx, &format!("{row}-pick"));
+    }
+    let locked = row_of(cx, "agent_browser_auth_save");
+    assert!(!present(cx, &format!("{locked}-pick")));
+    assert_eq!(
+        label(cx, "connection-review-bulk-count").as_deref(),
+        Some("3 selected"),
+        "the locked one is not counted"
+    );
+    click(cx, "connection-review-bulk-passes");
+    for name in [
+        "agent_browser_click",
+        "agent_browser_fill",
+        "agent_browser_eval",
+    ] {
+        assert_eq!(group_of(cx, name), Some("passes"), "{name}");
+    }
+    assert_eq!(
+        group_of(cx, "agent_browser_auth_save"),
+        Some("off"),
+        "the locked one stays off"
+    );
+    // The daemon takes the settings as they are: it refuses a locked action that is turned on.
+    click(cx, "accept-connection");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-review")
+    });
+    for (name, setting) in [
+        ("agent_browser_click", "passes"),
+        ("agent_browser_fill", "passes"),
+        ("agent_browser_eval", "passes"),
+        ("agent_browser_auth_save", "off"),
+    ] {
+        assert_eq!(pinned(&user, "browser", name), setting, "{name}");
+    }
+}
+
 #[gpui_kit::test]
 fn the_review_shows_changed_instructions_line_by_line(cx: &mut TestAppContext) {
     let user = user();
