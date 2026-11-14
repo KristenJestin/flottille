@@ -2708,7 +2708,6 @@ impl Shell {
         vault.update(cx, |vault, cx| vault.add_for(project, window, cx));
     }
 
-    /// Opens Settings at a section: its tab is the one chosen.
     /// Opens the dialog of an agent's request to write a connection.
     pub fn open_connection_request(&mut self, number: u64, cx: &mut Context<Self>) {
         self.connection_request
@@ -2738,6 +2737,7 @@ impl Shell {
         });
     }
 
+    /// Opens Settings at a section: its tab is the one chosen.
     pub fn open_settings_at(
         &mut self,
         at: crate::settings::Reveal,
