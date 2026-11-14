@@ -279,8 +279,9 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   the turn `failed`: what it was sent is given back (`delivery.given_back`, queued again), the
   session stays, its process is let go as after an idle release (`agent.released`, reason
   `failed`), and the agent is idle with a `state_reason` that says what to do (`Claude's login
-  expired: sign in again (run claude and /login)`), which the session's state line says. Then nothing starts it but the user: what is queued for it waits,
-  however it was rung, until the user writes to it or to its tree's root, which clears that
+  expired: sign in again (run claude and /login)`), which the session's state line says. Then
+  nothing starts it but the user: what is queued for it waits, however it was rung, until the
+  user writes to it or to its tree's root, which clears that
   line on the root and on every agent of its tree waiting on a login, and rings them. Their next
   prompt starts a process that resumes or loads the session, with what waited. A child's parent
   is told (`child-idle`) that the child cannot work until the user signs in again and not to
