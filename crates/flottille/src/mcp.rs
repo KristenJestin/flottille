@@ -326,16 +326,16 @@ const SERVED: [Definition; 33] = [
         name: "forge",
         title: "Pull requests",
         description: "PRs and CI via the user's \
-            gh/bkt (no forge sign-in here: never run them). list: by state, branch, \
+            gh/bkt (no forge sign-in here: never run them). list: by state and branch, \
             as last read. show: a branch's or number's \
-            with checks (each failed job's log end), review verdict, comment count; \
+            with checks (the log's end of each failed job), review state, comment count; \
             detail full: texts, threads (file, line). Writes, judged, answered at \
             once, the result maybe later: create, merge \
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
             user's words) and checks on a workspace's branch; edit, comment, reply, \
             resolve (threads), review (approve, request_changes wait for the user), \
             close (comment first), reopen on number. \
-            subscribe: events wake you till merged or closed (maybe already); unsubscribe. CI: pipelines lists what can \
+            subscribe: events wake you till merge/close (maybe already); unsubscribe. CI: pipelines lists what can \
             be run; run starts one by name (custom: <name>) with its variables, follows it unless \
             follow: false; follow_run one you did not start; runs, run_view, \
             run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
