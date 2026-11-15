@@ -287,6 +287,17 @@ fn archives(release: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The archive an rc or a next build follows: its own line's (`docs/releases.md`, "Updating").
+fn along_line(_releases: &[Value], _this: &Version) -> Option<String> {
+    None
+}
+
+/// Whether `new` is older than `this`: by version, but dev's beta of a line is not older than the
+/// next build of that line it was merged from (`0.5.0-beta.1` follows `0.5.0-next.7`).
+fn is_older(new: &Version, this: &Version) -> bool {
+    new < this
+}
+
 /// The address of the channel's latest archive for this machine.
 fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
     let found = match channel {
@@ -415,4 +426,79 @@ fn tempfile_dir(dir: &Path) -> Result<PathBuf> {
         }
     }
     Err("cannot make a folder beside the binary".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// A published release of `version`, at `at` (UTC, one shape).
+    fn release(version: &str, at: &str) -> Value {
+        json!({
+            "tag_name": format!("v{version}"),
+            "published_at": at,
+            "assets": [{"browser_download_url": format!("https://example.test/flottille-{version}-x86_64-linux.tar.gz")}],
+        })
+    }
+
+    fn taken(releases: &[Value], this: &str) -> Option<String> {
+        let url = along_line(releases, &Version::parse(this).unwrap())?;
+        Some(version_of(url.rsplit('/').next()?)?.to_string())
+    }
+
+    #[test]
+    fn an_rc_build_updates_along_its_line() {
+        let mut releases = vec![
+            release("0.3.0", "2026-11-01T10:00:00Z"),
+            release("0.3.1-rc.1", "2026-11-02T10:00:00Z"),
+            release("0.3.1-rc.2", "2026-11-03T10:00:00Z"),
+            release("0.3.1-rc.3", "2026-11-04T10:00:00Z"),
+            // Newer, and other lines' or other channels': never taken.
+            release("0.2.4-rc.1", "2026-11-05T10:00:00Z"),
+            release("0.4.0-beta.9", "2026-11-06T10:00:00Z"),
+            release("0.5.0-next.1", "2026-11-07T10:00:00Z"),
+            release("0.3.1-alpha.feat-a.1", "2026-11-08T10:00:00Z"),
+        ];
+        // The next rc of its line.
+        assert_eq!(
+            taken(&releases, "0.3.1-rc.2").as_deref(),
+            Some("0.3.1-rc.3")
+        );
+        // Then the line's stable, which is above its rcs.
+        releases.push(release("0.3.1", "2026-11-09T10:00:00Z"));
+        assert_eq!(taken(&releases, "0.3.1-rc.3").as_deref(), Some("0.3.1"));
+        // And the next fix's rc after it.
+        releases.push(release("0.3.2-rc.1", "2026-11-10T10:00:00Z"));
+        assert_eq!(taken(&releases, "0.3.1").as_deref(), Some("0.3.2-rc.1"));
+    }
+
+    #[test]
+    fn a_next_build_updates_along_its_line() {
+        let mut releases = vec![
+            release("0.5.0-next.1", "2026-11-01T10:00:00Z"),
+            release("0.5.0-next.2", "2026-11-02T10:00:00Z"),
+            release("0.5.0-next.3", "2026-11-03T10:00:00Z"),
+            // Dev's betas before the line is merged, and other lines': never taken.
+            release("0.4.0-beta.9", "2026-11-04T10:00:00Z"),
+            release("0.3.1-rc.1", "2026-11-05T10:00:00Z"),
+            release("0.6.0-next.1", "2026-11-06T10:00:00Z"),
+        ];
+        assert_eq!(
+            taken(&releases, "0.5.0-next.2").as_deref(),
+            Some("0.5.0-next.3")
+        );
+        // The line is merged into dev: dev's betas of it come after the last next.
+        releases.push(release("0.5.0-beta.1", "2026-11-07T10:00:00Z"));
+        let this = Version::parse("0.5.0-next.3").unwrap();
+        assert_eq!(
+            taken(&releases, "0.5.0-next.3").as_deref(),
+            Some("0.5.0-beta.1")
+        );
+        // Which the build follows, though a beta sorts below a next.
+        assert!(!is_older(&Version::parse("0.5.0-beta.1").unwrap(), &this));
+        assert!(is_older(&Version::parse("0.5.0-next.1").unwrap(), &this));
+        assert!(is_older(&Version::parse("0.4.0-beta.9").unwrap(), &this));
+    }
 }
