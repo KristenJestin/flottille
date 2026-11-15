@@ -2592,20 +2592,34 @@ impl ProjectSettingsPage {
                             .ok();
                     }),
             )
-            .child(presence("project-vault-list-block", !self.vault_rows.is_empty(), list).gap(space::MD))
-            .child(
-                presence(
-                    "no-project-vault-block",
-                    self.vault_read && self.vault_rows.is_empty(),
-                    EmptyLine::new(
-                        "no-project-vault",
-                        Icon::Key,
-                        "No entry this project sees yet. Add a secret its agents need, such as \
-                         a tracker's token: they use it through Flottille's tools and never see it.",
+            .child(section_blocks(
+                "project-vault-blocks",
+                self.vault_read || !self.vault_rows.is_empty(),
+                space::MD,
+                stack(space::MD)
+                    .child(
+                        presence(
+                            "project-vault-list-block",
+                            !self.vault_rows.is_empty(),
+                            list,
+                        )
+                        .space(space::MD),
+                    )
+                    .child(
+                        presence(
+                            "no-project-vault-block",
+                            self.vault_read && self.vault_rows.is_empty(),
+                            EmptyLine::new(
+                                "no-project-vault",
+                                Icon::Key,
+                                "No entry this project sees yet. Add a secret its agents need, \
+                                 such as a tracker's token: they use it through Flottille's tools \
+                                 and never see it.",
+                            ),
+                        )
+                        .space(space::MD),
                     ),
-                )
-                .gap(space::MD),
-            )
+            ))
             .into_any_element()
     }
 

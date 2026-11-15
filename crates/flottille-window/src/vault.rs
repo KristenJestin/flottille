@@ -688,7 +688,6 @@ impl VaultSection {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(space::XS)
                     .child(Field::new(
                         "vault-project-field",
                         "Seen by agents of",
@@ -710,7 +709,7 @@ impl VaultSection {
                                     .into_any_element()
                             },
                         )
-                        .gap(space::XS),
+                        .space(space::XS),
                     ),
             )
             .test_support();
