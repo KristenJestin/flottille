@@ -809,15 +809,19 @@ them: no tool of an agent does.
 
 `tool_results.show` and `tool_results.set` read and keep the limit above which a tool result is
 cut at the source (`docs/tools.md`, "Long results"): `limit` in `tool-results.toml` of
-Flottille's configuration folder.
+Flottille's configuration folder; and whether `fs_read` says a page is unchanged instead of
+sending it again (`docs/tools.md`, "Files"): `unchanged`, `true` or `false`, false when it is
+absent (off until what it saves is measured, `docs/tools.md`, "Files").
 
-- `tool_results.show` answers `{"limit"}`: a number of characters, or `"off"` when results are
-  returned whole. With no file, `8000`. `invalid-config` when the file cannot be read, names
-  another key, or holds a `limit` that is neither `"off"` nor a whole number from 4000 to 40000.
-- `tool_results.set {limit}` takes a number of characters or `"off"`, writes the file
-  (`limit = 16000`, or `limit = "off"`) and answers as `tool_results.show`; `invalid-params` for
-  anything else, a number out of the range and a missing `limit` included (a client leaves null
-  fields out, so `"off"` is a word).
+- `tool_results.show` answers `{"limit", "unchanged"}`: a number of characters, or `"off"` when
+  results are returned whole (with no file, `8000`), and a boolean. `invalid-config` when the file
+  cannot be read, names another key, holds a `limit` that is neither `"off"` nor a whole number
+  from 4000 to 40000, or an `unchanged` that is not a boolean.
+- `tool_results.set {limit?, unchanged?}` takes a number of characters or `"off"`, a boolean, or
+  both, keeps what it is not given as the file says, writes the file (`limit = 16000`, or
+  `limit = "off"`, then `unchanged = true` when it is on) and answers as `tool_results.show`;
+  `invalid-params` for anything else, a number out of the range and neither field given included
+  (a client leaves null fields out, so `"off"` is a word).
 
 The daemon reads the file at every tool call: a change applies to the next result of every
 running session. `tool_results.set` emits `tool_results.changed` with what it answers. The user's
@@ -898,28 +902,23 @@ for an entry a feature names and that is missing.
   (locked), the entry then left whole.
 
 Both writes emit `vault.changed`, and give the agents of every project the tools their roles have
-now (`vault` is listed to an agent whose project sees an entry, or misses one a feature names). A
-set answers the open requests for that entry whose project now sees it (`set`).
+now (`vault` is listed to an agent whose project sees an entry, misses one a feature names, or has
+a connection whose `login` takes one). A set answers the open requests for that entry's name
+(`set`), telling only the agents whose project sees the entry; an entry bound to a connection on
+plain `http` to another machine is refused, and so is an entry an open request with
+`takes_username` asks for, saved without a username.
 
-The requests agents made for a missing entry (`docs/vault.md`, "Asking the user for an entry"):
+The requests agents made for an entry (`docs/vault.md`, "Asking the user for an entry"):
 
 - `vault.asks` answers `{"asks": [{"ask", "at", "agent", "project", "name", "why", "description",
-  "takes_username", "taken", "joined"}]}`, the open requests, oldest first; `ask` is the number of
-  its `vault.asked` event, `taken` why its name cannot be set for the project (another project
-  uses it), `null` otherwise, `joined` the agents whose ask joined it.
-- `vault.ask_set {ask, secret, username?, name?}` sets the entry as `vault.set` does, with the
-  description and the project the request holds, under `name` when given, else the name it
-  holds; `refused` without a username when `takes_username`, and as `vault.set`; `refused` with
-  `` `<name>` is used by the project <other>: choose another name`` (`every project` for a global
-  entry) when an entry of that name exists and is not the project's, or `` `<name>` is bound to
-  <its use>: choose another name`` when it is bound to another use than the project's worklog: a
-  request never changes an existing entry's project nor its use. The entry is bound to the
-  project's worklog; `not-found` when no such request is open. Each agent that asked is
-  handed a `vault` delivery, `the user set the vault entry <name>`, which says the project's
-  setting still names the entry asked when the user chose another name.
+  "url", "host", "username", "for", "every", "takes_username", "joined"}]}`, the open requests,
+  oldest first; `ask` is the number of its `vault.asked` event, `project` the asking agent's,
+  `every` whether the entry is every project's, `description`, `url`, `username` and `for` what
+  prefills the form of a new entry (`null` when not given), `host` where the secret goes as the
+  daemon read `url`, `joined` the agents whose ask joined it. The
+  entry is set with `vault.set`, which answers the open requests for its name.
 - `vault.ask_dismiss {ask}` closes it, answers `{"dismissed": <request>}`, and hands each agent
-  `the user dismissed the request …`. The entry is not asked for again by this project until the
-  project's settings change (`project.changed`) or the entry is set (`vault.changed`).
+  `the user dismissed the request …`; `not-found` when no such request is open.
 
 ### The skill methods
 

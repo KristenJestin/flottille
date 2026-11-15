@@ -1223,7 +1223,8 @@ list of tables, `[[connections.server]]`, checked by it, written through the fra
 launched, gated, performed and described to the judge by the extension), and `needs_you` (its
 events the inbox lists, kind `connections`). The pin and the settings are in
 `ext_connections_connections`. A `help` action of a server's is not offered, as `help` is
-Flottille's. The server's environment is a run's (forge tokens emptied, no `XDG_RUNTIME_DIR`),
+Flottille's. The server's environment is a run's (forge tokens emptied, no `XDG_RUNTIME_DIR`, no session bus
+and no runtime folder: `docs/vault.md`, "The runtime folder"),
 its folder `$XDG_STATE_HOME/flottille/connections/<name>`. A URL is reached with no proxy,
 whatever the daemon's environment says. Accepting stops the server the review started, and no
 server of the connection starts until the pin is written: a change it announces before the accept
@@ -1412,6 +1413,9 @@ way in:
 - **`login {entry}`**, Flottille's own action: the agent names a vault entry **bound to this
   connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
   lists, never their values. An entry bound to another use, or to none, is refused, naming its use.
+  A name the vault does not hold is refused with the call that asks the user to add it, `vault
+  {action: "ask", name, why, url, username, for: "connection:<name>"}` (`vault.md`, "Asking the
+  user for an entry").
   **The login always opens the entry's own URL**, and takes no URL of the agent's: a page of its
   choosing, even on the entry's site, could redirect the fill elsewhere (`/go?to=…`). An entry
   without a URL, or whose URL is no web address (`http` or `https` with a host), is refused (said

@@ -759,6 +759,34 @@ pub fn rewrite(
     Ok(())
 }
 
+/// Whether `tool` is a connection's (`conn_<name>`) whose login takes a vault entry.
+pub fn logs_in(daemon: &Daemon, tool: &str) -> bool {
+    tool.strip_prefix(connections::PREFIX)
+        .is_some_and(|name| connections::logs_in(daemon, name))
+}
+
+/// Whether the feature of an extension a vault entry would be bound to (`bound`,
+/// `connection:<name>`) is declared: a connection by its name; why it cannot be told when its
+/// files cannot be read.
+pub fn bound_exists(daemon: &Daemon, bound: &str) -> Result<bool, String> {
+    match bound.split_once(':') {
+        Some(("connection", name)) => connections::exists(daemon, name),
+        _ => Ok(true),
+    }
+}
+
+/// The host a secret given for `url` goes to as a connection's login reads it (in ASCII, a
+/// backslash read as `/`), if it is a web address a secret may go to.
+pub fn site_of(url: &str) -> Option<String> {
+    connections::site(url)
+}
+
+/// The host of `url` when it is plain `http` to another machine, where a secret would travel in
+/// clear.
+pub fn in_clear(url: &str) -> Option<String> {
+    connections::in_clear(url)
+}
+
 /// The names of the tools the active extensions give an agent of the project: a root, another
 /// agent, or one an extension launched (`launched`, the extension's name and its agent's kind)
 /// (`agents::tools_of`).

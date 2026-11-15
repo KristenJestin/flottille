@@ -260,7 +260,7 @@ fn the_limit_is_8000_characters_until_the_user_chooses_another() {
 
     assert_eq!(
         user.call("tool_results.show", json!({})).unwrap(),
-        json!({"limit": 8000})
+        json!({"limit": 8000, "unchanged": false})
     );
     assert!(!user.path("config/flottille/tool-results.toml").exists());
 }
@@ -274,22 +274,25 @@ fn a_chosen_limit_is_kept_announced_and_read_back_after_a_restart() {
         .call("tool_results.set", json!({"limit": 16000}))
         .unwrap();
 
-    assert_eq!(shown, json!({"limit": 16000}));
+    assert_eq!(shown, json!({"limit": 16000, "unchanged": false}));
     let file = std::fs::read_to_string(user.path("config/flottille/tool-results.toml")).unwrap();
     assert!(file.contains("limit = 16000"), "{file}");
     let seen = watch.until(|e| e["name"] == "tool_results.changed");
-    assert_eq!(seen.last().unwrap()["data"], json!({"limit": 16000}));
+    assert_eq!(
+        seen.last().unwrap()["data"],
+        json!({"limit": 16000, "unchanged": false})
+    );
     assert!(user.run(&["daemon", "stop"]).status.success());
     assert_eq!(
         user.call("tool_results.show", json!({})).unwrap(),
-        json!({"limit": 16000})
+        json!({"limit": 16000, "unchanged": false})
     );
     limit(&user, json!("off"));
     let file = std::fs::read_to_string(user.path("config/flottille/tool-results.toml")).unwrap();
     assert!(file.contains("limit = \"off\""), "{file}");
     assert_eq!(
         user.call("tool_results.show", json!({})).unwrap(),
-        json!({"limit": "off"})
+        json!({"limit": "off", "unchanged": false})
     );
 }
 
@@ -370,6 +373,9 @@ fn a_page_of_fs_read_is_sized_so_that_its_result_is_not_cut() {
 fn a_page_of_fs_read_follows_the_limit_the_user_chose() {
     let user = User::with_fake_agent().with_cut_results();
     let (_, mcp, _) = session(&user);
+    // A page read again at another limit is a new page, not "unchanged".
+    user.call("tool_results.set", json!({"unchanged": false}))
+        .unwrap();
     let (_, at_default) = pages_of_big(&mcp);
     limit(&user, json!(4_000));
     let first = read(&mcp, "big.txt");

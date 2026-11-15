@@ -3,7 +3,8 @@
 //! its whole text, masked, is kept for the agent's session and read by ranges with `run_status`
 //! and the id of the cut. No model is involved. The limit is `tool-results.toml` of Flottille's
 //! configuration folder, read at every call so that a change applies at once
-//! (`docs/protocol.md`, "The tool results methods").
+//! (`docs/protocol.md`, "The tool results methods"). The same file says whether `fs_read` answers
+//! "unchanged" for a page the session already read (`unchanged`, off unless it says `true`).
 
 use std::path::PathBuf;
 
@@ -42,45 +43,65 @@ fn config(paths: &Paths) -> PathBuf {
     paths.config.join("tool-results.toml")
 }
 
-/// What `tool-results.toml` says: `Some(limit)`, `None` when results are returned whole. The
-/// default when there is no file.
-fn read(paths: &Paths) -> Result<Option<usize>, String> {
+/// What `tool-results.toml` says.
+struct Settings {
+    /// `Some(limit)`, `None` when results are returned whole.
+    limit: Option<usize>,
+    /// Whether `fs_read` says a page is unchanged instead of sending it again.
+    unchanged: bool,
+}
+
+/// What `tool-results.toml` says; the defaults when there is no file.
+fn read(paths: &Paths) -> Result<Settings, String> {
+    let mut settings = Settings {
+        limit: Some(DEFAULT_LIMIT),
+        unchanged: false,
+    };
     let text = match std::fs::read_to_string(config(paths)) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Some(DEFAULT_LIMIT));
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(settings),
         Err(error) => return Err(format!("tool-results.toml: {error}")),
     };
     let document: toml_edit::DocumentMut = text
         .parse()
         .map_err(|e: toml_edit::TomlError| format!("tool-results.toml: {}", e.message()))?;
     for (key, _) in document.iter() {
-        if key != "limit" {
+        if key != "limit" && key != "unchanged" {
             return Err(format!("tool-results.toml: unknown key `{key}`"));
         }
     }
-    let Some(item) = document.get("limit") else {
-        return Ok(Some(DEFAULT_LIMIT));
-    };
-    if item.as_str() == Some("off") {
-        return Ok(None);
+    if let Some(item) = document.get("limit") {
+        settings.limit = match item.as_integer() {
+            _ if item.as_str() == Some("off") => None,
+            Some(limit) if (MIN_LIMIT as i64..=MAX_LIMIT as i64).contains(&limit) => {
+                Some(limit as usize)
+            }
+            _ => {
+                return Err(format!(
+                    "tool-results.toml: limit is a number of characters from {MIN_LIMIT} to \
+                     {MAX_LIMIT}, or \"off\""
+                ));
+            }
+        };
     }
-    match item.as_integer() {
-        Some(limit) if (MIN_LIMIT as i64..=MAX_LIMIT as i64).contains(&limit) => {
-            Ok(Some(limit as usize))
-        }
-        _ => Err(format!(
-            "tool-results.toml: limit is a number of characters from {MIN_LIMIT} to {MAX_LIMIT}, \
-             or \"off\""
-        )),
+    if let Some(item) = document.get("unchanged") {
+        settings.unchanged = item
+            .as_bool()
+            .ok_or("tool-results.toml: unchanged is true or false")?;
     }
+    Ok(settings)
 }
 
 /// The limit a call is held to now. A file that cannot be read is the default's: a cut is the
 /// safe side.
 fn limit(paths: &Paths) -> Option<usize> {
-    read(paths).unwrap_or(Some(DEFAULT_LIMIT))
+    read(paths).map_or(Some(DEFAULT_LIMIT), |settings| settings.limit)
+}
+
+/// Whether `fs_read` says a page is unchanged now. Off by default until what it saves is measured
+/// (#547 records the cost of a turn): a file that cannot be read is the default's.
+pub fn says_unchanged(paths: &Paths) -> bool {
+    read(paths).is_ok_and(|settings| settings.unchanged)
 }
 
 /// How many bytes of text a result may hold now and still go to the agent whole: a tool that
@@ -94,18 +115,27 @@ pub fn page_room(paths: &Paths) -> usize {
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
     let paths = &daemon.paths;
     let answer = match method {
-        "tool_results.show" => {
-            let limit = read(paths).map_err(|e| Failure::new("invalid-config", e))?;
-            json!({"limit": said(limit)})
-        }
+        "tool_results.show" => said(&read(paths).map_err(|e| Failure::new("invalid-config", e))?),
         "tool_results.set" => {
-            let wanted = match params.get("limit") {
-                Some(Value::String(word)) if word == "off" => None,
+            let mut wanted = read(paths).unwrap_or(Settings {
+                limit: Some(DEFAULT_LIMIT),
+                unchanged: false,
+            });
+            let (limit, unchanged) = (params.get("limit"), params.get("unchanged"));
+            if limit.is_none() && unchanged.is_none() {
+                return Err(Failure::new(
+                    "invalid-params",
+                    "give a limit, unchanged, or both",
+                ));
+            }
+            match limit {
+                None => {}
+                Some(Value::String(word)) if word == "off" => wanted.limit = None,
                 Some(Value::Number(n))
                     if n.as_u64()
                         .is_some_and(|n| (MIN_LIMIT as u64..=MAX_LIMIT as u64).contains(&n)) =>
                 {
-                    n.as_u64().map(|n| n as usize)
+                    wanted.limit = n.as_u64().map(|n| n as usize)
                 }
                 _ => {
                     return Err(Failure::new(
@@ -116,17 +146,27 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                         ),
                     ));
                 }
-            };
+            }
+            match unchanged {
+                None => {}
+                Some(Value::Bool(on)) => wanted.unchanged = *on,
+                _ => {
+                    return Err(Failure::new("invalid-params", "unchanged is true or false"));
+                }
+            }
             std::fs::create_dir_all(&paths.config).map_err(|e| {
                 Failure::new("unavailable", format!("{}: {e}", paths.config.display()))
             })?;
-            let text = match wanted {
+            let mut text = match wanted.limit {
                 Some(limit) => format!("limit = {limit}\n"),
                 None => "limit = \"off\"\n".to_owned(),
             };
+            if wanted.unchanged {
+                text.push_str("unchanged = true\n");
+            }
             providers::write_in_place(&config(paths), &text)
                 .map_err(|e| Failure::new("unavailable", format!("tool-results.toml: {e}")))?;
-            let answer = json!({"limit": said(wanted)});
+            let answer = said(&wanted);
             daemon
                 .emit("tool_results.changed", answer.clone())
                 .map_err(|error| Failure::new("unavailable", error.to_string()))?;
@@ -142,13 +182,14 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
     Ok(answer)
 }
 
-/// The limit as the protocol says it: a number of characters, or `"off"`. Nothing is null: a
-/// client leaves null fields out of what it sends.
-fn said(limit: Option<usize>) -> Value {
-    match limit {
+/// The settings as the protocol says them: the limit is a number of characters, or `"off"`.
+/// Nothing is null: a client leaves null fields out of what it sends.
+fn said(settings: &Settings) -> Value {
+    let limit = match settings.limit {
         Some(limit) => json!(limit),
         None => json!("off"),
-    }
+    };
+    json!({"limit": limit, "unchanged": settings.unchanged})
 }
 
 /// A result that was cut: what its call is recorded with.

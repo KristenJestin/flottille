@@ -1454,7 +1454,7 @@ async fn prepare_steps(
             Ok(guarded) => (
                 guarded,
                 match services_of(daemon, &workspace, &step).await {
-                    Ok(()) => run_step(&workspace, &step, &live).await,
+                    Ok(()) => run_step(daemon, &workspace, &step, &live).await,
                     Err(why) => Err(StepFailure {
                         doing: step.doing(),
                         output: why,
@@ -1549,6 +1549,7 @@ async fn services_of(
 
 /// Does one step: done, skipped, or its failure.
 async fn run_step(
+    daemon: &Daemon,
     workspace: &Workspace,
     step: &Step,
     live: &StepLive,
@@ -1594,7 +1595,7 @@ async fn run_step(
         }
         Action::Run {
             line, time_limit, ..
-        } => run_line(workspace, &place, line, &target, *time_limit, live)
+        } => run_line(daemon, workspace, &place, line, &target, *time_limit, live)
             .await
             .map_err(fail)?,
     }
@@ -1870,9 +1871,11 @@ fn root_entries(folder: &Path, root: &Path, except: &[String]) -> Result<Vec<Str
     Ok(left)
 }
 
-/// Runs one line in `dir`, with the workspace's variables, for at most `time_limit` seconds. The
+/// Runs one line in `dir`, in the environment of a run in the workspace and kept from what a run
+/// is kept from (an agent may have written what it runs), for at most `time_limit` seconds. The
 /// error is the last lines of its output, masked.
 async fn run_line(
+    daemon: &Daemon,
     workspace: &Workspace,
     repository: &str,
     line: &str,
@@ -1891,11 +1894,8 @@ async fn run_line(
     for word in split_line(line)? {
         words.push(variables::fill(&word, &names)?);
     }
-    let mut filled = BTreeMap::new();
-    for (name, template) in &workspace.variables {
-        filled.insert(name.clone(), variables::fill(template, &names)?);
-    }
-    let env = variables::environment(std::env::vars_os(), &[&filled]);
+    let place = Place::of_workspace(workspace, workspace.folder.clone());
+    let env = crate::runs::environment(daemon, &place, repository, false)?;
     live.env.lock().unwrap().clone_from(&env);
 
     let (reader, writer) = std::io::pipe().map_err(|error| format!("cannot run it: {error}"))?;
@@ -1913,7 +1913,9 @@ async fn run_line(
         )
         .stderr(writer)
         .kill_on_drop(true);
-    let spawned = crate::children::spawn(crate::children::in_own_session(&mut command));
+    let spawned = crate::children::spawn(crate::landlock::confined(
+        crate::children::in_own_session(&mut command),
+    ));
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
     let mut child = spawned.map_err(|error| format!("cannot run {}: {error}", words[0]))?;

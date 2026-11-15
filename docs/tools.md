@@ -270,11 +270,43 @@ Paths are shown relative to the place's top.
 
 | Tool | Arguments | |
 |---|---|---|
-| `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). |
+| `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}`, `again?` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). A page the session already read, whose file has not changed since and with no compaction of the session since, is answered in one line (see "Unchanged files"). |
 | `fs_list` | `path`, `repository?`, `depth? 1..5` | The entries, sorted, a folder's after it: `path  file  size`, `path/  folder`, `path  link  -> target`. `.git` is left out. It stops at 1000 entries, or shorter to stay under the limit, and says so. |
 | `search` | `pattern`, `repository?`, `glob?`, `cursor?` | A case-insensitive substring, not a pattern. A sorted, depth-first walk that never enters `.git` or `node_modules` nor follows a link; the top `.gitignore` applies (simple patterns: no `!`, a pattern with a `/` is anchored, a trailing `/` is a folder). A file `fs_read` refuses, a login's place (The gate, 1), is never searched. `glob` keeps to the files it matches (on the name alone without a `/`; `**` for any folders). A file with a NUL byte in its first 64 KiB is skipped and named (20 at most). Hits are `path:line: text`, trimmed and cut at 200 characters. It stops at 100 matches, 1 MiB read or the size limit, with a cursor `path:line` that resumes it. The head says the count, the stop and its cursor, the limits, the skipped files. |
 | `fs_write` | `path`, `content`, `repository?`, `why?` | The whole file, made with its folders when new. |
 | `fs_edit` | `path`, `edits [1..50] {old, new}`, `repository?`, `why?` | Each `old` must appear exactly once (overlapping occurrences count) when its turn comes, else `refused: the anchor of edit N appears K time(s) in X; it must appear exactly once. Nothing was changed`. Edits apply in order, spliced (never as a pattern: `$&` is text), all or none. |
+
+**Unchanged files.** `fs_read` of the same range of a file (the same `range.offset` and
+`range.length`), by the same session, whose fingerprint (its SHA-256) is the one of that read, and
+with no compaction of the session since, answers one line instead of the page: `unchanged since
+you read it (bytes a-b of N, at HH:MM); give "again": true to read it whole`. `again: true` reads
+the page whole. The answer counts as a read for `fs_write` and `fs_edit`: the fingerprint is the
+same. A read of another range, or of a changed file, is a normal read, and so is a read of a file
+the session itself wrote or edited since (a file changed and changed back is not the page it was
+shown).
+
+- **Only Claude** is answered "unchanged". The compaction is known where the agent says it: the
+  completed `tool_call` with `_meta.contextCompaction` that the Claude bridge sends
+  (`docs/agents.md`), and the compaction Flottille itself makes (`docs/agents.md`, "Compaction").
+  It forgets every page the session was shown, as does a new session replacing the agent's (a
+  replacement, a fresh start, a session that could not be loaded): a read of the old session that
+  ends after the replacement is not kept for the new one. The compaction and the call do not
+  travel together (the first on the agent's pipe, the second over HTTP): "unchanged" is answered
+  only once the daemon has recorded the `tool_call` this call is (its id,
+  `claudecode/toolUseId`), which comes on the same pipe after any compaction; a call whose
+  `tool_call` is not recorded yet, or that carries no id, is read whole. Codex's bridge says its
+  compactions but its calls carry no id, and OpenCode or any plain ACP agent say neither: for them
+  nothing is ever answered "unchanged", and nothing is kept: the file is read as always.
+- What was shown is kept in the daemon's memory (the last 64 pages of each agent, and the ids of
+  the last 256 calls it saw, the latter only while the switch is on), until the agent ends: a
+  daemon that restarts reads whole once.
+- **The switch** is `unchanged` in `tool-results.toml` (`docs/protocol.md`, "The tool results
+  methods"), **off unless it says `true`**: it saves the tokens of a repeated page, but whether it
+  lowers the cost of a turn is not measured yet (the turn's cost, #547, is not recorded), and a
+  page Claude Code drops from its context without a compaction (clearing old tool
+  results, trimming the history) is not seen, so the one line could then answer a page the model no
+  longer has. Settings → Agents → Long tool results has it as "Say when a
+  file is unchanged".
 
 **Only regular files are read.** `fs_read` and `fs_edit` refuse a pipe, a socket or a device
 (`refused: X is not a regular file …`), which would hold the call forever; `search` skips them.
@@ -470,6 +502,8 @@ pending requests.
     run outside the gate's sight;
   - no `XDG_RUNTIME_DIR`, which says where the daemon's socket is (a client a run starts is
     refused anyway);
+  - no `DBUS_SESSION_BUS_ADDRESS`: the session bus leads to the keyring (`docs/vault.md`, "The
+    runtime folder", which also says how the runtime folder itself is denied);
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
     rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
     (its own line, no wrapper) the user or the judge let through.
@@ -851,22 +885,29 @@ run follows its run and forge subscribe a pull request's checks.`
 **`vault {action: "list"}`** lists the entries of the user's vault the agent's project sees
 (`docs/vault.md`): each name with what it is for, its URL and its username, one field a line (the
 use an entry is bound to is not told: it could name another project). It is
-listed to an agent whose project sees at least one entry (a tool that could only say the vault is
-empty is not listed), and the agents of every project get or lose it when an entry is set or
+listed to an agent whose project sees at least one entry, misses one a feature names, or has a
+connection whose `login` takes one (a tool that could
+only say the vault is empty and offer nothing to ask is not listed), and the agents of every project get or lose it when an entry is set or
 removed. No action returns a secret: any other action is refused, saying that a secret is never
 shown and that its name is given to the tool that needs it, which puts the secret where it goes
 itself. A read: the gate allows it in every mode.
 
-**`vault {action: "ask", name, why}`** asks the user for an entry a feature of Flottille names and
-that the project does not see (`docs/vault.md`, "Asking the user for an entry"): the refusal that
-met the missing entry offers it (`tickets log_time`: `… or ask the user for it, who types only the
-secret: vault {action: "ask", name: "jira-time", why: "<what you need it for>"} …`). It answers at
-once; the user's Set or Dismiss comes later as a `vault` delivery that never holds the secret. Any
-other name is refused (`refused: nothing of Flottille's needs a vault entry <name> for this
-project …`), as is an entry the user dismissed until its setting changes; a second ask while one
-is open joins it. The schema has no field for a secret, and an argument it does not know is
-refused. The tool is listed to an agent whose project sees an entry or misses one a feature
-names.
+**`vault {action: "ask", name, why, url?, username?, for?, project?}`** asks the user to add a new
+entry (`docs/vault.md`, "Asking the user for an entry"): `url` where the secret goes, `username` the
+account, `for` its one use (`worklog`, or `connection:<name>` for a connection the user declared),
+`project` `this` or `every` (a connection's entry is every project's). The daemon reads `url` as a
+connection's `login` does and refuses one that is no `https` address (or `http` on this machine),
+plain `http` to another machine included. The user sees a card that opens Settings, Vault's form
+of a new entry prefilled with it, the host the daemon read (in ASCII) on a line of its own; an
+entry a feature names (`worklog_token`) is prefilled by the feature. A refusal that met a
+missing entry offers it (`tickets log_time`: `… or ask the user for it, who types only the
+secret: vault {action: "ask", name: "jira-time", why: "<what you need it for>"} …`; a browser
+connection's `login`, with its `url` and `for: "connection:<name>"`). It answers at once; the
+user's save or dismissal comes later as a `vault` delivery that never holds the secret. A name
+the vault already holds is refused, naming it (`use it`, or `ask under another name` when the
+project does not see it); a second ask for a name while one is open joins it when it is of the
+same project or every project's, and is refused otherwise (`ask under another name`). The schema
+has no field for a secret, and an argument it does not know is refused.
 
 ## Connections
 

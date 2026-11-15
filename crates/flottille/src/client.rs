@@ -207,6 +207,10 @@ pub enum Stopped {
 /// leaves unable to end on their own.
 pub fn stop(paths: &Paths, mut client: Client) -> Result<Stopped> {
     let pid = locked_by(paths);
+    // The daemon keeps its runtime folder from what it runs (`docs/vault.md`): a client that may
+    // not read the lock was started for an agent.
+    let kept_out = std::fs::File::open(paths.lock())
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied);
     // Opened before it is asked: the pid it held may be taken by another process once it ends.
     let daemon = pid
         .parse()
@@ -227,11 +231,14 @@ pub fn stop(paths: &Paths, mut client: Client) -> Result<Stopped> {
         // It answered and refused (a client an agent started): it runs, and is not to be ended.
         Err(error) if error.is::<DaemonError>() => return Err(error),
         // A stuck daemon cannot refuse a client an agent started: the client refuses itself. One
-        // whose ancestry cannot be read counts as one (`descends_from`).
+        // whose ancestry cannot be read counts as one (`descends_from`), and so does one kept out
+        // of the lock.
         Err(error) if is_timeout(error.as_ref()) => {
-            if daemon.as_ref().is_some_and(|daemon| {
-                crate::children::descends_from(std::process::id(), daemon.0.pid)
-            }) {
+            if kept_out
+                || daemon.as_ref().is_some_and(|daemon| {
+                    crate::children::descends_from(std::process::id(), daemon.0.pid)
+                })
+            {
                 return Err(STARTED_BY_AN_AGENT.into());
             }
             (
