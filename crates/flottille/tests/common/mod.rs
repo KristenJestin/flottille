@@ -114,10 +114,15 @@ pub struct Spawned(Child);
 impl Spawned {
     pub fn new(mut command: Command) -> Spawned {
         let parent = std::process::id();
-        // SAFETY: the closure runs in the forked child before `exec` and calls only `prctl` and
-        // `getppid`, which are system calls and async-signal-safe; it allocates nothing and takes
-        // no lock. `getppid` catches a parent that died between the fork and the `prctl`, whose
-        // death signal would never come.
+        // SAFETY: the closure runs in the forked child before `exec`. Its success path calls only
+        // `prctl` and `getppid`, which are async-signal-safe: it allocates nothing and takes no
+        // lock. `getppid` catches a parent that died between the fork and the `prctl`, whose
+        // death signal would never come. Its second error path does allocate, though:
+        // `io::Error::other` boxes the message, which is not async-signal-safe. That path runs
+        // only when the test binary died in that same window, and then the child stops before
+        // `exec`; glibc's malloc is usable in a forked child (it takes its locks around the
+        // fork), so the allocation does not hang there. `io::Error::from_raw_os_error` would not
+        // allocate, but it would lose the message that says why the spawn failed.
         unsafe {
             command.pre_exec(move || {
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
