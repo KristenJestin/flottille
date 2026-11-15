@@ -167,6 +167,10 @@ pub enum Command {
     ToolResultsSet {
         limit: Option<usize>,
     },
+    /// Chooses whether `fs_read` says a file is unchanged (`tool_results.set`).
+    UnchangedSet {
+        unchanged: bool,
+    },
     /// After how many days an inactive session is ended (`sessions.show`).
     SessionsRead,
     /// Chooses it (`sessions.set`): `None` is off.
@@ -634,10 +638,10 @@ pub enum SkillWrite {
 /// A change to the vault, as the daemon takes it.
 #[derive(Clone, PartialEq)]
 pub enum VaultWrite {
-    /// A new entry, or one replaced whole.
+    /// A new entry, or one edited: without a secret, the one the keyring holds is kept.
     Set {
         name: String,
-        secret: String,
+        secret: Option<String>,
         description: String,
         url: String,
         username: String,
@@ -962,11 +966,11 @@ pub enum Outcome {
         then: crate::extensions::Then,
         answer: Result<Value, String>,
     },
-    /// The limit of tool results as the daemon says it (`None` is Off), after a read (`written`
-    /// false) or a choice.
+    /// The limit of tool results as the daemon says it (`None` is Off) and whether a file is said
+    /// unchanged, after a read (`written` false) or a choice.
     ToolResults {
         written: bool,
-        shown: Result<Option<usize>, String>,
+        shown: Result<(Option<usize>, bool), String>,
     },
     /// After how many days an inactive session is ended as the daemon says it (`None` is off),
     /// and whether a session is resumed at its quota's reset, after a read (`written` none) or a
@@ -1623,17 +1627,26 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let answer = answer(ask_alone(connect, &method, params, bounds.quick));
             Outcome::Asked { then, answer }
         }
-        Command::ToolResultsRead | Command::ToolResultsSet { .. } => {
+        Command::ToolResultsRead
+        | Command::ToolResultsSet { .. }
+        | Command::UnchangedSet { .. } => {
             let (method, params, written) = match command {
                 Command::ToolResultsSet { limit } => (
                     "tool_results.set",
                     json!({"limit": limit.map_or(json!("off"), |l| json!(l))}),
                     true,
                 ),
+                Command::UnchangedSet { unchanged } => {
+                    ("tool_results.set", json!({"unchanged": unchanged}), true)
+                }
                 _ => ("tool_results.show", json!({}), false),
             };
-            let shown = answer(ask_alone(connect, method, params, bounds.quick))
-                .map(|shown| shown["limit"].as_u64().map(|limit| limit as usize));
+            let shown = answer(ask_alone(connect, method, params, bounds.quick)).map(|shown| {
+                (
+                    shown["limit"].as_u64().map(|limit| limit as usize),
+                    shown["unchanged"] == true,
+                )
+            });
             Outcome::ToolResults { written, shown }
         }
         Command::SessionsRead | Command::SessionsSet { .. } | Command::ResumeSet { .. } => {

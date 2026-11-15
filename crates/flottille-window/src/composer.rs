@@ -6,8 +6,8 @@ use std::sync::Arc;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{HOVER, PANEL};
 use gpui_design_system::{
-    Align, Button, Dropdown, Icon, MenuItem, Skeleton, Toast, Type, enter, fade, follow_theme,
-    hoverable, palette, presence_of, space, toast,
+    Align, Button, Dropdown, Icon, MenuItem, Skeleton, Toast, TokenEvent, TokenField, Type, enter,
+    fade, hoverable, palette, presence_of, space, toast,
 };
 use gpui_kit::base::input::{InputEvent, RopeExt as _, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -204,6 +204,9 @@ pub enum Choice {
 pub struct Composer {
     shell: WeakEntity<Shell>,
     project: String,
+    /// The field: its text and the chips of its pictures.
+    tokens: Entity<TokenField>,
+    /// Its text, as `tokens` edits it.
     field: Entity<TextareaState>,
     has_text: bool,
     focused: bool,
@@ -253,36 +256,43 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let field = cx.new(|cx| {
-            let mut field = TextareaState::new(window, cx)
-                .auto_grow(MIN_ROWS, MAX_ROWS)
-                .submit_on_enter(true)
-                .placeholder("Describe a task, a bug to fix, an idea to try…");
-            follow_theme(&mut field, cx);
-            field
+        // The text holds the pictures' chips where they were put (#773).
+        let tokens = cx.new(|cx| TokenField::new("composer-text", window, cx));
+        let field = tokens.read(cx).input().clone();
+        field.update(cx, |field, cx| {
+            field.set_auto_grow(MIN_ROWS, MAX_ROWS, cx);
+            field.set_submit_on_enter(true, cx);
+            field.set_placeholder("Describe a task, a bug to fix, an idea to try…", window, cx);
         });
         let mode = cx.new(|_| ModeSwitch::local(shell.clone()));
-        let subscriptions = vec![cx.subscribe_in(
-            &field,
-            window,
-            |this, field, event, window, cx| match event {
-                InputEvent::Change => {
-                    let has_text = !field.read(cx).value().trim().is_empty();
-                    this.set_flag(|this| &mut this.has_text, has_text, cx);
-                }
-                InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
-                InputEvent::Focus => this.set_flag(|this| &mut this.focused, true, cx),
-                InputEvent::Blur => this.set_flag(|this| &mut this.focused, false, cx),
-                _ => {}
-            },
-        )];
+        let subscriptions = vec![
+            cx.subscribe(&tokens, |this: &mut Self, _, event: &TokenEvent, cx| {
+                this.attached.chip_changed(event, cx)
+            }),
+            cx.subscribe_in(
+                &field,
+                window,
+                |this, field, event, window, cx| match event {
+                    InputEvent::Change => {
+                        let has_text = !field.read(cx).value().trim().is_empty();
+                        this.set_flag(|this| &mut this.has_text, has_text, cx);
+                        this.attached.follow(window, cx);
+                    }
+                    InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
+                    InputEvent::Focus => this.set_flag(|this| &mut this.focused, true, cx),
+                    InputEvent::Blur => this.set_flag(|this| &mut this.focused, false, cx),
+                    _ => {}
+                },
+            ),
+        ];
         Self {
             shell,
             project,
+            attached: Attachments::new(tokens.clone()),
+            tokens,
             field,
             has_text: false,
             focused: false,
-            attached: Attachments::default(),
             places: Vec::new(),
             choice: Choice::Main,
             wanted: None,
@@ -481,14 +491,24 @@ impl Composer {
         &self.field
     }
 
+    /// The field with its chips.
+    pub fn tokens(&self) -> &Entity<TokenField> {
+        &self.tokens
+    }
+
     /// Whether the chosen provider's agents take images; `None` until one started.
     pub fn takes_images(&self) -> Option<bool> {
         self.provider().and_then(|provider| provider.images)
     }
 
     /// The pictures that go with the first message.
-    pub fn attachments(&self) -> &[Arc<gpui_kit::Image>] {
+    pub fn attachments(&self) -> Vec<Arc<gpui_kit::Image>> {
         self.attached.pictures()
+    }
+
+    /// The chip of the picture `at` is in the text.
+    pub fn has_chip(&self, at: usize, cx: &App) -> bool {
+        self.attached.has_chip(at, cx)
     }
 
     /// The pictures, told first whether the chosen provider's agents take any, so that one that
@@ -508,8 +528,8 @@ impl Composer {
         self.attached_of().attach_file(path, cx, Self::attached_of);
     }
 
-    pub fn detach(&mut self, at: usize, cx: &mut Context<Self>) {
-        self.attached.detach(at, cx);
+    pub fn detach(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.attached.detach(at, window, cx);
     }
 
     pub fn set_places(&mut self, places: Vec<PlaceChoice>, cx: &mut Context<Self>) {
@@ -629,7 +649,7 @@ impl Composer {
         if !self.can_send() {
             return;
         }
-        let message = self.field.read(cx).value().trim().to_owned();
+        let message = self.attached.message(cx).trim().to_owned();
         let target = match &self.choice {
             Choice::Main => Target::Main,
             Choice::Workspace(name) => Target::Workspace(name.clone()),
@@ -678,8 +698,8 @@ impl Composer {
         let used = self.sent.take();
         self.sending = None;
         self.error = None;
-        self.field
-            .update(cx, |field, cx| field.set_value("", window, cx));
+        self.tokens
+            .update(cx, |field, cx| field.set_value(Vec::new(), window, cx).ok());
         self.has_text = false;
         self.attached.clear();
         self.reset_mode(cx);
@@ -1226,9 +1246,10 @@ impl Render for Composer {
         }
         let p = palette(cx);
         let focus = fade("composer-focus", self.focused, HOVER, window, cx);
-        let strip = self
-            .attached
-            .strip(window, cx, |this, at, cx| this.detach(at, cx));
+        self.attached.place(window, cx);
+        let strip = self.attached.strip(window, cx, |this, at, window, cx| {
+            this.detach(at, window, cx)
+        });
         let body = div()
             .id("composer-field")
             .px(space::LG)
@@ -1236,7 +1257,7 @@ impl Render for Composer {
             .text_size(px(14.))
             .line_height(px(21.))
             .cursor_text()
-            .child(self.field.clone())
+            .child(self.tokens.clone())
             .on_click(cx.listener(|this, _, window, cx| {
                 let focus = this.field.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);

@@ -1223,7 +1223,8 @@ list of tables, `[[connections.server]]`, checked by it, written through the fra
 launched, gated, performed and described to the judge by the extension), and `needs_you` (its
 events the inbox lists, kind `connections`). The pin and the settings are in
 `ext_connections_connections`. A `help` action of a server's is not offered, as `help` is
-Flottille's. The server's environment is a run's (forge tokens emptied, no `XDG_RUNTIME_DIR`),
+Flottille's. The server's environment is a run's (forge tokens emptied, no `XDG_RUNTIME_DIR`, no session bus
+and no runtime folder: `docs/vault.md`, "The runtime folder"),
 its folder `$XDG_STATE_HOME/flottille/connections/<name>`. A URL is reached with no proxy,
 whatever the daemon's environment says. Accepting stops the server the review started, and no
 server of the connection starts until the pin is written: a change it announces before the accept

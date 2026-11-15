@@ -1793,6 +1793,35 @@ fn a_vault_secret_reaches_the_server_environment_and_never_the_agent_or_an_event
 }
 
 #[test]
+fn a_connection_server_gets_no_session_bus_address() {
+    let user = user();
+    project(&user, "app");
+    let mut script = almanac();
+    script["answers"]["search"] = json!({"env": "DBUS_SESSION_BUS_ADDRESS"});
+    turn_on(&user);
+    declare(&user, "almanac", &script, json!({}));
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes"}}),
+    )
+    .unwrap();
+    let (_, mcp) = session(&user, "app");
+
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+
+    let calls = logged(&user, "almanac", "call");
+    assert_eq!(
+        calls[0]["answered"], "DBUS_SESSION_BUS_ADDRESS is not set",
+        "{calls:?}"
+    );
+}
+
+#[test]
 fn a_vault_entry_tied_to_one_project_is_refused_for_a_connection() {
     let user = user();
     project(&user, "app");

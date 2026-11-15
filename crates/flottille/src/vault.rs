@@ -226,7 +226,9 @@ struct List {
 #[serde(deny_unknown_fields)]
 struct Set {
     name: String,
-    secret: String,
+    /// Left out, an entry that exists keeps the secret the keyring holds: it is never read to do
+    /// so, only the metadata is rewritten.
+    secret: Option<String>,
     description: Option<String>,
     url: Option<String>,
     username: Option<String>,
@@ -339,7 +341,7 @@ pub async fn call(
 }
 
 async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Failure> {
-    if !params["secret"].is_string() {
+    if !params["secret"].is_string() && !params["secret"].is_null() {
         return Err(Failure::new("invalid-params", "the secret is a text"));
     }
     let asked: Set = serde_json::from_value(params)?;
@@ -350,25 +352,37 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
             asked.name
         )));
     }
-    if asked.secret.chars().count() < VAULT_SHORTEST {
+    if let Some(secret) = &asked.secret
+        && secret.chars().count() < VAULT_SHORTEST
+    {
         return Err(Failure::refused(format!(
             "a secret is {VAULT_SHORTEST} characters at least: a shorter one could not be masked \
              without masking ordinary words"
         )));
     }
-    if let Some(project) = &asked.project {
-        crate::projects::load_project(daemon, project)?;
-    }
     let given = |text: Option<String>| {
         text.map(|text| text.trim().to_owned())
             .filter(|t| !t.is_empty())
     };
+    // Trimmed first: an empty project is every project's, which no project has to load.
     let project = given(asked.project);
-    let had = daemon
+    if let Some(project) = &project {
+        crate::projects::load_project(daemon, project)?;
+    }
+    let existing = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
-        .find(|entry| entry.name == asked.name)
-        .and_then(|entry| entry.bound);
+        .find(|entry| entry.name == asked.name);
+    if asked.secret.is_none() && existing.is_none() {
+        return Err(Failure::refused(format!(
+            "a new entry needs its secret: the vault has no entry {}",
+            asked.name
+        )));
+    }
+    // Which username was masked with the secret: an edit without a secret that changes it must
+    // mask the new Basic form too.
+    let username_was = existing.as_ref().and_then(|entry| entry.username.clone());
+    let had = existing.and_then(|entry| entry.bound);
     let bound = match (given(asked.bound), had) {
         (Some(new), Some(own)) if new != own => {
             return Err(Failure::refused(format!(
@@ -412,13 +426,24 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         updated_at: now_ms(),
         bound,
     };
-    // Masked before it is kept anywhere, so that nothing written after can hold it.
-    secrets::add_vault_login(entry.username.as_deref(), &asked.secret);
-    daemon
-        .vault
-        .store(&entry.name, &asked.secret)
-        .await
-        .map_err(unavailable)?;
+    if let Some(secret) = &asked.secret {
+        // Masked before it is kept anywhere, so that nothing written after can hold it.
+        secrets::add_vault_login(entry.username.as_deref(), secret);
+        daemon
+            .vault
+            .store(&entry.name, secret)
+            .await
+            .map_err(unavailable)?;
+    } else if entry.username != username_was {
+        // The daemon reads the secret itself, to mask the new login: it goes nowhere else, and a
+        // keyring that cannot be read (locked) leaves the edit as it is, as the masks of the
+        // other entries do at the start.
+        match daemon.vault.read(&entry.name).await {
+            Ok(Some(secret)) => secrets::add_vault_login(entry.username.as_deref(), &secret),
+            Ok(None) => {}
+            Err(why) => eprintln!("flottille daemon: vault entry {}: {why}", entry.name),
+        }
+    }
     daemon.write(|store| store.put_vault_entry(&entry))?;
     retool(daemon);
     // However it was set, from the form its request opened or another way, what asked is told:
@@ -1135,5 +1160,152 @@ mod tests {
             .unwrap_err();
         assert!(asked.elapsed() < SECRET_WAIT, "answered at once");
         assert_eq!(refused, LOCKED);
+    }
+
+    /// A daemon on temporary folders whose keyring is its memory.
+    fn a_daemon(dir: &Path) -> std::sync::Arc<Daemon> {
+        let paths = Paths {
+            runtime: dir.join("runtime"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        };
+        std::fs::create_dir_all(&paths.config).unwrap();
+        std::fs::write(paths.config.join(CHOICE), "backend = \"memory\"\n").unwrap();
+        let store = flottille_core::store::Store::open_in_memory().unwrap();
+        let projects = crate::projects::Projects::open(&paths).unwrap();
+        std::sync::Arc::new(Daemon::new(&paths, store, projects, 0, None))
+    }
+
+    /// The value of a call that succeeded; a failure says its message.
+    fn ok<T>(result: Result<T, Failure>) -> T {
+        result.unwrap_or_else(|failure| panic!("{}", failure.message))
+    }
+
+    async fn listed(daemon: &std::sync::Arc<Daemon>) -> Vec<Entry> {
+        daemon.read(|store| store.vault_entries()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn editing_an_entry_without_a_secret_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "jira", "secret": "k3pt-s3cret-value", "description": "Logs time",
+                "url": "https://tracker.example.com"}),
+        )
+        .await);
+
+        // The keyring refuses every store from here on: an edit that stored the secret again
+        // would fail, so the edits below prove that nothing is stored.
+        std::fs::write(
+            dir.path().join("config/keyring.toml"),
+            "backend = \"memory\"\nfail_stores = 1000\n",
+        )
+        .unwrap();
+        // The secret is absent, or null: the metadata is rewritten, the keyring item stays.
+        for absent in [json!({}), json!({"secret": null})] {
+            let mut params = json!({"name": "jira", "description": "Logs time on Jira",
+                "url": "https://tracker.example.org"});
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(absent.as_object().unwrap().clone());
+            ok(call(daemon.clone(), "vault.set", params).await);
+            let entries = listed(&daemon).await;
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].description.as_deref(), Some("Logs time on Jira"));
+            assert_eq!(
+                entries[0].url.as_deref(),
+                Some("https://tracker.example.org")
+            );
+            assert_eq!(
+                secret(&daemon, "any", "worklog:any", "jira").await.unwrap(),
+                "k3pt-s3cret-value"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn editing_an_entry_with_a_secret_replaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        for (secret_of, url) in [
+            ("f1rst-s3cret-value", "https://a.example.com"),
+            ("n3xt-s3cret-value", "https://b.example.com"),
+        ] {
+            call(
+                daemon.clone(),
+                "vault.set",
+                json!({"name": "jira", "secret": secret_of, "url": url}),
+            )
+            .await
+            .map_err(|failure| failure.message)
+            .unwrap();
+        }
+        assert_eq!(
+            listed(&daemon).await[0].url.as_deref(),
+            Some("https://b.example.com")
+        );
+        assert_eq!(
+            secret(&daemon, "any", "worklog:any", "jira").await.unwrap(),
+            "n3xt-s3cret-value"
+        );
+    }
+
+    #[tokio::test]
+    async fn editing_only_the_username_masks_the_new_basic_form() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let secret_of = "gr4ce-only-s3cret-value";
+        let form_of = |user: &str| {
+            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{secret_of}"))
+        };
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "jira", "secret": secret_of, "username": "ada"}),
+        )
+        .await);
+        let written = |form: &str| {
+            flottille_core::secrets::mask(
+                // Not in an `Authorization` header, which is masked whatever it holds: the
+                // form alone is what the vault's own masks have to catch.
+                &format!("the tool sent {form} and went on"),
+                &Default::default(),
+            )
+        };
+        assert!(!written(&form_of("ada")).contains(&form_of("ada")));
+        assert!(
+            written(&form_of("grace")).contains(&form_of("grace")),
+            "the form of a username nobody set yet is not masked"
+        );
+
+        // No secret is typed: the daemon reads the one it keeps, to mask the new login.
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "jira", "username": "grace"}),
+        )
+        .await);
+        assert!(!written(&form_of("grace")).contains(&form_of("grace")));
+    }
+
+    #[tokio::test]
+    async fn a_new_entry_still_needs_its_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let refused = call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "jira", "url": "https://a.example.com"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.message.contains("secret"), "{}", refused.message);
+        assert!(listed(&daemon).await.is_empty(), "nothing was kept");
     }
 }

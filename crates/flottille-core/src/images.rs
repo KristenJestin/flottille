@@ -215,9 +215,74 @@ fn encode(picture: &DynamicImage, format: ImageFormat) -> Option<Vec<u8>> {
     Some(out.into_inner())
 }
 
+/// The text that stands for a picture where it was put in a message, and where the agent finds
+/// it: `[Image 1: photo.png]`, numbered from 1 in the message's order. Its name never holds a
+/// `]` nor a line break, so that the marker reads back whole.
+pub fn marker(number: usize, name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|c| if c == ']' || c.is_control() { ' ' } else { c })
+        .collect();
+    format!("[Image {number}: {}]", name.trim())
+}
+
+/// A marker found in a text by [`markers`]: where it is, its number and its picture's name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Marker {
+    pub range: std::ops::Range<usize>,
+    pub number: usize,
+    pub name: String,
+}
+
+/// The markers of `text` ([`marker`]), in their order.
+pub fn markers(text: &str) -> Vec<Marker> {
+    const OPEN: &str = "[Image ";
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find(OPEN).map(|at| from + at) {
+        from = at + OPEN.len();
+        let rest = &text[from..];
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let Some(after) = rest[digits..].strip_prefix(": ") else {
+            continue;
+        };
+        let Some(close) = after
+            .find([']', '\n'])
+            .filter(|&close| after[close..].starts_with(']'))
+        else {
+            continue;
+        };
+        let Ok(number) = rest[..digits].parse() else {
+            continue;
+        };
+        let end = from + digits + 2 + close + 1;
+        found.push(Marker {
+            range: at..end,
+            number,
+            name: after[..close].to_owned(),
+        });
+        from = end;
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_marker_reads_back_where_it_was_put() {
+        let text = format!(
+            "see {} and {}, [Image x: no]",
+            marker(1, "a.png"),
+            marker(2, "b]c\nd.png")
+        );
+        let found = markers(&text);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!((found[0].number, found[0].name.as_str()), (1, "a.png"));
+        assert_eq!(&text[found[0].range.clone()], "[Image 1: a.png]");
+        assert_eq!((found[1].number, found[1].name.as_str()), (2, "b c d.png"));
+    }
 
     fn picture(width: u32, height: u32, format: ImageFormat) -> Vec<u8> {
         let mut out = Cursor::new(Vec::new());

@@ -270,11 +270,43 @@ Paths are shown relative to the place's top.
 
 | Tool | Arguments | |
 |---|---|---|
-| `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). |
+| `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}`, `again?` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). A page the session already read, whose file has not changed since and with no compaction of the session since, is answered in one line (see "Unchanged files"). |
 | `fs_list` | `path`, `repository?`, `depth? 1..5` | The entries, sorted, a folder's after it: `path  file  size`, `path/  folder`, `path  link  -> target`. `.git` is left out. It stops at 1000 entries, or shorter to stay under the limit, and says so. |
 | `search` | `pattern`, `repository?`, `glob?`, `cursor?` | A case-insensitive substring, not a pattern. A sorted, depth-first walk that never enters `.git` or `node_modules` nor follows a link; the top `.gitignore` applies (simple patterns: no `!`, a pattern with a `/` is anchored, a trailing `/` is a folder). A file `fs_read` refuses, a login's place (The gate, 1), is never searched. `glob` keeps to the files it matches (on the name alone without a `/`; `**` for any folders). A file with a NUL byte in its first 64 KiB is skipped and named (20 at most). Hits are `path:line: text`, trimmed and cut at 200 characters. It stops at 100 matches, 1 MiB read or the size limit, with a cursor `path:line` that resumes it. The head says the count, the stop and its cursor, the limits, the skipped files. |
 | `fs_write` | `path`, `content`, `repository?`, `why?` | The whole file, made with its folders when new. |
 | `fs_edit` | `path`, `edits [1..50] {old, new}`, `repository?`, `why?` | Each `old` must appear exactly once (overlapping occurrences count) when its turn comes, else `refused: the anchor of edit N appears K time(s) in X; it must appear exactly once. Nothing was changed`. Edits apply in order, spliced (never as a pattern: `$&` is text), all or none. |
+
+**Unchanged files.** `fs_read` of the same range of a file (the same `range.offset` and
+`range.length`), by the same session, whose fingerprint (its SHA-256) is the one of that read, and
+with no compaction of the session since, answers one line instead of the page: `unchanged since
+you read it (bytes a-b of N, at HH:MM); give "again": true to read it whole`. `again: true` reads
+the page whole. The answer counts as a read for `fs_write` and `fs_edit`: the fingerprint is the
+same. A read of another range, or of a changed file, is a normal read, and so is a read of a file
+the session itself wrote or edited since (a file changed and changed back is not the page it was
+shown).
+
+- **Only Claude** is answered "unchanged". The compaction is known where the agent says it: the
+  completed `tool_call` with `_meta.contextCompaction` that the Claude bridge sends
+  (`docs/agents.md`), and the compaction Flottille itself makes (`docs/agents.md`, "Compaction").
+  It forgets every page the session was shown, as does a new session replacing the agent's (a
+  replacement, a fresh start, a session that could not be loaded): a read of the old session that
+  ends after the replacement is not kept for the new one. The compaction and the call do not
+  travel together (the first on the agent's pipe, the second over HTTP): "unchanged" is answered
+  only once the daemon has recorded the `tool_call` this call is (its id,
+  `claudecode/toolUseId`), which comes on the same pipe after any compaction; a call whose
+  `tool_call` is not recorded yet, or that carries no id, is read whole. Codex's bridge says its
+  compactions but its calls carry no id, and OpenCode or any plain ACP agent say neither: for them
+  nothing is ever answered "unchanged", and nothing is kept: the file is read as always.
+- What was shown is kept in the daemon's memory (the last 64 pages of each agent, and the ids of
+  the last 256 calls it saw, the latter only while the switch is on), until the agent ends: a
+  daemon that restarts reads whole once.
+- **The switch** is `unchanged` in `tool-results.toml` (`docs/protocol.md`, "The tool results
+  methods"), **off unless it says `true`**: it saves the tokens of a repeated page, but whether it
+  lowers the cost of a turn is not measured yet (the turn's cost, #547, is not recorded), and a
+  page Claude Code drops from its context without a compaction (clearing old tool
+  results, trimming the history) is not seen, so the one line could then answer a page the model no
+  longer has. Settings → Agents → Long tool results has it as "Say when a
+  file is unchanged".
 
 **Only regular files are read.** `fs_read` and `fs_edit` refuse a pipe, a socket or a device
 (`refused: X is not a regular file …`), which would hold the call forever; `search` skips them.
@@ -470,6 +502,8 @@ pending requests.
     run outside the gate's sight;
   - no `XDG_RUNTIME_DIR`, which says where the daemon's socket is (a client a run starts is
     refused anyway);
+  - no `DBUS_SESSION_BUS_ADDRESS`: the session bus leads to the keyring (`docs/vault.md`, "The
+    runtime folder", which also says how the runtime folder itself is denied);
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
     rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
     (its own line, no wrapper) the user or the judge let through.

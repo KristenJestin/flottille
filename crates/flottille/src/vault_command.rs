@@ -46,6 +46,23 @@ pub enum VaultAction {
         #[arg(long)]
         json: bool,
     },
+    /// Change what an entry says, keeping its secret in the keyring as it is: what a flag does
+    /// not name stays, and an empty value clears it. To replace the secret, use `set`
+    Edit {
+        name: String,
+        /// What it is for, as the agents read it
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        username: Option<String>,
+        /// The only project whose agents see it; every project's when empty
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// agent-browser's credential provider, for the logins Flottille runs: one request on the
     /// standard input, one answer on the standard output (`agent-browser.plugin.v1`)
     #[command(hide = true)]
@@ -98,6 +115,35 @@ pub fn run(paths: &Paths, action: VaultAction) -> Result<ExitCode> {
             )?;
             let text = format!("Kept the secret of {name} in the keyring.");
             (set, json, text)
+        }
+        VaultAction::Edit {
+            name,
+            description,
+            url,
+            username,
+            project,
+            json,
+        } => {
+            // What a flag leaves out is what the entry says now: the call rewrites the metadata
+            // whole, and carries no secret.
+            let listed = ask("vault.list", json!({}))?;
+            let Some(entry) = listed["entries"]
+                .as_array()
+                .and_then(|all| all.iter().find(|entry| entry["name"] == name.as_str()))
+            else {
+                return Err(format!("the vault has no entry {name}").into());
+            };
+            let kept = |key: &str, given: Option<String>| {
+                given.or_else(|| entry[key].as_str().map(str::to_owned))
+            };
+            let edited = ask(
+                "vault.set",
+                json!({"name": name, "description": kept("description", description),
+                    "url": kept("url", url), "username": kept("username", username),
+                    "project": kept("project", project)}),
+            )?;
+            let text = format!("Changed {name}; its secret is kept as it was.");
+            (edited, json, text)
         }
         VaultAction::Remove {
             name,
