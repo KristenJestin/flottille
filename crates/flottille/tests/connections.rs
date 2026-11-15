@@ -4984,7 +4984,7 @@ fn a_secret_with_quotes_is_masked_in_html_and_json() {
     let basic = base64::engine::general_purpose::STANDARD.encode(format!("quoter:{QUOTED_SECRET}"));
     let page = format!(
         "text: <p>{text_only}</p>; attribute: <input value=\"{attribute}\">; \
-         json: {{\"password\":\"{in_json}\"}}; header: Authorization: Basic {basic}"
+         json: {{\"note\":\"{in_json}\"}}; seen as {basic}."
     );
     script["answers"]["agent_browser_snapshot"] = json!({"text": page});
     browser(&user, &script, json!({}));
@@ -4999,16 +4999,24 @@ fn a_secret_with_quotes_is_masked_in_html_and_json() {
         "conn_browser",
         json!({"action": "agent_browser_snapshot", "arguments": {}}),
     ));
+    // The page reached the agent, framed (`&` and `<` escaped), its secrets masked.
+    assert!(said.contains("text: &lt;p>"), "{said}");
+    assert!(said.contains("seen as "), "{said}");
+    let framed = |text: &str| text.replace('&', "&amp;").replace('<', "&lt;");
     let shown = user
         .call("agent.show", json!({"agent": id}))
         .unwrap()
         .to_string();
     for secret in [&text_only, &attribute, &in_json, &basic] {
-        assert!(!said.contains(secret.as_str()), "{secret}: {said}");
-        assert!(!shown.contains(secret.as_str()), "{secret}");
-        for folder in ["state", "data"] {
-            let found = files_holding(&user.path(folder), secret);
-            assert!(found.is_empty(), "{secret} in {folder}: {found:?}");
+        assert!(!said.contains(&framed(secret)), "{secret}: {said}");
+        // The answer and the store keep it as JSON, where its quotes are escaped.
+        let stored = serde_json::to_string(secret.as_str()).unwrap();
+        for kept in [secret.as_str(), &stored[1..stored.len() - 1]] {
+            assert!(!shown.contains(kept), "{kept}");
+            for folder in ["state", "data"] {
+                let found = files_holding(&user.path(folder), kept);
+                assert!(found.is_empty(), "{kept} in {folder}: {found:?}");
+            }
         }
     }
 }
@@ -5032,7 +5040,8 @@ fn the_review_no_longer_says_login_is_refused() {
     assert!(
         adapter.contains("login is Flottille's own action"),
         "{adapter}"
-    ); // Accepted with eval on, login comes beside it with no new review: the review says what that
+    );
+    // Accepted with eval on, login comes beside it with no new review: the review says what that
     // lets a page script do.
     assert!(
         adapter.contains("agent_browser_eval is on: a page script can read what login types"),
