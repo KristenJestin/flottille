@@ -2006,6 +2006,7 @@ fn adapter_said(
                 && let Some(why) = adapter
                     .drops_allowlist(words, &declaration.env)
                     .or_else(|| adapter.own_config(words, &declaration.env))
+                    .or_else(|| adapter.sends_elsewhere(words, &declaration.env))
             {
                 said.push_str(&format!(" {why}."));
             }

@@ -5101,6 +5101,78 @@ fn login_is_refused_when_the_environment_sets_a_variable_the_adapter_owns() {
 }
 
 #[test]
+fn login_is_refused_while_an_option_could_send_the_session_elsewhere() {
+    let command = |options: &[&str]| -> (Vec<String>, Option<&'static str>) {
+        (options.iter().map(|o| o.to_string()).collect(), None)
+    };
+    let mut cases = vec![
+        (command(&["--proxy", "http://127.0.0.1:9"]), "--proxy"),
+        (command(&["--proxy=http://127.0.0.1:9"]), "--proxy"),
+        (command(&["--ignore-https-errors"]), "--ignore-https-errors"),
+        (
+            command(&["--extension", "/tmp/an-extension"]),
+            "--extension",
+        ),
+        (
+            command(&["--executable-path", "/tmp/a-browser"]),
+            "--executable-path",
+        ),
+        (command(&["--ca-cert", "/tmp/a-ca.pem"]), "--ca-cert"),
+        (
+            command(&["--init-script", "/tmp/a-script.js"]),
+            "--init-script",
+        ),
+    ];
+    for variable in [
+        "AGENT_BROWSER_PROXY",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "AGENT_BROWSER_IGNORE_HTTPS_ERRORS",
+        "AGENT_BROWSER_EXTENSIONS",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+        "AGENT_BROWSER_CA_CERT",
+        "AGENT_BROWSER_INIT_SCRIPTS",
+    ] {
+        cases.push(((Vec::new(), Some(variable)), variable));
+    }
+    for ((options, variable), named) in cases {
+        let user = user();
+        let mut more = json!({});
+        if let Some(variable) = variable {
+            user.call(
+                "vault.set",
+                json!({"name": "browser-setting", "secret": SETTING}),
+            )
+            .unwrap();
+            more = json!({"env": {variable: {"vault": "browser-setting"}}});
+        }
+        let options: Vec<&str> = options.iter().map(String::as_str).collect();
+        browser_declared(&user, &agent_browser("0.43.0"), json!({}), &options, more);
+        let (_, mcp) = signed_up(&user);
+        let said = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        // The option or the variable by its name, and never its value.
+        assert!(said.contains(named), "{named}: {said}");
+        assert!(said.contains("password"), "{named}: {said}");
+        assert!(!said.contains(SETTING), "{named}: {said}");
+        assert!(logged(&user, "browser", "login").is_empty(), "{named}");
+        assert!(form(&user).is_none(), "{named}");
+        let review = user
+            .call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        let said = review["adapter"]["said"].as_str().unwrap();
+        assert!(said.contains(named), "{named}: {review}");
+        assert!(!review.to_string().contains(SETTING), "{named}: {review}");
+    }
+}
+
+#[test]
 fn a_harmless_variable_of_agent_browsers_is_accepted() {
     let user = user();
     user.call(

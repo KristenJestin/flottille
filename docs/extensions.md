@@ -1310,9 +1310,21 @@ way in:
   `AGENT_BROWSER_PROVIDER`, `AGENT_BROWSER_ARGS`, `AGENT_BROWSER_RESTORE`,
   `AGENT_BROWSER_SESSION_NAME`), **are the adapter's too**: `login` is refused the same way, naming
   the variable (never its value, a vault entry's) and saying to take it out of the connection's
-  `env`, and the server starts with it and no list of Flottille's. Its other variables
-  (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`…) are the user's and change nothing of it.
-  What is not covered: the variables of the daemon's own environment, which a run inherits.
+  `env`, and the server starts with it and no list of Flottille's. **The options that can send a
+  signed-in session, and the password a login types, elsewhere** are refused too, in the server's
+  command or as their variables in the connection's `env`: a proxy (`--proxy`,
+  `AGENT_BROWSER_PROXY`, and `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` in either case, which
+  agent-browser reads as its proxy), certificate errors ignored (`--ignore-https-errors`,
+  `AGENT_BROWSER_IGNORE_HTTPS_ERRORS`) or a certificate authority trusted (`--ca-cert`,
+  `AGENT_BROWSER_CA_CERT`), which let a proxy read the traffic, an extension (`--extension`,
+  `AGENT_BROWSER_EXTENSIONS`), another browser binary (`--executable-path`,
+  `AGENT_BROWSER_EXECUTABLE_PATH`) and a script run in every page (`--init-script`,
+  `AGENT_BROWSER_INIT_SCRIPTS`). The allowed sites do not keep the session from them: while one is
+  set, `login` is refused, naming the option or the variable alone and saying to take it out, and
+  the review says it; the server starts as the user wrote it, with Flottille's list. **Its other
+  options and variables are not judged** (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`,
+  `--headers`, `--engine`…): they are the user's, passed as written. What is not covered: the
+  variables of the daemon's own environment, which a run inherits.
 - **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
   written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the

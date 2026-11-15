@@ -348,6 +348,29 @@ impl Adapter {
              to the connection's sites"
         ))
     }
+
+    /// Why login is refused when the server's command, or the connection's environment, sets an
+    /// option that can send the browser's session, and the password a login types, through
+    /// something the command chooses (`SENDS_ELSEWHERE`): the allowed sites do not keep it from
+    /// that.
+    pub fn sends_elsewhere(
+        &self,
+        words: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        let options: Vec<&str> = SENDS_ELSEWHERE.iter().map(|(option, _)| *option).collect();
+        let variables: Vec<String> = SENDS_ELSEWHERE
+            .iter()
+            .flat_map(|(_, variables)| variables.iter().map(|name| (*name).to_owned()))
+            .collect();
+        let (sets, option, from) = set_by(words, env, &options, &variables)?;
+        Some(format!(
+            "login is refused while {sets} {option}: it can send the browser's session, and the \
+             password a login types, through a proxy, a browser, an extension, a certificate or a \
+             script of the command's choosing, which the allowed sites do not keep it from. The \
+             user takes {option} out of {from}"
+        ))
+    }
 }
 
 /// Where the first of the options `list` is set, by the server's command `words` or the
@@ -357,6 +380,18 @@ fn set_in(
     words: &[String],
     env: &BTreeMap<String, String>,
     list: &[&str],
+) -> Option<(&'static str, String, &'static str)> {
+    // agent-browser reads `AGENT_BROWSER_<OPTION>` as the option, above its configuration file.
+    let variables: Vec<String> = list.iter().filter_map(|option| variable(option)).collect();
+    set_by(words, env, list, &variables)
+}
+
+/// `set_in`, the variables that stand for the options named by the caller.
+fn set_by(
+    words: &[String],
+    env: &BTreeMap<String, String>,
+    list: &[&str],
+    variables: &[String],
 ) -> Option<(&'static str, String, &'static str)> {
     let in_command = words.iter().find_map(|word| {
         let name = word.split('=').next().unwrap_or(word);
@@ -368,18 +403,17 @@ fn set_in(
             )
         })
     });
-    // agent-browser reads `AGENT_BROWSER_<OPTION>` as the option, above its configuration file.
     // Said by its name alone: its value is a vault entry's.
     in_command.or_else(|| {
-        list.iter()
-            .filter_map(|option| variable(option))
-            .find_map(|name| {
-                env.contains_key(&name).then_some((
+        variables.iter().find_map(|name| {
+            env.contains_key(name).then(|| {
+                (
                     "the connection's environment sets",
-                    name,
+                    name.clone(),
                     "the connection's env",
-                ))
+                )
             })
+        })
     })
 }
 
@@ -406,6 +440,34 @@ const DROPS_ALLOWLIST: &[&str] = &[
     "--state",
     "--restore",
     "--session-name",
+];
+
+/// The options of agent-browser that can send a signed-in session, and the password a login
+/// types, through something the server's command chooses, and the variables it reads as each: a
+/// proxy (also from the usual proxy variables), certificate errors ignored or a certificate
+/// authority trusted (which let a proxy read the traffic), an extension, another browser binary,
+/// a script run in every page.
+const SENDS_ELSEWHERE: &[(&str, &[&str])] = &[
+    (
+        "--proxy",
+        &[
+            "AGENT_BROWSER_PROXY",
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ],
+    ),
+    (
+        "--ignore-https-errors",
+        &["AGENT_BROWSER_IGNORE_HTTPS_ERRORS"],
+    ),
+    ("--ca-cert", &["AGENT_BROWSER_CA_CERT"]),
+    ("--extension", &["AGENT_BROWSER_EXTENSIONS"]),
+    ("--executable-path", &["AGENT_BROWSER_EXECUTABLE_PATH"]),
+    ("--init-script", &["AGENT_BROWSER_INIT_SCRIPTS"]),
 ];
 
 // ── The start ────────────────────────────────────────────────────────────────────────────────
@@ -615,6 +677,7 @@ pub async fn perform(
         if let Some(why) = AGENT_BROWSER
             .drops_allowlist(&program, &declaration.env)
             .or_else(|| AGENT_BROWSER.own_config(&program, &declaration.env))
+            .or_else(|| AGENT_BROWSER.sends_elsewhere(&program, &declaration.env))
         {
             return Outcome::Refused(format!("refused: {why}"));
         }
