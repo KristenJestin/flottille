@@ -290,6 +290,8 @@ impl Attachments {
                 let id = tokens::picture_id(gone.id);
                 field.update(cx, |field, cx| field.remove(&id, window, cx));
             }
+            // An undo brings its chip back, and the chip its picture.
+            self.gone.push(gone);
             cx.notify();
         }
     }
