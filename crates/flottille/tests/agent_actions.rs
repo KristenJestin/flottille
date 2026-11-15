@@ -421,6 +421,111 @@ fn in_full_an_agent_s_base_branches_are_changed_at_once_and_checked_all_the_same
     );
 }
 
+/// `release` branched off `main` and pushed: a base the rule (`main`) does not name.
+fn with_release(user: &User, folder: &std::path::Path) {
+    user.git(folder, &["branch", "release"]);
+    user.git(folder, &["push", "--quiet", "origin", "release"]);
+}
+
+fn base_of(user: &User, workspace: &str, at: usize) -> Value {
+    let shown = user
+        .call(
+            "workspace.show",
+            json!({"project": "app", "name": workspace}),
+        )
+        .unwrap();
+    shown["repositories"][at]["base"].clone()
+}
+
+#[test]
+fn an_agent_s_workspace_starts_from_the_base_it_names() {
+    let user = User::with_fake_agent();
+    let folder = project(&user);
+    with_release(&user, &folder);
+    let (id, mcp) = root(&user, None);
+    cli(&user, &["agent", "mode", &id, "full"]).unwrap();
+
+    // A string takes every repository; an object names each one.
+    done(mcp.call(
+        "workspace",
+        json!({"action": "create", "name": "hotfix", "base": "release"}),
+    ));
+    assert_eq!(base_of(&user, "hotfix", 0)["branch"], "release");
+    done(mcp.call(
+        "workspace",
+        json!({"action": "create", "name": "hotfix-two", "base": {".": "release"}}),
+    ));
+    assert_eq!(base_of(&user, "hotfix-two", 0)["branch"], "release");
+    // Left out, the repository's rule.
+    done(mcp.call("workspace", json!({"action": "create", "name": "plain"})));
+    assert_eq!(base_of(&user, "plain", 0)["branch"], "main");
+
+    // The same on agent_launch with new_workspace.
+    done(mcp.call(
+        "agent_launch",
+        json!({"title": "fix", "brief": "HANG", "new_workspace": "launched", "base": "release"}),
+    ));
+    assert_eq!(base_of(&user, "launched", 0)["branch"], "release");
+}
+
+#[test]
+fn a_base_for_one_repository_only() {
+    let user = User::with_fake_agent();
+    let folder = project(&user);
+    with_release(&user, &folder);
+    with_lib(&user, &folder);
+    let (id, mcp) = root(&user, None);
+    cli(&user, &["agent", "mode", &id, "full"]).unwrap();
+
+    done(mcp.call(
+        "workspace",
+        json!({"action": "create", "name": "two", "repositories": [".", "lib"],
+            "base": {".": "release"}}),
+    ));
+    assert_eq!(base_of(&user, "two", 0)["branch"], "release");
+    // The repository left out keeps its own rule.
+    assert_eq!(base_of(&user, "two", 1)["branch"], "main");
+
+    // A base for a repository the workspace does not take is refused, nothing is made.
+    let said = refused(mcp.call(
+        "workspace",
+        json!({"action": "create", "name": "one", "repositories": ["."],
+            "base": {"lib": "release"}}),
+    ));
+    assert!(said.contains("does not take"), "{said}");
+}
+
+#[test]
+fn an_unknown_base_is_refused_naming_the_rule() {
+    let user = User::with_fake_agent();
+    let folder = project(&user);
+    user.git(&folder, &["branch", "develop"]);
+    user.git(&folder, &["push", "--quiet", "origin", "develop"]);
+    let (id, mcp) = root(&user, None);
+    cli(&user, &["agent", "mode", &id, "full"]).unwrap();
+    // The rule of the repository: develop, then main.
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [{"path": ".", "base": ["develop", "main"]}]}),
+    )
+    .unwrap();
+
+    let said = refused(mcp.call(
+        "workspace",
+        json!({"action": "create", "name": "lost", "base": "nowhere"}),
+    ));
+    assert!(
+        said.contains("nowhere is not a branch of the remote origin"),
+        "{said}"
+    );
+    assert!(said.contains("base rule of . is develop, main"), "{said}");
+    assert!(
+        user.call("workspace.show", json!({"project": "app", "name": "lost"}))
+            .is_err(),
+        "nothing was made"
+    );
+}
+
 #[test]
 fn an_agent_cannot_set_the_delete_branch_on_merge_of_a_repository() {
     // The setting is the user's (`docs/projects.md`): a call that carries it is refused as an
