@@ -156,15 +156,18 @@ an entry to the vault, not a request with rules of its own.
   its project and the agent's reason, with **New entry** and **Dismiss** (disabled while
   its call runs). New entry opens Settings, Vault's form of a new entry, prefilled with all
   of it, the agent's reason under what it is for, and what it will be bound to ("For …") with the
-  host its secret goes to ("Goes to …", while the URL is the one asked) and **Remove the
-  binding**: the user changes any field, types the secret and saves, with the checks of that form
-  (plain `http` to another machine refused for a connection's entry; the username required when
-  the feature that asked reads it, the worklog's), or closes it and nothing is stored. There is
-  no second form.
+  host its secret goes to ("Goes to …", under the URL's field, bound or not, while the URL is the
+  one asked) and **Remove the binding**: the user changes any field, types the secret and saves,
+  with the checks of that form (a connection's entry refused for a URL login cannot read, in the
+  words of the ask's refusal, or plain `http` to another machine; the username required when the
+  feature that asked reads it, the worklog's), or closes it and nothing is stored. There is no
+  second form.
 - **One request a name.** While a request for a name is open, another ask for it joins it when it
   is the same project's or the request is every project's; another project's agent is refused
-  (`ask under another name`), and told nothing of it. Dismiss closes the request; the name may be
-  asked for again.
+  (`ask under another name`). Entry names are shared across projects, so an agent of another
+  project that asks for a name a request holds can learn that the request is open and how it
+  ended (taken or not): that is inherent to shared names. Dismiss closes the request; the name
+  may be asked for again.
 - **Answered when the entry is saved**, from that form or any other way: each agent that asked
   and whose project sees the entry is handed a delivery, `the user set the vault entry <name>`,
   never the secret; on Dismiss each is handed `the user dismissed …`.
