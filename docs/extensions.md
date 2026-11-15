@@ -843,6 +843,7 @@ command = ["almanac", "mcp"]
 env     = { ALMANAC_TOKEN = { vault = "almanac-token" } }
 only    = { }                        # limits on arguments, below
 except  = ["client-site"]            # projects whose agents do not get it
+sites   = [ ]                        # hosts an adapter adds to the browser's sites ("Adapters")
 ```
 
 **On, it is given to every agent of every project**, and off to none, **except the projects its
@@ -1026,9 +1027,10 @@ read**:
   it): the review proposes exactly that, so a client that answers it back changes nothing. The
   review of a connection that nothing cut off shows no change, its actions folded away, and is the
   place to set them.
-- **A declaration the user edits** (the command, its arguments, the URL, the variables, the limits)
-  is a different server as far as trust goes: what it announces is pinned again at once, as when
-  it was added, against the last pin: the settings of the actions that did not change are kept.
+- **A declaration the user edits** (the command, its arguments, the URL, the variables, the limits,
+  the sites an adapter adds) is a different server as far as trust goes: what it announces is
+  pinned again at once, as when it was added, against the last pin: the settings of the actions
+  that did not change are kept.
   **But never a change nobody read**: a connection that has a pin is pinned at once only if what
   the server announces differs from the pin by its version alone (or not at all). A server that
   changed its instructions or an action since the user read them, and has not restarted since
@@ -1283,7 +1285,19 @@ way in:
   server's tools and them. It is **not an operating system firewall**, and agent-browser calls its
   blocking of WebSocket and EventSource best effort. A login that redirects to another domain to
   sign in (a single sign-on) fails, and so does a login page whose scripts or styles come from
-  another domain: those are not the entries'. The file is written when the server starts and when
+  another domain: those are not the entries'. **The user adds such hosts** in the connection's
+  declaration, `sites = ["sso.example.com"]` (`flottille connection add|edit --site HOST`): one
+  host each, written as a URL's host is (lower case, no scheme, port, path, comma, wildcard or
+  space; anything else is refused, saying what a host is), added to the entries' hosts in the
+  list, which the review shows where it shows the entries' sites. They are the user's alone (an
+  agent's request sets no `sites`), and **part of what trust is given to**, as the command and
+  the variables are: the user's own edit (`connection edit`, the window) stops the running server
+  at once and is given again at once by the rule of an edit, the next start writing the new list,
+  while an edit of `sites` made in the file waits for its review. **One list serves every entry
+  bound to the connection**, the entries' hosts and the `sites` alike: a host one entry's sign-in
+  needs is allowed in the login of every other, so the password of an entry whose site redirects
+  to another entry's sign-on host reaches that host. Entries whose sign-ins must not share their
+  hosts go in connections of their own. The file is written when
   a login runs, and tool calls read it when they run: an entry bound after the server started is
   in the list from the next of either. **An entry whose URL host holds a comma, a `*`, a space or
   starts with `-` is no usable site** (agent-browser reads the list by commas and `*` as a
@@ -1293,14 +1307,38 @@ way in:
   `--restore`'s key): **if the server's own command uses one, or sets `--allowed-domains` itself,
   `login` is refused**, saying why (the command already sets the browser's sites, which Flottille
   sets from the entries), and the server starts as the user wrote it, with no list of
-  Flottille's. The review says it, in its sentence and in what the adapter changed. What is not
-  covered: the same options set in the connection's environment (agent-browser's
-  `AGENT_BROWSER_PROFILE` and the like fail closed in agent-browser itself) or in a config file
-  the user's command names.
+  Flottille's. The review says it, in its sentence and in what the adapter changed. **The same
+  options set in the connection's environment** (`env`), as the variables agent-browser reads
+  above its configuration file (`AGENT_BROWSER_ALLOWED_DOMAINS`, `AGENT_BROWSER_PROFILE`,
+  `AGENT_BROWSER_STATE`, `AGENT_BROWSER_CDP`, `AGENT_BROWSER_AUTO_CONNECT`,
+  `AGENT_BROWSER_PROVIDER`, `AGENT_BROWSER_ARGS`, `AGENT_BROWSER_RESTORE`,
+  `AGENT_BROWSER_SESSION_NAME`), **are the adapter's too**: `login` is refused the same way, naming
+  the variable (never its value, a vault entry's) and saying to take it out of the connection's
+  `env`, and the server starts with it and no list of Flottille's. **The options that can send a
+  signed-in session, and the password a login types, elsewhere** are refused too, in the server's
+  command or as their variables in the connection's `env`: a proxy (`--proxy`,
+  `AGENT_BROWSER_PROXY`, and `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` in either case, which
+  agent-browser reads as its proxy), certificate errors ignored (`--ignore-https-errors`,
+  `AGENT_BROWSER_IGNORE_HTTPS_ERRORS`) or a certificate authority trusted (`--ca-cert`,
+  `AGENT_BROWSER_CA_CERT`), which let a proxy read the traffic, an extension (`--extension`,
+  `AGENT_BROWSER_EXTENSIONS`), another browser binary (`--executable-path`,
+  `AGENT_BROWSER_EXECUTABLE_PATH`) and a script run in every page (`--init-script`,
+  `AGENT_BROWSER_INIT_SCRIPTS`). The allowed sites do not keep the session from them: while one is
+  set, `login` is refused, naming the option or the variable alone and saying to take it out, and
+  the review says it; the server starts as the user wrote it, with Flottille's list. **Its other
+  options and variables are not judged** (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`,
+  `--headers`, `--engine`…): they are the user's, passed as written. What is not covered: the
+  variables of the daemon's own environment, which a run inherits.
 - **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
   written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the
-  user's own, and the sites of the entries (below).
+  user's own, and the sites of the entries (below). **A configuration file of the user's** that
+  the server's command names (`--config`, or `AGENT_BROWSER_CONFIG` in the connection's `env`) is
+  not read either: Flottille's replaces it whole, its `allowedDomains` included, and Flottille does
+  not open the user's file to merge them (it is the user's, and may hold a secret). So while one is
+  named, `login` is refused, saying that the adapter sets the allowed sites itself and that a
+  site a sign-in needs goes in the connection's `sites` (below); the review says it too, and the
+  server starts as before.
 - **`login {entry}`**, Flottille's own action: the agent names a vault entry **bound to this
   connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
   lists, never their values. An entry bound to another use, or to none, is refused, naming its use.
