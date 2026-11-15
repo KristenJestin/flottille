@@ -639,20 +639,148 @@ fn a_url_error_never_shows_a_query_value() {
         json!({"name": "notes", "about": "The notes."}),
     )
     .unwrap();
-    user.call(
-        "connection.edit",
-        json!({"name": "design", "url": "https://design.example.com/mcp"}),
-    )
-    .unwrap();
-    // No server answers there: it may fail to start, never for its URL.
+    // Mended to this machine, where no server listens: it may fail to start, never for its URL.
+    let mended = format!("http://127.0.0.1:{}/mcp", closed_port());
+    user.call("connection.edit", json!({"name": "design", "url": mended}))
+        .unwrap();
     let design = connection_named(&user, "design");
     assert!(
         !design["failing"]
             .as_str()
             .unwrap_or_default()
-            .contains("this machine"),
+            .starts_with("url"),
         "{design}"
     );
+    assert_eq!(design["url"], mended, "{design}");
+}
+
+/// A port of this machine no server listens on.
+fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+#[test]
+fn a_url_flagged_as_holding_a_secret_is_served_without_it() {
+    let user = user();
+    written_by_hand(
+        &user,
+        &format!(
+            "\n[[connections.server]]\nname = \"design\"\nabout = \"Designs.\"\n\
+             url = \"https://design.example.com/mcp?access_token={IN_A_URL}#k\"\n\
+             \n[[connections.server]]\nname = \"sketch\"\nabout = \"Sketches.\"\n\
+             url = \"https://ada:{IN_A_URL}@sketch.example.com/mcp\"\n\
+             \n[[connections.server]]\nname = \"notes\"\nabout = \"Notes.\"\n\
+             url = \"ada:{IN_A_URL}@notes.example.com/mcp\"\n\
+             \n[[connections.server]]\nname = \"plain\"\nabout = \"Plain.\"\n\
+             url = \"https://plain.example.com/mcp?page=2\"\n"
+        ),
+    );
+    let listed = user.call("connection.list", json!({})).unwrap();
+    assert!(!listed.to_string().contains(IN_A_URL), "{listed}");
+    for (name, url) in [
+        ("design", "https://design.example.com/mcp"),
+        ("sketch", "https://sketch.example.com/mcp"),
+        ("notes", "ada:"),
+        ("plain", "https://plain.example.com/mcp?page=2"),
+    ] {
+        assert_eq!(connection_named(&user, name)["url"], url, "{listed}");
+    }
+    // Nor does an agent see it, listed or shown.
+    let mcp = session(&user);
+    let mut said = vec![mcp.call("connections", json!({"action": "list"})).text];
+    for name in ["design", "sketch", "notes"] {
+        said.push(
+            mcp.call("connections", json!({"action": "show", "name": name}))
+                .text,
+        );
+    }
+    for text in &said {
+        assert!(!text.contains(IN_A_URL), "{text}");
+    }
+    assert!(
+        said[1].contains("https://design.example.com/mcp"),
+        "{}",
+        said[1]
+    );
+}
+
+#[test]
+fn longer_token_key_and_password_names_are_refused() {
+    let user = user();
+    for parameter in [
+        "x_user_token",
+        "google_id_token",
+        "x_refresh_token",
+        "bearer_token",
+        "jwt_token",
+        "secret_token",
+        "oauth_token",
+        "auth_key",
+        "app_key",
+        "client_key",
+        "subscription-key",
+        "pwd",
+        "passphrase",
+        "db_password",
+        "url_sig",
+    ] {
+        let url = format!("https://design.example.com/mcp?page=2&{parameter}=abc123");
+        let refused = user
+            .call(
+                "connection.add",
+                json!({"name": "design", "about": "Designs.", "url": url}),
+            )
+            .unwrap_err();
+        assert!(refused.1.contains(parameter), "{parameter}: {refused:?}");
+        assert!(!refused.1.contains("abc123"), "{refused:?}");
+    }
+}
+
+#[test]
+fn harmless_words_before_a_token_or_key_are_allowed() {
+    let user = user();
+    let url = "https://design.example.com/mcp?pageToken=a&next_page_token=b&cursor_key=c\
+               &project_key=d&idempotency_key=e&sync_token=f&continuationToken=g&nextpagetoken=h";
+    user.call(
+        "connection.add",
+        json!({"name": "design", "about": "Designs.", "url": url}),
+    )
+    .unwrap();
+    assert_eq!(connection_named(&user, "design")["url"], url);
+}
+
+#[test]
+fn a_semicolon_does_not_hide_a_token_in_the_query_or_fragment() {
+    let user = user();
+    for url in [
+        format!("https://design.example.com/mcp?page=1;access_token={IN_A_URL}"),
+        format!("https://design.example.com/mcp#state=x;access_token={IN_A_URL}"),
+    ] {
+        let refused = user
+            .call(
+                "connection.add",
+                json!({"name": "design", "about": "Designs.", "url": url}),
+            )
+            .unwrap_err();
+        assert!(refused.1.contains("access_token"), "{url}: {refused:?}");
+        assert!(!refused.1.contains(IN_A_URL), "{refused:?}");
+    }
+}
+
+#[test]
+fn a_url_pasted_without_its_scheme_names_only_the_scheme() {
+    let user = user();
+    let refused = user
+        .call(
+            "connection.add",
+            json!({"name": "notes", "about": "Notes.",
+                "url": format!("ada:{IN_A_URL}@notes.example.com/mcp")}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("\"ada\""), "{refused:?}");
+    assert!(!refused.1.contains(IN_A_URL), "{refused:?}");
+    assert!(!refused.1.contains("notes.example.com"), "{refused:?}");
 }
 
 #[test]

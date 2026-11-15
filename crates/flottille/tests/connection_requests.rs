@@ -732,6 +732,35 @@ fn a_split_or_uuid_shaped_entry_name_is_refused() {
 }
 
 #[test]
+fn an_entry_name_mixing_letters_and_digits_in_a_long_word_is_refused() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    for written in ["Zq7Wx3Vp9Kd2-Lm8Nb4Rt6Yh1-Pc5Fg0Jk3Sx7", "notes-Zq7Wx3Vp9"] {
+        let sent = refused(mcp.call(
+            "connections",
+            json!({"action": "add", "name": "design", "about": "Designs.",
+                "url": "https://design.example.com/mcp",
+                "secrets": [{"in": "query", "name": "userToken", "entry": written}]}),
+        ));
+        assert!(!sent.contains(written), "{sent}");
+    }
+    assert_eq!(pending(&user), 0);
+    for (n, entry) in ["github-token-2", "staging-db-password", "notion-api-v2"]
+        .into_iter()
+        .enumerate()
+    {
+        held(&mcp.call(
+            "connections",
+            json!({"action": "add", "name": format!("design{n}"), "about": "Designs.",
+                "url": "https://design.example.com/mcp",
+                "secrets": [{"in": "query", "name": "userToken", "entry": entry}]}),
+        ));
+    }
+}
+
+#[test]
 fn an_agent_s_add_proposal_with_a_token_like_url_is_refused() {
     let user = user();
     project(&user, "app");

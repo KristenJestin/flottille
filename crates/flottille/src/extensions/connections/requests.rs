@@ -1167,16 +1167,32 @@ mod tests {
         )
         .unwrap();
         let daemon = a_daemon(dir.path());
-        let entry = flottille_core::vault::Entry {
-            name: "notes-token".into(),
-            description: None,
-            url: Some("https://notes.example.com".into()),
-            username: None,
-            project: None,
-            updated_at: 0,
-            bound: None,
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(crate::vault::call(
+                daemon.clone(),
+                "vault.set",
+                json!({"name": "notes-token", "secret": "a-secret-of-the-test",
+                    "url": "https://notes.example.com"}),
+            ))
+            .map_err(|failure| failure.message)
+            .unwrap();
+        // Whether the keyring still holds its secret: the removal takes it first, then waits
+        // for the file's lock to take the row.
+        let kept = |daemon: &Daemon| {
+            runtime
+                .block_on(crate::vault::every_project_s(
+                    daemon,
+                    "notes",
+                    "notes-token",
+                ))
+                .map_err(|why| assert!(why.contains("no longer holds"), "{why}"))
+                .is_ok()
         };
-        daemon.write(|store| store.put_vault_entry(&entry)).unwrap();
+        assert!(kept(&daemon));
         let there = |daemon: &Daemon| {
             daemon
                 .read(|store| store.vault_entries())
@@ -1205,7 +1221,16 @@ mod tests {
                 ))
                 .map_err(|failure| failure.message)
         });
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // The removal has reached the lock once the secret is gone: the row is still there then.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while kept(&daemon) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the removal never took the secret"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
         let during = there(&daemon);
         release.send(()).unwrap();
         writer.join().unwrap();
