@@ -1,6 +1,6 @@
 //! The daemon's link to the user's other machines (`docs/remote.md`, "Architecture", "The
 //! transport", "The version"), with remote on: one endpoint, listening where `daemon.toml` says
-//! (`[remote] listen`); a link kept to every machine this one trusts, dialled at the addresses it
+//! (`[remote] listen`), nowhere when it says nothing; a link kept to every machine this one trusts, dialled at the addresses it
 //! knows for it; each side telling the other its addresses whenever they change.
 //!
 //! Flottille handles no network channel: no relay, no NAT traversal, no discovery. How two machines
@@ -118,10 +118,16 @@ pub fn start(
     key: MachineKey,
     stopping: tokio::sync::watch::Receiver<bool>,
 ) -> Result<Arc<Remote>, String> {
-    let listen = crate::remote::listen(paths)?;
-    let endpoint = Endpoint::bind(&key, listen).map_err(|error| error.to_string())?;
-    if let Some(local) = endpoint.listening() {
-        eprintln!("flottille daemon: the link listens on {local}");
+    let endpoint = match crate::remote::listen(paths)? {
+        Some(listen) => Endpoint::bind(&key, listen),
+        None => Endpoint::dialler(&key),
+    }
+    .map_err(|error| error.to_string())?;
+    match endpoint.listening() {
+        Some(local) => eprintln!("flottille daemon: the link listens on {local}"),
+        None => eprintln!(
+            "flottille daemon: the link listens nowhere ([remote] listen in daemon.toml); it dials"
+        ),
     }
     let remote = Arc::new(Remote {
         endpoint,
@@ -171,8 +177,7 @@ impl Remote {
         let port = self
             .endpoint
             .listening()
-            .map(|local| local.port())
-            .unwrap_or_default();
+            .map_or(crate::remote::PORT, |local| local.port());
         let found = self
             .endpoint
             .addresses()
