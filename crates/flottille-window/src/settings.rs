@@ -230,6 +230,10 @@ const TOOL_RESULTS_SENTENCE: &str = "A longer result reaches the agent as its st
 pub const UNCHANGED_HINT: &str = "A file the agent already read and that has not changed \
      since is answered in one line, unless the session was compacted.";
 
+/// What the switch that offers the outline of a file does, under its label.
+pub const OUTLINE_HINT: &str = "An agent can ask for the declarations of a Rust, TypeScript, \
+     JavaScript, Python or Go file instead of reading it; that is not a read.";
+
 /// The days the Sessions select offers. The daemon takes any number from 1 to 90
 /// (`docs/protocol.md`): a file edited by hand keeps its own, shown as one more option.
 pub const DAYS: [u64; 7] = [1, 3, 7, 14, 30, 60, 90];
@@ -292,6 +296,9 @@ pub struct SettingsPage {
     /// asked it to become while the daemon has not answered.
     unchanged: Option<bool>,
     unchanged_pending: Option<bool>,
+    /// The same for whether `fs_read` gives the outline of a source file when asked.
+    outline: Option<bool>,
+    outline_pending: Option<bool>,
     /// After how many days an inactive session is ended, once the daemon said it (`Some(None)` is
     /// off).
     sessions: Option<Option<u64>>,
@@ -392,6 +399,8 @@ impl SettingsPage {
             tool_results_pending: None,
             unchanged: None,
             unchanged_pending: None,
+            outline: None,
+            outline_pending: None,
             sessions: None,
             sessions_pending: None,
             resume: None,
@@ -1300,8 +1309,32 @@ impl SettingsPage {
         self.unchanged
     }
 
+    /// Whether the daemon last said `fs_read` gives the outline of a file when asked (`None`
+    /// before it said), whatever was asked since.
+    pub fn outline_said(&self) -> Option<bool> {
+        self.outline
+    }
+
     fn asked_tool_results(&self) -> bool {
-        self.tool_results_pending.is_some() || self.unchanged_pending.is_some()
+        self.tool_results_pending.is_some()
+            || self.unchanged_pending.is_some()
+            || self.outline_pending.is_some()
+    }
+
+    fn choose_outline(&mut self, cx: &mut Context<Self>) {
+        let Some(outline) = self.outline else {
+            return;
+        };
+        if self.asked_tool_results() {
+            return;
+        }
+        self.outline_pending = Some(!outline);
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::OutlineSet { outline: !outline })
+            })
+            .ok();
+        cx.notify();
     }
 
     fn choose_unchanged(&mut self, cx: &mut Context<Self>) {
@@ -1339,23 +1372,28 @@ impl SettingsPage {
     /// why.
     pub fn tool_results_answered(
         &mut self,
-        shown: Result<(Option<usize>, bool), String>,
+        shown: Result<(Option<usize>, bool, bool), String>,
         written: bool,
         cx: &mut Context<Self>,
     ) {
         let asked_unchanged = self.unchanged_pending.is_some();
+        let asked_outline = self.outline_pending.is_some();
         if written {
             self.tool_results_pending = None;
             self.unchanged_pending = None;
+            self.outline_pending = None;
         }
         match shown {
-            Ok((limit, unchanged)) => {
+            Ok((limit, unchanged, outline)) => {
                 self.tool_results = Some(limit);
                 self.unchanged = Some(unchanged);
+                self.outline = Some(outline);
             }
             Err(why) if written => toast(
                 Toast::failure(if asked_unchanged {
                     "The switch for unchanged files was not kept"
+                } else if asked_outline {
+                    "The switch for outlines was not kept"
                 } else {
                     "The limit of tool results was not kept"
                 })
@@ -1412,6 +1450,23 @@ impl SettingsPage {
             .border_color(p.line)
             .child(unchanged)
             .test_support();
+        let outline = Switch::new(
+            "tool-results-outline-switch",
+            self.outline_pending.or(self.outline).unwrap_or(true),
+            "Offer the outline of a file",
+        )
+        .hint(OUTLINE_HINT)
+        .disabled(self.outline.is_none() || self.asked_tool_results())
+        .on_click(cx.listener(|this, _, _, cx| this.choose_outline(cx)));
+        let outline_card = div()
+            .id("tool-results-outline")
+            .p(space::LG)
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(outline)
+            .test_support();
         Section::new("tool-results", "Long tool results")
             .sentence(TOOL_RESULTS_SENTENCE)
             .child(
@@ -1420,7 +1475,8 @@ impl SettingsPage {
                     .flex_col()
                     .gap(space::MD)
                     .child(Field::new("tool-results-field", "Cut above", select))
-                    .child(unchanged_card),
+                    .child(unchanged_card)
+                    .child(outline_card),
             )
     }
 
@@ -2398,13 +2454,14 @@ pub(crate) fn grouped(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPACTION_HINT, COMPACTION_LINE, COMPACTION_USAGE, COMPACTOR_COST, TOOL_RESULTS_SENTENCE,
-        UNCHANGED_HINT, grouped,
+        COMPACTION_HINT, COMPACTION_LINE, COMPACTION_USAGE, COMPACTOR_COST, OUTLINE_HINT,
+        TOOL_RESULTS_SENTENCE, UNCHANGED_HINT, grouped,
     };
 
     #[test]
     fn the_sentence_of_the_tool_results_section_has_no_run_of_spaces() {
         assert!(!UNCHANGED_HINT.contains("  "), "{UNCHANGED_HINT}");
+        assert!(!OUTLINE_HINT.contains("  "), "{OUTLINE_HINT}");
         assert!(
             !TOOL_RESULTS_SENTENCE.contains("  "),
             "{TOOL_RESULTS_SENTENCE}"
