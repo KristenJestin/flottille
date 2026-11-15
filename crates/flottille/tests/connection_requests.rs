@@ -610,7 +610,8 @@ fn an_agent_binds_an_entry_of_the_same_host() {
     assert_eq!(
         proposed["secrets"],
         json!([{"key": "headers", "name": "Authorization", "entry": "notes-token",
-            "entry_host": "notes.example.com", "host": "notes.example.com", "differs": false}]),
+            "entry_host": "notes.example.com", "host": "notes.example.com", "differs": false,
+            "missing": false}]),
         "{proposed}"
     );
 
@@ -627,7 +628,7 @@ fn an_agent_binds_an_entry_of_the_same_host() {
     assert_eq!(
         proposed["secrets"],
         json!([{"key": "env", "name": "GITHUB_TOKEN", "entry": "github-token",
-            "entry_host": null, "host": null, "differs": true}]),
+            "entry_host": null, "host": null, "differs": true, "missing": false}]),
         "{proposed}"
     );
 }
@@ -688,4 +689,83 @@ fn a_request_accepted_is_not_answered_again_by_the_users_save() {
         .unwrap_err();
     assert!(again.contains("already decided"), "{again}");
     assert!(connection(&user, "jotter").is_none());
+}
+
+/// An agent's proposal of a design server that takes its token in a query parameter.
+fn propose_design(mcp: &Mcp) -> u64 {
+    held(&mcp.call(
+        "connections",
+        json!({"action": "add", "name": "design", "about": "Designs.",
+            "url": "https://design.example.com/mcp",
+            "secrets": [{"in": "query", "name": "userToken", "entry": "design-usertoken"}]}),
+    ))
+}
+
+#[test]
+fn an_agent_proposes_a_connection_whose_entry_does_not_exist_yet() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = propose_design(&mcp);
+    let proposed = user
+        .call("connection.proposed", json!({"number": number}))
+        .unwrap();
+    assert_eq!(proposed["secrets"][0]["missing"], true, "{proposed}");
+    assert_eq!(
+        proposed["secrets"][0]["entry"], "design-usertoken",
+        "{proposed}"
+    );
+    assert!(
+        proposed["waits"]
+            .as_str()
+            .is_some_and(|why| why.contains("design-usertoken")),
+        "{proposed}"
+    );
+    // A value that is no entry's name, or that looks like a secret, is still refused, unsaid.
+    for written in ["ghp_abcdefghijklmnopqrstuvwxyz0123456789", "not a name"] {
+        let sent = refused(mcp.call(
+            "connections",
+            json!({"action": "add", "name": "other", "about": "Other.",
+                "url": "https://other.example.com/mcp",
+                "secrets": [{"in": "header", "name": "X-Key", "entry": written}]}),
+        ));
+        assert!(!sent.contains(written), "{sent}");
+    }
+    assert_eq!(pending(&user), 1);
+}
+
+#[test]
+fn accept_waits_for_the_missing_entry_then_takes_it() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = propose_design(&mcp);
+    let waited = user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap_err();
+    assert!(waited.1.contains("design-usertoken"), "{waited:?}");
+    // Still held: nothing was decided.
+    request(&user, number);
+    assert!(connection(&user, "design").is_none());
+
+    // Saved, on the connection's host: Accept takes it.
+    entry(
+        &user,
+        "design-usertoken",
+        Some("https://design.example.com"),
+    );
+    let proposed = user
+        .call("connection.proposed", json!({"number": number}))
+        .unwrap();
+    assert_eq!(proposed["secrets"][0]["missing"], false, "{proposed}");
+    assert!(proposed["waits"].is_null(), "{proposed}");
+    assert_eq!(proposed["current"], true, "{proposed}");
+    let answer = approve(&user, number);
+    assert!(answer.contains("and Flottille has now done it"), "{answer}");
+    assert_eq!(
+        connection(&user, "design").unwrap()["secrets"],
+        json!([{"in": "query", "name": "userToken", "entry": "design-usertoken"}])
+    );
 }
