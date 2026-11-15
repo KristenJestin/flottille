@@ -16,8 +16,8 @@ use flottille_core::images::{MAX_IMAGE_BYTES, MAX_IMAGES};
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
-    Button, Icon, Listing, Piece, Skeleton, Toast, Token, TokenEvent, TokenField, enter, fade,
-    hoverable, icon, palette, presence, space, toast,
+    Badge, Button, Icon, Listing, Piece, Skeleton, Toast, Token, TokenEvent, TokenField, enter,
+    fade, hoverable, icon, palette, presence, space, toast,
 };
 use gpui_kit::base::input::Paste;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -59,21 +59,13 @@ fn extension(format: gpui_kit::ImageFormat) -> &'static str {
     }
 }
 
-/// The number of a thumbnail, its chip's in the text: a new number fades in as the chips before
-/// it change.
-fn number<T: 'static>(key: &str, number: usize, cx: &mut Context<T>) -> AnyElement {
-    let p = palette(cx);
+/// The number of a thumbnail, its chip's in the text, as the kit's badge: a new number fades in
+/// as the chips before it change. `id` names it; one that leaves keeps the number it had.
+fn number(id: ElementId, key: &str, number: usize) -> AnyElement {
     let badge = div()
-        .id(ElementId::Name(
-            format!("attachment-number-{}", number - 1).into(),
-        ))
-        .px(space::XS)
-        .rounded(px(4.))
-        .bg(p.card2.opacity(0.9))
-        .text_size(px(10.5))
-        .text_color(p.text)
+        .id(id)
         .aria_label(SharedString::from(format!("Image {number}")))
-        .child(number.to_string())
+        .child(Badge::count(number))
         .test_support();
     div()
         .absolute()
@@ -120,6 +112,8 @@ pub struct Attachments {
     scaling: Vec<u64>,
     places: Listing<()>,
     scaled: u64,
+    /// The number each thumbnail last showed, by its key: one that folds away keeps it.
+    numbers: std::collections::HashMap<String, usize>,
     /// A thumbnail opened large; made when the strip is first drawn.
     viewer: Option<Entity<PictureViewer>>,
 }
@@ -683,6 +677,8 @@ impl Attachments {
                 )
             })
             .collect();
+        self.numbers
+            .retain(|key, _| listed.iter().any(|(listed, ..)| listed == key));
         self.places.sync(
             self.scaling.iter().map(|id| (format!("scaling-{id}"), ())),
             now,
@@ -710,7 +706,17 @@ impl Attachments {
                     window,
                     cx,
                 );
-                let badge = (!gone).then(|| number(&key, at + 1, cx));
+                if !gone {
+                    self.numbers.insert(key.clone(), at + 1);
+                }
+                // The badge folds away with its thumbnail, its number as it was.
+                let badge = self.numbers.get(&key).map(|&shown| {
+                    let id = match gone {
+                        true => format!("attachment-leaving-number-{key}"),
+                        false => format!("attachment-number-{at}"),
+                    };
+                    number(ElementId::Name(id.into()), &key, shown)
+                });
                 let thumb = div()
                     .id(id)
                     .relative()
