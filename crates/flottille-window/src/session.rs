@@ -6372,7 +6372,7 @@ impl Row {
             None => format!("Request #{number}"),
         };
         let page = self.page.clone();
-        let tones = crate::waiting::held_tones(card.base, p);
+        let tones = crate::waiting::held_tones(p);
         let ink = tones.ink;
         let line = div()
             .id(ElementId::Name(format!("approval-line-{number}").into()))

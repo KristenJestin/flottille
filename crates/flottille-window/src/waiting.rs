@@ -169,8 +169,8 @@ impl Waiting {
     }
 
     /// A compact card: what the call does and its number, the call in one line, its class and the
-    /// reason in one line, then Details, Deny and Allow. A base request stands apart, in the alarm
-    /// colour.
+    /// reason in one line, then Details, Deny and Allow. A base request stands apart by its
+    /// tag and its still dot, in the same attention tone: it failed nothing.
     fn card(
         &self,
         card: &ApprovalCard,
@@ -199,11 +199,12 @@ impl Waiting {
                 .disabled(busy)
                 .on_click(cx.listener(move |this, _, _, cx| this.answer(number, answer, cx)))
         };
-        let tones = held_tones(card.base, p);
-        let (class, ink) = match card.base {
-            true => ("Always asks", tones.ink),
-            false => ("To judge", tones.ink),
+        let tones = held_tones(p);
+        let class = match card.base {
+            true => "Always asks",
+            false => "To judge",
         };
+        let ink = tones.ink;
         // The reason in one line: the judge's when one was asked, else the first reason it was
         // held.
         let reason = card
@@ -437,13 +438,13 @@ impl Waiting {
             .into_any_element()
     }
 
-    /// The card's mark: the pulsing dot of what waits for the user, or the alarm's still one.
+    /// The card's mark: the pulsing dot of what waits for the user, or the still one of a base request.
     fn mark(&self, base: bool, p: Palette) -> AnyElement {
         match base {
             true => div()
                 .size(px(8.))
                 .rounded_full()
-                .bg(held_tones(base, p).ink)
+                .bg(held_tones(p).ink)
                 .into_any_element(),
             false => self.dot.clone().into_any_element(),
         }
@@ -534,24 +535,22 @@ pub(crate) struct HeldTones {
     pub line_edge: gpui_kit::Hsla,
 }
 
-pub(crate) fn held_tones(base: bool, p: Palette) -> HeldTones {
-    match base {
-        true => HeldTones {
-            ink: p.fail,
-            card_edge: mix(p.fail, p.card, 0.6),
-            line_edge: p.fail,
-        },
-        false => HeldTones {
-            ink: p.wait,
-            card_edge: mix(p.wait, p.card, 0.7),
-            line_edge: p.wait_line,
-        },
+/// A request that waits for the user is attention, a base one too: nothing failed. The error
+/// ink is for what was refused or failed.
+pub(crate) fn held_tones(p: Palette) -> HeldTones {
+    HeldTones {
+        ink: p.wait,
+        card_edge: mix(p.wait, p.card, 0.7),
+        line_edge: p.wait_line,
     }
 }
 
-/// The ink of the one-line record a decided request folds into.
-pub(crate) fn record_ink(_decision: Option<&str>, p: Palette) -> gpui_kit::Hsla {
-    p.faint
+/// The ink of the one-line record a decided request folds into: a denial is a refusal.
+pub(crate) fn record_ink(decision: Option<&str>, p: Palette) -> gpui_kit::Hsla {
+    match decision {
+        Some("deny") => p.fail,
+        _ => p.faint,
+    }
 }
 
 #[cfg(test)]
@@ -566,28 +565,26 @@ mod tests {
     #[test]
     fn a_request_waiting_for_the_user_is_not_drawn_as_an_error() {
         for p in palettes() {
-            for base in [true, false] {
-                let HeldTones {
-                    ink,
-                    card_edge,
-                    line_edge,
-                } = held_tones(base, p);
-                assert_eq!(ink, p.wait, "the dot and the tag, base {base}");
-                assert_ne!(ink, p.fail);
-                assert_ne!(
-                    card_edge,
-                    gpui_design_system::color::mix(p.fail, p.card, 0.6)
-                );
-                assert_ne!(line_edge, p.fail, "the line's border, base {base}");
-            }
+            let HeldTones {
+                ink,
+                card_edge,
+                line_edge,
+            } = held_tones(p);
+            assert_eq!(ink, p.wait, "the dot and the tag");
+            assert_ne!(ink, p.fail);
+            assert_ne!(
+                card_edge,
+                gpui_design_system::color::mix(p.fail, p.card, 0.6)
+            );
+            assert_ne!(line_edge, p.fail, "the line's border");
         }
     }
 
     #[test]
     fn the_rail_card_and_the_conversation_line_agree() {
         for p in palettes() {
-            assert_eq!(held_tones(true, p), held_tones(false, p));
-            assert_eq!(held_tones(true, p).line_edge, p.wait_line);
+            assert_eq!(held_tones(p).line_edge, p.wait_line);
+            assert_eq!(held_tones(p).ink, p.wait);
         }
     }
 
