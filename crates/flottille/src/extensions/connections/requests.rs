@@ -278,14 +278,29 @@ const NAME_WORD: usize = 19;
 /// of it: more is a token split where a name goes (`0123456789-abcdef0123-…`, a UUID).
 const NAME_HEX: usize = 15;
 
+/// The shortest word of a name to make that is random when letters and numbers alternate in it
+/// `NAME_NUMBERS` times or more (`Zq7Wx3Vp9`): a token's piece, where a word of a name holds one
+/// number, at its end (`v2`, `token-2`).
+const NAME_MIXED: usize = 8;
+const NAME_NUMBERS: usize = 3;
+
 fn random_like(name: &str) -> bool {
     let joined: Vec<char> = name
         .chars()
         .filter(|c| !matches!(c, '-' | '_' | '.'))
         .collect();
     let hex = joined.iter().filter(|c| c.is_ascii_hexdigit()).count();
+    let mixed = |word: &str| {
+        let numbers = word
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|number| !number.is_empty())
+            .count();
+        word.chars().count() >= NAME_MIXED
+            && word.chars().any(|c| c.is_alphabetic())
+            && numbers >= NAME_NUMBERS
+    };
     name.split(['-', '_', '.'])
-        .any(|word| word.chars().count() > NAME_WORD)
+        .any(|word| word.chars().count() > NAME_WORD || mixed(word))
         || (hex > NAME_HEX && hex * 5 >= joined.len() * 4)
 }
 
