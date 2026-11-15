@@ -6,6 +6,11 @@
 //! zeroized when dropped. This crate knows no daemon and no store: the caller names the key folder
 //! and hands its keyring in.
 
+mod invitation;
+mod members;
+mod serial;
+mod words;
+
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
@@ -16,6 +21,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ed25519_dalek::{SECRET_KEY_LENGTH, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
+
+pub use invitation::{Invitation, InvitationError, Token};
+pub use members::{
+    Action, Change, ChangeHash, ListError, Member, MemberList, Members, Role, Signature,
+};
+pub use words::verification_words;
 
 /// The machine key's file in the key folder: the daemon's alone.
 pub const MACHINE_FILE: &str = "machine.key";
