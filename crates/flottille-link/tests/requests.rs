@@ -67,6 +67,9 @@ fn time(milliseconds: u64) -> SystemTime {
 
 const MINUTE: u64 = 60_000;
 
+/// The one refusal before the signature passes: it names nothing of the list.
+const NOT_SIGNED: &str = "refused: this request is not signed by a member";
+
 /// `method` with `params`, for the machine `pc`, signed by `key` at `at`, as the link carries it.
 fn signed(key: &DeviceKey, method: &str, params: Value, at: u64) -> String {
     let request = Request::sign(key, "7", "pc", method, &params, time(at)).unwrap();
@@ -85,7 +88,7 @@ fn refused(requests: &mut Requests, text: &str, members: &Members, now: u64) -> 
 fn a_signed_request_of_a_member_is_accepted() {
     let (pc, pixel, _, list) = three();
     let members = members(&list);
-    let mut requests = Requests::new();
+    let mut requests = Requests::new(time(0));
     let params = json!({"session": "s1", "text": "go on"});
     let text = signed(&pixel, "agent.send", params.clone(), 0);
 
@@ -105,6 +108,7 @@ fn a_signed_request_of_a_member_is_accepted() {
     assert!(
         request
             .signed_bytes()
+            .unwrap()
             .starts_with(b"flottille-request-v1\0")
     );
 }
@@ -113,7 +117,7 @@ fn a_signed_request_of_a_member_is_accepted() {
 fn an_unsigned_or_badly_signed_request_is_refused() {
     let (_, pixel, tablet, list) = three();
     let members = members(&list);
-    let mut requests = Requests::new();
+    let mut requests = Requests::new(time(0));
     let text = signed(&pixel, "agent.send", json!({"text": "go on"}), 0);
     let request: Request = serde_json::from_str(&text).unwrap();
 
@@ -127,7 +131,7 @@ fn an_unsigned_or_badly_signed_request_is_refused() {
     );
 
     let bad = |request: Request| serde_json::to_string(&request).unwrap();
-    let not_pixels = "refused: this request does not carry the signature of pixel";
+    let not_pixels = NOT_SIGNED;
 
     // A signature of zeros.
     let mut zeros = request.clone();
@@ -210,15 +214,12 @@ fn an_unsigned_or_badly_signed_request_is_refused() {
 #[test]
 fn a_request_of_a_key_not_in_the_list_or_removed_is_refused() {
     let (pc, _, tablet, mut list) = three();
-    let mut requests = Requests::new();
+    let mut requests = Requests::new(time(0));
     let stranger = key(9);
     let text = signed(&stranger, "agent.list", Value::Null, 0);
     assert_eq!(
         refused(&mut requests, &text, &members(&list), 0),
-        format!(
-            "refused: the device {} is not a member",
-            stranger.public().fingerprint()
-        )
+        NOT_SIGNED
     );
 
     let text = signed(&tablet, "agent.list", Value::Null, 0);
@@ -236,10 +237,7 @@ fn a_request_of_a_key_not_in_the_list_or_removed_is_refused() {
     let text = signed(&tablet, "agent.list", Value::Null, 0);
     assert_eq!(
         refused(&mut requests, &text, &members(&list), 0),
-        format!(
-            "refused: the device {} is not a member",
-            tablet.public().fingerprint()
-        )
+        NOT_SIGNED
     );
 }
 
@@ -247,7 +245,7 @@ fn a_request_of_a_key_not_in_the_list_or_removed_is_refused() {
 fn a_request_older_than_five_minutes_is_refused() {
     let (_, pixel, _, list) = three();
     let members = members(&list);
-    let mut requests = Requests::new();
+    let mut requests = Requests::new(time(0));
     let at = 10 * MINUTE;
 
     let old = signed(&pixel, "agent.list", Value::Null, at);
@@ -263,7 +261,7 @@ fn a_request_older_than_five_minutes_is_refused() {
 
     // Five minutes either way are within the window; on a memory whose clock was not moved past
     // it already.
-    let mut requests = Requests::new();
+    let mut requests = Requests::new(time(0));
     let late = signed(&pixel, "agent.list", Value::Null, at);
     assert!(
         requests
@@ -282,7 +280,7 @@ fn a_request_older_than_five_minutes_is_refused() {
 fn a_replayed_nonce_is_refused() {
     let (_, pixel, _, list) = three();
     let members = members(&list);
-    let mut requests = Requests::new();
+    let mut requests = Requests::new(time(0));
     let text = signed(&pixel, "agent.send", json!({"text": "go on"}), 0);
     assert!(requests.check(&text, "pc", &members, time(0)).is_ok());
 
@@ -297,18 +295,24 @@ fn a_replayed_nonce_is_refused() {
         "refused: this request is older than five minutes"
     );
 
-    // A clock set back does not bring it back: the memory forgot it once it was out of the window.
-    assert_eq!(
-        refused(&mut requests, &text, &members, MINUTE),
-        "refused: this request is older than five minutes"
+    // A clock set back by less than the window does not bring it back.
+    let mut requests = Requests::new(time(0));
+    let text = signed(&pixel, "agent.send", json!({"text": "go on"}), 0);
+    assert!(requests.check(&text, "pc", &members, time(0)).is_ok());
+    let later = signed(&pixel, "agent.list", Value::Null, 4 * MINUTE);
+    assert!(
+        requests
+            .check(&later, "pc", &members, time(4 * MINUTE))
+            .is_ok()
     );
+    assert_eq!(refused(&mut requests, &text, &members, MINUTE), replayed);
 }
 
 #[test]
 fn the_nonces_of_a_device_are_bounded_and_forgotten_after_the_window() {
     let (_, pixel, tablet, list) = three();
     let members = members(&list);
-    let mut requests = Requests::new();
+    let mut requests = Requests::new(time(0));
     for _ in 0..NONCES_PER_DEVICE {
         let text = signed(&pixel, "agent.list", Value::Null, 0);
         requests.check(&text, "pc", &members, time(0)).unwrap();
@@ -333,7 +337,7 @@ fn the_nonces_of_a_device_are_bounded_and_forgotten_after_the_window() {
 fn a_viewer_may_read_but_not_drive_and_the_refusal_says_which_role_may() {
     let (pc, pixel, tablet, list) = three();
     let members = members(&list);
-    let mut requests = Requests::new();
+    let mut requests = Requests::new(time(0));
 
     let text = signed(&tablet, "agent.list", Value::Null, 0);
     assert!(requests.check(&text, "pc", &members, time(0)).is_ok());
@@ -355,8 +359,8 @@ fn a_viewer_may_read_but_not_drive_and_the_refusal_says_which_role_may() {
         "refused: agent.nope is not a method of Flottille's"
     );
 
-    // The role is checked before the signature: a viewer's request to drive is refused for its
-    // role, signed or not.
+    // The role is checked after the signature: a request in a viewer's name that it did not sign
+    // learns nothing of its name or its role.
     let mut forged: Request =
         serde_json::from_str(&signed(&tablet, "agent.send", Value::Null, 0)).unwrap();
     forged.sig = Signature([0; 64]);
@@ -367,7 +371,7 @@ fn a_viewer_may_read_but_not_drive_and_the_refusal_says_which_role_may() {
             &members,
             0
         ),
-        "refused: tablet may only view: a controller or a runner may call agent.send"
+        NOT_SIGNED
     );
 }
 
@@ -375,7 +379,7 @@ fn a_viewer_may_read_but_not_drive_and_the_refusal_says_which_role_may() {
 fn every_method_of_the_catalogue_has_a_class() {
     let (_, pixel, tablet, list) = three();
     let members = members(&list);
-    let mut requests = Requests::new();
+    let mut requests = Requests::new(time(0));
     for (method, class) in METHODS {
         let text = signed(&pixel, method, Value::Null, 0);
         assert!(
@@ -394,4 +398,109 @@ fn every_method_of_the_catalogue_has_a_class() {
             ),
         }
     }
+}
+
+#[test]
+fn a_request_signed_before_the_receiver_started_is_refused() {
+    let (_, pixel, _, list) = three();
+    let members = members(&list);
+    let mut requests = Requests::new(time(0));
+    let text = signed(&pixel, "agent.send", json!({"text": "go on"}), 0);
+    assert!(requests.check(&text, "pc", &members, time(0)).is_ok());
+
+    // The receiver started again, its memory empty: what it may have served is refused.
+    let mut restarted = Requests::new(time(MINUTE));
+    assert_eq!(
+        refused(&mut restarted, &text, &members, MINUTE),
+        "refused: this request was signed before this machine started: send it again"
+    );
+    let again = signed(&pixel, "agent.send", json!({"text": "go on"}), MINUTE);
+    assert!(
+        restarted
+            .check(&again, "pc", &members, time(MINUTE))
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_clock_read_far_ahead_once_locks_no_device_out() {
+    let (_, pixel, _, list) = three();
+    let members = members(&list);
+    let mut requests = Requests::new(time(0));
+    let hour = 60 * MINUTE;
+    let ahead = signed(&pixel, "agent.list", Value::Null, hour);
+    assert!(requests.check(&ahead, "pc", &members, time(hour)).is_ok());
+
+    // The clock is right again: requests at the right time are heard.
+    let text = signed(&pixel, "agent.list", Value::Null, MINUTE);
+    assert!(requests.check(&text, "pc", &members, time(MINUTE)).is_ok());
+}
+
+#[test]
+fn a_refusal_shows_no_control_character_nor_a_long_text() {
+    let (pc, _, _, list) = three();
+    let members = members(&list);
+    let mut requests = Requests::new(time(0));
+    let shown = |sentence: String| {
+        assert!(
+            !sentence.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "{sentence:?}"
+        );
+        assert!(
+            sentence.chars().count() < 200,
+            "{} characters",
+            sentence.len()
+        );
+        sentence
+    };
+
+    // A method with a newline and an ANSI escape, and one of a megabyte.
+    let text = signed(&pc, "agent.\n\u{1b}[31mlist\u{202e}", Value::Null, 0);
+    let sentence = shown(refused(&mut requests, &text, &members, 0));
+    assert!(
+        sentence.contains("is not a method of Flottille's"),
+        "{sentence}"
+    );
+    let text = signed(&pc, &"a".repeat(1 << 20), Value::Null, 0);
+    shown(refused(&mut requests, &text, &members, 0));
+
+    // A machine so named, refused before any check.
+    let request = Request::sign(
+        &pc,
+        "7",
+        "pc\n\u{1b}[2J",
+        "agent.list",
+        &Value::Null,
+        time(0),
+    )
+    .unwrap();
+    let text = serde_json::to_string(&request).unwrap();
+    let sentence = shown(refused(&mut requests, &text, &members, 0));
+    assert!(sentence.contains("not for pc"), "{sentence}");
+    let request = Request::sign(
+        &pc,
+        "7",
+        &"b".repeat(1 << 20),
+        "agent.list",
+        &Value::Null,
+        time(0),
+    )
+    .unwrap();
+    shown(refused(
+        &mut requests,
+        &serde_json::to_string(&request).unwrap(),
+        &members,
+        0,
+    ));
+
+    // A text that is not a request, whose error would echo it.
+    let mut odd: Value = serde_json::from_str(&signed(&pc, "agent.list", Value::Null, 0)).unwrap();
+    odd.as_object_mut()
+        .unwrap()
+        .insert(format!("x\n\u{1b}[31m{}", "c".repeat(1 << 20)), Value::Null);
+    let sentence = shown(refused(&mut requests, &odd.to_string(), &members, 0));
+    assert!(
+        sentence.starts_with("refused: this is not a signed request"),
+        "{sentence}"
+    );
 }
