@@ -3,7 +3,7 @@
 //! 127.0.0.1 only. Flottille handles no network channel: no relay, no NAT traversal, no
 //! discovery; a machine dials the addresses it is given for a key.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -21,9 +21,15 @@ struct Machine {
 
 impl Machine {
     async fn new() -> Machine {
+        Machine::at("127.0.0.1").await
+    }
+
+    /// A machine listening on loopback at `ip`: another host, as the other side sees it.
+    async fn at(ip: &str) -> Machine {
         let state = tempfile::tempdir().unwrap();
         let key = MachineKey::load_or_make(&state.path().join("remote")).unwrap();
-        let endpoint = Endpoint::bind(&key, loopback()).unwrap();
+        let ip: IpAddr = ip.parse().unwrap();
+        let endpoint = Endpoint::bind(&key, SocketAddr::new(ip, 0)).unwrap();
         Machine {
             _state: state,
             endpoint,
@@ -178,40 +184,53 @@ async fn a_machine_answering_with_another_key_is_refused() {
     );
 }
 
-#[tokio::test]
-async fn a_stalled_handshake_does_not_stop_a_trusted_pair_from_linking() {
-    let (laptop, server) = (Machine::new().await, Machine::new().await);
-    let ours = Hello::ours("0.4.1");
-    // The start of a handshake, as a machine sends it when it dials: caught on a socket that
-    // never answers.
-    let trap = tokio::net::UdpSocket::bind(loopback()).await.unwrap();
-    let dialling = {
-        let (endpoint, key, at) = (
-            laptop.endpoint.clone(),
-            server.key(),
-            trap.local_addr().unwrap(),
-        );
-        let ours = ours.clone();
-        tokio::spawn(async move {
-            let _ = endpoint
-                .connect(key, &[at], Traffic::Machine, &ours, "trap")
+/// A host that answers the server's retry, then never finishes its handshake: a real client
+/// dialling through a relay at `ip`, which passes the server everything the server sends, and the
+/// client's first two datagrams only (the first, and the one that carries the retry's token).
+fn staller(ip: &'static str, server: SocketAddr, key: PublicKey) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let client = Machine::new().await;
+        let ip: IpAddr = ip.parse().unwrap();
+        let relay = tokio::net::UdpSocket::bind(SocketAddr::new(ip, 0))
+            .await
+            .unwrap();
+        let at = relay.local_addr().unwrap();
+        let dialling = async {
+            let _ = client
+                .endpoint
+                .connect(
+                    key,
+                    &[at],
+                    Traffic::Machine,
+                    &Hello::ours("0.4.1"),
+                    "server",
+                )
                 .await;
-        })
-    };
-    let mut start = vec![0u8; 4096];
-    let size = tokio::time::timeout(WAIT, trap.recv(&mut start))
-        .await
-        .unwrap()
-        .unwrap();
-    dialling.abort();
-    // Sent to the server from a socket that says nothing more: a handshake that stalls.
-    let staller = std::net::UdpSocket::bind(loopback()).unwrap();
-    staller
-        .send_to(&start[..size], server.addresses()[0])
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+            std::future::pending::<()>().await;
+        };
+        let relaying = async {
+            let (mut dialler, mut passed, mut datagram) = (None, 0, vec![0u8; 65536]);
+            loop {
+                let (size, from) = relay.recv_from(&mut datagram).await.unwrap();
+                if from == server {
+                    if let Some(dialler) = dialler {
+                        let _ = relay.send_to(&datagram[..size], dialler).await;
+                    }
+                } else {
+                    dialler = Some(from);
+                    if passed < 2 {
+                        passed += 1;
+                        let _ = relay.send_to(&datagram[..size], server).await;
+                    }
+                }
+            }
+        };
+        tokio::join!(dialling, relaying);
+    })
+}
 
-    let serving = serve(&server, laptop.key(), ours.clone());
+/// Dials `server` until it links; how long it took.
+async fn link_timed(laptop: &Machine, server: &Machine, ours: &Hello) -> (Link, Duration) {
     let started = Instant::now();
     let link = tokio::time::timeout(
         WAIT,
@@ -219,20 +238,136 @@ async fn a_stalled_handshake_does_not_stop_a_trusted_pair_from_linking() {
             server.key(),
             &server.addresses(),
             Traffic::Machine,
-            &ours,
+            ours,
             "server",
         ),
     )
     .await
-    .unwrap()
-    .unwrap();
+    .expect("the trusted pair links in time")
+    .expect("the trusted pair links");
+    (link, started.elapsed())
+}
+
+#[tokio::test]
+async fn a_stalled_handshake_does_not_stop_a_trusted_pair_from_linking() {
+    let (laptop, server) = (Machine::new().await, Machine::new().await);
+    let ours = Hello::ours("0.4.1");
+    let at = server.addresses()[0];
+    // Hosts that prove their address, then stall: fifteen from one address, three from another,
+    // more than the handshakes the server runs at once.
+    let mut stallers: Vec<_> = (0..15)
+        .map(|_| staller("127.0.0.2", at, server.key()))
+        .collect();
+    stallers.extend((0..3).map(|_| staller("127.0.0.3", at, server.key())));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let serving = serve(&server, laptop.key(), ours.clone());
+    let (link, took) = link_timed(&laptop, &server, &ours).await;
     serving.await.unwrap().unwrap();
     assert!(
-        started.elapsed() < Duration::from_secs(4),
-        "the trusted pair waited {:?}",
-        started.elapsed()
+        took < Duration::from_secs(3),
+        "the trusted pair waited {took:?}"
     );
     assert_eq!(link.peer(), server.key());
+    for staller in stallers {
+        staller.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_flood_of_untrusted_keys_does_not_stop_a_trusted_pair() {
+    let (laptop, server) = (Machine::new().await, Machine::new().await);
+    let ours = Hello::ours("0.4.1");
+    // The server refuses every key but the laptop's, as long as they come.
+    let (sender, mut trusted) = tokio::sync::mpsc::channel(1);
+    let refusing = {
+        let (endpoint, laptop, ours) = (server.endpoint.clone(), laptop.key(), ours.clone());
+        tokio::spawn(async move {
+            while let Some(accepting) = endpoint.accept().await {
+                if accepting.peer() != laptop {
+                    accepting.refuse("refused: this machine's key is not one of the user's");
+                    continue;
+                }
+                let _ = sender
+                    .send(accepting.handshake(&ours, "laptop").await)
+                    .await;
+            }
+        })
+    };
+    // Strangers, each with a key of its own, dialling again as soon as they are refused.
+    let mut strangers = Vec::new();
+    for _ in 0..20 {
+        let stranger = Machine::at("127.0.0.4").await;
+        let (key, at, ours) = (server.key(), server.addresses(), ours.clone());
+        strangers.push(tokio::spawn(async move {
+            loop {
+                let _ = stranger
+                    .endpoint
+                    .connect(key, &at, Traffic::Machine, &ours, "server")
+                    .await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let (link, took) = link_timed(&laptop, &server, &ours).await;
+    trusted.recv().await.unwrap().unwrap();
+    assert!(
+        took < Duration::from_secs(3),
+        "the trusted pair waited {took:?}"
+    );
+    assert_eq!(link.peer(), server.key());
+    for stranger in strangers {
+        stranger.abort();
+    }
+    refusing.abort();
+}
+
+#[tokio::test]
+async fn a_dialler_s_socket_takes_no_link_after_its_first_dial() {
+    let state = tempfile::tempdir().unwrap();
+    let key = MachineKey::load_or_make(&state.path().join("remote")).unwrap();
+    let dialler = Endpoint::dialler(&key).unwrap();
+    // Its first dial opens its socket: a trap catches where it dials from.
+    let trap = tokio::net::UdpSocket::bind(loopback()).await.unwrap();
+    let dialling = {
+        let (endpoint, at) = (dialler.clone(), trap.local_addr().unwrap());
+        let other = Machine::new().await;
+        let key = other.key();
+        tokio::spawn(async move {
+            let _other = other;
+            let _ = endpoint
+                .connect(key, &[at], Traffic::Machine, &Hello::ours("0.4.1"), "trap")
+                .await;
+        })
+    };
+    let mut datagram = vec![0u8; 4096];
+    let (_, socket) = tokio::time::timeout(WAIT, trap.recv_from(&mut datagram))
+        .await
+        .unwrap()
+        .unwrap();
+    dialling.abort();
+
+    // Dialled at that socket, with its own key: no link.
+    let other = Machine::new().await;
+    let tried = tokio::time::timeout(
+        WAIT,
+        other.endpoint.connect(
+            dialler.key(),
+            &[socket],
+            Traffic::Machine,
+            &Hello::ours("0.4.1"),
+            "dialler",
+        ),
+    )
+    .await
+    .expect("the dial ends");
+    assert!(tried.is_err(), "the dialler took a link");
+    let accepted = tokio::time::timeout(Duration::from_secs(1), dialler.accept())
+        .await
+        .expect("accept ends at once");
+    assert!(accepted.is_none());
 }
 
 #[tokio::test]

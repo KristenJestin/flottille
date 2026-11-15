@@ -232,6 +232,16 @@ fn key_of(der: &[u8]) -> Option<[u8; 32]> {
 pub(crate) struct Incoming(quinn::Incoming);
 
 impl Incoming {
+    /// The address it came from, proved by the retry.
+    pub(crate) fn from(&self) -> SocketAddr {
+        self.0.remote_address()
+    }
+
+    /// Refuses it at once, telling the other side.
+    pub(crate) fn refuse(self) {
+        self.0.refuse();
+    }
+
     pub(crate) async fn finish(self) -> Result<Conn, Failure> {
         self.0.await.map(Conn).map_err(failure)
     }

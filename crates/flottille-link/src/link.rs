@@ -7,6 +7,7 @@
 //! other way. The first stream is the handshake: the side that dials sends its hello, the other
 //! answers its own, and each chooses the protocol, or refuses, by itself.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -29,6 +30,9 @@ const HANDSHAKE: Duration = Duration::from_secs(5);
 /// The most links that came in whose TLS is under way at once: one that stalls holds a place,
 /// not the others.
 const HANDSHAKES: usize = 16;
+/// The most of them from one host (an IPv4 address, an IPv6 /64): a host that stalls its own
+/// cannot hold the places of the others.
+const HANDSHAKES_FROM_ONE: usize = 2;
 /// The codes a side closes a link with.
 const CLOSE_REFUSED: u32 = 1;
 const CLOSE_NEEDS_UPDATE: u32 = 2;
@@ -251,9 +255,12 @@ impl Endpoint {
 }
 
 /// Takes the links that come in, each TLS in a task of its own, so that one that stalls stops
-/// no other; until the endpoint is closed, or every copy of it dropped.
+/// no other; until the endpoint is closed, or every copy of it dropped. One that finds no place
+/// free, for all or for its host, is refused at once: the links that come in are still taken,
+/// and the one refused dials again.
 async fn take_in(transport: Arc<Transport>, accepted: tokio::sync::mpsc::Sender<Accepting>) {
     let places = Arc::new(tokio::sync::Semaphore::new(HANDSHAKES));
+    let hosts = Hosts::default();
     loop {
         let incoming = tokio::select! {
             incoming = transport.accept() => incoming,
@@ -262,12 +269,17 @@ async fn take_in(transport: Arc<Transport>, accepted: tokio::sync::mpsc::Sender<
         let Some(incoming) = incoming else {
             return;
         };
-        let Ok(place) = places.clone().acquire_owned().await else {
-            return;
+        let Some(host) = Host::take(&hosts, incoming.from().ip()) else {
+            incoming.refuse();
+            continue;
+        };
+        let Ok(place) = places.clone().try_acquire_owned() else {
+            incoming.refuse();
+            continue;
         };
         let accepted = accepted.clone();
         tokio::spawn(async move {
-            let _place = place;
+            let _places = (place, host);
             let Ok(Ok(conn)) = tokio::time::timeout(HANDSHAKE, incoming.finish()).await else {
                 return;
             };
@@ -291,6 +303,56 @@ async fn take_in(transport: Arc<Transport>, accepted: tokio::sync::mpsc::Sender<
                 ),
             }
         });
+    }
+}
+
+/// The places each host holds.
+type Hosts = Arc<std::sync::Mutex<HashMap<IpAddr, usize>>>;
+
+/// A place a host holds among the handshakes under way, let go when dropped.
+struct Host {
+    hosts: Hosts,
+    host: IpAddr,
+}
+
+impl Host {
+    /// A place for the host at `ip`, unless it holds all of its own.
+    fn take(hosts: &Hosts, ip: IpAddr) -> Option<Host> {
+        let host = host_of(ip);
+        let mut held = hosts.lock().unwrap();
+        let count = held.entry(host).or_default();
+        if *count >= HANDSHAKES_FROM_ONE {
+            return None;
+        }
+        *count += 1;
+        Some(Host {
+            hosts: hosts.clone(),
+            host,
+        })
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        let mut held = self.hosts.lock().unwrap();
+        if let Some(count) = held.get_mut(&self.host) {
+            *count -= 1;
+            if *count == 0 {
+                held.remove(&self.host);
+            }
+        }
+    }
+}
+
+/// The host an address is: an IPv4 address (mapped into IPv6 or not), or the /64 of an IPv6 one,
+/// which one host is given whole.
+fn host_of(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6((u128::from(v6) & !u128::from(u64::MAX)).into()),
+        },
     }
 }
 
