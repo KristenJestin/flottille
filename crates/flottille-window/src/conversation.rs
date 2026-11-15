@@ -5,8 +5,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use flottille_core::protocol::Event;
 use flottille_core::question;
+use flottille_protocol::Event;
 use serde_json::Value;
 
 use crate::runs::CommandRow;

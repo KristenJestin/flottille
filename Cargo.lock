@@ -2295,7 +2295,9 @@ name = "flottille-window"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "flottille-client",
  "flottille-core",
+ "flottille-protocol",
  "futures",
  "gpui-design-system",
  "gpui-kit",

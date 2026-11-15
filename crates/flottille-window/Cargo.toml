@@ -13,7 +13,9 @@ frames = ["gpui-kit/profiler"]
 
 [dependencies]
 base64 = "0.22.1"
+flottille-client = { version = "0.1.0", path = "../flottille-client" }
 flottille-core = { version = "0.1.0", path = "../flottille-core" }
+flottille-protocol = { version = "0.1.0", path = "../flottille-protocol" }
 # The components, tokens and motion of the window, shared with other GPUI applications; on GPUI
 # Fast, with Omarchy as a desktop theme source (its default `omarchy` feature).
 gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.2.0-beta.12" }
