@@ -3246,6 +3246,16 @@ impl Store {
         Ok(changed == 1)
     }
 
+    /// An accepted proposal whose rule could not be written is open again, as it was proposed.
+    pub fn reopen_rule_proposal(&mut self, id: u64, rule: &str) -> Result<bool> {
+        let changed = self.connection.execute(
+            "UPDATE rule_proposals SET state = 'open', rule = ?2, decided_at = NULL \
+             WHERE id = ?1 AND state = 'accepted'",
+            params![id, rule],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Every row of the turns' usage, in the order they were recorded.
     pub fn turn_usage(&self) -> Result<Vec<TurnUsage>> {
         let mut statement = self.connection.prepare_cached(

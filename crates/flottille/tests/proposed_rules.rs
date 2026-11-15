@@ -47,6 +47,11 @@ fn user_judged_by(judge: Option<Value>) -> User {
         {"mcp": {"tool": "fs_read", "arguments": {"path": long}}},
         {"say": "done"}
     ]}));
+    // A tool the agent made up: its name is the agent's own text.
+    turns.push(json!({"when": "call the made-up tool", "do": [
+        {"mcp": {"tool": "wipe_everything_now", "arguments": {}}},
+        {"say": "done"}
+    ]}));
     turns.push(json!({"when": "write it", "do": [
         {"mcp": {"tool": "run", "arguments": {"line": format!("echo {TOKEN} | tee notes.txt")}}},
         {"say": "done"}
@@ -359,4 +364,107 @@ fn a_refusal_s_stored_error_never_holds_part_of_a_secret() {
     assert!(!shown.contains("fakefakefake"), "{shown}");
     let prompts = judge_prompts(&user);
     assert!(!prompts[0].contains("fakefakefake"), "{}", prompts[0]);
+}
+
+#[test]
+fn an_invented_tool_name_never_makes_a_proposal() {
+    let user = user(true);
+    for _ in 0..3 {
+        session(&user, "call the made-up tool");
+    }
+    // The refusals were made, and recorded under the name the agent gave.
+    let refused = store(&user).refused_calls("app", 0).unwrap();
+    assert_eq!(refused.len(), 3, "{refused:?}");
+    assert!(
+        refused
+            .iter()
+            .all(|(e, _)| e.data["tool"] == "wipe_everything_now")
+    );
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(proposals(&user).is_empty());
+    assert!(judge_prompts(&user).is_empty());
+}
+
+#[test]
+fn a_judge_that_answers_none_proposes_nothing() {
+    for answer in ["NONE", "none.", "  None\n"] {
+        let user = user_judged_by(Some(json!([{"say": answer}])));
+        three_sessions_refused(&user);
+        eventually("the judge asked", || judge_prompts(&user).len() == 1);
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(proposals(&user).is_empty(), "{answer:?}");
+    }
+}
+
+#[test]
+fn two_accepts_add_the_rule_once() {
+    let user = user(true);
+    three_sessions_refused(&user);
+    eventually("the proposal", || proposals(&user).len() == 1);
+    let id = proposals(&user)[0]["id"].clone();
+
+    let barrier = std::sync::Barrier::new(6);
+    let answers: Vec<_> = std::thread::scope(|scope| {
+        let tasks: Vec<_> = (0..6)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    user.call("rules.proposal.accept", json!({"proposal": id}))
+                })
+            })
+            .collect();
+        tasks.into_iter().map(|t| t.join().unwrap()).collect()
+    });
+    assert_eq!(
+        answers.iter().filter(|a| a.is_ok()).count(),
+        1,
+        "{answers:?}"
+    );
+    let shown = user.call("rules.show", json!({"project": "app"})).unwrap();
+    assert_eq!(
+        shown["text"].as_str().unwrap().matches(RULE).count(),
+        1,
+        "{shown}"
+    );
+}
+
+#[test]
+fn an_accept_after_a_dismiss_is_refused_and_writes_nothing() {
+    let user = user(true);
+    three_sessions_refused(&user);
+    eventually("the proposal", || proposals(&user).len() == 1);
+    let id = proposals(&user)[0]["id"].clone();
+    let before = user.call("rules.show", json!({"project": "app"})).unwrap();
+
+    user.call("rules.proposal.dismiss", json!({"proposal": id}))
+        .unwrap();
+    let accepted = user.call("rules.proposal.accept", json!({"proposal": id}));
+    assert!(accepted.is_err(), "{accepted:?}");
+    assert_eq!(
+        user.call("rules.show", json!({"project": "app"})).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn an_accept_that_cannot_write_leaves_the_proposal_open() {
+    let user = user(true);
+    three_sessions_refused(&user);
+    eventually("the proposal", || proposals(&user).len() == 1);
+    let id = proposals(&user)[0]["id"].clone();
+
+    // More than the rules may hold.
+    let accepted = user.call(
+        "rules.proposal.accept",
+        json!({"proposal": id, "text": "x".repeat(100_000)}),
+    );
+    assert!(accepted.is_err(), "{accepted:?}");
+    let open = proposals(&user);
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0]["state"], "open");
+    assert_eq!(open[0]["rule"], RULE);
+    // It can still be accepted.
+    user.call("rules.proposal.accept", json!({"proposal": id}))
+        .unwrap();
+    assert!(proposals(&user).is_empty());
 }

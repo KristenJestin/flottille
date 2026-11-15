@@ -336,6 +336,21 @@ pub fn set_project(
     })
 }
 
+/// Adds `rule` at the end of the project's rules, as the file says them now: read and written
+/// under the one lock of the project's file, so that a rule set at the same time is never lost.
+pub fn append_project(daemon: &Daemon, name: &str, rule: &str) -> Result<Project, Failure> {
+    projects::rewrite(daemon, name, |project, document| {
+        let own = project.rules.clone().unwrap_or_default();
+        let text = match own.trim_end() {
+            "" => rule.to_owned(),
+            own => format!("{own}\n\n{rule}"),
+        };
+        check(&text).map_err(Failure::refused)?;
+        document["rules"] = toml_edit::value(text);
+        Ok(())
+    })
+}
+
 /// Removes the project's rules and its `rules_alone`: it gets the global rules again.
 pub fn reset_project(daemon: &Daemon, name: &str) -> Result<Project, Failure> {
     projects::rewrite(daemon, name, |_, document| {

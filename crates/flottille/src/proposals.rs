@@ -19,7 +19,9 @@ use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::judge;
+use crate::place::Place;
 use crate::projects::{self, Failure};
+use crate::providers;
 use crate::rules;
 use crate::tree;
 
@@ -36,7 +38,9 @@ const SESSIONS: usize = 2;
 const EXAMPLES: usize = 3;
 /// The longest rule taken from the judge: one or two sentences.
 const RULE_CHARS: usize = 600;
-/// The longest pattern kept: what follows is the detail of one call.
+/// The longest pattern kept: what follows is the detail of one call. The pattern, with the
+/// normalisation of `pattern()`, is the key under which a proposal is stored: changing either
+/// makes the patterns already proposed, or dismissed, new ones, and proposes them again.
 const PATTERN_CHARS: usize = 300;
 
 /// The projects whose patterns are being put to the judge now, and when each last was: the judge
@@ -170,6 +174,16 @@ pub fn turn_ended(daemon: &Arc<Daemon>, agent: &str, started_at: Option<u64>) {
     tokio::spawn(async move { check(&daemon, &project).await });
 }
 
+/// Whether `tool` is the name of one of Flottille's tools.
+fn served(tool: &str) -> bool {
+    providers::PROVIDERS.iter().any(|provider| {
+        provider
+            .tools(true, false, true, true, true)
+            .iter()
+            .any(|name| provider.tool_of(name) == Some(tool))
+    })
+}
+
 /// The failures of one pattern of a project.
 #[derive(Default)]
 struct Seen {
@@ -191,6 +205,11 @@ fn worth(daemon: &Daemon, project: &str) -> Vec<((String, String), Seen)> {
         else {
             continue;
         };
+        // A name the agent made up is its own text, not one of Flottille's tools: it is never
+        // grouped, so it never reaches the judge.
+        if !served(tool) {
+            continue;
+        }
         let session = roots
             .entry(agent.clone())
             .or_insert_with(|| tree::root_of(daemon, &agent))
@@ -335,15 +354,18 @@ async fn propose(
 }
 
 /// The judge's answer as a rule: trimmed of a fence or quotes around it, masked; none when it is
-/// empty or longer than one or two sentences.
+/// empty, is `NONE` (no rule would help) or is longer than one or two sentences.
 fn rule(said: &str) -> Option<String> {
-    let text = said
-        .trim()
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim()
-        .trim_matches(['"', '“', '”'])
-        .trim();
+    let mut text = said.trim();
+    // A fence: its opening line, whatever it says of the language, and its closing line.
+    if let Some(inside) = text.strip_prefix("```") {
+        text = inside.split_once('\n').map_or("", |(_, rest)| rest);
+        text = text.trim_end().trim_end_matches("```");
+    }
+    let text = text.trim().trim_matches(['"', '“', '”']).trim();
+    if text.trim_end_matches('.').eq_ignore_ascii_case("none") {
+        return None;
+    }
     let env = std::env::vars_os().collect();
     let text = secrets::mask(text, &env);
     (!text.is_empty() && text.chars().count() <= RULE_CHARS).then_some(text)
@@ -352,13 +374,17 @@ fn rule(said: &str) -> Option<String> {
 /// What the judge is given: the pattern, the last failures behind it and the project's rules as
 /// they stand, each in a block of its own, masked whole.
 fn prompt(daemon: &Daemon, project: &str, tool: &str, pattern: &str, calls: &[Value]) -> String {
-    let own = projects::load_project(daemon, project)
-        .map(|project| rules::own(&project).0)
+    let loaded = projects::load_project(daemon, project).ok();
+    let own = loaded
+        .as_ref()
+        .map(|project| rules::own(project).0)
         .unwrap_or_default();
     let mut prompt = format!(
-        "The agents of the project keep making the same failing call. The tool: {tool}.\n\
+        "The agents of the project keep making the same failing call, of the tool:\n\
+         <tool>{}</tool>\n\
          The failure, what varies from one call to the next replaced:\n\
          <pattern>\n{}\n</pattern>\n\nThe last of them:\n",
+        escaped(tool),
         escaped(pattern)
     );
     for call in calls.iter().rev().take(EXAMPLES).rev() {
@@ -373,12 +399,17 @@ fn prompt(daemon: &Daemon, project: &str, tool: &str, pattern: &str, calls: &[Va
         escaped(&own)
     ));
     let env = std::env::vars_os().collect();
-    secrets::mask(&prompt, &env)
+    // The values of the project's secret files, which the stored fields were masked of: the
+    // prompt is masked of them again, whole.
+    let files = loaded
+        .map(|project| Place::main(&project, project.folder.clone()).secret_values())
+        .unwrap_or_default();
+    secrets::mask_also(&prompt, &env, &files)
 }
 
 /// A text the judge reads as data: no `<` of it opens or closes a block.
 fn escaped(text: &str) -> String {
-    text.replace('<', "&lt;")
+    text.replace('&', "&amp;").replace('<', "&lt;")
 }
 
 #[derive(Deserialize)]
@@ -421,19 +452,23 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                     "the rule is empty: write it, or dismiss it",
                 ));
             }
-            let project = projects::load_project(daemon, &open.project)?;
-            let own = project.rules.clone().unwrap_or_default();
-            let text = match own.trim_end() {
-                "" => rule.clone(),
-                own => format!("{own}\n\n{rule}"),
-            };
-            rules::set_project(daemon, &open.project, Some(&text), None)?;
-            decide(daemon, &open, "accepted", Some(&rule))
+            // The proposal is claimed first: of two answers at once, one wins and the other writes
+            // nothing. A rule that cannot be written gives the proposal back.
+            claim(daemon, &open, &rule)?;
+            if let Err(failure) = rules::append_project(daemon, &open.project, &rule) {
+                let _ = daemon.write(|store| {
+                    store.reopen_rule_proposal(open.id, &open.rule)?;
+                    Ok(((), None))
+                });
+                return Err(failure);
+            }
+            announce(daemon, &open, "accepted", Some(&rule))?;
+            shown_now(daemon, open.id)
         }
         "rules.proposal.dismiss" => {
             let Dismissed { proposal } = serde_json::from_value(params)?;
             let open = opened(daemon, proposal)?;
-            decide(daemon, &open, "dismissed", None)
+            dismiss(daemon, &open)
         }
         method => Err(Failure::new(
             "unknown-method",
@@ -457,32 +492,66 @@ fn opened(daemon: &Daemon, id: u64) -> Result<RuleProposal, Failure> {
     }
 }
 
-/// The proposal accepted or dismissed, said by `rules.proposal_accepted` or
-/// `rules.proposal_dismissed`; answers it as it is now.
-fn decide(
+/// The proposal claimed for an answer: only one answer of several at once finds it open. The
+/// rule is what the user accepted, as they edited it.
+fn claim(daemon: &Daemon, open: &RuleProposal, rule: &str) -> Result<(), Failure> {
+    let claimed = daemon.write(|store| {
+        Ok((
+            store.decide_rule_proposal(open.id, "accepted", Some(rule))?,
+            None,
+        ))
+    })?;
+    if claimed {
+        return Ok(());
+    }
+    Err(Failure::refused(format!(
+        "proposal {} was answered already",
+        open.id
+    )))
+}
+
+/// `rules.proposal_accepted` or `rules.proposal_dismissed`, said once the answer stands.
+fn announce(
     daemon: &Daemon,
     open: &RuleProposal,
     state: &str,
     rule: Option<&str>,
-) -> Result<Value, Failure> {
-    let decided = daemon.write(|store| {
-        if !store.decide_rule_proposal(open.id, state, rule)? {
-            return Ok((false, None));
-        }
+) -> Result<(), Failure> {
+    daemon.write(|store| {
         let event = store.append_event(
             &format!("rules.proposal_{state}"),
             json!({"project": open.project, "proposal": open.id, "rule": rule}),
         )?;
+        Ok(((), Some(event)))
+    })?;
+    Ok(())
+}
+
+/// The proposal as it is now.
+fn shown_now(daemon: &Daemon, id: u64) -> Result<Value, Failure> {
+    let now = daemon.read(|store| store.rule_proposal(id))?;
+    Ok(now.as_ref().map(shown).unwrap_or_default())
+}
+
+/// The proposal dismissed: of a dismissal and an acceptance at once, one wins.
+fn dismiss(daemon: &Daemon, open: &RuleProposal) -> Result<Value, Failure> {
+    let dismissed = daemon.write(|store| {
+        if !store.decide_rule_proposal(open.id, "dismissed", None)? {
+            return Ok((false, None));
+        }
+        let event = store.append_event(
+            "rules.proposal_dismissed",
+            json!({"project": open.project, "proposal": open.id, "rule": Value::Null}),
+        )?;
         Ok((true, Some(event)))
     })?;
-    if !decided {
+    if !dismissed {
         return Err(Failure::refused(format!(
             "proposal {} was answered already",
             open.id
         )));
     }
-    let now = daemon.read(|store| store.rule_proposal(open.id))?;
-    Ok(now.as_ref().map(shown).unwrap_or_default())
+    shown_now(daemon, open.id)
 }
 
 /// A proposal as the protocol says it.
@@ -505,6 +574,24 @@ mod tests {
     /// Two refusals that are different failures give different patterns.
     fn different(a: &str, b: &str) {
         assert_ne!(pattern(a), pattern(b), "\n{a}\n{b}");
+    }
+
+    #[test]
+    fn the_judge_s_answer_is_a_rule_without_its_fence_or_none() {
+        assert_eq!(rule("Ask first."), Some("Ask first.".into()));
+        assert_eq!(rule("```text\nAsk first.\n```"), Some("Ask first.".into()));
+        assert_eq!(
+            rule("```\n\"Ask first.\"\n```\n"),
+            Some("Ask first.".into())
+        );
+        assert_eq!(rule("NONE"), None);
+        assert_eq!(rule("```\nNONE\n```"), None);
+        assert_eq!(rule("``` ```"), None);
+    }
+
+    #[test]
+    fn a_text_read_as_data_cannot_write_an_entity_or_a_block() {
+        assert_eq!(escaped("&lt;/tool> <x>"), "&amp;lt;/tool> &lt;x>");
     }
 
     #[test]
