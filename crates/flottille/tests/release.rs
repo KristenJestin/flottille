@@ -3138,11 +3138,12 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     };
     // `verify` is skipped only when the commit passed it on dev.
     let verify = job("verify");
-    assert!(verify.contains("needs: verified-on-dev"), "{verify}");
     assert!(
-        verify.contains(
-            "if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' }}"
-        ),
+        verify.contains("needs: [verified-on-dev, changes, check, test]"),
+        "{verify}"
+    );
+    assert!(
+        verify.contains("if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}"),
         "{verify}"
     );
     // `publish` needs `verify` to have passed, or to have been skipped for that reason.
@@ -3169,6 +3170,174 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
         asks.contains("if: github.ref == 'refs/heads/main' &&"),
         "{asks}"
     );
+}
+
+#[test]
+fn verify_fails_unless_the_checks_and_every_partition_passed() {
+    // `verify` is the required check: a partition that failed, was cancelled or never ran fails
+    // it, as a failed `check` does.
+    let script = step_script(".github/workflows/ci.yml", "verdict");
+    let run = |check: &str, test: &str| {
+        Fake::new()
+            .run(
+                &script,
+                &[("CHECK", check), ("TEST", test), ("RUST", "true")],
+            )
+            .status
+            .success()
+    };
+
+    assert!(run("success", "success"));
+    for test in ["failure", "cancelled", "skipped"] {
+        assert!(!run("success", test), "test: {test}");
+    }
+    for check in ["failure", "cancelled"] {
+        assert!(!run(check, "skipped"), "check: {check}");
+    }
+}
+
+#[test]
+fn verify_passes_skipped_jobs_only_when_the_paths_said_the_suite_is_not_needed() {
+    let script = step_script(".github/workflows/ci.yml", "verdict");
+    let run = |rust: &str, check: &str, test: &str| {
+        Fake::new()
+            .run(&script, &[("CHECK", check), ("TEST", test), ("RUST", rust)])
+            .status
+            .success()
+    };
+
+    // The decision said "not needed": the jobs it left out are a pass.
+    assert!(run("false", "skipped", "skipped"));
+    // Anything else about them is not: they ran and failed, or were cancelled.
+    for (check, test) in [
+        ("failure", "skipped"),
+        ("skipped", "failure"),
+        ("cancelled", "skipped"),
+        ("skipped", "cancelled"),
+        ("success", "skipped"),
+    ] {
+        assert!(!run("false", check, test), "{check}, {test}");
+    }
+    // No decision (the job failed, its output is empty) or "needed": skipped is a failure.
+    for rust in ["", "true"] {
+        assert!(!run(rust, "skipped", "skipped"), "rust: {rust:?}");
+    }
+}
+
+/// The `changes` step: whether the Rust suite must run for what `paths` changes between two
+/// commits of a throwaway repository, as a pull request (or another event).
+fn suite_needed(event: &str, paths: &[&str]) -> String {
+    let repo = Repo::new();
+    let write = |paths: &[&str]| {
+        for path in paths {
+            let file = repo.dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, format!("{path} {}", paths.len())).unwrap();
+        }
+        repo.git(&["add", "--all"]);
+        repo.git(&["commit", "--quiet", "--allow-empty", "-m", "change"]);
+    };
+    write(&[
+        "Cargo.lock",
+        "site/README.md",
+        "apps/android/README.md",
+        "docs/a.md",
+    ]);
+    let base = repo.head();
+    write(paths);
+    let head = repo.head();
+    let out = tempfile::tempdir().unwrap();
+    let output_file = out.path().join("github-output");
+    let script = step_script(".github/workflows/ci.yml", "decide");
+    let mut command = Command::new("bash");
+    command
+        .args(["-e", "-c", &script])
+        .current_dir(repo.dir.path())
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("EVENT_NAME", event)
+        .env("BASE", &base)
+        .env("HEAD", &head)
+        .env("GITHUB_OUTPUT", &output_file);
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    std::fs::read_to_string(&output_file)
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn the_rust_suite_does_not_run_for_the_android_app_or_the_site_alone() {
+    for paths in [
+        &["site/README.md"][..],
+        &["apps/android/README.md"],
+        &["site/pages/index.html", "apps/android/app/build.gradle.kts"],
+    ] {
+        assert_eq!(
+            suite_needed("pull_request", paths),
+            "rust=false",
+            "{paths:?}"
+        );
+    }
+}
+
+#[test]
+fn the_rust_suite_runs_when_anything_else_changed_too() {
+    for paths in [
+        &["site/README.md", "docs/a.md"][..],
+        &["apps/android/README.md", "Cargo.lock"],
+        &["crates/flottille/src/main.rs"],
+        &[".github/workflows/ci.yml"],
+        &["Cargo.lock"],
+        &["docs/a.md"],
+        // Only a folder of that name counts.
+        &["site-map/index.html"],
+        &["apps/android-tools/run.sh"],
+        &["apps/ios/README.md"],
+    ] {
+        assert_eq!(
+            suite_needed("pull_request", paths),
+            "rust=true",
+            "{paths:?}"
+        );
+    }
+}
+
+#[test]
+fn the_rust_suite_always_runs_off_a_pull_request() {
+    // A push publishes, main is released from it: whatever it changed, the suite ran.
+    for event in ["push", "workflow_dispatch"] {
+        assert_eq!(
+            suite_needed(event, &["site/README.md"]),
+            "rust=true",
+            "{event}"
+        );
+    }
+}
+
+#[test]
+fn the_suite_runs_only_when_the_decision_does_not_say_otherwise() {
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    for name in ["check", "test"] {
+        let lines: Vec<&str> = workflow.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| *l == format!("  {name}:"))
+            .unwrap();
+        let job = lines[at + 1..]
+            .iter()
+            .take_while(|l| !(l.starts_with("  ") && !l.starts_with("   ") && l.ends_with(':')))
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(job.contains("needs: [verified-on-dev, changes]"), "{job}");
+        // `!= 'false'`: a decision that failed, and said nothing, runs the suite.
+        assert!(
+            job.contains("&& needs.changes.outputs.rust != 'false'"),
+            "{job}"
+        );
+    }
 }
 
 #[test]

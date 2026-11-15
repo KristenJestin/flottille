@@ -10,8 +10,7 @@ type Recogniser = fn(code: Option<&str>, text: &str) -> Option<&'static str>;
 /// The recognisers, by provider: another provider's wording is one more entry.
 const RECOGNISERS: &[(&str, Recogniser)] = &[("claude", claude), ("codex", codex)];
 
-pub const CLAUDE_LOGIN: &str =
-    "Claude's login expired: sign in again (run claude and /login), then send your message again";
+pub const CLAUDE_LOGIN: &str = "Claude's login expired: sign in again (run claude and /login)";
 
 /// Claude Code's kinds of error for a sign-in gone or refused, which the bridge passes as the
 /// failed prompt's code (`bridge.rs`, signed out); its words only when it passed none, as for a
@@ -31,8 +30,7 @@ fn claude(code: Option<&str>, text: &str) -> Option<&'static str> {
     login.then_some(CLAUDE_LOGIN)
 }
 
-const CODEX_LOGIN: &str =
-    "Codex's login expired: sign in again (run codex login), then send your message again";
+const CODEX_LOGIN: &str = "Codex's login expired: sign in again (run codex login)";
 
 /// Codex's account signed out, as the bridge tags it (`codex_bridge.rs`, `unauthorized`): its
 /// text can hold any number.

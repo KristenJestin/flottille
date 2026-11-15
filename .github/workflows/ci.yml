@@ -68,48 +68,152 @@ jobs:
             echo "::notice::No successful push run of $GITHUB_SHA on dev: verify runs here."
           fi
 
+  # Whether the Rust suite has anything to say about this change: a pull request that touches
+  # `apps/android/` and `site/` only (docs/remote.md, "The repository") leaves it out. Anything
+  # else runs it, and so does every push and every manual run: a push publishes, and main is
+  # released from a commit that ran it. A failure here says nothing (`rust` stays empty): the
+  # suite then runs, as if it had said so.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.decide.outputs.rust }}
+    steps:
+      - if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Does the Rust suite have to run
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != pull_request ]; then
+            echo "::notice::$EVENT_NAME: the Rust suite runs."
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Not read as a stream: a failure of git must fail this step, not say "nothing changed".
+          files=$(git diff --name-only --no-renames "$BASE...$HEAD")
+          rust=false
+          while IFS= read -r path; do
+            case "$path" in
+              apps/android/* | site/*) ;;
+              *)
+                echo "::notice::${path:-no file}: the Rust suite runs."
+                rust=true
+                break
+                ;;
+            esac
+          done <<< "$files"
+          # A change of no file at all is not one to skip the suite for.
+          if [ -z "$files" ]; then rust=true; fi
+          if [ "$rust" = false ]; then echo "::notice::Only apps/android/ and site/ changed: the Rust suite does not run."; fi
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+
   # No real agent, no real configuration: the suites run against a fake ACP agent and throwaway
-  # repositories (see AGENTS.md, Testing). Skipped until the Cargo workspace exists.
-  verify:
-    needs: verified-on-dev
+  # repositories (see AGENTS.md, Testing).
+  #
+  # The suite is split so that a pull request does not wait for every test binary one after the
+  # other on one runner: the matrix `test` builds the tests on six runners at once and each runs
+  # a sixth of them (`cargo nextest run --partition count:k/6`), `check` runs the formatting and
+  # clippy beside them, and `verify`, the required check, reports what they all said. Each
+  # partition builds the tests itself, from the cache: about four minutes, when an archive built
+  # once (6 GB, 37 GB extracted) took longer to pack, upload, download and extract.
+  check:
+    needs: [verified-on-dev, changes]
     # `verified-on-dev` is skipped off main: `!cancelled()` keeps that from skipping this job.
-    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' }}
+    # Left out only when `changes` said so, not when it said nothing.
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' }}
     runs-on: ubuntu-latest
     env:
       # An incremental cache is only written here, never reused by the next run.
       CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v4
-      - name: Is there a Cargo workspace yet
-        id: cargo
-        run: if [ -f Cargo.toml ]; then echo "present=true" >> "$GITHUB_OUTPUT"; fi
-      - if: steps.cargo.outputs.present == 'true'
-        run: rustup component add rustfmt clippy
-      - if: steps.cargo.outputs.present == 'true'
-        uses: Swatinem/rust-cache@v2
+      - run: rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
         with:
           # The key does not follow Cargo.toml: bump this one when a profile changes, or the
           # cache keeps the artefacts of the old profiles and never saves the new ones.
           prefix-key: v1-rust
+          # Clippy's own artefacts, apart from the tests' (`test`).
+          shared-key: check
       # The window links against fontconfig and freetype; GPUI loads Wayland and Vulkan at run
       # time and opens no window here: its tests use GPUI's own test platform.
       - name: Have the window's system libraries
-        if: steps.cargo.outputs.present == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
-      - if: steps.cargo.outputs.present == 'true'
-        run: cargo fmt --check
-      - if: steps.cargo.outputs.present == 'true'
-        run: cargo clippy --all-targets --locked -- -D warnings
-      - if: steps.cargo.outputs.present == 'true'
-        run: cargo test --locked
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
       # The margin left on the runner, read even when a step above failed.
       - name: Disk left
         if: always()
         run: df -h /
         # A failure to print it must not hide the verdict above.
         continue-on-error: true
+
+  test:
+    needs: [verified-on-dev, changes]
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Every partition says what fails in it, not only the first one to fail.
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4, 5, 6]
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          # The name of the job that wrote the cache before the suite was split: the
+          # dependencies already cached are kept. The partitions build the same thing: one saves.
+          shared-key: verify
+          save-if: ${{ matrix.partition == 1 }}
+      - name: Have the window's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+      - run: cargo nextest run --locked --partition count:${{ matrix.partition }}/6 --no-fail-fast
+      # nextest does not run doc tests: one partition runs them, whatever its tests said.
+      - if: ${{ !cancelled() && matrix.partition == 1 }}
+        run: cargo test --doc --locked
+      - name: Disk left
+        if: always()
+        run: df -h /
+        continue-on-error: true
+
+  # The required check: one job that always ends, success or failure, whatever happened to the
+  # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
+  # `check` and `test` skipped are a pass only when `changes` said the suite is not needed.
+  verify:
+    needs: [verified-on-dev, changes, check, test]
+    # Skipped only when this commit passed it on dev (on main, see `verified-on-dev`).
+    if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Did the checks and every partition pass
+        id: verdict
+        env:
+          CHECK: ${{ needs.check.result }}
+          TEST: ${{ needs.test.result }}
+          RUST: ${{ needs.changes.outputs.rust }}
+        run: |
+          if [ "$CHECK" = success ] && [ "$TEST" = success ]; then exit 0; fi
+          if [ "$RUST" = false ] && [ "$CHECK" = skipped ] && [ "$TEST" = skipped ]; then
+            echo "::notice::The Rust suite was not needed for this change."
+            exit 0
+          fi
+          echo "::error::check: $CHECK, test: $TEST, rust suite needed: ${RUST:-unknown}."
+          exit 1
 
   # The packages (docs/releases.md): main is stable, dev beta, a feature branch its own alpha.
   # `build` runs the branch's code with a token that can only read; `publish`, once `verify`

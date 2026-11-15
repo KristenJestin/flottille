@@ -658,7 +658,7 @@ async fn client(
 
 // ── The sign-in ──────────────────────────────────────────────────────────────────────────────
 
-fn random(bytes: usize) -> Result<String, String> {
+pub(super) fn random(bytes: usize) -> Result<String, String> {
     use std::io::Read;
     let mut drawn = vec![0u8; bytes];
     std::fs::File::open("/dev/urandom")
