@@ -276,7 +276,7 @@ impl Composer {
                     InputEvent::Change => {
                         let has_text = !field.read(cx).value().trim().is_empty();
                         this.set_flag(|this| &mut this.has_text, has_text, cx);
-                        this.attached.follow(window, cx);
+                        this.attached.follow(cx);
                     }
                     InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
                     InputEvent::Focus => this.set_flag(|this| &mut this.focused, true, cx),
