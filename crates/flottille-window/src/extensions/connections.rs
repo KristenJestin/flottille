@@ -2128,7 +2128,7 @@ impl ConnectionsSection {
                     self.reach == Reach::Command,
                     headed,
                 )
-                .gap(space::LG),
+                .space(space::LG),
             )
             .child(problem_line(
                 "connection-headed-why",
