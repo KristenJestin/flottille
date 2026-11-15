@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use gpui_design_system::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, Section,
-    Select, SelectOption, Toast, icon, palette, presence, space, toast,
+    Select, SelectOption, Toast, icon, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
@@ -105,6 +105,9 @@ pub struct VaultSection {
     bound: Option<String>,
     /// Why an agent asked for the new entry, when the dialog was opened from its request.
     why: Option<String>,
+    /// The host the request's URL sends the secret to, as the daemon read it, and that URL: the
+    /// host is said while the URL is the one asked.
+    host: Option<(String, String)>,
     saving: bool,
     writing: Option<Writing>,
     form_error: Option<SharedString>,
@@ -130,6 +133,7 @@ impl VaultSection {
             project: None,
             bound: None,
             why: None,
+            host: None,
             saving: false,
             writing: None,
             form_error: None,
@@ -216,6 +220,13 @@ impl VaultSection {
                         }
                     }));
             }
+            // The host asked is said while the URL is the one asked.
+            self._subscriptions
+                .push(cx.subscribe(&url, |this, _, event, cx| {
+                    if matches!(event, InputEvent::Change) && this.host.is_some() {
+                        cx.notify();
+                    }
+                }));
             self.fields = Some(Fields {
                 name,
                 secret,
@@ -241,11 +252,13 @@ impl VaultSection {
     }
 
     /// "New entry", prefilled with `entry` from an agent's request for it (`vault_ask.rs`), `why`
-    /// under what it is for: the user may change every field before Add, or close it.
+    /// under what it is for, and `host`, where the daemon reads its URL sends the secret: the
+    /// user may change every field before Add, remove the binding, or close it.
     pub fn add_prefilled(
         &mut self,
         entry: &VaultEntry,
         why: Option<String>,
+        host: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -253,6 +266,7 @@ impl VaultSection {
         self.form = Form::Editing(None);
         self.bound = entry.bound.clone();
         self.why = why;
+        self.host = host.zip(entry.url.clone());
     }
 
     /// The project to go back to, once the dialog it was opened for is closed (an entry set).
@@ -280,6 +294,7 @@ impl VaultSection {
         self.come_back = None;
         self.bound = None;
         self.why = None;
+        self.host = None;
         let fields = self.fields(window, cx);
         let (name, secret, description, url, username) = (
             fields.name.clone(),
@@ -580,6 +595,65 @@ impl VaultSection {
             })
     }
 
+    /// What a new entry is bound to, and where its secret goes, said in the dialog, with the way
+    /// to bind it to no use; it folds away once the binding is removed.
+    fn binding(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mute = palette(cx).mute;
+        let used = self
+            .bound
+            .as_deref()
+            .map(|bound| flottille_core::vault::use_said(bound).unwrap_or_else(|| bound.to_owned()))
+            .map(SharedString::from);
+        let url = self
+            .fields
+            .as_ref()
+            .map(|fields| fields.url.read(cx).value().trim().to_owned());
+        let host = self
+            .host
+            .clone()
+            .filter(|(_, asked)| url.as_deref() == Some(asked.trim()))
+            .map(|(host, _)| SharedString::from(host));
+        let this = cx.entity().downgrade();
+        let saving = self.saving;
+        let line = move |id: &'static str, label: &'static str, value: SharedString| {
+            div()
+                .id(id)
+                .flex()
+                .gap(space::SM)
+                .aria_label(SharedString::from(format!("{label}: {value}")))
+                .child(div().text_color(mute).child(label))
+                .child(div().min_w_0().child(value))
+                .test_support()
+                .into_any_element()
+        };
+        presence_of("vault-binding-block", used, move |used| {
+            div()
+                .id("vault-binding")
+                .flex()
+                .flex_col()
+                .gap(space::XS)
+                .child(line("vault-binding-for", "For", used))
+                .child(presence_of("vault-binding-host-block", host, move |host| {
+                    line("vault-binding-host", "Goes to", host)
+                }))
+                .child(
+                    div().pt(space::XS).child(
+                        Button::quiet("vault-binding-remove", "Remove the binding")
+                            .disabled(saving)
+                            .on_click(move |_, _, cx| {
+                                this.update(cx, |this, cx| {
+                                    this.bound = None;
+                                    cx.notify();
+                                })
+                                .ok();
+                            }),
+                    ),
+                )
+                .into_any_element()
+        })
+        .gap(space::LG)
+    }
+
     fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
         let this = cx.entity().downgrade();
@@ -597,6 +671,7 @@ impl VaultSection {
             return modal;
         };
         let select = self.project_select(cx);
+        let binding = self.binding(cx);
         let error = problem_line("vault-error", self.form_error.clone(), space::LG, cx);
         let fields = self.fields.as_ref().expect("made when the form opens");
         let description = Field::new(
@@ -654,6 +729,7 @@ impl VaultSection {
                 )
                 .optional(),
             )
+            .child(binding)
             .child(Field::new(
                 "vault-project-field",
                 "Seen by agents of",

@@ -283,7 +283,7 @@ pub async fn call(
         "vault.ask_dismiss" => {
             let AskDismiss { ask } = serde_json::from_value(params)?;
             let request = open_ask(&daemon, ask)?;
-            answered(&daemon, &request, "dismissed");
+            answered(&daemon, &request, None);
             Ok(json!({"dismissed": request.to_json()}))
         }
         "vault.remove" => {
@@ -380,16 +380,34 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         (Some(new), _) => Some(new),
         (None, had) => had,
     };
+    let url = given(asked.url);
     // A worklog's entry is its project's alone: no other project's agent learns it exists.
     let project = match &bound {
-        Some(bound) => bound_checked(daemon, bound, project.as_deref())?,
+        Some(bound) => bound_checked(daemon, bound, project.as_deref(), url.as_deref())?,
         None => project,
     };
+    let username = given(asked.username);
+    let open = daemon
+        .read(asks)
+        .map(|state| state.open)
+        .unwrap_or_default();
+    // The feature that asked for it reads it with its username: an entry without is of no use.
+    if username.is_none()
+        && open
+            .iter()
+            .any(|r| r.name == asked.name && r.takes_username)
+    {
+        return Err(Failure::refused(format!(
+            "the vault entry {} needs its username: the feature that asked for it signs in with \
+             it",
+            asked.name
+        )));
+    }
     let entry = Entry {
         name: asked.name,
         description: given(asked.description),
-        url: given(asked.url),
-        username: given(asked.username),
+        url,
+        username,
         project,
         updated_at: now_ms(),
         bound,
@@ -403,22 +421,23 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         .map_err(unavailable)?;
     daemon.write(|store| store.put_vault_entry(&entry))?;
     retool(daemon);
-    // However it was set, from the form its request opened or another way, what asked is told.
-    if let Ok(state) = daemon.read(asks) {
-        for request in state.open.iter().filter(|r| entry.name == r.name) {
-            answered(daemon, request, "set");
-        }
+    // However it was set, from the form its request opened or another way, what asked is told:
+    // the agents whose project sees it.
+    for request in open.iter().filter(|r| entry.name == r.name) {
+        answered(daemon, request, Some(&entry));
     }
     Ok(entry.to_json())
 }
 
 /// The project an entry bound to `bound` has, if Flottille knows the use and it fits the entry's
 /// `project`: a project's worklog reads only an entry that project sees, so the entry is the
-/// project's; a connection reads only an entry of every project.
+/// project's; a connection reads only an entry of every project, whose `url` is no plain `http`
+/// to another machine (its login would type the password there in clear).
 fn bound_checked(
     daemon: &Daemon,
     bound: &str,
     project: Option<&str>,
+    url: Option<&str>,
 ) -> Result<Option<String>, Failure> {
     let Some(said) = use_said(bound) else {
         return Err(Failure::refused(format!(
@@ -441,6 +460,14 @@ fn bound_checked(
                 failure.message
             ),
         }));
+    }
+    if bound.starts_with("connection:")
+        && let Some(host) = url.and_then(in_clear)
+    {
+        return Err(Failure::refused(format!(
+            "an entry for {said} cannot be on plain http to {host}, another machine: its \
+             password would travel in clear. Give its https address"
+        )));
     }
     match (bound.split_once(':'), project) {
         (Some(("worklog", of)), Some(own)) if of != own => Err(Failure::refused(format!(
@@ -469,6 +496,11 @@ fn named_by(daemon: &Daemon, bound: &str, name: &str) -> Result<bool, String> {
         },
         _ => crate::extensions::bound_names(daemon, bound, name),
     }
+}
+
+/// The host of `url` when it is plain `http` to another machine.
+fn in_clear(url: &str) -> Option<String> {
+    crate::extensions::in_clear(url)
 }
 
 fn unavailable(why: String) -> Failure {
@@ -572,22 +604,25 @@ struct Ask {
     why: String,
     description: Option<String>,
     url: Option<String>,
+    /// The host the secret goes to, as a connection's login reads `url`.
+    host: Option<String>,
     username: Option<String>,
     /// The use it is for, if any.
     bound: Option<String>,
     /// The entry is every project's, not the asking project's alone.
     every: bool,
     takes_username: bool,
-    /// The agents whose ask joined it while it was open.
-    joined: Vec<String>,
+    /// The agents whose ask joined it while it was open, with their projects.
+    joined: Vec<(String, String)>,
 }
 
 impl Ask {
     fn to_json(&self) -> Value {
         json!({"ask": self.number, "at": self.at, "agent": self.agent, "project": self.project,
             "name": self.name, "why": self.why, "description": self.description,
-            "url": self.url, "username": self.username, "for": self.bound, "every": self.every,
-            "takes_username": self.takes_username, "joined": self.joined})
+            "url": self.url, "host": self.host, "username": self.username, "for": self.bound,
+            "every": self.every, "takes_username": self.takes_username,
+            "joined": self.joined.iter().map(|(agent, _)| agent).collect::<Vec<_>>()})
     }
 }
 
@@ -616,6 +651,7 @@ fn asks(store: &Store) -> flottille_core::Result<Asks> {
                 why: text(data, "why"),
                 description: given(data, "description"),
                 url: given(data, "url"),
+                host: given(data, "host"),
                 username: given(data, "username"),
                 bound: given(data, "for"),
                 every: data["every"] == true,
@@ -624,7 +660,8 @@ fn asks(store: &Store) -> flottille_core::Result<Asks> {
             }),
             "vault.ask_joined" => {
                 if let Some(ask) = state.open.iter_mut().find(|a| data["ask"] == a.number) {
-                    ask.joined.push(text(data, "agent"));
+                    ask.joined
+                        .push((text(data, "agent"), text(data, "project")));
                 }
             }
             _ => state.open.retain(|ask| data["ask"] != ask.number),
@@ -647,9 +684,11 @@ fn open_ask(daemon: &Daemon, number: u64) -> Result<Ask, Failure> {
         })
 }
 
-/// The request is answered: its card folds away, and each agent that asked is told what the user
-/// did, never the secret.
-fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, outcome: &str) {
+/// The request is answered, with the entry `set` or dismissed: its card folds away, and each agent
+/// that asked is told what the user did, never the secret; of an entry set, only the agents whose
+/// project sees it.
+fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, set: Option<&Entry>) {
+    let outcome = if set.is_some() { "set" } else { "dismissed" };
     let data = json!({"agent": request.agent, "ask": request.number, "project": request.project,
         "name": request.name, "outcome": outcome});
     let written = daemon.write(|store| {
@@ -663,17 +702,26 @@ fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, outcome: &str) {
         );
         return;
     }
-    let body = match outcome {
-        "set" => format!(
+    let body = match set {
+        Some(_) => format!(
             "the user set the vault entry `{}`: give its name to the tool that needs it",
             request.name
         ),
-        _ => format!(
+        None => format!(
             "the user dismissed the request for the vault entry `{}`",
             request.name
         ),
     };
-    for agent in std::iter::once(&request.agent).chain(&request.joined) {
+    let asked = std::iter::once((&request.agent, &request.project)).chain(
+        request
+            .joined
+            .iter()
+            .map(|(agent, project)| (agent, project)),
+    );
+    for (agent, project) in asked {
+        if set.is_some_and(|entry| !entry.seen_by(project)) {
+            continue;
+        }
         deliveries::deliver(
             daemon,
             agent,
@@ -881,7 +929,17 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
         (None, Some(bound))
             if bound.starts_with("connection:") && crate::extensions::bound_possible(bound) =>
         {
-            Some(bound.to_owned())
+            let connection = &bound["connection:".len()..];
+            match crate::extensions::connection_exists(daemon, connection) {
+                Ok(true) => Some(bound.to_owned()),
+                Ok(false) => {
+                    return Outcome::Refused(format!(
+                        "refused: there is no connection {connection}: for names one the user \
+                         declared"
+                    ));
+                }
+                Err(why) => return Outcome::Failed(why),
+            }
         }
         (None, Some(bound)) => {
             return Outcome::Refused(format!(
@@ -917,9 +975,34 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
         given(asked.url).map(masked),
         given(asked.username).map(masked),
     );
+    // Where the secret goes, as a connection's login reads the URL: the card says that host,
+    // never its own reading of the text.
+    let host = match url.as_deref() {
+        None => None,
+        Some(url) => match (in_clear(url), crate::extensions::site_of(url)) {
+            (Some(host), _) => {
+                return Outcome::Refused(format!(
+                    "refused: {url} is plain http to {host}, another machine: a secret would \
+                     travel in clear; ask with its https address"
+                ));
+            }
+            (None, None) => {
+                return Outcome::Refused(format!(
+                    "refused: {url} is no web address a secret may go to: https, or http on \
+                     this machine"
+                ));
+            }
+            (None, Some(host)) => Some(host),
+        },
+    };
     let written = daemon.write(|store| {
         let state = asks(store)?;
         let open = state.open.iter().find(|ask| ask.name == name);
+        // Another project's request is not joined, nor described: its entry would not be this
+        // project's.
+        if open.is_some_and(|open| !open.every && open.project != project.name) {
+            return Ok((None, None));
+        }
         let (event, joined) = match open {
             Some(open) => (
                 store.append_agent_event(
@@ -936,7 +1019,7 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
                     &grant.agent,
                     "vault.asked",
                     json!({"agent": grant.agent, "project": project.name, "name": name,
-                        "why": why, "description": description, "url": url,
+                        "why": why, "description": description, "url": url, "host": host,
                         "username": username, "for": bound, "every": every,
                         "takes_username": takes_username}),
                     false,
@@ -944,16 +1027,19 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
                 false,
             ),
         };
-        Ok((joined, Some(event)))
+        Ok((Some(joined), Some(event)))
     });
     match written {
         Err(error) => Outcome::Failed(error.to_string()),
-        Ok(true) => Outcome::Done(format!(
+        Ok(None) => Outcome::Refused(format!(
+            "refused: the name {name} is taken: ask under another name"
+        )),
+        Ok(Some(true)) => Outcome::Done(format!(
             "The user is already asked for the vault entry {name}: yours joins that request. \
              Nothing waits: continue with what does not need it; a delivery says when the user \
              sets it or dismisses it."
         )),
-        Ok(false) => Outcome::Done(format!(
+        Ok(Some(false)) => Outcome::Done(format!(
             "The user is offered the vault's form of a new entry {name}, prefilled with what \
              you gave. Nothing waits: continue with what does not need it; a delivery says when \
              the user sets it or dismisses it. You never see the secret: once set, give its name \

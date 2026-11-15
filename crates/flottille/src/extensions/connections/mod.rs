@@ -32,7 +32,7 @@ use crate::gate::{Ask, Class, Verdict};
 use crate::mcp::{Definition, Grant, Outcome};
 use crate::projects::Failure;
 
-pub use adapters::provide;
+pub use adapters::{in_clear, provide, site};
 pub use client::{Live, stop_all};
 pub use oauth::secrets_in;
 
@@ -1609,6 +1609,24 @@ fn entries_checked(daemon: &Daemon, declaration: &Declaration) -> std::result::R
         entry.usable_for(&this).map_err(Failure::refused)?;
     }
     Ok(())
+}
+
+/// Whether the connection `name` is declared; why it cannot be told when the declarations cannot
+/// be read.
+pub fn exists(daemon: &Daemon, name: &str) -> std::result::Result<bool, String> {
+    Ok(declarations(&daemon.paths)?
+        .iter()
+        .any(|declaration| declaration.name == name))
+}
+
+/// Whether the connection `name` has a login of its own: Flottille's adapter applies to its
+/// server as pinned, and that adapter's actions hold one.
+pub fn logs_in(daemon: &Daemon, name: &str) -> bool {
+    row(daemon, name)
+        .pin
+        .as_ref()
+        .and_then(adapters::applying)
+        .is_some_and(|adapter| adapter.own(adapters::LOGIN).is_some())
 }
 
 /// Whether the connection `name`, as declared, names the vault entry `entry`; why it cannot be

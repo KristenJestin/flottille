@@ -1126,6 +1126,7 @@ pub enum Outcome {
     },
     /// The dismissal of a request for a vault entry was taken, or refused with why.
     VaultDismissed {
+        ask: u64,
         refused: Option<String>,
     },
     /// The answers from the card of the ask `seq` were taken, or refused with why.
@@ -1972,7 +1973,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Ok(_)) => None,
                 Ok(Err(why)) | Err(why) => Some(why),
             };
-            Outcome::VaultDismissed { refused }
+            Outcome::VaultDismissed { ask, refused }
         }
         Command::CommandWrite { project, write } => {
             let (method, params) = command_write(&project, write);

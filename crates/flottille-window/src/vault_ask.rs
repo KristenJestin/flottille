@@ -1,7 +1,8 @@
 //! The card of a request for a vault entry (`docs/vault.md`, "Asking the user for an entry"): an
 //! agent needs an entry the vault lacks and asked the user to add it. The card says what was
 //! prefilled (by the agent, or by the feature that names the entry), the host the secret will go
-//! to on its own line, and the agent's reason. It holds no field: "Add to the vault" opens
+//! to on its own line (the daemon's reading of the URL, a login's, never the window's), and the
+//! agent's reason. It holds no field: "Add to the vault" opens
 //! Settings, Vault's own form of a new entry, prefilled, where the user changes what they want and
 //! types the secret; Dismiss closes the request. It folds away once the daemon says the request
 //! was answered.
@@ -12,24 +13,9 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, div, px,
 };
 
-use crate::actions::Command;
-use crate::commands::perform_later;
 use crate::conversation::VaultAsk;
 use crate::shell::Shell;
 use crate::vault::{EVERY_PROJECT, VaultEntry};
-
-/// The host of `url`, where a secret given for it goes: without its scheme, user, port or path.
-pub fn host(url: &str) -> Option<String> {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let authority = authority.rsplit('@').next()?;
-    let host = match authority.strip_prefix('[') {
-        // An IPv6 address keeps its brackets' content whole.
-        Some(v6) => v6.split(']').next()?,
-        None => authority.split(':').next()?,
-    };
-    (!host.is_empty()).then(|| host.to_ascii_lowercase())
-}
 
 /// The entry the form opens with: what the request prefilled, the user's to change.
 fn prefilled(ask: &VaultAsk) -> VaultEntry {
@@ -88,10 +74,9 @@ pub fn card(
         .gap(space::XS)
         .child(line("vault-ask-name", "Entry", &ask.name))
         .children(
-            ask.url
+            ask.host
                 .as_deref()
-                .and_then(host)
-                .map(|host| line("vault-ask-host", "Goes to", &host)),
+                .map(|host| line("vault-ask-host", "Goes to", host)),
         )
         .children(
             ask.description
@@ -103,8 +88,11 @@ pub fn card(
         .child(line("vault-ask-why", "Why", &ask.why));
     let number = ask.seq;
     let entry = prefilled(ask);
-    let why = ask.why.clone();
+    let (why, host) = (ask.why.clone(), ask.host.clone());
     let dismiss_to = shell.clone();
+    let dismissing = shell
+        .upgrade()
+        .is_some_and(|shell| shell.read(cx).is_dismissing(number));
     let buttons = div()
         .px(space::LG)
         .py(space::MD)
@@ -112,17 +100,21 @@ pub fn card(
         .justify_end()
         .gap(space::SM)
         .child(
-            Button::quiet(id("vault-ask-dismiss"), "Dismiss").on_click(move |_, _, cx| {
-                perform_later(&dismiss_to, Command::VaultDismiss { ask: number }, cx)
-            }),
+            Button::quiet(id("vault-ask-dismiss"), "Dismiss")
+                .disabled(dismissing)
+                .on_click(move |_, _, cx| {
+                    dismiss_to
+                        .update(cx, |shell, cx| shell.dismiss_vault_ask(number, cx))
+                        .ok();
+                }),
         )
         .child(
             Button::primary(id("vault-ask-add"), "Add to the vault").on_click(
                 move |_, window, cx| {
-                    let (entry, why) = (entry.clone(), why.clone());
+                    let (entry, why, host) = (entry.clone(), why.clone(), host.clone());
                     shell
                         .update(cx, |shell, cx| {
-                            shell.add_asked_vault_entry(entry, why, window, cx)
+                            shell.add_asked_vault_entry(entry, why, host, window, cx)
                         })
                         .ok();
                 },
@@ -138,24 +130,4 @@ pub fn card(
         .child(presence(id("vault-ask-open"), ask.open, card))
         .test_support()
         .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::host;
-
-    #[test]
-    fn the_host_is_said_without_user_port_or_path() {
-        for (url, said) in [
-            (
-                "https://tester@Staging.example.com:8443/login?next=/",
-                Some("staging.example.com"),
-            ),
-            ("http://[::1]:8080/", Some("::1")),
-            ("shop.example.com/login", Some("shop.example.com")),
-            ("https:///nothing", None),
-        ] {
-            assert_eq!(host(url).as_deref(), said, "{url}");
-        }
-    }
 }

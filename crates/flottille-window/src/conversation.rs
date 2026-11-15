@@ -143,8 +143,10 @@ pub struct VaultAsk {
     /// The entry is every project's, not that project's alone.
     pub every: bool,
     pub description: Option<String>,
-    /// Where the secret goes, as the agent wrote it.
+    /// The address the agent gave.
     pub url: Option<String>,
+    /// The host the secret goes to, as the daemon reads `url` (the way a login does).
+    pub host: Option<String>,
     pub username: Option<String>,
     /// The one use it is for.
     pub bound: Option<String>,
@@ -1042,6 +1044,7 @@ impl Conversation {
                     every: data["every"] == true,
                     description: data["description"].as_str().map(str::to_owned),
                     url: data["url"].as_str().map(str::to_owned),
+                    host: data["host"].as_str().map(str::to_owned),
                     username: data["username"].as_str().map(str::to_owned),
                     bound: data["for"].as_str().map(str::to_owned),
                     why: text("why"),
