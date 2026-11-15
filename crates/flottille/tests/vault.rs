@@ -714,3 +714,37 @@ fn a_binding_to_an_impossible_connection_name_is_refused() {
     .unwrap();
     assert_eq!(listed_names(&user), ["token"]);
 }
+
+#[test]
+fn the_cli_edits_an_entry_without_its_secret() {
+    let user = User::new();
+    set_jira(&user);
+
+    // Nothing is given on the standard input: no secret is read, and the one kept stays.
+    let output = user.run_with_input(
+        &[
+            "vault",
+            "edit",
+            "jira",
+            "--url",
+            "https://tracker.example.org",
+        ],
+        "",
+    );
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("jira"), "{stdout}");
+    let listed = user.call("vault.list", json!({})).unwrap();
+    assert_eq!(listed["entries"][0]["url"], "https://tracker.example.org");
+    // What the flags did not name is kept as it was.
+    assert_eq!(listed["entries"][0]["description"], "Logs time on Jira");
+    assert_eq!(listed["entries"][0]["username"], "dev@example.com");
+
+    // An entry that does not exist cannot be edited into being: it has no secret.
+    let missing = user.run_with_input(
+        &["vault", "edit", "nowhere", "--url", "https://a.example.com"],
+        "",
+    );
+    assert!(!missing.status.success(), "{missing:?}");
+    assert_eq!(listed_names(&user), ["jira"]);
+}

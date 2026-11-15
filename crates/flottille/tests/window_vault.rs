@@ -203,9 +203,14 @@ fn the_vault_page_adds_replaces_and_removes_an_entry_and_never_shows_its_secret(
             .to_string()),
         "Logs time on Jira"
     );
-    // Without a secret the dialog says what is missing and stays open.
+    // Left without a secret it keeps the one it has, and changes the metadata.
     click("save-vault-entry", cx);
-    assert!(section.read_with(cx, |s, _| s.form_error().is_some()));
+    until(&shell, cx, "the entry is saved", |cx| {
+        toasts(&shell, cx).contains(&"Entry jira saved".to_owned())
+    });
+    settle(cx);
+    click("vault-jira", cx);
+    settle(cx);
     type_in(
         &section,
         VaultSection::secret_field,
@@ -214,10 +219,9 @@ fn the_vault_page_adds_replaces_and_removes_an_entry_and_never_shows_its_secret(
     );
     type_in(&section, VaultSection::description_field, "Logs time", cx);
     click("save-vault-entry", cx);
-    until(&shell, cx, "the entry is replaced", |cx| {
-        toasts(&shell, cx).contains(&"Entry jira replaced".to_owned())
+    until(&shell, cx, "the entry is saved with a secret", |cx| {
+        listed(&user)[0]["description"] == "Logs time"
     });
-    assert_eq!(listed(&user)[0]["description"], "Logs time");
     settle(cx);
 
     // Removed through its "⋯" and a confirmation.
@@ -293,5 +297,76 @@ fn the_vault_creates_with_new_entry_and_saves_with_add(cx: &mut TestAppContext) 
         label_of("save-vault-entry", cx).as_deref(),
         Some("Add"),
         "the dialog's title says it is new: its button only says Add"
+    );
+}
+
+#[gpui_kit::test]
+fn the_edit_form_says_it_keeps_the_secret_left_empty(cx: &mut TestAppContext) {
+    let user = User::new();
+    user.call(
+        "vault.set",
+        json!({"name": "jira", "secret": SECRET, "description": "Logs time on Jira"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    let section = open_vault(&shell, cx);
+    assert_eq!(
+        section.read_with(cx, |s, _| s.entries().map(<[_]>::len)),
+        Some(1)
+    );
+
+    // A new entry: no error before a Save attempt, then the error, which typing clears.
+    click("add-vault-entry", cx);
+    settle(cx);
+    assert_eq!(
+        section.read_with(cx, |s, _| s.form_title()).as_deref(),
+        Some("New entry")
+    );
+    assert_eq!(
+        section.read_with(cx, |s, _| s.form_error().map(str::to_owned)),
+        None
+    );
+    click("save-vault-entry", cx);
+    assert_eq!(
+        section
+            .read_with(cx, |s, _| s.form_error().map(str::to_owned))
+            .as_deref(),
+        Some("An entry needs a name and a secret.")
+    );
+    settle(cx);
+    assert!(
+        shown("vault-error", cx),
+        "the error unfolds after the attempt"
+    );
+    // Closed with nothing sent, never a new entry.
+    assert_eq!(listed(&user).as_array().unwrap().len(), 1);
+
+    // An existing entry: its title, its hint, a Save button, and no error for an empty secret.
+    cx.update(|window, cx| section.update(cx, |s, cx| s.close(window, cx)));
+    settle(cx);
+    click("vault-jira", cx);
+    settle(cx);
+    assert_eq!(
+        section.read_with(cx, |s, _| s.form_title()).as_deref(),
+        Some("Edit jira")
+    );
+    assert_eq!(
+        label_of("vault-secret-field-hint", cx).as_deref(),
+        Some("Leave empty to keep the current secret")
+    );
+    assert_eq!(label_of("save-vault-entry", cx).as_deref(), Some("Save"));
+    assert_eq!(
+        section.read_with(cx, |s, _| s.form_error().map(str::to_owned)),
+        None
+    );
+    type_in(&section, VaultSection::description_field, "Logs time", cx);
+    click("save-vault-entry", cx);
+    until(&shell, cx, "the entry is saved", |cx| {
+        toasts(&shell, cx).contains(&"Entry jira saved".to_owned())
+    });
+    assert_eq!(listed(&user)[0]["description"], "Logs time");
+    assert!(
+        !section.read_with(cx, |s, _| s.is_open()),
+        "the dialog closed without a secret asked"
     );
 }

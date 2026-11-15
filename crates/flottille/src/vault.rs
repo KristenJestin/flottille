@@ -1125,4 +1125,100 @@ mod tests {
         assert!(asked.elapsed() < SECRET_WAIT, "answered at once");
         assert_eq!(refused, LOCKED);
     }
+
+    /// A daemon on temporary folders whose keyring is its memory.
+    fn a_daemon(dir: &Path) -> std::sync::Arc<Daemon> {
+        let paths = Paths {
+            runtime: dir.join("runtime"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        };
+        std::fs::create_dir_all(&paths.config).unwrap();
+        std::fs::write(paths.config.join(CHOICE), "backend = \"memory\"\n").unwrap();
+        let store = flottille_core::store::Store::open_in_memory().unwrap();
+        let projects = crate::projects::Projects::open(&paths).unwrap();
+        std::sync::Arc::new(Daemon::new(&paths, store, projects, 0, None))
+    }
+
+    async fn listed(daemon: &std::sync::Arc<Daemon>) -> Vec<Entry> {
+        daemon.read(|store| store.vault_entries()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn editing_an_entry_without_a_secret_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "jira", "secret": "k3pt-s3cret-value", "description": "Logs time",
+                "url": "https://tracker.example.com"}),
+        )
+        .await
+        .unwrap();
+
+        // The secret is absent, or null: the metadata is rewritten, the keyring item stays.
+        for absent in [json!({}), json!({"secret": null})] {
+            let mut params = json!({"name": "jira", "description": "Logs time on Jira",
+                "url": "https://tracker.example.org"});
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(absent.as_object().unwrap().clone());
+            call(daemon.clone(), "vault.set", params).await.unwrap();
+            let entries = listed(&daemon).await;
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].description.as_deref(), Some("Logs time on Jira"));
+            assert_eq!(
+                entries[0].url.as_deref(),
+                Some("https://tracker.example.org")
+            );
+            assert_eq!(
+                secret(&daemon, "any", "worklog:any", "jira").await.unwrap(),
+                "k3pt-s3cret-value"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn editing_an_entry_with_a_secret_replaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        for (secret_of, url) in [
+            ("f1rst-s3cret-value", "https://a.example.com"),
+            ("n3xt-s3cret-value", "https://b.example.com"),
+        ] {
+            call(
+                daemon.clone(),
+                "vault.set",
+                json!({"name": "jira", "secret": secret_of, "url": url}),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            listed(&daemon).await[0].url.as_deref(),
+            Some("https://b.example.com")
+        );
+        assert_eq!(
+            secret(&daemon, "any", "worklog:any", "jira").await.unwrap(),
+            "n3xt-s3cret-value"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_entry_still_needs_its_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let refused = call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "jira", "url": "https://a.example.com"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.message.contains("secret"), "{}", refused.message);
+        assert!(listed(&daemon).await.is_empty(), "nothing was kept");
+    }
 }

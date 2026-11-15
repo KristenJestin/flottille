@@ -150,6 +150,15 @@ impl VaultSection {
         self.confirming.is_some()
     }
 
+    /// The dialog's title, `None` while it is closed.
+    pub fn form_title(&self) -> Option<String> {
+        match &self.form {
+            Form::Closed => None,
+            Form::Editing(Some(name)) => Some(format!("Replace {name}")),
+            Form::Editing(None) => Some("New entry".to_owned()),
+        }
+    }
+
     pub fn form_error(&self) -> Option<&str> {
         self.form_error.as_deref()
     }
