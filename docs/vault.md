@@ -183,13 +183,16 @@ field), with `vault::secret`, which only a tool's own code calls and whose value
 use. It never waits for the user: an item of a locked keyring is answered at once that the keyring
 is locked and the user must unlock it, and a keyring that does not answer within 3 seconds is
 answered the same. The first users: `tickets log_time` (`docs/tickets.md`, "Logging time") and
-Connections (`docs/extensions.md`, "Connections"): a connection's `env` and `headers` name entries
+Connections (`docs/extensions.md`, "Connections"): a connection's `env` and `secrets` name entries
 of every project, read when its server starts and put in its environment or on its requests,
 never shown to an agent; an entry tied to one project, or bound to another use, is refused for
-it. A connection an agent proposes (`docs/extensions.md`, "Connections") puts an entry in a header
+it. A connection an agent proposes (`docs/extensions.md`, "Connections") puts an entry in its requests
 only when the entry's `url` has the connection's host: the `url` is where the secret may go, and
-an entry without one goes in no header an agent chose; the user's own form binds freely, and the
-card of the request says where each entry goes. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
+an entry without one goes in no request an agent chose; the user's own form binds freely, and the
+card of the request says where each entry goes. An agent's connection may name an entry that does
+not exist yet, for the user to save (never one that looks like a secret): the request waits, its
+Accept refused while the entry is missing, and once saved the entry's host is checked as any
+other's. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
 another.
 
 ## The runtime folder
