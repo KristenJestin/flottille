@@ -470,10 +470,31 @@ impl Attachments {
     }
 
     /// The pictures a message taken back carries, with its text: each marker of the text is the
-    /// chip of the picture of its place, the others go after the text. The pieces for the field.
-    pub fn restore_with(&mut self, text: &str, pictures: Vec<Picture>) -> Vec<Piece> {
+    /// chip of the picture of its number, the others go after the text. The pieces for the field.
+    /// The limits of an attachment hold: an agent that takes no images gets none back, and a
+    /// message carries [`MAX_IMAGES`] at most, each refusal said in a toast; a marker left without
+    /// its picture stays text.
+    pub fn restore_with<T: 'static>(
+        &mut self,
+        text: &str,
+        pictures: Vec<Picture>,
+        cx: &mut Context<T>,
+    ) -> Vec<Piece> {
         let mut ids = Vec::new();
-        for picture in pictures {
+        if !pictures.is_empty() && self.takes == Some(false) {
+            Self::not_attached(NO_IMAGES, cx);
+        }
+        let room = match self.takes {
+            Some(false) => 0,
+            _ => MAX_IMAGES.saturating_sub(self.images.len() + self.scaling.len()),
+        };
+        if self.takes != Some(false) && pictures.len() > room {
+            Self::not_attached(
+                format!("A message carries {MAX_IMAGES} images at most."),
+                cx,
+            );
+        }
+        for picture in pictures.into_iter().take(room) {
             let Some(format) = gpui_kit::ImageFormat::from_mime_type(&picture.mime) else {
                 continue;
             };

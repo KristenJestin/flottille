@@ -10029,7 +10029,7 @@ impl Reply {
         cx: &mut Context<Self>,
     ) {
         // Its pictures' markers become their chips again, its commands once they are known.
-        let restored = self.attached.restore_with(text, pictures);
+        let restored = self.attached.restore_with(text, pictures, cx);
         let mut pieces = self.tokens.read(cx).value(cx);
         if crate::tokens::sent_text(&pieces, |_| None)
             .trim()
