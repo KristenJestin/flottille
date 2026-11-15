@@ -1144,6 +1144,57 @@ mod tests {
         assert_eq!(file(), before);
     }
 
+    /// The user's removal of an entry and the write of an accepted request, which checks the
+    /// entries it names are there (`still`), are not interleaved: the removal waits for the file.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_vault_entry_is_removed_under_the_extensions_file_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config/keyring.toml"),
+            "backend = \"memory\"\n",
+        )
+        .unwrap();
+        let daemon = a_daemon(dir.path());
+        let entry = flottille_core::vault::Entry {
+            name: "notes-token".into(),
+            description: None,
+            url: Some("https://notes.example.com".into()),
+            username: None,
+            project: None,
+            updated_at: 0,
+            bound: None,
+        };
+        daemon.write(|store| store.put_vault_entry(&entry)).unwrap();
+        let there = |daemon: &Daemon| {
+            daemon
+                .read(|store| store.vault_entries())
+                .unwrap()
+                .iter()
+                .any(|entry| entry.name == "notes-token")
+        };
+        let (taken, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let _writing = crate::extensions::WRITING.lock().unwrap();
+            taken.send(()).unwrap();
+            released.recv().unwrap();
+        });
+        held.recv().unwrap();
+        let removing = tokio::spawn(crate::vault::call(
+            daemon.clone(),
+            "vault.remove",
+            json!({"name": "notes-token"}),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let during = there(&daemon);
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        removing.await.unwrap().unwrap();
+        assert!(during, "removed while the file was being written");
+        assert!(!there(&daemon));
+    }
+
     #[test]
     fn an_address_names_its_host_over_https_or_on_this_machine() {
         assert_eq!(

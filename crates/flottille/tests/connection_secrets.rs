@@ -495,6 +495,179 @@ fn a_parameter_that_only_contains_token_is_allowed() {
     assert_eq!(connection_named(&user, "design")["url"], url);
 }
 
+#[test]
+fn run_together_and_short_token_names_are_refused() {
+    let user = user();
+    for parameter in [
+        "usertoken",
+        "accesstoken",
+        "authtoken",
+        "apitoken",
+        "sessiontoken",
+        "securitytoken",
+        "clientsecret",
+        "appsecret",
+        "apisecret",
+        "secretkey",
+        "accesskey",
+        "sig",
+        "signature",
+        "X-Amz-Signature",
+        "X-Amz-Security-Token",
+        "jwt",
+        "bearer",
+        "sessionid",
+        "session_id",
+        "sid",
+        "token2",
+        "gitlab_private_token",
+    ] {
+        let url = format!("https://design.example.com/mcp?page=2&{parameter}=abc123");
+        let refused = user
+            .call(
+                "connection.add",
+                json!({"name": "design", "about": "Designs.", "url": url}),
+            )
+            .unwrap_err();
+        assert!(refused.1.contains(parameter), "{parameter}: {refused:?}");
+        assert!(!refused.1.contains("abc123"), "{refused:?}");
+    }
+    assert!(
+        user.call("connection.list", json!({})).unwrap()["connections"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn page_and_next_tokens_and_project_key_are_still_allowed() {
+    let user = user();
+    let url = "https://design.example.com/mcp?pageToken=2&nextToken=b&page_token=c\
+               &next_page_token=d&continuation_token=e&project_key=ab1&signed=1&session=7\
+               &keyword=a#section-2";
+    user.call(
+        "connection.add",
+        json!({"name": "design", "about": "Designs.", "url": url}),
+    )
+    .unwrap();
+    assert_eq!(connection_named(&user, "design")["url"], url);
+}
+
+#[test]
+fn a_token_in_the_fragment_is_refused() {
+    let user = user();
+    let refused = user
+        .call(
+            "connection.add",
+            json!({"name": "design", "about": "Designs.",
+                "url": "https://design.example.com/mcp#access_token=abc123&state=x"}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("access_token"), "{refused:?}");
+    assert!(!refused.1.contains("abc123"), "{refused:?}");
+    user.call(
+        "connection.add",
+        json!({"name": "design", "about": "Designs.", "url": "https://design.example.com/mcp"}),
+    )
+    .unwrap();
+    let refused = user
+        .call(
+            "connection.edit",
+            json!({"name": "design", "url": "https://design.example.com/mcp#userToken=abc123"}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("userToken"), "{refused:?}");
+    assert!(!refused.1.contains("abc123"), "{refused:?}");
+    assert_eq!(
+        connection_named(&user, "design")["url"],
+        "https://design.example.com/mcp"
+    );
+}
+
+/// What may be a secret in a URL that is refused for something else: its login, its query, its
+/// fragment.
+const IN_A_URL: &str = "Zq7Wx3Vp9";
+
+#[test]
+fn a_url_error_never_shows_a_query_value() {
+    let user = user();
+    for url in [
+        format!("http://notes.example.com/mcp?access_token={IN_A_URL}"),
+        format!("http://notes.example.com/mcp?page={IN_A_URL}"),
+        format!("ftp://notes.example.com/mcp?key={IN_A_URL}"),
+        format!("http://notes.example.com/mcp#access_token={IN_A_URL}"),
+        format!("https://ada:{IN_A_URL}@notes.example.com/mcp"),
+        format!("https://[notes?token={IN_A_URL}"),
+    ] {
+        let refused = user
+            .call(
+                "connection.add",
+                json!({"name": "notes", "about": "Notes.", "url": url}),
+            )
+            .unwrap_err();
+        assert!(!refused.1.contains(IN_A_URL), "{url}: {refused:?}");
+    }
+
+    // Declared by hand: that connection alone fails, saying why without its value.
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "Notes.", "url": "https://notes.example.com/mcp"}),
+    )
+    .unwrap();
+    written_by_hand(
+        &user,
+        &format!(
+            "\n[[connections.server]]\nname = \"design\"\nabout = \"Designs.\"\n\
+             url = \"http://design.example.com/mcp?access_token={IN_A_URL}\"\n"
+        ),
+    );
+    let listed = user.call("connection.list", json!({})).unwrap();
+    assert!(listed["error"].is_null(), "{listed}");
+    let design = connection_named(&user, "design");
+    let failing = design["failing"].as_str().unwrap_or_default();
+    assert!(failing.contains("this machine"), "{design}");
+    assert!(!failing.contains(IN_A_URL), "{design}");
+    let started = user
+        .call("connection.review", json!({"name": "design"}))
+        .unwrap_err();
+    assert!(started.1.contains("this machine"), "{started:?}");
+    assert!(!started.1.contains(IN_A_URL), "{started:?}");
+    // The others are edited as before, and it is mended.
+    user.call(
+        "connection.edit",
+        json!({"name": "notes", "about": "The notes."}),
+    )
+    .unwrap();
+    user.call(
+        "connection.edit",
+        json!({"name": "design", "url": "https://design.example.com/mcp"}),
+    )
+    .unwrap();
+    assert!(connection_named(&user, "design")["failing"].is_null());
+}
+
+#[test]
+fn login_of_a_connection_failing_at_load_is_refused() {
+    let user = user();
+    written_by_hand(
+        &user,
+        "\n[[connections.server]]\nname = \"design\"\nabout = \"Designs.\"\n\
+         url = \"https://design.example.com/mcp?userToken=abc123\"\n\
+         \n[[connections.server]]\nname = \"sketch\"\nabout = \"Sketches.\"\n\
+         url = \"http://sketch.example.com/mcp\"\n",
+    );
+    let refused = user
+        .call("connection.login", json!({"name": "design"}))
+        .unwrap_err();
+    assert!(refused.1.contains("userToken"), "{refused:?}");
+    assert!(!refused.1.contains("abc123"), "{refused:?}");
+    let refused = user
+        .call("connection.login", json!({"name": "sketch"}))
+        .unwrap_err();
+    assert!(refused.1.contains("this machine"), "{refused:?}");
+}
+
 fn connection_named(user: &User, name: &str) -> Value {
     user.call("connection.list", json!({})).unwrap()["connections"]
         .as_array()

@@ -692,6 +692,67 @@ fn a_request_accepted_is_not_answered_again_by_the_users_save() {
 }
 
 /// An agent's proposal of a design server that takes its token in a query parameter.
+#[test]
+fn a_split_or_uuid_shaped_entry_name_is_refused() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    for written in [
+        "0123456789-abcdef0123-456789abcd-ef01234567",
+        "3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f",
+        "3F2A9C1E.7B4D.4E8A.9C2F.1A2B3C4D5E6F",
+        "design_0123456789abcdef-0123456789abcdef",
+    ] {
+        let sent = refused(mcp.call(
+            "connections",
+            json!({"action": "add", "name": "design", "about": "Designs.",
+                "url": "https://design.example.com/mcp",
+                "secrets": [{"in": "query", "name": "userToken", "entry": written}]}),
+        ));
+        assert!(!sent.contains(written), "{sent}");
+    }
+    assert_eq!(pending(&user), 0);
+    // Names of words, a short number among them, are still ones the user is to make.
+    for (n, entry) in [
+        "design-usertoken",
+        "design-api-key-2026",
+        "acme.design_v2-token",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        held(&mcp.call(
+            "connections",
+            json!({"action": "add", "name": format!("design{n}"), "about": "Designs.",
+                "url": "https://design.example.com/mcp",
+                "secrets": [{"in": "query", "name": "userToken", "entry": entry}]}),
+        ));
+    }
+}
+
+#[test]
+fn an_agent_s_add_proposal_with_a_token_like_url_is_refused() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    for url in [
+        "https://design.example.com/mcp?usertoken=abc123",
+        "https://design.example.com/mcp?X-Amz-Signature=abc123",
+        "https://design.example.com/mcp#access_token=abc123",
+        "http://design.example.com/mcp?page=abc123",
+        "ftp://design.example.com/mcp?userToken=abc123",
+    ] {
+        let sent = refused(mcp.call(
+            "connections",
+            json!({"action": "add", "name": "design", "about": "Designs.", "url": url}),
+        ));
+        assert!(!sent.contains("abc123"), "{url}: {sent}");
+    }
+    assert_eq!(pending(&user), 0);
+}
+
 fn propose_design(mcp: &Mcp) -> u64 {
     held(&mcp.call(
         "connections",
