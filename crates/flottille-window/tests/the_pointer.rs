@@ -6,6 +6,8 @@
 //! nothing here; an element the window draws itself (`div()`, a `.id(..)` of its own) sets
 //! `cursor_pointer()` in the same chain, and only while it can act. An element that is no
 //! control (a scrim, the mouse's back button) is listed below, with its reason.
+//! A press or release (`.on_mouse_down`, `.on_mouse_up`) is found on any element, with an id or
+//! without one; GPUI takes it on a bare `div()` too, and a kit component has none.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -128,7 +130,9 @@ fn chain(lines: &[&str], at: usize, column: usize) -> String {
     text[start..].to_owned()
 }
 
-/// Whether a chain is an element the window draws itself, not a call on one of the kit's.
+/// Whether a chain is an element the window draws itself, not a call on one of the kit's. Only
+/// a click is told apart so: a mouse handler is GPUI's own, wired on whatever element the chain
+/// starts with (a bare `flex_col()` or a variable too), so `uncursored` takes it as drawn here.
 fn drawn_here(chain: &str) -> bool {
     let chain = flat(chain);
     ["div()", ".id()", "text_region()", "Stateful"]
@@ -166,9 +170,9 @@ fn uncursored(source: &str) -> Vec<(usize, String)> {
     let mut found = Vec::new();
     for (at, line) in lines.iter().enumerate() {
         let line = code(line);
-        let Some(column) = [".on_click(", ".on_mouse_down("]
+        let Some((column, mouse)) = [".on_click(", ".on_mouse_down(", ".on_mouse_up("]
             .iter()
-            .filter_map(|call| line.find(call))
+            .filter_map(|call| line.find(call).map(|at| (at, *call != ".on_click(")))
             .min()
         else {
             continue;
@@ -177,7 +181,7 @@ fn uncursored(source: &str) -> Vec<(usize, String)> {
             continue;
         }
         let chain = chain(&lines, at, column);
-        if !drawn_here(&chain) {
+        if !mouse && !drawn_here(&chain) {
             continue;
         }
         let after = std::iter::once(&line[column..])
@@ -232,6 +236,20 @@ fn a_clickable_element_drawn_here_without_a_cursor_is_found() {
     assert_eq!(without_a_cursor("src/a.rs", source).len(), 1);
     let press = "div().on_mouse_down(MouseButton::Left, f)";
     assert_eq!(without_a_cursor("src/a.rs", press).len(), 1);
+}
+
+/// A mouse handler is GPUI's own: a kit component only takes `.on_click(..)`. So the element it is
+/// wired on is drawn here whatever starts its chain, with an id or without one.
+#[test]
+fn a_mouse_handler_on_an_element_without_an_id_is_found() {
+    let bare = "let row = flex_col().on_mouse_down(MouseButton::Left, f);";
+    assert_eq!(without_a_cursor("src/a.rs", bare).len(), 1);
+    let up = "let row = flex_col()\n    .child(x)\n    .on_mouse_up(MouseButton::Left, f);";
+    assert_eq!(without_a_cursor("src/a.rs", up).len(), 1);
+    let variable = "row.on_mouse_down(MouseButton::Left, f);";
+    assert_eq!(without_a_cursor("src/a.rs", variable).len(), 1);
+    let pointer = "let row = flex_col().cursor_pointer().on_mouse_down(MouseButton::Left, f);";
+    assert!(without_a_cursor("src/a.rs", pointer).is_empty());
 }
 
 #[test]
