@@ -4135,6 +4135,17 @@ fn browser(user: &User, script: &Value, login: Value) -> Value {
 
 /// `browser`, its command carrying `options` (agent-browser's global options) before `mcp`.
 fn browser_run_with(user: &User, script: &Value, login: Value, options: &[&str]) -> Value {
+    browser_declared(user, script, login, options, json!({}))
+}
+
+/// `browser_run_with`, the declaration also holding the keys of `more`.
+fn browser_declared(
+    user: &User,
+    script: &Value,
+    login: Value,
+    options: &[&str],
+    more: Value,
+) -> Value {
     turn_on(user);
     let mut script = script.clone();
     script["login"] = login;
@@ -4146,11 +4157,12 @@ fn browser_run_with(user: &User, script: &Value, login: Value, options: &[&str])
         .unwrap()
         .extend(options.iter().map(|o| json!(o)));
     command.as_array_mut().unwrap().push(json!("mcp"));
-    user.call(
-        "connection.add",
-        json!({"name": "browser", "about": "A browser for the tests.", "command": command}),
-    )
-    .unwrap()
+    let mut declaration =
+        json!({"name": "browser", "about": "A browser for the tests.", "command": command});
+    for (key, value) in more.as_object().unwrap() {
+        declaration[key] = value.clone();
+    }
+    user.call("connection.add", declaration).unwrap()
 }
 
 /// The vault entry `shop-test`, bound to the connection `browser`, and the agent's session in
@@ -5026,6 +5038,89 @@ fn login_is_refused_when_the_command_already_sets_the_browsers_sites() {
             "{options:?}: {review}"
         );
     }
+}
+
+/// The value of the vault entry the tests put in agent-browser's own variables.
+const SETTING: &str = "value-of-the-users-setting";
+
+#[test]
+fn login_is_refused_when_the_environment_sets_a_variable_the_adapter_owns() {
+    for (variable, said_too) in [
+        (
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "already sets the browser's sites",
+        ),
+        ("AGENT_BROWSER_PROFILE", "allowed domains"),
+        ("AGENT_BROWSER_STATE", "allowed domains"),
+        ("AGENT_BROWSER_CDP", "allowed domains"),
+        ("AGENT_BROWSER_AUTO_CONNECT", "allowed domains"),
+        ("AGENT_BROWSER_PROVIDER", "allowed domains"),
+        ("AGENT_BROWSER_ARGS", "allowed domains"),
+        ("AGENT_BROWSER_RESTORE", "allowed domains"),
+        ("AGENT_BROWSER_SESSION_NAME", "allowed domains"),
+    ] {
+        let user = user();
+        user.call(
+            "vault.set",
+            json!({"name": "browser-setting", "secret": SETTING}),
+        )
+        .unwrap();
+        browser_declared(
+            &user,
+            &agent_browser("0.43.0"),
+            json!({}),
+            &[],
+            json!({"env": {variable: {"vault": "browser-setting"}}}),
+        );
+        let (_, mcp) = signed_up(&user);
+        let said = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        // The variable by its name, why the adapter owns it, and never its value.
+        assert!(said.contains(variable), "{variable}: {said}");
+        assert!(said.contains(said_too), "{variable}: {said}");
+        assert!(said.contains("environment"), "{variable}: {said}");
+        assert!(!said.contains(SETTING), "{variable}: {said}");
+        assert!(logged(&user, "browser", "login").is_empty(), "{variable}");
+        assert!(form(&user).is_none(), "{variable}");
+        // The server starts with the user's variable and no list of Flottille's, which
+        // agent-browser would refuse beside it.
+        let started = logged(&user, "browser", "start");
+        assert_eq!(allowed(started.last().unwrap()), None, "{variable}");
+        let review = user
+            .call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        let said = review["adapter"]["said"].as_str().unwrap();
+        assert!(said.contains(variable), "{variable}: {review}");
+        assert!(
+            !review.to_string().contains(SETTING),
+            "{variable}: {review}"
+        );
+    }
+}
+
+#[test]
+fn a_harmless_variable_of_agent_browsers_is_accepted() {
+    let user = user();
+    user.call(
+        "vault.set",
+        json!({"name": "browser-setting", "secret": SETTING}),
+    )
+    .unwrap();
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"env": {"AGENT_BROWSER_SESSION": {"vault": "browser-setting"}}}),
+    );
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert_eq!(logged(&user, "browser", "login").len(), 1);
 }
 
 #[test]

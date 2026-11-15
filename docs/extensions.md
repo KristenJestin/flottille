@@ -1293,10 +1293,16 @@ way in:
   `--restore`'s key): **if the server's own command uses one, or sets `--allowed-domains` itself,
   `login` is refused**, saying why (the command already sets the browser's sites, which Flottille
   sets from the entries), and the server starts as the user wrote it, with no list of
-  Flottille's. The review says it, in its sentence and in what the adapter changed. What is not
-  covered: the same options set in the connection's environment (agent-browser's
-  `AGENT_BROWSER_PROFILE` and the like fail closed in agent-browser itself) or in a config file
-  the user's command names.
+  Flottille's. The review says it, in its sentence and in what the adapter changed. **The same
+  options set in the connection's environment** (`env`), as the variables agent-browser reads
+  above its configuration file (`AGENT_BROWSER_ALLOWED_DOMAINS`, `AGENT_BROWSER_PROFILE`,
+  `AGENT_BROWSER_STATE`, `AGENT_BROWSER_CDP`, `AGENT_BROWSER_AUTO_CONNECT`,
+  `AGENT_BROWSER_PROVIDER`, `AGENT_BROWSER_ARGS`, `AGENT_BROWSER_RESTORE`,
+  `AGENT_BROWSER_SESSION_NAME`), **are the adapter's too**: `login` is refused the same way, naming
+  the variable (never its value, a vault entry's) and saying to take it out of the connection's
+  `env`, and the server starts with it and no list of Flottille's. Its other variables
+  (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`…) are the user's and change nothing of it.
+  What is not covered: the variables of the daemon's own environment, which a run inherits.
 - **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
   written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the

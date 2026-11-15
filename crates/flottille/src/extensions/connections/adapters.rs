@@ -307,31 +307,65 @@ impl Adapter {
         said
     }
 
-    /// Why login is refused when the server's own command sets the browser's sites itself, or
-    /// uses an option agent-browser refuses together with them: the session would not be kept to
-    /// the entries' sites.
-    pub fn drops_allowlist(&self, words: &[String]) -> Option<String> {
+    /// Why login is refused when the server's own command, or the variables the connection puts
+    /// in its environment (`env`), set the browser's sites themselves, or an option agent-browser
+    /// refuses together with them: the session would not be kept to the entries' sites.
+    pub fn drops_allowlist(
+        &self,
+        words: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        // Where the option is set, its name, and where the user takes it out.
         let used = |list: &[&str]| {
-            words.iter().find_map(|word| {
+            let in_command = words.iter().find_map(|word| {
                 let name = word.split('=').next().unwrap_or(word);
-                list.contains(&name).then_some(name)
+                list.contains(&name).then(|| {
+                    (
+                        "the server's command uses",
+                        name.to_owned(),
+                        "the connection's command",
+                    )
+                })
+            });
+            // agent-browser reads `AGENT_BROWSER_<OPTION>` as the option, above its configuration
+            // file. Said by its name alone: its value is a vault entry's.
+            in_command.or_else(|| {
+                list.iter()
+                    .filter_map(|option| variable(option))
+                    .find_map(|name| {
+                        env.contains_key(&name).then_some((
+                            "the connection's environment sets",
+                            name,
+                            "the connection's env",
+                        ))
+                    })
             })
         };
-        if let Some(option) = used(&["--allowed-domains"]) {
+        if let Some((sets, option, from)) = used(&["--allowed-domains"]) {
             return Some(format!(
-                "login is refused while the server's command uses {option}: the command already \
-                 sets the browser's sites, and Flottille sets them from the vault entries bound \
-                 to this connection. The user takes {option} out of the connection's command"
+                "login is refused while {sets} {option}: it already sets the browser's sites, \
+                 and Flottille's adapter sets them itself, from the vault entries bound to this \
+                 connection. The user takes {option} out of {from}"
             ));
         }
-        let option = used(DROPS_ALLOWLIST)?;
+        let (sets, option, from) = used(DROPS_ALLOWLIST)?;
         Some(format!(
-            "login is refused while the server's command uses {option}: agent-browser refuses it \
-             together with the browser's allowed domains, which keep the browser to the sites of \
-             the vault entries bound to this connection, and a session that is not kept to them \
-             could be sent elsewhere. The user takes {option} out of the connection's command"
+            "login is refused while {sets} {option}: agent-browser refuses it together with the \
+             browser's allowed domains, which Flottille's adapter sets to keep the browser to the \
+             sites of the vault entries bound to this connection, and a session that is not kept \
+             to them could be sent elsewhere. The user takes {option} out of {from}"
         ))
     }
+}
+
+/// The variable agent-browser reads as the long option `option`: `--auto-connect` is
+/// `AGENT_BROWSER_AUTO_CONNECT`.
+fn variable(option: &str) -> Option<String> {
+    let name = option.strip_prefix("--")?;
+    Some(format!(
+        "AGENT_BROWSER_{}",
+        name.to_ascii_uppercase().replace('-', "_")
+    ))
 }
 
 /// The options of agent-browser that it refuses together with allowed domains (its documented
@@ -400,12 +434,16 @@ pub fn sites(daemon: &Daemon, name: &str) -> Vec<String> {
 }
 
 /// The sites the server's start and Flottille's own runs keep the browser to: those of the
-/// entries, unless the server's command uses an option that agent-browser refuses with them, in
-/// which case the server starts as the user wrote it and `login` is refused.
-pub fn kept_to(daemon: &Daemon, adapter: &Adapter, name: &str, words: &[String]) -> Vec<String> {
-    match adapter.drops_allowlist(words) {
+/// entries, unless the server's command or its environment sets an option that agent-browser
+/// refuses with them, in which case the server starts as the user wrote it and `login` is refused.
+pub fn kept_to(daemon: &Daemon, adapter: &Adapter, declaration: &Declaration) -> Vec<String> {
+    let words = match &declaration.reach {
+        Reach::Command(words) => words.as_slice(),
+        Reach::Url(_) => &[],
+    };
+    match adapter.drops_allowlist(words, &declaration.env) {
         Some(_) => Vec::new(),
-        None => sites(daemon, name),
+        None => sites(daemon, &declaration.name),
     }
 }
 
@@ -542,7 +580,7 @@ pub async fn perform(
         if let Err(why) = at_turn(row.pin.as_ref(), |action| super::setting_of(&row, action)) {
             return Outcome::Refused(format!("refused: {why}"));
         }
-        if let Some(why) = AGENT_BROWSER.drops_allowlist(&program) {
+        if let Some(why) = AGENT_BROWSER.drops_allowlist(&program, &declaration.env) {
             return Outcome::Refused(format!("refused: {why}"));
         }
         let login = Login {
