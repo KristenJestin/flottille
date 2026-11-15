@@ -326,6 +326,16 @@ fn along_line(releases: &[Value], this: &Version) -> Option<String> {
     }
 }
 
+/// `along_line` over the pages of the releases, newest first, as GitHub gives them, a page at a
+/// time through `page` (1 is the first).
+fn along_line_paged(
+    this: &Version,
+    mut page: impl FnMut(u32) -> Result<Vec<Value>>,
+) -> Result<Option<String>> {
+    let releases = page(1)?;
+    Ok(along_line(&releases, this))
+}
+
 /// Whether `new` is older than `this`: by version, but dev's beta of a line is not older than the
 /// next build of that line it was merged from (`0.5.0-beta.1` follows `0.5.0-next.7`).
 fn is_older(new: &Version, this: &Version) -> bool {
@@ -382,13 +392,13 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
         // The build's own line: it says its channel, which `--channel` does not offer.
         "rc" | "next" => {
             let this = Version::parse(VERSION)?;
-            along_line(
-                json(&format!("{}/releases?per_page=100", api()))?
-                    .unwrap_or_default()
-                    .as_array()
-                    .map_or(&[], Vec::as_slice),
-                &this,
-            )
+            along_line_paged(&this, |page| {
+                Ok(
+                    json(&format!("{}/releases?per_page=100&page={page}", api()))?
+                        .and_then(|releases| releases.as_array().cloned())
+                        .unwrap_or_default(),
+                )
+            })?
         }
         _ => return Err("the channel is stable, beta or alpha".into()),
     };
@@ -551,5 +561,86 @@ mod tests {
         assert!(!is_older(&Version::parse("0.5.0-beta.1").unwrap(), &this));
         assert!(is_older(&Version::parse("0.5.0-next.1").unwrap(), &this));
         assert!(is_older(&Version::parse("0.4.0-beta.9").unwrap(), &this));
+    }
+
+    /// `n` pages of releases, a page being what `releases` hold, newest first.
+    fn taken_paged(pages: &[Vec<Value>], this: &str) -> Option<String> {
+        let url = along_line_paged(&Version::parse(this).unwrap(), |page| {
+            Ok(pages.get(page as usize - 1).cloned().unwrap_or_default())
+        })
+        .unwrap()?;
+        Some(version_of(url.rsplit('/').next()?)?.to_string())
+    }
+
+    /// Dev's betas, which fill a page of releases within weeks.
+    fn betas(from: u32, count: u32) -> Vec<Value> {
+        (from..from + count)
+            .map(|n| release(&format!("0.4.0-beta.{n}"), "2026-11-20T10:00:00Z"))
+            .collect()
+    }
+
+    #[test]
+    fn an_rc_build_already_the_newest_of_its_line_says_already() {
+        let releases = [
+            release("0.3.1-rc.2", "2026-11-03T10:00:00Z"),
+            release("0.3.1-rc.3", "2026-11-04T10:00:00Z"),
+            release("0.4.0-beta.9", "2026-11-06T10:00:00Z"),
+        ];
+        // The archive taken is the build's own: `run` says "already", it does not update.
+        assert_eq!(
+            taken(&releases, "0.3.1-rc.3").as_deref(),
+            Some("0.3.1-rc.3")
+        );
+    }
+
+    #[test]
+    fn an_rc_build_whose_release_is_on_page_two_says_already() {
+        let pages = [
+            betas(1, 100),
+            vec![
+                release("0.3.1-rc.2", "2026-11-03T10:00:00Z"),
+                release("0.3.1-rc.1", "2026-11-02T10:00:00Z"),
+            ],
+        ];
+        assert_eq!(
+            taken_paged(&pages, "0.3.1-rc.2").as_deref(),
+            Some("0.3.1-rc.2")
+        );
+    }
+
+    #[test]
+    fn an_rc_build_finds_a_newer_rc_on_page_two() {
+        let pages = [
+            betas(1, 100),
+            vec![
+                release("0.3.1-rc.3", "2026-11-04T10:00:00Z"),
+                release("0.3.1-rc.2", "2026-11-03T10:00:00Z"),
+            ],
+        ];
+        assert_eq!(
+            taken_paged(&pages, "0.3.1-rc.2").as_deref(),
+            Some("0.3.1-rc.3")
+        );
+    }
+
+    #[test]
+    fn an_rc_build_reads_the_pages_only_as_far_as_it_needs() {
+        let mut asked = Vec::new();
+        let this = Version::parse("0.3.1-rc.1").unwrap();
+        // Its own release is never found: the reading stops at the ten pages.
+        along_line_paged(&this, |page| {
+            asked.push(page);
+            Ok(betas(page * 100, 100))
+        })
+        .unwrap();
+        assert_eq!(asked, (1..=10).collect::<Vec<_>>());
+        // Found on the first page: the second is not read.
+        asked.clear();
+        along_line_paged(&this, |page| {
+            asked.push(page);
+            Ok(vec![release("0.3.1-rc.1", "2026-11-02T10:00:00Z")])
+        })
+        .unwrap();
+        assert_eq!(asked, [1]);
     }
 }
