@@ -39,6 +39,12 @@ fn fixture_with(user: &User, others: &[&str]) {
 
 /// The same, `api` on the forge `forge` declares, its `origin` being `url`.
 fn fixture_on(user: &User, others: &[&str], url: &str, forge: Value) {
+    fixture_in(user, others, url, forge, None);
+}
+
+/// The same, the workspace `login` holding the repositories `held` when given (`api` and the
+/// others otherwise).
+fn fixture_in(user: &User, others: &[&str], url: &str, forge: Value, held: Option<&[&str]>) {
     let folder = user.path("work/app");
     for other in others {
         let dir = folder.join(other);
@@ -71,12 +77,11 @@ fn fixture_on(user: &User, others: &[&str], url: &str, forge: Value) {
     user.git(&dir, &["remote", "set-url", "origin", url]);
     user.call("project.add", json!({"folder": folder, "name": "app"}))
         .unwrap();
-    let workspace = user
-        .call(
-            "workspace.create",
-            json!({"project": "app", "name": "login", "offline": true}),
-        )
-        .unwrap();
+    let mut asked = json!({"project": "app", "name": "login", "offline": true});
+    if let Some(held) = held {
+        asked["repositories"] = json!(held);
+    }
+    let workspace = user.call("workspace.create", asked).unwrap();
     assert_eq!(workspace["state"], "ready", "{workspace}");
     user.call(
         "project.set_settings",
@@ -3905,21 +3910,23 @@ fn hand_opened(number: u64, repository: &str) -> Value {
 #[test]
 fn a_pull_request_of_another_repository_on_the_same_branch_subscribes_nobody() {
     let user = user();
-    fixture(&user);
     // A repository of the project that the workspace does not hold.
-    let lib = user.path("work/app/lib");
-    user.git_init(&lib);
-    std::fs::write(lib.join("README.md"), "lib\n").unwrap();
-    user.git(&lib, &["add", "."]);
-    user.git(&lib, &["commit", "--quiet", "-m", "start"]);
+    let github = json!({"kind": "github", "repository": "acme/api"});
+    fixture_in(
+        &user,
+        &["lib"],
+        "git@github.com:acme/api.git",
+        github.clone(),
+        Some(&["api"]),
+    );
     user.git(
-        &lib,
-        &["remote", "add", "origin", "git@github.com:acme/lib.git"],
+        &user.path("work/app/lib"),
+        &["remote", "set-url", "origin", "git@github.com:acme/lib.git"],
     );
     user.call(
         "project.set_settings",
         json!({"name": "app", "repositories": [
-            {"path": "api", "forge": {"kind": "github", "repository": "acme/api"}},
+            {"path": "api", "forge": github},
             {"path": "lib", "forge": {"kind": "github", "repository": "acme/lib"}}
         ]}),
     )
