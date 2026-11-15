@@ -1972,7 +1972,9 @@ fn adapter_said(
                 }
             }
             if let Reach::Command(words) = &declaration.reach
-                && let Some(why) = adapter.drops_allowlist(words, &declaration.env)
+                && let Some(why) = adapter
+                    .drops_allowlist(words, &declaration.env)
+                    .or_else(|| adapter.own_config(words, &declaration.env))
             {
                 said.push_str(&format!(" {why}."));
             }

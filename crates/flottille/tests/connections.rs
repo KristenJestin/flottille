@@ -5124,6 +5124,53 @@ fn a_harmless_variable_of_agent_browsers_is_accepted() {
 }
 
 #[test]
+fn login_is_refused_when_the_users_own_config_would_be_ignored() {
+    let user_config = |user: &User| user.path("my-agent-browser.json");
+    for (options, variable) in [
+        (vec!["--config", "<file>"], None),
+        (vec!["--config=<file>"], None),
+        (vec![], Some("AGENT_BROWSER_CONFIG")),
+    ] {
+        let user = user();
+        let file = user_config(&user);
+        std::fs::write(&file, r#"{"allowedDomains": ["intranet.example.org"]}"#).unwrap();
+        let options: Vec<String> = options
+            .iter()
+            .map(|o| o.replace("<file>", &file.display().to_string()))
+            .collect();
+        let options: Vec<&str> = options.iter().map(String::as_str).collect();
+        let mut more = json!({});
+        if let Some(variable) = variable {
+            user.call(
+                "vault.set",
+                json!({"name": "browser-setting", "secret": file.display().to_string()}),
+            )
+            .unwrap();
+            more = json!({"env": {variable: {"vault": "browser-setting"}}});
+        }
+        browser_declared(&user, &agent_browser("0.43.0"), json!({}), &options, more);
+        let (_, mcp) = signed_up(&user);
+        let said = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+        ));
+        let named = variable.unwrap_or("--config");
+        // Why, and how to add a site to a sign-in instead.
+        for words in [named, "allowedDomains", "sites"] {
+            assert!(said.contains(words), "{options:?} {variable:?}: {said}");
+        }
+        assert!(logged(&user, "browser", "login").is_empty(), "{options:?}");
+        assert!(form(&user).is_none(), "{options:?}");
+        let review = user
+            .call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        let said = review["adapter"]["said"].as_str().unwrap();
+        assert!(said.contains(named), "{options:?}: {review}");
+        assert!(said.contains("allowedDomains"), "{options:?}: {review}");
+    }
+}
+
+#[test]
 fn an_entry_whose_host_is_no_usable_site_is_refused() {
     for url in [
         "https://shop.example.com,evil.example.net/login",

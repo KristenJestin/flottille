@@ -1306,7 +1306,13 @@ way in:
 - **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
   written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the
-  user's own, and the sites of the entries (below).
+  user's own, and the sites of the entries (below). **A configuration file of the user's** that
+  the server's command names (`--config`, or `AGENT_BROWSER_CONFIG` in the connection's `env`) is
+  not read either: Flottille's replaces it whole, its `allowedDomains` included, and Flottille does
+  not open the user's file to merge them (it is the user's, and may hold a secret). So while one is
+  named, `login` is refused, saying that the adapter sets the allowed sites itself and that a
+  site a sign-in needs goes in the connection's `sites` (below); the review says it too, and the
+  server starts as before.
 - **`login {entry}`**, Flottille's own action: the agent names a vault entry **bound to this
   connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
   lists, never their values. An entry bound to another use, or to none, is refused, naming its use.

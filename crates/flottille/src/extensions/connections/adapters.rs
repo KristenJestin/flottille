@@ -315,32 +315,7 @@ impl Adapter {
         words: &[String],
         env: &BTreeMap<String, String>,
     ) -> Option<String> {
-        // Where the option is set, its name, and where the user takes it out.
-        let used = |list: &[&str]| {
-            let in_command = words.iter().find_map(|word| {
-                let name = word.split('=').next().unwrap_or(word);
-                list.contains(&name).then(|| {
-                    (
-                        "the server's command uses",
-                        name.to_owned(),
-                        "the connection's command",
-                    )
-                })
-            });
-            // agent-browser reads `AGENT_BROWSER_<OPTION>` as the option, above its configuration
-            // file. Said by its name alone: its value is a vault entry's.
-            in_command.or_else(|| {
-                list.iter()
-                    .filter_map(|option| variable(option))
-                    .find_map(|name| {
-                        env.contains_key(&name).then_some((
-                            "the connection's environment sets",
-                            name,
-                            "the connection's env",
-                        ))
-                    })
-            })
-        };
+        let used = |list: &[&str]| set_in(words, env, list);
         if let Some((sets, option, from)) = used(&["--allowed-domains"]) {
             return Some(format!(
                 "login is refused while {sets} {option}: it already sets the browser's sites, \
@@ -356,6 +331,55 @@ impl Adapter {
              to them could be sent elsewhere. The user takes {option} out of {from}"
         ))
     }
+
+    /// Why login is refused when the server's command, or the connection's environment, names a
+    /// configuration file of the user's: Flottille passes its own, which replaces it whole, its
+    /// `allowedDomains` included. Flottille does not read the user's file to merge them: it is
+    /// the user's, and may hold a secret.
+    pub fn own_config(&self, words: &[String], env: &BTreeMap<String, String>) -> Option<String> {
+        let (sets, option, from) = set_in(words, env, &["--config"])?;
+        Some(format!(
+            "login is refused while {sets} {option}: Flottille's adapter passes agent-browser a \
+             configuration of its own, which names Flottille as the credential provider and sets \
+             the browser's allowed sites (allowedDomains) from the vault entries bound to this \
+             connection, so the user's is not read, its allowedDomains included. The user takes \
+             {option} out of {from}, and adds a site a sign-in needs, such as a single sign-on's, \
+             to the connection's sites"
+        ))
+    }
+}
+
+/// Where the first of the options `list` is set, by the server's command `words` or the
+/// connection's environment `env`: what sets it, the option or variable, and where the user takes
+/// it out.
+fn set_in(
+    words: &[String],
+    env: &BTreeMap<String, String>,
+    list: &[&str],
+) -> Option<(&'static str, String, &'static str)> {
+    let in_command = words.iter().find_map(|word| {
+        let name = word.split('=').next().unwrap_or(word);
+        list.contains(&name).then(|| {
+            (
+                "the server's command uses",
+                name.to_owned(),
+                "the connection's command",
+            )
+        })
+    });
+    // agent-browser reads `AGENT_BROWSER_<OPTION>` as the option, above its configuration file.
+    // Said by its name alone: its value is a vault entry's.
+    in_command.or_else(|| {
+        list.iter()
+            .filter_map(|option| variable(option))
+            .find_map(|name| {
+                env.contains_key(&name).then_some((
+                    "the connection's environment sets",
+                    name,
+                    "the connection's env",
+                ))
+            })
+    })
 }
 
 /// The variable agent-browser reads as the long option `option`: `--auto-connect` is
@@ -580,7 +604,10 @@ pub async fn perform(
         if let Err(why) = at_turn(row.pin.as_ref(), |action| super::setting_of(&row, action)) {
             return Outcome::Refused(format!("refused: {why}"));
         }
-        if let Some(why) = AGENT_BROWSER.drops_allowlist(&program, &declaration.env) {
+        if let Some(why) = AGENT_BROWSER
+            .drops_allowlist(&program, &declaration.env)
+            .or_else(|| AGENT_BROWSER.own_config(&program, &declaration.env))
+        {
             return Outcome::Refused(format!("refused: {why}"));
         }
         let login = Login {
