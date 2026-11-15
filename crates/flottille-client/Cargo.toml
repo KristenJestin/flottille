@@ -1,0 +1,13 @@
+[package]
+name = "flottille-client"
+description = "A client of Flottille's daemon: requests, answers and events on one connection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The protocol and std only: the command line, the window, the mobile core and the link read the
+# daemon through it without the store, the daemon or an async runtime.
+[dependencies]
+flottille-protocol = { version = "0.1.0", path = "../flottille-protocol" }
+serde_json = "1.0.154"

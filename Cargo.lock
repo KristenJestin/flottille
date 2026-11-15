@@ -2152,6 +2152,7 @@ dependencies = [
  "clap",
  "dom_smoothie",
  "flate2",
+ "flottille-client",
  "flottille-core",
  "flottille-protocol",
  "flottille-window",
@@ -2187,6 +2188,14 @@ dependencies = [
  "tokio-util",
  "toml_edit 0.25.17+spec-1.1.0",
  "url",
+]
+
+[[package]]
+name = "flottille-client"
+version = "0.1.0"
+dependencies = [
+ "flottille-protocol",
+ "serde_json",
 ]
 
 [[package]]
@@ -2286,7 +2295,9 @@ name = "flottille-window"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "flottille-client",
  "flottille-core",
+ "flottille-protocol",
  "futures",
  "gpui-design-system",
  "gpui-kit",

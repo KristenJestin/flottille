@@ -969,13 +969,10 @@ fn events_since(paths: &Paths, args: Value) -> Done {
     // none is lost; the second subscription, with no number, answers with the last event's.
     let mut watcher = Client::connect_or_start(paths).map_err(failure)?;
     watcher
-        .request(
-            "events.watch",
-            json!(WatchParams {
-                after: Some(after),
-                client: None
-            }),
-        )
+        .watch(WatchParams {
+            after: Some(after),
+            client: None,
+        })
         .map_err(failure)?;
     let last = Client::connect_or_start(paths)
         .and_then(|mut probe| probe.request("events.watch", Value::Null))

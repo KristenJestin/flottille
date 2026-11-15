@@ -82,7 +82,11 @@ fn every_method_the_sources_name_is_catalogued() {
     let files = ["md", "toml", "log", "pdf", "sock"];
 
     let mut sources = Vec::new();
-    for folder in ["flottille/src", "flottille-window/src"] {
+    for folder in [
+        "flottille/src",
+        "flottille-client/src",
+        "flottille-window/src",
+    ] {
         rust_files(&crates.join(folder), &mut sources);
     }
     let mut unknown = Vec::new();

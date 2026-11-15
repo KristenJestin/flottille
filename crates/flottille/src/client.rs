@@ -1,7 +1,7 @@
 //! The command line's side of the socket: connect, start the daemon when it is not running, ask.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::io::ErrorKind;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use flottille_client::{Answer, Connection};
 use flottille_core::paths::{Paths, ensure_private_dir};
-use flottille_core::protocol::{Event, Message, Request};
+use flottille_core::protocol::{Event, WatchParams};
 use serde_json::Value;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -36,11 +37,7 @@ impl std::fmt::Display for DaemonError {
 impl std::error::Error for DaemonError {}
 
 pub struct Client {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
-    next_id: u64,
-    /// The start of a line read before a timeout cut the read short.
-    partial: String,
+    connection: Connection<UnixStream>,
 }
 
 impl Client {
@@ -48,10 +45,7 @@ impl Client {
     pub fn connect(paths: &Paths) -> Result<Option<Client>> {
         match UnixStream::connect(paths.socket()) {
             Ok(stream) => Ok(Some(Client {
-                reader: BufReader::new(stream.try_clone()?),
-                writer: stream,
-                next_id: 1,
-                partial: String::new(),
+                connection: Connection::new(stream),
             })),
             // No socket, or one left by a daemon that died: nobody is listening.
             Err(error)
@@ -99,92 +93,54 @@ impl Client {
 
     /// The connection itself, for a client that speaks the protocol on its own (the window).
     pub fn into_stream(self) -> UnixStream {
-        self.writer
+        self.connection.into_stream()
     }
 
-    /// Sends a request and returns its result; events arriving meanwhile are not for a request.
+    /// Sends a request and returns its result.
     pub fn request(&mut self, method: &str, params: Value) -> Result<Value> {
-        let id = self.send(method, params)?;
-        loop {
-            let message = self.read()?.ok_or("the daemon closed the connection")?;
-            if message.id.as_deref() != Some(&id) {
-                continue;
-            }
-            if let Some(error) = message.error {
-                return Err(Box::new(DaemonError {
-                    code: error.code,
-                    message: error.message,
-                }));
-            }
-            return Ok(message.result.unwrap_or(Value::Null));
-        }
+        answered(self.connection.ask(method, params)?)
+    }
+
+    /// Subscribes to the events (`events.watch`).
+    pub fn watch(&mut self, params: WatchParams) -> Result<Value> {
+        answered(self.connection.watch(params)?)
     }
 
     /// Sends a request without waiting for its answer: its id.
     pub fn send(&mut self, method: &str, params: Value) -> Result<String> {
-        let id = self.next_id.to_string();
-        self.next_id += 1;
-        let request = Request {
-            id: id.clone(),
-            method: method.to_owned(),
-            params,
-        };
-        let mut line = serde_json::to_string(&request)?;
-        line.push('\n');
-        self.writer.write_all(line.as_bytes())?;
-        Ok(id)
+        Ok(self.connection.send(method, params)?)
     }
 
     /// The next event of a subscription, `None` when the daemon closed the connection.
     pub fn next_event(&mut self) -> Result<Option<Event>> {
-        while let Some(message) = self.read()? {
-            if let Some(event) = message.event {
-                return Ok(Some(event));
-            }
+        match self.connection.next_event(None) {
+            Err(flottille_client::Error::Closed) => Ok(None),
+            next => Ok(next?),
         }
-        Ok(None)
     }
 
     /// The next event of a subscription, `None` when none came within `wait`.
     pub fn next_event_within(&mut self, wait: Duration) -> Result<Option<Event>> {
-        let deadline = Instant::now() + wait;
-        let event = loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                break None;
-            }
-            self.writer.set_read_timeout(Some(left))?;
-            match self.read() {
-                Ok(Some(Message {
-                    event: Some(event), ..
-                })) => break Some(event),
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    self.writer.set_read_timeout(None)?;
-                    return Err("the daemon closed the connection".into());
-                }
-                Err(error) if is_timeout(error.as_ref()) => break None,
-                Err(error) => return Err(error),
-            }
-        };
-        self.writer.set_read_timeout(None)?;
-        Ok(event)
-    }
-
-    fn read(&mut self) -> Result<Option<Message>> {
-        // A line cut short by a timeout stays in `partial` for the next read.
-        if self.reader.read_line(&mut self.partial)? == 0 {
-            return Ok(None);
-        }
-        let line = std::mem::take(&mut self.partial);
-        Ok(Some(serde_json::from_str(&line)?))
+        Ok(self.connection.next_event(Some(wait))?)
     }
 }
 
+/// The result of an answer; the error the daemon answered with as a [`DaemonError`].
+fn answered(answer: Answer) -> Result<Value> {
+    answer.map_err(|error| {
+        DaemonError {
+            code: error.code,
+            message: error.message,
+        }
+        .into()
+    })
+}
+
 fn is_timeout(error: &(dyn std::error::Error + 'static)) -> bool {
-    error
-        .downcast_ref::<std::io::Error>()
-        .is_some_and(|error| matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut))
+    matches!(
+        error.downcast_ref::<flottille_client::Error>(),
+        Some(flottille_client::Error::TimedOut)
+    )
 }
 
 /// Starts `flottille daemon` in its own session, detached from this terminal, its output in the
@@ -260,8 +216,11 @@ pub fn stop(paths: &Paths, mut client: Client) -> Result<Stopped> {
         .ok()
         .and_then(|ms| ms.parse().ok())
         .map_or(STOP_WAIT, Duration::from_millis);
-    client.writer.set_read_timeout(Some(wait))?;
-    let asked = client.request("daemon.stop", Value::Null);
+    let asked = client
+        .connection
+        .ask_within("daemon.stop", Value::Null, wait)
+        .map_err(Into::into)
+        .and_then(answered);
     drop(client);
     // A daemon that closed the connection as it stopped is waited for all the same.
     let (asked, deadline) = match asked {
@@ -492,6 +451,8 @@ fn wait_until(paths: &Paths, pid: &str, deadline: Instant) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader};
+
     use super::*;
 
     #[test]
