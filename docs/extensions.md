@@ -899,20 +899,31 @@ sentence on what it is for, and how to reach the server, either
 
   A URL whose query or fragment (`#access_token=…`) holds a parameter named like a secret is
   refused when the connection is added or edited, saying to move it to "Secrets of its requests";
-  its name is said, never its value. The name is read as words (`userToken`, `user_token` and
-  `UserToken` alike, a number at a word's end left out: `token2` is `token`): it is refused when
-  it is one of `token`, `user_token`, `id_token`, `refresh_token`, `session_id`, `key`, `auth`,
-  `authorization`, `sig`, `jwt`, `bearer`, `sid`, whole or run together (`usertoken`,
-  `sessionid`), or ends with `access_token`, `auth_token`, `api_token`, `session_token`,
-  `security_token`, `private_token`, `api_key`, `secret_key`, `private_key`, `access_key`,
-  `secret`, `password`, `passwd` or `signature`, as words or run together (`x_api_key`,
-  `client_secret`, `clientsecret`, `X-Amz-Security-Token`, `X-Amz-Signature`). A word that only
-  holds one of them is allowed: `author`, `oauth_state`, `pageToken`, `nextToken`, `keyword`,
-  `project_key`. The path is not looked at: a token written in it is the user's to move. An error
-  about a URL (its scheme, its host, a login in it) says it without its login, query and fragment.
+  its name is said, never its value. Its pairs are split at `&` and at `;`, which some servers
+  read as `&` (`?page=1;access_token=…` is refused). The name is read as words (`userToken`,
+  `user_token` and `UserToken` alike, a number at a word's end left out: `token2` is `token`): it
+  is refused when its last word is `token`, `key`, `sig`, `jwt`, `secret`, `password`, `passwd`,
+  `pwd`, `passphrase` or `signature` (`x_user_token`, `google_id_token`, `bearer_token`,
+  `subscription-key`, `app_key`, `X-Amz-Signature`), or when a last word run together ends with
+  `token`, `secret`, `password`, `passwd`, `passphrase`, `signature`, `apikey`, `accesskey`,
+  `secretkey` or `privatekey` (`usertoken`, `clientsecret`), unless the words before it are one of
+  `page`, `next`, `next_page`, `continuation`, `cursor`, `sync`, `project` or `idempotency`, a
+  position, a state or an identifier the server hands out and no credential (`pageToken`,
+  `next_page_token`, `cursor_key`, `project_key`, `idempotency_key`, `pagetoken`). It is refused
+  too when it is `session_id`, `auth`, `authorization`, `bearer` or `sid`, whole or run together
+  (`sessionid`). A word that only holds one of them is allowed: `author`, `oauth_state`,
+  `keyword`, `monkey`. A name ending in `key` for something else (`sort_key`) is refused too: the
+  user writes such a parameter from a vault entry, a reversible cost against a credential sent in
+  clear. The path is not looked at: a token written in it is the user's to move. An error about a
+  URL (its host, a login in it) says it without its login, query and fragment; one whose scheme
+  is no `http` or `https` says its scheme alone, what follows it being maybe a login pasted
+  without `https://` (`ada:…@host`).
   A connection already declared with such a URL, or with one that is no `https://` URL nor
   `http://` on this machine (written before this check, or by hand), is not refused with the file:
-  it is listed with `failing` saying why, its server never starts, `login` is refused with the
+  it is listed with `failing` saying why, and its URL is served (`connection.list`, the window,
+  an agent's `connections list` and `show`, a request's before and after) as an error says it:
+  without its login, query and fragment, its scheme alone for another scheme. Its server never
+  starts, `login` is refused with the
   same reason, and it is edited (its URL mended) or removed as any other; an edit that keeps the
   URL, and its on or off, are refused with that reason until the URL is mended. The other
   connections are untouched.
@@ -958,7 +969,9 @@ of a URL's requests one that exists or one the user is to make).
 whose token the user has not saved yet names the entry it is to be saved as. The name must be an
 entry's name (`valid_name`) and nothing that looks like a secret: no word of it between `-`, `_`
 and `.` is longer than 19 characters, it is not mostly hexadecimal digits once those are taken out
-(more than 15 of them making four fifths of it or more: a token split by dashes, a UUID), and no
+(more than 15 of them making four fifths of it or more: a token split by dashes, a UUID), no word
+of 8 characters or more holds letters and three numbers or more apart (`Zq7Wx3Vp9`, a token's
+piece, where a name's word holds one number, at its end: `github-token-2`, `notion-api-v2`), and no
 masking rule takes it for a token, so that a token
 written where a name goes is refused unsaid instead of being shown to the user as a name to save.
 `connection.proposed` gives each secret line's `missing`, and `waits`, the sentence saying which
