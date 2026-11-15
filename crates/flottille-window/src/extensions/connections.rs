@@ -1113,6 +1113,13 @@ impl ConnectionsSection {
         }
         toast(shown, cx);
         self.read(cx);
+        // The review that waited for it reads the server again by itself.
+        if said == "signed_in" && self.review_open && self.review.as_ref().is_some_and(|r| {
+            r.name == name
+                && matches!(&r.answer, Some(Err(why)) if flottille_core::vault::asks_sign_in(why))
+        }) {
+            self.open_review(name, cx);
+        }
         cx.notify();
     }
 
@@ -3018,6 +3025,27 @@ impl ConnectionsSection {
                     true,
                 )
             }
+            Some(Err(why)) if flottille_core::vault::asks_sign_in(why) => {
+                // A state, in the attention tone, not an error: the way out is a button.
+                let name = review.name.clone();
+                (
+                    Some("Its server asks you to sign in before it can be read.".to_owned()),
+                    div()
+                        .id("connection-review-needs-sign-in")
+                        .aria_label(SharedString::from(format!("{name} needs a sign-in")))
+                        .text_size(px(12.5))
+                        .text_color(p.wait)
+                        .child(SharedString::from(format!(
+                            "Sign in to {name}: this review reads its server again by itself, \
+                             and shows its actions."
+                        )))
+                        .test_support()
+                        .into_any_element(),
+                    None,
+                    None,
+                    false,
+                )
+            }
             Some(Err(why)) => (
                 Some("Its server did not start, so there is nothing to read yet.".to_owned()),
                 div()
@@ -3042,6 +3070,11 @@ impl ConnectionsSection {
             cx,
         );
         let accepting = review.accepting;
+        let signing = self.signing.contains(&review.name);
+        let sign_in = match &answer {
+            Some(Err(why)) if flottille_core::vault::asks_sign_in(why) => Some(review.name.clone()),
+            _ => None,
+        };
         review.answer = answer;
         self.review = Some(review);
         let body = div()
@@ -3069,6 +3102,14 @@ impl ConnectionsSection {
         }
         if let Some(sentence) = sentence {
             modal = modal.sentence(sentence);
+        }
+        if let Some(name) = sign_in {
+            modal = modal.action(
+                Button::primary("connection-review-sign-in", "Sign in")
+                    .leading(Icon::Lucide("log-in"))
+                    .disabled(signing)
+                    .on_click(cx.listener(move |this, _, _, cx| this.sign_in(&name, cx))),
+            );
         }
         if ready {
             modal = modal.action(

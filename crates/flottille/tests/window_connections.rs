@@ -2938,7 +2938,7 @@ fn a_review_that_needs_a_sign_in_offers_the_button(cx: &mut TestAppContext) {
         "the review offers Sign in"
     );
     assert_eq!(
-        label(cx, "connection-review-sign-in-label").as_deref(),
+        label(cx, "connection-review-sign-in").as_deref(),
         Some("Sign in")
     );
     // A state, not an error: the error line is not drawn, and there is nothing to accept yet.

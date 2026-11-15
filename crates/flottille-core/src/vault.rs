@@ -35,6 +35,17 @@ pub fn connection(name: &str) -> String {
     format!("connection:{name}")
 }
 
+/// What the daemon says when the server of a connection asks to be signed in (a `401`), and the
+/// part of what it says when the authorization server refused to refresh its tokens: the window
+/// knows a sign-in is what is missing by them, and offers its button instead of a command.
+pub const SIGN_IN_ASKED: &str = "the server asks to be signed in";
+pub const SIGNED_OUT: &str = " is signed out (";
+
+/// Whether what the daemon said of a connection's server is that a sign-in is missing.
+pub fn asks_sign_in(said: &str) -> bool {
+    said.contains(SIGN_IN_ASKED) || said.contains(SIGNED_OUT)
+}
+
 /// A use as a sentence names it, or `None` when it is no use Flottille knows.
 pub fn use_said(bound: &str) -> Option<String> {
     match bound.split_once(':')? {

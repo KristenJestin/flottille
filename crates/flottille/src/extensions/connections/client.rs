@@ -598,8 +598,8 @@ async fn start_with(
                         return Err(said);
                     }
                     return Err(format!(
-                        "the server asks to be signed in: the user signs it in with `flottille \
-                         connection login {name}`"
+                        "{}: the user signs it in with `flottille connection login {name}`",
+                        flottille_core::vault::SIGN_IN_ASKED
                     ));
                 }
                 Err(error) => return Err(error.to_string()),
@@ -697,8 +697,9 @@ async fn token_refused(daemon: &Arc<Daemon>, declaration: &Declaration) -> Optio
 /// What a start says of a connection whose authorization server refused to refresh its tokens.
 fn signed_out_said(name: &str, why: &str) -> String {
     format!(
-        "the connection {name} is signed out ({why}): the user is asked to sign in again \
-         (`flottille connection login {name}`)"
+        "the connection {name}{}{why}): the user is asked to sign in again \
+         (`flottille connection login {name}`)",
+        flottille_core::vault::SIGNED_OUT
     )
 }
 
