@@ -1067,6 +1067,54 @@ mod tests {
         assert_eq!(file(), before);
     }
 
+    #[tokio::test]
+    async fn an_entry_deleted_after_accept_is_refused_at_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let place = crate::place::Place {
+            project: "app".into(),
+            workspace: None,
+            root: dir.path().into(),
+            repositories: Vec::new(),
+            branch: String::new(),
+            variables: Default::default(),
+            home: None,
+        };
+        let entry = flottille_core::vault::Entry {
+            name: "notes-token".into(),
+            description: None,
+            url: Some("https://notes.example.com".into()),
+            username: None,
+            project: None,
+            updated_at: 0,
+            bound: None,
+        };
+        daemon.write(|store| store.put_vault_entry(&entry)).unwrap();
+        let file = || std::fs::read_to_string(dir.path().join("config/extensions.toml")).unwrap();
+        let before = file();
+        let args = json!({"action": "add", "name": "notes", "about": "Notes.",
+            "url": "https://notes.example.com/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "notes-token"}]});
+        // What the user read and accepted, the entry there.
+        let read: Vec<String> = words(&daemon, &proposal(&daemon, &args).unwrap())
+            .iter()
+            .map(|said| mcp::masked(said, &place))
+            .collect();
+        // Deleted before the write: made again on another host, it would skip the host check.
+        daemon
+            .write(|store| store.remove_vault_entry("notes-token"))
+            .unwrap();
+
+        let outcome = tool(&daemon, args, &read, &place).await;
+        assert!(
+            matches!(&outcome, Outcome::Refused(why) | Outcome::Failed(why)
+                if why.contains("notes-token")),
+            "refused"
+        );
+        assert_eq!(file(), before);
+    }
+
     #[test]
     fn an_address_names_its_host_over_https_or_on_this_machine() {
         assert_eq!(

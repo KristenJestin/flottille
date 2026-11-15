@@ -457,3 +457,46 @@ fn review_text(answer: &Value) -> String {
     ));
     text
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_flag_is_read_as_a_line_of_secrets() {
+        for (given, line) in [
+            (
+                "header:Authorization=Bearer notes-token",
+                json!({"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                    "entry": "notes-token"}),
+            ),
+            // The prefix is all before the last space.
+            (
+                "header:Authorization=Splunk Bearer notes-token",
+                json!({"in": "header", "name": "Authorization", "prefix": "Splunk Bearer ",
+                    "entry": "notes-token"}),
+            ),
+            (
+                "header:X-Key=notes-key",
+                json!({"in": "header", "name": "X-Key", "entry": "notes-key"}),
+            ),
+            (
+                "query:userToken=design-usertoken",
+                json!({"in": "query", "name": "userToken", "entry": "design-usertoken"}),
+            ),
+            (
+                "cookie:session=notes-session",
+                json!({"in": "cookie", "name": "session", "entry": "notes-session"}),
+            ),
+            (
+                "basic=notes-login",
+                json!({"in": "basic", "entry": "notes-login"}),
+            ),
+        ] {
+            assert_eq!(secret_line(given).unwrap(), line, "{given}");
+        }
+        for wrong in ["header=notes-token", "notes-token", "query:userToken"] {
+            assert!(secret_line(wrong).is_err(), "{wrong}");
+        }
+    }
+}

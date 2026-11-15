@@ -769,3 +769,105 @@ fn accept_waits_for_the_missing_entry_then_takes_it() {
         json!([{"in": "query", "name": "userToken", "entry": "design-usertoken"}])
     );
 }
+
+#[test]
+fn query_cookie_and_basic_lines_bound_to_another_host_are_refused() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    entry(&user, "github-token", Some("https://api.github.com"));
+    let (_, mcp) = root(&user);
+    for line in [
+        json!({"in": "query", "name": "userToken", "entry": "github-token"}),
+        json!({"in": "cookie", "name": "session", "entry": "github-token"}),
+        json!({"in": "basic", "entry": "github-token"}),
+    ] {
+        let sent = refused(mcp.call(
+            "connections",
+            json!({"action": "add", "name": "notes", "about": "Notes.",
+                "url": "https://notes.example.com/mcp", "secrets": [line]}),
+        ));
+        assert!(
+            sent.contains("api.github.com") && sent.contains("notes.example.com"),
+            "{line}: {sent}"
+        );
+    }
+    assert_eq!(pending(&user), 0);
+}
+
+/// Accept of `number` once its missing entry exists: what the agent is told, or why the Accept
+/// was refused.
+fn accepted(user: &User, number: u64) -> String {
+    match user.call("approval.approve", json!({"number": number})) {
+        Ok(_) => delivered(user, number),
+        Err((_, why)) => why,
+    }
+}
+
+#[test]
+fn a_missing_entry_created_later_on_another_host_is_refused_at_accept() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = propose_design(&mcp);
+    entry(&user, "design-usertoken", Some("https://other.example.com"));
+    let answer = accepted(&user, number);
+    assert!(
+        answer.contains("other.example.com") && answer.contains("design.example.com"),
+        "{answer}"
+    );
+    assert!(connection(&user, "design").is_none());
+}
+
+#[test]
+fn a_missing_entry_created_later_with_no_url_is_refused_at_accept() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = propose_design(&mcp);
+    entry(&user, "design-usertoken", None);
+    let answer = accepted(&user, number);
+    assert!(answer.contains("no address"), "{answer}");
+    assert!(connection(&user, "design").is_none());
+}
+
+#[test]
+fn an_agent_s_env_cannot_name_a_missing_entry() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let line = line_of(&user, "almanac");
+    let sent = refused(mcp.call(
+        "connections",
+        json!({"action": "add", "name": "almanac", "about": "Notes.", "command": line,
+            "env": {"ALMANAC_TOKEN": "almanac-token"}}),
+    ));
+    assert!(sent.contains("names no vault entry"), "{sent}");
+    assert_eq!(pending(&user), 0);
+}
+
+#[test]
+fn a_missing_entry_name_that_looks_like_a_secret_is_refused() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    for written in [
+        "0123456789abcdef0123456789abcdef01234567",
+        "design_0123456789abcdef0123456789abcdef01234567",
+    ] {
+        let sent = refused(mcp.call(
+            "connections",
+            json!({"action": "add", "name": "design", "about": "Designs.",
+                "url": "https://design.example.com/mcp",
+                "secrets": [{"in": "query", "name": "userToken", "entry": written}]}),
+        ));
+        assert!(!sent.contains(written), "{sent}");
+    }
+    assert_eq!(pending(&user), 0);
+    // A name of words is still one the user is to make.
+    propose_design(&mcp);
+}

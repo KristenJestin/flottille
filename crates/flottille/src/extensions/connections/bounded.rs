@@ -466,6 +466,96 @@ mod tests {
         assert!(read.is_err() && cut.take());
     }
 
+    /// A query secret that URL-encoding changes, so that both of its forms are looked for.
+    const SECRET: &str = "s3cret/t0ken+of=design";
+    const ENCODED: &str = "s3cret%2Ft0ken%2Bof%3Ddesign";
+
+    /// Every error a request of a connection's client gives at `uri`, by POST, GET and DELETE,
+    /// as Display and Debug say it.
+    async fn errors_at(uri: &str) -> Vec<String> {
+        let client = super::super::client::http_client(uri).unwrap();
+        let bounded = Bounded::new(
+            client,
+            Cut::default(),
+            vec![("userToken".into(), SECRET.into())],
+        );
+        let uri: Arc<str> = Arc::from(uri);
+        let ping: ClientJsonRpcMessage = serde_json::from_value(
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+        )
+        .unwrap();
+        let mut said = Vec::new();
+        let mut say = |error: &dyn std::fmt::Display, debug: String| {
+            said.push(error.to_string());
+            said.push(debug);
+        };
+        if let Err(error) = bounded
+            .post_message(uri.clone(), ping, None, None, HashMap::new())
+            .await
+        {
+            say(&error, format!("{error:?}"));
+        }
+        if let Err(error) = bounded
+            .get_stream(
+                uri.clone(),
+                Some(Arc::from("s")),
+                None,
+                None,
+                HashMap::new(),
+            )
+            .await
+        {
+            say(&error, format!("{error:?}"));
+        }
+        if let Err(error) = bounded
+            .delete_session(uri, Arc::from("s"), None, HashMap::new())
+            .await
+        {
+            say(&error, format!("{error:?}"));
+        }
+        said
+    }
+
+    fn never_said(said: &[String]) {
+        for text in said {
+            assert!(!text.contains(SECRET) && !text.contains(ENCODED), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_query_secret_is_never_in_an_error_of_a_post_a_get_or_a_delete() {
+        // Nothing listens there: each request fails to be sent.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let said = errors_at(&format!("http://127.0.0.1:{port}/mcp")).await;
+        assert_eq!(said.len(), 6, "each request fails: {said:?}");
+        never_said(&said);
+    }
+
+    #[tokio::test]
+    async fn a_query_secret_is_never_in_an_error_of_a_status_that_is_no_success() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\
+                      Content-Length: 4\r\nConnection: close\r\n\r\nboom",
+                );
+            }
+        });
+        let said = errors_at(&format!("http://127.0.0.1:{port}/mcp")).await;
+        assert!(!said.is_empty(), "a 500 is an error");
+        never_said(&said);
+    }
+
     #[test]
     fn a_cut_is_told_once() {
         let cut = Cut::default();

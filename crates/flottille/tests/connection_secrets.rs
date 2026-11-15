@@ -351,3 +351,218 @@ fn old_headers_still_work() {
     assert!(shown.get("secrets").is_none(), "{shown}");
     assert_eq!(shown["state"], "ready", "{shown}");
 }
+
+/// Connections written to `extensions.toml` by hand, beside what the daemon wrote there.
+fn written_by_hand(user: &User, tables: &str) {
+    let path = user.path("config/flottille/extensions.toml");
+    let mut file = std::fs::read_to_string(&path).unwrap_or_default();
+    file.push_str(tables);
+    std::fs::write(&path, file).unwrap();
+}
+
+#[test]
+fn an_existing_file_with_a_token_like_query_fails_only_that_connection() {
+    let user = user();
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "Notes.", "url": "https://notes.example.com/mcp"}),
+    )
+    .unwrap();
+    written_by_hand(
+        &user,
+        "\n[[connections.server]]\nname = \"design\"\nabout = \"Designs.\"\n\
+         url = \"https://design.example.com/mcp?userToken=abc123\"\n\
+         \n[[connections.server]]\nname = \"sketch\"\nabout = \"Sketches.\"\n\
+         url = \"https://sketch.example.com/mcp?access_token=abc123\"\n",
+    );
+
+    // Every connection is listed; the one whose URL holds a token says why it fails, unsaid.
+    let listed = user.call("connection.list", json!({})).unwrap();
+    assert!(listed["error"].is_null(), "{listed}");
+    let of = |name: &str| {
+        listed["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} is not listed: {listed}"))
+    };
+    let design = of("design");
+    let failing = design["failing"].as_str().unwrap_or_default();
+    assert!(failing.contains("userToken"), "{design}");
+    assert!(!failing.contains("abc123"), "{design}");
+    // No server answers there: it may fail to start, never for its query.
+    let notes = of("notes");
+    assert!(
+        !notes["failing"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("query holds"),
+        "{notes}"
+    );
+
+    // It does not start, and says why; the others are edited as before.
+    let started = user
+        .call("connection.review", json!({"name": "design"}))
+        .unwrap_err();
+    assert!(started.1.contains("userToken"), "{started:?}");
+    assert!(!started.1.contains("abc123"), "{started:?}");
+    user.call(
+        "connection.edit",
+        json!({"name": "notes", "about": "The notes."}),
+    )
+    .unwrap();
+
+    // The failing ones are mended or removed.
+    user.call(
+        "connection.edit",
+        json!({"name": "design", "url": "https://design.example.com/mcp"}),
+    )
+    .unwrap();
+    user.call("connection.remove", json!({"name": "sketch"}))
+        .unwrap();
+    let listed = user.call("connection.list", json!({})).unwrap();
+    let names: Vec<&str> = listed["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["notes", "design"], "{listed}");
+    let design = &listed["connections"][1];
+    assert!(
+        !design["failing"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("query holds"),
+        "{design}"
+    );
+}
+
+#[test]
+fn a_token_like_query_is_refused_on_add_and_on_edit() {
+    let user = user();
+    for parameter in [
+        "token",
+        "userToken",
+        "access_token",
+        "api_key",
+        "apikey",
+        "X-API-Key",
+        "client_secret",
+        "password",
+    ] {
+        let url = format!("https://design.example.com/mcp?page=2&{parameter}=abc123");
+        let refused = user
+            .call(
+                "connection.add",
+                json!({"name": "design", "about": "Designs.", "url": url}),
+            )
+            .unwrap_err();
+        assert!(refused.1.contains(parameter), "{parameter}: {refused:?}");
+        assert!(!refused.1.contains("abc123"), "{refused:?}");
+    }
+    user.call(
+        "connection.add",
+        json!({"name": "design", "about": "Designs.", "url": "https://design.example.com/mcp"}),
+    )
+    .unwrap();
+    let refused = user
+        .call(
+            "connection.edit",
+            json!({"name": "design", "url": "https://design.example.com/mcp?access_token=abc123"}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("access_token"), "{refused:?}");
+    assert!(!refused.1.contains("abc123"), "{refused:?}");
+    assert_eq!(
+        connection_named(&user, "design")["url"],
+        "https://design.example.com/mcp"
+    );
+}
+
+#[test]
+fn a_parameter_that_only_contains_token_is_allowed() {
+    let user = user();
+    let url = "https://design.example.com/mcp?author=ada&oauth_state=x&pageToken=2&keyword=a\
+               &project_key=ab1";
+    user.call(
+        "connection.add",
+        json!({"name": "design", "about": "Designs.", "url": url}),
+    )
+    .unwrap();
+    assert_eq!(connection_named(&user, "design")["url"], url);
+}
+
+fn connection_named(user: &User, name: &str) -> Value {
+    user.call("connection.list", json!({})).unwrap()["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .cloned()
+        .unwrap()
+}
+
+#[test]
+fn a_secret_line_on_edit_replaces_the_old_header_line() {
+    let user = user();
+    set(&user, json!({"name": "notes-token", "secret": SECRET}));
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "Notes.", "url": "https://notes.example.com/mcp",
+            "headers": {"Authorization": {"vault": "notes-token"}}}),
+    )
+    .unwrap();
+    // What `--secret header:Authorization=Bearer notes-token` sends.
+    user.call(
+        "connection.edit",
+        json!({"name": "notes", "secrets": [{"in": "header", "name": "Authorization",
+            "prefix": "Bearer ", "entry": "notes-token"}]}),
+    )
+    .unwrap();
+    let shown = connection(&user);
+    assert!(shown.get("headers").is_none(), "{shown}");
+    assert_eq!(
+        shown["secrets"],
+        json!([{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+            "entry": "notes-token"}]),
+        "{shown}"
+    );
+}
+
+#[test]
+fn null_secrets_on_edit_clear_the_old_header_lines_too() {
+    let user = user();
+    set(&user, json!({"name": "notes-token", "secret": SECRET}));
+    set(&user, json!({"name": "notes-session", "secret": SECRET}));
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "Notes.", "url": "https://notes.example.com/mcp",
+            "headers": {"X-Notes-Key": {"vault": "notes-token"}},
+            "secrets": [{"in": "cookie", "name": "session", "entry": "notes-session"}]}),
+    )
+    .unwrap();
+    user.call("connection.edit", json!({"name": "notes", "secrets": null}))
+        .unwrap();
+    let shown = connection(&user);
+    assert!(shown.get("headers").is_none(), "{shown}");
+    assert!(shown.get("secrets").is_none(), "{shown}");
+}
+
+#[test]
+fn a_cookie_header_beside_cookie_lines_is_refused() {
+    let user = user();
+    set(&user, json!({"name": "notes-token", "secret": SECRET}));
+    set(&user, json!({"name": "notes-session", "secret": SECRET}));
+    let refused = user
+        .call(
+            "connection.add",
+            json!({"name": "notes", "about": "Notes.", "url": "https://notes.example.com/mcp",
+                "headers": {"Cookie": {"vault": "notes-token"}},
+                "secrets": [{"in": "cookie", "name": "session", "entry": "notes-session"}]}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("given twice"), "{refused:?}");
+}
