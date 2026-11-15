@@ -18,7 +18,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::Command;
-use crate::commands::perform_later;
+use crate::commands::{perform_later, stack};
 use crate::shell::Shell;
 
 /// One program's state for one host, as `project.programs` says it.
@@ -336,7 +336,7 @@ fn line_of<B: FnOnce(SharedString) -> AnyElement + 'static>(
     text: Option<String>,
     build: B,
 ) -> impl IntoElement + use<B> {
-    presence_of(format!("{id}-block"), text.map(SharedString::from), build).gap(space::XS)
+    presence_of(format!("{id}-block"), text.map(SharedString::from), build).space(space::XS)
 }
 
 /// A command with the button that copies it.
@@ -395,30 +395,27 @@ impl RenderOnce for StateLine {
             p.fail
         };
         let ink = tint(self.id.clone(), target, PANEL, window, cx);
-        div().flex().flex_col().gap(space::XS).children(
-            Phase::ALL
-                .into_iter()
-                .filter(|at| *at != Phase::Ready)
-                .map(|at| {
-                    let line_id = self.id.clone();
-                    let shown = said.clone().filter(|_| phase == Some(at));
-                    presence_of(
-                        format!("{}-{}", self.id, at.name()),
-                        shown.map(SharedString::from),
-                        move |said| {
-                            div()
-                                .id(ElementId::Name(line_id.into()))
-                                .aria_label(said.clone())
-                                .text_size(px(12.))
-                                .text_color(ink)
-                                .child(said)
-                                .test_support()
-                                .into_any_element()
-                        },
-                    )
-                    .gap(space::XS)
-                }),
-        )
+        stack(space::XS).children(Phase::ALL.into_iter().filter(|at| *at != Phase::Ready).map(
+            |at| {
+                let line_id = self.id.clone();
+                let shown = said.clone().filter(|_| phase == Some(at));
+                presence_of(
+                    format!("{}-{}", self.id, at.name()),
+                    shown.map(SharedString::from),
+                    move |said| {
+                        div()
+                            .id(ElementId::Name(line_id.into()))
+                            .aria_label(said.clone())
+                            .text_size(px(12.))
+                            .text_color(ink)
+                            .child(said)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .space(space::XS)
+            },
+        ))
     }
 }
 
@@ -617,7 +614,6 @@ pub fn program_block(
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .gap(space::XS)
                 .child(state_line)
                 .child(install_page)
                 .child(install_command)

@@ -729,6 +729,19 @@ const MIGRATIONS: &[&str] = &[
     -- the CI failed (`docs/forges.md`, \"What kind of failure it was\").
     ALTER TABLE item_checks ADD COLUMN outcome TEXT;
 ",
+    "
+    -- A pull request an agent opened with `forge create`, until the rounds see it open or it is
+    -- too old (Automatic subscriptions, #793): what tells it from one opened
+    -- another way, across a restart of the daemon.
+    CREATE TABLE opened_pulls (
+        id         INTEGER PRIMARY KEY,
+        project    TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        branch     TEXT NOT NULL,
+        opened_at  INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX opened_pulls_branch ON opened_pulls (project, repository, branch);
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -2975,6 +2988,48 @@ impl Store {
         Ok(())
     }
 
+    /// Records that an agent opened a pull request on `branch` of `repository`, at `at`.
+    pub fn add_opened_pull(
+        &self,
+        (project, repository, branch): (&str, &str, &str),
+        at: u64,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO opened_pulls (project, repository, branch, opened_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![project, repository, branch, at],
+        )?;
+        Ok(())
+    }
+
+    /// Takes the oldest record of a pull request an agent opened on `branch`: whether there was
+    /// one, so that the next pull request opened on the branch is not taken for it. Records made
+    /// before `since` are too old to count, and are dropped.
+    pub fn take_opened_pull(
+        &self,
+        (project, repository, branch): (&str, &str, &str),
+        since: u64,
+    ) -> Result<bool> {
+        self.connection.execute(
+            "DELETE FROM opened_pulls WHERE opened_at < ?1",
+            params![since],
+        )?;
+        let found: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT id FROM opened_pulls WHERE project = ?1 AND repository = ?2 \
+                 AND branch = ?3 ORDER BY id LIMIT 1",
+                params![project, repository, branch],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = found {
+            self.connection
+                .execute("DELETE FROM opened_pulls WHERE id = ?1", params![id])?;
+        }
+        Ok(found.is_some())
+    }
+
     /// What was posted on one item, oldest first.
     pub fn posts(
         &self,
@@ -4140,6 +4195,31 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn an_opened_pull_is_taken_once_and_an_old_one_not_at_all() {
+        let store = Store::open_in_memory().unwrap();
+        let on = ("app", "api", "app/login");
+        store.add_opened_pull(on, 1_000).unwrap();
+        store.add_opened_pull(on, 5_000).unwrap();
+        store
+            .add_opened_pull(("app", "web", "app/login"), 5_000)
+            .unwrap();
+
+        // Taken one by one, in order; another repository's is its own.
+        assert!(store.take_opened_pull(on, 0).unwrap());
+        assert!(store.take_opened_pull(on, 0).unwrap());
+        assert!(!store.take_opened_pull(on, 0).unwrap());
+        assert!(
+            store
+                .take_opened_pull(("app", "web", "app/login"), 0)
+                .unwrap()
+        );
+
+        // One that is too old no longer hides a pull request opened another way.
+        store.add_opened_pull(on, 1_000).unwrap();
+        assert!(!store.take_opened_pull(on, 2_000).unwrap());
     }
 
     #[test]

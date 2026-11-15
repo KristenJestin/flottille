@@ -26,7 +26,9 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::{Command, RunAct, RunAnswer, RunFrom};
-use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
+use crate::commands::{
+    boxed, line_field, menu_of, perform_later, problem_line, section_blocks, stack,
+};
 use crate::project::{only_at_root, repository_label};
 use crate::runs::{CommandList, CommandOutput, CommandPanel, CommandRow, Watch};
 use crate::shell::Shell;
@@ -1007,63 +1009,68 @@ impl TasksSection {
             .id("task-form")
             .flex()
             .flex_col()
-            .gap(space::LG)
             .child(
                 div()
                     .flex()
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            Field::new("task-name-field", "Name", name)
-                                .hint("Agents run it by this name."),
-                        ),
-                    )
+                    .flex_col()
+                    .gap(space::LG)
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex_grow(asked)
-                            .overflow_hidden()
-                            .ml(space::MD * asked)
-                            .opacity(asked)
-                            .when(asked > 0., |d| {
-                                d.child(
-                                    Field::new("task-place-field", "Runs in", place)
-                                        .hint("Or one repository of the place."),
-                                )
-                            }),
-                    ),
+                            .flex()
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Field::new("task-name-field", "Name", name)
+                                        .hint("Agents run it by this name."),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex_grow(asked)
+                                    .overflow_hidden()
+                                    .ml(space::MD * asked)
+                                    .opacity(asked)
+                                    .when(asked > 0., |d| {
+                                        d.child(
+                                            Field::new("task-place-field", "Runs in", place)
+                                                .hint("Or one repository of the place."),
+                                        )
+                                    }),
+                            ),
+                    )
+                    .child(Field::new(
+                        "task-line-field",
+                        "Command line",
+                        boxed("task-line", Input::new(&fields.line), cx),
+                    ))
+                    .child(Field::new(
+                        "task-kind",
+                        "What it is",
+                        div().flex().flex_col().gap(space::MD).children(kinds),
+                    ))
+                    .child(ask)
+                    .child(needs_field(
+                        "task",
+                        self.services
+                            .as_ref()
+                            .map(|listed| listed.as_deref().map_err(String::as_str)),
+                        None,
+                        &self.flags.needs,
+                        |this: &mut Self, name, cx| this.toggle_need(name, cx),
+                        cx,
+                    ))
+                    .child(ready_and_url(
+                        "task",
+                        false,
+                        &fields.ready,
+                        self.ready_kind(),
+                        self.flags.url.as_ref().map(|(kind, _)| *kind),
+                        |this: &mut Self, kind, cx| this.choose_ready(kind, cx),
+                        |this: &mut Self, kind, cx| this.choose_url(kind, cx),
+                        cx,
+                    )),
             )
-            .child(Field::new(
-                "task-line-field",
-                "Command line",
-                boxed("task-line", Input::new(&fields.line), cx),
-            ))
-            .child(Field::new(
-                "task-kind",
-                "What it is",
-                div().flex().flex_col().gap(space::MD).children(kinds),
-            ))
-            .child(ask)
-            .child(needs_field(
-                "task",
-                self.services
-                    .as_ref()
-                    .map(|listed| listed.as_deref().map_err(String::as_str)),
-                None,
-                &self.flags.needs,
-                |this: &mut Self, name, cx| this.toggle_need(name, cx),
-                cx,
-            ))
-            .child(ready_and_url(
-                "task",
-                false,
-                &fields.ready,
-                self.ready_kind(),
-                self.flags.url.as_ref().map(|(kind, _)| *kind),
-                |this: &mut Self, kind, cx| this.choose_ready(kind, cx),
-                |this: &mut Self, kind, cx| this.choose_url(kind, cx),
-                cx,
-            ))
             .child(problem_line(
                 "task-error",
                 self.form_error.clone(),
@@ -1221,7 +1228,7 @@ pub(crate) fn ready_and_url<V: 'static>(
             )
             .hint(hint.to_owned()),
         )
-        .gap(space::MD)
+        .space(space::MD)
     };
     let ready_blocks: Vec<_> = ReadyKind::ALL
         .into_iter()
@@ -1253,7 +1260,6 @@ pub(crate) fn ready_and_url<V: 'static>(
             div()
                 .flex()
                 .flex_col()
-                .gap(space::MD)
                 .child(
                     Field::new(
                         ElementId::Name(format!("{prefix}-ready-field").into()),
@@ -1268,7 +1274,6 @@ pub(crate) fn ready_and_url<V: 'static>(
             div()
                 .flex()
                 .flex_col()
-                .gap(space::MD)
                 .child(
                     Field::new(
                         ElementId::Name(format!("{prefix}-url-field").into()),
@@ -1320,25 +1325,32 @@ impl Render for TasksSection {
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.open(None, window, cx))),
             )
-            .child(presence("task-list-block", count > 0, list).gap(space::MD))
-            .child(
-                presence(
-                    "no-tasks-block",
-                    empty,
-                    EmptyLine::new(
-                        "no-tasks",
-                        Icon::Play,
-                        "No task yet: name the lines the project runs (tests, lint, a server). \
-                         Agents run them by name, and the project page has a Run for each.",
-                    ),
-                )
-                .gap(space::MD),
-            )
-            .child(problem_line(
-                "tasks-problem",
-                self.problem.clone(),
+            .child(section_blocks(
+                "tasks-blocks",
+                count > 0 || empty || self.problem.is_some(),
                 space::MD,
-                cx,
+                stack(space::MD)
+                    .child(presence("task-list-block", count > 0, list).space(space::MD))
+                    .child(
+                        presence(
+                            "no-tasks-block",
+                            empty,
+                            EmptyLine::new(
+                                "no-tasks",
+                                Icon::Play,
+                                "No task yet: name the lines the project runs (tests, lint, a \
+                                 server). Agents run them by name, and the project page has a Run \
+                                 for each.",
+                            ),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(problem_line(
+                        "tasks-problem",
+                        self.problem.clone(),
+                        space::MD,
+                        cx,
+                    )),
             ));
         div()
             .text_color(p.text)

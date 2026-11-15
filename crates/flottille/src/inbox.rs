@@ -214,12 +214,25 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             "report" => event.data["text"].clone(),
             "question" => event.data["question"].clone(),
             "unchecked" | "put_back" => json!(daemon_text(kind, &event.data)),
-            "vault" => json!(format!(
-                "It asks you to set the vault entry {} of {}: {}",
-                event.data["name"].as_str().unwrap_or_default(),
-                event.data["project"].as_str().unwrap_or_default(),
-                event.data["why"].as_str().unwrap_or_default()
-            )),
+            "vault" => {
+                let whose = if event.data["every"] == true {
+                    "every project".to_owned()
+                } else {
+                    format!(
+                        "the project {}",
+                        event.data["project"].as_str().unwrap_or_default()
+                    )
+                };
+                let host = event.data["host"]
+                    .as_str()
+                    .map(|host| format!(", its secret going to {host}"))
+                    .unwrap_or_default();
+                json!(format!(
+                    "It asks you to add the vault entry {} for {whose}{host}: {}",
+                    event.data["name"].as_str().unwrap_or_default(),
+                    event.data["why"].as_str().unwrap_or_default()
+                ))
+            }
             _ => event.data["reason"].clone(),
         };
         entries.push(json!({

@@ -295,3 +295,32 @@ fn the_vault_creates_with_new_entry_and_saves_with_add(cx: &mut TestAppContext) 
         "the dialog's title says it is new: its button only says Add"
     );
 }
+
+#[gpui_kit::test]
+fn a_prefilled_form_says_why_it_was_asked(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = window(&user, cx);
+    let section = open_vault(&shell, cx);
+    let asked = flottille_window::vault::VaultEntry {
+        name: "tracker-token".into(),
+        description: Some("Reads the tracker".into()),
+        ..Default::default()
+    };
+    section.update_in(cx, |section, window, cx| {
+        section.add_prefilled(&asked, Some("to read the tickets".into()), None, window, cx)
+    });
+    settle(cx);
+    assert_eq!(
+        label_of("vault-description-field-hint", cx).as_deref(),
+        Some("Why the agent asks: to read the tickets")
+    );
+    assert_eq!(
+        label_of("save-vault-entry", cx).as_deref(),
+        Some("Add"),
+        "a prefilled entry is a new one"
+    );
+    // Opened again without a reason, the form says none.
+    section.update_in(cx, |section, window, cx| section.add(window, cx));
+    settle(cx);
+    assert!(!shown("vault-description-field-hint", cx));
+}

@@ -24,7 +24,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::Command;
-use crate::commands::perform_later;
+use crate::commands::{perform_later, spaced, stack};
 use crate::settings::Reveal;
 use crate::shell::Shell;
 
@@ -549,8 +549,8 @@ impl Render for RulesEditor {
                 .into(),
             )
         };
+        // Under the field with the gap of whatever column holds it, and `XS` more.
         let footer = div()
-            .mt(space::XS)
             .flex()
             .items_center()
             .gap(space::SM)
@@ -624,7 +624,6 @@ impl Render for RulesEditor {
             return div()
                 .flex()
                 .flex_col()
-                .gap(space::SM)
                 .child(text)
                 .child(
                     presence_of(
@@ -639,7 +638,7 @@ impl Render for RulesEditor {
                             }),
                         line(id("error")),
                     )
-                    .gap(space::SM),
+                    .space(space::SM),
                 )
                 .child(
                     presence_of(
@@ -647,9 +646,9 @@ impl Render for RulesEditor {
                         self.problem.clone(),
                         line(id("problem")),
                     )
-                    .gap(space::SM),
+                    .space(space::SM),
                 )
-                .child(footer)
+                .child(spaced(space::SM + space::XS, footer))
                 .into_any_element();
         }
         let (title, sentence, section): (String, String, String) = match (judge, &self.project) {
@@ -756,7 +755,7 @@ impl Render for RulesEditor {
                 .on_click(cx.listener(move |this, _, _, cx| this.set_alone(!alone, cx)));
             (
                 toggle,
-                presence(id("global-block"), open, body).gap(space::MD),
+                presence(id("global-block"), open, body).space(space::MD),
                 switch,
             )
         });
@@ -779,63 +778,70 @@ impl Render for RulesEditor {
         Section::new(section, title)
             .tag(self.origin())
             .sentence(sentence)
-            .children(global_toggle)
-            .children(global_body)
-            .children(alone_switch)
-            .child(text)
             .child(
-                presence_of(
-                    id("repeats-block"),
-                    self.shown
-                        .as_ref()
-                        .filter(|shown| shown.repeats)
-                        .map(|_| SharedString::from(REPEATS)),
-                    note(id("repeats")),
-                )
-                .gap(space::MD),
+                stack(space::MD)
+                    .children(global_toggle.map(|toggle| spaced(space::MD, toggle)))
+                    .children(global_body)
+                    .children(alone_switch.map(|switch| spaced(space::MD, switch)))
+                    .child(spaced(space::MD, text))
+                    .child(
+                        presence_of(
+                            id("repeats-block"),
+                            self.shown
+                                .as_ref()
+                                .filter(|shown| shown.repeats)
+                                .map(|_| SharedString::from(REPEATS)),
+                            note(id("repeats")),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(
+                        presence_of(
+                            id("cut-block"),
+                            self.shown
+                                .as_ref()
+                                .and_then(|shown| shown.cut.clone())
+                                .map(|cut| SharedString::from(format!("Cut: {cut}."))),
+                            line(id("cut")),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(
+                        presence_of(
+                            id("error-block"),
+                            self.shown
+                                .as_ref()
+                                .and_then(|shown| shown.error.clone())
+                                .map(|error| {
+                                    SharedString::from(if let Some((_, title)) = &self.part {
+                                        format!(
+                                            "{title} does not run until this is fixed: {error}."
+                                        )
+                                    } else if compaction {
+                                        format!(
+                                            "Every compaction fails until this is fixed: {error}."
+                                        )
+                                    } else {
+                                        format!(
+                                            "The judge asks you about every call until this is \
+                                             fixed: {error}."
+                                        )
+                                    })
+                                }),
+                            line(id("error")),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(
+                        presence_of(
+                            id("problem-block"),
+                            self.problem.clone(),
+                            line(id("problem")),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(spaced(space::MD + space::XS, footer)),
             )
-            .child(
-                presence_of(
-                    id("cut-block"),
-                    self.shown
-                        .as_ref()
-                        .and_then(|shown| shown.cut.clone())
-                        .map(|cut| SharedString::from(format!("Cut: {cut}."))),
-                    line(id("cut")),
-                )
-                .gap(space::MD),
-            )
-            .child(
-                presence_of(
-                    id("error-block"),
-                    self.shown
-                        .as_ref()
-                        .and_then(|shown| shown.error.clone())
-                        .map(|error| {
-                            SharedString::from(if let Some((_, title)) = &self.part {
-                                format!("{title} does not run until this is fixed: {error}.")
-                            } else if compaction {
-                                format!("Every compaction fails until this is fixed: {error}.")
-                            } else {
-                                format!(
-                                    "The judge asks you about every call until this is fixed: \
-                                     {error}."
-                                )
-                            })
-                        }),
-                    line(id("error")),
-                )
-                .gap(space::MD),
-            )
-            .child(
-                presence_of(
-                    id("problem-block"),
-                    self.problem.clone(),
-                    line(id("problem")),
-                )
-                .gap(space::MD),
-            )
-            .child(footer)
             .into_any_element()
     }
 }

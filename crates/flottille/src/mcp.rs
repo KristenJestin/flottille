@@ -116,7 +116,8 @@ const SERVED: [Definition; 33] = [
         description: "Reads a text file of the place, a page at a time (32 KiB at most), lines \
             numbered. The end of the page names the offset of the next one: pass it as \
             range.offset to read on. Reading a file is what lets fs_write and fs_edit change it \
-            later. Refused outside the place and for a folder (use fs_list).",
+            later. A page already read and unchanged since is answered in one line, unless again \
+            is true. Refused outside the place and for a folder (use fs_list).",
         read_only: true,
         idempotent: true,
         destructive: false,
@@ -127,7 +128,8 @@ const SERVED: [Definition; 33] = [
                 "range": {"type": "object", "properties": {
                     "offset": {"type": "integer", "minimum": 0, "description": "The byte to start at; a page names the next one."},
                     "length": {"type": "integer", "minimum": 1, "maximum": files::READ_PAGE_BYTES}
-                }, "additionalProperties": false}
+                }, "additionalProperties": false},
+                "again": {"type": "boolean", "description": "Send the page even when it is unchanged since you read it."}
             }, "required": ["path"], "additionalProperties": false})
         },
     },
@@ -325,17 +327,17 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "forge",
         title: "Pull requests",
-        description: "Project PRs and CI via the user's \
-            gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
+        description: "PRs and CI via the user's \
+            gh/bkt (no forge sign-in here: never run them). list: by state and branch, \
             as last read. show: a branch's or number's \
-            with checks (the log's end of each failed job), review and comment counts; \
+            with checks (the log's end of each failed job), review state, comment count; \
             detail full: texts, threads (file, line). Writes, judged, answered at \
             once, the result maybe later: create, merge \
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
             user's words) and checks on a workspace's branch; edit, comment, reply, \
             resolve (threads), review (approve, request_changes wait for the user), \
             close (comment first), reopen on number. \
-            subscribe: events wake you until merged or closed; unsubscribe. CI: pipelines lists what can \
+            subscribe: events wake you till merge/close (maybe already); unsubscribe. CI: pipelines lists what can \
             be run; run starts one by name (custom: <name>) with its variables, follows it unless \
             follow: false; follow_run one you did not start; runs, run_view, \
             run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
@@ -360,6 +362,7 @@ const SERVED: [Definition; 33] = [
                 "query": {"type": "string", "description": "people: lists who can be named a reviewer (a display name, nickname or e-mail does for reviewers); these words narrow it."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels (GitHub only)."},
                 "delete_branch_on_merge": {"type": "boolean", "description": "create: delete the source branch when it is merged."},
+                "subscribe": {"type": "boolean", "description": "create: false opens it without its automatic subscription."},
                 "reviewers_add": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to ask."},
                 "reviewers_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to take off."},
                 "labels_add": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to put on (GitHub only)."},
@@ -403,13 +406,13 @@ const SERVED: [Definition; 33] = [
             yours with ids; Jira images and files are named, not shown; \
             types: a Jira project's work item types (never guess); link_types. \
             Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
-            reopen, status, link and unlink, comment_edit and \
-            comment_delete (yours only); log_time (Jira), \
-            time_spent (this session's work time, to propose). \
+            reopen, status, link, unlink, comment_edit, \
+            comment_delete (both yours only); log_time (Jira), \
+            time_spent (this session's time, to propose). \
             Assign only if asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (see sprints). \
-            Milestones (Jira: versions): milestones, progress (tickets, their work); GitHub: milestone_create/_edit. \
-            subscribe: a ticket's events wake you until it closes; unsubscribe.",
+            Milestones (Jira: versions): milestones, progress (tickets and work); GitHub: milestone_create/_edit. \
+            subscribe: a ticket's events wake you until it closes (maybe already); unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -570,6 +573,7 @@ const SERVED: [Definition; 33] = [
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
                 "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name. A branch the workspace starts or renames to must match the project's branch format when it has one (project settings says it): the refusal names the pattern."},
+                "base": {"type": ["string", "object"], "additionalProperties": {"type": "string"}, "description": "create: the branch it starts from in place of the base rule, on the remote: one for every repository, or {path: branch}. Its pull requests target it."},
                 "repository": {"type": "string", "description": "rename_branch: by path; every repository of the workspace when left out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
@@ -648,17 +652,22 @@ const SERVED: [Definition; 33] = [
             account's login): list gives each entry's name, what it is for, its URL and its \
             username. A secret is never shown: a tool of Flottille's that needs one takes the \
             entry's name and puts the secret where it goes itself. {\"action\": \"list\"}. \
-            ask: only when a refusal says an entry is missing and may be asked for, the user is \
-            asked to set it (answered at once, the user's answer later as a delivery). \
-            {\"action\": \"ask\", \"name\": \"jira-time\", \"why\": \"to log 2h on ABC-1\"}.",
+            ask: when you need an entry the vault lacks, the user is offered its form, \
+            prefilled with what you give; they type the secret (answered at once, their answer \
+            later as a delivery). {\"action\": \"ask\", \"name\": \"staging-login\", \"why\": \
+            \"to sign in to staging\", \"url\": \"https://staging.example.com/login\"}.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["list", "ask"]},
-                "name": {"type": "string", "description": "ask: the entry a refusal said is missing."},
-                "why": {"type": "string", "description": "ask: what you need it for, for the user."}
+                "name": {"type": "string", "description": "ask: the new entry's name."},
+                "why": {"type": "string", "description": "ask: what you need it for, for the user."},
+                "url": {"type": "string", "description": "ask: where the secret goes (a login page)."},
+                "username": {"type": "string", "description": "ask: the account, if known."},
+                "for": {"type": "string", "description": "ask: its one use: worklog, or connection:<name> (a login)."},
+                "project": {"type": "string", "enum": ["this", "every"], "description": "ask: whose it is; a connection's is every project's."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -717,7 +726,7 @@ const SERVED: [Definition; 33] = [
                 "new_workspace": {"type": "string", "description": "With led or handed: the name of a new workspace to make for the session. Not with workspace."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
                 "branch": {"type": "string", "description": "With new_workspace: its branch, as workspace create takes it. Name it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, the branches it has, the project's branch format), with the ticket's key when there is one (feat/ABC-8-pickup-dashboard); the card shows it, and it is the branch made. Left out, <branch prefix>/<name>. An existing branch is resumed."},
-                "base": {"type": "object", "additionalProperties": {"type": "string"}, "description": "With new_workspace: the branch a repository starts from, by path ({\"api\": \"develop\"}), in place of its base rule."}
+                "base": {"type": ["string", "object"], "additionalProperties": {"type": "string"}, "description": "With new_workspace: the branch it starts from in place of the base rule: one for every repository, or by path ({\"api\": \"develop\"})."}
             }, "required": ["kind", "title", "brief"], "additionalProperties": false})
         },
     },
@@ -2360,8 +2369,10 @@ async fn played_in(
                     gate::Verdict::Allow => match stale(daemon, grant, tool) {
                         Some(refused) => refused,
                         None => {
-                            perform(daemon, grant, tool, args, cancelled, None, &first, &reads)
-                                .await
+                            perform(
+                                daemon, grant, tool, args, cancelled, None, &first, key, &reads,
+                            )
+                            .await
                         }
                     },
                     gate::Verdict::Deny(why) => Outcome::Refused(why),
@@ -2431,7 +2442,7 @@ async fn played_in(
                                     let approved = Some(ask.class);
                                     perform(
                                         daemon, grant, tool, args, cancelled, approved, &first,
-                                        &reads,
+                                        key, &reads,
                                     )
                                     .await
                                 }
@@ -2453,7 +2464,7 @@ async fn played_in(
                                         let approved = Some(gate::Class::Judge);
                                         perform(
                                             daemon, grant, tool, args, cancelled, approved, &first,
-                                            &reads,
+                                            key, &reads,
                                         )
                                         .await
                                     }
@@ -3127,6 +3138,7 @@ pub async fn performed(
                 cancelled,
                 Some(class),
                 first,
+                None,
                 &Reads::default(),
             )
             .await
@@ -3265,17 +3277,18 @@ async fn perform(
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
     first: &[String],
+    call: Option<&str>,
     reads: &Reads,
 ) -> Outcome {
     if !matches!(tool, "web" | "tickets" | "forge") {
-        return performed_once(daemon, grant, tool, args, cancelled, approved, first).await;
+        return performed_once(daemon, grant, tool, args, cancelled, approved, first, call).await;
     }
     // What a page, a search, a ticket or a pull request showed the agent, from its data and
     // never from the call's own arguments, it may read with `web`. The forge and tracker reads
     // it made are counted for the developer log.
     let (outcome, shown) = reads
         .counting(crate::web::showing(performed_once(
-            daemon, grant, tool, args, cancelled, approved, first,
+            daemon, grant, tool, args, cancelled, approved, first, call,
         )))
         .await;
     if let Outcome::Done(_) = &outcome {
@@ -3284,6 +3297,7 @@ async fn perform(
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn performed_once(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -3292,6 +3306,7 @@ async fn performed_once(
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
     first: &[String],
+    call: Option<&str>,
 ) -> Outcome {
     match tool {
         "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
@@ -3327,12 +3342,15 @@ async fn performed_once(
         _ => {
             // The file tools read and write the disk: off the daemon's thread.
             let (daemon, grant, tool) = (daemon.clone(), grant.clone(), tool.to_owned());
+            let call = call.map(str::to_owned);
             let done = tokio::task::spawn_blocking(move || {
                 let cx = Context {
                     daemon: &daemon,
                     agent: &grant.agent,
                     place: &grant.place,
                     approved,
+                    call: call.as_deref(),
+                    epoch: grant.epoch,
                 };
                 match tool.as_str() {
                     "fs_read" => files::fs_read(&cx, args),

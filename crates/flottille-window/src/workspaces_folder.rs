@@ -421,7 +421,7 @@ impl Render for WorkspacesFolder {
                     .child(save),
             ),
         )
-        .gap(space::MD);
+        .space(space::MD);
 
         let (problem_id, error_id) = (named("problem"), named("error"));
         let (folder_change_id, folder_id) = (named("folder-change"), named("folder"));
@@ -435,7 +435,7 @@ impl Render for WorkspacesFolder {
                 .test_support()
                 .into_any_element()
         })
-        .gap(space::MD);
+        .space(space::MD);
         let unread = presence_of(
             id("error-block"),
             self.shown
@@ -457,7 +457,7 @@ impl Render for WorkspacesFolder {
                     .into_any_element()
             },
         )
-        .gap(space::MD);
+        .space(space::MD);
 
         // The folder that results, for a project: its line fades when it changes.
         let resulting = self.folder().map(|folder| {
@@ -485,7 +485,7 @@ impl Render for WorkspacesFolder {
             })
             .into_any_element()
         })
-        .gap(space::MD);
+        .space(space::MD);
 
         // A project's section has no sentence: the choice says it all.
         let (title, sentence): (&str, Option<&str>) = if project {
@@ -505,24 +505,25 @@ impl Render for WorkspacesFolder {
             },
             title,
         )
-        // A skeleton stands for the choice until the daemon says it.
-        .child(awaiting(
-            id("waiting"),
-            !known && self.problem.is_none(),
-            Skeleton::new(id("skeleton")).h(px(96.)),
-            Field::new(id("choice-field"), "Where", kinds),
-        ))
-        .child(path)
-        .child(problem)
-        .child(unread);
-        let section = match sentence {
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                // A skeleton stands for the choice until the daemon says it.
+                .child(awaiting(
+                    id("waiting"),
+                    !known && self.problem.is_none(),
+                    Skeleton::new(id("skeleton")).h(px(96.)),
+                    Field::new(id("choice-field"), "Where", kinds),
+                ))
+                .child(path)
+                .child(problem)
+                .child(unread)
+                .children(project.then_some(resulting)),
+        );
+        match sentence {
             Some(sentence) => section.sentence(sentence),
             None => section,
-        };
-        if project {
-            section.child(resulting)
-        } else {
-            section
         }
     }
 }

@@ -65,6 +65,11 @@ An entry made for one precise feature is that feature's alone. `for` names it:
   without `for` is unbound; set again without `for`, an entry keeps its use, and another use for
   a bound entry is refused, naming the one it has: it is removed first. Settings, Vault shows the
   use of each entry on its row (`For the worklog of the project app alone`).
+- **Seen from a project.** A project's Settings has a Vault tab: the entries that project sees (its
+  own first, then every project's, marked as such), each the row of Settings, Vault. "New entry"
+  there opens Settings, Vault's own dialog with "Seen by agents of" set to the project, and a click
+  on a row edits the entry in it (the dialog says when the entry is every project's); closed, the
+  window goes back to the tab. The tab follows the vault live.
 - **A worklog's entry is its project's.** Bound to `worklog:<project>`, an entry is that project's
   (its `project` is set to it when it names none; an entry of another project is refused), so no
   other project's agent lists it, and the `vault` tool never tells an agent the use of an entry.
@@ -96,7 +101,9 @@ again as soon as the secret is sent.
 
 Every value of every entry is added to the masking of everything the daemon stores and shows
 (`flottille_core::secrets`): an agent that came across a secret some other way and writes it in a
-message, a command's output, a tool's arguments, finds it `[masked]` there. The values are read
+message, a command's output, a tool's arguments, finds it `[masked]` there, raw and in the forms
+a page shows a typed secret in (percent-encoded in an address, escaped in HTML or JSON, and, with
+the entry's username, in base64 as HTTP Basic authentication sends them). The values are read
 from the keyring when the daemon starts, before any agent resumes (the start waits 5 seconds at
 most for a keyring that asks to be unlocked, then goes on), and a new secret is masked as soon as
 it is set. A secret replaced or removed stays masked until the daemon restarts: another entry may
@@ -111,41 +118,54 @@ entry it makes bound to the project's worklog.
 
 ## What agents see
 
-The `vault` tool, listed to an agent whose project sees at least one entry (`docs/tools.md`, "The
-vault"): `vault {action: "list"}` gives the name, the description, the URL and the username of each
+The `vault` tool, listed to an agent whose project sees at least one entry, misses one a feature
+names, or has a connection whose `login` takes one (`docs/tools.md`, "The vault"): `vault {action: "list"}` gives the name, the description, the URL and the username of each
 entry the agent's project sees, so that it knows what exists and what it is for. No action returns
 a secret. An entry of another project is not listed, and is no entry for a tool of the agent's.
 
 ## Asking the user for an entry
 
-An agent often finds out it needs a secret when it reaches for it: a tool refuses because the entry
-a feature names is missing. It may then ask the user for that entry, and only that one: **there is
-no free-form ask**.
+An agent often finds out it needs a secret when it reaches for it: a tool refuses because an entry
+is missing (the tracker's `worklog_token`, a browser `login`'s entry), or the task needs a sign-in
+the vault does not hold. It may ask the user to add **any new entry**: the ask is a helper to add
+an entry to the vault, not a request with rules of its own.
 
-- **Only a known need.** An entry may be asked for only when a feature of Flottille names it for
-  the agent's project and the project does not see it: today the tracker's `worklog_token`
-  (`docs/tickets.md`, "Logging time"). The daemon knows the entry's name and what it is for; the
-  agent gives only its reason. `vault {action: "ask", name, why}` for any other name is refused.
-  The `vault` tool is listed to an agent whose project misses such an entry, even when it sees
-  none.
-- **Offered with the refusal.** The call that needed it is refused as before, and the refusal
-  says the entry may be asked for, with the call to make. The ask answers at once: nothing waits
-  for the user.
-- **One request, never twice.** The user sees one card in the session of the agent that asked
-  (and an inbox entry): the entry's name, its description and its project, prefilled by Flottille,
-  the agent's reason, a username field when the entry needs one (Jira's API takes the account's
-  e-mail), and one empty masked field for the secret, with Set and Dismiss. While a request for an
-  entry is open, another ask for it joins it. A dismissed entry is not offered again, nor asked
-  for, until the project's settings change or the entry is set from Settings, Vault.
-- **Set** stores the entry as Settings, Vault does, with the same checks, for the project that
-  asked, bound to its worklog ("Bound to one use"). It never changes an existing entry's project: when another project uses the name (or it
-  is global), the card says so on its name line, `<name> is used by the project <other>: choose
-  another name`, and Set waits for another name. The card does not change the setting that names
-  the entry: it says that setting must name the new one, and so does the delivery. Each agent
-  that asked is handed a delivery, `the user set the vault entry <name>`, never the secret; or
-  `the user dismissed …`. An entry set from Settings answers its open requests the same way.
+- **`vault {action: "ask", name, why, url?, username?, for?, project?}`.** `name` is the new
+  entry's name; `url` the address the secret is for, which the daemon reads as a connection's
+  `login` does (a backslash is a `/`, a domain is said in ASCII) and refuses when it is no `https`
+  address, or `http` on this machine; `username` the account; `for` the use it is bound to,
+  `worklog` (the agent's project's) or `connection:<name>` (a connection the user declared), or
+  none; `project` `this`
+  (the agent's project's alone) or `every`, a connection's entry being every project's. A name
+  the vault already holds is refused, naming it: the agent uses it (when its project sees it) or
+  asks under another name. An entry a feature of Flottille names and the project misses (today
+  the tracker's `worklog_token`, `docs/tickets.md`, "Logging time") keeps the feature's prefill:
+  its description and its use, the worklog.
+- **Offered with the refusal.** The call that needed the entry is refused as before, and the
+  refusal says the entry may be asked for, with the call to make: `tickets log_time` with its
+  name, a browser connection's `login` with its name and `for: "connection:<name>"`
+  (`docs/extensions.md`, "Connections"). The ask answers at once: nothing waits for the user.
+- **A way in to the vault's own form.** The user sees one card in the session of the agent that
+  asked (and an inbox entry, which names the host and whose entry it is, the project's or every
+  project's): the entry's name, the host of its URL **on a line of its own** (where the secret
+  will go: the agent chose it; the daemon's reading, never the window's), what it is for, its use,
+  its project and the agent's reason, with **New entry** and **Dismiss** (disabled while
+  its call runs). New entry opens Settings, Vault's form of a new entry, prefilled with all
+  of it, the agent's reason under what it is for, and what it will be bound to ("For …") with the
+  host its secret goes to ("Goes to …", while the URL is the one asked) and **Remove the
+  binding**: the user changes any field, types the secret and saves, with the checks of that form
+  (plain `http` to another machine refused for a connection's entry; the username required when
+  the feature that asked reads it, the worklog's), or closes it and nothing is stored. There is
+  no second form.
+- **One request a name.** While a request for a name is open, another ask for it joins it when it
+  is the same project's or the request is every project's; another project's agent is refused
+  (`ask under another name`), and told nothing of it. Dismiss closes the request; the name may be
+  asked for again.
+- **Answered when the entry is saved**, from that form or any other way: each agent that asked
+  and whose project sees the entry is handed a delivery, `the user set the vault entry <name>`,
+  never the secret; on Dismiss each is handed `the user dismissed …`.
 
-The secret goes from the card's field to the keyring as any secret set from the window: it never
+The secret goes from the form's field to the keyring as any secret set from the window: it never
 reaches the agent, an event, a log or an error.
 
 ## How a secret is used
@@ -167,6 +187,50 @@ not exist yet, for the user to save (never one that looks like a secret): the re
 Accept refused while the entry is missing, and once saved the entry's host is checked as any
 other's. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
 another.
+
+## The runtime folder
+
+The keyring answers on the session bus, whose socket is in the user's runtime folder
+(`/run/user/<uid>/bus`), and any program can speak D-Bus: refusing `secret-tool` or `busctl` by
+name keeps nothing out. So what the daemon runs for an agent or a connection reaches no session
+bus: a run, a project's service and its readiness probe, a workspace's setup line, a commit's or
+a push's message checks and the git reads made for them (the push's dry run, with the line's own
+options and the remote's transport), a connection's server and its login:
+
+- its environment has no `DBUS_SESSION_BUS_ADDRESS`, and no `XDG_RUNTIME_DIR` either, so libdbus,
+  sd-bus and GDBus find no bus by default. `DBUS_SYSTEM_BUS_ADDRESS` is kept: the system bus holds
+  none of the user's secrets, and its socket is at a fixed path anyway;
+- the socket's path is guessable, so on Linux with Landlock (its second ABI or later, Linux 5.19)
+  the process is denied the user's runtime folders, `/run/user/<uid>` and the daemon's
+  `XDG_RUNTIME_DIR`: before it runs its program, it is bound to rules that grant every right on
+  everything else (each entry of `/` and of each folder on the way to a runtime folder, symbolic
+  links aside, which lead to where their target is ruled). It gets `no_new_privs` with it, so a
+  setuid program it starts gains nothing.
+
+The daemon's own runtime folder is denied with the rest: a `flottille daemon stop` run for an
+agent cannot read the daemon's lock, and refuses itself when the daemon does not answer, as a
+client started by an agent does.
+
+The gaps, where the platform does not allow more:
+
+- Landlock denies **connecting** to a socket by its path from its ninth ABI only (the right
+  `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`). Before it, the runtime folder cannot be listed and its files
+  cannot be opened, but a process that guesses the bus's path can still connect to it;
+- from the ninth ABI on, connecting is denied to every socket of the runtime folder, not only the
+  bus: an `SSH_AUTH_SOCK` or a gpg-agent socket there cannot be reached either, so a `git push`
+  over SSH through an agent's keys, its dry run, or a commit signed through gpg-agent fails. A
+  known gap the other way: `SSH_AUTH_SOCK` is still passed to what the daemon runs, and below the
+  ninth ABI the SSH agent it names can be connected to;
+- without Landlock (a kernel before 5.19, or one built without it), the process runs as before,
+  with only the environment kept from it;
+- a bus listening on an abstract socket (`unix:abstract=…`, older setups) is not a path, and is
+  not kept out;
+- a process cannot create an entry directly in a folder on the way to a runtime folder (`/`,
+  `/run`, `/run/user`): they get no rule of their own, only their entries do; and an entry
+  created there after the process started is denied to it. A rule on such a folder would hold
+  for the runtime folder under it too, since Landlock grants by hierarchy and denies nothing. The
+  user cannot write in these folders anyway; a runtime folder set in one the user writes to (an
+  `XDG_RUNTIME_DIR` in `/tmp`) takes that folder's new entries from what the daemon runs.
 
 ## The tests' keyring
 

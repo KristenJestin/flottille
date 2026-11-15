@@ -27,6 +27,7 @@ use gpui_kit::{
 };
 
 use crate::actions::Answer;
+use crate::commands::spaced;
 use crate::runs::rail_label;
 use crate::session::{ApprovalCard, SessionPage};
 
@@ -169,8 +170,8 @@ impl Waiting {
     }
 
     /// A compact card: what the call does and its number, the call in one line, its class and the
-    /// reason in one line, then Details, Deny and Allow. A base request stands apart, in the alarm
-    /// colour.
+    /// reason in one line, then Details, Deny and Allow. A base request stands apart by its
+    /// tag and its still dot, in the same attention tone: it failed nothing.
     fn card(
         &self,
         card: &ApprovalCard,
@@ -199,10 +200,12 @@ impl Waiting {
                 .disabled(busy)
                 .on_click(cx.listener(move |this, _, _, cx| this.answer(number, answer, cx)))
         };
-        let (class, ink) = match card.base {
-            true => ("Always asks", p.fail),
-            false => ("To judge", p.wait),
+        let tones = held_tones(p);
+        let class = match card.base {
+            true => "Always asks",
+            false => "To judge",
         };
+        let ink = tones.ink;
         // The reason in one line: the judge's when one was asked, else the first reason it was
         // held.
         let reason = card
@@ -346,69 +349,75 @@ impl Waiting {
             .id(id("approval-card"))
             .flex()
             .flex_col()
-            .gap(space::XS)
             .px(space::MD)
             .py(space::SM)
             .rounded(px(12.))
             .bg(p.card)
             .border_1()
-            .border_color(match card.base {
-                true => mix(p.fail, p.card, 0.6),
-                false => mix(p.wait, p.card, 0.7),
-            })
-            .child(head)
-            // The whole call, wrapping over as many lines as it takes: what is allowed is read
-            // before it is allowed, never guessed from its start.
-            .children(line.map(|line| {
-                div()
-                    .id(match from_says {
-                        true => ElementId::Name(format!("approval-says-{number}-0").into()),
-                        false => id("approval-call"),
-                    })
-                    .min_w_0()
-                    .whitespace_normal()
-                    .mono(11.5)
-                    .text_color(p.mute)
-                    .aria_label(SharedString::from(line.clone()))
-                    .child(SharedString::from(line))
-                    .test_support()
-            }))
+            .border_color(tones.card_edge)
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap(space::SM)
-                    .min_w_0()
+                    .flex_col()
+                    .gap(space::XS)
+                    .child(head)
+                    // The whole call, wrapping over as many lines as it takes: what is allowed is
+                    // read before it is allowed, never guessed from its start.
+                    .children(line.map(|line| {
+                        div()
+                            .id(match from_says {
+                                true => ElementId::Name(format!("approval-says-{number}-0").into()),
+                                false => id("approval-call"),
+                            })
+                            .min_w_0()
+                            .whitespace_normal()
+                            .mono(11.5)
+                            .text_color(p.mute)
+                            .aria_label(SharedString::from(line.clone()))
+                            .child(SharedString::from(line))
+                            .test_support()
+                    }))
                     .child(
                         div()
-                            .id(id("approval-class"))
-                            .flex_none()
-                            .aria_label(class)
-                            .mono(10.)
-                            .medium()
-                            .text_color(ink)
-                            .child(class.to_uppercase())
-                            .test_support(),
-                    )
-                    .child(
-                        one_line(div().id(id("approval-reason")))
-                            .text_size(px(12.))
-                            .text_color(p.faint)
-                            .aria_label(SharedString::from(reason.clone()))
-                            .child(SharedString::from(reason))
-                            .test_support(),
+                            .flex()
+                            .items_center()
+                            .gap(space::SM)
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .id(id("approval-class"))
+                                    .flex_none()
+                                    .aria_label(class)
+                                    .mono(10.)
+                                    .medium()
+                                    .text_color(ink)
+                                    .child(class.to_uppercase())
+                                    .test_support(),
+                            )
+                            .child(
+                                one_line(div().id(id("approval-reason")))
+                                    .text_size(px(12.))
+                                    .text_color(p.faint)
+                                    .aria_label(SharedString::from(reason.clone()))
+                                    .child(SharedString::from(reason))
+                                    .test_support(),
+                            ),
                     ),
             )
-            .child(presence(id("approval-more-block"), open, details).gap(space::XS))
+            .child(presence(id("approval-more-block"), open, details).space(space::XS))
             .children(self.errors.get(&number).cloned().map(|error| {
-                div()
-                    .id(id("approval-error"))
-                    .text_size(px(12.))
-                    .text_color(p.fail)
-                    .child(error)
-                    .test_support()
+                spaced(
+                    space::XS,
+                    div()
+                        .id(id("approval-error"))
+                        .text_size(px(12.))
+                        .text_color(p.fail)
+                        .child(error)
+                        .test_support(),
+                )
             }))
-            .child(
+            .child(spaced(
+                space::XS,
                 div()
                     .pt(space::XS)
                     .flex()
@@ -427,7 +436,7 @@ impl Waiting {
                             })),
                         false => button("allow", "Allow", Answer::Once, true),
                     }),
-            );
+            ));
         // A glow round the card the user was sent to, which fades in and out.
         div()
             .id(id("approval"))
@@ -439,13 +448,13 @@ impl Waiting {
             .into_any_element()
     }
 
-    /// The card's mark: the pulsing dot of what waits for the user, or the alarm's still one.
+    /// The card's mark: the pulsing dot of what waits for the user, or the still one of a base request.
     fn mark(&self, base: bool, p: Palette) -> AnyElement {
         match base {
             true => div()
                 .size(px(8.))
                 .rounded_full()
-                .bg(p.fail)
+                .bg(held_tones(p).ink)
                 .into_any_element(),
             false => self.dot.clone().into_any_element(),
         }
@@ -525,9 +534,78 @@ impl Render for Waiting {
 /// The most the cards take of the rail's height before they scroll.
 const WAITING_HEIGHT: f32 = 420.;
 
+/// The tones of a request held for the user, on the rail's card and on the conversation's line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HeldTones {
+    /// The dot and the class tag.
+    pub ink: gpui_kit::Hsla,
+    /// The card's border, over the card.
+    pub card_edge: gpui_kit::Hsla,
+    /// The conversation line's border once pointed at.
+    pub line_edge: gpui_kit::Hsla,
+}
+
+/// A request that waits for the user is attention, a base one too: nothing failed. The error
+/// ink is for what was refused or failed.
+pub(crate) fn held_tones(p: Palette) -> HeldTones {
+    HeldTones {
+        ink: p.wait,
+        card_edge: mix(p.wait, p.card, 0.7),
+        line_edge: p.wait_line,
+    }
+}
+
+/// The ink of the one-line record a decided request folds into: a denial is a refusal.
+pub(crate) fn record_ink(decision: Option<&str>, p: Palette) -> gpui_kit::Hsla {
+    match decision {
+        Some("deny") => p.fail,
+        _ => p.faint,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sentences;
+    use super::{HeldTones, held_tones, record_ink, sentences};
+    use gpui_design_system::{Palette, theme::Shade};
+
+    fn palettes() -> [Palette; 2] {
+        [Palette::own(Shade::Light), Palette::own(Shade::Dark)]
+    }
+
+    #[test]
+    fn a_request_waiting_for_the_user_is_not_drawn_as_an_error() {
+        for p in palettes() {
+            let HeldTones {
+                ink,
+                card_edge,
+                line_edge,
+            } = held_tones(p);
+            assert_eq!(ink, p.wait, "the dot and the tag");
+            assert_ne!(ink, p.fail);
+            assert_ne!(
+                card_edge,
+                gpui_design_system::color::mix(p.fail, p.card, 0.6)
+            );
+            assert_ne!(line_edge, p.fail, "the line's border");
+        }
+    }
+
+    #[test]
+    fn the_rail_card_and_the_conversation_line_agree() {
+        for p in palettes() {
+            assert_eq!(held_tones(p).line_edge, p.wait_line);
+            assert_eq!(held_tones(p).ink, p.wait);
+        }
+    }
+
+    #[test]
+    fn a_denied_request_is_drawn_as_refused() {
+        for p in palettes() {
+            assert_eq!(record_ink(Some("deny"), p), p.fail);
+            assert_ne!(record_ink(Some("once"), p), p.fail);
+            assert_ne!(record_ink(None, p), p.fail);
+        }
+    }
 
     #[test]
     fn two_reasons_are_two_sentences_with_no_doubled_word() {

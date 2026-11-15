@@ -599,6 +599,7 @@ async fn detailed_with(
         head: found.branch,
         head_commit: found.head_commit,
         base: found.base,
+        cross: !found.own,
         url: found.url,
         description: found.description,
         mergeable,
@@ -638,6 +639,7 @@ fn cheap(forge: &Forge, path: &str, found: Listed) -> crate::items::Fetched {
         head: found.branch,
         head_commit: found.head_commit,
         base: found.base,
+        cross: !found.own,
         url: found.url,
         description: found.description,
         mergeable: None,
@@ -787,7 +789,7 @@ fn listed_of(item: &flottille_core::item::Item) -> Option<Listed> {
         base: text("base"),
         url: item.url.clone().unwrap_or_default(),
         description: text("description"),
-        own: true,
+        own: item.details["cross"] != true,
         updated: item
             .updated_at
             .as_deref()

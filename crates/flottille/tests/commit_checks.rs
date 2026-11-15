@@ -986,3 +986,472 @@ fn a_fifo_named_lefthook_yml_is_not_read() {
         "{answer}"
     );
 }
+
+/// Each line, run by the agent in the repository `from` (`None`: the workspace's folder), is
+/// refused with `said`, and commits nothing into `web`.
+fn each_refused(
+    user: &User,
+    mcp: &Mcp,
+    workspace: &Path,
+    from: Option<&str>,
+    lines: &[&str],
+    said: &str,
+) {
+    for line in lines {
+        let answer = line_in(user, mcp, from, line);
+        assert!(answer.error, "{line}: {}", answer.text);
+        assert!(answer.text.contains(said), "{line}: {}", answer.text);
+        assert!(
+            answer.text.contains("nothing was committed"),
+            "{line}: {}",
+            answer.text
+        );
+    }
+    assert!(!subjects_of(user, &workspace.join("web")).contains("into web"));
+}
+
+#[test]
+fn env_s_abbreviated_and_grouped_options_move_the_commit_into_their_folder() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    each_refused(
+        &user,
+        &mcp,
+        &workspace,
+        Some("api"),
+        &[
+            "env --c=../web git commit -n -m 'into web'",
+            "env --ch ../web git commit -n -m 'into web'",
+            "env -vC ../web git commit -n -m 'into web'",
+            "env -ivC../web git commit -n -m 'into web'",
+            "env -C ../nowhere --chdir=../web git commit -n -m 'into web'",
+            "env -S '-C ../web git commit -n' -m 'into web'",
+            "env -vS'-v -C ../web git' commit -n -m 'into web'",
+        ],
+        "--no-verify skips the commit checks of the repository web",
+    );
+    assert_eq!(ran(&user, "pre-lint"), "");
+}
+
+#[test]
+fn a_program_that_changes_folder_itself_cannot_commit_where_checks_exist() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    each_refused(
+        &user,
+        &mcp,
+        &workspace,
+        Some("api"),
+        &[
+            "pnpm -C ../web exec git commit -m 'into web'",
+            "pnpm exec -C ../web git commit -m 'into web'",
+        ],
+        // `pnpm` itself, not a word it was handed as the program it runs.
+        "refused: `pnpm` runs git in a folder it chooses itself",
+    );
+    each_refused(
+        &user,
+        &mcp,
+        &workspace,
+        Some("api"),
+        &[
+            "uv run --directory ../web git commit -m 'into web'",
+            "find ../web/README.md -execdir git commit -m 'into web' ';'",
+            "find ../web/README.md -okdir env git commit -m 'into web' ';'",
+            "fd --base-directory ../web README -x git commit -m 'into web'",
+            "fd --base-directory=../web README -x git ci -m 'into web'",
+        ],
+        "runs git in a folder it chooses itself",
+    );
+    assert_eq!(ran(&user, "pre-lint"), "");
+}
+
+#[test]
+fn git_dir_in_any_assignment_word_of_any_layer_is_refused_where_checks_exist() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    each_refused(
+        &user,
+        &mcp,
+        &workspace,
+        Some("api"),
+        &[
+            "sh -c \"A=1 GIT_DIR=../web/.git git commit -n -m 'into web'\"",
+            "env -S 'GIT_DIR=../web/.git git commit' -m 'into web'",
+            "env --split-string='A=1 GIT_DIR=../web/.git git' commit -m 'into web'",
+            "env A=1 GIT_DIR=../web/.git git commit -m 'into web'",
+        ],
+        "GIT_DIR points the commit at a repository other than its folder's",
+    );
+    assert_eq!(ran(&user, "pre-lint"), "");
+}
+
+#[test]
+fn every_git_variable_is_refused_on_a_commit_where_checks_exist() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    for (line, name) in [
+        (
+            "env GIT_COMMON_DIR=../web/.git git commit -m 'into web'",
+            "GIT_COMMON_DIR",
+        ),
+        (
+            "env GIT_INDEX_FILE=../web/.git/index git commit -m 'into web'",
+            "GIT_INDEX_FILE",
+        ),
+    ] {
+        each_refused(
+            &user,
+            &mcp,
+            &workspace,
+            Some("api"),
+            &[line],
+            &format!("refused: {name} changes where or how git commits"),
+        );
+    }
+    assert_eq!(ran(&user, "pre-lint"), "");
+}
+
+#[test]
+fn a_worktree_of_web_inside_api_runs_web_s_checks() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-fail"], &[]);
+    let mcp = agent(&user);
+    let inside = workspace.join("api/web-tree");
+    user.git(
+        &workspace.join("web"),
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "tree",
+            inside.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(inside.join("change.txt"), "change\n").unwrap();
+    user.git(&inside, &["add", "change.txt"]);
+
+    let answer = line_in(
+        &user,
+        &mcp,
+        Some("api"),
+        "git -C web-tree commit -m 'into web'",
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("the pre-commit check `pre-fail` of the repository web refused the commit"),
+        "{}",
+        answer.text
+    );
+    assert!(!subjects_of(&user, &inside).contains("into web"));
+    let folder = inside.canonicalize().unwrap();
+    assert_eq!(ran(&user, "pre-fail"), format!("{} \n", folder.display()));
+}
+
+#[test]
+fn a_nested_git_file_in_api_pointing_at_web_runs_web_s_checks() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-fail"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+    let web_git = user.git_output(&workspace.join("web"), &["rev-parse", "--absolute-git-dir"]);
+    let nested = workspace.join("api/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join(".git"), format!("gitdir: {}\n", web_git.trim())).unwrap();
+
+    let answer = line_in(
+        &user,
+        &mcp,
+        Some("api"),
+        "git -C nested commit -m 'into web'",
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("the pre-commit check `pre-fail` of the repository web refused the commit"),
+        "{}",
+        answer.text
+    );
+    assert!(!subjects_of(&user, &workspace.join("web")).contains("into web"));
+}
+
+#[test]
+fn a_worktree_of_web_outside_the_workspace_runs_web_s_checks() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-fail"], &[]);
+    let mcp = agent(&user);
+    let outside = user.path("elsewhere/web-tree");
+    user.git(
+        &workspace.join("web"),
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "outside",
+            outside.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(outside.join("change.txt"), "change\n").unwrap();
+    user.git(&outside, &["add", "change.txt"]);
+
+    let line = format!("git -C {} commit -m 'into web'", outside.display());
+    let answer = line_in(&user, &mcp, Some("api"), &line);
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("the pre-commit check `pre-fail` of the repository web refused the commit"),
+        "{}",
+        answer.text
+    );
+    assert!(!subjects_of(&user, &outside).contains("into web"));
+}
+
+#[test]
+fn find_exec_git_cannot_commit_where_checks_exist() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    each_refused(
+        &user,
+        &mcp,
+        &workspace,
+        Some("api"),
+        &[
+            "find ../web -maxdepth 0 -exec git -C {} commit --message='into web' ';'",
+            "find ../web -maxdepth 0 -exec git -C {} commit -m 'into web' +",
+            "find ../web -maxdepth 0 -ok git -C {} commit --message='into web' ';'",
+            "find ../web -maxdepth 0 -exec env git -C {} commit --message='into web' ';'",
+        ],
+        "runs git in a folder it chooses itself",
+    );
+    assert_eq!(ran(&user, "pre-lint"), "");
+}
+
+#[test]
+fn xargs_git_cannot_commit_where_checks_exist() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+    std::fs::write(workspace.join("api/where"), "../web\n").unwrap();
+    std::fs::write(
+        workspace.join("api/args"),
+        "-C ../web commit -m 'into web'\n",
+    )
+    .unwrap();
+
+    each_refused(
+        &user,
+        &mcp,
+        &workspace,
+        Some("api"),
+        &[
+            "xargs -a args git",
+            "xargs --arg-file=args git",
+            "xargs -a where -I{} git -C {} commit --message='into web'",
+            "xargs -a where git -C ../web commit -m 'into web'",
+            "xargs -a args env git",
+        ],
+        "runs git in a folder it chooses itself",
+    );
+    assert_eq!(ran(&user, "pre-lint"), "");
+}
+
+#[test]
+fn fd_exec_git_cannot_commit_where_checks_exist() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    each_refused(
+        &user,
+        &mcp,
+        &workspace,
+        Some("api"),
+        &[
+            "fd README.md ../web -x git -C {//} commit --message='into web'",
+            "fd README.md ../web -x git",
+            "fd README.md ../web -X git -C ../web commit -m 'into web'",
+            "fd README.md ../web --exec=git -C ../web commit -m 'into web'",
+        ],
+        "runs git in a folder it chooses itself",
+    );
+    assert_eq!(ran(&user, "pre-lint"), "");
+}
+
+#[test]
+fn pnpm_exec_with_a_folder_option_cannot_commit_unchecked() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    each_refused(
+        &user,
+        &mcp,
+        &workspace,
+        Some("api"),
+        &[
+            "pnpm exec --dir=../web git commit -m 'into web'",
+            "pnpm exec -C../web git commit -m 'into web'",
+            "pnpm dlx --dir=../web git commit -m 'into web'",
+        ],
+        "refused: `pnpm` runs git in a folder it chooses itself",
+    );
+    each_refused(
+        &user,
+        &mcp,
+        &workspace,
+        Some("api"),
+        &["yarn exec --cwd=../web git commit -m 'into web'"],
+        "refused: `yarn` runs git in a folder it chooses itself",
+    );
+    assert_eq!(ran(&user, "pre-lint"), "");
+}
+
+#[test]
+fn pnpm_exec_shell_mode_is_refused_where_checks_exist() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    each_refused(
+        &user,
+        &mcp,
+        &workspace,
+        Some("web"),
+        &[
+            "pnpm exec -c 'git commit -n -m into-web'",
+            "pnpm exec --shell-mode 'git commit -m into-web'",
+            "yarn exec -c 'git commit -m into-web'",
+        ],
+        "runs git in a folder it chooses itself",
+    );
+    assert!(!subjects_of(&user, &workspace.join("web")).contains("into-web"));
+    assert_eq!(ran(&user, "pre-lint"), "");
+}
+
+#[test]
+fn a_commit_is_refused_when_a_checked_repository_cannot_be_read() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    let outside = user.path("elsewhere/web-tree");
+    user.git(
+        &workspace.join("web"),
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "outside",
+            outside.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(outside.join("change.txt"), "change\n").unwrap();
+    user.git(&outside, &["add", "change.txt"]);
+    // The workspace's `web` points git nowhere: its checks' repository cannot be read.
+    std::fs::write(workspace.join("web/.git"), "gitdir: /nowhere/at/all\n").unwrap();
+
+    let line = format!("git -C {} commit -m 'into web'", outside.display());
+    let answer = line_in(&user, &mcp, Some("api"), &line);
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("git cannot say which repository"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        answer.text.contains("nothing was committed"),
+        "{}",
+        answer.text
+    );
+    assert!(!subjects_of(&user, &outside).contains("into web"));
+}
+
+#[test]
+fn git_author_variables_do_not_refuse_a_commit() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    let answer = line_in(
+        &user,
+        &mcp,
+        Some("web"),
+        "env GIT_AUTHOR_NAME=Someone GIT_AUTHOR_EMAIL=someone@example.invalid \
+         GIT_COMMITTER_NAME=Someone GIT_COMMITTER_EMAIL=someone@example.invalid \
+         git commit -m 'into web'",
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    let web = workspace.join("web");
+    assert!(subjects_of(&user, &web).contains("into web"));
+    assert_eq!(
+        user.git_output(&web, &["log", "-1", "--format=%an %ce"])
+            .trim(),
+        "Someone someone@example.invalid"
+    );
+    let folder = web.canonicalize().unwrap();
+    assert_eq!(ran(&user, "pre-lint"), format!("{} \n", folder.display()));
+}
+
+#[test]
+fn an_ordinary_commit_runs_its_checks() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &["msg-lint {message_file}"]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    let answer = line_in(&user, &mcp, Some("web"), "git commit -m 'into web'");
+
+    assert!(!answer.error, "{}", answer.text);
+    let web = workspace.join("web");
+    assert!(subjects_of(&user, &web).contains("into web"));
+    let folder = web.canonicalize().unwrap();
+    assert_eq!(ran(&user, "pre-lint"), format!("{} \n", folder.display()));
+    assert_eq!(ran(&user, "msg-lint").lines().count(), 1);
+    assert!(seen(&user).contains("into web"), "{}", seen(&user));
+}

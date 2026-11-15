@@ -29,6 +29,7 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::{Command, SessionsSetting};
+use crate::commands::{spaced, stack};
 use crate::extensions::Registry;
 use crate::extensions::connections::{self, ConnectionsSection};
 use crate::providers::{NewSession, Provider, Providers};
@@ -225,6 +226,10 @@ pub const LIMITS: [usize; 4] = [4_000, 8_000, 16_000, 32_000];
 const TOOL_RESULTS_SENTENCE: &str = "A longer result reaches the agent as its start and its end; \
      the agent reads the rest when it needs it.";
 
+/// What the switch that says a file is unchanged does, under its label.
+pub const UNCHANGED_HINT: &str = "A file the agent already read and that has not changed \
+     since is answered in one line, unless the session was compacted.";
+
 /// The days the Sessions select offers. The daemon takes any number from 1 to 90
 /// (`docs/protocol.md`): a file edited by hand keeps its own, shown as one more option.
 pub const DAYS: [u64; 7] = [1, 3, 7, 14, 30, 60, 90];
@@ -283,6 +288,10 @@ pub struct SettingsPage {
     tool_results: Option<Option<usize>>,
     /// A limit chosen, until the daemon answers: what it was asked to become.
     tool_results_pending: Option<Option<usize>>,
+    /// Whether `fs_read` says a file is unchanged, as the daemon last said it, and what the user
+    /// asked it to become while the daemon has not answered.
+    unchanged: Option<bool>,
+    unchanged_pending: Option<bool>,
     /// After how many days an inactive session is ended, once the daemon said it (`Some(None)` is
     /// off).
     sessions: Option<Option<u64>>,
@@ -381,6 +390,8 @@ impl SettingsPage {
             developer_pending: None,
             tool_results: None,
             tool_results_pending: None,
+            unchanged: None,
+            unchanged_pending: None,
             sessions: None,
             sessions_pending: None,
             resume: None,
@@ -651,7 +662,6 @@ impl SettingsPage {
                     .pt(space::MD)
                     .flex()
                     .flex_col()
-                    .gap(space::MD)
                     .child(automatic)
                     .child(
                         presence(
@@ -663,15 +673,14 @@ impl SettingsPage {
                                 threshold,
                             ),
                         )
-                        .gap(space::MD),
+                        .space(space::MD),
                     )
-                    .child(more),
+                    .child(spaced(space::MD, more)),
             ))
             .test_support();
         div()
             .flex()
             .flex_col()
-            .gap(space::XXL)
             .child(enter("compaction-page-enter", 0, card))
             .child(
                 presence(
@@ -679,7 +688,7 @@ impl SettingsPage {
                     some,
                     self.compaction_guidance.clone(),
                 )
-                .gap(space::XXL),
+                .space(space::XXL),
             )
             .into_any_element()
     }
@@ -860,35 +869,47 @@ impl SettingsPage {
         div()
             .flex()
             .flex_col()
-            .gap(space::MD)
             .pl(space::LG)
-            .child(Field::new("compaction-maximum-field", "Or above", maximum))
-            .child(Field::new(
-                "compaction-kept-field",
-                "Recent messages kept as they are",
-                kept,
-            ))
-            .child(before_expiry)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::MD)
+                    .child(Field::new("compaction-maximum-field", "Or above", maximum))
+                    .child(Field::new(
+                        "compaction-kept-field",
+                        "Recent messages kept as they are",
+                        kept,
+                    ))
+                    .child(before_expiry),
+            )
             .child(
                 presence(
                     "compaction-margin-block",
                     shown.before_expiry,
                     Field::new("compaction-margin-field", "How long before", margin),
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
-            .child(after_expiry)
-            .child(Field::new("compaction-minimum-field", "Not below", minimum))
             .child(
                 div()
-                    .id("compaction-lifetimes")
-                    .text_size(px(12.))
-                    .text_color(p.faint)
-                    .aria_label(SharedString::from(format!(
-                        "Prompt cache lifetimes. {lifetimes}"
-                    )))
-                    .child(format!("Prompt cache lifetimes. {lifetimes}"))
-                    .test_support(),
+                    .mt(space::MD)
+                    .flex()
+                    .flex_col()
+                    .gap(space::MD)
+                    .child(after_expiry)
+                    .child(Field::new("compaction-minimum-field", "Not below", minimum))
+                    .child(
+                        div()
+                            .id("compaction-lifetimes")
+                            .text_size(px(12.))
+                            .text_color(p.faint)
+                            .aria_label(SharedString::from(format!(
+                                "Prompt cache lifetimes. {lifetimes}"
+                            )))
+                            .child(format!("Prompt cache lifetimes. {lifetimes}"))
+                            .test_support(),
+                    ),
             )
             .into_any_element()
     }
@@ -1229,7 +1250,6 @@ impl SettingsPage {
             .bg(p.card)
             .border_1()
             .border_color(p.line)
-            .gap(space::MD)
             .child(switch)
             .child(
                 presence_of("developer-file-line", file, move |file| {
@@ -1250,7 +1270,7 @@ impl SettingsPage {
                         .test_support()
                         .into_any_element()
                 })
-                .gap(space::MD),
+                .space(space::MD),
             )
             .test_support();
         Section::new("developer", "Developer mode").child(card)
@@ -1274,8 +1294,36 @@ impl SettingsPage {
             .unwrap_or(Some(8_000))
     }
 
+    /// Whether the daemon last said `fs_read` answers "unchanged" for a file the agent already
+    /// read (`None` before it said), whatever was asked since.
+    pub fn unchanged_said(&self) -> Option<bool> {
+        self.unchanged
+    }
+
+    fn asked_tool_results(&self) -> bool {
+        self.tool_results_pending.is_some() || self.unchanged_pending.is_some()
+    }
+
+    fn choose_unchanged(&mut self, cx: &mut Context<Self>) {
+        let Some(unchanged) = self.unchanged else {
+            return;
+        };
+        if self.asked_tool_results() {
+            return;
+        }
+        self.unchanged_pending = Some(!unchanged);
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::UnchangedSet {
+                    unchanged: !unchanged,
+                })
+            })
+            .ok();
+        cx.notify();
+    }
+
     fn choose_tool_results(&mut self, limit: Option<usize>, cx: &mut Context<Self>) {
-        if self.tool_results_pending.is_some() || self.tool_results.is_none() {
+        if self.asked_tool_results() || self.tool_results.is_none() {
             return;
         }
         self.tool_results_pending = Some(limit);
@@ -1291,17 +1339,27 @@ impl SettingsPage {
     /// why.
     pub fn tool_results_answered(
         &mut self,
-        shown: Result<Option<usize>, String>,
+        shown: Result<(Option<usize>, bool), String>,
         written: bool,
         cx: &mut Context<Self>,
     ) {
+        let asked_unchanged = self.unchanged_pending.is_some();
         if written {
             self.tool_results_pending = None;
+            self.unchanged_pending = None;
         }
         match shown {
-            Ok(limit) => self.tool_results = Some(limit),
+            Ok((limit, unchanged)) => {
+                self.tool_results = Some(limit);
+                self.unchanged = Some(unchanged);
+            }
             Err(why) if written => toast(
-                Toast::failure("The limit of tool results was not kept").detail(why),
+                Toast::failure(if asked_unchanged {
+                    "The switch for unchanged files was not kept"
+                } else {
+                    "The limit of tool results was not kept"
+                })
+                .detail(why),
                 cx,
             ),
             Err(_) => {}
@@ -1330,15 +1388,40 @@ impl SettingsPage {
         let this = cx.entity().downgrade();
         let picked = limits.clone();
         let select = Select::new("tool-results-limit", options, chosen)
-            .disabled(self.tool_results.is_none() || self.tool_results_pending.is_some())
+            .disabled(self.tool_results.is_none() || self.asked_tool_results())
             .on_choose(move |index, _, cx| {
                 let limit = picked[index];
                 this.update(cx, |this, cx| this.choose_tool_results(limit, cx))
                     .ok();
             });
+        let p = palette(cx);
+        let unchanged = Switch::new(
+            "tool-results-unchanged-switch",
+            self.unchanged_pending.or(self.unchanged).unwrap_or(false),
+            "Say when a file is unchanged",
+        )
+        .hint(UNCHANGED_HINT)
+        .disabled(self.unchanged.is_none() || self.asked_tool_results())
+        .on_click(cx.listener(|this, _, _, cx| this.choose_unchanged(cx)));
+        let unchanged_card = div()
+            .id("tool-results-unchanged")
+            .p(space::LG)
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(unchanged)
+            .test_support();
         Section::new("tool-results", "Long tool results")
             .sentence(TOOL_RESULTS_SENTENCE)
-            .child(Field::new("tool-results-field", "Cut above", select))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::MD)
+                    .child(Field::new("tool-results-field", "Cut above", select))
+                    .child(unchanged_card),
+            )
     }
 
     /// Whether the daemon said the setting of inactive sessions.
@@ -1637,7 +1720,6 @@ impl SettingsPage {
             .p(space::LG)
             .flex()
             .flex_col()
-            .gap(space::MD)
             .rounded(px(12.))
             .bg(p.card)
             .border_1()
@@ -1662,7 +1744,7 @@ impl SettingsPage {
                             .into_any_element()
                     },
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .child(
                 presence_of(
@@ -1681,7 +1763,7 @@ impl SettingsPage {
                             .into_any_element()
                     },
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .child(
                 presence(
@@ -1689,7 +1771,7 @@ impl SettingsPage {
                     matches!(shown.source, Source::Theme(_)),
                     row("Shade", "", shade.into_any_element()),
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .test_support();
         Section::new("appearance", "Appearance").child(card)
@@ -1921,7 +2003,7 @@ impl SettingsPage {
                 move |command| crate::programs::command_row(id, command, p)
             },
         )
-        .gap(space::SM);
+        .space(space::SM);
         let install = presence_of(
             format!("provider-install-{}-block", provider.name),
             provider
@@ -1952,7 +2034,7 @@ impl SettingsPage {
                 }
             },
         )
-        .gap(space::SM);
+        .space(space::SM);
         div()
             .id(ElementId::Name(
                 format!("provider-row-{}", provider.name).into(),
@@ -1961,7 +2043,6 @@ impl SettingsPage {
             .py(space::MD)
             .flex()
             .flex_col()
-            .gap(space::SM)
             .child(
                 div()
                     .flex()
@@ -1970,7 +2051,7 @@ impl SettingsPage {
                     .child(div().flex_1().min_w_0().child(switch))
                     .children(version),
             )
-            .child(state)
+            .child(state.mt(space::SM))
             .child(sign_in)
             .child(install)
             .into_any_element()
@@ -2014,27 +2095,33 @@ impl SettingsPage {
             .sentence("The agent programs Flottille can start. Each signs in with its own login.")
             .action(check)
             .child(
-                presence_of(
-                    "providers-error-line",
-                    self.providers.error.clone().map(SharedString::from),
-                    move |error| {
-                        div()
-                            .id("providers-error")
-                            .text_size(px(12.5))
-                            .text_color(p.fail)
-                            .child(error)
-                            .test_support()
-                            .into_any_element()
-                    },
-                )
-                .gap(space::MD),
+                stack(space::MD)
+                    .child(
+                        presence_of(
+                            "providers-error-line",
+                            self.providers.error.clone().map(SharedString::from),
+                            move |error| {
+                                div()
+                                    .id("providers-error")
+                                    .text_size(px(12.5))
+                                    .text_color(p.fail)
+                                    .child(error)
+                                    .test_support()
+                                    .into_any_element()
+                            },
+                        )
+                        .space(space::MD),
+                    )
+                    .child(spaced(
+                        space::MD,
+                        awaiting(
+                            "providers-waiting",
+                            !known,
+                            Skeleton::new("providers-skeleton").h(px(96.)),
+                            presence("provider-list-block", listed, list),
+                        ),
+                    )),
             )
-            .child(awaiting(
-                "providers-waiting",
-                !known,
-                Skeleton::new("providers-skeleton").h(px(96.)),
-                presence("provider-list-block", listed, list),
-            ))
             .into_any_element()
     }
 
@@ -2176,19 +2263,15 @@ impl SettingsPage {
                     registry.switch_on(key, None)
                         && registry.listed(key).is_some_and(|listed| listed.enabled)
                 });
-                // The gap is the parent's: `presence(..).gap(..)` only folds it away with the block.
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::XXL)
-                    .children(page)
+                stack(space::XXL)
+                    .children(page.map(|page| spaced(space::XXL, page)))
                     .child(
                         presence(
                             "connection-servers-block",
                             on,
                             enter("connection-servers-enter", 1, self.connections.clone()),
                         )
-                        .gap(space::XXL),
+                        .space(space::XXL),
                     )
                     .into_any_element()
             }
@@ -2316,11 +2399,12 @@ pub(crate) fn grouped(n: usize) -> String {
 mod tests {
     use super::{
         COMPACTION_HINT, COMPACTION_LINE, COMPACTION_USAGE, COMPACTOR_COST, TOOL_RESULTS_SENTENCE,
-        grouped,
+        UNCHANGED_HINT, grouped,
     };
 
     #[test]
     fn the_sentence_of_the_tool_results_section_has_no_run_of_spaces() {
+        assert!(!UNCHANGED_HINT.contains("  "), "{UNCHANGED_HINT}");
         assert!(
             !TOOL_RESULTS_SENTENCE.contains("  "),
             "{TOOL_RESULTS_SENTENCE}"

@@ -47,7 +47,7 @@ pub fn target_named(target: &Value) -> String {
 }
 
 /// What the item of `key` is in the project's tracker: its repository (none for Jira) and key.
-pub(super) fn item_of(project: &Project, key: &Key) -> Option<(String, String)> {
+pub(crate) fn item_of(project: &Project, key: &Key) -> Option<(String, String)> {
     match (project.tracker.as_ref()?, key) {
         (ProjectTracker::Github { repository }, Key::Issue(number)) => {
             Some((repository.clone(), number.to_string()))

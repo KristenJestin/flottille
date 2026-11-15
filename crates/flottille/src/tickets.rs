@@ -42,6 +42,7 @@ mod sprints;
 mod versions;
 mod worklog;
 
+pub(crate) use events::item_of;
 pub use events::{EVENTS, offer, reference_of, target_named};
 pub use links::checked as checked_links;
 pub use milestones::says as milestone_says;
@@ -814,10 +815,14 @@ pub async fn link(daemon: Arc<Daemon>, params: Value) -> Result<Value, Failure> 
         "ticket": ticket,
     });
     daemon.write(|store| {
-        let event =
-            store.set_ticket(workspace.id, ticket.as_deref(), ("workspace.ticket", event))?;
+        let event = store.set_ticket(
+            workspace.id,
+            ticket.as_deref(),
+            ("workspace.ticket", event.clone()),
+        )?;
         Ok(((), event))
     })?;
+    crate::extensions::heard(&daemon, &[("workspace.ticket", event)]);
     let workspace = find(&daemon, &asked.project, &asked.name)?;
     Ok(state_of(&daemon, &workspace).await)
 }
