@@ -349,52 +349,67 @@ impl Render for AddProject {
             .on_close(move |_, cx| {
                 this.update(cx, |this, cx| this.close(cx)).ok();
             })
-            .child(div().text_size(px(12.5)).text_color(p.mute).child(
-                "A folder that is a Git repository, or holds some one or two levels down. \
-                 Nothing is written in it.",
-            ))
             .child(
+                // The body's gap is the kit's: the blocks sit in a column of their own, after the
+                // lines that are always there, with the space above them themselves.
                 div()
                     .flex()
-                    .gap(space::SM)
-                    .child(div().flex_1().child(field_frame(
-                        "add-project-folder",
-                        &self.folder,
-                        cx,
-                    )))
+                    .flex_col()
                     .child(
-                        Button::secondary("add-project-browse", "Browse…")
-                            .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx))),
-                    ),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(space::LG)
+                            .child(div().text_size(px(12.5)).text_color(p.mute).child(
+                                "A folder that is a Git repository, or holds some one or two \
+                                 levels down. Nothing is written in it.",
+                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(space::SM)
+                                    .child(div().flex_1().child(field_frame(
+                                        "add-project-folder",
+                                        &self.folder,
+                                        cx,
+                                    )))
+                                    .child(
+                                        Button::secondary("add-project-browse", "Browse…")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.browse(window, cx)
+                                            })),
+                                    ),
+                            )
+                            .child(field_frame("add-project-name", &self.name, cx)),
+                    )
+                    .child(
+                        presence(
+                            "add-project-looking",
+                            self.detecting,
+                            div()
+                                .id("add-project-looking")
+                                .mono(11.5)
+                                .text_color(p.faint)
+                                .child("Looking…")
+                                .test_support(),
+                        )
+                        .space(space::LG),
+                    )
+                    .child(
+                        presence(
+                            "add-project-found",
+                            self.detected.is_some(),
+                            div().children(detected),
+                        )
+                        .space(space::LG),
+                    )
+                    .child(problem_line(
+                        "add-project-error",
+                        self.error.clone(),
+                        space::LG,
+                        cx,
+                    )),
             )
-            .child(field_frame("add-project-name", &self.name, cx))
-            .child(
-                presence(
-                    "add-project-looking",
-                    self.detecting,
-                    div()
-                        .id("add-project-looking")
-                        .mono(11.5)
-                        .text_color(p.faint)
-                        .child("Looking…")
-                        .test_support(),
-                )
-                .gap(space::LG),
-            )
-            .child(
-                presence(
-                    "add-project-found",
-                    self.detected.is_some(),
-                    div().children(detected),
-                )
-                .gap(space::LG),
-            )
-            .child(problem_line(
-                "add-project-error",
-                self.error.clone(),
-                space::LG,
-                cx,
-            ))
             .action(action)
     }
 }

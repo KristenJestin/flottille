@@ -27,7 +27,8 @@ pub struct Subscription {
     pub from: String,
     /// What its source last saw of the target. No source writes it since the subscriptions
     /// filter the items' events (#257), which compare with the store: it is `{}`, its column
-    /// kept, a migration being worth nothing here.
+    /// kept, a migration being worth nothing here; the automatic subscriptions say `{"automatic":
+    /// true}` in it, so that what ends them leaves an agent's own alone.
     pub seen: Value,
     pub created_at: u64,
     /// Its deadline; `NO_DEADLINE` when the agent gave none.

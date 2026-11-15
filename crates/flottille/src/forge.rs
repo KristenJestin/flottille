@@ -48,6 +48,7 @@ mod threads;
 mod yaml;
 
 pub(crate) use events::offer;
+pub(crate) use events::same_pull;
 pub use events::{EVENTS, target_named};
 
 /// How long a state read stays fresh, and how often a watched workspace is read again.
@@ -61,8 +62,8 @@ const SSH_TIME: Duration = Duration::from_secs(5);
 /// What `forge show` shows of one comment at most.
 const COMMENT_CHARS: usize = 2000;
 /// What `gh pr view` is asked for.
-const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,url,\
-    mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt";
+const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,\
+    isCrossRepository,url,mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt";
 /// The ways `forge` `merge` merges a pull request, the first by default.
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
 pub(crate) use pipelines::{HIDDEN_EVERYWHERE, bitbucket_key, with_branch};
@@ -301,6 +302,9 @@ pub struct Pull {
     /// The commit its branch was at, as a hash, when the forge says it.
     pub head_commit: Option<String>,
     pub base: String,
+    /// Whether its branch is in another repository than the one it merges into (a fork), as
+    /// GitHub says it (`isCrossRepository`) and Bitbucket by its source repository.
+    pub cross: bool,
     pub url: String,
     /// What its author wrote of it, masked; empty when nothing.
     pub description: String,
@@ -495,6 +499,7 @@ impl Pull {
             head: text(&value["headRefName"]),
             head_commit: commit_hash(&value["headRefOid"]),
             base: text(&value["baseRefName"]),
+            cross: value["isCrossRepository"] == true,
             url: text(&value["url"]),
             description: text(&value["body"]),
             mergeable: match value["mergeable"].as_str() {
@@ -1123,6 +1128,8 @@ pub(crate) struct ForgeCall {
     delete_branch: Option<bool>,
     /// subscribe: the events it waits for (`EVENTS`).
     events: Option<Vec<String>>,
+    /// create: `false` opens it without the automatic subscription.
+    subscribe: Option<bool>,
     /// subscribe: whose reviews and comments count (`subscriptions::FROM`).
     from: Option<String>,
     /// subscribe: a deadline, in minutes; none when left out.
@@ -1417,7 +1424,23 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         }
         ("subscribe", _) => forge_subscribe(daemon, agent, place, asked).await,
         ("unsubscribe", _) => forge_unsubscribe(daemon, agent, place, asked),
-        ("create" | "merge" | "checks", _) => {
+        ("create", _) => {
+            let (subscribe, workspace, repository) = (
+                asked.subscribe != Some(false),
+                asked.workspace.clone(),
+                asked.repository.clone(),
+            );
+            let written = forge_write(daemon, place, asked).await;
+            daemon.forges.pulls.drop_all();
+            match written {
+                Outcome::Done(text) if subscribe => {
+                    let said = created(daemon, agent, place, workspace, repository).await;
+                    Outcome::Done(text + &said)
+                }
+                other => other,
+            }
+        }
+        ("merge" | "checks", _) => {
             let written = forge_write(daemon, place, asked).await;
             daemon.forges.pulls.drop_all();
             written
@@ -1452,6 +1475,41 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
             "refused: forge has no action {action:?}: its actions are {}",
             crate::gate::FORGE_ACTIONS
         )),
+    }
+}
+
+/// A pull request the agent just opened subscribes it, a session, to the events Settings and the
+/// project set (`docs/extensions.md`, "Automatic subscriptions"), from people: what its answer
+/// says of it, nothing when no event is set or the agent is no session.
+async fn created(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    place: &Place,
+    workspace: Option<String>,
+    repository: Option<String>,
+) -> String {
+    let session = daemon
+        .read(|store| store.agent(agent))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.parent.is_none());
+    let events = crate::extensions::subscribed_on_create(daemon, &place.project);
+    if !session || events.is_empty() {
+        return String::new();
+    }
+    let call = json!({"action": "subscribe", "workspace": workspace, "repository": repository,
+        "events": events, "from": "people"});
+    let asked: ForgeCall = match arguments("forge", call) {
+        Ok(asked) => asked,
+        Err(_) => return String::new(),
+    };
+    match forge_subscribe(daemon, agent, place, asked).await {
+        Outcome::Done(_) => format!("\n{}", crate::extensions::pull_sentence(&events, "")),
+        Outcome::Refused(why) | Outcome::Invalid(why) | Outcome::Failed(why) => format!(
+            "\nYou are not subscribed to it: {}; forge subscribe subscribes you.",
+            why.trim_start_matches("refused: ")
+        ),
+        _ => String::new(),
     }
 }
 
@@ -1503,6 +1561,92 @@ fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
     text
 }
 
+/// The branches an agent's call is reading or opening the pull request of right now, by
+/// (project, repository, branch), each with how many calls hold it: what the rounds see of that
+/// pull request opening meanwhile is that call's, never one opened another way
+/// (`docs/extensions.md`, "Automatic subscriptions"). Held for the call alone: what must outlive
+/// it, across a restart, is `opened_pulls` in the store.
+static OWN: crate::locks::Lock<std::collections::BTreeMap<(String, String, String), usize>> =
+    crate::locks::Lock::named("OWN", std::collections::BTreeMap::new());
+
+/// A branch held by an agent's call: let go when dropped.
+pub(crate) struct Own {
+    key: (String, String, String),
+}
+
+impl Own {
+    fn hold(project: &str, repository: &str, branch: &str) -> Own {
+        let key = (project.to_owned(), repository.to_owned(), branch.to_owned());
+        *OWN.lock().unwrap().entry(key.clone()).or_default() += 1;
+        Own { key }
+    }
+}
+
+impl Drop for Own {
+    fn drop(&mut self) {
+        let mut own = OWN.lock().unwrap();
+        if let Some(count) = own.get_mut(&self.key) {
+            *count -= 1;
+            if *count == 0 {
+                own.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// The workspaces a stored pull request is the own of: on their branch, in a repository they hold
+/// (another repository can have a branch of the same name), and not from a fork (a fork's branch
+/// of the same name is someone else's).
+pub(crate) fn workspaces_of(
+    pull: &flottille_core::item::Item,
+    workspaces: Vec<flottille_core::workspace::Workspace>,
+) -> Vec<flottille_core::workspace::Workspace> {
+    let head = pull.details["head"].as_str().unwrap_or_default();
+    if head.is_empty() || pull.details["cross"] == true {
+        return Vec::new();
+    }
+    workspaces
+        .into_iter()
+        .filter(|w| w.branch == head && w.repositories.iter().any(|r| r.path == pull.repository))
+        .collect()
+}
+
+/// How long a pull request an agent opened is remembered as its own, when no round has seen it
+/// open: the rounds come every few minutes, so a record this old was never going to be taken (a
+/// live read stored the pull request first), and must not hide one opened by hand later.
+const OPENED_FOR: u64 = 30 * 60_000;
+
+/// Whether the pull request of `branch` that a round just saw open is an agent's own call's: one
+/// a call is reading or opening now, or one `forge create` opened (taken from the store, so that
+/// the next one opened on the branch is not).
+pub(crate) fn owned(daemon: &Daemon, project: &str, repository: &str, branch: &str) -> bool {
+    let key = (project.to_owned(), repository.to_owned(), branch.to_owned());
+    if OWN.lock().unwrap().contains_key(&key) {
+        return true;
+    }
+    taken(daemon, project, repository, branch)
+}
+
+/// The record `forge create` left of the pull request of `branch`, taken: it is an agent's, and
+/// the next one opened there is not.
+fn taken(daemon: &Daemon, project: &str, repository: &str, branch: &str) -> bool {
+    let since = flottille_core::store::now_ms().saturating_sub(OPENED_FOR);
+    daemon
+        .read(|store| store.take_opened_pull((project, repository, branch), since))
+        .unwrap_or(false)
+}
+
+/// `forge create` opened the pull request of `branch`: kept in the store until a round sees it
+/// open, or `OPENED_FOR` has passed.
+fn opened(daemon: &Daemon, project: &str, repository: &str, branch: &str) {
+    let at = flottille_core::store::now_ms();
+    if let Err(error) =
+        daemon.read(|store| store.add_opened_pull((project, repository, branch), at))
+    {
+        eprintln!("flottille daemon: the pull request of {branch} could not be recorded: {error}");
+    }
+}
+
 /// `forge subscribe`: the agent is woken at each of the events it names of the pull request of a
 /// workspace's branch, until it is merged or closed; the answer comes at once, the events later as
 /// deliveries. What is already so is not an event: this read is what the next ones are compared
@@ -1546,6 +1690,7 @@ async fn forge_subscribe(
         pull,
         target,
         before,
+        _own,
     } = match found {
         Ok(found) => found,
         Err(refusal) => return refusal,
@@ -1594,6 +1739,8 @@ async fn forge_subscribe(
     if let Err(error) = subscribed {
         return Outcome::Failed(error);
     }
+    // Subscribed: the pull request is followed by this call, however it was opened.
+    taken(daemon, &place.project, &path, &pull.head);
     let from = match from {
         "people" => ", from people",
         _ => "",
@@ -1638,6 +1785,8 @@ struct Followed {
     pull: Pull,
     target: Value,
     before: crate::items::Before,
+    /// Held while the call subscribes: the pull request opening, seen by its live read, is its own.
+    _own: Own,
 }
 
 /// The pull request of a workspace's branch, read as the workspace is.
@@ -1661,6 +1810,7 @@ async fn read_of_branch(
     )?
     .remove(0)
     .path;
+    let own = Own::hold(&place.project, &path, &workspace.branch);
     // The read now is stored before the subscription opens, unless a round wrote meanwhile: what
     // is so now is no event of the next rounds.
     let before = crate::items::before_live(daemon, &place.project);
@@ -1691,6 +1841,7 @@ async fn read_of_branch(
         pull: pull.clone(),
         path,
         before,
+        _own: own,
     })
 }
 
@@ -1737,6 +1888,7 @@ async fn read_numbered(
     know_posts(daemon, &place.project, &checkout.path, &forge, &mut pull);
     Ok(Followed {
         target: events::target(&place.project, None, &checkout.path, &pull),
+        _own: Own::hold(&place.project, &checkout.path, &pull.head),
         forge: Some(forge),
         pull,
         path: checkout.path,
@@ -2915,6 +3067,9 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         Err(Some(why)) => return Outcome::Refused(why),
     };
     let branch = head.branch_or(&workspace.branch);
+    // The pull request it opens is this call's while it runs: the round that sees it open does not
+    // take it for one opened another way. Kept in the store once it is opened.
+    let own = (asked.action == "create").then(|| Own::hold(&place.project, &checkout.path, branch));
     if asked.action == "create"
         && let Err(refusal) = on_remote(
             &workspace.folder_of(&checkout.path),
@@ -2990,7 +3145,12 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         let written =
             bitbucket::write(on, &forge, (branch, base), &reviewers, &deletion, asked).await;
         return match written {
-            Outcome::Done(said) => Outcome::Done(said + &reviewers_said),
+            Outcome::Done(said) => {
+                if own.is_some() {
+                    opened(daemon, &place.project, &checkout.path, branch);
+                }
+                Outcome::Done(said + &reviewers_said)
+            }
             other => other,
         };
     }
@@ -3023,6 +3183,9 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             }
             match gh_text(&args).await {
                 Ok(said) => {
+                    if own.is_some() {
+                        opened(daemon, &place.project, &checkout.path, branch);
+                    }
                     // `gh` prints the new pull request's link, which ends with its number.
                     let number = said.trim().rsplit('/').next().unwrap_or_default();
                     let numbered = number.parse::<u64>().is_ok();
@@ -3535,8 +3698,8 @@ fn threads_text(text: &mut String, pull: &Pull, full: bool, again: &str) {
 /// What `gh pr list` is asked of each pull request a round of the items lists: the cheap fields
 /// alone. The checks, reviews and comments nested in a list of a whole history are what makes
 /// GitHub's GraphQL time out; they are read one pull request at a time (`Pulls::detail`).
-const LIST_FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,url,\
-    author,assignees,labels,updatedAt,createdAt";
+const LIST_FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,\
+    isCrossRepository,url,author,assignees,labels,updatedAt,createdAt";
 /// The most pull requests or issues one list asks `gh` for.
 pub(crate) const ALL: &str = "1000";
 const ALL_COUNT: usize = 1000;
@@ -3784,6 +3947,7 @@ fn fetched_pull(path: &str, source: &str, pull: &Pull, detailed: bool) -> crate:
         "head": pull.head,
         "base": pull.base,
         "head_commit": pull.head_commit,
+        "cross": pull.cross,
     });
     // Bitbucket's list says the description, GitHub's does not.
     if detailed || source == "bitbucket" {

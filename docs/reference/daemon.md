@@ -105,6 +105,35 @@ says it had to: `The daemon did not stop (why): it was ended, with the N process
 next daemon settles what they left, as after any daemon that died (`agents::kill_orphans`,
 `runs::settle_at_start`).
 
+## A stream and a busy disk
+
+The store commits with `synchronous = FULL`: each commit is an `fsync`, on the daemon's one thread,
+and on a busy disk one `fsync` can wait seconds behind another process's writes. What a session
+says (`Daemon::say`) is therefore not written one commit a piece: it is queued, and committed in
+one transaction by the next task the runtime runs, or by the next access to the store, whichever
+comes first (`Daemon::stored`: every `read`, `write`, `emit`, `subscribe` takes the queue's commit
+before it touches the store, so a read sees every piece said before it, in order, and an event
+emitted after gets a higher number). **Durability, said precisely**: a piece is durable once that
+commit returns, that is at the next yield of the daemon's loop or at the next access to the store,
+not when `say` returns; a crash of the daemon in between loses it, a commit already made is
+never lost by the daemon alone (`FULL`). At a stop, what was queued is committed after the grace
+wait. A batch the store refuses is written again piece by piece, and only the refused piece is lost
+(the log names the count and the agents).
+
+`crates/flottille/tests/stream_load.rs` measures the daemon's answers and the pieces' delay while a
+session streams. Unloaded it passes with or without the batching, so its two tests are `#[ignore]`d
+and run by hand, with a busy disk, on a machine that can take it (a CI runner, not the
+maintainer's):
+
+```
+( while :; do dd if=/dev/zero of=/tmp/busy bs=1M count=1024 conv=fsync 2>/dev/null; done ) &
+cargo test -p flottille --test stream_load -- --ignored --nocapture
+kill %1; rm /tmp/busy
+```
+
+They print the median, the 95th percentile and the slowest with the load; the bound is the 95th
+percentile (one commit can still wait seconds behind the other writer).
+
 ## The window
 
 The window's link marks the request it waits for; when one waited more than 30 s (the watchdog's

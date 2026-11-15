@@ -718,8 +718,7 @@ impl VaultSection {
             .sentence(
                 "Agents see its name, what it is for, its URL and its username; never its secret.",
             )
-            .child(body)
-            .child(error)
+            .child(div().flex().flex_col().child(body).child(error))
             .action(
                 Button::primary(
                     "save-vault-entry",
@@ -760,32 +759,37 @@ impl Render for VaultSection {
         let section = Section::new("vault", "Vault")
             .count(count.to_string())
             .sentence(SENTENCE)
-            .child(crate::extensions::usage_line("vault-usage", USAGE, cx))
             .action(
                 Button::secondary("add-vault-entry", "New entry")
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
             )
-            .child(presence("vault-list-block", count > 0, list).gap(space::MD))
             .child(
-                presence(
-                    "no-vault-block",
-                    empty,
-                    EmptyLine::new(
-                        "no-vault",
-                        Icon::Key,
-                        "No entry yet. Add a secret an agent needs, such as a tracker's token: \
-                         agents use it through Flottille's tools and never see it.",
-                    ),
-                )
-                .gap(space::MD),
-            )
-            .child(problem_line(
-                "vault-problem",
-                self.problem.clone(),
-                space::MD,
-                cx,
-            ));
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(crate::extensions::usage_line("vault-usage", USAGE, cx))
+                    .child(presence("vault-list-block", count > 0, list).space(space::MD))
+                    .child(
+                        presence(
+                            "no-vault-block",
+                            empty,
+                            EmptyLine::new(
+                                "no-vault",
+                                Icon::Key,
+                                "No entry yet. Add a secret an agent needs, such as a tracker's \
+                                 token: agents use it through Flottille's tools and never see it.",
+                            ),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(problem_line(
+                        "vault-problem",
+                        self.problem.clone(),
+                        space::MD,
+                        cx,
+                    )),
+            );
         div()
             .text_color(p.text)
             .child(section)

@@ -2105,3 +2105,62 @@ fn a_child_with_running_runs_says_so_in_the_agents_list(cx: &mut TestAppContext)
         "nothing running: nothing said"
     );
 }
+
+/// What the commands section is taller than its header and its sentence, before its list arrives,
+/// as the page drew it before blocks held their own space (`origin/dev`, #884).
+const BEFORE_THE_LIST_BELOW_SENTENCE: f32 = 0.;
+
+#[gpui_kit::test]
+fn a_section_before_its_list_arrives_ends_under_its_sentence(cx: &mut TestAppContext) {
+    let user = user();
+    let env = Environment {
+        os_release: user.path("os-release"),
+        state_home: user.path("state"),
+    };
+    cx.update(|cx| flottille_window::init_with(env, cx));
+    let (_view, cx) = cx.add_window_view(|_, cx| {
+        let section = gpui_kit::AppContext::new(cx, |_| {
+            flottille_window::commands::CommandsSection::new(
+                gpui_kit::WeakEntity::new_invalid(),
+                "app".into(),
+            )
+        });
+        // The section's root is not an element the tests find: a probe right under it says where
+        // it ends.
+        Probe(section)
+    });
+    cx.simulate_resize(size(px(1280.), px(900.)));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+
+    let below = cx.update(|window, _| {
+        window.find("commands-end".to_owned()).bounds().top()
+            - window
+                .find("commands-sentence".to_owned())
+                .bounds()
+                .bottom()
+    });
+    assert_eq!(
+        f32::from(below),
+        BEFORE_THE_LIST_BELOW_SENTENCE,
+        "blocks that are all folded take no room in their section"
+    );
+}
+
+struct Probe(Entity<flottille_window::commands::CommandsSection>);
+
+impl gpui_kit::Render for Probe {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        use gpui_kit::{
+            InteractiveElement as _, ParentElement as _, Styled as _, TestSupportExt as _, div,
+        };
+        div()
+            .flex()
+            .flex_col()
+            .child(self.0.clone())
+            .child(div().id("commands-end").h(px(1.)).test_support())
+    }
+}
