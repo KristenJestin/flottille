@@ -207,8 +207,10 @@ options and the remote's transport), a connection's server and its login:
   everything else (each entry of `/` and of each folder on the way to a runtime folder, symbolic
   links aside, which lead to where their target is ruled). It gets `no_new_privs` with it, so a
   setuid program it starts gains nothing. A connection's server that shows its browser, and its
-  login, are also granted their display folder, `$XDG_RUNTIME_DIR/flottille/display/<connection>`,
-  which holds a hard link of the Wayland socket alone (`docs/extensions.md`, "Adapters").
+  login (and its reload of the page), are also granted their display folder,
+  `$XDG_RUNTIME_DIR/flottille/display/<connection>`, which holds a hard link of the Wayland socket
+  alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
+  The folder is the one the daemon made, never one a variable of the connection names.
 
 The daemon's own runtime folder is denied with the rest: a `flottille daemon stop` run for an
 agent cannot read the daemon's lock, and refuses itself when the daemon does not answer, as a

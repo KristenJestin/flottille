@@ -12,17 +12,23 @@ use std::path::{Path, PathBuf};
 
 use flottille_core::paths::Paths;
 
-/// The folder of one owner, removed when this is dropped: the program that used it has stopped.
+/// The folder of one owner, removed when the last of its handles is dropped: the programs that
+/// used it have stopped. Only this module makes one, so that a folder named by anything else (an
+/// environment variable, a request) is never taken for one (`landlock::confined_but` accepts no
+/// other).
+#[derive(Clone, Debug)]
+pub struct Folder(std::sync::Arc<Made>);
+
 #[derive(Debug)]
-pub struct Folder(PathBuf);
+struct Made(PathBuf);
 
 impl Folder {
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.0.0
     }
 }
 
-impl Drop for Folder {
+impl Drop for Made {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
@@ -31,7 +37,7 @@ impl Drop for Folder {
 /// What a program that shows a window is given: its folder, kept while it runs, and the
 /// variables of its environment (`XDG_RUNTIME_DIR` is the folder, then `WAYLAND_DISPLAY`, or
 /// `DISPLAY` when the session has no Wayland).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Shown {
     pub folder: Folder,
     pub env: BTreeMap<OsString, OsString>,
@@ -81,9 +87,12 @@ fn share_with(
         .mode(0o700)
         .create(&folder)
         .map_err(|error| error.to_string())?;
-    let folder = Folder(folder);
+    let folder = Folder(std::sync::Arc::new(Made(folder)));
     let mut env = BTreeMap::new();
-    env.insert("XDG_RUNTIME_DIR".into(), folder.0.clone().into_os_string());
+    env.insert(
+        "XDG_RUNTIME_DIR".into(),
+        folder.path().to_owned().into_os_string(),
+    );
     match (wayland, x11) {
         (Some(name), _) => {
             let socket = match Path::new(&name).is_absolute() {
@@ -95,7 +104,7 @@ fn share_with(
             let file = socket
                 .file_name()
                 .ok_or("WAYLAND_DISPLAY names no socket")?;
-            std::fs::hard_link(&socket, folder.0.join(file)).map_err(|error| {
+            std::fs::hard_link(&socket, folder.path().join(file)).map_err(|error| {
                 format!(
                     "the Wayland socket {} cannot be shared with a hard link (the filesystem \
                      refuses it, or the socket is not there): {error}",

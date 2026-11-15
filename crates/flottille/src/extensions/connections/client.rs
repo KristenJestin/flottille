@@ -262,14 +262,14 @@ pub(super) async fn exclusively<T>(
 pub(super) async fn exclusively_shown<T, F: std::future::Future<Output = T>>(
     daemon: &Daemon,
     name: &str,
-    work: impl FnOnce(Option<BTreeMap<OsString, OsString>>) -> F,
+    work: impl FnOnce(Option<crate::display::Shown>) -> F,
 ) -> T {
     let server = server_of(daemon, name);
     let turn = server.turn.lock().await;
     let served = turn
         .as_ref()
         .and_then(|running| running.display.as_ref())
-        .map(|shown| shown.env.clone());
+        .cloned();
     work(served).await
 }
 
@@ -549,7 +549,7 @@ async fn start_with(
                 .kill_on_drop(true);
             let mut child = crate::children::spawn(crate::landlock::confined_but(
                 crate::children::in_own_session(&mut command),
-                display.as_ref().map(|shown| shown.folder.path()),
+                display.as_ref().map(|shown| &shown.folder),
             ))
             .map_err(|error| format!("{}: {error}", words[0]))?;
             let leader = child.id();
@@ -950,7 +950,9 @@ pub async fn stop_all(daemon: &Arc<Daemon>) {
         .values()
         .cloned()
         .collect();
-    for server in servers {
+    // At once, not one after another: each close is bounded, but a daemon with several shown
+    // browsers must not wait for the sum of them.
+    futures::future::join_all(servers.iter().map(|server| async move {
         let leader = server.leader.lock().unwrap().take();
         if let Some(leader) = leader {
             crate::children::end_session(leader).await;
@@ -960,8 +962,9 @@ pub async fn stop_all(daemon: &Arc<Daemon>) {
         {
             stop_running(running).await;
         }
-        closed(daemon, &server).await;
-    }
+        closed(daemon, server).await;
+    }))
+    .await;
 }
 
 /// Why the server could not start, masked by `mask` before it is cut: a secret is never cut in

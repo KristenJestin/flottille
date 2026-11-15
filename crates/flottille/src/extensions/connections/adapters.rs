@@ -645,12 +645,6 @@ pub fn display(
     );
 }
 
-/// The display folder an environment [`display`] made names: the one folder of the user's runtime
-/// folder its command may reach (`crate::landlock::confined_but`).
-pub fn display_folder(env: &BTreeMap<OsString, OsString>) -> Option<&Path> {
-    env.get(&OsString::from("XDG_RUNTIME_DIR")).map(Path::new)
-}
-
 /// How the browser agent-browser's daemon runs for a connection is closed: its command line and
 /// the socket folder the daemon answers on.
 #[derive(Clone, Debug)]
@@ -904,18 +898,17 @@ async fn run(
     program: &[String],
     login: &Login,
     url: &str,
-    served: Option<BTreeMap<OsString, OsString>>,
+    served: Option<crate::display::Shown>,
 ) -> Result<String, String> {
     let folder = folder(daemon, &declaration.name);
     flottille_core::paths::ensure_private_dir(&folder).map_err(|error| error.to_string())?;
     let sites = sites(daemon, declaration);
     // The server's display folder, one browser for both: the server's own while it runs, else
     // made under its name, the same path the server's next start makes again.
-    let (own, _) = match served {
-        Some(_) => (None, None),
-        None => shown(daemon, declaration, &declaration.name),
+    let shown = match served {
+        Some(served) => Some(served),
+        None => shown(daemon, declaration, &declaration.name).0,
     };
-    let shown = served.or_else(|| own.as_ref().map(|own| own.env.clone()));
     let options = start_options(&folder, &sites, shown.is_some())?;
     if let Some(browser) = browser(daemon, declaration) {
         super::client::browser_started(daemon, &declaration.name, browser);
@@ -929,8 +922,10 @@ async fn run(
     let _gone = Removed(socket.clone());
     // The same environment and folder as the server: the same browser session and namespace.
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
-    display(&mut env, shown.as_ref(), &folder);
-    let reached = display_folder(&env).map(Path::to_path_buf);
+    display(&mut env, shown.as_ref().map(|shown| &shown.env), &folder);
+    // The one folder the login's commands may reach: the daemon's own, never what a variable of
+    // the connection (the vault's, below) names.
+    let reached = shown.as_ref().map(|shown| shown.folder.clone());
     for (variable, secret) in
         super::client::secrets(daemon, &declaration.name, &declaration.env).await?
     {
@@ -964,7 +959,7 @@ async fn run(
         .kill_on_drop(true);
     let mut child = crate::children::spawn(crate::landlock::confined_but(
         crate::children::in_own_session(&mut command),
-        reached.as_deref(),
+        reached.as_ref(),
     ))
     .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();
@@ -996,7 +991,16 @@ async fn run(
                 "agent-browser did not sign in within {} seconds: it was stopped",
                 LOGIN_LIMIT.as_secs()
             );
-            reloaded(program, &options, &without_token, &folder, url, &mut why).await;
+            reloaded(
+                program,
+                &options,
+                &without_token,
+                reached.as_ref(),
+                &folder,
+                url,
+                &mut why,
+            )
+            .await;
             return Err(why);
         }
     };
@@ -1015,7 +1019,16 @@ async fn run(
     if let Some(line) = first {
         why.push_str(&format!("; it said: {line}"));
     }
-    reloaded(program, &options, &without_token, &folder, url, &mut why).await;
+    reloaded(
+        program,
+        &options,
+        &without_token,
+        reached.as_ref(),
+        &folder,
+        url,
+        &mut why,
+    )
+    .await;
     Err(why)
 }
 
@@ -1026,11 +1039,12 @@ async fn reloaded(
     program: &[String],
     options: &[String],
     env: &BTreeMap<OsString, OsString>,
+    reached: Option<&crate::display::Folder>,
     folder: &Path,
     url: &str,
     why: &mut String,
 ) {
-    if let Err(failed) = reload(program, options, env, folder, url).await {
+    if let Err(failed) = reload(program, options, env, reached, folder, url).await {
         why.push_str(&format!(
             "; Flottille could not load {url} again to clear the form: {failed}"
         ));
@@ -1041,6 +1055,7 @@ async fn reload(
     program: &[String],
     options: &[String],
     env: &BTreeMap<OsString, OsString>,
+    reached: Option<&crate::display::Folder>,
     folder: &Path,
     url: &str,
 ) -> Result<(), String> {
@@ -1058,7 +1073,7 @@ async fn reload(
         .kill_on_drop(true);
     let mut child = crate::children::spawn(crate::landlock::confined_but(
         crate::children::in_own_session(&mut command),
-        display_folder(env),
+        reached,
     ))
     .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();

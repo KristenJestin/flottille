@@ -5,7 +5,7 @@
 //! one of them, but that way itself. Applied in the child before it runs its program, never to
 //! the daemon.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -106,11 +106,13 @@ pub fn confined(command: &mut tokio::process::Command) -> &mut tokio::process::C
     confined_but(command, None)
 }
 
-/// [`confined`], `open` (a folder in the runtime folder, made for this command alone) left
-/// within its reach: a shown browser's display folder (`display.rs`).
+/// [`confined`], `open` (the display folder the daemon made for this command alone) left within
+/// its reach, but for the right to link or move a file out of it: the socket in it is not
+/// linked elsewhere. A [`crate::display::Folder`] and no path: only the daemon's own folder is
+/// ever an exception, never one an environment variable or a request names.
 pub fn confined_but<'a>(
     command: &'a mut tokio::process::Command,
-    open: Option<&Path>,
+    open: Option<&crate::display::Folder>,
 ) -> &'a mut tokio::process::Command {
     let abi = abi();
     let denied = runtime_folders();
@@ -120,14 +122,15 @@ pub fn confined_but<'a>(
     let rights = rights(abi);
     let mut paths = Vec::new();
     allowed(Path::new("/"), &denied, &mut paths);
-    paths.extend(open.and_then(|folder| CString::new(folder.as_os_str().as_bytes()).ok()));
+    let open = open.and_then(|folder| CString::new(folder.path().as_os_str().as_bytes()).ok());
     // SAFETY: the closure allocates nothing and only makes system calls (open, fstat,
     // landlock_*, prctl, close), all async-signal-safe.
-    unsafe { command.pre_exec(move || restrict(rights, &paths)) }
+    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref())) }
 }
 
-/// In the child: every path a rule with every right, then the child bound to them.
-fn restrict(rights: u64, paths: &[CString]) -> io::Result<()> {
+/// In the child: every path a rule with every right, `open` one without `REFER`, then the child
+/// bound to them.
+fn restrict(rights: u64, paths: &[CString], open: Option<&CStr>) -> io::Result<()> {
     let handled = [rights];
     // SAFETY: the attribute is a `u64` of the size given, which the kernel reads as the first
     // field of its own, the rest zero.
@@ -143,7 +146,11 @@ fn restrict(rights: u64, paths: &[CString]) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let ruleset = ruleset as libc::c_int;
-    for path in paths {
+    let ruled = paths
+        .iter()
+        .map(|path| (path.as_c_str(), rights))
+        .chain(open.map(|path| (path, rights & !REFER)));
+    for (path, granted) in ruled {
         // SAFETY: a valid C string; O_PATH opens nothing but a handle.
         let fd = unsafe {
             libc::open(
@@ -159,7 +166,11 @@ fn restrict(rights: u64, paths: &[CString]) -> io::Result<()> {
         // SAFETY: fd is open and stat is ours.
         let is_dir = unsafe { libc::fstat(fd, &mut stat) } == 0
             && stat.st_mode & libc::S_IFMT == libc::S_IFDIR;
-        let mut access = if is_dir { rights } else { rights & FILE_RIGHTS };
+        let mut access = if is_dir {
+            granted
+        } else {
+            granted & FILE_RIGHTS
+        };
         loop {
             let rule = PathBeneath {
                 allowed_access: access,
