@@ -10,8 +10,8 @@ mod common;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use common::User;
 use common::mcp::{Answer, Mcp, server_of};
+use common::{User, landlock_abi};
 use flottille_core::store::Store;
 use serde_json::{Value, json};
 
@@ -671,20 +671,6 @@ fn a_run_gets_no_session_bus_address() {
 
     assert!(bus.contains("exited with code 1"), "{bus}");
     assert!(!bus.contains("unix:path="), "{bus}");
-}
-
-/// The ABI of the kernel's Landlock, 0 where it has none.
-fn landlock_abi() -> i64 {
-    // SAFETY: with a null attribute and the version flag, the call only returns a number.
-    unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            std::ptr::null::<u8>(),
-            0usize,
-            1u32,
-        )
-    }
-    .max(0)
 }
 
 #[test]

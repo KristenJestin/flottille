@@ -1196,3 +1196,17 @@ pub fn bkt_pipeline(result: &str, seconds: u64) -> Value {
     json!({"build_number": 1, "state": {"name": "COMPLETED", "result": {"name": result}},
         "target": {"ref": {"name": "main"}}, "created_on": stamp(0), "completed_on": stamp(seconds)})
 }
+
+/// The ABI of the kernel's Landlock, 0 where it has none.
+pub fn landlock_abi() -> i64 {
+    // SAFETY: with a null attribute and the version flag, the call only returns a number.
+    unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<u8>(),
+            0usize,
+            1u32,
+        )
+    }
+    .max(0)
+}
