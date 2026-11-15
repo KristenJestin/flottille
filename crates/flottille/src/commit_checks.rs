@@ -6,7 +6,8 @@
 //! hooks; those are only read to propose lines (`proposals`), which nothing runs until the user
 //! saved them.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::time::Duration;
 
 use flottille_core::project::{MESSAGE_FILE, check_commit_check};
 use flottille_core::secrets;
@@ -17,13 +18,16 @@ use crate::message_checks::{Check, MessageFile, Where, commit_of, run_check, una
 use crate::place::Place;
 
 const NOTHING: &str = "nothing was committed";
+/// What a commit check may take before it is stopped, and counted as not run: longer than a
+/// message check, as the first `pre-commit run` installs the environments of its hooks.
+pub const TIME_LIMIT: Duration = Duration::from_secs(300);
 
 /// Runs the commit checks of the repository each `git commit` of the line `words` commits in
 /// (the user's alias of one too): the refusal of the first that fails, of a commit that skips
 /// them (`--no-verify`), or of one whose message its `commit-msg` checks cannot know. Nothing
 /// when the commit's repository declares none.
 pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
-    let gits = gate::gits(words);
+    let gits = gate::gits(at.place, at.folder, words);
     if gits.is_empty() {
         return Ok(());
     }
@@ -51,11 +55,22 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
     let env =
         crate::runs::environment(at.daemon, at.place, at.repository, false).map_err(unknown)?;
     for git in gits {
-        let git = unaliased(git, at.folder, &env).await.map_err(unknown)?;
-        let Some(commit) = commit_of(&git, at.folder).map_err(unknown)? else {
+        let words = unaliased(git.words, &git.folder, &env)
+            .await
+            .map_err(unknown)?;
+        let Some(commit) = commit_of(&words, &git.folder).map_err(unknown)? else {
             continue;
         };
-        let Some((path, folder)) = repository_of(at.place, &commit.folder) else {
+        // Where git commits is then another repository than its folder's, whose checks it skips.
+        if let Some(pointer) = commit.elsewhere.map(str::to_owned).or(git.elsewhere) {
+            return Err(format!(
+                "refused: {pointer} points the commit at a repository other than its folder's, \
+                 whose commit checks would not run, and the project's repositories have commit \
+                 checks: commit in the repository's folder, with git -C <folder> if it is \
+                 another one; {NOTHING}"
+            ));
+        }
+        let Some((path, folder)) = repository_of(at.place, &git.folder) else {
             continue;
         };
         let Some(checks) = project
@@ -88,6 +103,7 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
                 nothing: NOTHING,
                 again: "fix what it says and try again",
                 fill: None,
+                limit: TIME_LIMIT,
             };
             run_check(&at, line, &check).await?;
         }
@@ -111,6 +127,7 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
                 nothing: NOTHING,
                 again: "change it and try again",
                 fill: Some((MESSAGE_FILE, &file.0)),
+                limit: TIME_LIMIT,
             };
             run_check(&at, line, &check).await?;
         }
@@ -118,12 +135,16 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The repository of the place a folder is in: the deepest whose folder holds it.
+/// The repository of the place a folder (real, `gate::gits`) is in: the deepest whose folder
+/// holds it.
 fn repository_of<'a>(place: &'a Place, folder: &Path) -> Option<(&'a str, &'a Path)> {
     place
         .repositories
         .iter()
-        .filter(|(_, root)| folder.starts_with(root))
+        .filter(|(_, root)| {
+            folder.starts_with(root)
+                || crate::place::real_path(root).is_ok_and(|real| folder.starts_with(real))
+        })
         .max_by_key(|(_, root)| root.components().count())
         .map(|(path, root)| (path.as_str(), root.as_path()))
 }
@@ -157,6 +178,7 @@ pub struct LeftOut {
 /// with shell syntax left out and said. Nothing is run; every line is masked.
 pub fn proposals(folder: &Path) -> (Vec<Proposal>, Vec<LeftOut>) {
     let (mut proposed, mut left) = (Vec::new(), Vec::new());
+    let masked = masker(folder);
     for hook in HOOKS {
         let message = hook == "commit-msg";
         if let Some((line, from)) = manager(folder, hook) {
@@ -200,8 +222,31 @@ pub fn proposals(folder: &Path) -> (Vec<Proposal>, Vec<LeftOut>) {
     (proposed, left)
 }
 
-fn masked(text: &str) -> String {
-    secrets::mask(text, &std::env::vars_os().collect())
+/// Masks a text as other shown text is: the daemon's variables, the values of the repository's
+/// files of secrets (`.env`), the vault's.
+fn masker(folder: &Path) -> impl Fn(&str) -> String {
+    let mut values = Vec::new();
+    for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
+        if entry.file_name().to_str().is_some_and(secrets::secret_file)
+            && let Some(text) = small_file(&entry.path())
+        {
+            values.extend(secrets::file_values(&text));
+        }
+    }
+    let known = secrets::Secrets::new(&std::env::vars_os().collect(), &values);
+    move |text| known.mask(text)
+}
+
+/// What a hook file or a hook manager's file may hold to be read.
+const FILE_BYTES: u64 = 256 * 1024;
+
+/// The text of a regular file of `FILE_BYTES` at most: not a link, which may lead out of the
+/// repository, nor a FIFO, whose read would wait for a writer.
+fn small_file(path: &Path) -> Option<String> {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.len() <= FILE_BYTES)
+        .then(|| std::fs::read_to_string(path).ok())
+        .flatten()
 }
 
 /// The entry point of the hook manager the repository configures for `hook`, and its file.
@@ -213,7 +258,7 @@ fn manager(folder: &Path, hook: &str) -> Option<(String, String)> {
         ".lefthook.yml",
         ".lefthook.yaml",
     ] {
-        let Ok(text) = std::fs::read_to_string(folder.join(file)) else {
+        let Some(text) = small_file(&folder.join(file)) else {
             continue;
         };
         // A hook of lefthook's is a key at the top of its file.
@@ -229,10 +274,10 @@ fn manager(folder: &Path, hook: &str) -> Option<(String, String)> {
         }
     }
     let file = ".pre-commit-config.yaml";
-    let text = std::fs::read_to_string(folder.join(file)).ok()?;
+    let text = small_file(&folder.join(file))?;
     // Its hooks run at commit unless they say another stage; one at commit-msg names it.
     match message {
-        true => text.contains("commit-msg").then(|| {
+        true => names_commit_msg(&text).then(|| {
             format!("pre-commit run --hook-stage commit-msg --commit-msg-filename {MESSAGE_FILE}")
         }),
         false => Some("pre-commit run --hook-stage pre-commit".to_owned()),
@@ -246,14 +291,51 @@ fn hook_file(folder: &Path, hook: &str) -> Option<(String, String)> {
         .iter()
         .map(|dir| format!("{dir}/{hook}"))
         .find_map(|from| {
-            let path: PathBuf = folder.join(&from);
             // A link may lead out of the repository; a hook of git's own is a plain file.
-            let plain = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file());
-            plain
-                .then(|| std::fs::read_to_string(&path).ok())
-                .flatten()
-                .map(|text| (from, text))
+            small_file(&folder.join(&from)).map(|text| (from, text))
         })
+}
+
+/// Whether a `.pre-commit-config.yaml` runs a hook at `commit-msg`: one of its `stages`,
+/// `default_stages` or `default_install_hook_types` lists it, inline (`[commit-msg]`) or as the
+/// items below the key.
+fn names_commit_msg(text: &str) -> bool {
+    const KEYS: [&str; 3] = ["stages", "default_stages", "default_install_hook_types"];
+    let item = |word: &str| word.trim().trim_matches(['"', '\'']) == "commit-msg";
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        let line = line.split('#').next().unwrap_or_default();
+        let indent = line.len() - line.trim_start().len();
+        let entry = line.trim_start().trim_start_matches("- ");
+        let Some((key, value)) = entry.split_once(':') else {
+            continue;
+        };
+        if !KEYS.contains(&key.trim()) {
+            continue;
+        }
+        let value = value.trim();
+        if !value.is_empty() {
+            if value.trim_matches(['[', ']']).split(',').any(item) {
+                return true;
+            }
+            continue;
+        }
+        // A list below the key: its items, indented more than it or as much.
+        while let Some(next) = lines.peek() {
+            let next = next.split('#').next().unwrap_or_default();
+            let deeper = next.len() - next.trim_start().len() >= indent;
+            match next.trim_start().strip_prefix("- ") {
+                Some(word) if deeper => {
+                    if item(word) {
+                        return true;
+                    }
+                    lines.next();
+                }
+                _ => break,
+            }
+        }
+    }
+    false
 }
 
 fn executable(path: &Path) -> bool {
@@ -294,6 +376,77 @@ mod tests {
         assert_eq!(
             message_argument("check ${1} $1"),
             "check {message_file} {message_file}"
+        );
+    }
+
+    /// A throwaway repository folder holding `files`.
+    fn folder_of(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        let folder = std::env::temp_dir().join(format!("flottille-{name}-{}", std::process::id()));
+        for (file, text) in files {
+            let path = folder.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        folder
+    }
+
+    fn hooks(proposed: &[Proposal]) -> Vec<&str> {
+        proposed.iter().map(|proposal| proposal.hook).collect()
+    }
+
+    #[test]
+    fn a_pre_commit_config_s_commit_msg_is_read_from_its_stages() {
+        let config = |name: &str, text: &str| {
+            let folder = folder_of(name, &[(".pre-commit-config.yaml", text)]);
+            let (proposed, _) = proposals(&folder);
+            std::fs::remove_dir_all(folder).unwrap();
+            hooks(&proposed).contains(&"commit-msg")
+        };
+        // The word alone, in a comment or a hook's id, is no stage.
+        assert!(!config(
+            "no-stage",
+            "# no commit-msg hook here\nrepos:\n- repo: local\n  hooks:\n  - id: no-commit-msg\n    \
+             entry: lint\n    language: system\n"
+        ));
+        for (name, text) in [
+            (
+                "inline",
+                "repos:\n- repo: local\n  hooks:\n  - id: message\n    entry: lint\n    \
+                 stages: [pre-push, \"commit-msg\"]\n",
+            ),
+            (
+                "block",
+                "repos:\n- repo: local\n  hooks:\n  - id: message\n    stages:\n    - \
+                 commit-msg\n    entry: lint\n",
+            ),
+            (
+                "installed",
+                "default_install_hook_types: [pre-commit, commit-msg]\nrepos: []\n",
+            ),
+        ] {
+            assert!(config(name, text), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_proposal_is_masked_with_the_vault_s_values_and_the_repository_s_secrets() {
+        secrets::add_vault_value("vaulted-orchard-77");
+        let folder = folder_of(
+            "masked",
+            &[
+                (".env", "DEPLOY=riverstone-lane-42\n"),
+                (
+                    ".githooks/pre-commit",
+                    "lint --with vaulted-orchard-77 --and riverstone-lane-42\n",
+                ),
+            ],
+        );
+        let (proposed, _) = proposals(&folder);
+        std::fs::remove_dir_all(folder).unwrap();
+        assert_eq!(proposed.len(), 1, "{proposed:?}");
+        assert_eq!(
+            proposed[0].line,
+            format!("lint --with {0} --and {0}", secrets::MASK)
         );
     }
 

@@ -369,8 +369,9 @@ every one in order, in its file where it stands: `commit_checks = { pre_commit =
 what `project.commit_checks` does. `refused`, nothing written, when the project has no such
 repository, or a line cannot be split without a shell (with the sentence a `run` line gets for its
 shell syntax), a `commit-msg` one does not name `{message_file}` or a `pre-commit` one does (`the
-check `lint x` cannot be used: must name {message_file}, the file that holds the commit's message;
-nothing was saved`). It is the user's alone: no tool of an agent writes them.
+commit-msg check `lint x` cannot be used: must name {message_file}, the file that holds the
+commit's message; nothing was saved`, its hook named). It is the user's alone: no tool of an
+agent writes them.
 
 #### `project.ticket`
 

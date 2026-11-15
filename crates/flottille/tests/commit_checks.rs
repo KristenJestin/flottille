@@ -723,3 +723,266 @@ fn a_repository_script_runs_as_a_check() {
         format!("{0}\n{0}\n", folder.display())
     );
 }
+
+/// A project `app` whose folder holds the repositories `api` and `web`, each pushed to its
+/// throwaway remote, and its workspace `login` made (offline). The workspace's folder.
+fn two_repositories(user: &User) -> PathBuf {
+    let folder = user.path("work/app");
+    for name in ["api", "web"] {
+        let repository = folder.join(name);
+        user.git_init(&repository);
+        std::fs::write(repository.join("README.md"), format!("{name}\n")).unwrap();
+        user.git(&repository, &["add", "."]);
+        user.git(&repository, &["commit", "--quiet", "-m", "start"]);
+        let remote = user.path(&format!("remotes/{name}.git"));
+        let remote = remote.to_str().unwrap();
+        user.git(&user.path(""), &["init", "--quiet", "--bare", remote]);
+        user.git(&repository, &["remote", "add", "origin", remote]);
+        user.git(&repository, &["push", "--quiet", "origin", "main"]);
+    }
+    user.write_project_file(
+        "app",
+        &format!(
+            "folder = \"{}\"\n\n[[repositories]]\npath = \"api\"\n\n[[repositories]]\npath = \
+             \"web\"\n",
+            folder.display()
+        ),
+    );
+    let workspace = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login", "offline": true}),
+        )
+        .unwrap();
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+    PathBuf::from(workspace["folder"].as_str().unwrap())
+}
+
+/// Saves the commit checks of one repository of `app`.
+fn declare_in(user: &User, repository: &str, pre_commit: &[&str], commit_msg: &[&str]) {
+    user.call(
+        "project.set_commit_checks",
+        json!({
+            "name": "app",
+            "repository": repository,
+            "pre_commit": pre_commit,
+            "commit_msg": commit_msg,
+        }),
+    )
+    .unwrap();
+}
+
+/// A line the agent runs in one repository of the workspace (`None`: its folder), allowed by the
+/// user when it is held.
+fn line_in(user: &User, mcp: &Mcp, repository: Option<&str>, line: &str) -> Answer {
+    let mut asked = json!({"line": line, "timeout": 30});
+    if let Some(repository) = repository {
+        asked["repository"] = json!(repository);
+    }
+    let answer = mcp.call("run", asked);
+    if answer.text.starts_with("Waiting for the user's approval") {
+        allowed(user, answer)
+    } else {
+        answer
+    }
+}
+
+/// A change staged in `web`, by the user.
+fn staged_in_web(user: &User, workspace: &Path) {
+    let web = workspace.join("web");
+    std::fs::write(web.join("change.txt"), "change\n").unwrap();
+    user.git(&web, &["add", "change.txt"]);
+}
+
+fn subjects_of(user: &User, folder: &Path) -> String {
+    user.git_output(folder, &["log", "--format=%s"])
+}
+
+#[test]
+fn a_commit_with_dash_c_into_another_repository_runs_that_repository_s_checks() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-fail"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    let answer = line_in(
+        &user,
+        &mcp,
+        Some("api"),
+        "git -C ../web commit -m 'from api'",
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("the pre-commit check `pre-fail` of the repository web refused the commit"),
+        "{}",
+        answer.text
+    );
+    let web = workspace.join("web");
+    assert!(!subjects_of(&user, &web).contains("from api"));
+    let folder = web.canonicalize().unwrap();
+    assert_eq!(ran(&user, "pre-fail"), format!("{} \n", folder.display()));
+}
+
+#[test]
+fn a_commit_under_env_dash_c_runs_the_checks_of_that_folder() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-fail"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    let answer = line_in(
+        &user,
+        &mcp,
+        None,
+        "env -C web git commit -m 'from the root'",
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("the pre-commit check `pre-fail` of the repository web refused the commit"),
+        "{}",
+        answer.text
+    );
+    let web = workspace.join("web");
+    assert!(!subjects_of(&user, &web).contains("from the root"));
+    assert_eq!(ran(&user, "pre-fail").lines().count(), 1);
+}
+
+#[test]
+fn no_verify_through_dash_c_is_refused_where_checks_exist() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    for (repository, line) in [
+        (Some("api"), "git -C ../web commit -n -m 'skipped'"),
+        (None, "env -C web git commit --no-verify -m 'skipped'"),
+    ] {
+        let answer = line_in(&user, &mcp, repository, line);
+        assert!(answer.error, "{line}: {}", answer.text);
+        assert!(
+            answer
+                .text
+                .contains("--no-verify skips the commit checks of the repository web"),
+            "{line}: {}",
+            answer.text
+        );
+    }
+    assert!(!subjects_of(&user, &workspace.join("web")).contains("skipped"));
+    assert_eq!(ran(&user, "pre-lint"), "");
+}
+
+#[test]
+fn a_commit_with_git_dir_is_refused_where_checks_exist() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &["pre-lint"], &[]);
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+
+    for (line, pointer) in [
+        (
+            "git --git-dir ../web/.git --work-tree ../web commit -m 'elsewhere'",
+            "--git-dir",
+        ),
+        (
+            "git --work-tree=../web commit -m 'elsewhere'",
+            "--work-tree",
+        ),
+        (
+            "env GIT_DIR=../web/.git git commit -m 'elsewhere'",
+            "GIT_DIR",
+        ),
+        (
+            "env GIT_WORK_TREE=../web git commit -m 'elsewhere'",
+            "GIT_WORK_TREE",
+        ),
+    ] {
+        let answer = line_in(&user, &mcp, Some("api"), line);
+        assert!(answer.error, "{line}: {}", answer.text);
+        assert!(
+            answer.text.contains(&format!(
+                "refused: {pointer} points the commit at a repository other than its folder's"
+            )),
+            "{line}: {}",
+            answer.text
+        );
+        assert!(
+            answer.text.contains("nothing was committed"),
+            "{}",
+            answer.text
+        );
+    }
+    assert!(!subjects_of(&user, &workspace.join("web")).contains("elsewhere"));
+    assert!(!subjects_of(&user, &workspace.join("api")).contains("elsewhere"));
+    assert_eq!(ran(&user, "pre-lint"), "");
+}
+
+#[test]
+fn a_message_file_is_read_from_the_folder_git_commits_in() {
+    let user = with_checks();
+    let workspace = two_repositories(&user);
+    declare_in(&user, "web", &[], &["msg-lint {message_file}"]);
+    // The project's message checks read it too.
+    user.call(
+        "project.set_message_checks",
+        json!({"name": "app", "checks": ["msg-lint {message}"]}),
+    )
+    .unwrap();
+    let mcp = agent(&user);
+    staged_in_web(&user, &workspace);
+    std::fs::write(workspace.join("msg.txt"), "bad, from the root\n").unwrap();
+    std::fs::write(workspace.join("web/msg.txt"), "from web\n").unwrap();
+
+    let answer = line_in(&user, &mcp, None, "env -C web git commit -F msg.txt");
+
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(seen(&user), "from web\nfrom web\n");
+    assert!(
+        subjects_of(&user, &workspace.join("web")).starts_with("from web"),
+        "{}",
+        subjects_of(&user, &workspace.join("web"))
+    );
+}
+
+#[test]
+fn a_fifo_named_lefthook_yml_is_not_read() {
+    use std::io::{BufRead, BufReader, Write};
+    let user = with_checks();
+    let folder = prepared(&user, |_| {});
+    let made = std::process::Command::new("mkfifo")
+        .arg(folder.join("lefthook.yml"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    user.status();
+
+    // A FIFO with no writer would hold its read, and the daemon's answers with it, forever.
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(user.path("runtime/flottille/daemon.sock"))
+            .unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let request = json!({"id": "1", "method": "project.commit_checks", "params": {"name": "app"}});
+    writeln!(stream, "{request}").unwrap();
+    let mut line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .expect("the daemon answers");
+    let answer: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        answer["result"]["repositories"][0]["proposed"],
+        json!([]),
+        "{answer}"
+    );
+}

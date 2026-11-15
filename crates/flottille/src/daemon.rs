@@ -645,6 +645,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 "project.programs",
                 "project.set_settings",
                 "project.ticket",
+                "project.commit_checks",
+                "project.set_commit_checks",
                 "task.run",
             ]
             .contains(&request.method.as_str())
@@ -688,6 +690,11 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     projects::set_settings(daemon, request.params).await
                 } else if request.method == "project.ticket" {
                     tickets::preview(daemon, request.params).await
+                } else if request.method == "project.commit_checks" {
+                    // It reads files of the repositories, which may be slow to read.
+                    projects::commit_checks(&daemon, request.params)
+                } else if request.method == "project.set_commit_checks" {
+                    projects::set_commit_checks(&daemon, request.params)
                 } else if request.method == "task.run" {
                     tasks::run(&daemon, request.params).await
                 } else if extensions::answers(&request.method) {
@@ -843,20 +850,6 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         "project.set_conventions" => (
             match projects::set_conventions(daemon, request.params) {
-                Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
-            },
-            None,
-        ),
-        "project.commit_checks" => (
-            match projects::commit_checks(daemon, request.params) {
-                Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
-            },
-            None,
-        ),
-        "project.set_commit_checks" => (
-            match projects::set_commit_checks(daemon, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

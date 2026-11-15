@@ -70,7 +70,7 @@ pub struct Where<'a> {
 /// fails, or of a commit whose message cannot be known before it is made. Nothing when the
 /// project declares none.
 pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
-    let gits = gate::gits(words);
+    let gits = gate::gits(at.place, at.folder, words);
     if gits.is_empty() {
         return Ok(());
     }
@@ -88,8 +88,10 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
     let env =
         crate::runs::environment(at.daemon, at.place, at.repository, false).map_err(unknown)?;
     for git in gits {
-        let git = unaliased(git, at.folder, &env).await.map_err(unknown)?;
-        if let Some(message) = message_of(&git, at.folder).map_err(unknown)? {
+        let words = unaliased(git.words, &git.folder, &env)
+            .await
+            .map_err(unknown)?;
+        if let Some(message) = message_of(&words, &git.folder).map_err(unknown)? {
             run_all(at, &checks, Checked::Commit, &message).await?;
         }
     }
@@ -102,7 +104,8 @@ const ALIASES_MAX: usize = 10;
 /// A git command's words with the user's alias of its command expanded, as git expands it: an
 /// alias of `ci` to `commit` makes `git ci -m x` a commit. A command git has, built in or a
 /// `git-<command>` it finds, is never an alias; one that is neither is refused, since git may
-/// run another in its place (`help.autocorrect`), which would commit unread.
+/// run another in its place (`help.autocorrect`), which would commit unread. `folder` is where
+/// it runs, its `-C` taken (`gate::gits`).
 pub(crate) async fn unaliased(
     mut git: Vec<String>,
     folder: &Path,
@@ -117,13 +120,11 @@ pub(crate) async fn unaliased(
         if ["commit", "merge", "commit-tree", "revert"].contains(&command.as_str()) {
             return Ok(git);
         }
-        // Where git would look for it: the line's folder and its own aliases.
-        let mut dir = folder.to_path_buf();
+        // Where git would look for it: its folder and its own aliases.
         let mut asked: Vec<String> = Vec::new();
         for (option, value) in globals {
             let alias = value.is_some_and(|v| v.to_ascii_lowercase().starts_with("alias."));
             match (option, value) {
-                ("-C", Some(value)) => dir = dir.join(value),
                 ("-c", Some(value)) if alias => asked.extend(["-c".into(), value.into()]),
                 ("--config-env", _) if alias => {
                     return Err(format!(
@@ -136,12 +137,12 @@ pub(crate) async fn unaliased(
         }
         asked.extend(["config".into(), "--get".into(), format!("alias.{command}")]);
         let unread = |why: String| format!("the alias git {command} could not be read ({why})");
-        let found = crate::git::run(&dir, &asked, crate::git::Class::Read)
+        let found = crate::git::run(folder, &asked, crate::git::Class::Read)
             .await
             .map_err(unread)?;
         // Where the run looks for a `git-<command>`: the `PATH` of its environment.
         let listed = ["git", "--list-cmds=builtins,main,others"];
-        let commands = crate::git::run_in(&dir, &listed, env, None)
+        let commands = crate::git::run_in(folder, &listed, env, None)
             .await
             .map_err(unread)?;
         if !commands.success {
@@ -583,6 +584,7 @@ async fn run_one(at: &Where<'_>, line: &str, file: &Path, checked: Checked) -> R
         nothing: checked.nothing(),
         again: "change it and try again",
         fill: Some((MESSAGE, file)),
+        limit: TIME_LIMIT,
     };
     run_check(at, line, &check).await
 }
@@ -601,6 +603,8 @@ pub(crate) struct Check<'a> {
     pub again: &'a str,
     /// The word that stands for the file in its line, and the file.
     pub fill: Option<(&'a str, &'a Path)>,
+    /// What it may take before it is stopped, and counted as not run.
+    pub limit: Duration,
 }
 
 /// One check: split without a shell, its file filled in, run in the place's run environment in
@@ -614,6 +618,7 @@ pub(crate) async fn run_check(at: &Where<'_>, line: &str, check: &Check<'_>) -> 
         nothing,
         again,
         fill,
+        limit,
     } = check;
     let shown = crate::mcp::masked(line, at.place);
     let not_run = |why: String| {
@@ -652,13 +657,13 @@ pub(crate) async fn run_check(at: &Where<'_>, line: &str, check: &Check<'_>) -> 
     // Its whole group goes once it ended, was stopped at its limit, or its call was dropped:
     // `kill_on_drop` alone stops only its first process.
     let _group = Group(child.id());
-    let output = match tokio::time::timeout(TIME_LIMIT, child.wait_with_output()).await {
+    let output = match tokio::time::timeout(*limit, child.wait_with_output()).await {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => return Err(not_run(e.to_string())),
         Err(_) => {
             return Err(not_run(format!(
                 "it took longer than {} s and was stopped",
-                TIME_LIMIT.as_secs()
+                limit.as_secs()
             )));
         }
     };
@@ -704,18 +709,13 @@ fn end_of(text: &str) -> String {
     )
 }
 
-/// What a git command (its words from `git` on) run in `folder` commits as its message: `None`
-/// when it makes no commit, or why the message cannot be known before the commit, with what to
-/// do instead: an editor writes it, git takes it from another commit or writes it itself.
+/// What a git command (its words from `git` on) working in `folder` (its `-C` taken,
+/// `gate::gits`) commits as its message: `None` when it makes no commit, or why the message
+/// cannot be known before the commit, with what to do instead: an editor writes it, git takes it
+/// from another commit or writes it itself.
 pub fn message_of(git: &[String], folder: &Path) -> Result<Option<String>, String> {
     let args = &git[1..];
-    let (at, globals) = gate::git_globals(args);
-    let mut folder = folder.to_path_buf();
-    for (option, value) in globals {
-        if let ("-C", Some(value)) = (option, value) {
-            folder = folder.join(value);
-        }
-    }
+    let at = gate::git_globals(args).0;
     let Some(command) = args.get(at) else {
         return Ok(None);
     };
@@ -726,17 +726,17 @@ pub fn message_of(git: &[String], folder: &Path) -> Result<Option<String>, Strin
             if let Some(why) = said.elsewhere {
                 return Err(why.into());
             }
-            commit(said, &folder)
+            commit(said, folder)
                 .map(Some)
                 .map_err(|why| format!("{why}: give the message with -m or -F"))
         }
-        "merge" => merge(read(rest, &MERGE)?, &folder).map_err(|why| {
+        "merge" => merge(read(rest, &MERGE)?, folder).map_err(|why| {
             format!(
                 "{why}: give the message with -m or -F, or merge with --no-commit and commit with \
                  git commit -m"
             )
         }),
-        "commit-tree" => joined(read(rest, &COMMIT_TREE)?, &folder)
+        "commit-tree" => joined(read(rest, &COMMIT_TREE)?, folder)
             .and_then(|message| {
                 message.ok_or_else(|| "it reads its message from its standard input".to_owned())
             })
@@ -751,25 +751,25 @@ pub fn message_of(git: &[String], folder: &Path) -> Result<Option<String>, Strin
 
 /// A `git commit` as the commit checks of its repository read it (`commit_checks`).
 pub(crate) struct Commit {
-    /// Where it commits: the line's folder, with its `-C`.
-    pub folder: PathBuf,
+    /// It points git at another repository than its folder's (`--git-dir`, `--work-tree`).
+    pub elsewhere: Option<&'static str>,
     /// It says to skip the hooks (`--no-verify`, `-n`).
     pub no_verify: bool,
     /// Its message, or why it cannot be known before the commit, with what to do instead.
     pub message: Result<String, String>,
 }
 
-/// What a git command (its words from `git` on) run in `folder` is as a `git commit`: none when
-/// it is another command, an error when its options cannot be read as git reads them.
+/// What a git command (its words from `git` on) working in `folder` (its `-C` taken,
+/// `gate::gits`) is as a `git commit`: none when it is another command, an error when its options
+/// cannot be read as git reads them.
 pub(crate) fn commit_of(git: &[String], folder: &Path) -> Result<Option<Commit>, String> {
     let args = &git[1..];
     let (at, globals) = gate::git_globals(args);
-    let mut folder = folder.to_path_buf();
-    for (option, value) in globals {
-        if let ("-C", Some(value)) = (option, value) {
-            folder = folder.join(value);
-        }
-    }
+    let elsewhere = globals.iter().find_map(|(option, _)| match *option {
+        "--git-dir" => Some("--git-dir"),
+        "--work-tree" => Some("--work-tree"),
+        _ => None,
+    });
     if args.get(at).map(String::as_str) != Some("commit") {
         return Ok(None);
     }
@@ -777,11 +777,11 @@ pub(crate) fn commit_of(git: &[String], folder: &Path) -> Result<Option<Commit>,
     let no_verify = said.no_verify;
     let message = match said.elsewhere {
         Some(why) => Err(why.to_owned()),
-        None => commit(said, &folder),
+        None => commit(said, folder),
     }
     .map_err(|why| format!("{why}: give the message with -m or -F"));
     Ok(Some(Commit {
-        folder,
+        elsewhere,
         no_verify,
         message,
     }))
@@ -1183,11 +1183,29 @@ mod tests {
         split_line(line).unwrap()
     }
 
+    /// A place of one repository, in `root`.
+    fn place(root: &Path) -> Place {
+        Place {
+            project: "app".into(),
+            workspace: None,
+            root: root.to_owned(),
+            repositories: vec![(".".into(), root.to_owned())],
+            branch: String::new(),
+            variables: BTreeMap::new(),
+            home: None,
+        }
+    }
+
+    /// The git commands of a line run in `folder`.
+    fn gits(line: &str, folder: &Path) -> Vec<gate::Git> {
+        gate::gits(&place(folder), folder, &words(line))
+    }
+
     /// What the line's one git command commits as its message: `None` when it commits none.
     fn committed(line: &str) -> Result<Option<String>, String> {
-        let gits = gate::gits(&words(line));
+        let gits = gits(line, Path::new("/nowhere"));
         assert_eq!(gits.len(), 1, "{line}");
-        message_of(&gits[0], Path::new("/nowhere"))
+        message_of(&gits[0].words, &gits[0].folder)
     }
 
     fn message(line: &str) -> Result<String, String> {
@@ -1237,9 +1255,9 @@ mod tests {
         let folder = std::env::temp_dir().join(format!("flottille-message-{}", std::process::id()));
         std::fs::create_dir_all(folder.join("api")).unwrap();
         std::fs::write(folder.join("api/msg"), "fix: a\n").unwrap();
-        let gits = gate::gits(&words("git -C api commit -F msg"));
+        let gits = gits("git -C api commit -F msg", &folder);
         assert_eq!(
-            message_of(&gits[0], &folder),
+            message_of(&gits[0].words, &gits[0].folder),
             Ok(Some("fix: a\n".to_owned()))
         );
         std::fs::remove_dir_all(folder).unwrap();
@@ -1250,7 +1268,7 @@ mod tests {
         for line in ["git log -m", "git status", "git merge --ff-only -m x main"] {
             assert_eq!(committed(line), Ok(None), "{line}");
         }
-        assert!(gate::gits(&words("echo git commit")).is_empty());
+        assert!(gits("echo git commit", Path::new("/nowhere")).is_empty());
     }
 
     #[test]
@@ -1317,11 +1335,10 @@ mod tests {
         let fifo = folder.join("msg");
         let path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
-        let gits = gate::gits(&words("git commit -F msg"));
+        let gits = gits("git commit -F msg", &folder);
         // A FIFO with no writer would hold an open for reading forever.
         let (sender, answer) = std::sync::mpsc::channel();
-        let read = folder.clone();
-        std::thread::spawn(move || sender.send(message_of(&gits[0], &read)));
+        std::thread::spawn(move || sender.send(message_of(&gits[0].words, &gits[0].folder)));
         let refused = answer
             .recv_timeout(Duration::from_secs(5))
             .expect("the read of a FIFO returns")

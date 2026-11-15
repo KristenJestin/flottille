@@ -886,11 +886,12 @@ pub fn set_commit_checks(daemon: &Daemon, params: Value) -> std::result::Result<
             .collect()
     };
     let (pre_commit, commit_msg) = (kept(&asked.pre_commit), kept(&asked.commit_msg));
-    for (lines, message) in [(&pre_commit, false), (&commit_msg, true)] {
+    for (lines, hook) in [(&pre_commit, "pre-commit"), (&commit_msg, "commit-msg")] {
         for line in lines {
+            let message = hook == "commit-msg";
             flottille_core::project::check_commit_check(line, message).map_err(|why| {
                 Failure::refused(format!(
-                    "the check `{line}` cannot be used: {why}; nothing was saved"
+                    "the {hook} check `{line}` cannot be used: {why}; nothing was saved"
                 ))
             })?;
         }
