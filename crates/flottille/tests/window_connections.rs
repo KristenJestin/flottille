@@ -2018,6 +2018,184 @@ fn a_ticked_row_hidden_by_the_search_is_not_set(cx: &mut TestAppContext) {
     );
 }
 
+/// The names of the actions of `driftbrowser` whose row shows a ticked box now.
+fn ticked_rows(cx: &mut VisualTestContext) -> Vec<String> {
+    let names: Vec<String> = driftbrowser()["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect();
+    names
+        .into_iter()
+        .filter(|name| match rows_of(cx, name).first() {
+            Some(row) => selected(cx, &format!("{row}-pick")),
+            None => false,
+        })
+        .collect()
+}
+
+/// What a tick says of its rows: its value, "mixed" when only part of them is ticked.
+fn tick_value(cx: &mut VisualTestContext, id: &str) -> Option<String> {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .and_then(|found| found.value().map(str::to_owned))
+    })
+}
+
+#[gpui_kit::test]
+fn a_group_s_tick_selects_every_shown_row_of_the_group(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    // Ask one row first: the Judged group is then every other action.
+    choose(cx, "browser_click", "asked");
+    let tick = "connection-review-group-judged-pick";
+    assert!(visible(cx, tick), "the header has a tick");
+    assert!(ticked_rows(cx).is_empty());
+
+    click(cx, tick);
+    let ticked = ticked_rows(cx);
+    assert!(!ticked.is_empty());
+    assert!(
+        !ticked.iter().any(|name| name == "browser_click"),
+        "a row of another group is not ticked: {ticked:?}"
+    );
+    for name in &ticked {
+        assert_eq!(group_of(cx, name), Some("judged"), "{name}");
+    }
+    assert!(selected(cx, tick), "the tick says all");
+    assert_eq!(
+        label(cx, "connection-review-bulk-count"),
+        Some(format!("{} selected", ticked.len()))
+    );
+
+    // A second click unticks them all.
+    click(cx, tick);
+    assert!(ticked_rows(cx).is_empty());
+    assert!(!selected(cx, tick));
+    assert!(!present(cx, "connection-review-bulk"));
+}
+
+#[gpui_kit::test]
+fn a_group_s_tick_says_some_when_part_of_it_is_ticked(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    let tick = "connection-review-group-judged-pick";
+    assert_eq!(tick_value(cx, tick), None, "none ticked says none");
+    let row = row_of(cx, "browser_open");
+    click(cx, &format!("{row}-pick"));
+    assert_eq!(tick_value(cx, tick).as_deref(), Some("mixed"));
+    assert!(!selected(cx, tick));
+
+    // A click on a tick that says some ticks them all.
+    click(cx, tick);
+    assert!(selected(cx, tick));
+    assert_eq!(tick_value(cx, tick), None);
+
+    // Unticking one row says some again.
+    click(cx, &format!("{row}-pick"));
+    assert_eq!(tick_value(cx, tick).as_deref(), Some("mixed"));
+}
+
+#[gpui_kit::test]
+fn select_all_shown_ticks_what_the_search_shows(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    let row = row_of(cx, "browser_back");
+    click(cx, &format!("{row}-pick"));
+    let field = search_field(&shell, cx);
+    type_in(&field, "browser_c", cx);
+    settle(cx);
+    assert_eq!(
+        label(cx, "connection-review-bulk-select-all").as_deref(),
+        Some("Select all shown")
+    );
+    click(cx, "connection-review-bulk-select-all");
+    // What the search shows is ticked, and what it hides is left as it was.
+    let mut ticked = ticked_rows(cx);
+    ticked.sort();
+    assert_eq!(ticked, ["browser_click", "browser_cookies"]);
+    assert_eq!(
+        label(cx, "connection-review-bulk-count").as_deref(),
+        Some("2 selected")
+    );
+
+    type_in(&field, "", cx);
+    settle(cx);
+    let (back, press) = (row_of(cx, "browser_back"), row_of(cx, "browser_press"));
+    assert!(
+        selected(cx, &format!("{back}-pick")),
+        "the tick of a hidden row stays"
+    );
+    assert!(
+        !selected(cx, &format!("{press}-pick")),
+        "a hidden row was not ticked by it"
+    );
+    assert_eq!(
+        label(cx, "connection-review-bulk-count").as_deref(),
+        Some("3 selected")
+    );
+}
+
+#[gpui_kit::test]
+fn ctrl_a_in_the_review_selects_every_shown_row(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    let field = search_field(&shell, cx);
+    type_in(&field, "browser_c", cx);
+    settle(cx);
+    // The list has the focus once it is clicked in: a click on a row's name opens it, and the
+    // focus stays with the list.
+    let row = row_of(cx, "browser_click");
+    click(cx, &row);
+    cx.simulate_keystrokes("ctrl-a");
+    settle(cx);
+    let mut ticked = ticked_rows(cx);
+    ticked.sort();
+    assert_eq!(ticked, ["browser_click", "browser_cookies"]);
+    assert_eq!(
+        label(cx, "connection-review-bulk-count").as_deref(),
+        Some("2 selected")
+    );
+}
+
 /// A server with `n` actions, `tool_000` to `tool_{n-1}`, each with a sentence of its own.
 fn many_tools(n: usize) -> Value {
     let tools: Vec<Value> = (0..n)
