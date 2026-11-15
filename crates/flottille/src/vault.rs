@@ -1244,6 +1244,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn editing_only_the_username_masks_the_new_basic_form() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let secret_of = "gr4ce-only-s3cret-value";
+        let form_of = |user: &str| {
+            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{secret_of}"))
+        };
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "jira", "secret": secret_of, "username": "ada"}),
+        )
+        .await);
+        let written = |form: &str| {
+            flottille_core::secrets::mask(
+                &format!("Authorization: Basic {form}"),
+                &Default::default(),
+            )
+        };
+        assert!(!written(&form_of("ada")).contains(&form_of("ada")));
+        assert!(
+            written(&form_of("grace")).contains(&form_of("grace")),
+            "the form of a username nobody set yet is not masked"
+        );
+
+        // No secret is typed: the daemon reads the one it keeps, to mask the new login.
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "jira", "username": "grace"}),
+        )
+        .await);
+        assert!(!written(&form_of("grace")).contains(&form_of("grace")));
+    }
+
+    #[tokio::test]
     async fn a_new_entry_still_needs_its_secret() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = a_daemon(dir.path());
