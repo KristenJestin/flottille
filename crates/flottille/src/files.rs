@@ -107,11 +107,18 @@ impl Kept {
     }
 
     /// The agent ended: nothing of it is held any more.
-    pub fn ended(&self, _agent: &str) {}
+    pub fn ended(&self, agent: &str) {
+        self.shown.lock().unwrap().remove(agent);
+        self.calls.lock().unwrap().remove(agent);
+    }
 
     /// The agent's session said it made the tool call `id`. It comes on the pipe a compaction
-    /// comes on, so one that came before it has been processed when this is.
+    /// comes on, so one that came before it has been processed when this is. Only while the switch
+    /// is on: nothing else reads the ids.
     pub fn called(&self, paths: &Paths, agent: &str, id: &str) {
+        if !crate::results::says_unchanged(paths) {
+            return;
+        }
         let mut calls = self.calls.lock().unwrap();
         let ids = calls.entry(agent.to_owned()).or_default();
         ids.push_back(id.to_owned());
@@ -166,7 +173,7 @@ impl Kept {
             .get(agent)?
             .iter()
             .find(|p| p.path == path && p.offset == offset && p.length == length)?;
-        (page.sha == sha).then(|| {
+        (page.epoch == epoch && page.sha == sha).then(|| {
             format!(
                 "unchanged since you read it (bytes {}-{} of {}, at {}); give \"again\": true \
                  to read it whole",
@@ -313,24 +320,25 @@ impl Context<'_> {
             .map_err(|e| Outcome::Failed(e.to_string()))
     }
 
-    /// Whether Flottille sees this agent's compactions: the Claude and Codex bridges say them
-    /// (`docs/agents.md`), any other provider does not, and "unchanged" is never safe for it.
-    fn sees_compactions(&self) -> bool {
+    /// Whether "unchanged" can be said to this agent at all: Flottille sees its compactions and
+    /// its calls name themselves. Only the Claude bridge does both (`docs/agents.md`): Codex says
+    /// its compactions but gives no call id, and any other provider says neither.
+    fn can_be_told_unchanged(&self) -> bool {
         let agent = self.daemon.read(|store| store.agent(self.agent));
         matches!(
             agent.ok().flatten().map(|agent| agent.provider).as_deref(),
-            Some("claude" | "codex")
+            Some("claude")
         )
     }
 
-    /// Whether "unchanged" is safe for this call: the switch is on, the provider's compactions
-    /// are seen, and the daemon has recorded the tool call this one is. A compaction that came
+    /// Whether "unchanged" is safe for this call: the switch is on, the provider is one that can
+    /// be told, and the daemon has recorded the tool call this one is. A compaction that came
     /// before the call on the agent's pipe has then been processed; the call's own HTTP request
     /// may have outrun it otherwise.
     fn may_say_unchanged(&self) -> bool {
         self.call
             .is_some_and(|id| self.daemon.mcp.kept.call_seen(self.agent, id))
-            && self.sees_compactions()
+            && self.can_be_told_unchanged()
             && crate::results::says_unchanged(&self.daemon.paths)
     }
 
@@ -767,7 +775,7 @@ fn page(
     let range = json!({"offset": start, "end": end, "size": size, "next": next});
     if let (Some(cx), Some(sha)) = (cx, sha_read)
         && taken > 0
-        && cx.sees_compactions()
+        && cx.can_be_told_unchanged()
     {
         cx.daemon.mcp.kept.show(
             cx.agent,

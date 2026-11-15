@@ -2003,6 +2003,9 @@ pub fn change(
     if let Err(error) = result {
         eprintln!("flottille daemon: agent {id}: {error}");
     }
+    if state.is_final() {
+        daemon.mcp.kept.ended(id);
+    }
 }
 
 pub fn record(daemon: &Daemon, id: &str, name: &str, mut data: Value, activity: bool) {
