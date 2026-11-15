@@ -1,0 +1,90 @@
+# A pull request into dev labelled `backport X.Y`, once merged, is brought to the stable line
+# stable/X.Y (docs/releases.md, "Stable lines"): the cherry-pick of its squash on a branch
+# backport/<pr>-X.Y from stable/X.Y, and a pull request into the line. When the pick does not
+# apply, a comment on the pull request says so, and nothing is opened.
+name: backport
+
+on:
+  # Run with the repository's token, from dev's workflow, whatever the pull request's branch says.
+  # A label added after the merge brings it too.
+  pull_request_target:
+    types: [closed, labeled]
+    branches: [dev]
+
+permissions: {}
+
+jobs:
+  backport:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      # To make the backport branch.
+      contents: write
+      # To open its pull request, or to comment on the one merged.
+      pull-requests: write
+      # To start ci.yml on the backport branch: a pull request opened with this token starts no
+      # run of its own, a workflow_dispatch started with it does.
+      actions: write
+    concurrency:
+      group: backport-${{ github.event.pull_request.number }}
+    # This job holds a token that writes the repository: no checkout, no git, no code of any
+    # branch. Only `gh`, through GitHub's API, and the pull request's number, squash, title and
+    # labels reach the script through its environment only.
+    steps:
+      - name: Open the backports its labels ask for
+        id: backport
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SQUASH: ${{ github.event.pull_request.merge_commit_sha }}
+          TITLE: ${{ github.event.pull_request.title }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          if ! [[ $SQUASH =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::#$PR has no squash to bring."
+            exit 1
+          fi
+          status=0
+          while IFS= read -r label; do
+            [[ $label =~ ^backport\ ((0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]] || continue
+            line=${BASH_REMATCH[1]}
+            branch=backport/$PR-$line work=backport-work/$PR-$line
+            # Brought already, by an earlier run of another label.
+            if gh api "repos/$GH_REPO/git/ref/heads/$branch" > /dev/null 2>&1; then
+              echo "::notice::$branch is there already."
+              continue
+            fi
+            if ! tip=$(gh api "repos/$GH_REPO/git/ref/heads/stable/$line" --jq .object.sha); then
+              echo "::error::There is no stable/$line to bring #$PR to."
+              status=1
+              continue
+            fi
+            # A cherry-pick through the API: a commit with the line's files on the squash's
+            # parent, the squash merged into it (three ways, from that parent), then the files
+            # merged on the line's tip, with the squash's message and where it was picked from.
+            parent=$(gh api "repos/$GH_REPO/git/commits/$SQUASH" --jq '.parents[0].sha')
+            files=$(gh api "repos/$GH_REPO/git/commits/$tip" --jq .tree.sha)
+            sibling=$(gh api "repos/$GH_REPO/git/commits" -f message="backport of #$PR to stable/$line" -f tree="$files" -f "parents[]=$parent" --jq .sha)
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$work" -f sha="$sibling" > /dev/null
+            if merged=$(gh api "repos/$GH_REPO/merges" -f base="$work" -f head="$SQUASH" -f commit_message="backport of #$PR to stable/$line" --jq .sha 2> "$RUNNER_TEMP/merge.err"); then
+              gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$work"
+              picked=$(gh api "repos/$GH_REPO/git/commits/$merged" --jq .tree.sha)
+              message=$(gh api "repos/$GH_REPO/git/commits/$SQUASH" --jq .message)
+              commit=$(gh api "repos/$GH_REPO/git/commits" -f message="$message"$'\n\n'"(cherry picked from commit $SQUASH)" -f tree="$picked" -f "parents[]=$tip" --jq .sha)
+              gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$branch" -f sha="$commit" > /dev/null
+              gh pr create --base "stable/$line" --head "$branch" --title "$TITLE" \
+                --body "Brings #$PR to \`stable/$line\`: the \`cherry-pick -x\` of its squash, $SQUASH."
+              gh workflow run ci.yml --ref "$branch"
+            else
+              gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$work"
+              if grep -q 'HTTP 409' "$RUNNER_TEMP/merge.err"; then
+                gh pr comment "$PR" --body "The backport to \`stable/$line\` does not apply: the cherry-pick of $SQUASH conflicts, and nothing was opened. Bring it by hand (docs/releases.md, \"Stable lines\")."
+                echo "::error::#$PR does not apply on stable/$line: said on the pull request."
+              else
+                cat "$RUNNER_TEMP/merge.err" >&2
+              fi
+              status=1
+            fi
+          done < <(jq -r '.[]' <<< "$LABELS")
+          exit "$status"
