@@ -46,7 +46,8 @@ pub struct ProposedRules {
     answered: HashSet<u64>,
     /// Why an answer was refused, under its field until the text changes.
     problems: HashMap<u64, SharedString>,
-    _subscriptions: Vec<Subscription>,
+    /// Each field's watch of its text, kept as long as the field.
+    _subscriptions: HashMap<u64, Subscription>,
 }
 
 impl ProposedRules {
@@ -59,7 +60,7 @@ impl ProposedRules {
             waiting: HashSet::new(),
             answered: HashSet::new(),
             problems: HashMap::new(),
-            _subscriptions: Vec::new(),
+            _subscriptions: HashMap::new(),
         }
     }
 
@@ -165,13 +166,15 @@ impl ProposedRules {
             field
         });
         field.update(cx, |field, cx| field.set_value(&proposal.rule, window, cx));
-        self._subscriptions
-            .push(cx.subscribe(&field, move |this, _, event, cx| {
+        self._subscriptions.insert(
+            id,
+            cx.subscribe(&field, move |this, _, event, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.problems.remove(&id);
                     cx.notify();
                 }
-            }));
+            }),
+        );
         self.fields.insert(id, field);
     }
 
@@ -295,6 +298,10 @@ impl Render for ProposedRules {
             .map(|row| (row.placement, row.value.clone()))
             .collect();
         let present = !self.rows.is_empty();
+        // A proposal no row shows any more keeps neither its field nor its watch.
+        let shown: HashSet<u64> = drawn.iter().map(|(_, proposal)| proposal.id).collect();
+        self.fields.retain(|id, _| shown.contains(id));
+        self._subscriptions.retain(|id, _| shown.contains(id));
         let mut list = ListCard::new("proposed-rules-list");
         for (placement, proposal) in &drawn {
             let row = self.row(proposal, cx);

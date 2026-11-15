@@ -250,4 +250,61 @@ fn a_dismissed_proposed_rule_folds_away(cx: &mut TestAppContext) {
     assert_eq!(rules_of(&user), before, "nothing was added");
     // The section folds away with its last proposal.
     assert!(!present(cx, "proposed-rules-app"));
+    // Nothing of the answered proposal is kept: its field is gone with its row.
+    assert!(section(&shell, cx).read_with(cx, |section, _| section.field(id).is_none()));
+}
+
+#[gpui_kit::test]
+fn a_rule_added_under_an_edit_of_the_rules_says_so(cx: &mut TestAppContext) {
+    let (user, id) = proposed();
+    let (shell, cx) = window(&user, cx);
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("app".into()), window, cx)
+    });
+    until(&shell, cx, "the project's settings", |cx| {
+        settings_page(&shell, cx).is_some()
+    });
+    click(cx, "project-settings-tabs-instructions");
+    until(&shell, cx, "the proposal in the project's settings", |cx| {
+        present(cx, part_id(id, "row"))
+    });
+    settle(cx);
+    let editor = settings_page(&shell, cx)
+        .unwrap()
+        .read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules editor", |cx| {
+        editor.read_with(cx, |editor, _| {
+            editor.field().is_some() && editor.shown().is_some()
+        })
+    });
+    let field = editor
+        .read_with(cx, |editor, _| editor.field().cloned())
+        .unwrap();
+    cx.update(|window, cx| {
+        field.update(cx, |field, cx| {
+            field.set_value("My own rules, half written.", window, cx)
+        })
+    });
+    assert!(editor.read_with(cx, |editor, cx| editor.is_edited(cx)));
+
+    click(cx, part_id(id, "add"));
+    folds_away(&shell, id, cx);
+
+    let said: Vec<String> = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| toast.title().to_owned())
+            .collect()
+    });
+    assert!(
+        said.iter()
+            .any(|title| title.starts_with("The rules changed while you were editing")),
+        "{said:?}"
+    );
+    // What was typed stays: the toast only tells.
+    assert_eq!(
+        field.read_with(cx, |field, _| field.value().to_string()),
+        "My own rules, half written."
+    );
 }

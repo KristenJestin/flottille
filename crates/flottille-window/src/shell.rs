@@ -1306,6 +1306,17 @@ impl Shell {
                     };
                     // The rule added is in the project's rules: the editor shows them again.
                     if added && result.is_ok() {
+                        // What the user typed is kept, and a Save of it would drop the rule just
+                        // added: it is said now, not found out later.
+                        if rules.read(cx).is_edited(cx) {
+                            toast(
+                                Toast::failure("The rules changed while you were editing").detail(
+                                    "The rule was added to them, and your text does not hold it: \
+                                     add it to your text before you save.",
+                                ),
+                                cx,
+                            );
+                        }
                         rules.update(cx, |editor, cx| editor.read(cx));
                     }
                     section.update(cx, |section, cx| {
