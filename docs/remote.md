@@ -738,8 +738,15 @@ on a real phone, by hand, and reported.
   repository never received is made by `git init` and that fetch, with no remote. The fetch sets
   `protocol.file.allow=always` for itself: a configuration that refuses git's file transport is
   about submodules and remotes, not a file of Flottille's.
-- The snapshot is laid with `read-tree -m -u HEAD <snapshot>`, then `reset`: every change is
-  unstaged, and a file `HEAD` does not have is untracked there, even one the sender had staged.
+- The snapshot is laid with `read-tree -m -u HEAD <snapshot>`, then `reset`, on a workspace with
+  no change of its own (refused otherwise): every change is unstaged, and a file `HEAD` does not
+  have is untracked there, even one the sender had staged.
+- Every git of a launch runs with `GIT_NO_LAZY_FETCH=1`, and a partial clone
+  (`extensions.partialClone`, or a remote with `promisor = true`) is refused on either side: what
+  it lacks is on its remote, and a bundle of it would be incomplete.
+- Git LFS objects do not travel, their pointers do: the receiving side runs with
+  `GIT_LFS_SKIP_SMUDGE=1`, so that its smudge filter downloads nothing and leaves the pointer.
+  The sending side's clean filters run as the user's own `git add` would run them, locally.
 - A returning bundle holds the one branch of the workspace; a `machine` is one ref component and
   the `branch` a branch name git accepts, or nothing is fetched.
 
