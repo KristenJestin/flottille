@@ -79,7 +79,7 @@ fn every_method_the_sources_name_is_catalogued() {
         // An event, said in `docs/protocol.md` ("Rules").
         "rules.changed",
     ];
-    let files = ["md", "toml", "log", "pdf"];
+    let files = ["md", "toml", "log", "pdf", "sock"];
 
     let mut sources = Vec::new();
     for folder in ["flottille/src", "flottille-window/src"] {
