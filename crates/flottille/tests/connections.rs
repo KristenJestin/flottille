@@ -5888,3 +5888,60 @@ fn a_shown_browser_runs_headless_when_the_socket_cannot_be_shared() {
     assert_eq!(started.last().unwrap()["config"].get("headed"), None);
     assert!(!user.path("runtime/flottille/display/browser").exists());
 }
+
+#[test]
+fn a_hidden_browser_gets_no_session_bus_address() {
+    // Hidden or shown, the browser has no way to the session bus, hence none to the keyring.
+    let user = user_with_display();
+    browser(&user, &agent_browser("0.43.0"), json!({"fail": true}));
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let seen = display_of(&user, "browser");
+    assert_eq!(seen["DBUS_SESSION_BUS_ADDRESS"], Value::Null, "{seen}");
+}
+
+#[test]
+fn the_server_and_its_login_share_one_browser_socket_folder() {
+    // agent-browser puts its daemon's socket in `AGENT_BROWSER_SOCKET_DIR`, else under
+    // `$XDG_RUNTIME_DIR`: the server and its login run, with display folders of their own, would
+    // reach two browsers, and a folder removed with one would take the other's socket with it.
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"headed": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let shared = user.path("state/flottille/connections/browser");
+    let server = display_of(&user, "browser");
+    let login = logged(&user, "browser", "login").last().unwrap()["display"].clone();
+    assert_eq!(
+        server["AGENT_BROWSER_SOCKET_DIR"],
+        shared.to_str().unwrap(),
+        "{server}"
+    );
+    assert_eq!(
+        login["AGENT_BROWSER_SOCKET_DIR"],
+        shared.to_str().unwrap(),
+        "{login}"
+    );
+    // Their display folders are their own, and neither holds the browser's socket.
+    assert_ne!(server["XDG_RUNTIME_DIR"], login["XDG_RUNTIME_DIR"]);
+}

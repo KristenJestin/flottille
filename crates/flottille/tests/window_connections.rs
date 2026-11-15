@@ -2924,3 +2924,29 @@ fn the_form_shows_the_browser_when_its_toggle_is_on(cx: &mut TestAppContext) {
     });
     assert_eq!(connection(&user, "browser").unwrap()["headed"], json!(true));
 }
+
+#[gpui_kit::test]
+fn a_browser_that_could_not_be_shown_says_why_under_its_switch(cx: &mut TestAppContext) {
+    // The session names a Wayland socket that is not there: the browser runs headless.
+    let user = user().with_env("WAYLAND_DISPLAY", "wayland-none");
+    turn_on(&user);
+    agent_browser(&user, &["agent_browser_click"], false);
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "headed": true}),
+    )
+    .unwrap();
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    settle(cx);
+    assert!(visible(cx, "connection-headed-why"));
+    let said = everything_said(cx);
+    assert!(said.contains("not shown"), "{said}");
+    assert!(said.contains("Wayland socket"), "{said}");
+    // Turned off in the form, there is nothing to say: it folds away.
+    click(cx, "connection-headed");
+    settle(cx);
+    assert!(!visible(cx, "connection-headed-why"));
+}

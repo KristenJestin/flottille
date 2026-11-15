@@ -145,17 +145,7 @@ fn main() {
         "sid": fields.get(3).and_then(|f| f.parse::<u32>().ok()),
         "cwd": std::env::current_dir().ok(), "args": args, "child": child,
         "config": loaded_config(&args),
-        "display": {"WAYLAND_DISPLAY": std::env::var("WAYLAND_DISPLAY").ok(),
-            "DISPLAY": std::env::var("DISPLAY").ok(),
-            "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok(),
-            "DBUS_SESSION_BUS_ADDRESS": std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
-            // What the runtime folder held when the server started.
-            "runtime_files": std::env::var("XDG_RUNTIME_DIR").ok().and_then(|dir| {
-                let mut names: Vec<String> = std::fs::read_dir(dir).ok()?
-                    .filter_map(|e| e.ok()?.file_name().into_string().ok()).collect();
-                names.sort();
-                Some(names)
-            })}}),
+        "display": display_environment()}),
     );
     if let Some(line) = script["stderr"].as_str() {
         eprintln!("{line}");
@@ -312,6 +302,23 @@ fn send(message: &Value) {
     let mut out = std::io::stdout().lock();
     writeln!(out, "{message}").unwrap();
     out.flush().unwrap();
+}
+
+/// The environment a browser's display and sockets come from, for the tests to read: the
+/// display variables, the folders agent-browser puts its sockets in, and what the runtime folder
+/// held.
+fn display_environment() -> Value {
+    json!({"WAYLAND_DISPLAY": std::env::var("WAYLAND_DISPLAY").ok(),
+    "DISPLAY": std::env::var("DISPLAY").ok(),
+    "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok(),
+    "DBUS_SESSION_BUS_ADDRESS": std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
+    "AGENT_BROWSER_SOCKET_DIR": std::env::var("AGENT_BROWSER_SOCKET_DIR").ok(),
+    "runtime_files": std::env::var("XDG_RUNTIME_DIR").ok().and_then(|dir| {
+        let mut names: Vec<String> = std::fs::read_dir(dir).ok()?
+            .filter_map(|e| e.ok()?.file_name().into_string().ok()).collect();
+        names.sort();
+        Some(names)
+    })})
 }
 
 fn write_log(log: &Option<String>, line: Value) {
@@ -945,7 +952,7 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
     let answer = ask(&plugin);
     let success = answer["success"] == true && answer["protocol"] == "agent-browser.plugin.v1";
     let mut line = json!({"event": "login", "args": args, "config": loaded_config(args),
-        "cwd": std::env::current_dir().ok(),
+        "cwd": std::env::current_dir().ok(), "display": display_environment(),
         "plugin": {"success": success, "error": answer["error"]}});
     if behaviour["replay"] == true {
         let again = ask(&plugin);
