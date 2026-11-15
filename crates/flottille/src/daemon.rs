@@ -368,11 +368,16 @@ impl Daemon {
     /// loop turns again: a stream costs a commit, so an `fsync`, for each turn, not for each of
     /// its pieces, and another client waits one commit, not a backlog of them. Measured on a busy
     /// disk, one commit a piece put the pieces seconds behind, and `agent.list` with them (#903).
+    ///
+    /// A read that finds the queue full commits it, `fsync` included: the lock report then names
+    /// that reader as the one who held the store, not the stream.
     pub fn say(self: &Arc<Self>, agent: &str, name: &str, data: Value, activity: bool) {
         let mut events = self.events.lock().unwrap();
         events
             .said
             .push((agent.to_owned(), name.to_owned(), data, activity));
+        // A queue of more than one entry always has its flush task scheduled: the first entry
+        // scheduled it, and only a commit empties the queue.
         if events.said.len() > 1 {
             return;
         }
@@ -399,16 +404,34 @@ impl Daemon {
             return;
         }
         let said = std::mem::take(&mut events.said);
-        match events.store.append_agent_events(said) {
-            Ok(written) => {
-                for event in written {
-                    self.developer.event(&event);
-                    if let Some(bus) = &events.bus {
-                        let _ = bus.send(event);
+        let (store, bus) = (&mut events.store, &events.bus);
+        let publish = |event: Event| {
+            self.developer.event(&event);
+            if let Some(bus) = bus {
+                let _ = bus.send(event);
+            }
+        };
+        match store.append_agent_events(&said) {
+            Ok(written) => written.into_iter().for_each(publish),
+            Err(error) => {
+                // One piece the store refuses must not take the others with it: each on its own,
+                // and only the refused one is lost.
+                let mut lost = Vec::new();
+                for (agent, name, data, activity) in said {
+                    match store.append_agent_event(&agent, &name, data, activity) {
+                        Ok(event) => publish(event),
+                        Err(_) => lost.push(agent),
                     }
                 }
+                lost.sort();
+                let count = lost.len();
+                lost.dedup();
+                eprintln!(
+                    "flottille daemon: what the sessions said: {error}; written one by one, \
+                     {count} lost (agents {})",
+                    lost.join(", ")
+                );
             }
-            Err(error) => eprintln!("flottille daemon: what the sessions said: {error}"),
         }
     }
 
@@ -566,6 +589,18 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     agents::stop_all(&daemon).await;
     runs::stop_all(&daemon).await;
     extensions::stop_all(&daemon).await;
+    wind_down(&daemon, &mut connections, reason).await?;
+    eprintln!("flottille daemon stopped ({reason})");
+    Ok(())
+}
+
+/// Tells the subscribers and the connections the daemon stops, waits for them `GRACE` at most,
+/// and commits what the sessions said meanwhile.
+async fn wind_down(
+    daemon: &Arc<Daemon>,
+    connections: &mut JoinSet<()>,
+    reason: &str,
+) -> Result<()> {
     daemon.emit("daemon.stopping", json!({"reason": reason}))?;
     daemon.events.lock().unwrap().bus = None;
     daemon.stopping.send_replace(true);
@@ -573,7 +608,8 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         while connections.join_next().await.is_some() {}
     })
     .await;
-    eprintln!("flottille daemon stopped ({reason})");
+    // What was said while they ended: the flush task may never run, the runtime ends with this.
+    drop(daemon.stored());
     Ok(())
 }
 
@@ -1010,6 +1046,8 @@ async fn forward(daemon: Arc<Daemon>, mut subscription: Subscription, out: mpsc:
 
 #[cfg(test)]
 mod tests {
+    use flottille_core::agent::{Agent, AgentState, Choices, GateMode};
+
     use super::*;
 
     const OURS: (u64, u64) = (1, 2);
@@ -1027,5 +1065,202 @@ mod tests {
             Socket::Unknown
         );
         assert_eq!(judge(error(ErrorKind::Interrupted), OURS), Socket::Unknown);
+    }
+
+    fn an_agent(id: &str) -> Agent {
+        Agent {
+            id: id.into(),
+            provider: "claude".into(),
+            role: "lead".into(),
+            project: "app".into(),
+            workspace: None,
+            folder: "/app".into(),
+            state: AgentState::Starting,
+            state_reason: None,
+            created_at: 1_792_843_730_808,
+            updated_at: 1_792_843_730_808,
+            active_at: None,
+            exchanged_at: None,
+            ended_at: None,
+            chosen: Choices::default(),
+            taken: Choices::default(),
+            pending: Choices::default(),
+            native_id: None,
+            agent_version: None,
+            instructions: String::new(),
+            tools: Vec::new(),
+            parent: None,
+            depth: 0,
+            epoch: 0,
+            title: None,
+            brief: None,
+            reported_at: None,
+            quiet_turns: 0,
+            waiting_on_answer: false,
+            reopens: false,
+            images: None,
+            gate_mode: GateMode::Auto,
+            launched_by: None,
+            led: false,
+            detached_from: None,
+            titled_by: None,
+        }
+    }
+
+    /// A daemon on a throwaway store with the agent `a`, and its bus when `bus` says so.
+    fn a_daemon(dir: &std::path::Path, bus: bool) -> Arc<Daemon> {
+        let paths = Paths {
+            runtime: dir.join("runtime"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        };
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent("a"), ("agent.created", json!({})))
+            .unwrap();
+        let projects = Projects::open(&paths).unwrap();
+        Arc::new(Daemon::new(
+            &paths,
+            store,
+            projects,
+            0,
+            bus.then(|| broadcast::channel(1024).0),
+        ))
+    }
+
+    fn piece(text: &str) -> Value {
+        json!({"text": text})
+    }
+
+    /// The texts of the agent's messages, in the store, without going through the queue.
+    fn stored_texts(daemon: &Daemon, agent: &str) -> Vec<String> {
+        let events = daemon.events.lock().unwrap();
+        events
+            .store
+            .agent_events(agent, 0, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.name == "agent.message")
+            .map(|event| event.data["text"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_pieces_said_are_read_in_order_and_watched_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path(), true);
+        let mut live = daemon.live().unwrap();
+        const PIECES: usize = 25;
+        for n in 0..PIECES {
+            daemon.say("a", "agent.message", piece(&n.to_string()), true);
+        }
+
+        // Read after write: nothing waited for the flush task.
+        let read = daemon
+            .read(|store| store.agent_events("a", 0, 100))
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.name == "agent.message")
+            .collect::<Vec<_>>();
+        let texts: Vec<String> = read
+            .iter()
+            .map(|event| event.data["text"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            texts,
+            (0..PIECES).map(|n| n.to_string()).collect::<Vec<_>>()
+        );
+        assert!(read.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+
+        // An event after them is numbered after them.
+        let emitted = daemon.emit("test.after", json!({})).unwrap();
+        assert!(emitted.seq > read.last().unwrap().seq);
+
+        // A subscriber from the start sees each event once: the store's pages and the bus's
+        // events together, as `forward` reads them.
+        let subscription = daemon.subscribe(Some(0)).unwrap();
+        let mut seen: Vec<u64> = Vec::new();
+        let mut last = subscription.last;
+        loop {
+            let page = daemon.events_after(last).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            for event in page {
+                last = event.seq;
+                seen.push(event.seq);
+            }
+        }
+        let mut from_the_bus = subscription.live;
+        while let Ok(event) = from_the_bus.try_recv() {
+            if event.seq > last {
+                last = event.seq;
+                seen.push(event.seq);
+            }
+        }
+        let mut sorted = seen.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(seen, sorted, "each event once, in order");
+        assert_eq!(*seen.last().unwrap(), emitted.seq);
+        // What the first subscriber of the bus got: the same events, once each.
+        let mut heard = Vec::new();
+        while let Ok(event) = live.try_recv() {
+            heard.push(event.seq);
+        }
+        assert_eq!(heard.len(), PIECES + 1);
+        assert!(heard.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn one_piece_the_store_refuses_loses_only_that_piece() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path(), true);
+        let mut live = daemon.live().unwrap();
+        daemon.say("a", "agent.message", piece("first"), true);
+        // An agent the store does not know: its row breaks the batch's foreign key.
+        daemon.say("nobody", "agent.message", piece("lost"), true);
+        daemon.say("a", "agent.message", piece("last"), true);
+
+        daemon.read(|_| Ok(())).unwrap();
+
+        assert_eq!(stored_texts(&daemon, "a"), ["first", "last"]);
+        let mut heard = Vec::new();
+        while let Ok(event) = live.try_recv() {
+            heard.push(event.data["text"].as_str().unwrap_or_default().to_owned());
+        }
+        assert_eq!(
+            heard,
+            ["first", "last"],
+            "the subscribers hear what was kept"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_piece_said_after_the_daemon_began_to_stop_is_stored_when_it_has_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path(), true);
+        let mut connections = JoinSet::new();
+
+        // Said while the daemon winds down, its flush task not run before the runtime ends: the
+        // queue holds it, as `say` leaves it, and nothing else reads the store after.
+        let saying = daemon.clone();
+        let mut stopping = daemon.stopping.subscribe();
+        connections.spawn(async move {
+            let _ = stopping.wait_for(|stopping| *stopping).await;
+            saying.events.lock().unwrap().said.push((
+                "a".into(),
+                "agent.message".into(),
+                piece("the last word"),
+                true,
+            ));
+        });
+
+        wind_down(&daemon, &mut connections, "request")
+            .await
+            .unwrap();
+
+        assert_eq!(stored_texts(&daemon, "a"), ["the last word"]);
     }
 }

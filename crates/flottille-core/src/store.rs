@@ -1543,13 +1543,13 @@ impl Store {
     /// piece (#903).
     pub fn append_agent_events(
         &mut self,
-        events: Vec<(String, String, Value, bool)>,
+        events: &[(String, String, Value, bool)],
     ) -> Result<Vec<Event>> {
         let transaction = self.connection.transaction()?;
         let mut appended = Vec::with_capacity(events.len());
         for (agent, name, data, activity) in events {
-            let event = append_agent_event(&transaction, &agent, &name, data)?;
-            if activity {
+            let event = append_agent_event(&transaction, agent, name, data.clone())?;
+            if *activity {
                 transaction.execute(
                     "UPDATE agents SET active_at = ?2 WHERE id = ?1",
                     params![agent, event.at],
@@ -4976,7 +4976,7 @@ mod tests {
         };
 
         let written = store
-            .append_agent_events(vec![piece("one ", false), piece("two", true)])
+            .append_agent_events(&[piece("one ", false), piece("two", true)])
             .unwrap();
 
         assert_eq!(written.len(), 2);
