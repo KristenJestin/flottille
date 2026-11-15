@@ -53,6 +53,11 @@ pub const VARIABLES_HINT: &str = "Each one's value is a vault entry every projec
 pub const LIMITS_HINT: &str = "An argument of that name may take only these values, in every \
                                action that has it.";
 
+/// What the sites' field says: what a sign-in's extra hosts are for.
+pub const SITES_HINT: &str = "Hosts a sign-in goes through besides the sites of its entries, such \
+                              as a single sign-on's. The browser Flottille signs in with may \
+                              reach them. One host each, in lower case, with no scheme or port.";
+
 /// The radio's label of what happens when an agent calls an action.
 pub const WHEN_CALLED: &str = "When an agent calls it";
 
@@ -110,6 +115,8 @@ pub struct Server {
     pub env: BTreeMap<String, String>,
     pub headers: BTreeMap<String, String>,
     pub only: BTreeMap<String, Vec<String>>,
+    /// The hosts a sign-in also needs.
+    pub sites: Vec<String>,
     /// `off`, `awaiting review`, `cut off` or `ready`.
     pub state: String,
     /// What changed when it was cut off.
@@ -153,6 +160,12 @@ impl Server {
                     let values = values.as_array().into_iter().flatten().map(text).collect();
                     (argument.clone(), values)
                 })
+                .collect(),
+            sites: value["sites"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(text)
                 .collect(),
             state: text(&value["state"]),
             cut_off: value["cut_off"].as_str().map(str::to_owned),
@@ -580,6 +593,13 @@ struct Limit {
     values: Entity<InputState>,
 }
 
+/// A site of the form: the host a sign-in also needs.
+#[derive(Clone)]
+struct Site {
+    key: String,
+    host: Entity<InputState>,
+}
+
 /// The review open, or the last one while it fades out.
 struct Review {
     name: String,
@@ -735,6 +755,8 @@ pub struct ConnectionsSection {
     variable_rows: Listing<String>,
     limits: Vec<Limit>,
     limit_rows: Listing<String>,
+    sites: Vec<Site>,
+    site_rows: Listing<Site>,
     made: u64,
     saving: bool,
     form_error: Option<SharedString>,
@@ -768,6 +790,8 @@ impl ConnectionsSection {
             variable_rows: Listing::default(),
             limits: Vec::new(),
             limit_rows: Listing::default(),
+            sites: Vec::new(),
+            site_rows: Listing::default(),
             made: 0,
             saving: false,
             form_error: None,
@@ -807,6 +831,16 @@ impl ConnectionsSection {
         self.limits
             .get(at)
             .map(|l| (l.argument.clone(), l.values.clone()))
+    }
+
+    /// The host field of the site at `at` of the form.
+    pub fn site_field(&self, at: usize) -> Option<Entity<InputState>> {
+        self.sites.get(at).map(|s| s.host.clone())
+    }
+
+    /// What the form says is wrong, under its fields.
+    pub fn form_error(&self) -> Option<String> {
+        self.form_error.as_ref().map(ToString::to_string)
     }
 
     /// The review's search field, once the dialog has drawn it.
@@ -1159,6 +1193,7 @@ impl ConnectionsSection {
         };
         self.variables.clear();
         self.limits.clear();
+        self.sites.clear();
         if let Some(server) = server {
             let entries = match self.reach {
                 Reach::Command => &server.env,
@@ -1170,10 +1205,14 @@ impl ConnectionsSection {
             for (argument, values) in server.only.clone() {
                 self.new_limit(Some((argument, values.join(", "))), window, cx);
             }
+            for host in server.sites.clone() {
+                self.new_site(Some(host), window, cx);
+            }
         }
         // The rows the dialog opens with are there at once.
         self.variable_rows = Listing::default();
         self.limit_rows = Listing::default();
+        self.site_rows = Listing::default();
         self.form = Form::Editing(server.map(|s| s.name.clone()));
         self.form_error = None;
         self.saving = false;
@@ -1252,6 +1291,17 @@ impl ConnectionsSection {
         cx.notify();
     }
 
+    fn new_site(&mut self, given: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let host = line_field("sso.example.com", window, cx);
+        host.update(cx, |f, cx| {
+            f.set_value(given.unwrap_or_default(), window, cx)
+        });
+        self.watch(&host, cx);
+        let key = self.next_key();
+        self.sites.push(Site { key, host });
+        cx.notify();
+    }
+
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.form = Form::Closed;
         self.form_error = None;
@@ -1325,6 +1375,13 @@ impl ConnectionsSection {
                 _ => return Err("A limit needs an argument and the values it may take.".into()),
             }
         }
+        // The daemon says why a host is not one: nothing is checked here.
+        let sites: Vec<String> = self
+            .sites
+            .iter()
+            .map(|site| value(&site.host))
+            .filter(|host| !host.is_empty())
+            .collect();
         let editing = original.is_some();
         // In an edit, an empty table removes what was there: the link drops a `null`, so `{}` is
         // what says "none".
@@ -1338,6 +1395,11 @@ impl ConnectionsSection {
                 let words = flottille_core::command::split_line(&line)?;
                 params["command"] = json!(words);
                 params["env"] = Value::Object(entries);
+                // An empty list in an edit takes the sites away: the window's link leaves a
+                // `null` out of the request, so the list is what says it.
+                if editing || !sites.is_empty() {
+                    params["sites"] = json!(sites);
+                }
                 if editing {
                     params["headers"] = json!({});
                 }
@@ -1351,6 +1413,7 @@ impl ConnectionsSection {
                 params["headers"] = Value::Object(entries);
                 if editing {
                     params["env"] = json!({});
+                    params["sites"] = json!([]);
                 }
             }
         }
@@ -1704,6 +1767,31 @@ impl ConnectionsSection {
             .into_any_element()
     }
 
+    fn site_row(&self, id: String, site: &Site, cx: &mut Context<Self>) -> AnyElement {
+        let key = site.key.clone();
+        let remove = Button::icon(
+            SharedString::from(format!("{id}-remove")),
+            Icon::Close,
+            "Remove this site",
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.sites.retain(|s| s.key != key);
+            cx.notify();
+        }));
+        div()
+            .id(SharedString::from(id.clone()))
+            .flex()
+            .items_end()
+            .gap(space::SM)
+            .child(div().flex_1().min_w_0().child(Field::new(
+                SharedString::from(format!("{id}-host-field")),
+                "Host",
+                boxed(format!("{id}-host"), Input::new(&site.host), cx),
+            )))
+            .child(remove)
+            .into_any_element()
+    }
+
     fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
         let this = cx.entity().downgrade();
@@ -1737,6 +1825,12 @@ impl ConnectionsSection {
             .map(|l| (l.key.clone(), l.key.clone()))
             .collect();
         self.limit_rows.sync(keys, now, reduce);
+        let keys: Vec<(String, Site)> = self
+            .sites
+            .iter()
+            .map(|s| (s.key.clone(), s.clone()))
+            .collect();
+        self.site_rows.sync(keys, now, reduce);
 
         let name = match &original {
             Some(name) => div()
@@ -1836,6 +1930,28 @@ impl ConnectionsSection {
                 .gap(space::SM),
             );
         }
+        let mut sites = div().flex().flex_col();
+        for (key, site, placement) in self
+            .site_rows
+            .rows()
+            .map(|r| (r.key.to_owned(), r.value.clone(), r.placement))
+            .collect::<Vec<_>>()
+        {
+            // A row that left keeps its text while it folds away.
+            let id = match self.sites.iter().position(|s| s.key == key) {
+                Some(at) => format!("connection-site-{at}"),
+                None => format!("connection-site-gone-{key}"),
+            };
+            let content = self.site_row(id, &site, cx);
+            sites = sites.child(
+                gpui_design_system::Item::new(
+                    ElementId::Name(format!("connection-site-item-{key}").into()),
+                    placement,
+                    content,
+                )
+                .gap(space::SM),
+            );
+        }
         let (variables_label, add_label) = match self.reach {
             Reach::Command => ("Variables of its environment", "New variable"),
             Reach::Url => ("Headers of its requests", "New header"),
@@ -1846,6 +1962,21 @@ impl ConnectionsSection {
         let new_limit = Button::secondary("connection-new-limit", "New limit")
             .leading(Icon::Plus)
             .on_click(cx.listener(|this, _, window, cx| this.new_limit(None, window, cx)));
+        let new_site = Button::secondary("connection-new-site", "New site")
+            .leading(Icon::Plus)
+            .on_click(cx.listener(|this, _, window, cx| this.new_site(None, window, cx)));
+        let sites = Field::new(
+            "connection-sites-field",
+            "Sites a sign-in also needs",
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(div().w_full().child(sites))
+                .child(div().pt(space::SM).child(new_site)),
+        )
+        .optional()
+        .hint(SITES_HINT);
         let body = div()
             .id("connection-form")
             .max_h(window.viewport_size().height - px(240.))
@@ -1903,6 +2034,14 @@ impl ConnectionsSection {
                 )
                 .optional()
                 .hint(LIMITS_HINT),
+            )
+            .child(
+                presence(
+                    "connection-sites-block",
+                    self.reach == Reach::Command,
+                    sites,
+                )
+                .gap(space::LG),
             )
             .test_support();
         // What a modal keeps in sight is a column without a gap: nothing to fold but the line.
