@@ -1175,6 +1175,13 @@ mod tests {
         )
         .await);
 
+        // The keyring refuses every store from here on: an edit that stored the secret again
+        // would fail, so the edits below prove that nothing is stored.
+        std::fs::write(
+            dir.path().join("config/keyring.toml"),
+            "backend = \"memory\"\nfail_stores = 1000\n",
+        )
+        .unwrap();
         // The secret is absent, or null: the metadata is rewritten, the keyring item stays.
         for absent in [json!({}), json!({"secret": null})] {
             let mut params = json!({"name": "jira", "description": "Logs time on Jira",
