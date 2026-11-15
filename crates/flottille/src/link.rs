@@ -43,6 +43,8 @@ const MOST_ADDRESSES: usize = 64;
 const NOT_TRUSTED: &str = "refused: this machine's key is not one of the user's";
 /// What closes the second link two machines that dialled each other at once made.
 const LINKED_ALREADY: &str = "linked already";
+/// How long a key refused is not said again in the log.
+const SAID_AGAIN: Duration = Duration::from_secs(60);
 /// What a client's request over a link is answered, until they are served (#813).
 const NOT_SERVED: &str = "requests from another machine's clients are not served yet";
 
@@ -83,6 +85,8 @@ impl Peer {
 struct Kept {
     last: Peers,
     said: bool,
+    /// What the file was when it was last read, whole or not.
+    read: Option<Stamp>,
 }
 
 /// What `remote/addresses.json` holds.
@@ -137,6 +141,8 @@ pub struct Remote {
     /// The addresses last told to the other machines.
     told: Mutex<Vec<String>>,
     links: std::sync::atomic::AtomicU64,
+    /// The keys refused lately, and when each was last said in the log.
+    refused: Mutex<HashMap<[u8; 32], Instant>>,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -158,6 +164,8 @@ pub fn start(
         ),
     }
     let remote = Arc::new(Remote::new(endpoint, crate::remote::folder(paths)));
+    // Read before the first link comes in, which is judged by the file as last read.
+    remote.peers();
     tokio::spawn(accept(remote.clone()));
     tokio::spawn(dial(remote.clone(), stopping));
     Ok(remote)
@@ -188,10 +196,12 @@ impl Remote {
             peers: Mutex::new(Kept {
                 last: Peers::default(),
                 said: false,
+                read: None,
             }),
             seen: Mutex::new(HashMap::new()),
             told: Mutex::new(Vec::new()),
             links: Default::default(),
+            refused: Mutex::new(HashMap::new()),
         }
     }
 
@@ -204,6 +214,7 @@ impl Remote {
     fn peers(&self) -> Peers {
         let file = self.folder.join(PEERS_FILE);
         let mut kept = self.peers.lock().unwrap();
+        kept.read = stamp(&file);
         match read_json::<Peers>(&file) {
             Ok(peers) => {
                 kept.said = false;
@@ -281,6 +292,37 @@ impl Remote {
         for link in links {
             tokio::spawn(tell(link, now.clone()));
         }
+    }
+
+    /// The machine of `key`, when this one trusts it: by the peers' file as last read, read
+    /// again only when it changed since, so that a key refused costs no read of it.
+    fn trusted(&self, key: &PublicKey) -> Option<Peer> {
+        let find = |peers: &Peers| peers.machines.iter().find(|peer| peer.key == *key).cloned();
+        {
+            let kept = self.peers.lock().unwrap();
+            if let Some(peer) = find(&kept.last) {
+                return Some(peer);
+            }
+            if stamp(&self.folder.join(PEERS_FILE)) == kept.read {
+                return None;
+            }
+        }
+        find(&self.peers())
+    }
+
+    /// A key refused: said in the log, unless it was lately.
+    fn say_refused(&self, key: &PublicKey) {
+        let now = Instant::now();
+        let mut refused = self.refused.lock().unwrap();
+        refused.retain(|_, said| now.duration_since(*said) < SAID_AGAIN);
+        if refused.contains_key(key.as_bytes()) {
+            return;
+        }
+        refused.insert(*key.as_bytes(), now);
+        eprintln!(
+            "flottille daemon: refused a link from {}: not a machine this one trusts",
+            key.fingerprint()
+        );
     }
 
     /// A link made, `dialled` by this machine or by the other: kept, told this machine's
@@ -438,16 +480,8 @@ async fn accept(remote: Arc<Remote>) {
         .map(Duration::from_millis);
     while let Some(accepting) = remote.endpoint.accept().await {
         let key = accepting.peer();
-        let Some(peer) = remote
-            .peers()
-            .machines
-            .into_iter()
-            .find(|peer| peer.key == key)
-        else {
-            eprintln!(
-                "flottille daemon: refused a link from {}: not a machine this one trusts",
-                key.fingerprint()
-            );
+        let Some(peer) = remote.trusted(&key) else {
+            remote.say_refused(&key);
             accepting.refuse(NOT_TRUSTED);
             continue;
         };

@@ -297,6 +297,22 @@ fn a_key_that_is_not_trusted_is_refused() {
 }
 
 #[test]
+fn an_untrusted_key_that_dials_again_is_said_once() {
+    let (laptop, server) = (Machine::new(), Machine::new());
+    laptop.trust("server", &server, &server.addresses("found"));
+    laptop.wait_until("server", "the server refuses the laptop", |seen| {
+        seen["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("refused the link"))
+    });
+    // The laptop dials again after 1 s, then 2 s: refused each time, said once.
+    std::thread::sleep(Duration::from_secs(4));
+    let line = format!("refused a link from {}", laptop.fingerprint());
+    let log = server.log();
+    assert_eq!(log.matches(&line).count(), 1, "{log}");
+}
+
+#[test]
 fn an_address_declared_by_hand_is_used_to_link() {
     let (laptop, server) = (Machine::new(), Machine::new());
     let port = server.addresses("found")[0]
