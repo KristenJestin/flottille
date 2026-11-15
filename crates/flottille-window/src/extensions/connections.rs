@@ -116,6 +116,8 @@ pub struct Server {
     /// Each variable (or header, for a URL) and the vault entry it names.
     pub env: BTreeMap<String, String>,
     pub headers: BTreeMap<String, String>,
+    /// The vault entries of its other secrets: a query parameter, a cookie, basic authentication.
+    pub secrets: Vec<String>,
     pub only: BTreeMap<String, Vec<String>>,
     /// The hosts a sign-in also needs.
     pub sites: Vec<String>,
@@ -156,6 +158,12 @@ impl Server {
             url: value["url"].as_str().map(str::to_owned),
             env: entries(&value["env"]),
             headers: entries(&value["headers"]),
+            secrets: value["secrets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|secret| text(&secret["entry"]))
+                .collect(),
             only: value["only"]
                 .as_object()
                 .into_iter()
@@ -3158,11 +3166,19 @@ impl ConnectionsSection {
         };
         let entries: Vec<String> = match &answer {
             Some(Err(why)) if flottille_core::vault::refused_entry(why) => {
-                let mut kept: Vec<String> = self
+                let mut kept: Vec<String> = Vec::new();
+                for entry in self
                     .server(&review.name)
-                    .map(|server| server.headers.values().cloned().collect())
-                    .unwrap_or_default();
-                kept.dedup();
+                    .map(|server| {
+                        let headers = server.headers.values().cloned();
+                        headers.chain(server.secrets.clone()).collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+                {
+                    if !kept.contains(&entry) {
+                        kept.push(entry);
+                    }
+                }
                 kept
             }
             _ => Vec::new(),
