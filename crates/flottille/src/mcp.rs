@@ -3194,6 +3194,11 @@ fn record(
     if matches!(outcome, Outcome::Invalid(_)) {
         data["input_refused"] = true.into();
     }
+    // What a refusal said, for the rules proposed from the failures that repeat
+    // (`docs/projects.md`, "Proposed rules").
+    if let Outcome::Refused(text) | Outcome::Invalid(text) = outcome {
+        data["error"] = masked(&crate::mcp::cut(text, ARGUMENT_CHARS), &grant.place).into();
+    }
     // A time that cannot be logged for want of the project's vault entry: the window offers its
     // Settings, where the user chooses one.
     if tool == "tickets"
