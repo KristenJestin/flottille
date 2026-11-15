@@ -206,12 +206,12 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
             ("secrets", Value::Array(lines)) => {
                 for (n, line) in lines.iter().enumerate() {
                     let entry = line["entry"].as_str().unwrap_or_default();
-                    if !nameable(&entries, entry) {
+                    if !nameable(&entries, entry, true) {
                         // The value is not said back: it may be a secret written where a name goes.
                         return Err(format!(
-                            "secrets[{n}].entry: not a vault entry's name: a secret is never \
-                             written here, only the name of an entry the vault list gives or of \
-                             one the user is to make"
+                            "secrets[{n}].entry: names no vault entry: a secret is never written \
+                             here, only the name of an entry the vault list gives (or, on a URL's \
+                             secret line, of one the user is to make)"
                         ));
                     }
                 }
@@ -230,12 +230,12 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
                     let entry = entry.as_str().ok_or_else(|| {
                         format!("{key}.{variable}: must name a vault entry, a text")
                     })?;
-                    if !nameable(&entries, entry) {
+                    if !nameable(&entries, entry, key == "headers") {
                         // The value is not said back: it may be a secret written where a name goes.
                         return Err(format!(
-                            "{key}.{variable}: not a vault entry's name: a secret is never \
-                             written here, only the name of an entry the vault list gives or of \
-                             one the user is to make"
+                            "{key}.{variable}: names no vault entry: a secret is never written \
+                             here, only the name of an entry the vault list gives (or, on a URL's \
+                             secret line, of one the user is to make)"
                         ));
                     }
                     named.insert(variable.clone(), json!({"vault": entry}));
@@ -254,11 +254,13 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
     Ok(params)
 }
 
-/// Whether an agent may name `entry`: one of the vault, or one the user is to make before they
-/// accept (`waits`), whose name is an entry's and nothing the masking takes for a secret.
-fn nameable(entries: &[flottille_core::vault::Entry], entry: &str) -> bool {
+/// Whether an agent may name `entry`: one of the vault, or, on a secret line of a URL's requests
+/// (`to_make`), one the user is to make before they accept (`waits`), whose name is an entry's and
+/// nothing the masking takes for a secret. A command's variables name entries that exist.
+fn nameable(entries: &[flottille_core::vault::Entry], entry: &str, to_make: bool) -> bool {
     entries.iter().any(|known| known.name == entry)
-        || (flottille_core::project::valid_name(entry)
+        || (to_make
+            && flottille_core::project::valid_name(entry)
             && flottille_core::secrets::mask(entry, &std::env::vars_os().collect()) == entry)
 }
 
