@@ -3352,7 +3352,7 @@ fn the_connection_form_opens_in_its_resting_state(cx: &mut TestAppContext) {
     )
     .unwrap();
     agent_browser(&user, &["agent_browser_click"], false);
-    let token = json!("browser-token");
+    let token = json!({"vault": "browser-token"});
     user.call(
         "connection.edit",
         json!({"name": "browser",
