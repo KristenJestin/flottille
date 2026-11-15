@@ -38,6 +38,8 @@
 //!  "answers": {"search": {"text": "found it"}},
 //!  "stderr": "a line written to the error output at the start",
 //!  "exit": 3,
+//!  "abort": true,
+//!  "close_streams": true,
 //!  "notify": {"when": "<file>", "times": 50},
 //!  "list_sleep_ms": 100,
 //!  "endless_listing": true,
@@ -45,7 +47,9 @@
 //! ```
 //!
 //! On stdio, `tools/list` reads the script again: a test changes the tools of a running server
-//! by writing it. `notify` says its tools changed `times` times, at once, when the file `when`
+//! by writing it. `exit` ends it with that code at the start and `abort` by the signal of an abort,
+//! after the `stderr` line; `close_streams` closes its input and output at the start and stays
+//! alive. `notify` says its tools changed `times` times, at once, when the file `when`
 //! appears; `list_sleep_ms` slows each listing; `endless_listing` answers every page with a next
 //! one; `list_error` fails each listing with that text; `echo_env` ends its instructions and every
 //! tool's description with the value of that variable, as a careless server echoes its configuration.
@@ -146,6 +150,22 @@ fn main() {
     }
     if let Some(code) = script["exit"].as_i64() {
         std::process::exit(code as i32);
+    }
+    if script["abort"].as_bool() == Some(true) {
+        std::process::abort();
+    }
+    if script["close_streams"].as_bool() == Some(true) {
+        // No `libc` here: the two calls are declared as they are.
+        unsafe extern "C" {
+            fn close(fd: i32) -> i32;
+        }
+        // SAFETY: closing the standard streams, which nothing uses after.
+        unsafe {
+            close(0);
+            close(1);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(600));
+        return;
     }
     if let Some(port_file) = option("--http") {
         return http(&script_path, &log, &port_file);
