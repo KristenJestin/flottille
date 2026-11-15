@@ -52,7 +52,7 @@ use gpui_kit::{
 
 use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer, RunFrom};
 use crate::attachments::{Attachments, STILL_SCALING};
-use crate::commands::CommandInfo;
+use crate::commands::{CommandInfo, spaced};
 use crate::conversation::{
     Activity, Block, COMPACTED_KIND, COMPACTION_FAILED_KIND, Call, CallState, Change, Conversation,
     DiffLine, Ending, STARTED_SESSION_KIND, Summary, TIME_LOGGING_KIND, USER, VaultAsk,
@@ -5429,7 +5429,6 @@ impl Render for Row {
                     .max_w(px(540.))
                     .flex()
                     .flex_col()
-                    .gap(space::XS)
                     .border_1()
                     .border_color(p.line2)
                     .rounded_tl(px(14.))
@@ -5442,10 +5441,9 @@ impl Render for Row {
                 // Another session's message is folded to its first line and who sent it, until a
                 // click opens it: a report can be long. What this one sent is its own words.
                 let bubble = match sent {
-                    true => bubble.child(from).child(markdown_view(
-                        id("relayed-region"),
-                        &self.markdown,
-                        self.scope,
+                    true => bubble.child(from).child(spaced(
+                        space::XS,
+                        markdown_view(id("relayed-region"), &self.markdown, self.scope),
                     )),
                     false => {
                         let turn = turning(id("relayed-toggle"), self.open, window, cx);
@@ -5495,7 +5493,7 @@ impl Render for Row {
                                         .child(first)
                                         .test_support(),
                                 )
-                                .gap(space::XS),
+                                .space(space::XS),
                             )
                             .child(
                                 presence(
@@ -5510,7 +5508,7 @@ impl Render for Row {
                                         ))
                                         .test_support(),
                                 )
-                                .gap(space::XS),
+                                .space(space::XS),
                             )
                     }
                 };
@@ -8253,7 +8251,6 @@ impl Render for SessionRail {
                     ))
                     .flex()
                     .flex_col()
-                    .gap(space::XS)
                     .px(space::XS)
                     .py(space::XS)
                     .aria_label(SharedString::from(format!("Repository {name}")))
@@ -8340,7 +8337,7 @@ impl Render for SessionRail {
                                 )
                             },
                         )
-                        .gap(space::XS),
+                        .space(space::XS),
                     )
                     .test_support()
                     .into_any_element(),
@@ -9920,6 +9917,8 @@ impl Reply {
             .shadow_lg()
             .flex()
             .flex_col()
+            // The rows are `Item`s, which fold the gap of this column: it keeps it, and the labels
+            // and the note borrow it (`KEPT` in `tests/a_block_has_its_own_space.rs`).
             .gap(space::XS)
             .child(
                 presence(
