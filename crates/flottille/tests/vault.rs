@@ -748,3 +748,23 @@ fn the_cli_edits_an_entry_without_its_secret() {
     assert!(!missing.status.success(), "{missing:?}");
     assert_eq!(listed_names(&user), ["jira"]);
 }
+
+#[test]
+fn the_cli_gives_an_entry_back_to_every_project() {
+    let user = User::new();
+    project(&user, "app");
+    set_jira(&user);
+    let bound = user.run_with_input(&["vault", "edit", "jira", "--project", "app"], "");
+    assert!(bound.status.success(), "{bound:?}");
+    assert_eq!(
+        user.call("vault.list", json!({})).unwrap()["entries"][0]["project"],
+        "app"
+    );
+
+    // An empty project is every project's: the entry is given back, not refused.
+    let given_back = user.run_with_input(&["vault", "edit", "jira", "--project", ""], "");
+    assert!(given_back.status.success(), "{given_back:?}");
+    let listed = user.call("vault.list", json!({})).unwrap();
+    assert!(listed["entries"][0]["project"].is_null(), "{listed}");
+    assert_eq!(listed["entries"][0]["description"], "Logs time on Jira");
+}
