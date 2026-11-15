@@ -311,6 +311,11 @@ impl Attachments {
                     let back = self.gone.remove(at);
                     self.images.push(back);
                     cx.notify();
+                    // The text's change may have come before its picture did: the numbers and
+                    // the order are settled now.
+                    if let Some(field) = self.field.clone() {
+                        self.follow_chips(&field, cx);
+                    }
                 }
             }
         }
