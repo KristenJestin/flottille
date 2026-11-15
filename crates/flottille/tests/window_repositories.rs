@@ -1335,6 +1335,38 @@ fn the_task_list_of_a_project_that_is_its_only_repository_drops_in_the_repositor
 }
 
 #[gpui_kit::test]
+fn choosing_the_place_s_folder_for_a_task_in_a_repository_clears_it_on_the_daemon(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    three_shapes(&user);
+    let repository = || {
+        let listed = user.call("task.list", json!({"project": "duo"})).unwrap();
+        listed["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["name"] == "build")
+            .unwrap()["repository"]
+            .clone()
+    };
+    assert_eq!(repository(), "api");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    tasks_of(&shell, "duo", cx);
+    cx.update(|window, cx| window.click("task-build", cx));
+    until(&shell, cx, "the form is open on it", |cx| {
+        has("task-place", cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("task-place", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("task-place-place", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("save-task", cx));
+    until(&shell, cx, "the daemon has it", |_| repository().is_null());
+}
+
+#[gpui_kit::test]
 fn the_new_workspace_dialog_of_a_project_that_is_its_only_repository_shows_the_base_alone(
     cx: &mut TestAppContext,
 ) {

@@ -652,7 +652,9 @@ impl TasksSection {
             "project": self.project,
             "name": name,
             "line": value(&fields.line),
-            "repository": self.flags.repository,
+            // `""` is the place's folder: the link drops a `null`, which would leave the task
+            // where it was.
+            "repository": self.flags.repository.as_deref().unwrap_or_default(),
         });
         for flag in Flag::ALL {
             params[flag.key()] = flag.of(&self.flags).into();
