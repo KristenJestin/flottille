@@ -63,6 +63,23 @@ fn refused(list: &MemberList, root: &DeviceKey) -> String {
     }
 }
 
+/// Points of small order, which decompress but are no device's key: the identity, and the point of
+/// order two.
+const IDENTITY: &str = "0100000000000000000000000000000000000000000000000000000000000000";
+const ORDER_TWO: &str = "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f";
+
+#[test]
+fn a_weak_key_is_refused_in_an_entry() {
+    let (pc, _, _, list) = three();
+    for weak in [IDENTITY, ORDER_TWO] {
+        let mut json = serde_json::to_value(&list).unwrap();
+        json[1]["action"]["key"] = serde_json::Value::String(weak.to_owned());
+        let error = serde_json::from_value::<MemberList>(json).unwrap_err();
+        assert!(error.to_string().contains("weak key"), "{error}");
+    }
+    assert!(list.check(&pc.public()).is_ok());
+}
+
 #[test]
 fn a_list_checks_back_to_the_pinned_root() {
     let (pc, pixel, tablet, mut list) = three();
@@ -351,6 +368,45 @@ fn a_list_that_lost_changes_this_device_has_is_refused() {
 }
 
 #[test]
+fn a_list_that_forked_from_the_one_this_device_has_is_refused() {
+    let (pc, _, _, list) = three();
+    let mut known = list.clone();
+    known.sign(add(&key(4), "laptop", Role::Runner), &pc);
+
+    // As long as the known one, each change signed, but another fourth change.
+    let mut fork = list.clone();
+    fork.sign(add(&key(5), "server", Role::Runner), &pc);
+    assert!(fork.check(&pc.public()).is_ok());
+    let error = fork.check_update(&pc.public(), &known).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("it lacks changes this device has already checked"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_name_with_an_invisible_character_is_refused() {
+    let (pc, _, _, list) = three();
+    for name in [
+        "p\u{200B}xel",
+        "pixel\u{200D}",
+        "\u{202E}lexip",
+        "pi\u{2066}xel",
+        "\u{FEFF}pc",
+    ] {
+        let mut invisible = list.clone();
+        invisible.sign(add(&key(4), name, Role::Viewer), &pc);
+        let why = refused(&invisible, &pc);
+        assert!(
+            why.contains("change 4 names a device") && why.contains("no invisible character"),
+            "{name:?}: {why}"
+        );
+    }
+}
+
+#[test]
 fn a_name_is_unique_among_the_members() {
     let (pc, pixel, _, list) = three();
 
@@ -433,7 +489,12 @@ fn a_list_travels_as_json_and_still_checks() {
     assert!(back.check(&pc.public()).is_ok());
 
     // A key that is not one is refused when read.
-    for not_a_key in ["zz".repeat(32), "ab".repeat(31)] {
+    for not_a_key in [
+        "zz".repeat(32),
+        "ab".repeat(31),
+        IDENTITY.to_owned(),
+        ORDER_TWO.to_owned(),
+    ] {
         let mut broken = serde_json::to_value(&list).unwrap();
         broken[1]["signer"] = serde_json::Value::String(not_a_key);
         assert!(serde_json::from_value::<MemberList>(broken).is_err());

@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use flottille_link::{
-    Action, DeviceKey, Invitation, Keyring, KeyringError, MemberList, Role, Token,
+    Action, DeviceKey, Invitation, InvitationError, Keyring, KeyringError, MemberList, Role, Token,
     verification_words,
 };
 use zeroize::Zeroizing;
@@ -65,7 +65,7 @@ const ALPHABET: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 #[test]
 fn an_invitation_code_round_trips_and_a_damaged_one_is_refused() {
     let sent = invitation(&key(2));
-    let code = sent.code();
+    let code = sent.code().unwrap();
     assert!(code.chars().all(|c| ALPHABET.contains(c)), "{code}");
     assert_eq!(Invitation::from_code(&code).unwrap(), sent);
 
@@ -110,6 +110,37 @@ fn an_invitation_code_round_trips_and_a_damaged_one_is_refused() {
 }
 
 #[test]
+fn a_hub_url_that_is_not_one_is_refused() {
+    for url in [
+        "",
+        "hub.example.net",
+        "ftp://hub.example.net",
+        "https://",
+        "https:///path",
+        "https://hub.example.net/a b",
+        "https://hub.example.net\n",
+        "https://hub\u{200B}.example.net",
+        "https://\u{202E}ten.elpmaxe.buh",
+        &format!("https://hub.example.net/{}", "a".repeat(2048)),
+    ] {
+        let mut sent = invitation(&key(2));
+        sent.hub_url = url.to_owned();
+        let error = sent.code().unwrap_err();
+        assert_eq!(error, InvitationError::HubUrl, "{url:?}");
+        assert_eq!(
+            error.to_string(),
+            "the hub URL of this invitation is not an http:// or https:// address of at most 2048 \
+             characters, with no space and no invisible character",
+        );
+    }
+    for url in ["http://192.0.2.7:7443", "https://hub.example.net/flottille"] {
+        let mut sent = invitation(&key(2));
+        sent.hub_url = url.to_owned();
+        assert_eq!(Invitation::from_code(&sent.code().unwrap()).unwrap(), sent);
+    }
+}
+
+#[test]
 fn both_sides_draw_the_same_four_words() {
     // The keys of RFC 8032's first two test vectors.
     let new_device = key_from(bytes(
@@ -130,7 +161,7 @@ fn both_sides_draw_the_same_four_words() {
     // The inviting member: the join request's key, its own, the token the hub gave it.
     let on_the_member = verification_words(&new_device.public(), &inviter.public(), &token());
     // The new device: its own key and what it read in the code.
-    let read = Invitation::from_code(&invitation(&inviter).code()).unwrap();
+    let read = Invitation::from_code(&invitation(&inviter).code().unwrap()).unwrap();
     let on_the_new_device = read.words(&new_device.public());
 
     assert_eq!(on_the_member, on_the_new_device);
@@ -144,6 +175,10 @@ fn both_sides_draw_the_same_four_words() {
     );
     assert_ne!(
         verification_words(&key(5).public(), &inviter.public(), &token()),
+        on_the_member
+    );
+    assert_ne!(
+        verification_words(&new_device.public(), &key(5).public(), &token()),
         on_the_member
     );
 }
@@ -161,7 +196,7 @@ fn an_entry_not_signed_by_the_invitation_s_fingerprint_is_refused_by_the_new_dev
         &pc,
     );
     // The phone invited the laptop.
-    let read = Invitation::from_code(&invitation(&pixel).code()).unwrap();
+    let read = Invitation::from_code(&invitation(&pixel).code().unwrap()).unwrap();
     let laptop_entry = Action::Add {
         key: laptop.public(),
         name: "laptop".to_owned(),

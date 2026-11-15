@@ -231,6 +231,33 @@ mod tests {
     }
 
     #[test]
+    fn a_weak_key_in_a_code_is_refused() {
+        // RFC 8032's first test key, and the identity, a point of small order.
+        let key = crate::serial::from_hex::<32>(
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        )
+        .unwrap();
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        for (hub, inviter) in [(identity, key), (key, identity)] {
+            let mut bytes = vec![VERSION];
+            bytes.extend_from_slice(&hub);
+            bytes.extend_from_slice(&inviter);
+            bytes.extend_from_slice(&[7; 16]);
+            bytes.extend_from_slice(b"https://hub.example.net");
+            let sum = checksum(&bytes);
+            bytes.extend_from_slice(&sum);
+
+            let error = Invitation::from_code(&encode(&bytes)).unwrap_err();
+            assert_eq!(error, InvitationError::BadKey);
+            assert_eq!(
+                error.to_string(),
+                "this invitation code holds a key no device makes: ask for a new invitation"
+            );
+        }
+    }
+
+    #[test]
     fn base32_round_trips_every_length() {
         let bytes: Vec<u8> = (0..=255).collect();
         for length in 0..40 {
