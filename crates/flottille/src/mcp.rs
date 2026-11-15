@@ -116,7 +116,8 @@ const SERVED: [Definition; 33] = [
         description: "Reads a text file of the place, a page at a time (32 KiB at most), lines \
             numbered. The end of the page names the offset of the next one: pass it as \
             range.offset to read on. Reading a file is what lets fs_write and fs_edit change it \
-            later. Refused outside the place and for a folder (use fs_list).",
+            later. A page already read and unchanged since is answered in one line, unless again \
+            is true. Refused outside the place and for a folder (use fs_list).",
         read_only: true,
         idempotent: true,
         destructive: false,
@@ -127,7 +128,8 @@ const SERVED: [Definition; 33] = [
                 "range": {"type": "object", "properties": {
                     "offset": {"type": "integer", "minimum": 0, "description": "The byte to start at; a page names the next one."},
                     "length": {"type": "integer", "minimum": 1, "maximum": files::READ_PAGE_BYTES}
-                }, "additionalProperties": false}
+                }, "additionalProperties": false},
+                "again": {"type": "boolean", "description": "Send the page even when it is unchanged since you read it."}
             }, "required": ["path"], "additionalProperties": false})
         },
     },

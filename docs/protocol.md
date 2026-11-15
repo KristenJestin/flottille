@@ -805,15 +805,19 @@ them: no tool of an agent does.
 
 `tool_results.show` and `tool_results.set` read and keep the limit above which a tool result is
 cut at the source (`docs/tools.md`, "Long results"): `limit` in `tool-results.toml` of
-Flottille's configuration folder.
+Flottille's configuration folder; and whether `fs_read` says a page is unchanged instead of
+sending it again (`docs/tools.md`, "Files"): `unchanged`, `true` or `false`, true when it is
+absent.
 
-- `tool_results.show` answers `{"limit"}`: a number of characters, or `"off"` when results are
-  returned whole. With no file, `8000`. `invalid-config` when the file cannot be read, names
-  another key, or holds a `limit` that is neither `"off"` nor a whole number from 4000 to 40000.
-- `tool_results.set {limit}` takes a number of characters or `"off"`, writes the file
-  (`limit = 16000`, or `limit = "off"`) and answers as `tool_results.show`; `invalid-params` for
-  anything else, a number out of the range and a missing `limit` included (a client leaves null
-  fields out, so `"off"` is a word).
+- `tool_results.show` answers `{"limit", "unchanged"}`: a number of characters, or `"off"` when
+  results are returned whole (with no file, `8000`), and a boolean. `invalid-config` when the file
+  cannot be read, names another key, holds a `limit` that is neither `"off"` nor a whole number
+  from 4000 to 40000, or an `unchanged` that is not a boolean.
+- `tool_results.set {limit?, unchanged?}` takes a number of characters or `"off"`, a boolean, or
+  both, keeps what it is not given as the file says, writes the file (`limit = 16000`, or
+  `limit = "off"`, then `unchanged = false` when it is off) and answers as `tool_results.show`;
+  `invalid-params` for anything else, a number out of the range and neither field given included
+  (a client leaves null fields out, so `"off"` is a word).
 
 The daemon reads the file at every tool call: a change applies to the next result of every
 running session. `tool_results.set` emits `tool_results.changed` with what it answers. The user's

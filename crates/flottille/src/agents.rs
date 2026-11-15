@@ -1857,6 +1857,7 @@ fn compacted_session(
             data["missing"] = true.into();
         }
         crate::compaction::over(daemon, id);
+        daemon.mcp.kept.compacted(id);
         record(daemon, id, "agent.compacted", data, false);
     }
     crate::compaction::finish(daemon, id);
@@ -2272,6 +2273,9 @@ impl acp::Events for Recorder {
             }
         } else {
             self.said();
+        }
+        if name == "agent.compacted" {
+            self.daemon.mcp.kept.compacted(&self.agent);
         }
         self.record(name, data, activity);
         if name == "agent.compacted" {

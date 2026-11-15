@@ -12564,6 +12564,38 @@ fn the_developer_mode_is_switched_in_settings_with_its_log_s_path_beside_the_swi
 }
 
 #[gpui_kit::test]
+fn the_switch_that_says_a_file_is_unchanged_is_on_until_it_is_turned_off(cx: &mut TestAppContext) {
+    let user = User::new().with_cut_results();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    choose_settings_tab("agents", cx);
+    until(&shell, cx, "the page knows the switch", |cx| {
+        page.read_with(cx, |page, _| page.unchanged_said().is_some())
+    });
+    settle(cx);
+    assert_eq!(
+        page.read_with(cx, |page, _| page.unchanged_said()),
+        Some(true)
+    );
+
+    cx.update(|window, cx| window.click("tool-results-unchanged-switch", cx));
+    until(&shell, cx, "the daemon says it is off", |cx| {
+        page.read_with(cx, |page, _| page.unchanged_said() == Some(false))
+    });
+    let text = std::fs::read_to_string(user.path("config/flottille/tool-results.toml")).unwrap();
+    assert!(text.contains("unchanged = false"), "{text}");
+    settle(cx);
+
+    // Chosen from elsewhere, the page follows.
+    user.call("tool_results.set", json!({"unchanged": true}))
+        .unwrap();
+    until(&shell, cx, "the page shows it on", |cx| {
+        page.read_with(cx, |page, _| page.unchanged_said() == Some(true))
+    });
+    settle(cx);
+}
+
+#[gpui_kit::test]
 fn the_limit_of_tool_results_is_chosen_in_a_section_at_the_end_of_the_providers_tab(
     cx: &mut TestAppContext,
 ) {

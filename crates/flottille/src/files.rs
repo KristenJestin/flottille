@@ -40,9 +40,24 @@ const EDITS_MAX: usize = 50;
 /// many files per agent.
 const KEPT_BYTES: u64 = 256 * 1024;
 const KEPT_FILES: usize = 32;
+/// The pages each agent was shown that "unchanged" can answer, so many per agent.
+const SHOWN_PAGES: usize = 64;
 const DIFF_LINES: usize = 20;
 const DIFF_LINE_CHARS: usize = 120;
 const CHUNK: usize = 64 * 1024;
+
+/// A page of a file a session was shown: what `fs_read` asked for, what the file then was, and
+/// what the page held.
+struct Shown {
+    path: PathBuf,
+    offset: u64,
+    length: u64,
+    sha: String,
+    start: u64,
+    end: u64,
+    size: u64,
+    at: String,
+}
 
 /// The texts of the files each agent read, for the diffs of the refusals: the last ones only.
 #[derive(Default)]
@@ -52,6 +67,8 @@ pub struct Kept {
     /// single step, whoever the agent.
     writing: Mutex<HashSet<PathBuf>>,
     written: Condvar,
+    /// The pages of files each session was shown since its last compaction, by agent.
+    shown: Mutex<HashMap<String, VecDeque<Shown>>>,
     /// Run between the check of a file and its write, so that a test makes two calls meet there.
     #[cfg(test)]
     between: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
@@ -69,6 +86,46 @@ impl Kept {
             kept: self,
             path: path.to_owned(),
         }
+    }
+
+    /// The session's context was compacted: it no longer has any page in front of it.
+    pub fn compacted(&self, agent: &str) {
+        self.shown.lock().unwrap().remove(agent);
+    }
+
+    fn show(&self, agent: &str, page: Shown) {
+        let mut shown = self.shown.lock().unwrap();
+        let pages = shown.entry(agent.to_owned()).or_default();
+        pages.retain(|p| (&p.path, p.offset, p.length) != (&page.path, page.offset, page.length));
+        pages.push_back(page);
+        if pages.len() > SHOWN_PAGES {
+            pages.pop_front();
+        }
+    }
+
+    /// The line that answers a read of the same page of a file that is still as it was shown.
+    fn unchanged(
+        &self,
+        agent: &str,
+        path: &Path,
+        (offset, length): (u64, u64),
+        sha: &str,
+    ) -> Option<String> {
+        let shown = self.shown.lock().unwrap();
+        let page = shown
+            .get(agent)?
+            .iter()
+            .find(|p| p.path == path && p.offset == offset && p.length == length)?;
+        (page.sha == sha).then(|| {
+            format!(
+                "unchanged since you read it (bytes {}-{} of {}, at {}); give \"again\": true \
+                 to read it whole",
+                page.start,
+                page.end - 1,
+                page.size,
+                page.at
+            )
+        })
     }
 
     fn keep(&self, agent: &str, path: &Path, text: Option<String>) {
@@ -200,6 +257,20 @@ impl Context<'_> {
         self.daemon
             .read(|store| store.file_read(self.agent, &Context::key(path)))
             .map_err(|e| Outcome::Failed(e.to_string()))
+    }
+
+    /// Whether Flottille sees this agent's compactions: the Claude and Codex bridges say them
+    /// (`docs/agents.md`), any other provider does not, and "unchanged" is never safe for it.
+    fn sees_compactions(&self) -> bool {
+        let agent = self.daemon.read(|store| store.agent(self.agent));
+        matches!(
+            agent.ok().flatten().map(|agent| agent.provider).as_deref(),
+            Some("claude" | "codex")
+        )
+    }
+
+    fn may_say_unchanged(&self) -> bool {
+        self.sees_compactions() && crate::results::says_unchanged(&self.daemon.paths)
     }
 
     /// What the session now knows of the file: its fingerprint, and its text when small.
@@ -354,6 +425,9 @@ struct ReadArguments {
     repository: Option<String>,
     path: String,
     range: Option<Range>,
+    /// Reads the page whole even when it is unchanged since the session read it.
+    #[serde(default)]
+    again: bool,
 }
 
 #[derive(Deserialize)]
@@ -398,7 +472,7 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
     // session knows the file's fingerprint once it read a page, and a page it was shown only in
     // part would let it write over text it never saw.
     let budget = page_budget(cx.daemon);
-    match read_page(Some(cx), &path, offset, length, budget) {
+    match page(Some(cx), &path, (offset, length), budget, args.again) {
         Ok(outcome) => outcome,
         Err(error) => failed(&path, error),
     }
@@ -513,6 +587,18 @@ pub fn read_page(
     length: u64,
     budget: usize,
 ) -> std::io::Result<Outcome> {
+    page(cx, path, (offset, length), budget, true)
+}
+
+/// `read_page`, answering one line instead when `again` is false, the session was shown this very
+/// page and the file is as it was then (`docs/tools.md`, "Files").
+fn page(
+    cx: Option<&Context>,
+    path: &Resolved,
+    (offset, length): (u64, u64),
+    budget: usize,
+    again: bool,
+) -> std::io::Result<Outcome> {
     let mut file = match open_regular(&path.path) {
         Err(error) if error.kind() == ErrorKind::IsADirectory => {
             return Ok(Outcome::Refused(format!(
@@ -530,6 +616,7 @@ pub fn read_page(
             path.shown
         )));
     }
+    let mut sha_read = None;
     if let Some(cx) = cx {
         let (sha, kept) = if size <= KEPT_BYTES {
             let mut bytes = Vec::new();
@@ -541,6 +628,17 @@ pub fn read_page(
         if let Err(outcome) = cx.remember(&path.path, &sha, kept) {
             return Ok(outcome);
         }
+        if !again
+            && cx.may_say_unchanged()
+            && let Some(line) =
+                cx.daemon
+                    .mcp
+                    .kept
+                    .unchanged(cx.agent, &path.path, (offset, length), &sha)
+        {
+            return Ok(Outcome::Done(line));
+        }
+        sha_read = Some(sha);
     }
 
     // A few bytes more than the page: an offset inside a character skips its continuation bytes,
@@ -606,6 +704,24 @@ pub fn read_page(
         _ => format!("(no bytes at offset {start} of {size}: the end of the file)"),
     };
     let range = json!({"offset": start, "end": end, "size": size, "next": next});
+    if let (Some(cx), Some(sha)) = (cx, sha_read)
+        && taken > 0
+        && cx.sees_compactions()
+    {
+        cx.daemon.mcp.kept.show(
+            cx.agent,
+            Shown {
+                path: path.path.clone(),
+                offset,
+                length,
+                sha,
+                start,
+                end,
+                size,
+                at: jiff::Zoned::now().strftime("%H:%M").to_string(),
+            },
+        );
+    }
     Ok(Outcome::Done(format!("{body}{tail}\n{range}")))
 }
 
