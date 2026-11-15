@@ -81,14 +81,39 @@ fn answers(received: Vec<Value>) -> Vec<String> {
         .collect()
 }
 
-fn read() -> Value {
-    json!({"mcp": {"tool": "fs_read", "arguments": {"path": "notes.txt"}}})
+/// A read of `notes.txt` as the fake `claude` makes one: announced as the tool use `id`, which it
+/// hands the server as `claudecode/toolUseId` (the fake makes the id its session's).
+fn read_as(id: &str) -> Value {
+    json!({"mcp": {"tool": "fs_read", "id": id, "arguments": {"path": "notes.txt"}}})
 }
 
-fn claude_user(turns: Value) -> User {
+/// The same, whose tool use the fake does not announce on its output.
+fn read_unseen(id: &str) -> Value {
+    json!({"mcp": {"tool": "fs_read", "id": id, "unseen": true,
+        "arguments": {"path": "notes.txt"}}})
+}
+
+/// A user whose fake `claude` plays `turns`, the switch left as it is by default.
+fn claude_user_off(turns: Value) -> User {
+    claude_user_with(json!({"turns": turns}))
+}
+
+fn claude_user_with(script: Value) -> User {
     let user = User::with_fake_claude();
-    user.claude_script(json!({"turns": turns}));
+    user.claude_script(script);
     user
+}
+
+/// The same with the switch that says a file is unchanged turned on.
+fn claude_user(turns: Value) -> User {
+    let user = claude_user_off(turns);
+    on(&user);
+    user
+}
+
+fn on(user: &User) {
+    user.call("tool_results.set", json!({"unchanged": true}))
+        .unwrap();
 }
 
 const UNCHANGED: &str = "unchanged since you read it (bytes 0-13 of 14, at ";
@@ -100,7 +125,7 @@ fn assert_whole(answer: &str) {
 
 #[test]
 fn a_second_read_of_an_unchanged_file_says_unchanged() {
-    let user = claude_user(json!([{"when": "read", "do": [read(), read()]}]));
+    let user = claude_user(json!([{"when": "read", "do": [read_as("a"), read_as("b")]}]));
     project(&user);
 
     turn(&user, None, "read it twice");
@@ -120,7 +145,7 @@ fn a_second_read_of_an_unchanged_file_says_unchanged() {
 #[test]
 fn a_read_after_a_compaction_is_whole() {
     let user = claude_user(json!([{"when": "read", "do": [
-        read(), {"compaction": true}, {"wait": 700}, read()
+        read_as("a"), {"compaction": true}, read_as("b")
     ]}]));
     project(&user);
 
@@ -135,8 +160,8 @@ fn a_read_after_a_compaction_is_whole() {
 #[test]
 fn a_changed_file_is_read_whole() {
     let user = claude_user(json!([
-        {"when": "first", "do": [read()]},
-        {"when": "second", "do": [read()]}
+        {"when": "first", "do": [read_as("a")]},
+        {"when": "second", "do": [read_as("b")]}
     ]));
     let folder = project(&user);
     let agent = turn(&user, None, "first");
@@ -153,8 +178,9 @@ fn a_changed_file_is_read_whole() {
 #[test]
 fn a_read_of_another_range_is_whole() {
     let user = claude_user(json!([{"when": "read", "do": [
-        read(),
-        {"mcp": {"tool": "fs_read", "arguments": {"path": "notes.txt", "range": {"offset": 4}}}}
+        read_as("a"),
+        {"mcp": {"tool": "fs_read", "id": "b",
+            "arguments": {"path": "notes.txt", "range": {"offset": 4}}}}
     ]}]));
     project(&user);
 
@@ -169,8 +195,9 @@ fn a_read_of_another_range_is_whole() {
 #[test]
 fn again_reads_it_whole() {
     let user = claude_user(json!([{"when": "read", "do": [
-        read(),
-        {"mcp": {"tool": "fs_read", "arguments": {"path": "notes.txt", "again": true}}}
+        read_as("a"),
+        {"mcp": {"tool": "fs_read", "id": "b",
+            "arguments": {"path": "notes.txt", "again": true}}}
     ]}]));
     project(&user);
 
@@ -184,11 +211,13 @@ fn again_reads_it_whole() {
 #[test]
 fn an_agent_whose_compactions_are_not_seen_always_reads_whole() {
     let user = User::with_fake_providers();
+    let plain = json!({"mcp": {"tool": "fs_read", "arguments": {"path": "notes.txt"}}});
     user.provider_script(
         "opencode",
-        json!({"turns": [{"when": "read", "do": [read(), read()]}]}),
+        json!({"turns": [{"when": "read", "do": [plain, plain]}]}),
     );
     project(&user);
+    on(&user);
 
     turn_on(&user, None, "read it twice", Some("opencode"));
 
@@ -199,13 +228,11 @@ fn an_agent_whose_compactions_are_not_seen_always_reads_whole() {
 }
 
 #[test]
-fn the_switch_off_reads_whole_and_is_kept_with_the_limit() {
-    let user = claude_user(json!([{"when": "read", "do": [read(), read()]}]));
+fn the_switch_is_off_until_it_is_turned_on_and_is_kept_with_the_limit() {
+    let user = claude_user_off(json!([{"when": "read", "do": [read_as("a"), read_as("b")]}]));
     project(&user);
     // A test daemon has no cut of results until one is chosen.
-    let shown = user
-        .call("tool_results.set", json!({"unchanged": false}))
-        .unwrap();
+    let shown = user.call("tool_results.show", json!({})).unwrap();
     assert_eq!(shown, json!({"limit": "off", "unchanged": false}));
     let shown = user
         .call("tool_results.set", json!({"limit": 16000}))
@@ -215,9 +242,63 @@ fn the_switch_off_reads_whole_and_is_kept_with_the_limit() {
     turn(&user, None, "read it twice");
 
     let answers = claude_answers(&user);
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    assert_whole(&answers[0]);
     assert_whole(&answers[1]);
     let shown = user
         .call("tool_results.set", json!({"unchanged": true}))
         .unwrap();
     assert_eq!(shown, json!({"limit": 16000, "unchanged": true}));
+    let shown = user
+        .call("tool_results.set", json!({"limit": 8000}))
+        .unwrap();
+    assert_eq!(shown, json!({"limit": 8000, "unchanged": true}));
+}
+
+#[test]
+fn a_read_whose_tool_call_is_not_yet_seen_is_whole() {
+    // The compaction and the call travel on two roads: a call whose `tool_call` the daemon has not
+    // recorded may have outrun a compaction before it, so it is read whole.
+    let user = claude_user(json!([{"when": "read", "do": [
+        read_as("a"), read_unseen("b"), read_as("c")
+    ]}]));
+    project(&user);
+
+    turn(&user, None, "read it three times");
+
+    let answers = claude_answers(&user);
+    assert_eq!(answers.len(), 3, "{answers:?}");
+    assert_whole(&answers[0]);
+    assert_whole(&answers[1]);
+    assert!(answers[2].starts_with(UNCHANGED), "{}", answers[2]);
+}
+
+#[test]
+fn a_read_after_a_replacement_is_whole() {
+    // A session it left cannot be resumed: the death is followed by a new session, which starts
+    // from the first message and reads the file again.
+    let user = claude_user_with(json!({"resume_error": true, "turns": [
+        {"when": "read", "do": [read_as("a"), {"die": 3}]}
+    ]}));
+    // No compactor: the one Flottille would pick is this fake `claude`, which dies as well.
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/compaction.toml"),
+        "compactor = \"none\"\n",
+    )
+    .unwrap();
+    project(&user);
+    on(&user);
+
+    user.call("agent.run", json!({"project": "app", "message": "read it"}))
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while claude_answers(&user).len() < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let answers = claude_answers(&user);
+    assert!(answers.len() >= 2, "{answers:?}");
+    assert_whole(&answers[0]);
+    assert_whole(&answers[1]);
 }

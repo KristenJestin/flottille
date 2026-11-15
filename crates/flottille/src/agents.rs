@@ -1857,7 +1857,6 @@ fn compacted_session(
             data["missing"] = true.into();
         }
         crate::compaction::over(daemon, id);
-        daemon.mcp.kept.compacted(id);
         record(daemon, id, "agent.compacted", data, false);
     }
     crate::compaction::finish(daemon, id);
@@ -1925,6 +1924,8 @@ fn renew(
             return false;
         }
     };
+    // The new session has seen no page of any file: what the old one was shown is not before it.
+    daemon.mcp.kept.compacted(id);
     // No process runs here: the old session is over, and nothing will load it.
     if let Some((provider, native)) = replaced {
         (provider.forget_session)(&daemon.paths, &native);
@@ -2276,6 +2277,12 @@ impl acp::Events for Recorder {
         }
         if name == "agent.compacted" {
             self.daemon.mcp.kept.compacted(&self.agent);
+        }
+        if name == "agent.tool_call"
+            && data["update"] == false
+            && let Some(id) = data["id"].as_str()
+        {
+            self.daemon.mcp.kept.called(&self.agent, id);
         }
         self.record(name, data, activity);
         if name == "agent.compacted" {

@@ -42,6 +42,8 @@ const KEPT_BYTES: u64 = 256 * 1024;
 const KEPT_FILES: usize = 32;
 /// The pages each agent was shown that "unchanged" can answer, so many per agent.
 const SHOWN_PAGES: usize = 64;
+/// The tool calls of each agent the daemon remembers having seen.
+const SEEN_CALLS: usize = 256;
 const DIFF_LINES: usize = 20;
 const DIFF_LINE_CHARS: usize = 120;
 const CHUNK: usize = 64 * 1024;
@@ -69,6 +71,9 @@ pub struct Kept {
     written: Condvar,
     /// The pages of files each session was shown since its last compaction, by agent.
     shown: Mutex<HashMap<String, VecDeque<Shown>>>,
+    /// The ids of the tool calls the agents' sessions said they made, as the daemon recorded
+    /// them: the last ones of each agent.
+    calls: Mutex<HashMap<String, VecDeque<String>>>,
     /// Run between the check of a file and its write, so that a test makes two calls meet there.
     #[cfg(test)]
     between: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
@@ -91,6 +96,32 @@ impl Kept {
     /// The session's context was compacted: it no longer has any page in front of it.
     pub fn compacted(&self, agent: &str) {
         self.shown.lock().unwrap().remove(agent);
+    }
+
+    /// The agent's session said it made the tool call `id`. It comes on the pipe a compaction
+    /// comes on, so one that came before it has been processed when this is.
+    pub fn called(&self, agent: &str, id: &str) {
+        let mut calls = self.calls.lock().unwrap();
+        let ids = calls.entry(agent.to_owned()).or_default();
+        ids.push_back(id.to_owned());
+        if ids.len() > SEEN_CALLS {
+            ids.pop_front();
+        }
+    }
+
+    fn call_seen(&self, agent: &str, id: &str) -> bool {
+        let calls = self.calls.lock().unwrap();
+        calls
+            .get(agent)
+            .is_some_and(|ids| ids.iter().any(|seen| seen == id))
+    }
+
+    /// The agent's file `path` was changed by a write: what it was shown of it is no longer what
+    /// the file may come back to.
+    fn forget(&self, agent: &str, path: &Path) {
+        if let Some(pages) = self.shown.lock().unwrap().get_mut(agent) {
+            pages.retain(|page| page.path != path);
+        }
     }
 
     fn show(&self, agent: &str, page: Shown) {
@@ -178,6 +209,8 @@ pub struct Context<'a> {
     pub place: &'a Place,
     /// The user or the judge allowed the call, of this class: its path may be outside the place.
     pub approved: Option<Class>,
+    /// The id the provider gave the call (`claudecode/toolUseId`), when it came with one.
+    pub call: Option<&'a str>,
 }
 
 impl Context<'_> {
@@ -269,8 +302,15 @@ impl Context<'_> {
         )
     }
 
+    /// Whether "unchanged" is safe for this call: the switch is on, the provider's compactions
+    /// are seen, and the daemon has recorded the tool call this one is. A compaction that came
+    /// before the call on the agent's pipe has then been processed; the call's own HTTP request
+    /// may have outrun it otherwise.
     fn may_say_unchanged(&self) -> bool {
-        self.sees_compactions() && crate::results::says_unchanged(&self.daemon.paths)
+        self.call
+            .is_some_and(|id| self.daemon.mcp.kept.call_seen(self.agent, id))
+            && self.sees_compactions()
+            && crate::results::says_unchanged(&self.daemon.paths)
     }
 
     /// What the session now knows of the file: its fingerprint, and its text when small.
@@ -1385,6 +1425,7 @@ fn write(cx: &Context, path: &Resolved, content: String) -> Result<usize, Outcom
     #[cfg(test)]
     cx.daemon.mcp.kept.between_check_and_write();
     put(path, content.as_bytes())?;
+    cx.daemon.mcp.kept.forget(cx.agent, &path.path);
     let size = content.len();
     let sha = sha256(content.as_bytes());
     let kept = (size as u64 <= KEPT_BYTES).then_some(content);
@@ -2050,12 +2091,29 @@ mod at_once {
         }
 
         fn cx<'a>(&'a self, agent: &'a str) -> Context<'a> {
+            self.cx_of(agent, None)
+        }
+
+        fn cx_of<'a>(&'a self, agent: &'a str, call: Option<&'a str>) -> Context<'a> {
             Context {
                 daemon: &self.daemon,
                 agent,
                 place: &self.place,
                 approved: None,
+                call,
             }
+        }
+
+        /// The switch that says a file is unchanged is turned on, and the agent's session said
+        /// the tool call `call`: a read made as that call may be answered so.
+        fn says_unchanged(&self, agent: &str, call: &str) {
+            std::fs::create_dir_all(&self.daemon.paths.config).unwrap();
+            std::fs::write(
+                self.daemon.paths.config.join("tool-results.toml"),
+                "unchanged = true\n",
+            )
+            .unwrap();
+            self.daemon.mcp.kept.called(agent, call);
         }
 
         fn read(&self, agent: &str, path: &str) {
@@ -2202,7 +2260,8 @@ mod at_once {
         let scene = Scene::new();
 
         // `Scene::new` read the file: this second read is answered "unchanged".
-        let outcome = fs_read(&scene.cx("a"), json!({"path": "src/lib.rs"}));
+        scene.says_unchanged("a", "t1");
+        let outcome = fs_read(&scene.cx_of("a", Some("t1")), json!({"path": "src/lib.rs"}));
         assert!(
             said(&outcome).starts_with("unchanged since you read it"),
             "{}",
@@ -2212,5 +2271,28 @@ mod at_once {
 
         assert!(matches!(outcome, Outcome::Done(_)), "{}", said(&outcome));
         assert_eq!(scene.text("src/lib.rs"), "ONE\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn a_file_edited_then_reverted_is_read_whole() {
+        let scene = Scene::new();
+        scene.says_unchanged("a", "t1");
+        let read = || fs_read(&scene.cx_of("a", Some("t1")), json!({"path": "src/lib.rs"}));
+        assert!(said(&read()).starts_with("unchanged since you read it"));
+
+        let outcome = fs_edit(&scene.cx("a"), edit("src/lib.rs", "one", "ONE"));
+        assert!(matches!(outcome, Outcome::Done(_)), "{}", said(&outcome));
+        let outcome = fs_edit(&scene.cx("a"), edit("src/lib.rs", "ONE", "one"));
+        assert!(matches!(outcome, Outcome::Done(_)), "{}", said(&outcome));
+
+        // The file is as the session read it, but what it saw since is two edits: whole.
+        let outcome = read();
+        assert!(
+            said(&outcome).contains("     1\tone\n"),
+            "{}",
+            said(&outcome)
+        );
+        // Whole once: shown again, it is unchanged again.
+        assert!(said(&read()).starts_with("unchanged since you read it"));
     }
 }

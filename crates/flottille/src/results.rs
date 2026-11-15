@@ -4,7 +4,7 @@
 //! and the id of the cut. No model is involved. The limit is `tool-results.toml` of Flottille's
 //! configuration folder, read at every call so that a change applies at once
 //! (`docs/protocol.md`, "The tool results methods"). The same file says whether `fs_read` answers
-//! "unchanged" for a page the session already read (`unchanged`, on unless it says `false`).
+//! "unchanged" for a page the session already read (`unchanged`, off unless it says `true`).
 
 use std::path::PathBuf;
 
@@ -55,7 +55,7 @@ struct Settings {
 fn read(paths: &Paths) -> Result<Settings, String> {
     let mut settings = Settings {
         limit: Some(DEFAULT_LIMIT),
-        unchanged: true,
+        unchanged: false,
     };
     let text = match std::fs::read_to_string(config(paths)) {
         Ok(text) => text,
@@ -98,10 +98,10 @@ fn limit(paths: &Paths) -> Option<usize> {
     read(paths).map_or(Some(DEFAULT_LIMIT), |settings| settings.limit)
 }
 
-/// Whether `fs_read` says a page is unchanged now. A file that cannot be read is the default's:
-/// on.
+/// Whether `fs_read` says a page is unchanged now. Off by default until what it saves is measured
+/// (#547 records the cost of a turn): a file that cannot be read is the default's.
 pub fn says_unchanged(paths: &Paths) -> bool {
-    read(paths).map_or(true, |settings| settings.unchanged)
+    read(paths).is_ok_and(|settings| settings.unchanged)
 }
 
 /// How many bytes of text a result may hold now and still go to the agent whole: a tool that
@@ -119,7 +119,7 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
         "tool_results.set" => {
             let mut wanted = read(paths).unwrap_or(Settings {
                 limit: Some(DEFAULT_LIMIT),
-                unchanged: true,
+                unchanged: false,
             });
             let (limit, unchanged) = (params.get("limit"), params.get("unchanged"));
             if limit.is_none() && unchanged.is_none() {
@@ -161,8 +161,8 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                 Some(limit) => format!("limit = {limit}\n"),
                 None => "limit = \"off\"\n".to_owned(),
             };
-            if !wanted.unchanged {
-                text.push_str("unchanged = false\n");
+            if wanted.unchanged {
+                text.push_str("unchanged = true\n");
             }
             providers::write_in_place(&config(paths), &text)
                 .map_err(|e| Failure::new("unavailable", format!("tool-results.toml: {e}")))?;

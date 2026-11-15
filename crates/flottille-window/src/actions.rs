@@ -1671,7 +1671,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let shown = answer(ask_alone(connect, method, params, bounds.quick)).map(|shown| {
                 (
                     shown["limit"].as_u64().map(|limit| limit as usize),
-                    shown["unchanged"] != false,
+                    shown["unchanged"] == true,
                 )
             });
             Outcome::ToolResults { written, shown }

@@ -2361,8 +2361,10 @@ async fn played_in(
                     gate::Verdict::Allow => match stale(daemon, grant, tool) {
                         Some(refused) => refused,
                         None => {
-                            perform(daemon, grant, tool, args, cancelled, None, &first, &reads)
-                                .await
+                            perform(
+                                daemon, grant, tool, args, cancelled, None, &first, key, &reads,
+                            )
+                            .await
                         }
                     },
                     gate::Verdict::Deny(why) => Outcome::Refused(why),
@@ -2432,7 +2434,7 @@ async fn played_in(
                                     let approved = Some(ask.class);
                                     perform(
                                         daemon, grant, tool, args, cancelled, approved, &first,
-                                        &reads,
+                                        key, &reads,
                                     )
                                     .await
                                 }
@@ -2454,7 +2456,7 @@ async fn played_in(
                                         let approved = Some(gate::Class::Judge);
                                         perform(
                                             daemon, grant, tool, args, cancelled, approved, &first,
-                                            &reads,
+                                            key, &reads,
                                         )
                                         .await
                                     }
@@ -3128,6 +3130,7 @@ pub async fn performed(
                 cancelled,
                 Some(class),
                 first,
+                None,
                 &Reads::default(),
             )
             .await
@@ -3266,17 +3269,18 @@ async fn perform(
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
     first: &[String],
+    call: Option<&str>,
     reads: &Reads,
 ) -> Outcome {
     if !matches!(tool, "web" | "tickets" | "forge") {
-        return performed_once(daemon, grant, tool, args, cancelled, approved, first).await;
+        return performed_once(daemon, grant, tool, args, cancelled, approved, first, call).await;
     }
     // What a page, a search, a ticket or a pull request showed the agent, from its data and
     // never from the call's own arguments, it may read with `web`. The forge and tracker reads
     // it made are counted for the developer log.
     let (outcome, shown) = reads
         .counting(crate::web::showing(performed_once(
-            daemon, grant, tool, args, cancelled, approved, first,
+            daemon, grant, tool, args, cancelled, approved, first, call,
         )))
         .await;
     if let Outcome::Done(_) = &outcome {
@@ -3285,6 +3289,7 @@ async fn perform(
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn performed_once(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -3293,6 +3298,7 @@ async fn performed_once(
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
     first: &[String],
+    call: Option<&str>,
 ) -> Outcome {
     match tool {
         "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
@@ -3328,12 +3334,14 @@ async fn performed_once(
         _ => {
             // The file tools read and write the disk: off the daemon's thread.
             let (daemon, grant, tool) = (daemon.clone(), grant.clone(), tool.to_owned());
+            let call = call.map(str::to_owned);
             let done = tokio::task::spawn_blocking(move || {
                 let cx = Context {
                     daemon: &daemon,
                     agent: &grant.agent,
                     place: &grant.place,
                     approved,
+                    call: call.as_deref(),
                 };
                 match tool.as_str() {
                     "fs_read" => files::fs_read(&cx, args),

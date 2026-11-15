@@ -281,17 +281,28 @@ Paths are shown relative to the place's top.
 with no compaction of the session since, answers one line instead of the page: `unchanged since
 you read it (bytes a-b of N, at HH:MM); give "again": true to read it whole`. `again: true` reads
 the page whole. The answer counts as a read for `fs_write` and `fs_edit`: the fingerprint is the
-same. A read of another range, or of a changed file, is a normal read.
+same. A read of another range, or of a changed file, is a normal read, and so is a read of a file
+the session itself wrote or edited since (a file changed and changed back is not the page it was
+shown).
 
 - **Compaction** is known where the agent says it: the completed `tool_call` with
   `_meta.contextCompaction` that the Claude and Codex bridges send (`docs/agents.md`), and the
   compaction Flottille itself makes (`docs/agents.md`, "Compaction"). It forgets every page the
-  session was shown. For a provider whose compactions Flottille cannot see (OpenCode, any plain ACP
+  session was shown, as does a new session replacing the agent's (a replacement, a fresh start, a
+  session that could not be loaded). The compaction and the call do not travel together (the first
+  on the agent's pipe, the second over HTTP): "unchanged" is answered only once the daemon has
+  recorded the `tool_call` this call is (its id, `claudecode/toolUseId`), which comes on the same
+  pipe after any compaction; a call whose `tool_call` is not recorded yet, or that carries no id,
+  is read whole. For a provider whose compactions Flottille cannot see (OpenCode, any plain ACP
   agent) nothing is ever answered "unchanged": the file is read as always.
 - What was shown is kept in the daemon's memory (the last 64 pages of each agent): a daemon that
   restarts reads whole once.
 - **The switch** is `unchanged` in `tool-results.toml` (`docs/protocol.md`, "The tool results
-  methods"), on unless it says `false`; Settings → Agents → Long tool results has it as "Say when a
+  methods"), **off unless it says `true`**: it saves the tokens of a repeated page, but whether it
+  lowers the cost of a turn is not measured yet (the turn's cost, #547, is not recorded), and a
+  page Claude Code or Codex drops from its context without a compaction (clearing old tool
+  results, trimming the history) is not seen, so the one line could then answer a page the model no
+  longer has. Settings → Agents → Long tool results has it as "Say when a
   file is unchanged".
 
 **Only regular files are read.** `fs_read` and `fs_edit` refuse a pipe, a socket or a device
