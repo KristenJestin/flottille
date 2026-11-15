@@ -10,12 +10,15 @@ repository.workspace = true
 # The keys of the user's devices (`docs/remote.md`, "Identity and keys"): Ed25519, the transport
 # candidate's own. Its default features zeroize a private key when it is dropped.
 ed25519-dalek = "2.2.0"
+flottille-protocol = { version = "0.1.0", path = "../flottille-protocol" }
 # The operating system's random generator, which makes every private key.
 getrandom = "0.3.4"
 libc = "0.2.191"
+serde = { version = "1.0.229", features = ["derive"] }
 # Already built under ed25519-dalek: a public key's fingerprint.
 sha2 = "0.10.9"
 zeroize = "1.9.1"
 
 [dev-dependencies]
+serde_json = "1.0.154"
 tempfile = "3.27.0"
