@@ -166,6 +166,14 @@ impl VaultSection {
         self.fields.as_ref().map(|f| &f.description)
     }
 
+    pub fn url_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.url)
+    }
+
+    pub fn username_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.username)
+    }
+
     /// Asks the daemon for the list.
     pub fn read(&self, cx: &mut Context<Self>) {
         perform_later(&self.shell, Command::Vault, cx);

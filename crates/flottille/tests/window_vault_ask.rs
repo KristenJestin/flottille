@@ -1,7 +1,7 @@
-//! The card of a request for a vault entry in the window (#566): an agent asks the user for the
-//! entry its project's tracker names and the vault lacks; the card shows what Flottille
-//! prefilled, the agent's reason and a masked field, unfolds into the conversation, and folds away
-//! once the user set the entry. On GPUI's test platform in front of a real daemon whose agent is
+//! The card of a request for a vault entry in the window (#566, #947): an agent asks the user for
+//! an entry; the card shows what was prefilled, the host the secret goes to and the agent's
+//! reason, unfolds into the conversation, opens Settings, Vault's own form prefilled, and folds
+//! away once the user saved the entry. On GPUI's test platform in front of a real daemon whose agent is
 //! the fake ACP agent, with the in-memory keyring; no window opens on a screen.
 
 mod common;
@@ -15,13 +15,16 @@ use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
 use flottille_window::tree::session_id;
+use flottille_window::vault::VaultSection;
 use gpui_design_system::omarchy::Environment;
+use gpui_kit::base::input::InputState;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
-const SECRET: &str = "w0rklog-t0ken-from-the-card";
+const SECRET: &str = "w0rklog-t0ken-from-the-form";
 const WHY: &str = "to log the two hours spent on ABC-1";
+const STAGING: &str = "to sign in to staging";
 
 fn user() -> User {
     let user = User::with_fake_agent().with_fake_acli();
@@ -30,6 +33,13 @@ fn user() -> User {
             {"mcp": {"tool": "vault", "arguments":
                 {"action": "ask", "name": "jira-time", "why": WHY}}},
             {"say": "Asked for the token."},
+            {"hold": "release"}]},
+        {"when": "sign in to staging", "do": [
+            {"mcp": {"tool": "vault", "arguments":
+                {"action": "ask", "name": "staging-login", "why": STAGING,
+                 "url": "https://tester@staging.example.com:8443/login?next=/",
+                 "username": "tester@example.com"}}},
+            {"say": "Asked for the login."},
             {"hold": "release"}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
@@ -44,29 +54,9 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
     }
 }
 
-/// A session of `app`, whose Jira tracker names the missing entry `jira-time`, told to log time:
+/// A session of `app`, whose Jira tracker names the missing entry `jira-time`, told `message`:
 /// its turn holds until the test releases it, so the card stays in sight while it is answered.
-fn session(user: &User) -> String {
-    session_with(user, false)
-}
-
-/// As `session`; `taken` has another project `other` own the entry `jira-time` first.
-fn session_with(user: &User, taken: bool) -> String {
-    if taken {
-        let folder = user.path("work/other");
-        user.git_init(&folder);
-        std::fs::write(folder.join("README.md"), "other\n").unwrap();
-        user.git(&folder, &["add", "."]);
-        user.git(&folder, &["commit", "--quiet", "-m", "start"]);
-        user.call("project.add", json!({"folder": folder, "name": "other"}))
-            .unwrap();
-        user.call(
-            "vault.set",
-            json!({"name": "jira-time", "secret": "the-other-projects-secret",
-                "project": "other"}),
-        )
-        .unwrap();
-    }
+fn session(user: &User, message: &str) -> String {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -87,10 +77,7 @@ fn session_with(user: &User, taken: bool) -> String {
     )
     .unwrap();
     let answer = user
-        .call(
-            "agent.run",
-            json!({"project": "app", "message": "log my time"}),
-        )
+        .call("agent.run", json!({"project": "app", "message": message}))
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap().to_owned();
     eventually("the ask", || {
@@ -176,31 +163,93 @@ fn ask_row(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<usi
     })
 }
 
-#[gpui_kit::test]
-fn the_card_of_a_vault_ask_is_prefilled_masked_and_folds_once_set(cx: &mut TestAppContext) {
-    let user = user();
-    let id = session(&user);
-    let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the session is in the tree", |cx| {
-        has(session_id(&id), cx)
+/// Opens the session `id` and waits for its request's card: its row.
+fn card(
+    shell: &Entity<Shell>,
+    id: &str,
+    cx: &mut VisualTestContext,
+) -> (Entity<SessionPage>, usize) {
+    until(shell, cx, "the session is in the tree", |cx| {
+        has(session_id(id), cx)
     });
     settle(cx);
-    cx.update(|window, cx| window.click(session_id(&id), cx));
-    until(&shell, cx, "the card", |cx| {
-        let page = session_page(&shell, cx);
-        ask_row(&page, cx).is_some_and(|at| has(format!("row-{at}-vault-ask-secret"), cx))
+    cx.update(|window, cx| window.click(session_id(id), cx));
+    until(shell, cx, "the card", |cx| {
+        let page = session_page(shell, cx);
+        ask_row(&page, cx).is_some_and(|at| has(format!("row-{at}-vault-ask-add"), cx))
     });
-    let page = session_page(&shell, cx);
+    let page = session_page(shell, cx);
     let at = ask_row(&page, cx).unwrap();
-
     // It unfolds into the conversation: it moves before it rests.
     assert!(
         cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
         "the card enters without moving"
     );
     settle(cx);
+    (page, at)
+}
 
-    // Prefilled by Flottille, the agent's reason beside it, each with its visible label.
+fn vault_form(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<VaultSection> {
+    shell.read_with(cx, |s, cx| {
+        s.main()
+            .read(cx)
+            .settings_page()
+            .expect("Settings is shown")
+            .read(cx)
+            .vault()
+            .clone()
+    })
+}
+
+fn value(
+    vault: &Entity<VaultSection>,
+    field: fn(&VaultSection) -> Option<&Entity<InputState>>,
+    cx: &mut VisualTestContext,
+) -> String {
+    let field = vault
+        .read_with(cx, |v, _| field(v).cloned())
+        .expect("the form's field");
+    field.read_with(cx, |f, _| f.value().to_string())
+}
+
+/// Types the secret in the open form, saves it, and waits for the card to fold away.
+fn save(
+    shell: &Entity<Shell>,
+    vault: &Entity<VaultSection>,
+    page: &Entity<SessionPage>,
+    at: usize,
+    cx: &mut VisualTestContext,
+) {
+    let secret = vault
+        .read_with(cx, |v, _| v.secret_field().cloned())
+        .unwrap();
+    assert!(
+        secret.read_with(cx, |s, _| s.presentation().is_masked()),
+        "the secret's field is masked"
+    );
+    cx.update(|window, cx| secret.update(cx, |f, cx| f.set_value(SECRET, window, cx)));
+    cx.update(|window, cx| window.click("save-vault-entry", cx));
+    until(
+        shell,
+        cx,
+        "the entry is set and the card folds away",
+        |cx| {
+            settle(cx);
+            page.read_with(cx, |page, cx| {
+            matches!(&page.conversation().read(cx).blocks()[at], Block::VaultAsk(ask) if !ask.open)
+        })
+        },
+    );
+}
+
+#[gpui_kit::test]
+fn the_card_of_a_vault_ask_opens_the_vault_form_prefilled(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (page, at) = card(&shell, &id, cx);
+
+    // What the feature prefilled and the agent's reason, each with its visible label.
     assert_eq!(
         label(format!("row-{at}-vault-ask-name"), cx).as_deref(),
         Some("Entry: jira-time")
@@ -209,73 +258,57 @@ fn the_card_of_a_vault_ask_is_prefilled_masked_and_folds_once_set(cx: &mut TestA
         label(format!("row-{at}-vault-ask-project"), cx).as_deref(),
         Some("Project: app")
     );
-    assert!(
-        label(format!("row-{at}-vault-ask-what"), cx).is_some_and(|l| l.contains("Jira")),
-        "what it is for"
+    assert_eq!(
+        label(format!("row-{at}-vault-ask-for"), cx).as_deref(),
+        Some("For: the worklog of the project app")
     );
     assert_eq!(
         label(format!("row-{at}-vault-ask-why"), cx),
         Some(format!("Why: {WHY}"))
     );
     assert_eq!(
-        label(format!("row-{at}-vault-ask-set"), cx).as_deref(),
-        Some("Set")
+        label(format!("row-{at}-vault-ask-add"), cx).as_deref(),
+        Some("Add to the vault")
     );
     assert_eq!(
         label(format!("row-{at}-vault-ask-dismiss"), cx).as_deref(),
         Some("Dismiss")
     );
-    assert!(
-        has(format!("row-{at}-vault-ask-username"), cx),
-        "Jira takes a username"
-    );
+    // No field of its own: the card is a way in to the vault's form.
+    assert!(!has(format!("row-{at}-vault-ask-secret"), cx));
 
-    let fields = page
-        .read_with(cx, |page, cx| {
-            page.conversation().read(cx).rows()[at]
-                .read(cx)
-                .vault_ask()
-                .cloned()
-        })
-        .expect("the card's fields");
-    let (secret, username) =
-        fields.read_with(cx, |f, _| (f.secret().clone(), f.username().clone()));
+    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    settle(cx);
+    let vault = vault_form(&shell, cx);
+    assert!(vault.read_with(cx, |v, _| v.is_open()), "the form is open");
+    assert_eq!(value(&vault, VaultSection::name_field, cx), "jira-time");
     assert!(
-        secret.read_with(cx, |s, _| s.presentation().is_masked()),
-        "the secret's field is masked"
+        value(&vault, VaultSection::description_field, cx).contains("Jira"),
+        "what it is for"
     );
-    secret.update_in(cx, |field, window, cx| field.set_value(SECRET, window, cx));
-    username.update_in(cx, |field, window, cx| {
-        field.set_value("dev@example.com", window, cx)
-    });
-    fields.update_in(cx, |fields, window, cx| fields.set(window, cx));
+    // The agent's reason is the hint of what it is for.
     assert_eq!(
-        secret.read_with(cx, |s, _| s.value().to_string()),
-        "",
-        "the secret leaves the field at once"
+        label("vault-description-field-hint", cx),
+        Some(format!("Why the agent asks: {WHY}"))
     );
-
-    until(
-        &shell,
-        cx,
-        "the entry is set and the card folds away",
-        |cx| {
-            settle(cx);
-            // No longer needing the user, it folds away into its turn's group.
-            !has(format!("row-{at}-vault-ask-secret"), cx)
-        },
-    );
-    let answered = page.read_with(cx, |page, cx| {
-        page.conversation().read(cx).blocks()[at].clone()
+    cx.update(|window, cx| {
+        vault
+            .read(cx)
+            .username_field()
+            .unwrap()
+            .clone()
+            .update(cx, |f, cx| f.set_value("dev@example.com", window, cx))
     });
-    assert!(
-        matches!(answered, Block::VaultAsk(ref ask) if !ask.open),
-        "{answered:?}"
-    );
+    save(&shell, &vault, &page, at, cx);
+
     std::fs::write(user.path("fake/release"), "").unwrap();
-    let entries = user.call("vault.list", json!({})).unwrap();
-    assert_eq!(entries["entries"][0]["name"], "jira-time");
-    assert_eq!(entries["entries"][0]["project"], "app");
+    let set = user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
+    assert_eq!(set["name"], "jira-time");
+    assert_eq!(set["project"], "app");
+    assert_eq!(
+        set["for"], "worklog:app",
+        "bound as the feature asks: {set}"
+    );
     settle(cx);
     assert_eq!(
         cx.update(|window, cx| window.simulate_next_frame(cx)),
@@ -285,76 +318,54 @@ fn the_card_of_a_vault_ask_is_prefilled_masked_and_folds_once_set(cx: &mut TestA
 }
 
 #[gpui_kit::test]
-fn the_card_refuses_a_name_another_project_uses_until_it_is_edited(cx: &mut TestAppContext) {
+fn the_card_shows_the_host_the_secret_goes_to(cx: &mut TestAppContext) {
     let user = user();
-    let id = session_with(&user, true);
+    let id = session(&user, "sign in to staging");
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the session is in the tree", |cx| {
-        has(session_id(&id), cx)
-    });
-    settle(cx);
-    cx.update(|window, cx| window.click(session_id(&id), cx));
-    until(&shell, cx, "the card", |cx| {
-        let page = session_page(&shell, cx);
-        ask_row(&page, cx).is_some_and(|at| has(format!("row-{at}-vault-ask-secret"), cx))
-    });
-    let page = session_page(&shell, cx);
-    let at = ask_row(&page, cx).unwrap();
-    settle(cx);
+    let (page, at) = card(&shell, &id, cx);
 
-    // The name line says it, with the sentence the daemon refuses with.
+    // The host on its own line, without the user, the port or the path the agent wrote.
+    assert_eq!(
+        label(format!("row-{at}-vault-ask-host"), cx).as_deref(),
+        Some("Goes to: staging.example.com")
+    );
     assert_eq!(
         label(format!("row-{at}-vault-ask-name"), cx).as_deref(),
-        Some("Entry: `jira-time` is used by the project other: choose another name")
+        Some("Entry: staging-login")
     );
-    assert!(
-        has(format!("row-{at}-vault-ask-new-name"), cx),
-        "a name to edit"
+    assert_eq!(
+        label(format!("row-{at}-vault-ask-why"), cx),
+        Some(format!("Why: {STAGING}"))
     );
 
-    let fields = page
-        .read_with(cx, |page, cx| {
-            page.conversation().read(cx).rows()[at]
-                .read(cx)
-                .vault_ask()
-                .cloned()
-        })
-        .expect("the card's fields");
-    let (secret, username, name) = fields.read_with(cx, |f, _| {
-        (f.secret().clone(), f.username().clone(), f.name().clone())
-    });
-    secret.update_in(cx, |field, window, cx| field.set_value(SECRET, window, cx));
-    username.update_in(cx, |field, window, cx| {
-        field.set_value("dev@example.com", window, cx)
-    });
-
-    // Unedited, Set does nothing: the secret stays in its field and nothing reached the vault.
-    fields.update_in(cx, |fields, window, cx| fields.set(window, cx));
-    assert_eq!(secret.read_with(cx, |s, _| s.value().to_string()), SECRET);
-    let entries = user.call("vault.list", json!({})).unwrap();
-    assert_eq!(entries["entries"].as_array().unwrap().len(), 1, "{entries}");
-    assert_eq!(entries["entries"][0]["project"], "other");
-
-    // Edited, it sets the entry under the new name and leaves the other project's alone.
-    name.update_in(cx, |field, window, cx| {
-        field.set_value("app-jira-time", window, cx)
-    });
-    fields.update_in(cx, |fields, window, cx| fields.set(window, cx));
-    until(&shell, cx, "the card folds away", |cx| {
-        settle(cx);
-        !has(format!("row-{at}-vault-ask-secret"), cx)
-    });
-    let entries = user.call("vault.list", json!({})).unwrap();
-    let find = |name: &str| {
-        entries["entries"]
-            .as_array()
+    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    settle(cx);
+    let vault = vault_form(&shell, cx);
+    assert_eq!(value(&vault, VaultSection::name_field, cx), "staging-login");
+    assert_eq!(
+        value(&vault, VaultSection::url_field, cx),
+        "https://tester@staging.example.com:8443/login?next=/"
+    );
+    assert_eq!(
+        value(&vault, VaultSection::username_field, cx),
+        "tester@example.com"
+    );
+    // The user may change any field before saving.
+    cx.update(|window, cx| {
+        vault
+            .read(cx)
+            .url_field()
             .unwrap()
-            .iter()
-            .find(|entry| entry["name"] == name)
-            .unwrap_or_else(|| panic!("no {name}: {entries}"))
             .clone()
-    };
-    assert_eq!(find("jira-time")["project"], "other");
-    assert_eq!(find("app-jira-time")["project"], "app");
+            .update(cx, |f, cx| {
+                f.set_value("https://staging.example.com/login", window, cx)
+            })
+    });
+    save(&shell, &vault, &page, at, cx);
+
     std::fs::write(user.path("fake/release"), "").unwrap();
+    let set = user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
+    assert_eq!(set["name"], "staging-login");
+    assert_eq!(set["url"], "https://staging.example.com/login");
+    assert_eq!(set["project"], "app");
 }
