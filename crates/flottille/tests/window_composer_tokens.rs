@@ -606,7 +606,7 @@ fn what_the_agent_received_is_not_shown(cx: &mut TestAppContext) {
         commanded(&page, cx).is_some()
     });
     settle(cx);
-    let (at, block) = commanded(&page, cx).unwrap();
+    let (at, _) = commanded(&page, cx).unwrap();
 
     for part in [
         "received-toggle",

@@ -2356,13 +2356,6 @@ fn a_command_message_shows_what_the_user_typed(cx: &mut TestAppContext) {
     };
     assert_eq!(text, "fix the test, then /ship", "what the user typed");
     assert_eq!(commanded.names, ["ship"]);
-    assert!(
-        commanded
-            .received
-            .contains("Push the branch, then open its pull request."),
-        "{}",
-        commanded.received
-    );
     assert_eq!(
         flottille_window::session::command_chips(&text, &commanded.names),
         vec![19..24usize],

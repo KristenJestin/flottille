@@ -4769,15 +4769,7 @@ fn sub_agents_said(agents: &[SubAgent], cx: &App) -> (String, usize) {
 /// keeps its break and its indentation. An address the renderer links by itself is left as typed:
 /// an escape inside it would be drawn, backslash and all.
 fn as_typed(text: &str) -> String {
-    typed_with_chips(text, &[])
-}
-
-/// [`as_typed`], each of `chips` (byte ranges of `text`, the commands it used) drawn as inline
-/// code, which the message's view styles as the accent's chip: its characters are the command's,
-/// nothing in it is escaped.
-fn typed_with_chips(text: &str, chips: &[std::ops::Range<usize>]) -> String {
     let line = |line: &str| {
-        let base = line.as_ptr() as usize - text.as_ptr() as usize;
         let indent = line.len() - line.trim_start_matches(' ').len();
         let mut out = "\u{a0}".repeat(indent);
         let line = &line[indent..];
@@ -4785,16 +4777,6 @@ fn typed_with_chips(text: &str, chips: &[std::ops::Range<usize>]) -> String {
         let mut previous = None;
         while at < line.len() {
             let ahead = &line[at..];
-            let here = base + indent + at;
-            if let Some(chip) = chips
-                .iter()
-                .find(|chip| chip.start == here && !text[(*chip).clone()].contains('`'))
-            {
-                out.push_str(&format!("`{}`", &text[chip.clone()]));
-                at += chip.len();
-                previous = Some('`');
-                continue;
-            }
             if let Some(length) = address(previous, ahead) {
                 out.push_str(&ahead[..length]);
                 at += length;
@@ -10485,19 +10467,6 @@ mod tests {
             "xhttps://a\\.b\\-c",
             "a word that ends in a scheme is no address"
         );
-    }
-
-    #[test]
-    fn a_command_is_inline_code_in_the_text_as_typed_and_the_rest_keeps_its_marks() {
-        let text = "check\n\n- one /open-prs\n- two\n\n```\nlet a = 1;\n``` then /ship";
-        let chips = command_chips(text, &["open-prs".into(), "ship".into()]);
-        assert_eq!(chips.len(), 2);
-
-        assert_eq!(
-            typed_with_chips(text, &chips),
-            "check\n\n\\- one `/open-prs`\\\n\\- two\n\n\\`\\`\\`\\\nlet a = 1;\\\n\\`\\`\\` then `/ship`",
-        );
-        assert_eq!(typed_with_chips(text, &[]), as_typed(text));
     }
 
     fn agent(parent: Option<&str>, state: &str) -> TreeAgent {

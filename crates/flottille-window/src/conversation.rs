@@ -29,8 +29,6 @@ pub const FULL: &str = "Full mode";
 pub struct Commanded {
     /// The commands' names, in the order of their first use.
     pub names: Vec<String>,
-    /// What the agent received: the commands' text with the message marked at its end.
-    pub received: String,
 }
 
 /// What one row of the conversation shows.
@@ -43,8 +41,7 @@ pub enum Block {
         from: String,
         text: String,
         images: Vec<String>,
-        /// For a message that used commands: `text` is what was typed, and this what it used
-        /// and what the agent received for it.
+        /// For a message that used commands: `text` is what was typed, and this what it used.
         commands: Option<Commanded>,
     },
     /// A message between two sessions (`session_send`): one `peer` wrote to this agent, or one
@@ -855,14 +852,14 @@ impl Conversation {
                     }
                     let said = changes.len();
                     let rows = self.blocks.len();
-                    changes.extend(self.deliver(&kind, body.clone()));
+                    changes.extend(self.deliver(&kind, body));
                     if self.blocks.len() > rows
                         && let Some(last) = self.deliveries.last_mut()
                     {
                         *last = delivery(at);
                     }
-                    // A message that used commands shows what was typed; what the agent received
-                    // unfolds under it. The daemon says which, one entry per delivery.
+                    // A message that used commands shows what was typed. The daemon says which, one
+                    // entry per delivery.
                     let entry = &data["typed"][at];
                     if changes.len() > said
                         && let Some(typed) = entry["text"].as_str()
@@ -876,7 +873,6 @@ impl Conversation {
                                 .flatten()
                                 .filter_map(|name| name.as_str().map(str::to_owned))
                                 .collect(),
-                            received: body,
                         });
                     }
                 }
