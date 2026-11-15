@@ -1157,8 +1157,8 @@ mod tests {
 
     /// The user's removal of an entry and the write of an accepted request, which checks the
     /// entries it names are there (`still`), are not interleaved: the removal waits for the file.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_vault_entry_is_removed_under_the_extensions_file_lock() {
+    #[test]
+    fn a_vault_entry_is_removed_under_the_extensions_file_lock() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
         std::fs::write(
@@ -1192,16 +1192,24 @@ mod tests {
             released.recv().unwrap();
         });
         held.recv().unwrap();
-        let removing = tokio::spawn(crate::vault::call(
-            daemon.clone(),
-            "vault.remove",
-            json!({"name": "notes-token"}),
-        ));
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let remover = daemon.clone();
+        let removing = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(crate::vault::call(
+                    remover,
+                    "vault.remove",
+                    json!({"name": "notes-token"}),
+                ))
+                .map_err(|failure| failure.message)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
         let during = there(&daemon);
         release.send(()).unwrap();
         writer.join().unwrap();
-        removing.await.unwrap().unwrap();
+        removing.join().unwrap().unwrap();
         assert!(during, "removed while the file was being written");
         assert!(!there(&daemon));
     }
