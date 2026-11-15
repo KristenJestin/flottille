@@ -27,6 +27,11 @@ const NOT_CONTROLS: &[(&str, &str, &str)] = &[
         "begins a text selection on a message: the text view over it sets the I-beam",
     ),
     (
+        "src/extensions/connections.rs",
+        ".on_mouse_down(MouseButton::Left, move |_, window, cx| { window.focus(&clicked, cx);",
+        "puts the focus in the review's list so that Ctrl+A is the list's: the rows and buttons in it set their own hand",
+    ),
+    (
         "src/shell.rs",
         ".on_mouse_down( MouseButton::Navigate(NavigationDirection::Back),",
         "the mouse's back button: no pointer to show",
