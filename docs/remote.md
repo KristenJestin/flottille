@@ -252,9 +252,12 @@ proxy), a state folder. The hub URL is given to every device at join, in the inv
 **Its state folder** is `--state <dir>`, `$XDG_STATE_HOME/flottille-hub` by default, made 700. It
 holds the hub's key, `hub.key` (600, made at the first start with the machine key's care), and
 `hub.json` (600): the member list as the members signed it, and the setup code while no member
-exists, written whole under a temporary name and renamed over the old file. A list in it that does
-not check stops the hub's start. The invitations, their join requests, the presence and the
-addresses are kept in memory: they last minutes, or are told again when a device connects.
+exists, written whole under a temporary name and renamed over the old file. One process uses the
+folder at a time (a lock on `hub.lock`): a second hub, or `flottille-hub setup-code` with or
+without `--reset`, is refused while a hub runs (`another flottille-hub uses <folder>: stop it
+first`). A list in it that does not check stops the hub's start, saying to reset it. The
+invitations, their join requests, the presence and the addresses are kept in memory: they last
+minutes, or are told again when a device connects.
 
 ### The first member
 
@@ -753,7 +756,10 @@ on a real phone, by hand, and reported.
   refusing adds nothing.
 - The hub takes an addition only as the answer to a join request to its signer: a device joins
   through an invitation, never by a change alone.
-- A reset ends every invitation, presence and address with the list.
+- `flottille-hub setup-code --reset` is refused while a hub uses the state folder, rather than
+  told to it: the running hub would keep the old code valid and undo the reset at its next write.
+  It reads nothing of the state, so a list that does not check, or a damaged file, does not stop
+  it; the hub's key stays.
 
 ## Open questions
 
