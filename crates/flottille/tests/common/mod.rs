@@ -163,6 +163,10 @@ impl std::ops::DerefMut for Spawned {
 /// A throwaway user: its own home and XDG folders, and the daemon it starts, stopped on drop.
 pub struct User {
     dir: TempDir,
+    /// The runtime folder, `runtime` in `dir` by a symbolic link. A real one's parent is a
+    /// folder nothing writes into (`/run/user`), and what the daemon runs may create nothing
+    /// there (`docs/vault.md`, "The runtime folder"): `dir` is where the tests' programs write.
+    _runtime: TempDir,
     /// More variables for every command, and so for the daemon the first one starts.
     env: Vec<(String, String)>,
     /// True once the user is dropped, its daemon stopped and its folder about to go: a client the
@@ -181,14 +185,20 @@ impl User {
             .prefix("flottille-test")
             .tempdir()
             .unwrap();
-        for sub in ["home", "runtime", "state", "config", "data"] {
+        for sub in ["home", "state", "config", "data"] {
             std::fs::DirBuilder::new()
                 .mode(0o700)
                 .create(dir.path().join(sub))
                 .unwrap();
         }
+        let runtime = tempfile::Builder::new()
+            .prefix("flottille-runtime")
+            .tempdir()
+            .unwrap();
+        std::os::unix::fs::symlink(runtime.path(), dir.path().join("runtime")).unwrap();
         let mut user = User {
             dir,
+            _runtime: runtime,
             env: Vec::new(),
             closed: Arc::new(Mutex::new(false)),
             reaper: None,
