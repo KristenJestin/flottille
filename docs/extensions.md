@@ -836,9 +836,23 @@ sentence on what it is for, and how to reach the server, either
   the cookies of a connection in one header; **basic** is `Authorization: Basic
   base64(<entry's username>:<secret>)` and takes no name. The old `headers = { Name = { vault =
   "<entry>" } }` is read as header lines with no prefix and written back as it was, so that a
-  connection pinned with it keeps its digest. A URL whose query holds a parameter whose name looks
-  like a secret (`token`, `key`, `secret`, `password` or `auth`, in any case, inside its name) is
-  refused, saying to move it to "Secrets of its requests".
+  connection pinned with it keeps its digest. A connection given `secrets` on an edit, without
+  `headers`, has those lines and no others: the plain header lines it had are replaced too, and
+  `secrets = null` removes them all. A header named `Cookie` beside cookie lines, or
+  `Authorization` beside basic, is refused as given twice.
+
+  A URL whose query holds a parameter named like a secret is refused when the connection is added
+  or edited, saying to move it to "Secrets of its requests"; its name is said, never its value.
+  The name is read as words (`userToken`, `user_token` and `UserToken` alike): it is refused when
+  it is one of `token`, `access_token`, `auth_token`, `user_token`, `api_token`, `id_token`,
+  `refresh_token`, `session_token`, `private_token`, `key`, `apikey`, `auth`, `authorization`,
+  `secret`, `password`, `passwd`, `access_key`, `private_key`, whole, or ends with `access_token`,
+  `auth_token`, `api_token`, `api_key`, `apikey`, `secret_key`, `private_key`, `secret` or
+  `password` (`x_api_key`, `client_secret`). A word that only holds one of them is allowed:
+  `author`, `oauth_state`, `pageToken`, `keyword`, `project_key`. A connection already declared
+  with such a URL (written before this check, or by hand) is not refused with the file: it is
+  listed with `failing` saying why, its server never starts, and it is edited (its URL mended) or
+  removed as any other; the other connections are untouched.
 
 A plain `http://` URL to any other address is refused: what crosses a network is encrypted.
 
@@ -875,7 +889,20 @@ what is written is what the card showed: the request's words are made again from
 as it is then and compared with those the user read, and one that differs is not done. Once
 accepted it goes through the path of the user's own Save (added = given at once, every action
 judged). An agent's declaration is checked as the form's fields are (a command is one line split
-without a shell, shell syntax refused; a variable or a secret names a vault entry that exists).
+without a shell, shell syntax refused; a variable names a vault entry that exists, a secret line
+of a URL's requests one that exists or one the user is to make).
+**A secret line may name an entry still missing**: an agent proposing a connection to a server
+whose token the user has not saved yet names the entry it is to be saved as. The name must be an
+entry's name (`valid_name`) and nothing that looks like a secret: no word of it between `-`, `_`
+and `.` is longer than 19 characters, and no masking rule takes it for a token, so that a token
+written where a name goes is refused unsaid instead of being shown to the user as a name to save.
+`connection.proposed` gives each secret line's `missing`, and `waits`, the sentence saying which
+entries are to be saved. The request stays held and **its Accept is refused while an entry it names
+is missing** (`approval.approve` answers why, the request still pending); once the user saved the
+entry, the checks of an entry apply to it as to any other, its host first, and an entry made on
+another host, or with no `url`, makes the accepted write refused. An entry deleted between the
+Accept and the write is refused where the write is decided, under the file's lock: the write never
+lands with an entry whose host was not checked.
 **An agent sends a vault entry only to the entry's own host**: a secret of a URL connection it
 proposes names an entry whose `url` has the connection URL's host (over `https://`, or `http://`
 on this machine); an entry with no `url`, or of another host, is refused before the user is asked,

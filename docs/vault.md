@@ -162,7 +162,10 @@ never shown to an agent; an entry tied to one project, or bound to another use, 
 it. A connection an agent proposes (`docs/extensions.md`, "Connections") puts an entry in its requests
 only when the entry's `url` has the connection's host: the `url` is where the secret may go, and
 an entry without one goes in no request an agent chose; the user's own form binds freely, and the
-card of the request says where each entry goes. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
+card of the request says where each entry goes. An agent's connection may name an entry that does
+not exist yet, for the user to save (never one that looks like a secret): the request waits, its
+Accept refused while the entry is missing, and once saved the entry's host is checked as any
+other's. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
 another.
 
 ## The tests' keyring
