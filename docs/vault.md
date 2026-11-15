@@ -185,6 +185,50 @@ an entry without one goes in no header an agent chose; the user's own form binds
 card of the request says where each entry goes. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
 another.
 
+## The runtime folder
+
+The keyring answers on the session bus, whose socket is in the user's runtime folder
+(`/run/user/<uid>/bus`), and any program can speak D-Bus: refusing `secret-tool` or `busctl` by
+name keeps nothing out. So what the daemon runs for an agent or a connection reaches no session
+bus: a run, a project's service and its readiness probe, a workspace's setup line, a commit's or
+a push's message checks and the git reads made for them (the push's dry run, with the line's own
+options and the remote's transport), a connection's server and its login:
+
+- its environment has no `DBUS_SESSION_BUS_ADDRESS`, and no `XDG_RUNTIME_DIR` either, so libdbus,
+  sd-bus and GDBus find no bus by default. `DBUS_SYSTEM_BUS_ADDRESS` is kept: the system bus holds
+  none of the user's secrets, and its socket is at a fixed path anyway;
+- the socket's path is guessable, so on Linux with Landlock (its second ABI or later, Linux 5.19)
+  the process is denied the user's runtime folders, `/run/user/<uid>` and the daemon's
+  `XDG_RUNTIME_DIR`: before it runs its program, it is bound to rules that grant every right on
+  everything else (each entry of `/` and of each folder on the way to a runtime folder, symbolic
+  links aside, which lead to where their target is ruled). It gets `no_new_privs` with it, so a
+  setuid program it starts gains nothing.
+
+The daemon's own runtime folder is denied with the rest: a `flottille daemon stop` run for an
+agent cannot read the daemon's lock, and refuses itself when the daemon does not answer, as a
+client started by an agent does.
+
+The gaps, where the platform does not allow more:
+
+- Landlock denies **connecting** to a socket by its path from its ninth ABI only (the right
+  `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`). Before it, the runtime folder cannot be listed and its files
+  cannot be opened, but a process that guesses the bus's path can still connect to it;
+- from the ninth ABI on, connecting is denied to every socket of the runtime folder, not only the
+  bus: an `SSH_AUTH_SOCK` or a gpg-agent socket there cannot be reached either, so a `git push`
+  over SSH through an agent's keys, its dry run, or a commit signed through gpg-agent fails. A
+  known gap the other way: `SSH_AUTH_SOCK` is still passed to what the daemon runs, and below the
+  ninth ABI the SSH agent it names can be connected to;
+- without Landlock (a kernel before 5.19, or one built without it), the process runs as before,
+  with only the environment kept from it;
+- a bus listening on an abstract socket (`unix:abstract=…`, older setups) is not a path, and is
+  not kept out;
+- a process cannot create an entry directly in a folder on the way to a runtime folder (`/`,
+  `/run`, `/run/user`): they get no rule of their own, only their entries do; and an entry
+  created there after the process started is denied to it. A rule on such a folder would hold
+  for the runtime folder under it too, since Landlock grants by hierarchy and denies nothing. The
+  user cannot write in these folders anyway; a runtime folder set in one the user writes to (an
+  `XDG_RUNTIME_DIR` in `/tmp`) takes that folder's new entries from what the daemon runs.
+
 ## The tests' keyring
 
 The tests never reach the user's keyring: their daemon's configuration folder holds `keyring.toml`

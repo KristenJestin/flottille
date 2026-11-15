@@ -10,8 +10,8 @@ mod common;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use common::User;
 use common::mcp::{Answer, Mcp, server_of};
+use common::{User, landlock_abi};
 use flottille_core::store::Store;
 use serde_json::{Value, json};
 
@@ -659,6 +659,73 @@ fn the_test_daemon_reaches_no_session_bus_nor_a_real_launcher() {
             "{launcher} is not the fake one"
         );
     }
+}
+
+#[test]
+fn a_run_gets_no_session_bus_address() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+
+    let bus = done(mcp.call("run", json!({"line": "printenv DBUS_SESSION_BUS_ADDRESS"})));
+
+    assert!(bus.contains("exited with code 1"), "{bus}");
+    assert!(!bus.contains("unix:path="), "{bus}");
+}
+
+#[test]
+fn a_run_cannot_open_the_session_bus_socket_by_its_path() {
+    // Connecting to a socket by its path is a right of Landlock's ninth ABI only.
+    if landlock_abi() < 9 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) cannot deny connecting to a socket",
+            landlock_abi()
+        );
+        return;
+    }
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+    let bus = user.path("runtime/bus");
+    let _listening = std::os::unix::net::UnixListener::bind(&bus).unwrap();
+
+    let line = format!(
+        "python3 -c \"import socket; socket.socket(socket.AF_UNIX).connect('{}')\"",
+        bus.display()
+    );
+    let ran = done(mcp.call("run", json!({"line": line})));
+
+    assert!(ran.contains("PermissionError"), "{ran}");
+    assert!(!ran.contains("exited with code 0"), "{ran}");
+}
+
+#[test]
+fn a_run_cannot_read_the_user_s_runtime_folder() {
+    if landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) is not used",
+            landlock_abi()
+        );
+        return;
+    }
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+    let note = user.path("runtime/note");
+    std::fs::write(&note, "kept from runs").unwrap();
+    let elsewhere = user.path("home/note");
+    std::fs::write(&elsewhere, "open to runs").unwrap();
+
+    let read = |path: &std::path::Path| {
+        let line = format!("python3 -c \"print(open('{}').read())\"", path.display());
+        done(mcp.call("run", json!({"line": line})))
+    };
+    let kept = read(&note);
+    let open = read(&elsewhere);
+
+    assert!(kept.contains("PermissionError"), "{kept}");
+    assert!(!kept.contains("kept from runs"), "{kept}");
+    assert!(open.contains("open to runs"), "{open}");
 }
 
 #[test]

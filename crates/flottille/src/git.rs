@@ -86,6 +86,9 @@ pub async fn run_in<S: AsRef<OsStr>>(
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
+    // It runs the line's own options and its transport (a remote's helper, its ssh command), as
+    // the run would: kept from what a run is kept from.
+    crate::landlock::confined(&mut command);
     let limit = Class::Read.limit();
     bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, input).await
 }

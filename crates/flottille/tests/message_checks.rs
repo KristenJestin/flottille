@@ -868,6 +868,51 @@ fn a_push_whose_dry_run_fails_for_one_of_its_urls_is_refused() {
     assert_eq!(remote_head(&user, &branch(&user)), None);
 }
 
+#[test]
+fn a_push_dry_run_cannot_read_the_user_s_runtime_folder() {
+    if common::landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) is not used",
+            common::landlock_abi()
+        );
+        return;
+    }
+    let user = User::with_fake_agent();
+    let kept = user.path("runtime/app.git");
+    prepared(&user, |folder| {
+        user.git(
+            &user.path(""),
+            &["init", "--quiet", "--bare", kept.to_str().unwrap()],
+        );
+        user.git(
+            folder,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                kept.to_str().unwrap(),
+            ],
+        );
+    });
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    committed_outside(&user, "good.txt", "fix: a good change");
+
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    // The dry run reads what it would send from the remote: kept out of it, it reads nothing,
+    // and no check is run on what it could not read.
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("nothing was pushed"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(seen(&user), "");
+}
+
 /// The commit the remote's `name` is at, any ref: `None` when the remote has no such ref.
 fn remote_ref(user: &User, name: &str) -> Option<String> {
     let listed = user.git_output(
