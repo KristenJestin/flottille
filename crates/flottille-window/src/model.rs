@@ -307,6 +307,11 @@ impl Forged {
                 ("Ran a job again", on(&run, &[field("step")]))
             }
             ("forge", "comment") => ("Commented on a pull request", on(&number, &[field("body")])),
+            ("forge", "reply") => ("Replied in a review thread", on(&number, &[field("body")])),
+            ("forge", "resolve") => match arguments["resolved"].as_bool() {
+                Some(false) => ("Opened a review thread again", number.clone()),
+                _ => ("Resolved a review thread", number.clone()),
+            },
             ("forge", "edit") => (
                 "Edited a pull request",
                 on(&number, &[field("title"), field("body")]),
@@ -1100,6 +1105,48 @@ mod tests {
             excerpt.ends_with('…') && excerpt.chars().count() == 121,
             "{excerpt}"
         );
+    }
+
+    #[test]
+    fn an_agent_s_reply_to_a_thread_rings_the_bell() {
+        let said = |arguments: Value, outcome: &str| {
+            Forged::of(&served("forge", arguments, outcome)).map(|f| (f.said, f.excerpt, f.ticket))
+        };
+        assert_eq!(
+            said(
+                json!({"action": "reply", "number": 12, "thread": "PRRT_1", "body": "Renamed."}),
+                "ok"
+            ),
+            Some((
+                "Replied in a review thread".into(),
+                "#12: Renamed.".into(),
+                false
+            ))
+        );
+        assert_eq!(
+            said(
+                json!({"action": "resolve", "number": 12, "thread": "PRRT_1", "resolved": true}),
+                "ok"
+            ),
+            Some(("Resolved a review thread".into(), "#12".into(), false))
+        );
+        assert_eq!(
+            said(
+                json!({"action": "resolve", "number": 12, "thread": "PRRT_1", "resolved": false}),
+                "ok"
+            ),
+            Some(("Opened a review thread again".into(), "#12".into(), false))
+        );
+        // Held or refused, it changed nothing.
+        for outcome in ["held", "refused"] {
+            assert_eq!(
+                said(
+                    json!({"action": "reply", "number": 12, "body": "x"}),
+                    outcome
+                ),
+                None
+            );
+        }
     }
 
     #[test]

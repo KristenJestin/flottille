@@ -79,6 +79,9 @@
 //! otherwise, `fail` as for the other calls); the record's `input` holds what the file held, as
 //! JSON, since the file is gone when the call ends.
 //!
+//! The review threads of a pull request (#359): `api graphql`, its queries and mutations described
+//! at `graphql`.
+//!
 //! `events` gives, by repository and number, what `gh api repos/<owner>/<name>/issues/<number>/events`
 //! lists (`{"acme/app": {"7": [{"event": "merged", "actor": {"login": "bob"}, "created_at":
 //! "2026-01-01T10:00:00Z"}]}}`), `[]` without; with a `--jq`, the `merged` and `closed` ones as
@@ -303,6 +306,135 @@ fn milestones(script: &Value, path: &str, rest: &[&str]) -> i32 {
     }
 }
 
+/// The review threads of a pull request (#359, `docs/forges.md`, "Review threads"), through `gh
+/// api graphql -f query=… [-f|-F key=value]…`, as GitHub's GraphQL API answers them: a query of
+/// `reviewThreads` (`owner`, `name`, `number`) prints the script's `threads` of that pull request
+/// (`{"threads": {"acme/app": {"12": [{"id": "PRRT_1", "isResolved": false, "isOutdated": false,
+/// "path": "src/login.rs", "line": 14, "startLine": null, "originalLine": 14,
+/// "originalStartLine": null, "diffSide": "RIGHT", "comments": {"nodes": [{"author": {"login":
+/// "alice"}, "body": "…", "createdAt": "…", "url": "…#discussion_r1"}]}}]}}}`), none for a pull
+/// request of `pulls` without, and fails as GitHub does for one it holds neither of; only the first
+/// 100 of them, as GraphQL pages, with the whole `totalCount`. A query of `node(id: $thread)`
+/// prints that thread with its `pullRequest {number repository {nameWithOwner}}`, wherever it is.
+/// `addPullRequestReviewThreadReply` (`thread`, `body`) prints the new comment's link
+/// (`…/pull/<n>#discussion_r<replied>`, 1 by default), `resolveReviewThread` and
+/// `unresolveReviewThread` (`thread`) the thread with its new state; a thread id the script holds
+/// nowhere is a node GitHub cannot resolve. `fail` makes them fail as the other calls.
+fn graphql(script: &Value, words: &[&str]) -> i32 {
+    let mut fields = Map::new();
+    for pair in words
+        .windows(2)
+        .filter(|pair| matches!(pair[0], "-f" | "-F"))
+    {
+        if let Some((key, value)) = pair[1].split_once('=') {
+            fields.insert(key.to_owned(), Value::from(value));
+        }
+    }
+    let field = |key: &str| fields.get(key).and_then(Value::as_str).unwrap_or_default();
+    let query = field("query");
+    // Every thread of the script, with the repository and the pull request it is on.
+    let all: Vec<(String, String, Value)> = script["threads"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .flat_map(|(repository, pulls)| {
+            pulls
+                .as_object()
+                .into_iter()
+                .flatten()
+                .flat_map(move |(number, threads)| {
+                    threads
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(move |t| (repository.clone(), number.clone(), t.clone()))
+                })
+        })
+        .collect();
+    if query.contains("reviewThreads") {
+        let repository = format!("{}/{}", field("owner"), field("name"));
+        if let Some(failure) = script["fail"][&repository].as_str() {
+            eprintln!("{failure}");
+            return 1;
+        }
+        let number = field("number");
+        let held = script["pulls"][&repository]
+            .as_object()
+            .into_iter()
+            .flat_map(|branches| branches.values())
+            .any(|pull| number.parse().ok() == pull["number"].as_u64());
+        let threads = &script["threads"][&repository][number];
+        if !held && threads.is_null() {
+            eprintln!(
+                "GraphQL: Could not resolve to a PullRequest with the number of {number}. \
+                 (repository.pullRequest)"
+            );
+            return 1;
+        }
+        // `reviewThreads(first: 100)`: GraphQL's page is 100 at most, the count is the whole.
+        let all = threads.as_array().cloned().unwrap_or_default();
+        let nodes: Vec<Value> = all.iter().take(100).cloned().collect();
+        println!(
+            "{}",
+            json!({"data": {"repository": {"pullRequest": {"reviewThreads":
+                {"totalCount": all.len(), "nodes": nodes}}}}})
+        );
+        return 0;
+    }
+    // `node(id: $thread)`: one thread by its id, with the pull request it is on, whatever the page.
+    if query.contains("node(id") {
+        let id = field("thread");
+        let Some((repository, number, thread)) = all.iter().find(|(_, _, t)| t["id"] == id) else {
+            eprintln!("GraphQL: Could not resolve to a node with the global id of '{id}'. (node)");
+            return 1;
+        };
+        let mut node = thread.clone();
+        node["pullRequest"] = json!({"number": number.parse::<u64>().ok(),
+            "repository": {"nameWithOwner": repository}});
+        println!("{}", json!({"data": {"node": node}}));
+        return 0;
+    }
+    let mutation = [
+        "addPullRequestReviewThreadReply",
+        "unresolveReviewThread",
+        "resolveReviewThread",
+    ]
+    .into_iter()
+    .find(|name| query.contains(name));
+    let Some(mutation) = mutation else {
+        eprintln!("fake gh: a GraphQL query Flottille does not make: {query}");
+        return 2;
+    };
+    let id = field("thread");
+    let Some((repository, number, thread)) = all.iter().find(|(_, _, t)| t["id"] == id) else {
+        eprintln!(
+            "GraphQL: Could not resolve to a node with the global id of '{id}'. ({mutation})"
+        );
+        return 1;
+    };
+    if let Some(failure) = script["fail"][repository].as_str() {
+        eprintln!("{failure}");
+        return 1;
+    }
+    let answer = match mutation {
+        "addPullRequestReviewThreadReply" => {
+            if field("body").trim().is_empty() {
+                eprintln!("GraphQL: Body can't be blank ({mutation})");
+                return 1;
+            }
+            let url = format!(
+                "https://github.com/{repository}/pull/{number}#discussion_r{}",
+                script["replied"].as_u64().unwrap_or(1)
+            );
+            json!({"comment": {"url": url}})
+        }
+        _ => json!({"thread": {"id": thread["id"],
+            "isResolved": mutation == "resolveReviewThread"}}),
+    };
+    println!("{}", json!({"data": {mutation: answer}}));
+    0
+}
+
 /// What `gh` prints for `args`, and its exit code.
 fn answer(script: &Value, args: &[String]) -> i32 {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -378,6 +510,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             0
         }
+        ["api", "graphql", ..] => graphql(script, &words),
         ["api", path, rest @ ..] if path.starts_with("repos/") && path.ends_with("/reviews") => {
             let parts: Vec<&str> = path.split('/').collect();
             let [_, owner, name, "pulls", number, "reviews"] = parts[..] else {

@@ -55,6 +55,13 @@
 //! `pipeline_fail` makes `pipeline list` alone fail that way, and `checks_fail`
 //! (`{"acme/api": {"12": "Error: 404 Not Found"}}`) `pr checks` of that pull request alone.
 //!
+//! The review threads (#359): `bkt api <…>/pullrequests/<id>/comments --method POST --input
+//! <json>` answers a Cloud comment (a reply with `parent.id`, which must be a comment `api` holds
+//! at that pull request's `…/comments`), numbered `replied` (1 by default);
+//! `…/comments/<n>/resolve` with `POST` resolves a top-level one and `DELETE` opens it again;
+//! Data Center's are described at `data_center_comment`. A `versions` (`{"<path>": [0, 1]}`) makes
+//! the nth read of that path say the nth version, as a comment edited between two reads does.
+//!
 //! `bkt api <path> --method POST [--input <json>]` starts a run of a Cloud repository
 //! (`/repositories/<w>/<r>/pipelines/`, answering the new pipeline numbered `triggered`, 1 by
 //! default) or stops one of `pipelines` (`…/pipelines/<uuid>/stopPipeline`, answering nothing);
@@ -415,6 +422,60 @@ fn answer(script: &Value, args: &[String]) -> i32 {
     0
 }
 
+/// A write of a Data Center pull request's comments: `POST
+/// /rest/api/1.0/projects/<p>/repos/<r>/pull-requests/<id>/comments` with `text` (and `parent.id`
+/// for a reply) answers the new comment, numbered `replied` (1 by default); `PUT …/comments/<n>`
+/// with the comment's `version` and `threadResolved` or `state` answers it changed, for a comment
+/// the script's `api` holds at that path, refusing another version, as Data Center does.
+fn data_center_comment(script: &Value, method: &str, path: &str, input: Option<&str>) -> i32 {
+    let body: Value = input
+        .and_then(|input| serde_json::from_str(input).ok())
+        .unwrap_or(Value::Null);
+    let parts: Vec<&str> = path
+        .trim_start_matches("/rest/api/1.0/")
+        .split('/')
+        .collect();
+    match (method, parts.as_slice()) {
+        ("POST", ["projects", _, "repos", _, "pull-requests", _, "comments"]) => {
+            let Some(text) = body["text"].as_str().filter(|t| !t.is_empty()) else {
+                eprintln!("Error: 400 Bad Request: text is required");
+                return 1;
+            };
+            println!(
+                "{}",
+                json!({"id": script["replied"].as_u64().unwrap_or(1), "version": 0, "text": text,
+                    "parent": body["parent"]})
+            );
+            0
+        }
+        ("PUT", ["projects", _, "repos", _, "pull-requests", _, "comments", _]) => {
+            let Some(held) = script["api"].get(path) else {
+                eprintln!("Error: 404 Not Found: {path}");
+                return 1;
+            };
+            if body["version"] != held["version"] {
+                eprintln!(
+                    "Error: 409 Conflict: You are attempting to modify a comment based on out-of-date information."
+                );
+                return 1;
+            }
+            let mut changed = held.clone();
+            for key in ["threadResolved", "state"] {
+                if !body[key].is_null() {
+                    changed[key] = body[key].clone();
+                }
+            }
+            changed["version"] = json!(held["version"].as_u64().unwrap_or(0) + 1);
+            println!("{changed}");
+            0
+        }
+        _ => {
+            eprintln!("fake bkt: not a call Flottille makes: {method} {path}");
+            2
+        }
+    }
+}
+
 /// The body the script holds for `path`: its `api`, else the `pipelines` of a Cloud repository,
 /// or one of them by its uuid.
 fn body_of(script: &Value, path: &str) -> Option<Value> {
@@ -472,6 +533,30 @@ fn api(
         eprintln!("Error: 404 Not Found: {path}");
         return 1;
     };
+    // A comment changed between two reads (`versions`, `{"<path>": [0, 1]}`): the nth read of the
+    // path says the nth version, the last one for every read after, while `PUT` is judged against
+    // the `version` the script's `api` holds.
+    if let Some(versions) = script["versions"][path]
+        .as_array()
+        .filter(|v| !v.is_empty())
+    {
+        let reads = std::env::var_os("FLOTTILLE_FAKE_BKT_DIR")
+            .and_then(|dir| std::fs::read_to_string(PathBuf::from(dir).join("received.jsonl")).ok())
+            .map_or(0, |record| {
+                record
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .filter(|call| {
+                        let args = call["args"].as_array().cloned().unwrap_or_default();
+                        args.first().and_then(Value::as_str) == Some("api")
+                            && args.get(1).and_then(Value::as_str) == Some(path)
+                            && !args.iter().any(|arg| arg == "--method")
+                    })
+                    .count()
+            });
+        // The read being answered is already recorded.
+        body["version"] = versions[reads.saturating_sub(1).min(versions.len() - 1)].clone();
+    }
     // Whether `bkt api` merges a `--param` into a path that already holds a `?` is not proven: the
     // newest-first order of the pipelines is asked as a param, never inside the path.
     if path.ends_with("/pipelines/")
@@ -550,12 +635,77 @@ fn api(
 /// `…/pipelines/<uuid>/stopPipeline` stops a run of the script's `pipelines`, answering nothing, as
 /// the server's 204 does. Anything else is not a call Flottille makes.
 fn posted(script: &Value, method: &str, path: &str, input: Option<&str>) -> i32 {
+    if path.starts_with("/rest/api/1.0/") {
+        return data_center_comment(script, method, path, input);
+    }
     let Some(rest) = path.strip_prefix("/repositories/") else {
         eprintln!("fake bkt: not a call Flottille makes: {method} {path}");
         return 2;
     };
     let parts: Vec<&str> = rest.split('/').collect();
+    // The comments the script holds for that pull request, as `api` gives them.
+    let comment_of = |owner: &str, repo: &str, id: &str, comment: &str| {
+        let comments = format!("/repositories/{owner}/{repo}/pullrequests/{id}/comments");
+        script["api"][&comments]["values"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|c| comment.parse().ok() == c["id"].as_u64())
+            .cloned()
+    };
     match (method, parts.as_slice()) {
+        ("POST", [owner, repo, "pullrequests", id, "comments"]) => {
+            let body: Value = input
+                .and_then(|input| serde_json::from_str(input).ok())
+                .unwrap_or(Value::Null);
+            let Some(text) = body["content"]["raw"].as_str().filter(|t| !t.is_empty()) else {
+                eprintln!("Error: 400 Bad Request: content.raw is required");
+                return 1;
+            };
+            let parent = body["parent"]["id"].as_u64();
+            if let Some(parent) = parent
+                && comment_of(owner, repo, id, &parent.to_string()).is_none()
+            {
+                eprintln!("Error: 404 Not Found: comment {parent}");
+                return 1;
+            }
+            println!(
+                "{}",
+                json!({"id": script["replied"].as_u64().unwrap_or(1), "type": "pullrequest_comment",
+                    "content": {"raw": text}, "parent": parent.map(|id| json!({"id": id})),
+                    "deleted": false})
+            );
+            0
+        }
+        (
+            "POST" | "DELETE",
+            [
+                owner,
+                repo,
+                "pullrequests",
+                id,
+                "comments",
+                comment,
+                "resolve",
+            ],
+        ) => {
+            let Some(found) = comment_of(owner, repo, id, comment) else {
+                eprintln!("Error: 404 Not Found: comment {comment}");
+                return 1;
+            };
+            if found["parent"].is_object() {
+                eprintln!("Error: 400 Bad Request: only a top-level comment can be resolved");
+                return 1;
+            }
+            if method == "POST" {
+                println!(
+                    "{}",
+                    json!({"type": "comment_resolution", "user": {"display_name": "Someone"},
+                        "created_on": "2026-11-01T10:00:00+00:00"})
+                );
+            }
+            0
+        }
         ("POST", [owner, repo, "pipelines", ""]) => {
             let body: Value = input
                 .and_then(|input| serde_json::from_str(input).ok())
