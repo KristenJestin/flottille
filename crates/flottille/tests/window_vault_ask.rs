@@ -463,7 +463,7 @@ fn the_vault_form_shows_the_binding_and_its_host(cx: &mut TestAppContext) {
         Some("For: the connection browser")
     );
     assert_eq!(
-        label("vault-binding-host", cx).as_deref(),
+        label("vault-goes-to", cx).as_deref(),
         Some("Goes to: shop.example.com")
     );
     assert_eq!(
@@ -486,6 +486,84 @@ fn the_vault_form_shows_the_binding_and_its_host(cx: &mut TestAppContext) {
     let set = user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
     assert_eq!(set["name"], "shop-test");
     assert_eq!(set["for"], serde_json::Value::Null, "{set}");
+}
+
+#[gpui_kit::test]
+fn the_vault_form_says_where_an_unbound_secret_goes(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "sign in to the bank");
+    let (shell, cx) = window(&user, cx);
+    let (_, at) = card(&shell, &id, cx);
+
+    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    settle(cx);
+    let vault = vault_form(&shell, cx);
+    assert!(vault.read_with(cx, |v, _| v.is_open()), "the form is open");
+    // The entry is bound to no use, and the URL's text reads like bank.example: the form, where
+    // the secret is typed, says the host as login reads it.
+    assert!(!has("vault-binding-for", cx), "the entry is unbound");
+    assert_eq!(
+        value(&vault, VaultSection::url_field, cx),
+        "https://evil.example\\@bank.example/"
+    );
+    assert_eq!(
+        label("vault-goes-to", cx).as_deref(),
+        Some("Goes to: evil.example")
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn the_goes_to_line_folds_with_the_url(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "sign in to the bank");
+    let (shell, cx) = window(&user, cx);
+    let (_, at) = card(&shell, &id, cx);
+
+    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    settle(cx);
+    let vault = vault_form(&shell, cx);
+    let url = vault
+        .read_with(cx, |v, _| v.url_field().cloned())
+        .expect("the URL's field");
+    let asked = url.read_with(cx, |f, _| f.value().to_string());
+    assert!(
+        has("vault-goes-to", cx),
+        "said while the URL is the one asked"
+    );
+
+    // Cleared, the line folds away, moving; it is no longer the URL the host was read from.
+    cx.update(|window, cx| url.update(cx, |f, cx| f.set_value("", window, cx)));
+    cx.run_until_parked();
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the line leaves without moving"
+    );
+    settle(cx);
+    assert!(!has("vault-goes-to", cx), "still shown");
+
+    // Another URL says no host the daemon did not read.
+    cx.update(|window, cx| {
+        url.update(cx, |f, cx| {
+            f.set_value("https://other.example/", window, cx)
+        })
+    });
+    settle(cx);
+    assert!(!has("vault-goes-to", cx), "said of another URL");
+
+    // The URL asked, typed again, brings it back, unfolding.
+    cx.update(|window, cx| url.update(cx, |f, cx| f.set_value(asked, window, cx)));
+    cx.run_until_parked();
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the line comes without moving"
+    );
+    settle(cx);
+    assert_eq!(
+        label("vault-goes-to", cx).as_deref(),
+        Some("Goes to: evil.example")
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
 }
 
 #[gpui_kit::test]
