@@ -838,14 +838,21 @@ fn action_ok(name: &str) -> bool {
 /// says the URL without its login, query and fragment, where a secret may be.
 fn checked_url(text: &str) -> std::result::Result<String, String> {
     let url = url::Url::parse(text).map_err(|error| format!("is no URL: {error}"))?;
-    // Another scheme says its name alone: what follows it may be a login pasted without
-    // `https://` (`ada:secret@host`), which no other part of it would hide.
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(format!(
-            "its scheme {:?} is none Flottille reaches: must be an https:// URL, or http:// on \
-             this machine",
-            url.scheme()
-        ));
+    // Another scheme says its name alone, and only a known one: what is read as the scheme may be
+    // a token pasted as a login without `https://` (`xoxb-…:x@host`).
+    match url.scheme() {
+        "http" | "https" => {}
+        scheme if KNOWN_SCHEMES.contains(&scheme) => {
+            return Err(format!(
+                "its scheme {scheme:?} is none Flottille reaches: must be an https:// URL, or \
+                 http:// on this machine"
+            ));
+        }
+        _ => {
+            return Err(
+                "is no http(s) URL: must be an https:// URL, or http:// on this machine".into(),
+            );
+        }
     }
     let said = said_url(&url);
     if !url.username().is_empty() || url.password().is_some() {
@@ -877,13 +884,16 @@ fn checked_url(text: &str) -> std::result::Result<String, String> {
     }
 }
 
+/// The schemes other than http(s) an error may name: any other may be a secret (`checked_url`).
+const KNOWN_SCHEMES: [&str; 4] = ["ws", "wss", "ftp", "file"];
+
 /// `text` as Flottille says a URL it does not reach: as an error says it (`said_url`); its scheme
-/// alone when it is no http(s) one; nothing when it is no URL.
+/// alone when it is another known one (`KNOWN_SCHEMES`); nothing otherwise.
 fn said_text(text: &str) -> String {
     match url::Url::parse(text) {
         Ok(url) if matches!(url.scheme(), "http" | "https") => said_url(&url),
-        Ok(url) => format!("{}:", url.scheme()),
-        Err(_) => String::new(),
+        Ok(url) if KNOWN_SCHEMES.contains(&url.scheme()) => format!("{}:", url.scheme()),
+        _ => String::new(),
     }
 }
 
