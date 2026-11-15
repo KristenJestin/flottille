@@ -5066,6 +5066,21 @@ mod tests {
     }
 
     #[test]
+    fn a_body_on_a_resolve_names_every_action_that_takes_one() {
+        let fixture = Fixture::workspace();
+        let args = json!({"action": "resolve", "repository": ".", "number": 1, "thread": 7,
+            "resolved": true, "body": "x"});
+        let verdict = fixture.judge("forge", args, Some(&fixture.never));
+        let Verdict::Deny(said) = verdict else {
+            panic!("not refused: {verdict:?}");
+        };
+        assert!(
+            said.contains("body is for create, comment, edit, reply and review"),
+            "{said}"
+        );
+    }
+
+    #[test]
     fn a_review_comment_is_judged_and_an_approval_or_a_change_request_is_base() {
         let fixture = Fixture::workspace();
         let review = |verdict: Value| {

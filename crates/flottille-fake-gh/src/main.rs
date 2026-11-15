@@ -313,7 +313,9 @@ fn milestones(script: &Value, path: &str, rest: &[&str]) -> i32 {
 /// "path": "src/login.rs", "line": 14, "startLine": null, "originalLine": 14,
 /// "originalStartLine": null, "diffSide": "RIGHT", "comments": {"nodes": [{"author": {"login":
 /// "alice"}, "body": "…", "createdAt": "…", "url": "…#discussion_r1"}]}}]}}}`), none for a pull
-/// request of `pulls` without, and fails as GitHub does for one it holds neither of.
+/// request of `pulls` without, and fails as GitHub does for one it holds neither of; only the first
+/// 100 of them, as GraphQL pages, with the whole `totalCount`. A query of `node(id: $thread)`
+/// prints that thread with its `pullRequest {number repository {nameWithOwner}}`, wherever it is.
 /// `addPullRequestReviewThreadReply` (`thread`, `body`) prints the new comment's link
 /// (`…/pull/<n>#discussion_r<replied>`, 1 by default), `resolveReviewThread` and
 /// `unresolveReviewThread` (`thread`) the thread with its new state; a thread id the script holds
@@ -369,12 +371,27 @@ fn graphql(script: &Value, words: &[&str]) -> i32 {
             );
             return 1;
         }
-        let nodes = threads.as_array().cloned().unwrap_or_default();
+        // `reviewThreads(first: 100)`: GraphQL's page is 100 at most, the count is the whole.
+        let all = threads.as_array().cloned().unwrap_or_default();
+        let nodes: Vec<Value> = all.iter().take(100).cloned().collect();
         println!(
             "{}",
             json!({"data": {"repository": {"pullRequest": {"reviewThreads":
-                {"totalCount": nodes.len(), "nodes": nodes}}}}})
+                {"totalCount": all.len(), "nodes": nodes}}}}})
         );
+        return 0;
+    }
+    // `node(id: $thread)`: one thread by its id, with the pull request it is on, whatever the page.
+    if query.contains("node(id") {
+        let id = field("thread");
+        let Some((repository, number, thread)) = all.iter().find(|(_, _, t)| t["id"] == id) else {
+            eprintln!("GraphQL: Could not resolve to a node with the global id of '{id}'. (node)");
+            return 1;
+        };
+        let mut node = thread.clone();
+        node["pullRequest"] = json!({"number": number.parse::<u64>().ok(),
+            "repository": {"nameWithOwner": repository}});
+        println!("{}", json!({"data": {"node": node}}));
         return 0;
     }
     let mutation = [

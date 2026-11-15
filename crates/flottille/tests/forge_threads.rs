@@ -806,3 +806,286 @@ fn a_reply_or_a_resolve_missing_what_it_needs_is_refused_before_the_user_is_aske
     }
     assert!(graphql(&user).is_empty(), "{:?}", graphql(&user));
 }
+
+/// A comment of Bitbucket Cloud's pull request #13, which is not one of #12's.
+fn cloud_script_with_another_pull() -> Value {
+    let mut script = cloud_script();
+    script["api"]["/repositories/acme/app/pullrequests/13/comments"] = json!({"values": [
+        {"id": 301, "content": {"raw": "Elsewhere."}, "user": {"display_name": "Eve"},
+            "created_on": "2026-11-01T14:00:00+00:00", "deleted": false,
+            "inline": {"path": "src/other.rs", "from": null, "to": 1}}
+    ]});
+    script
+}
+
+#[test]
+fn a_thread_of_another_pull_request_is_refused_on_bitbucket_cloud() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_cloud(&user);
+    user.bkt_script(cloud_script_with_another_pull());
+    let mcp = agent(&user);
+
+    // 301 is a comment of #13, 104 a general comment of #12, 102 a reply and not a thread.
+    for thread in [301, 104, 102] {
+        for asked in [reply(json!(thread)), resolve(json!(thread), true)] {
+            let answer = written(&user, &mcp, asked);
+            assert!(answer.error, "{thread}: {}", answer.text);
+            assert!(
+                answer
+                    .text
+                    .contains(&format!("has no review thread {thread}"))
+                    && answer.text.contains("nothing was written"),
+                "{thread}: {}",
+                answer.text
+            );
+        }
+    }
+    assert!(bkt_writes(&user).is_empty(), "{:?}", bkt_writes(&user));
+}
+
+#[test]
+fn a_thread_of_another_pull_request_is_refused_on_bitbucket_data_center() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_data_center(&user);
+    let mut script = data_center_script();
+    let path = "/rest/api/1.0/projects/APP/repos/app/pull-requests";
+    // 301 is a comment of #13, 204 a general comment of #12, 202 a reply and not a thread.
+    script["api"][format!("{path}/13/comments/301")] = json!({"id": 301, "version": 0,
+        "text": "Elsewhere.", "severity": "NORMAL", "state": "OPEN", "threadResolved": false});
+    for (id, text) in [(204, "Looks good overall."), (202, "Agreed.")] {
+        script["api"][format!("{path}/12/comments/{id}")] = json!({"id": id, "version": 0,
+            "text": text, "severity": "NORMAL", "state": "OPEN", "threadResolved": false});
+    }
+    user.bkt_script(script);
+    let mcp = agent(&user);
+
+    for thread in [301, 204, 202] {
+        for asked in [reply(json!(thread)), resolve(json!(thread), true)] {
+            let answer = written(&user, &mcp, asked);
+            assert!(answer.error, "{thread}: {}", answer.text);
+            assert!(
+                answer
+                    .text
+                    .contains(&format!("has no review thread {thread}"))
+                    && answer.text.contains("nothing was written"),
+                "{thread}: {}",
+                answer.text
+            );
+        }
+    }
+    assert!(bkt_writes(&user).is_empty(), "{:?}", bkt_writes(&user));
+}
+
+#[test]
+fn a_thread_already_resolved_is_said_so_and_nothing_is_changed_on_bitbucket_cloud() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_cloud(&user);
+    let mcp = agent(&user);
+
+    let answer = written(&user, &mcp, resolve(json!(103), true));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("was already resolved"),
+        "{}",
+        answer.text
+    );
+    assert!(bkt_writes(&user).is_empty(), "{:?}", bkt_writes(&user));
+}
+
+#[test]
+fn a_thread_already_resolved_is_said_so_and_nothing_is_changed_on_bitbucket_data_center() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_data_center(&user);
+    let mcp = agent(&user);
+
+    let answer = written(&user, &mcp, resolve(json!(203), true));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("was already resolved"),
+        "{}",
+        answer.text
+    );
+    assert!(bkt_writes(&user).is_empty(), "{:?}", bkt_writes(&user));
+}
+
+#[test]
+fn a_bitbucket_thread_that_is_not_a_number_is_refused_before_the_user_is_asked() {
+    for (user, script) in [
+        (User::with_fake_agent().with_fake_bkt(), "cloud"),
+        (User::with_fake_agent().with_fake_bkt(), "data center"),
+    ] {
+        match script {
+            "cloud" => on_cloud(&user),
+            _ => on_data_center(&user),
+        }
+        let mcp = agent(&user);
+        for asked in [reply(json!("PRRT_open")), resolve(json!("abc"), true)] {
+            let answer = mcp.call("forge", asked.clone());
+            assert!(answer.error, "{script}: {asked}: {}", answer.text);
+            assert!(
+                answer.text.contains("is not a thread of Bitbucket")
+                    && !answer.text.contains("Waiting for the user's approval"),
+                "{script}: {}",
+                answer.text
+            );
+        }
+        assert!(bkt_writes(&user).is_empty(), "{:?}", bkt_writes(&user));
+    }
+}
+
+#[test]
+fn a_thread_past_the_first_hundred_can_be_replied_to() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    let mut script = github_script();
+    let threads = script["threads"]["acme/app"]["12"].as_array_mut().unwrap();
+    for n in 0..100 {
+        threads.push(json!({"id": format!("PRRT_more{n}"), "isResolved": false,
+            "isOutdated": false, "path": "src/more.rs", "line": n + 1, "diffSide": "RIGHT",
+            "comments": {"nodes": []}}));
+    }
+    user.gh_script(script);
+    let mcp = agent(&user);
+
+    // The 102nd thread of the pull request: past the page of 100 a read gives.
+    let answer = written(&user, &mcp, reply(json!("PRRT_more99")));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("src/more.rs line 100, new side"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(mutations(&user), ["addPullRequestReviewThreadReply"]);
+    let checked = graphql(&user)
+        .into_iter()
+        .find(|args| field(args, "query").is_some_and(|q| q.contains("node(id")))
+        .expect("the thread was checked by its id");
+    assert_eq!(field(&checked, "thread"), Some("PRRT_more99"));
+}
+
+#[test]
+fn a_data_center_read_cut_short_says_the_forge_has_more_threads() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_data_center(&user);
+    let mut script = data_center_script();
+    let path = "/rest/api/1.0/projects/APP/repos/app/pull-requests/12/activities";
+    let activities = script["api"][path]["values"].as_array_mut().unwrap();
+    for n in 0..120 {
+        activities.push(json!({"action": "COMMENTED", "commentAction": "ADDED",
+            "comment": {"id": 1000 + n, "version": 0, "text": "General.",
+                "author": {"displayName": "Dan", "name": "dan"}, "createdDate": at(13),
+                "comments": []}}));
+    }
+    user.bkt_script(script);
+    let mcp = agent(&user);
+
+    let text = show(&mcp);
+
+    assert!(
+        text.contains("review threads (2 read, the forge has more"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_thread_with_more_comments_than_read_says_so_on_github() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    let mut script = github_script();
+    script["threads"]["acme/app"]["12"][0]["comments"]["totalCount"] = json!(130);
+    user.gh_script(script);
+    let mcp = agent(&user);
+
+    let text = show(&mcp);
+
+    let open = text
+        .lines()
+        .find(|l| l.contains("thread PRRT_open"))
+        .unwrap();
+    assert!(
+        open.contains("130 comments, only the first 2 shown"),
+        "{open}"
+    );
+    let old = text
+        .lines()
+        .find(|l| l.contains("thread PRRT_old"))
+        .unwrap();
+    assert!(!old.contains("comments, only"), "{old}");
+}
+
+const DC_COMMENT: &str = "/rest/api/1.0/projects/APP/repos/app/pull-requests/12/comments/201";
+
+#[test]
+fn a_data_center_comment_without_a_version_is_never_resolved_with_a_zero() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_data_center(&user);
+    let mut script = data_center_script();
+    script["api"][DC_COMMENT]
+        .as_object_mut()
+        .unwrap()
+        .remove("version");
+    user.bkt_script(script);
+    let mcp = agent(&user);
+
+    let answer = written(&user, &mcp, resolve(json!(201), true));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("no version"), "{}", answer.text);
+    assert!(bkt_writes(&user).is_empty(), "{:?}", bkt_writes(&user));
+}
+
+#[test]
+fn a_data_center_comment_changed_between_the_read_and_the_write_is_read_again_once() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_data_center(&user);
+    let mut script = data_center_script();
+    // Read as version 0, edited since: the server holds version 1.
+    script["api"][DC_COMMENT]["version"] = json!(1);
+    script["versions"] = json!({DC_COMMENT: [0, 1]});
+    user.bkt_script(script);
+    let mcp = agent(&user);
+
+    let answer = written(&user, &mcp, resolve(json!(201), true));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(answer.text.contains("is now resolved"), "{}", answer.text);
+    assert_eq!(
+        bkt_writes(&user),
+        [
+            (
+                format!("PUT {DC_COMMENT}"),
+                json!({"version": 0, "threadResolved": true})
+            ),
+            (
+                format!("PUT {DC_COMMENT}"),
+                json!({"version": 1, "threadResolved": true})
+            )
+        ]
+    );
+}
+
+#[test]
+fn a_data_center_comment_that_keeps_changing_says_to_try_again() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_data_center(&user);
+    let mut script = data_center_script();
+    script["api"][DC_COMMENT]["version"] = json!(1);
+    script["versions"] = json!({DC_COMMENT: [0, 0]});
+    user.bkt_script(script);
+    let mcp = agent(&user);
+
+    let answer = written(&user, &mcp, resolve(json!(201), true));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("the comment changed meanwhile: try again"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_writes(&user).len(), 2, "{:?}", bkt_writes(&user));
+}

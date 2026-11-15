@@ -59,7 +59,8 @@
 //! <json>` answers a Cloud comment (a reply with `parent.id`, which must be a comment `api` holds
 //! at that pull request's `…/comments`), numbered `replied` (1 by default);
 //! `…/comments/<n>/resolve` with `POST` resolves a top-level one and `DELETE` opens it again;
-//! Data Center's are described at `data_center_comment`.
+//! Data Center's are described at `data_center_comment`. A `versions` (`{"<path>": [0, 1]}`) makes
+//! the nth read of that path say the nth version, as a comment edited between two reads does.
 //!
 //! `bkt api <path> --method POST [--input <json>]` starts a run of a Cloud repository
 //! (`/repositories/<w>/<r>/pipelines/`, answering the new pipeline numbered `triggered`, 1 by
@@ -532,6 +533,30 @@ fn api(
         eprintln!("Error: 404 Not Found: {path}");
         return 1;
     };
+    // A comment changed between two reads (`versions`, `{"<path>": [0, 1]}`): the nth read of the
+    // path says the nth version, the last one for every read after, while `PUT` is judged against
+    // the `version` the script's `api` holds.
+    if let Some(versions) = script["versions"][path]
+        .as_array()
+        .filter(|v| !v.is_empty())
+    {
+        let reads = std::env::var_os("FLOTTILLE_FAKE_BKT_DIR")
+            .and_then(|dir| std::fs::read_to_string(PathBuf::from(dir).join("received.jsonl")).ok())
+            .map_or(0, |record| {
+                record
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .filter(|call| {
+                        let args = call["args"].as_array().cloned().unwrap_or_default();
+                        args.first().and_then(Value::as_str) == Some("api")
+                            && args.get(1).and_then(Value::as_str) == Some(path)
+                            && !args.iter().any(|arg| arg == "--method")
+                    })
+                    .count()
+            });
+        // The read being answered is already recorded.
+        body["version"] = versions[reads.saturating_sub(1).min(versions.len() - 1)].clone();
+    }
     // Whether `bkt api` merges a `--param` into a path that already holds a `?` is not proven: the
     // newest-first order of the pipelines is asked as a param, never inside the path.
     if path.ends_with("/pipelines/")
