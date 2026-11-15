@@ -1260,7 +1260,9 @@ mod tests {
         .await);
         let written = |form: &str| {
             flottille_core::secrets::mask(
-                &format!("Authorization: Basic {form}"),
+                // Not in an `Authorization` header, which is masked whatever it holds: the
+                // form alone is what the vault's own masks have to catch.
+                &format!("the tool sent {form} and went on"),
                 &Default::default(),
             )
         };
