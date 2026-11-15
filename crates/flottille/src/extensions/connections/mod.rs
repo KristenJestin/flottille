@@ -480,9 +480,8 @@ impl Declaration {
                     })?;
                 Reach::Command(words)
             }
-            (None, Some(url)) => {
-                Reach::Url(checked_url(&url).map_err(|why| format!("{at}.url: {why}"))?)
-            }
+            // Checked when it is added or edited (`url_fault`): one declared by hand fails alone.
+            (None, Some(url)) => Reach::Url(url),
             _ => return Err(format!("{at}: needs a command or a url, one of them")),
         };
         let entries = |key: &str| -> std::result::Result<BTreeMap<String, String>, String> {
@@ -727,10 +726,15 @@ impl Declaration {
         format!("{PREFIX}{}", self.name)
     }
 
-    /// Why its URL is not reached: `query_secret`.
-    pub(super) fn query_secret(&self) -> Option<String> {
+    /// Why its URL is not reached: it is none the daemon may reach (`checked_url`), or it holds
+    /// a secret (`query_secret`). Refused when it is added or edited; a connection declared with
+    /// one fails alone: it does not start, nor sign in.
+    pub(super) fn url_fault(&self) -> Option<String> {
         match &self.reach {
-            Reach::Url(url) => query_secret(url),
+            Reach::Url(url) => checked_url(url)
+                .err()
+                .map(|why| format!("url: {why}"))
+                .or_else(|| query_secret(url)),
             Reach::Command(_) => None,
         }
     }
@@ -768,12 +772,14 @@ fn action_ok(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
-/// A URL the daemon may reach: `https://` anywhere, `http://` on this machine alone.
+/// A URL the daemon may reach: `https://` anywhere, `http://` on this machine alone. An error
+/// says the URL without its login, query and fragment, where a secret may be.
 fn checked_url(text: &str) -> std::result::Result<String, String> {
-    let url = url::Url::parse(text).map_err(|error| format!("{text:?}: {error}"))?;
+    let url = url::Url::parse(text).map_err(|error| format!("is no URL: {error}"))?;
+    let said = said_url(&url);
     if !url.username().is_empty() || url.password().is_some() {
         return Err(format!(
-            "{text:?}: holds a login: name a vault entry in secrets instead"
+            "{said:?}: holds a login: name a vault entry in secrets instead"
         ));
     }
     match url.scheme() {
@@ -789,15 +795,25 @@ fn checked_url(text: &str) -> std::result::Result<String, String> {
                 Ok(text.to_owned())
             } else {
                 Err(format!(
-                    "{text:?}: a plain http:// URL must be this machine's (127.0.0.1, localhost or \
+                    "{said:?}: a plain http:// URL must be this machine's (127.0.0.1, localhost or \
                      [::1]); another server is reached over https://"
                 ))
             }
         }
         _ => Err(format!(
-            "{text:?}: must be an https:// URL, or http:// on this machine"
+            "{said:?}: must be an https:// URL, or http:// on this machine"
         )),
     }
+}
+
+/// `url` as an error may say it: no login, query or fragment.
+fn said_url(url: &url::Url) -> String {
+    let mut said = url.clone();
+    let _ = said.set_username("");
+    let _ = said.set_password(None);
+    said.set_query(None);
+    said.set_fragment(None);
+    said.to_string()
 }
 
 /// `[[connections.server]]` checked, each table and their names.
@@ -1806,6 +1822,10 @@ async fn signed_in(daemon: &Arc<Daemon>, name: &str, ended: std::result::Result<
 async fn login(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
     let name = named(&params)?;
     let declaration = declaration(&daemon.paths, &name)?;
+    // Its URL is not reached, the sign-in's requests no more than the server's.
+    if let Some(why) = declaration.url_fault() {
+        return Err(Failure::refused(format!("connection.{why}")));
+    }
     let url = oauth::begin(daemon, &declaration).await.map_err(|why| {
         Failure::new(
             "unavailable",
@@ -1896,7 +1916,7 @@ fn connection_json(daemon: &Daemon, declaration: &Declaration, on: bool) -> Valu
 /// Why its server does not start: its URL, or what the last start said.
 fn failing(daemon: &Daemon, declaration: &Declaration) -> Option<String> {
     declaration
-        .query_secret()
+        .url_fault()
         .or_else(|| client::failing(daemon, &declaration.name))
 }
 
@@ -1984,7 +2004,7 @@ async fn add_if(
         .as_object()
         .ok_or_else(|| Failure::refused("connection.add takes an object"))?;
     let declaration = Declaration::of(table, "connection").map_err(Failure::refused)?;
-    if let Some(why) = declaration.query_secret() {
+    if let Some(why) = declaration.url_fault() {
         return Err(Failure::refused(format!("connection.{why}")));
     }
     entries_checked(daemon, &declaration)?;
@@ -2190,7 +2210,7 @@ fn edited(old: &Declaration, params: &Value) -> std::result::Result<Declaration,
         table.remove("headers");
     }
     let new = Declaration::of(&table, "connection").map_err(Failure::refused)?;
-    if let Some(why) = new.query_secret() {
+    if let Some(why) = new.url_fault() {
         return Err(Failure::refused(format!("connection.{why}")));
     }
     Ok(new)

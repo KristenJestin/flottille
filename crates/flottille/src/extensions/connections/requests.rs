@@ -360,7 +360,8 @@ fn headers_checked(
     let Reach::Url(url) = &after.reach else {
         return Ok(());
     };
-    let host = host_of(url).ok_or_else(|| format!("{url:?}: names no host"))?;
+    // Not the URL itself: its query may hold a secret.
+    let host = host_of(url).ok_or_else(|| "url: names no host".to_owned())?;
     let entries = daemon
         .read(|store| store.vault_entries())
         .map_err(|error| error.to_string())?;
@@ -467,7 +468,7 @@ fn proposal(daemon: &Daemon, args: &Value) -> Result<Proposal, String> {
             }
             let params = params_of(daemon, args, false)?;
             let declaration = Declaration::of(&params, "connection")?;
-            if let Some(why) = declaration.query_secret() {
+            if let Some(why) = declaration.url_fault() {
                 return Err(why);
             }
             entries_checked(daemon, &declaration).map_err(|f| f.message)?;
