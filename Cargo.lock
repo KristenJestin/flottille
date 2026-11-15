@@ -2282,6 +2282,7 @@ dependencies = [
 name = "flottille-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "flottille-protocol",
  "image",
  "libc",
@@ -2953,7 +2954,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-beta.12#3eecd4ab1230d62245275a7d4b1ffe253ad8b41d"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-beta.13#ee14d29a3ba314f0edd7d5ad6effe0eed48baca3"
 dependencies = [
  "gpui-kit",
  "toml 1.1.8+spec-1.1.0",

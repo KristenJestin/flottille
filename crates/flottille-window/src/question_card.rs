@@ -30,6 +30,7 @@ use gpui_kit::{
     TestSupportExt as _, WeakEntity, Window, canvas, div, px,
 };
 
+use crate::commands::{spaced, stack};
 use crate::session::{MarkdownText, SessionPage};
 
 /// What a question's card says once its answer was sent while the agent works: a message of the
@@ -594,18 +595,17 @@ impl QuestionCard {
             .children(rows)
             .children(other)
             .test_support();
-        let inputs = div()
-            .flex()
-            .flex_col()
-            .gap(space::SM)
-            .when(!question.options.is_empty(), |d| d.child(options))
+        let inputs = stack(space::SM)
+            .when(!question.options.is_empty(), |d| {
+                d.child(spaced(space::SM, options))
+            })
             .child(
                 presence(
                     id(format!("question-{n}-words")),
                     open && question.options.is_empty(),
                     field("answer", "Your answer", &self.fields[n]),
                 )
-                .gap(space::SM),
+                .space(space::SM),
             )
             .child(
                 presence(
@@ -613,7 +613,7 @@ impl QuestionCard {
                     open && self.note_open(n),
                     field("note", "Note with your choice", &self.notes[n]),
                 )
-                .gap(space::SM),
+                .space(space::SM),
             )
             .child(
                 presence(
@@ -632,7 +632,7 @@ impl QuestionCard {
                         }),
                     ),
                 )
-                .gap(space::SM),
+                .space(space::SM),
             );
         div()
             .id(id(format!("question-{n}")))
@@ -640,9 +640,8 @@ impl QuestionCard {
             .py(space::MD)
             .flex()
             .flex_col()
-            .gap(space::SM)
             .child(top)
-            .child(presence(id(format!("question-{n}-inputs")), open, inputs).gap(space::SM))
+            .child(presence(id(format!("question-{n}-inputs")), open, inputs).space(space::SM))
             .test_support()
     }
 

@@ -32,7 +32,9 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::{CommandsSection, boxed, menu_of, problem_line};
+use crate::commands::{
+    CommandsSection, boxed, menu_of, problem_line, section_blocks, spaced, stack,
+};
 use crate::commit_checks::CommitChecks;
 use crate::conventions::{Convention, Kind};
 use crate::message_checks::MessageChecks;
@@ -82,13 +84,18 @@ pub fn field_frame(
 }
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 5] = [
+pub const SECTIONS: [(&str, &str); 6] = [
     ("repositories", "Repositories"),
     ("workspaces", "Workspaces"),
     ("tasks", "Tasks"),
     ("instructions", "Instructions"),
     ("features", "Features"),
+    ("vault", "Vault"),
 ];
+
+/// What the Vault tab says it lists.
+pub const VAULT_SENTENCE: &str = "The secrets this project's agents can use: its own first, then \
+                                  every project's. A secret is never shown.";
 
 /// The sections of the Repositories tab, in order: the page's children, which a link scrolls to.
 const REPOSITORIES_SECTIONS: [&str; 2] = ["repositories", "tracker"];
@@ -365,6 +372,7 @@ pub enum Reveal {
     Tracker,
     Tasks,
     Feature(String),
+    Vault,
 }
 
 impl Reveal {
@@ -374,6 +382,7 @@ impl Reveal {
             Reveal::Repository(_) | Reveal::Tracker => "repositories",
             Reveal::Tasks => "tasks",
             Reveal::Feature(_) => "features",
+            Reveal::Vault => "vault",
         };
         SECTIONS
             .iter()
@@ -423,6 +432,10 @@ pub struct ProjectSettingsPage {
     worklog: Option<String>,
     /// The vault's entries as last listed (their metadata, never a secret): the project sees some.
     vault: Vec<VaultEntry>,
+    /// The Vault tab's rows as drawn: an entry added or removed unfolds or folds away.
+    vault_rows: Listing<VaultEntry>,
+    /// The daemon listed the vault once: before, the tab says nothing of an empty list.
+    vault_read: bool,
     /// The repository dialog's base branches and dependencies, as edited and not yet saved.
     bases: Vec<String>,
     base_rows: Listing<String>,
@@ -560,6 +573,8 @@ impl ProjectSettingsPage {
             tracker_repository: None,
             worklog: None,
             vault: Vec::new(),
+            vault_rows: Listing::default(),
+            vault_read: false,
             bases: Vec::new(),
             base_rows: Listing::default(),
             base_error: None,
@@ -1225,7 +1240,26 @@ impl ProjectSettingsPage {
     /// The vault's entries, as the daemon lists them: the select offers those the project sees.
     pub fn vault_listed(&mut self, entries: &[VaultEntry], cx: &mut Context<Self>) {
         self.vault = entries.to_vec();
+        self.vault_read = true;
         cx.notify();
+    }
+
+    /// The entries the project sees, as its Vault tab lists them: its own by name, then every
+    /// project's by name.
+    pub fn vault_seen(&self) -> Vec<VaultEntry> {
+        let mut seen: Vec<VaultEntry> = self
+            .vault
+            .iter()
+            .filter(|entry| entry.project.as_deref().is_none_or(|p| p == self.name))
+            .cloned()
+            .collect();
+        seen.sort_by(|a, b| {
+            a.project
+                .is_none()
+                .cmp(&b.project.is_none())
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        seen
     }
 
     /// What the `Log time with` select offers, each as its key and its label: none first, then
@@ -1703,6 +1737,9 @@ impl ProjectSettingsPage {
             let paths: Vec<_> = read.listed.iter().map(|info| info.path.clone()).collect();
             only_at_root(&paths)
         });
+        let none = read
+            .as_ref()
+            .is_some_and(|read| read.listed.is_empty() && read.new.is_empty());
         let section = Section::new("repositories", "Repositories")
             .when(!alone, |section| section.count(count.to_string()))
             .sentence(if alone {
@@ -1710,29 +1747,34 @@ impl ProjectSettingsPage {
             } else {
                 "The git repositories of the project. Each workspace gets its own copy of each."
             })
-            .child(
-                presence(
-                    "repository-list-block",
-                    !self.repository_rows.is_empty(),
-                    list,
-                )
-                .gap(space::MD),
-            )
-            .child(
-                presence(
-                    "no-repositories-block",
-                    read.as_ref()
-                        .is_some_and(|read| read.listed.is_empty() && read.new.is_empty()),
-                    EmptyLine::new(
-                        "no-repositories",
-                        Icon::Repository,
-                        "No git repository in this folder yet. Flottille looks again when you \
-                         come back.",
-                    ),
-                )
-                .gap(space::MD),
-            )
-            .child(problem_line("repositories-problem", problem, space::MD, cx));
+            .child(section_blocks(
+                "repositories-blocks",
+                !self.repository_rows.is_empty() || none || problem.is_some(),
+                space::MD,
+                stack(space::MD)
+                    .child(
+                        presence(
+                            "repository-list-block",
+                            !self.repository_rows.is_empty(),
+                            list,
+                        )
+                        .space(space::MD),
+                    )
+                    .child(
+                        presence(
+                            "no-repositories-block",
+                            none,
+                            EmptyLine::new(
+                                "no-repositories",
+                                Icon::Repository,
+                                "No git repository in this folder yet. Flottille looks again \
+                                 when you come back.",
+                            ),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(problem_line("repositories-problem", problem, space::MD, cx)),
+            ));
         // Adding a second repository (or removing the last other) changes the section's words:
         // it fades back in rather than swapping them at once.
         changing(
@@ -1981,12 +2023,8 @@ impl ProjectSettingsPage {
             .on_click(move |_, window, cx| {
                 this.update(cx, |this, cx| this.add_base(window, cx)).ok();
             });
-        // The gap is the parent's: the blocks that come and go take theirs with them.
-        let control = div()
-            .flex()
-            .flex_col()
-            .gap(space::SM)
-            .child(presence("base-list-block", !self.bases.is_empty(), list).gap(space::SM))
+        let control = stack(space::SM)
+            .child(presence("base-list-block", !self.bases.is_empty(), list).space(space::SM))
             .child(
                 presence(
                     "base-empty-block",
@@ -1997,9 +2035,10 @@ impl ProjectSettingsPage {
                         "No base branch: add one, a workspace starts from it.",
                     ),
                 )
-                .gap(space::SM),
+                .space(space::SM),
             )
-            .child(
+            .child(spaced(
+                space::SM,
                 div()
                     .flex()
                     .items_center()
@@ -2010,7 +2049,7 @@ impl ProjectSettingsPage {
                             .child(boxed("base-branch", Input::new(branch), cx)),
                     )
                     .child(add),
-            );
+            ));
         Field::new("base-field", "Base branches", control)
             .hint("A new workspace starts from the first of these branches the remote has.")
             .error(self.base_error.clone())
@@ -2160,54 +2199,69 @@ impl ProjectSettingsPage {
                 let (bases, depends, delete_branch) =
                     lists.expect("made for a repository's dialog");
                 modal
-                    .child(bases)
-                    .child(depends)
-                    .child(delete_branch)
-                    .child(Field::new("forge-kind-field", "Forge", select))
                     .child(
-                        presence(
-                            "forge-host-block",
-                            self.forge_kind == ForgeKind::BitbucketDataCenter,
-                            Field::new(
-                                "forge-host-field",
-                                "Host",
-                                boxed("forge-host", Input::new(&fields.host), cx),
-                            ),
-                        )
-                        .gap(space::LG),
-                    )
-                    .child(
-                        presence(
-                            "forge-repository-block",
-                            self.forge_kind != ForgeKind::None,
-                            Field::new(
-                                "forge-repository-field",
-                                "Repository on the forge",
-                                boxed("forge-repository", Input::new(&fields.repository), cx),
-                            )
-                            .hint(hint),
-                        )
-                        .gap(space::LG),
-                    )
-                    .child(
-                        presence_of(
-                            "forge-disagrees-block",
-                            disagrees.map(|why| {
-                                SharedString::from(format!(
-                                    "The forge declared is refused until it agrees: {why}."
-                                ))
-                            }),
-                            move |said| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
                                 div()
-                                    .id("forge-disagrees")
-                                    .text_size(px(12.5))
-                                    .text_color(p.wait)
-                                    .child(said)
-                                    .test_support()
-                                    .into_any_element()
-                            },
-                        )
-                        .gap(space::LG),
+                                    .flex()
+                                    .flex_col()
+                                    .gap(space::LG)
+                                    .child(bases)
+                                    .child(depends)
+                                    .child(delete_branch)
+                                    .child(Field::new("forge-kind-field", "Forge", select)),
+                            )
+                            .child(
+                                presence(
+                                    "forge-host-block",
+                                    self.forge_kind == ForgeKind::BitbucketDataCenter,
+                                    Field::new(
+                                        "forge-host-field",
+                                        "Host",
+                                        boxed("forge-host", Input::new(&fields.host), cx),
+                                    ),
+                                )
+                                .space(space::LG),
+                            )
+                            .child(
+                                presence(
+                                    "forge-repository-block",
+                                    self.forge_kind != ForgeKind::None,
+                                    Field::new(
+                                        "forge-repository-field",
+                                        "Repository on the forge",
+                                        boxed(
+                                            "forge-repository",
+                                            Input::new(&fields.repository),
+                                            cx,
+                                        ),
+                                    )
+                                    .hint(hint),
+                                )
+                                .space(space::LG),
+                            )
+                            .child(
+                                presence_of(
+                                    "forge-disagrees-block",
+                                    disagrees.map(|why| {
+                                        SharedString::from(format!(
+                                            "The forge declared is refused until it agrees: {why}."
+                                        ))
+                                    }),
+                                    move |said| {
+                                        div()
+                                            .id("forge-disagrees")
+                                            .text_size(px(12.5))
+                                            .text_color(p.wait)
+                                            .child(said)
+                                            .test_support()
+                                            .into_any_element()
+                                    },
+                                )
+                                .space(space::LG),
+                            ),
                     )
                     .kept(error)
                     .action(save)
@@ -2279,42 +2333,47 @@ impl ProjectSettingsPage {
                         .into_any_element()
                 };
                 modal
-                    .child(Field::new("tracker-kind-field", "Tickets", select))
                     .child(
-                        presence(
-                            "tracker-github-block",
-                            self.tracker_kind == TrackerKind::Github,
-                            github,
-                        )
-                        .gap(space::LG),
-                    )
-                    .child(
-                        presence(
-                            "tracker-jira-block",
-                            self.tracker_kind == TrackerKind::Jira,
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(space::LG)
-                                .child(Field::new(
-                                    "tracker-site-field",
-                                    "Site",
-                                    boxed("tracker-site", Input::new(&fields.site), cx),
-                                ))
-                                .child(
-                                    Field::new(
-                                        "tracker-keys-field",
-                                        "Project keys",
-                                        boxed("tracker-keys", Input::new(&fields.keys), cx),
-                                    )
-                                    .hint(
-                                        "A ticket is a key of one of these projects (ABC-123), \
-                                         read with acli when it is signed in to this site.",
-                                    ),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(Field::new("tracker-kind-field", "Tickets", select))
+                            .child(
+                                presence(
+                                    "tracker-github-block",
+                                    self.tracker_kind == TrackerKind::Github,
+                                    github,
                                 )
-                                .child(worklog),
-                        )
-                        .gap(space::LG),
+                                .space(space::LG),
+                            )
+                            .child(
+                                presence(
+                                    "tracker-jira-block",
+                                    self.tracker_kind == TrackerKind::Jira,
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(space::LG)
+                                        .child(Field::new(
+                                            "tracker-site-field",
+                                            "Site",
+                                            boxed("tracker-site", Input::new(&fields.site), cx),
+                                        ))
+                                        .child(
+                                            Field::new(
+                                                "tracker-keys-field",
+                                                "Project keys",
+                                                boxed("tracker-keys", Input::new(&fields.keys), cx),
+                                            )
+                                            .hint(
+                                                "A ticket is a key of one of these projects (ABC-123), read \
+                                                 with acli when it is signed in to this site.",
+                                            ),
+                                        )
+                                        .child(worklog),
+                                )
+                                .space(space::LG),
+                            )
                     )
                     .kept(error)
                     .action(save)
@@ -2366,7 +2425,12 @@ impl ProjectSettingsPage {
                         .on_click(move |_: &ClickEvent, window, cx| {
                             shell
                                 .update(cx, |shell, cx| {
-                                    shell.add_vault_entry_for(&project, window, cx)
+                                    let prefill = VaultEntry {
+                                        bound: Some(flottille_core::vault::worklog(&project)),
+                                        ..VaultEntry::default()
+                                    };
+                                    let back = Some((project.clone(), Reveal::Tracker));
+                                    shell.add_vault_entry(&prefill, None, back, window, cx)
                                 })
                                 .ok();
                         }),
@@ -2421,7 +2485,7 @@ impl ProjectSettingsPage {
     }
 
     /// What each tab counts, once its list is read: the repositories and the tasks.
-    fn counts(&self, cx: &App) -> [Option<usize>; 5] {
+    fn counts(&self, cx: &App) -> [Option<usize>; 6] {
         [
             self.repositories
                 .read(cx)
@@ -2429,6 +2493,7 @@ impl ProjectSettingsPage {
                 .map(|read| read.listed.len()),
             None,
             self.tasks.read(cx).tasks().map(<[_]>::len),
+            None,
             None,
             None,
         ]
@@ -2464,6 +2529,98 @@ impl ProjectSettingsPage {
             self.feature = key;
             cx.notify();
         }
+    }
+
+    /// The Vault tab: the entries the project sees, its own first, then every project's, each
+    /// the row of Settings' Vault (never a value). "New entry" and a row open that page's own
+    /// dialog, and the list follows the vault's changes as the daemon announces them.
+    fn vault_tab(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let seen = self.vault_seen();
+        if self.vault_read {
+            let now = cx.background_executor().now();
+            self.vault_rows.sync(
+                seen.iter().map(|e| (e.name.clone(), e.clone())),
+                now,
+                cx.reduce_motion(),
+            );
+        }
+        let drawn: Vec<_> = self
+            .vault_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
+            .collect();
+        let mut list = ListCard::new("project-vault-list");
+        for (key, placement, entry) in drawn {
+            let (shell, project, name) = (self.shell.clone(), self.name.clone(), key.clone());
+            let row = crate::vault::entry_row(
+                ElementId::Name(format!("project-vault-{key}").into()),
+                &entry,
+                cx,
+            )
+            .on_click(move |_, window, cx| {
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.replace_vault_entry_for(&project, &name, window, cx)
+                    })
+                    .ok();
+            });
+            list = list.item(
+                ElementId::Name(format!("project-vault-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
+        let (shell, project) = (self.shell.clone(), self.name.clone());
+        Section::new("project-vault", "Vault")
+            .when(self.vault_read, |section| {
+                section.count(self.vault_rows.len().to_string())
+            })
+            .sentence(VAULT_SENTENCE)
+            .action(
+                Button::secondary("project-vault-add", "New entry")
+                    .leading(Icon::Plus)
+                    .on_click(move |_, window, cx| {
+                        shell
+                            .update(cx, |shell, cx| {
+                                let prefill = VaultEntry {
+                                    project: Some(project.clone()),
+                                    ..VaultEntry::default()
+                                };
+                                let back = Some((project.clone(), Reveal::Vault));
+                                shell.add_vault_entry(&prefill, None, back, window, cx)
+                            })
+                            .ok();
+                    }),
+            )
+            .child(section_blocks(
+                "project-vault-blocks",
+                self.vault_read || !self.vault_rows.is_empty(),
+                space::MD,
+                stack(space::MD)
+                    .child(
+                        presence(
+                            "project-vault-list-block",
+                            !self.vault_rows.is_empty(),
+                            list,
+                        )
+                        .space(space::MD),
+                    )
+                    .child(
+                        presence(
+                            "no-project-vault-block",
+                            self.vault_read && self.vault_rows.is_empty(),
+                            EmptyLine::new(
+                                "no-project-vault",
+                                Icon::Key,
+                                "No entry this project sees yet. Add a secret its agents need, \
+                                 such as a tracker's token: they use it through Flottille's tools \
+                                 and never see it.",
+                            ),
+                        )
+                        .space(space::MD),
+                    ),
+            ))
+            .into_any_element()
     }
 
     /// The Features tab: the parts that touch a project, each a row that opens its page in place
@@ -2629,7 +2786,6 @@ impl Render for ProjectSettingsPage {
         let header = div()
             .flex()
             .flex_col()
-            .gap(space::MD)
             .child(
                 PageHeader::new("project-settings-header", "Settings")
                     .crumb(crumb)
@@ -2656,7 +2812,7 @@ impl Render for ProjectSettingsPage {
                             .into_any_element()
                     },
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .child(
                 presence_of(
@@ -2672,7 +2828,7 @@ impl Render for ProjectSettingsPage {
                             .into_any_element()
                     },
                 )
-                .gap(space::MD),
+                .space(space::MD),
             );
         if let Some((at, until)) = self.scroll_to {
             self.scroll.scroll_to_top_of_item(at);
@@ -2717,6 +2873,7 @@ impl Render for ProjectSettingsPage {
                     self.pull_request_template.clone().into_any_element(),
                 ),
             ],
+            "vault" => vec![("vault", self.vault_tab(cx))],
             _ => vec![("features", self.features_tab(cx))],
         };
         let this = cx.entity().downgrade();

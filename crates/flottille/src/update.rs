@@ -86,7 +86,7 @@ pub fn run(
     let channel = channel
         .or(kept.channel.clone())
         .unwrap_or_else(|| match CHANNEL {
-            "beta" | "alpha" => CHANNEL.to_owned(),
+            "beta" | "alpha" | "rc" | "next" => CHANNEL.to_owned(),
             _ => "stable".to_owned(),
         });
     let branch = branch.or_else(|| {
@@ -135,7 +135,7 @@ pub fn run(
             }
             return Ok(ExitCode::SUCCESS);
         }
-        if *new < this {
+        if is_older(new, &this) {
             if !force {
                 return Err(if which.is_empty() {
                     format!("{new} is older than this {this}: --force goes back to it ({NOT_DOWN}).")
@@ -287,6 +287,90 @@ fn archives(release: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The archive an rc or a next build follows: its own line's (`docs/releases.md`, "Updating").
+/// An rc build of `X.Y.Z` takes the highest of the line's `-rc.` builds and stable releases (a
+/// line's stable is above its rcs); a next build of `X.Y.0` the most recently published of the
+/// line's `-next.` builds and, once the line is merged into dev, of dev's betas from `X.Y.0` on.
+/// Other lines' builds, whatever they are, are never taken.
+fn along_line(releases: &[Value], this: &Version) -> Option<String> {
+    let rc = this.pre.as_str().starts_with("rc.");
+    let candidates = releases
+        .iter()
+        .filter(|release| release["published_at"].as_str().is_some())
+        .flat_map(|release| {
+            let at = release["published_at"].as_str().unwrap_or_default();
+            archives(release)
+                .into_iter()
+                .filter_map(move |url| Some((at, version_of(url.rsplit('/').next()?)?, url)))
+        })
+        .filter(|(_, version, _)| {
+            let pre = version.pre.as_str();
+            let line = (version.major, version.minor) == (this.major, this.minor);
+            if rc {
+                line && (pre.is_empty() || pre.starts_with("rc."))
+            } else {
+                // Next is above dev (`docs/releases.md`, "The branches"): a beta from this line's
+                // `X.Y.0` on is dev with the line merged in, the next build's own successor.
+                (line && pre.starts_with("next."))
+                    || (pre.starts_with("beta.")
+                        && (version.major, version.minor, version.patch)
+                            >= (this.major, this.minor, this.patch))
+            }
+        });
+    if rc {
+        candidates
+            .max_by(|a, b| a.1.cmp(&b.1))
+            .map(|(_, _, url)| url)
+    } else {
+        candidates
+            .max_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)))
+            .map(|(_, _, url)| url)
+    }
+}
+
+/// The pages of releases read at most: dev's betas fill a page within weeks, a line's rc sits
+/// some pages down, and a build whose own release is gone must not read the whole history.
+const MAX_PAGES: u32 = 10;
+
+/// `along_line` over the pages of the releases, newest first, as GitHub gives them, a page at a
+/// time through `page` (1 is the first). The reading stops at the page that holds this build's own
+/// release (what is newer is above it), at an empty page, or after `MAX_PAGES`.
+fn along_line_paged(
+    this: &Version,
+    mut page: impl FnMut(u32) -> Result<Vec<Value>>,
+) -> Result<Option<String>> {
+    let mut releases = Vec::new();
+    for n in 1..=MAX_PAGES {
+        let next = page(n)?;
+        if next.is_empty() {
+            break;
+        }
+        let own = next.iter().flat_map(archives).any(|url| {
+            url.rsplit('/')
+                .next()
+                .and_then(version_of)
+                .is_some_and(|version| version == *this)
+        });
+        releases.extend(next);
+        if own {
+            break;
+        }
+    }
+    Ok(along_line(&releases, this))
+}
+
+/// Whether `new` is older than `this`: by version, but dev's beta of a line is not older than the
+/// next build of that line it was merged from (`0.5.0-beta.1` follows `0.5.0-next.7`). This trusts
+/// that next is above dev: a beta of `X.Y.0` or above is taken from a next build of `X.Y.0` without
+/// `--force`, because next only holds the version after dev's, so such a beta is that line merged
+/// into dev, not a step back.
+fn is_older(new: &Version, this: &Version) -> bool {
+    let merged = this.pre.as_str().starts_with("next.")
+        && new.pre.as_str().starts_with("beta.")
+        && (new.major, new.minor, new.patch) >= (this.major, this.minor, this.patch);
+    new < this && !merged
+}
+
 /// The address of the channel's latest archive for this machine.
 fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
     let found = match channel {
@@ -330,6 +414,17 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
                 .into());
             };
             Some(url)
+        }
+        // The build's own line: it says its channel, which `--channel` does not offer.
+        "rc" | "next" => {
+            let this = Version::parse(VERSION)?;
+            along_line_paged(&this, |page| {
+                Ok(
+                    json(&format!("{}/releases?per_page=100&page={page}", api()))?
+                        .and_then(|releases| releases.as_array().cloned())
+                        .unwrap_or_default(),
+                )
+            })?
         }
         _ => return Err("the channel is stable, beta or alpha".into()),
     };
@@ -415,4 +510,163 @@ fn tempfile_dir(dir: &Path) -> Result<PathBuf> {
         }
     }
     Err("cannot make a folder beside the binary".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// A published release of `version`, at `at` (UTC, one shape).
+    fn release(version: &str, at: &str) -> Value {
+        json!({
+            "tag_name": format!("v{version}"),
+            "published_at": at,
+            "assets": [{"browser_download_url": format!("https://example.test/flottille-{version}-x86_64-linux.tar.gz")}],
+        })
+    }
+
+    fn taken(releases: &[Value], this: &str) -> Option<String> {
+        let url = along_line(releases, &Version::parse(this).unwrap())?;
+        Some(version_of(url.rsplit('/').next()?)?.to_string())
+    }
+
+    #[test]
+    fn an_rc_build_updates_along_its_line() {
+        let mut releases = vec![
+            release("0.3.0", "2026-11-01T10:00:00Z"),
+            release("0.3.1-rc.1", "2026-11-02T10:00:00Z"),
+            release("0.3.1-rc.2", "2026-11-03T10:00:00Z"),
+            release("0.3.1-rc.3", "2026-11-04T10:00:00Z"),
+            // Newer, and other lines' or other channels': never taken.
+            release("0.2.4-rc.1", "2026-11-05T10:00:00Z"),
+            release("0.4.0-beta.9", "2026-11-06T10:00:00Z"),
+            release("0.5.0-next.1", "2026-11-07T10:00:00Z"),
+            release("0.3.1-alpha.feat-a.1", "2026-11-08T10:00:00Z"),
+        ];
+        // The next rc of its line.
+        assert_eq!(
+            taken(&releases, "0.3.1-rc.2").as_deref(),
+            Some("0.3.1-rc.3")
+        );
+        // Then the line's stable, which is above its rcs.
+        releases.push(release("0.3.1", "2026-11-09T10:00:00Z"));
+        assert_eq!(taken(&releases, "0.3.1-rc.3").as_deref(), Some("0.3.1"));
+        // And the next fix's rc, for a build that did not move to the stable in time.
+        releases.push(release("0.3.2-rc.1", "2026-11-10T10:00:00Z"));
+        assert_eq!(
+            taken(&releases, "0.3.1-rc.3").as_deref(),
+            Some("0.3.2-rc.1")
+        );
+    }
+
+    #[test]
+    fn a_next_build_updates_along_its_line() {
+        let mut releases = vec![
+            release("0.5.0-next.1", "2026-11-01T10:00:00Z"),
+            release("0.5.0-next.2", "2026-11-02T10:00:00Z"),
+            release("0.5.0-next.3", "2026-11-03T10:00:00Z"),
+            // Dev's betas before the line is merged, and other lines': never taken.
+            release("0.4.0-beta.9", "2026-11-04T10:00:00Z"),
+            release("0.3.1-rc.1", "2026-11-05T10:00:00Z"),
+            release("0.6.0-next.1", "2026-11-06T10:00:00Z"),
+        ];
+        assert_eq!(
+            taken(&releases, "0.5.0-next.2").as_deref(),
+            Some("0.5.0-next.3")
+        );
+        // The line is merged into dev: dev's betas of it come after the last next.
+        releases.push(release("0.5.0-beta.1", "2026-11-07T10:00:00Z"));
+        let this = Version::parse("0.5.0-next.3").unwrap();
+        assert_eq!(
+            taken(&releases, "0.5.0-next.3").as_deref(),
+            Some("0.5.0-beta.1")
+        );
+        // Which the build follows, though a beta sorts below a next.
+        assert!(!is_older(&Version::parse("0.5.0-beta.1").unwrap(), &this));
+        assert!(is_older(&Version::parse("0.5.0-next.1").unwrap(), &this));
+        assert!(is_older(&Version::parse("0.4.0-beta.9").unwrap(), &this));
+    }
+
+    /// `n` pages of releases, a page being what `releases` hold, newest first.
+    fn taken_paged(pages: &[Vec<Value>], this: &str) -> Option<String> {
+        let url = along_line_paged(&Version::parse(this).unwrap(), |page| {
+            Ok(pages.get(page as usize - 1).cloned().unwrap_or_default())
+        })
+        .unwrap()?;
+        Some(version_of(url.rsplit('/').next()?)?.to_string())
+    }
+
+    /// Dev's betas, which fill a page of releases within weeks.
+    fn betas(from: u32, count: u32) -> Vec<Value> {
+        (from..from + count)
+            .map(|n| release(&format!("0.4.0-beta.{n}"), "2026-11-20T10:00:00Z"))
+            .collect()
+    }
+
+    #[test]
+    fn an_rc_build_already_the_newest_of_its_line_says_already() {
+        let releases = [
+            release("0.3.1-rc.2", "2026-11-03T10:00:00Z"),
+            release("0.3.1-rc.3", "2026-11-04T10:00:00Z"),
+            release("0.4.0-beta.9", "2026-11-06T10:00:00Z"),
+        ];
+        // The archive taken is the build's own: `run` says "already", it does not update.
+        assert_eq!(
+            taken(&releases, "0.3.1-rc.3").as_deref(),
+            Some("0.3.1-rc.3")
+        );
+    }
+
+    #[test]
+    fn an_rc_build_whose_release_is_on_page_two_says_already() {
+        let pages = [
+            betas(1, 100),
+            vec![
+                release("0.3.1-rc.2", "2026-11-03T10:00:00Z"),
+                release("0.3.1-rc.1", "2026-11-02T10:00:00Z"),
+            ],
+        ];
+        assert_eq!(
+            taken_paged(&pages, "0.3.1-rc.2").as_deref(),
+            Some("0.3.1-rc.2")
+        );
+    }
+
+    #[test]
+    fn an_rc_build_finds_a_newer_rc_on_page_two() {
+        let pages = [
+            betas(1, 100),
+            vec![
+                release("0.3.1-rc.3", "2026-11-04T10:00:00Z"),
+                release("0.3.1-rc.2", "2026-11-03T10:00:00Z"),
+            ],
+        ];
+        assert_eq!(
+            taken_paged(&pages, "0.3.1-rc.2").as_deref(),
+            Some("0.3.1-rc.3")
+        );
+    }
+
+    #[test]
+    fn an_rc_build_reads_the_pages_only_as_far_as_it_needs() {
+        let mut asked = Vec::new();
+        let this = Version::parse("0.3.1-rc.1").unwrap();
+        // Its own release is never found: the reading stops at the ten pages.
+        along_line_paged(&this, |page| {
+            asked.push(page);
+            Ok(betas(page * 100, 100))
+        })
+        .unwrap();
+        assert_eq!(asked, (1..=10).collect::<Vec<_>>());
+        // Found on the first page: the second is not read.
+        asked.clear();
+        along_line_paged(&this, |page| {
+            asked.push(page);
+            Ok(vec![release("0.3.1-rc.1", "2026-11-02T10:00:00Z")])
+        })
+        .unwrap();
+        assert_eq!(asked, [1]);
+    }
 }

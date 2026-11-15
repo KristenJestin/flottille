@@ -65,6 +65,11 @@ An entry made for one precise feature is that feature's alone. `for` names it:
   without `for` is unbound; set again without `for`, an entry keeps its use, and another use for
   a bound entry is refused, naming the one it has: it is removed first. Settings, Vault shows the
   use of each entry on its row (`For the worklog of the project app alone`).
+- **Seen from a project.** A project's Settings has a Vault tab: the entries that project sees (its
+  own first, then every project's, marked as such), each the row of Settings, Vault. "New entry"
+  there opens Settings, Vault's own dialog with "Seen by agents of" set to the project, and a click
+  on a row edits the entry in it (the dialog says when the entry is every project's); closed, the
+  window goes back to the tab. The tab follows the vault live.
 - **A worklog's entry is its project's.** Bound to `worklog:<project>`, an entry is that project's
   (its `project` is set to it when it names none; an entry of another project is refused), so no
   other project's agent lists it, and the `vault` tool never tells an agent the use of an entry.
@@ -99,7 +104,9 @@ again as soon as the secret is sent.
 
 Every value of every entry is added to the masking of everything the daemon stores and shows
 (`flottille_core::secrets`): an agent that came across a secret some other way and writes it in a
-message, a command's output, a tool's arguments, finds it `[masked]` there. The values are read
+message, a command's output, a tool's arguments, finds it `[masked]` there, raw and in the forms
+a page shows a typed secret in (percent-encoded in an address, escaped in HTML or JSON, and, with
+the entry's username, in base64 as HTTP Basic authentication sends them). The values are read
 from the keyring when the daemon starts, before any agent resumes (the start waits 5 seconds at
 most for a keyring that asks to be unlocked, then goes on), and a new secret is masked as soon as
 it is set. A secret replaced or removed stays masked until the daemon restarts: another entry may

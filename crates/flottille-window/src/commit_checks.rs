@@ -20,7 +20,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::Command;
-use crate::commands::perform_later;
+use crate::commands::{perform_later, section_blocks, stack};
 use crate::project::{only_at_root, repository_label};
 use crate::shell::Shell;
 
@@ -508,37 +508,56 @@ impl CommitChecks {
             .id(id("repository"))
             .flex()
             .flex_col()
-            .gap(space::MD)
-            .children(named.then(|| {
+            .child(
                 div()
-                    .id(id("name"))
-                    .aria_label(SharedString::from(label.clone()))
                     .flex()
-                    .items_center()
-                    .gap(space::SM)
-                    .text_size(px(13.))
-                    .child(icon(Icon::Repository).size(px(14.)).text_color(p.faint))
-                    .child(SharedString::from(label.clone()))
-                    .test_support()
-            }))
-            .child(
-                Field::new(id("pre-commit-field"), "Before the commit (pre-commit)", pre_text)
-                    .optional()
-                    .hint("One command line per line, run in the repository's folder.")
-                    .error(pre_problem),
+                    .flex_col()
+                    .gap(space::MD)
+                    .children(named.then(|| {
+                        div()
+                            .id(id("name"))
+                            .aria_label(SharedString::from(label.clone()))
+                            .flex()
+                            .items_center()
+                            .gap(space::SM)
+                            .text_size(px(13.))
+                            .child(icon(Icon::Repository).size(px(14.)).text_color(p.faint))
+                            .child(SharedString::from(label.clone()))
+                            .test_support()
+                    }))
+                    .child(
+                        Field::new(
+                            id("pre-commit-field"),
+                            "Before the commit (pre-commit)",
+                            pre_text,
+                        )
+                        .optional()
+                        .hint("One command line per line, run in the repository's folder.")
+                        .error(pre_problem),
+                    )
+                    .child(
+                        Field::new(
+                            id("commit-msg-field"),
+                            "On its message (commit-msg)",
+                            msg_text,
+                        )
+                        .optional()
+                        .hint(
+                            "One command line per line; {message_file} stands for the file \
+                                 that holds the message.",
+                        )
+                        .error(msg_problem),
+                    )
+                    .child(div().flex().justify_end().child(
+                        presence(
+                            id("save-block"),
+                            savable,
+                            Button::secondary(id("save"), "Save").on_click(
+                                cx.listener(move |this, _, _, cx| this.save(&saving, cx)),
+                            ),
+                        ),
+                    )),
             )
-            .child(
-                Field::new(id("commit-msg-field"), "On its message (commit-msg)", msg_text)
-                    .optional()
-                    .hint("One command line per line; {message_file} stands for the file that holds the message.")
-                    .error(msg_problem),
-            )
-            .child(div().flex().justify_end().child(presence(
-                id("save-block"),
-                savable,
-                Button::secondary(id("save"), "Save")
-                    .on_click(cx.listener(move |this, _, _, cx| this.save(&saving, cx))),
-            )))
             .child(
                 presence(
                     id("proposals-block"),
@@ -560,7 +579,7 @@ impl CommitChecks {
                         .child(list)
                         .test_support(),
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .test_support()
             .into_any_element()
@@ -598,18 +617,23 @@ impl Render for CommitChecks {
                     .children(blocks)
                     .test_support(),
             ))
-            .child(
-                presence_of(id("unread-block"), self.unread.clone(), move |why| {
-                    div()
-                        .id("commit-checks-unread")
-                        .aria_label(why.clone())
-                        .text_size(px(12.5))
-                        .text_color(p.fail)
-                        .child(why)
-                        .test_support()
-                        .into_any_element()
-                })
-                .gap(space::MD),
-            )
+            .child(section_blocks(
+                "commit-checks-blocks",
+                self.unread.is_some(),
+                space::MD,
+                stack(space::MD).child(
+                    presence_of(id("unread-block"), self.unread.clone(), move |why| {
+                        div()
+                            .id("commit-checks-unread")
+                            .aria_label(why.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.fail)
+                            .child(why)
+                            .test_support()
+                            .into_any_element()
+                    })
+                    .space(space::MD),
+                ),
+            ))
     }
 }

@@ -421,31 +421,43 @@ impl Render for ProjectRemoval {
         .on_cancel(move |_, cx| {
             again.update(cx, |this, cx| this.cancel(cx)).ok();
         })
-        .child(enter(
-            id("running"),
-            0,
-            block("running", "Stopped", runs_count, pending, running, cx),
-        ))
-        .child(enter(
-            id("workspaces"),
-            1,
-            block(
-                "workspaces",
-                "Workspaces",
-                workspaces_count,
-                pending,
-                workspaces,
-                cx,
-            ),
-        ))
-        // The block is the column's child, so that its gap folds with it: its entrance is inside.
+        // The dialog's body gaps `LG` between its children: one column holds them all, the last
+        // with the space above it itself.
         .child(
-            presence(
-                id("discard-block"),
-                unsaved,
-                enter(id("discard-enter"), 2, switch),
-            )
-            .gap(space::LG),
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(space::LG)
+                        .child(enter(
+                            id("running"),
+                            0,
+                            block("running", "Stopped", runs_count, pending, running, cx),
+                        ))
+                        .child(enter(
+                            id("workspaces"),
+                            1,
+                            block(
+                                "workspaces",
+                                "Workspaces",
+                                workspaces_count,
+                                pending,
+                                workspaces,
+                                cx,
+                            ),
+                        )),
+                )
+                .child(
+                    presence(
+                        id("discard-block"),
+                        unsaved,
+                        enter(id("discard-enter"), 2, switch),
+                    )
+                    .space(space::LG),
+                ),
         )
     }
 }

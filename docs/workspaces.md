@@ -114,7 +114,8 @@ not (the default set taken, at least one stays taken), with the base branch it s
 rule when the field is left empty, which the field says; `--base`), a branch field (`<branch
 prefix>/<name>`, or the name alone without a prefix, when empty; "To resume a branch, name it."), the offline switch (`--offline`), and the optional ticket, previewed
 as it is typed (`docs/tickets.md`). The agent's `workspace create` takes `repositories` the same
-way, each repository on its rule.
+way, each repository on its rule, and `base` as `--base` does: `{"<repository>": "<branch>"}`, or a
+string for every repository taken (`agent_launch` with `new_workspace` takes it too).
 
 ## The base of each branch
 
@@ -138,7 +139,9 @@ last fetched`, `…: started from the local main`. The CLI prints it on the repo
 says it, and the window shows it under the repository on the workspace's card and in the rail. A
 stale cache once based a branch on `main` instead of `develop`: the line is there so that a base
 taken without a fetch is never silent. Only a repository with none of its base branches, on the
-remote or of its own, is refused.
+remote or of its own, is refused; when the branch is one chosen (`--base`, the agent's `base`), the
+refusal says so and names the base rule of the repository, the branches to choose from. What a
+pull request of the workspace targets by default is this base.
 
 With `--offline`, nothing is fetched: the first branch of the rule that has a tracking ref is the
 base, as it is, and its age is said (from git's reflog of the tracking ref; unknown when git kept

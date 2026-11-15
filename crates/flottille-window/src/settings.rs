@@ -29,6 +29,7 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::{Command, SessionsSetting};
+use crate::commands::{spaced, stack};
 use crate::extensions::Registry;
 use crate::extensions::connections::{self, ConnectionsSection};
 use crate::providers::{NewSession, Provider, Providers};
@@ -651,7 +652,6 @@ impl SettingsPage {
                     .pt(space::MD)
                     .flex()
                     .flex_col()
-                    .gap(space::MD)
                     .child(automatic)
                     .child(
                         presence(
@@ -663,15 +663,14 @@ impl SettingsPage {
                                 threshold,
                             ),
                         )
-                        .gap(space::MD),
+                        .space(space::MD),
                     )
-                    .child(more),
+                    .child(spaced(space::MD, more)),
             ))
             .test_support();
         div()
             .flex()
             .flex_col()
-            .gap(space::XXL)
             .child(enter("compaction-page-enter", 0, card))
             .child(
                 presence(
@@ -679,7 +678,7 @@ impl SettingsPage {
                     some,
                     self.compaction_guidance.clone(),
                 )
-                .gap(space::XXL),
+                .space(space::XXL),
             )
             .into_any_element()
     }
@@ -860,35 +859,47 @@ impl SettingsPage {
         div()
             .flex()
             .flex_col()
-            .gap(space::MD)
             .pl(space::LG)
-            .child(Field::new("compaction-maximum-field", "Or above", maximum))
-            .child(Field::new(
-                "compaction-kept-field",
-                "Recent messages kept as they are",
-                kept,
-            ))
-            .child(before_expiry)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::MD)
+                    .child(Field::new("compaction-maximum-field", "Or above", maximum))
+                    .child(Field::new(
+                        "compaction-kept-field",
+                        "Recent messages kept as they are",
+                        kept,
+                    ))
+                    .child(before_expiry),
+            )
             .child(
                 presence(
                     "compaction-margin-block",
                     shown.before_expiry,
                     Field::new("compaction-margin-field", "How long before", margin),
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
-            .child(after_expiry)
-            .child(Field::new("compaction-minimum-field", "Not below", minimum))
             .child(
                 div()
-                    .id("compaction-lifetimes")
-                    .text_size(px(12.))
-                    .text_color(p.faint)
-                    .aria_label(SharedString::from(format!(
-                        "Prompt cache lifetimes. {lifetimes}"
-                    )))
-                    .child(format!("Prompt cache lifetimes. {lifetimes}"))
-                    .test_support(),
+                    .mt(space::MD)
+                    .flex()
+                    .flex_col()
+                    .gap(space::MD)
+                    .child(after_expiry)
+                    .child(Field::new("compaction-minimum-field", "Not below", minimum))
+                    .child(
+                        div()
+                            .id("compaction-lifetimes")
+                            .text_size(px(12.))
+                            .text_color(p.faint)
+                            .aria_label(SharedString::from(format!(
+                                "Prompt cache lifetimes. {lifetimes}"
+                            )))
+                            .child(format!("Prompt cache lifetimes. {lifetimes}"))
+                            .test_support(),
+                    ),
             )
             .into_any_element()
     }
@@ -1229,7 +1240,6 @@ impl SettingsPage {
             .bg(p.card)
             .border_1()
             .border_color(p.line)
-            .gap(space::MD)
             .child(switch)
             .child(
                 presence_of("developer-file-line", file, move |file| {
@@ -1250,7 +1260,7 @@ impl SettingsPage {
                         .test_support()
                         .into_any_element()
                 })
-                .gap(space::MD),
+                .space(space::MD),
             )
             .test_support();
         Section::new("developer", "Developer mode").child(card)
@@ -1637,7 +1647,6 @@ impl SettingsPage {
             .p(space::LG)
             .flex()
             .flex_col()
-            .gap(space::MD)
             .rounded(px(12.))
             .bg(p.card)
             .border_1()
@@ -1662,7 +1671,7 @@ impl SettingsPage {
                             .into_any_element()
                     },
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .child(
                 presence_of(
@@ -1681,7 +1690,7 @@ impl SettingsPage {
                             .into_any_element()
                     },
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .child(
                 presence(
@@ -1689,7 +1698,7 @@ impl SettingsPage {
                     matches!(shown.source, Source::Theme(_)),
                     row("Shade", "", shade.into_any_element()),
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .test_support();
         Section::new("appearance", "Appearance").child(card)
@@ -1921,7 +1930,7 @@ impl SettingsPage {
                 move |command| crate::programs::command_row(id, command, p)
             },
         )
-        .gap(space::SM);
+        .space(space::SM);
         let install = presence_of(
             format!("provider-install-{}-block", provider.name),
             provider
@@ -1952,7 +1961,7 @@ impl SettingsPage {
                 }
             },
         )
-        .gap(space::SM);
+        .space(space::SM);
         div()
             .id(ElementId::Name(
                 format!("provider-row-{}", provider.name).into(),
@@ -1961,7 +1970,6 @@ impl SettingsPage {
             .py(space::MD)
             .flex()
             .flex_col()
-            .gap(space::SM)
             .child(
                 div()
                     .flex()
@@ -1970,7 +1978,7 @@ impl SettingsPage {
                     .child(div().flex_1().min_w_0().child(switch))
                     .children(version),
             )
-            .child(state)
+            .child(state.mt(space::SM))
             .child(sign_in)
             .child(install)
             .into_any_element()
@@ -2014,27 +2022,33 @@ impl SettingsPage {
             .sentence("The agent programs Flottille can start. Each signs in with its own login.")
             .action(check)
             .child(
-                presence_of(
-                    "providers-error-line",
-                    self.providers.error.clone().map(SharedString::from),
-                    move |error| {
-                        div()
-                            .id("providers-error")
-                            .text_size(px(12.5))
-                            .text_color(p.fail)
-                            .child(error)
-                            .test_support()
-                            .into_any_element()
-                    },
-                )
-                .gap(space::MD),
+                stack(space::MD)
+                    .child(
+                        presence_of(
+                            "providers-error-line",
+                            self.providers.error.clone().map(SharedString::from),
+                            move |error| {
+                                div()
+                                    .id("providers-error")
+                                    .text_size(px(12.5))
+                                    .text_color(p.fail)
+                                    .child(error)
+                                    .test_support()
+                                    .into_any_element()
+                            },
+                        )
+                        .space(space::MD),
+                    )
+                    .child(spaced(
+                        space::MD,
+                        awaiting(
+                            "providers-waiting",
+                            !known,
+                            Skeleton::new("providers-skeleton").h(px(96.)),
+                            presence("provider-list-block", listed, list),
+                        ),
+                    )),
             )
-            .child(awaiting(
-                "providers-waiting",
-                !known,
-                Skeleton::new("providers-skeleton").h(px(96.)),
-                presence("provider-list-block", listed, list),
-            ))
             .into_any_element()
     }
 
@@ -2176,19 +2190,15 @@ impl SettingsPage {
                     registry.switch_on(key, None)
                         && registry.listed(key).is_some_and(|listed| listed.enabled)
                 });
-                // The gap is the parent's: `presence(..).gap(..)` only folds it away with the block.
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::XXL)
-                    .children(page)
+                stack(space::XXL)
+                    .children(page.map(|page| spaced(space::XXL, page)))
                     .child(
                         presence(
                             "connection-servers-block",
                             on,
                             enter("connection-servers-enter", 1, self.connections.clone()),
                         )
-                        .gap(space::XXL),
+                        .space(space::XXL),
                     )
                     .into_any_element()
             }

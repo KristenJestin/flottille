@@ -424,7 +424,7 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     };
     if let Some(secret) = &asked.secret {
         // Masked before it is kept anywhere, so that nothing written after can hold it.
-        secrets::add_vault_value(secret);
+        secrets::add_vault_login(entry.username.as_deref(), secret);
         daemon
             .vault
             .store(&entry.name, secret)
@@ -820,7 +820,7 @@ pub async fn load(daemon: &Daemon) {
                 for inner in crate::extensions::secrets_in(&secret) {
                     secrets::add_vault_value(&inner);
                 }
-                secrets::add_vault_value(&secret);
+                secrets::add_vault_login(entry.username.as_deref(), &secret);
             }
             Ok(None) => {}
             Err(why) => eprintln!("flottille daemon: vault entry {}: {why}", entry.name),

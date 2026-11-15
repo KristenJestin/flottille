@@ -969,20 +969,15 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
 }
 
 /// Writes the agent `made` made.
-pub fn write_new(daemon: &Daemon, agent: &Agent) -> Result<(), Failure> {
+pub fn write_new(daemon: &Arc<Daemon>, agent: &Agent) -> Result<(), Failure> {
+    let data = json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
+        "folder": agent.folder, "provider": agent.provider, "model": agent.chosen.model,
+        "role": agent.role, "parent": agent.parent, "depth": agent.depth, "title": agent.title});
     daemon.write(|store| {
-        let event = store.create_agent(
-            agent,
-            (
-                "agent.created",
-                json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
-                    "folder": agent.folder, "provider": agent.provider, "model": agent.chosen.model,
-                    "role": agent.role, "parent": agent.parent, "depth": agent.depth,
-                    "title": agent.title}),
-            ),
-        )?;
+        let event = store.create_agent(agent, ("agent.created", data.clone()))?;
         Ok(((), event))
     })?;
+    crate::extensions::heard(daemon, &[("agent.created", data)]);
     Ok(())
 }
 

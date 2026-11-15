@@ -1200,20 +1200,18 @@ pub fn feature_page(registry: &Entity<Registry>, name: &str, cx: &App) -> Option
             on && listed.enabled,
             editor.into_any_element(),
         )
-        .gap(space::XXL)
+        .space(space::XXL)
     });
     let others = projects_line(registry, name, on, cx);
-    // A presence's gap is the parent's: the card and its line keep `MD`, the guidance `XXL`.
+    // The card and its line keep `MD` between them, the guidance has `XXL` above it.
     Some(
         div()
             .flex()
             .flex_col()
-            .gap(space::XXL)
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(space::MD)
                     .child(enter(
                         SharedString::from(format!("{name}-page-enter")),
                         0,
@@ -1293,7 +1291,7 @@ fn projects_line(registry: &Entity<Registry>, name: &str, on: bool, cx: &App) ->
             .children(links)
             .test_support(),
     )
-    .gap(space::MD)
+    .space(space::MD)
 }
 
 /// The icon a declaration names (a Lucide file name): those the window embeds, else a generic one.
@@ -1303,6 +1301,7 @@ pub fn icon_named(name: &str) -> Icon {
         "scan-search" => Icon::Lucide("scan-search"),
         "shrink" => Icon::Lucide("shrink"),
         "plug" => Icon::Lucide("plug"),
+        "bell" => Icon::Bell,
         _ => Icon::Lucide("blocks"),
     }
 }

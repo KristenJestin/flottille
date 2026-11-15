@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Already built for the daemon: a username and a secret, as HTTP Basic authentication sends them,
+# are masked in base64.
+base64 = "0.22.1"
 # Already built for the window (and GPUI): PNG and JPEG, to scale a picture down before it is kept;
 # GIF and WebP, to read the size of a picture and make its thumbnail.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

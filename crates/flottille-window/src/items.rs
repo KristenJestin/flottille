@@ -27,7 +27,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::Command;
-use crate::commands::perform_later;
+use crate::commands::{perform_later, spaced, stack};
 use crate::extensions::specs::{self, SpecsTab, WriteSpec};
 use crate::model::ago;
 use crate::project::repository_label;
@@ -1208,20 +1208,32 @@ impl ProjectItems {
         };
         let mut facts: Vec<AnyElement> = Vec::new();
         if let Some(author) = &row.author {
-            facts.push(fact(
-                "item-detail-author",
-                glyphs::AGENTS,
-                "Author",
-                author.clone(),
-            ));
+            facts.push(
+                spaced(
+                    LINE_GAP,
+                    fact(
+                        "item-detail-author",
+                        glyphs::AGENTS,
+                        "Author",
+                        author.clone(),
+                    ),
+                )
+                .into_any_element(),
+            );
         }
         if !row.assignees.is_empty() {
-            facts.push(fact(
-                "item-detail-assignees",
-                glyphs::AGENTS,
-                "Assignees",
-                row.assignees.join(", "),
-            ));
+            facts.push(
+                spaced(
+                    LINE_GAP,
+                    fact(
+                        "item-detail-assignees",
+                        glyphs::AGENTS,
+                        "Assignees",
+                        row.assignees.join(", "),
+                    ),
+                )
+                .into_any_element(),
+            );
         }
         let branches = full.and_then(|full| {
             Some(format!(
@@ -1241,7 +1253,7 @@ impl ProjectItems {
                     branches.unwrap_or_default(),
                 ),
             )
-            .gap(LINE_GAP)
+            .space(LINE_GAP)
             .into_any_element(),
         );
         let labels = full
@@ -1258,10 +1270,15 @@ impl ProjectItems {
                     labels.unwrap_or_default(),
                 ),
             )
-            .gap(LINE_GAP)
+            .space(LINE_GAP)
             .into_any_element(),
         );
-        let facts = div().flex().flex_col().gap(LINE_GAP).children(facts);
+        // In a column of its own: a flex container is never below zero, so that no fact shown
+        // leaves the pull of the stack (`-LINE_GAP`) out of the body's height.
+        let facts = div()
+            .flex()
+            .flex_col()
+            .child(stack(LINE_GAP).children(facts));
         let quiet = |said: &'static str| {
             div()
                 .id("item-detail-description")
@@ -1397,16 +1414,15 @@ impl ProjectItems {
         let body = div()
             .flex()
             .flex_col()
-            .gap(space::LG)
             .child(facts)
-            .child(presence("item-detail-gone-block", detail.gone, gone).gap(space::LG))
+            .child(presence("item-detail-gone-block", detail.gone, gone).space(space::LG))
             .child(
                 presence(
                     "item-detail-description-block",
                     full.is_some() && listed,
                     description,
                 )
-                .gap(space::LG),
+                .space(space::LG),
             )
             .child(
                 presence(
@@ -1414,7 +1430,7 @@ impl ProjectItems {
                     !checks.is_empty() && listed,
                     checks_card,
                 )
-                .gap(space::LG),
+                .space(space::LG),
             )
             .child(
                 presence(
@@ -1422,7 +1438,7 @@ impl ProjectItems {
                     !said.is_empty() && listed,
                     discussion,
                 )
-                .gap(space::LG),
+                .space(space::LG),
             );
         Some(modal.child(body).kept(refused).into_any_element())
     }
