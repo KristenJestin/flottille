@@ -2230,7 +2230,7 @@ fn ctrl_a_on_a_failed_review_keeps_its_message(cx: &mut TestAppContext) {
     assert!(said.is_some(), "it says why");
 
     // The list has the focus once it is clicked in; Ctrl+A on it has nothing to tick.
-    click(cx, "connection-review-body");
+    click(cx, "connection-review-error");
     cx.simulate_keystrokes("ctrl-a");
     settle(cx);
     assert!(
