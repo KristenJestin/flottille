@@ -63,6 +63,8 @@ fn until(
     loop {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
         cx.run_until_parked();
+        // The test clock moves a frame at a time, as a real one would: a row unfolds in view.
+        cx.executor().advance_clock(Duration::from_millis(16));
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
         if check(cx) {
@@ -307,11 +309,13 @@ fn editing_an_every_project_entry_from_a_project_says_so(cx: &mut TestAppContext
     assert!(section.read_with(cx, |s, _| s.is_open()));
     assert!(!shown("vault-project-field-hint", cx));
     section.update_in(cx, |section, window, cx| section.close(window, cx));
-    settle(cx);
-    assert!(
-        shown("project-vault-shared", cx),
-        "closed, the window is back on the project's Vault tab"
+    until(
+        &shell,
+        cx,
+        "the window is back on the project's Vault tab",
+        |cx| shown("project-vault-shared", cx),
     );
+    settle(cx);
     // An every-project entry says on the form that it is every project's.
     click("project-vault-shared", cx);
     settle(cx);
