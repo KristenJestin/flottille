@@ -9,6 +9,7 @@
 mod hello;
 mod invitation;
 mod members;
+mod request;
 mod serial;
 mod words;
 
@@ -27,6 +28,9 @@ pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationError, Token};
 pub use members::{
     Action, Change, ChangeHash, ListError, Member, MemberList, Members, Role, Signature,
+};
+pub use request::{
+    Accepted, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed,
 };
 pub use words::verification_words;
 
