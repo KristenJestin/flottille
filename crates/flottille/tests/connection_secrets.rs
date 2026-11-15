@@ -644,7 +644,15 @@ fn a_url_error_never_shows_a_query_value() {
         json!({"name": "design", "url": "https://design.example.com/mcp"}),
     )
     .unwrap();
-    assert!(connection_named(&user, "design")["failing"].is_null());
+    // No server answers there: it may fail to start, never for its URL.
+    let design = connection_named(&user, "design");
+    assert!(
+        !design["failing"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("this machine"),
+        "{design}"
+    );
 }
 
 #[test]
