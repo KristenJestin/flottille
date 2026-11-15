@@ -125,6 +125,8 @@ pub struct Server {
     pub cut_off: Option<String>,
     /// Why its server did not start.
     pub failing: Option<String>,
+    /// Why its URL is not reached: the URL it was served is a cleaned one, never saved back.
+    pub url_fault: Option<String>,
     /// Why it must sign in again.
     pub signed_out: Option<String>,
     /// The version accepted, once it was.
@@ -172,6 +174,7 @@ impl Server {
             state: text(&value["state"]),
             cut_off: value["cut_off"].as_str().map(str::to_owned),
             failing: value["failing"].as_str().map(str::to_owned),
+            url_fault: value["url_fault"].as_str().map(str::to_owned),
             signed_out: value["signed_out"].as_str().map(str::to_owned),
             version: value["server"]["version"].as_str().map(str::to_owned),
             actions: value["actions"]
@@ -762,6 +765,9 @@ pub struct ConnectionsSection {
     made: u64,
     saving: bool,
     form_error: Option<SharedString>,
+    /// Why the URL of the connection edited is not reached: under its field, left empty, until
+    /// the user types one.
+    url_fault: Option<SharedString>,
     review: Option<Review>,
     review_open: bool,
     confirming: Option<String>,
@@ -797,6 +803,7 @@ impl ConnectionsSection {
             made: 0,
             saving: false,
             form_error: None,
+            url_fault: None,
             review: None,
             review_open: false,
             confirming: None,
@@ -1155,7 +1162,9 @@ impl ConnectionsSection {
     fn watch(&mut self, input: &Entity<InputState>, cx: &mut Context<Self>) {
         self._subscriptions
             .push(cx.subscribe(input, |this, _, event, cx| {
-                if matches!(event, InputEvent::Change) && this.form_error.take().is_some() {
+                if matches!(event, InputEvent::Change)
+                    && (this.form_error.take().is_some() || this.url_fault.is_some())
+                {
                     cx.notify();
                 }
             }));
@@ -1191,7 +1200,10 @@ impl ConnectionsSection {
             (&fields.command, line),
             (
                 &fields.url,
-                server.and_then(|s| s.url.clone()).unwrap_or_default(),
+                server
+                    .filter(|s| s.url_fault.is_none())
+                    .and_then(|s| s.url.clone())
+                    .unwrap_or_default(),
             ),
         ] {
             field.update(cx, |f, cx| f.set_value(value, window, cx));
@@ -1225,6 +1237,9 @@ impl ConnectionsSection {
         self.site_rows = Listing::default().at_rest();
         self.form = Form::Editing(server.map(|s| s.name.clone()));
         self.form_error = None;
+        self.url_fault = server
+            .and_then(|s| s.url_fault.clone())
+            .map(SharedString::from);
         self.saving = false;
         self.request = None;
         self.vault.update(cx, |vault, cx| vault.read(cx));
@@ -1910,12 +1925,24 @@ impl ConnectionsSection {
             boxed("connection-command", Input::new(&fields.command), cx),
         )
         .hint("The program and its arguments, run without a shell.");
+        // The fault of the URL saved stays under its field while the field is left empty.
+        let url_fault = self
+            .url_fault
+            .clone()
+            .filter(|_| fields.url.read(cx).value().trim().is_empty())
+            .map(|fault| {
+                let why = fault.strip_prefix("url: ").unwrap_or(&fault);
+                SharedString::from(format!(
+                    "The URL saved is not reached ({why}). Type it again."
+                ))
+            });
         let url = Field::new(
             "connection-url-field",
             "URL",
             boxed("connection-url", Input::new(&fields.url), cx),
         )
-        .hint("https://, or http:// on this machine.");
+        .hint("https://, or http:// on this machine.")
+        .error(url_fault);
         let offered = self.offered(original.as_deref().unwrap_or_default(), cx);
         let mut variables = div().flex().flex_col();
         for row in self

@@ -2053,6 +2053,8 @@ fn connection_json(daemon: &Daemon, declaration: &Declaration, on: bool) -> Valu
     entry["signed_out"] = json!(row.signed_out);
     entry["running"] = json!(client::running(daemon, &declaration.name));
     entry["failing"] = json!(failing(daemon, declaration));
+    // Apart from `failing`: a form leaves a faulty URL to be typed again, never saves it cleaned.
+    entry["url_fault"] = json!(declaration.url_fault());
     entry["server"] = row
         .pin
         .as_ref()
