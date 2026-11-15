@@ -8,6 +8,7 @@ pub mod ask_dock;
 pub mod attachments;
 pub mod claude;
 pub mod commands;
+pub mod commit_checks;
 pub mod composer;
 pub mod conventions;
 pub mod conversation;
