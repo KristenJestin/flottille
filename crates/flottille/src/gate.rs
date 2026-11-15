@@ -2304,10 +2304,18 @@ fn reads_the_keys(call: &Call, layers: &[Vec<String>]) -> Option<String> {
         .iter()
         .map(|own| own.join(crate::remote::FOLDER))
         .collect();
+    // A file system may not tell cases apart: `~/.local/STATE` holds the keys there.
+    let above = |path: &Path, keys: &Path| {
+        let mut keys = keys.components();
+        path.components().all(|part| {
+            keys.next()
+                .is_some_and(|key| key.as_os_str().eq_ignore_ascii_case(part.as_os_str()))
+        })
+    };
     let holds = |folder: &Resolved| {
         seen(folder)
             .iter()
-            .any(|path| keys.iter().any(|keys| keys.starts_with(path)))
+            .any(|path| keys.iter().any(|keys| above(path, keys)))
     };
     for (layer, starts) in layers.iter().zip(folders(place, from, layers)) {
         let Some((start, pattern)) = reads_every_file(layer) else {
@@ -8049,6 +8057,20 @@ mod tests {
         ] {
             let args: Vec<String> = args.iter().map(|word| word.to_string()).collect();
             assert!(!greps_recursively(&args), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_folder_above_the_keys_is_found_in_any_case() {
+        let mut fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        with_keys(&mut fixture, home.join(".local/state/flottille"));
+        for line in [
+            "grep -r x '~/.local/STATE/flottille'",
+            "rg x '~/.LOCAL/state'",
+            "grep -ra x '~/.Local'",
+        ] {
+            refused_for_the_keys(&fixture, line);
         }
     }
 }
