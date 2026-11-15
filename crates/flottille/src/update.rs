@@ -309,6 +309,8 @@ fn along_line(releases: &[Value], this: &Version) -> Option<String> {
             if rc {
                 line && (pre.is_empty() || pre.starts_with("rc."))
             } else {
+                // Next is above dev (`docs/releases.md`, "The branches"): a beta from this line's
+                // `X.Y.0` on is dev with the line merged in, the next build's own successor.
                 (line && pre.starts_with("next."))
                     || (pre.starts_with("beta.")
                         && (version.major, version.minor, version.patch)
@@ -326,18 +328,42 @@ fn along_line(releases: &[Value], this: &Version) -> Option<String> {
     }
 }
 
+/// The pages of releases read at most: dev's betas fill a page within weeks, a line's rc sits
+/// some pages down, and a build whose own release is gone must not read the whole history.
+const MAX_PAGES: u32 = 10;
+
 /// `along_line` over the pages of the releases, newest first, as GitHub gives them, a page at a
-/// time through `page` (1 is the first).
+/// time through `page` (1 is the first). The reading stops at the page that holds this build's own
+/// release (what is newer is above it), at an empty page, or after `MAX_PAGES`.
 fn along_line_paged(
     this: &Version,
     mut page: impl FnMut(u32) -> Result<Vec<Value>>,
 ) -> Result<Option<String>> {
-    let releases = page(1)?;
+    let mut releases = Vec::new();
+    for n in 1..=MAX_PAGES {
+        let next = page(n)?;
+        if next.is_empty() {
+            break;
+        }
+        let own = next.iter().flat_map(archives).any(|url| {
+            url.rsplit('/')
+                .next()
+                .and_then(version_of)
+                .is_some_and(|version| version == *this)
+        });
+        releases.extend(next);
+        if own {
+            break;
+        }
+    }
     Ok(along_line(&releases, this))
 }
 
 /// Whether `new` is older than `this`: by version, but dev's beta of a line is not older than the
-/// next build of that line it was merged from (`0.5.0-beta.1` follows `0.5.0-next.7`).
+/// next build of that line it was merged from (`0.5.0-beta.1` follows `0.5.0-next.7`). This trusts
+/// that next is above dev: a beta of `X.Y.0` or above is taken from a next build of `X.Y.0` without
+/// `--force`, because next only holds the version after dev's, so such a beta is that line merged
+/// into dev, not a step back.
 fn is_older(new: &Version, this: &Version) -> bool {
     let merged = this.pre.as_str().starts_with("next.")
         && new.pre.as_str().starts_with("beta.")

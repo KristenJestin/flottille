@@ -361,7 +361,8 @@ its branch), else the one it was built on (a `local` build takes stable) and the
 built from. A build of a line stays on it: an `rc` build takes the next rc of its line, then that
 line's stable release, and later its next fix's rc; a `next` build takes the next `-next.N` of
 its line, then dev's betas from that version on once the line is merged into dev (a beta of
-the line is not "older" than its last next, though it sorts below it). `--channel` (stable, beta
+the line is not "older" than its last next, though it sorts below it); a build of a line reads the releases page by
+page, 100 at a time, until the page of its own version (at most ten pages), as dev's betas fill the first ones. `--channel` (stable, beta
 or alpha) leaves the line, and is remembered as ever; `--branch` goes with `--channel alpha` only. It reads the releases as `install.sh` does, with the user's own `curl`
 spawned without a shell, checks the archive's SHA-256 sum (a wrong one replaces nothing), unpacks
 it with `tar` in a folder beside the binary and renames the new binary over the old one: the file
@@ -376,7 +377,10 @@ is the old one or the new one, never half of one.
   update succeeds, in `$XDG_STATE_HOME/flottille/update-channel.json`: it is Flottille's own
   memory, not a setting, so it is not in the configuration. A plain `flottille update` stays on it,
   so `--channel alpha --branch feat/specs` then `--channel beta` goes there and back. `install.sh`
-  does not write it: after installing another channel by hand, say `--channel` once.
+  does not write it: after installing another channel by hand, say `--channel` once. A choice
+  remembered wins over the build's line, and `--channel` offers no rc and no next: to follow the
+  line again, delete `$XDG_STATE_HOME/flottille/update-channel.json` (`~/.local/state/flottille/`
+  when `XDG_STATE_HOME` is not set).
 - **`--version <X.Y.Z[-pre]>` installs that release exactly**, of any channel, as `install.sh
   --version` does, and goes without `--channel` and `--branch`. A version that does not exist is
   refused with the nearest published ones, and nothing is downloaded. It does not touch the
