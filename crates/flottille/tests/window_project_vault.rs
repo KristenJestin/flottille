@@ -308,7 +308,7 @@ fn editing_an_every_project_entry_from_a_project_says_so(cx: &mut TestAppContext
     settle(cx);
     let section = vault_section(&shell, cx);
     assert!(section.read_with(cx, |s, _| s.is_open()));
-    assert!(!shown("vault-project-field-hint", cx));
+    assert!(!shown("vault-every-project-note", cx));
     section.update_in(cx, |section, window, cx| section.close(window, cx));
     until(
         &shell,
@@ -321,6 +321,139 @@ fn editing_an_every_project_entry_from_a_project_says_so(cx: &mut TestAppContext
     click("project-vault-shared", cx);
     settle(cx);
     assert!(section.read_with(cx, |s, _| s.is_open()));
-    let said = label_of("vault-project-field-hint", cx).expect("the form says it");
+    let said = label_of("vault-every-project-note", cx).expect("the form says it");
     assert!(said.contains("every project"), "{said}");
+}
+
+#[gpui_kit::test]
+fn the_every_project_note_leaves_when_a_project_is_chosen(cx: &mut TestAppContext) {
+    let user = User::new();
+    project(&user, "atlas");
+    entry(&user, "shared", None);
+    let (shell, cx) = window(&user, cx);
+    open_vault_tab(&shell, "atlas", cx);
+    until(&shell, cx, "the entry is listed", |cx| {
+        shown("project-vault-shared", cx)
+    });
+    settle(cx);
+    click("project-vault-shared", cx);
+    settle(cx);
+    assert!(
+        shown("vault-every-project-note", cx),
+        "an every-project entry says so"
+    );
+    let whole = cx.update(|window, _| {
+        window
+            .find("vault-every-project-note-block")
+            .bounds()
+            .size
+            .height
+    });
+    // A project chosen: the entry is no longer every project's, and the note folds away.
+    click("vault-project", cx);
+    settle(cx);
+    click("vault-project-atlas", cx);
+    cx.executor().advance_clock(Duration::from_millis(48));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let partway = cx.update(|window, _| {
+        window
+            .find("vault-every-project-note-block")
+            .bounds()
+            .size
+            .height
+    });
+    assert!(
+        partway < whole,
+        "the note folds away: {whole:?} then {partway:?}"
+    );
+    settle(cx);
+    let section = vault_section(&shell, cx);
+    assert_eq!(
+        section.read_with(cx, |s, _| s.project().map(str::to_owned)),
+        Some("atlas".to_owned())
+    );
+    assert!(
+        !shown("vault-every-project-note", cx),
+        "the note no longer says every project"
+    );
+    // Back to every project: it is true again, and comes back.
+    click("vault-project", cx);
+    settle(cx);
+    click("vault-project-every", cx);
+    settle(cx);
+    assert!(shown("vault-every-project-note", cx));
+}
+
+#[gpui_kit::test]
+fn the_vault_tab_shows_no_count_before_the_vault_is_read(cx: &mut TestAppContext) {
+    let user = User::new();
+    project(&user, "atlas");
+    entry(&user, "jira", Some("atlas"));
+    let (shell, cx) = window(&user, cx);
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("atlas".into()), window, cx)
+    });
+    until(&shell, cx, "the project's page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
+    });
+    settle(cx);
+    click("project-settings", cx);
+    // The tab is chosen as soon as the settings show it, and watched at every frame until the
+    // entry is listed: its count says what was read, never a zero for an entry still to come.
+    let chosen = std::cell::Cell::new(false);
+    until(&shell, cx, "the entry is listed in the tab", |cx| {
+        if !chosen.get() && shown("project-settings-tabs-vault", cx) {
+            click("project-settings-tabs-vault", cx);
+            chosen.set(true);
+        }
+        if let Some(count) = label_of("project-vault-count", cx) {
+            assert_ne!(count, "0", "the tab counts before the vault is read");
+        }
+        chosen.get() && shown("project-vault-jira", cx)
+    });
+    settle(cx);
+    assert_eq!(label_of("project-vault-count", cx).as_deref(), Some("1"));
+}
+
+#[gpui_kit::test]
+fn editing_an_entry_that_is_gone_comes_back_to_the_tab(cx: &mut TestAppContext) {
+    let user = User::new();
+    project(&user, "atlas");
+    entry(&user, "jira", Some("atlas"));
+    entry(&user, "keep", Some("atlas"));
+    let (shell, cx) = window(&user, cx);
+    let page = open_vault_tab(&shell, "atlas", cx);
+    until(&shell, cx, "both entries are listed", |cx| {
+        shown("project-vault-jira", cx) && shown("project-vault-keep", cx)
+    });
+    settle(cx);
+    // Removed anywhere: the window knows it, and the row is still folding away when it is clicked.
+    user.call("vault.remove", json!({"name": "jira", "confirmed": true}))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while page.read_with(cx, |page, _| {
+        page.vault_seen().iter().any(|entry| entry.name == "jira")
+    }) {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        assert!(
+            Instant::now() < deadline,
+            "the removal never reached the window"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    assert!(shown("project-vault-jira", cx), "the row is still drawn");
+    click("project-vault-jira", cx);
+    // Nothing to edit: the user is not left in Settings, without a form, but back on the tab.
+    until(&shell, cx, "the window is back on the tab", |cx| {
+        shown("project-vault-keep", cx)
+    });
+    settle(cx);
+    assert!(
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_none()),
+        "Settings is not shown"
+    );
+    assert!(!shown("project-vault-jira", cx), "the entry is gone");
 }

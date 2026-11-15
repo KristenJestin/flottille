@@ -2398,7 +2398,12 @@ impl ProjectSettingsPage {
                         .on_click(move |_: &ClickEvent, window, cx| {
                             shell
                                 .update(cx, |shell, cx| {
-                                    shell.add_vault_entry_for(&project, window, cx)
+                                    let prefill = VaultEntry {
+                                        bound: Some(flottille_core::vault::worklog(&project)),
+                                        ..VaultEntry::default()
+                                    };
+                                    let back = Some((project.clone(), Reveal::Tracker));
+                                    shell.add_vault_entry(&prefill, None, back, window, cx)
                                 })
                                 .ok();
                         }),
@@ -2528,7 +2533,7 @@ impl ProjectSettingsPage {
             .on_click(move |_, window, cx| {
                 shell
                     .update(cx, |shell, cx| {
-                        shell.open_vault_form_for(&project, Some(&name), window, cx)
+                        shell.replace_vault_entry_for(&project, &name, window, cx)
                     })
                     .ok();
             });
@@ -2540,7 +2545,9 @@ impl ProjectSettingsPage {
         }
         let (shell, project) = (self.shell.clone(), self.name.clone());
         Section::new("project-vault", "Vault")
-            .count(self.vault_rows.len().to_string())
+            .when(self.vault_read, |section| {
+                section.count(self.vault_rows.len().to_string())
+            })
             .sentence(VAULT_SENTENCE)
             .action(
                 Button::secondary("project-vault-add", "New entry")
@@ -2548,7 +2555,12 @@ impl ProjectSettingsPage {
                     .on_click(move |_, window, cx| {
                         shell
                             .update(cx, |shell, cx| {
-                                shell.open_vault_form_for(&project, None, window, cx)
+                                let prefill = VaultEntry {
+                                    project: Some(project.clone()),
+                                    ..VaultEntry::default()
+                                };
+                                let back = Some((project.clone(), Reveal::Vault));
+                                shell.add_vault_entry(&prefill, None, back, window, cx)
                             })
                             .ok();
                     }),

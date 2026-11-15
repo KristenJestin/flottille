@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use gpui_design_system::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, Section,
-    Select, SelectOption, Toast, icon, palette, presence, space, toast,
+    Select, SelectOption, Toast, icon, palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
@@ -43,7 +43,7 @@ pub const EVERY_PROJECT_NOTE: &str = "This entry is every project's: changing it
 pub const EVERY_PROJECT: &str = "Every project";
 
 /// An entry as the daemon lists it: its metadata, never its secret.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct VaultEntry {
     pub name: String,
     pub description: Option<String>,
@@ -107,6 +107,8 @@ pub struct VaultSection {
     project: Option<String>,
     /// The use a new entry is made for, when the dialog was opened from that feature.
     bound: Option<String>,
+    /// Why an agent asked for the new entry, when the dialog was opened from its request.
+    why: Option<String>,
     saving: bool,
     writing: Option<Writing>,
     form_error: Option<SharedString>,
@@ -166,6 +168,7 @@ impl VaultSection {
             fields: None,
             project: None,
             bound: None,
+            why: None,
             saving: false,
             writing: None,
             form_error: None,
@@ -266,36 +269,42 @@ impl VaultSection {
         self.fill(None, window, cx);
     }
 
-    /// "New entry in the vault" of a project's Tracker: the dialog, empty, and back to that
-    /// project's Tracker once it is closed.
-    pub fn add_for(&mut self, project: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.fill(None, window, cx);
-        self.come_back = Some((project.to_owned(), ProjectReveal::Tracker));
-        self.bound = Some(flottille_core::vault::worklog(project));
-    }
-
-    /// "New entry" of a project's Vault tab: the dialog, empty, its project this one, and back to
-    /// that tab once it is closed.
-    pub fn add_in(&mut self, project: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.fill(None, window, cx);
-        self.project = Some(project.to_owned());
-        self.come_back = Some((project.to_owned(), ProjectReveal::Vault));
+    /// "New entry", the dialog on `prefill` (its name, metadata, project and use) with the secret
+    /// to type: what a project's Tracker or Vault tab, or an agent's request, already knows of it.
+    /// `why` is an agent's reason, said under what it is for; `back` is the project page to go
+    /// back to once the dialog is closed.
+    pub fn add_prefilled(
+        &mut self,
+        prefill: &VaultEntry,
+        why: Option<String>,
+        back: Option<(String, ProjectReveal)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fill(Some(prefill), window, cx);
+        self.form = Form::Editing(None);
+        self.bound = prefill.bound.clone();
+        self.why = why;
+        self.come_back = back;
     }
 
     /// A row of a project's Vault tab: the entry in the same dialog, and back to that tab once it
-    /// is closed. An entry of every project says so on the form.
+    /// is closed. An entry of every project says so on the form. Whether it opened: the entry may
+    /// be gone since the row was drawn.
     pub fn replace_in(
         &mut self,
         project: &str,
         name: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         self.replace(name, window, cx);
-        if self.is_open() {
+        let opened = self.is_open();
+        if opened {
             self.every_project = self.project.is_none();
             self.come_back = Some((project.to_owned(), ProjectReveal::Vault));
         }
+        opened
     }
 
     /// The project page to go back to, once the dialog it was opened for is closed (an entry set).
@@ -323,6 +332,7 @@ impl VaultSection {
         self.come_back = None;
         self.every_project = false;
         self.bound = None;
+        self.why = None;
         let fields = self.fields(window, cx);
         let (name, secret, description, url, username) = (
             fields.name.clone(),
@@ -346,9 +356,13 @@ impl VaultSection {
         self.form = Form::Editing(entry.map(|entry| entry.name.clone()));
         self.form_error = None;
         self.saving = false;
-        let focus = if entry.is_some() { secret } else { name }
-            .read(cx)
-            .focus_handle(cx);
+        let focus = if entry.is_some_and(|entry| !entry.name.is_empty()) {
+            secret
+        } else {
+            name
+        }
+        .read(cx)
+        .focus_handle(cx);
         window.focus(&focus, cx);
         cx.notify();
     }
@@ -613,6 +627,16 @@ impl VaultSection {
         let select = self.project_select(cx);
         let error = problem_line("vault-error", self.form_error.clone(), space::LG, cx);
         let fields = self.fields.as_ref().expect("made when the form opens");
+        let description = Field::new(
+            "vault-description-field",
+            "What it is for",
+            boxed("vault-description", Input::new(&fields.description), cx),
+        )
+        .optional();
+        let description = match &self.why {
+            Some(why) => description.hint(SharedString::from(format!("Why the agent asks: {why}"))),
+            None => description,
+        };
         let name = match &original {
             Some(name) => div()
                 .id("vault-name")
@@ -641,14 +665,7 @@ impl VaultSection {
                 )
                 .hint(SECRET_HINT),
             )
-            .child(
-                Field::new(
-                    "vault-description-field",
-                    "What it is for",
-                    boxed("vault-description", Input::new(&fields.description), cx),
-                )
-                .optional(),
-            )
+            .child(description)
             .child(
                 Field::new(
                     "vault-url-field",
@@ -665,14 +682,37 @@ impl VaultSection {
                 )
                 .optional(),
             )
-            .child({
-                let field = Field::new("vault-project-field", "Seen by agents of", select);
-                if self.every_project {
-                    field.hint(EVERY_PROJECT_NOTE)
-                } else {
-                    field
-                }
-            })
+            .child(
+                // The note goes once a project is chosen: it said what the entry was when the form
+                // opened, not what it is about to become.
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::XS)
+                    .child(Field::new(
+                        "vault-project-field",
+                        "Seen by agents of",
+                        select,
+                    ))
+                    .child(
+                        presence_of(
+                            "vault-every-project-note-block",
+                            (self.every_project && self.project.is_none())
+                                .then(|| SharedString::from(EVERY_PROJECT_NOTE)),
+                            move |note| {
+                                div()
+                                    .id("vault-every-project-note")
+                                    .aria_label(note.clone())
+                                    .text_size(px(12.5))
+                                    .text_color(p.mute)
+                                    .child(note)
+                                    .test_support()
+                                    .into_any_element()
+                            },
+                        )
+                        .gap(space::XS),
+                    ),
+            )
             .test_support();
         modal
             .sentence(
