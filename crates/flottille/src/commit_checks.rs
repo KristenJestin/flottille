@@ -6,7 +6,7 @@
 //! hooks; those are only read to propose lines (`proposals`), which nothing runs until the user
 //! saved them.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use flottille_core::project::{MESSAGE_FILE, check_commit_check};
@@ -14,7 +14,7 @@ use flottille_core::secrets;
 use serde::Serialize;
 
 use crate::gate;
-use crate::message_checks::{Check, MessageFile, Where, commit_of, run_check, unaliased};
+use crate::message_checks::{Check, Env, MessageFile, Where, commit_of, run_check, unaliased};
 use crate::place::Place;
 
 const NOTHING: &str = "nothing was committed";
@@ -54,23 +54,36 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
     };
     let env =
         crate::runs::environment(at.daemon, at.place, at.repository, false).map_err(unknown)?;
+    let commons = common_dirs(at.place, &env).await;
     for git in gits {
-        let words = unaliased(git.words, &git.folder, &env)
-            .await
-            .map_err(unknown)?;
-        let Some(commit) = commit_of(&words, &git.folder).map_err(unknown)? else {
+        // What makes the gate unsure of the repository git commits in: refused for a commit, and
+        // for an alias, which may be read from another repository than the one git reads.
+        let doubt = doubt(&git);
+        let words = match (
+            unaliased(git.words.clone(), &git.folder, &env).await,
+            &doubt,
+        ) {
+            (Ok(words), _) => words,
+            (Err(_), Some(doubt)) => return Err(doubt.clone()),
+            (Err(why), None) => return Err(unknown(why)),
+        };
+        let commit = commit_of(&words, &git.folder).map_err(unknown)?;
+        if let Some(doubt) = doubt
+            && (commit.is_some() || words != git.words)
+        {
+            return Err(doubt);
+        }
+        let Some(commit) = commit else {
             continue;
         };
-        // Where git commits is then another repository than its folder's, whose checks it skips.
-        if let Some(pointer) = commit.elsewhere.map(str::to_owned).or(git.elsewhere) {
-            return Err(format!(
-                "refused: {pointer} points the commit at a repository other than its folder's, \
-                 whose commit checks would not run, and the project's repositories have commit \
-                 checks: commit in the repository's folder, with git -C <folder> if it is \
-                 another one; {NOTHING}"
-            ));
-        }
-        let Some((path, folder)) = repository_of(at.place, &git.folder) else {
+        // The repository is the one git reads there, whatever folder holds it: a worktree of
+        // `web` inside `api`, a `.git` file, a folder outside the workspace.
+        let (common, top) = repository_at(&git.folder, &env).await.map_err(unknown)?;
+        let Some(path) = commons
+            .iter()
+            .find(|(_, dir)| *dir == common)
+            .map(|(path, _)| *path)
+        else {
             continue;
         };
         let Some(checks) = project
@@ -93,7 +106,7 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
             daemon: at.daemon,
             place: at.place,
             repository: path,
-            folder,
+            folder: &top,
         };
         for line in &checks.pre_commit {
             let check = Check {
@@ -135,18 +148,94 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The repository of the place a folder (real, `gate::gits`) is in: the deepest whose folder
-/// holds it.
-fn repository_of<'a>(place: &'a Place, folder: &Path) -> Option<(&'a str, &'a Path)> {
-    place
-        .repositories
-        .iter()
-        .filter(|(_, root)| {
-            folder.starts_with(root)
-                || crate::place::real_path(root).is_ok_and(|real| folder.starts_with(real))
+/// Why the gate cannot tell which repository a git command commits in, as the refusal of a
+/// commit: a `GIT_*` variable the line sets, `--git-dir` or `--work-tree`, or a folder it cannot
+/// follow (`gate::Git::astray`).
+fn doubt(git: &gate::Git) -> Option<String> {
+    let pointer = gate::git_globals(&git.words[1..])
+        .1
+        .into_iter()
+        .find_map(|(option, _)| {
+            ["--git-dir", "--work-tree"]
+                .contains(&option)
+                .then_some(option)
         })
-        .max_by_key(|(_, root)| root.components().count())
-        .map(|(path, root)| (path.as_str(), root.as_path()))
+        .map(str::to_owned)
+        .or_else(|| {
+            git.variables
+                .iter()
+                .find(|name| ["GIT_DIR", "GIT_WORK_TREE"].contains(&name.as_str()))
+                .cloned()
+        });
+    if let Some(pointer) = pointer {
+        return Some(format!(
+            "refused: {pointer} points the commit at a repository other than its folder's, whose \
+             commit checks would not run, and the project's repositories have commit checks: \
+             commit in the repository's folder, with git -C <folder> if it is another one; \
+             {NOTHING}"
+        ));
+    }
+    if let Some(name) = git.variables.first() {
+        return Some(format!(
+            "refused: {name} changes where or how git commits, past the commit checks of its \
+             repository, and the project's repositories have commit checks: commit without it; \
+             {NOTHING}"
+        ));
+    }
+    git.astray.as_ref().map(|who| {
+        format!(
+            "refused: {who} runs git in a folder it chooses itself, where Flottille cannot tell \
+             which repository's commit checks to run, and the project's repositories have commit \
+             checks: run git commit itself, with git -C <folder> for another repository; \
+             {NOTHING}"
+        )
+    })
+}
+
+/// What git reads in `folder`, in the run's environment `env`: its repository's common folder
+/// (that of every worktree of the repository) and the top of its worktree, where the checks run.
+async fn repository_at(folder: &Path, env: &Env) -> Result<(PathBuf, PathBuf), String> {
+    let asked = [
+        "git",
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+        "--show-toplevel",
+    ];
+    let unread = |why: String| {
+        format!(
+            "git cannot say which repository {} is in ({why})",
+            folder.display()
+        )
+    };
+    let output = crate::git::run_in(folder, &asked, env, None)
+        .await
+        .map_err(unread)?;
+    if !output.success {
+        return Err(unread(output.stderr.trim().to_owned()));
+    }
+    let mut lines = output.stdout.lines().map(real);
+    match (lines.next(), lines.next()) {
+        (Some(common), Some(top)) => Ok((common, top)),
+        _ => Err(unread("it said no worktree".into())),
+    }
+}
+
+/// The common folder of each repository of the place, as `repository_at` says it: none for one
+/// git cannot read.
+async fn common_dirs<'a>(place: &'a Place, env: &Env) -> Vec<(&'a str, PathBuf)> {
+    let mut commons = Vec::new();
+    for (path, root) in &place.repositories {
+        if let Ok((common, _)) = repository_at(root, env).await {
+            commons.push((path.as_str(), common));
+        }
+    }
+    commons
+}
+
+/// A path git said, every link followed.
+fn real(path: &str) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
 }
 
 /// The hooks a commit check stands for.

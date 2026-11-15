@@ -2917,13 +2917,15 @@ pub struct Git {
     /// The folder it works in: the run's, moved by the wrappers around it (`env -C`) and its own
     /// `-C`, as the gate reads them, every link and `..` followed.
     pub folder: PathBuf,
-    /// A variable a wrapper around it sets that points git at another repository (`GIT_DIR`,
-    /// `GIT_WORK_TREE`).
-    pub elsewhere: Option<String>,
+    /// The `GIT_*` variables the line sets before a program it runs, at any of its layers
+    /// (`GIT_DIR=x git`, `env GIT_DIR=x git`, `sh -c "A=1 GIT_DIR=x git"`): any of them may
+    /// change where git commits.
+    pub variables: Vec<String>,
+    /// Why the gate cannot tell the folder it works in, when it cannot: a program it does not
+    /// know runs it (`pnpm -C dir exec git`), or one that moves to another folder first (`find
+    /// -execdir`, `fd --base-directory`).
+    pub astray: Option<String>,
 }
-
-/// The variables that point git at a repository other than its folder's.
-const GIT_ELSEWHERE: [&str; 2] = ["GIT_DIR", "GIT_WORK_TREE"];
 
 /// Each git command a line run in `from` runs, at any of its layers, for the project's message
 /// checks and the repositories' commit checks (`crate::message_checks`, `crate::commit_checks`).
@@ -2932,43 +2934,96 @@ pub fn gits(place: &place::Place, from: &Path, words: &[String]) -> Vec<Git> {
         return Vec::new();
     };
     let starts = folders(place, &place.at(from), &layers);
+    let astray = astray(&layers);
+    let variables: Vec<String> = layers
+        .iter()
+        .flat_map(|layer| git_variables(layer))
+        .collect();
     let mut found: Vec<Git> = Vec::new();
-    let mut elsewhere: Option<String> = None;
-    for (layer, start) in layers.iter().zip(&starts) {
-        for (_, suffix) in suffixes(layer) {
+    for ((layer, start), astray) in layers.iter().zip(&starts).zip(astray) {
+        // A wrapper's program is the next layer's own.
+        if matches!(inner(layer), Ok(Some(_))) {
+            continue;
+        }
+        let own = layer.iter().take_while(|word| assignment(word)).count();
+        for (at, suffix) in suffixes(layer) {
             let args = &suffix[1..];
             if base(&suffix[0]) != "git" || args.get(git_globals(args).0).is_none() {
                 continue;
             }
-            let git = Git {
+            let astray = match at == own {
+                true => astray.clone(),
+                false => astray
+                    .clone()
+                    .or_else(|| Some(format!("`{}`", base(&layer[0])))),
+            };
+            found.push(Git {
                 words: suffix.to_vec(),
                 folder: moved(place, start, suffix).path,
-                elsewhere: elsewhere.clone(),
-            };
-            // A wrapper's layer and the layer it runs say the same command: the inner one knows
-            // where it runs.
-            match found.iter_mut().find(|seen| seen.words == git.words) {
-                Some(seen) => *seen = git,
-                None => found.push(git),
-            }
-        }
-        // What a wrapper sets before the program it runs holds for the layers after it.
-        if let Ok(Some(inner)) = inner(layer) {
-            let before = &layer[..layer.len().saturating_sub(inner.len())];
-            let before = if before.is_empty() {
-                &layer[..]
-            } else {
-                before
-            };
-            elsewhere = elsewhere.or_else(|| {
-                before.iter().find_map(|word| {
-                    let (name, _) = word.split_once('=')?;
-                    GIT_ELSEWHERE.contains(&name).then(|| name.to_owned())
-                })
+                variables: variables.clone(),
+                astray,
             });
         }
     }
     found
+}
+
+/// The names of the `GIT_*` variables a layer sets before the program it runs: its first words,
+/// and a wrapper's words before its program (`env`, `sudo`).
+fn git_variables(layer: &[String]) -> Vec<String> {
+    let mut end = layer.iter().take_while(|word| assignment(word)).count();
+    if let Ok(Some(inner)) = inner(layer)
+        && layer.ends_with(&inner)
+    {
+        end = end.max(layer.len() - inner.len());
+    }
+    layer[..end]
+        .iter()
+        .filter(|word| assignment(word))
+        .filter_map(|word| word.split_once('=').map(|(name, _)| name))
+        .filter(|name| name.starts_with("GIT_"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// For each layer of `lines`, in the same order, why the folder its program runs in cannot be
+/// told when a program around it moves to a folder of its own choosing first (`find -execdir`,
+/// `fd --base-directory`), as `folders` follows its wrappers and the lines run.
+fn astray(layers: &[Vec<String>]) -> Vec<Option<String>> {
+    let mut astray: Vec<Option<String>> = vec![None];
+    let mut runners = std::collections::VecDeque::new();
+    for (at, layer) in layers
+        .iter()
+        .enumerate()
+        .take(layers.len().saturating_sub(1))
+    {
+        let here = astray[at].clone().or_else(|| moves_itself(layer));
+        let lines = executed(layer).map_or(0, |(_, lines)| lines.len());
+        runners.extend(std::iter::repeat_n(here, lines));
+        astray.push(if matches!(inner(layer), Ok(Some(_))) {
+            astray[at].clone()
+        } else {
+            runners.pop_front().flatten()
+        });
+    }
+    astray
+}
+
+/// A program that runs lines in a folder it moves to: `find -execdir` (each found file's),
+/// `fd --base-directory`.
+fn moves_itself(layer: &[String]) -> Option<String> {
+    let args = &layer[1..];
+    match base(&layer[0]) {
+        "find" => args
+            .iter()
+            .find(|word| *word == "-execdir" || *word == "-okdir")
+            .map(|word| format!("`find {word}`")),
+        "fd" => args
+            .iter()
+            .any(|word| word == "--base-directory" || word.starts_with("--base-directory="))
+            .then(|| "`fd --base-directory`".to_owned()),
+        _ => None,
+    }
 }
 
 /// Whether the line's own program is git pushing, with no wrapper around it: the push the gate
@@ -3474,9 +3529,6 @@ const SUDO_VALUED: [&str; 21] = [
     "--host",
 ];
 
-/// The options of `env` that take the next word.
-const ENV_VALUED: [&str; 4] = ["-u", "--unset", "-C", "--chdir"];
-
 /// The folders a layer's options change to, in turn: a wrapper's (`env -C`, `sudo -D`), where
 /// the program it runs starts, and git's `-C`, where its own words name paths from.
 fn changes_to(layer: &[String]) -> Vec<&str> {
@@ -3490,7 +3542,14 @@ fn changes_to(layer: &[String]) -> Vec<&str> {
                 .filter_map(|(_, folder)| folder)
                 .collect();
         }
-        "env" => ("-C", &ENV_VALUED),
+        // The folder of its last `-C`, as `env` reads its options; those of a `-S` are read
+        // again in the layer it runs (`env`).
+        "env" => {
+            return match env_read(args) {
+                Ok(EnvRead::Ends { chdir, .. }) => chdir.into_iter().collect(),
+                _ => Vec::new(),
+            };
+        }
         "sudo" => ("-D", &SUDO_VALUED),
         _ => return Vec::new(),
     };
@@ -3561,35 +3620,148 @@ fn skip(args: &[String], valued: &[&str], assignments: bool) -> usize {
     at
 }
 
-fn env(args: &[String]) -> Result<Option<Vec<String>>, String> {
+/// What `env`'s options say, read as GNU `env` reads them (getopt): grouped short options
+/// (`-vC dir`), a long one by any prefix that names it alone (`--ch=dir`).
+enum EnvRead<'a> {
+    /// Its options end at this word, and the folder its last `-C` changes to.
+    Ends { at: usize, chdir: Option<&'a str> },
+    /// `-S` splits its value into words that take its place: `env` and the words it then reads.
+    Split(Vec<String>),
+}
+
+/// `env`'s long options, and whether each takes a value: the next word when it is required,
+/// only after `=` when it is optional.
+const ENV_LONG: [(&str, Takes); 13] = [
+    ("argv0", Takes::Required),
+    ("ignore-environment", Takes::No),
+    ("null", Takes::No),
+    ("unset", Takes::Required),
+    ("chdir", Takes::Required),
+    ("split-string", Takes::Required),
+    ("debug", Takes::No),
+    ("block-signal", Takes::Optional),
+    ("default-signal", Takes::Optional),
+    ("ignore-signal", Takes::Optional),
+    ("list-signal-handling", Takes::No),
+    ("help", Takes::No),
+    ("version", Takes::No),
+];
+
+#[derive(Clone, Copy, PartialEq)]
+enum Takes {
+    No,
+    Required,
+    Optional,
+}
+
+/// `env`'s short options that take a value, as the long one each stands for.
+const ENV_SHORT_VALUED: [(char, &str); 4] = [
+    ('a', "argv0"),
+    ('u', "unset"),
+    ('C', "chdir"),
+    ('S', "split-string"),
+];
+
+fn env_read(args: &[String]) -> Result<EnvRead<'_>, String> {
     let mut at = 0;
+    let mut chdir = None;
+    // The words `-S` stands in, its own value left out: the option's word, cut before the `S`
+    // when it groups letters, and where its value ends.
+    let resplit = |value: Option<&str>, word: usize, kept: Option<String>, after: usize| {
+        let mut words = vec!["env".to_owned()];
+        words.extend_from_slice(&args[..word]);
+        words.extend(kept);
+        let Some(line) = split("env", value, &[])? else {
+            return Ok(EnvRead::Ends {
+                at: args.len(),
+                chdir: None,
+            });
+        };
+        words.extend(line);
+        words.extend_from_slice(args.get(after..).unwrap_or_default());
+        Ok(EnvRead::Split(words))
+    };
     while let Some(word) = args.get(at) {
         let word = word.as_str();
+        let here = at;
+        at += 1;
         if word == "--" {
-            at += 1;
             break;
         }
-        if word == "-S" || word == "--split-string" {
-            return split(
-                "env",
-                args.get(at + 1).map(String::as_str),
-                &args[(at + 2).min(args.len())..],
-            );
+        if word == "-" {
+            continue;
         }
-        if let Some(line) = word
-            .strip_prefix("--split-string=")
-            .or_else(|| word.strip_prefix("-S").filter(|_| !word.starts_with("--")))
-        {
-            return split("env", Some(line), &args[at + 1..]);
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, attached) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
+            let named: Vec<_> = ENV_LONG
+                .iter()
+                .filter(|(full, _)| full.starts_with(name))
+                .collect();
+            // `env` refuses one it does not know or that names several, and runs nothing.
+            let exact = ENV_LONG.iter().find(|(full, _)| *full == name);
+            let alone = match named.as_slice() {
+                [one] => Some(*one),
+                _ => None,
+            };
+            let Some(&(full, takes)) = exact.or(alone) else {
+                continue;
+            };
+            let value = match takes {
+                Takes::Required if attached.is_none() => {
+                    at += 1;
+                    args.get(at - 1).map(String::as_str)
+                }
+                _ => attached,
+            };
+            match full {
+                "chdir" => chdir = value,
+                "split-string" => return resplit(value, here, None, at),
+                _ => {}
+            }
+            continue;
         }
-        if ENV_VALUED.contains(&word) {
-            at += 2;
-        } else if word.starts_with('-') || assignment(word) {
-            at += 1;
-        } else {
+        let Some(letters) = word.strip_prefix('-').filter(|letters| !letters.is_empty()) else {
+            at -= 1;
+            break;
+        };
+        for (i, letter) in letters.char_indices() {
+            let Some(&(_, full)) = ENV_SHORT_VALUED.iter().find(|(short, _)| *short == letter)
+            else {
+                continue;
+            };
+            let rest = &letters[i + letter.len_utf8()..];
+            let value = match rest.is_empty() {
+                true => {
+                    at += 1;
+                    args.get(at - 1).map(String::as_str)
+                }
+                false => Some(rest),
+            };
+            match full {
+                "chdir" => chdir = value,
+                "split-string" => {
+                    let kept = (i > 0).then(|| format!("-{}", &letters[..i]));
+                    return resplit(value, here, kept, at);
+                }
+                _ => {}
+            }
             break;
         }
     }
+    Ok(EnvRead::Ends {
+        at: at.min(args.len()),
+        chdir,
+    })
+}
+
+fn env(args: &[String]) -> Result<Option<Vec<String>>, String> {
+    let mut at = match env_read(args)? {
+        EnvRead::Split(words) => return Ok(Some(words)),
+        EnvRead::Ends { at, .. } => at,
+    };
     while args.get(at).is_some_and(|word| assignment(word)) {
         at += 1;
     }
