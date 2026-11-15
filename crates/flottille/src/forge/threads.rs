@@ -215,7 +215,7 @@ async fn github_thread_of(forge: &Forge, number: u64, id: &str) -> Result<Option
         && on["repository"]["nameWithOwner"]
             .as_str()
             .is_some_and(|name| name.eq_ignore_ascii_case(&forge.slug()));
-    Ok(Some(node).filter(|_| ours).and_then(github_thread))
+    Ok(ours.then_some(node).and_then(github_thread))
 }
 
 /// A thread of GitHub's GraphQL answer: an outdated one says no `line`, only the one it was
