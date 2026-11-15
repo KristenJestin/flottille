@@ -9,7 +9,8 @@ app) reads and answers the sessions of every machine of the user. It is the mile
 
 **Status: the design of v0.4, decided with the maintainer on 2026-11-12, 2026-11-13 and 2026-11-14.** Nothing
 here is built but the keys, and the member list, the invitation code and the four words as data
-and their checks (`crates/flottille-link`). What is decided is said as such; the defaults taken are in "Defaults taken, to
+and their checks (`crates/flottille-link`), and the hub's state and its rules, without the network
+it will serve on (`crates/flottille-hub`). What is decided is said as such; the defaults taken are in "Defaults taken, to
 confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
@@ -248,6 +249,16 @@ list (names, keys, roles, never a secret); the presence. Never what the devices 
 **Its configuration**: a listen address, TLS (a certificate given, ACME, or plain behind a reverse
 proxy), a state folder. The hub URL is given to every device at join, in the invitation.
 
+**Its state folder** is `--state <dir>`, `$XDG_STATE_HOME/flottille-hub` by default, made 700. It
+holds the hub's key, `hub.key` (600, made at the first start with the machine key's care), and
+`hub.json` (600): the member list as the members signed it, and the setup code while no member
+exists, written whole under a temporary name and renamed over the old file. One process uses the
+folder at a time (a lock on `hub.lock`): a second hub, or `flottille-hub setup-code` with or
+without `--reset`, is refused while a hub runs (`another flottille-hub uses <folder>: stop it
+first`). A list in it that does not check stops the hub's start, saying to reset it. The
+invitations, their join requests, the presence and the addresses are kept in memory: they last
+minutes, or are told again when a device connects.
+
 ### The first member
 
 At its first start, with an empty member list, the hub prints a **setup code** in its log, once:
@@ -255,7 +266,9 @@ At its first start, with an empty member list, the hub prints a **setup code** i
 it again while no member exists. The first device (usually the computer) joins with it:
 `flottille remote setup <hub URL> <code>`, or Settings, Machines, **Set up a hub** in the window. It
 becomes the first member, a `runner`, its entry signed by itself; it is the **root** of the list, and
-every device that joins later pins it.
+every device that joins later pins it. The code is 80 random bits in Crockford's base32, read in
+any case and with or without its hyphens, compared in constant time; the entry it comes with must
+be the presenting device's own.
 
 **Recovery**: `flottille-hub setup-code --reset`, on the hub's machine only, empties the member list
 and prints a new setup code. Every device then refuses the new list (its root is not the one they
@@ -269,9 +282,10 @@ each other.
 
 1. **An existing member asks the hub for an invitation**: Settings, Machines, **Add a device** in the
    window, `flottille remote invite`, or the phone's **Add a device**. It is a user action, signed by
-   that member's device key. The hub answers with a token, valid **5 minutes, once**. The member
-   shows a QR and the same as a code to copy, holding the hub URL with the hub's key, the token, and
-   the inviting member's key fingerprint.
+   that member's device key (an ask, `crates/flottille-link/src/invitation.rs`: for this hub, within
+   5 minutes of the hub's time, taken once). The hub answers with a token, valid **5 minutes,
+   once**. The member shows a QR and the same as a code to copy, holding the hub URL with the hub's
+   key, the token, and the inviting member's key fingerprint.
 2. **The new device reads it** (the phone scans the QR; a computer is given the code), makes its key,
    and connects **to the hub**, not to the inviting member, with the token and its new public key.
 3. **The hub holds the request** and notifies the inviting member. Both screens show the same **four
@@ -726,6 +740,48 @@ on a real phone, by hand, and reported.
   then let a forgotten request in again: accepted.
 - A field of a request longer than 4 GB, more than its length prefix says, is neither signed nor
   taken.
+
+- The hub's state is one JSON file, `hub.json`, written whole and renamed into place, beside its
+  key: no database. The invitations and their join requests are kept in memory: a hub started
+  again has none, and the member asks again.
+- The setup code is printed in the log at the start that made it only; a hub started again before
+  a first member joined prints none, and `flottille-hub setup-code` prints it. With no listener yet,
+  `flottille-hub` makes or reads its state, prints its key's fingerprint, and exits.
+- A member's ask for an invitation signs, after `flottille-hub-invite-v1` and a zero byte, the
+  hub's key, its own key, its time and 16 random bytes: an ask is for one hub, taken within 5
+  minutes of the hub's time either way, and once. A `viewer`'s ask is refused.
+- A join request ends with its invitation, 5 minutes after the invitation was given, however late
+  the device joined. Only the member that invited may accept it (its signed entry of that key) or
+  refuse it; the refusal is the member's word over its control session, not a signed change, since
+  refusing adds nothing.
+- The hub takes an addition only as the answer to a join request to its signer: a device joins
+  through an invitation, never by a change alone.
+- `flottille-hub setup-code --reset` is refused while a hub uses the state folder, rather than
+  told to it: the running hub would keep the old code valid and undo the reset at its next write.
+  It reads nothing of the state, so a list that does not check, or a damaged file, does not stop
+  it; the hub's key stays.
+- The git work of "What travels" is `crates/flottille/src/git/bundle.rs`. The snapshot is made
+  from a copy of the repository's index (a linked worktree's own), under Flottille's name
+  (`Flottille <flottille@localhost>`), never signed: it is never kept as a commit. The bundle
+  holds one ref, `refs/flottille/outgoing/<launch>`: its parent is the branch as it was when the
+  snapshot was made, so the branch travels below it and the branch's name goes beside the bundle.
+  When the other side has every commit already, no bundle is written (git makes no empty one)
+  and the answer says "nothing new".
+- A bundle received is verified, then fetched into `refs/flottille/incoming/<launch>`; a
+  repository never received is made by `git init` and that fetch, with no remote. The fetch sets
+  `protocol.file.allow=always` for itself: a configuration that refuses git's file transport is
+  about submodules and remotes, not a file of Flottille's.
+- The snapshot is laid with `read-tree -m -u HEAD <snapshot>`, then `reset`, on a workspace with
+  no change of its own (refused otherwise): every change is unstaged, and a file `HEAD` does not
+  have is untracked there, even one the sender had staged.
+- Every git of a launch runs with `GIT_NO_LAZY_FETCH=1`, and a partial clone
+  (`extensions.partialClone`, or a remote with `promisor = true`) is refused on either side: what
+  it lacks is on its remote, and a bundle of it would be incomplete.
+- Git LFS objects do not travel, their pointers do: the receiving side runs with
+  `GIT_LFS_SKIP_SMUDGE=1`, so that its smudge filter downloads nothing and leaves the pointer.
+  The sending side's clean filters run as the user's own `git add` would run them, locally.
+- A returning bundle holds the one branch of the workspace; a `machine` is one ref component and
+  the `branch` a branch name git accepts, or nothing is fetched.
 
 ## Open questions
 

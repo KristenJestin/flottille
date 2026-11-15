@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 pub use hello::{Hello, NeedsUpdate, PeerState, choose};
-pub use invitation::{Invitation, InvitationError, Token};
+pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
 pub use members::{
     Action, Change, ChangeHash, ListError, Member, MemberList, Members, Role, Signature,
 };
@@ -36,6 +36,8 @@ pub use words::verification_words;
 
 /// The machine key's file in the key folder: the daemon's alone.
 pub const MACHINE_FILE: &str = "machine.key";
+/// The hub's key's file in its state folder: the hub's alone.
+pub const HUB_FILE: &str = "hub.key";
 /// The device key's file in the key folder, on a machine with no keyring: its clients' alone.
 pub const DEVICE_FILE: &str = "device.key";
 /// The device key's item in the session's keyring (`docs/vault.md`, "Where the secrets are").
@@ -136,6 +138,31 @@ impl fmt::Debug for MachineKey {
     }
 }
 
+/// The key of the user's hub (`docs/remote.md`, "Identity and keys"): the devices pin it when they
+/// join. Only the hub makes and reads it.
+pub struct HubKey(SigningKey);
+
+impl HubKey {
+    /// The key in the hub's state `folder`, made there the first time, with the machine key's care:
+    /// the folder 700, the file 600, either one open to others refused and left as it is.
+    pub fn load_or_make(folder: &Path) -> Result<HubKey, KeyError> {
+        private_folder(folder)?;
+        load_or_make_file(&folder.join(HUB_FILE)).map(HubKey)
+    }
+
+    pub fn public(&self) -> PublicKey {
+        PublicKey(self.0.verifying_key())
+    }
+}
+
+impl fmt::Debug for HubKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("HubKey")
+            .field(&self.public().fingerprint())
+            .finish()
+    }
+}
+
 /// The key of a machine's clients, the window and the command line of a user session: it signs
 /// the user's actions. A client makes and reads it, never the daemon, which could then forge them.
 pub struct DeviceKey(SigningKey);
@@ -179,6 +206,13 @@ impl fmt::Debug for DeviceKey {
             .field(&self.public().fingerprint())
             .finish()
     }
+}
+
+/// `N` bytes from the operating system's random generator.
+fn random<const N: usize>() -> Result<[u8; N], KeyError> {
+    let mut bytes = [0u8; N];
+    getrandom::fill(&mut bytes).map_err(|error| KeyError(format!("no random bytes: {error}")))?;
+    Ok(bytes)
 }
 
 /// A new key, from the operating system's random generator.

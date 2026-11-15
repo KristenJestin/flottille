@@ -16,6 +16,17 @@
 //! ```
 //!
 //! A code that does not decode, or whose checksum is not its own, is refused as damaged.
+//!
+//! A member asks the hub for the token with an **ask** signed by its device key. Its signed bytes,
+//! a fixed encoding as a member change's are, and never one of them:
+//!
+//! ```text
+//! "flottille-hub-invite-v1" 0x00    the domain: nothing else a device key signs starts so
+//! hub      32 bytes                 the hub's public key: an ask made for one hub is no other's
+//! member   32 bytes                 the asking member's public key
+//! at        8 bytes                 when it was signed, in seconds since 1970, big-endian
+//! nonce    16 bytes                 random: two asks of the same second are two
+//! ```
 
 use std::fmt;
 
@@ -23,10 +34,15 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 use crate::serial::{from_hex_text, invisible, to_hex};
-use crate::{ListError, MemberList, Members, PublicKey, verification_words};
+use crate::{
+    DeviceKey, KeyError, ListError, MemberList, Members, PublicKey, Signature, random,
+    verification_words,
+};
 
 const VERSION: u8 = 1;
 const CHECKSUM_DOMAIN: &[u8] = b"flottille-invitation-v1\0";
+/// The start of an ask's signed bytes.
+const ASK_DOMAIN: &[u8] = b"flottille-hub-invite-v1\0";
 const CHECKSUM: usize = 4;
 /// The bytes before the hub URL.
 const FIXED: usize = 1 + 32 + 32 + 16;
@@ -170,6 +186,52 @@ impl fmt::Display for InvitationError {
 }
 
 impl std::error::Error for InvitationError {}
+
+/// A member's ask for an invitation (`docs/remote.md`, "Pairing", 1): a user action, signed by the
+/// member's device key. The hub takes it within 5 minutes of `at`, once.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvitationAsk {
+    pub hub: PublicKey,
+    pub member: PublicKey,
+    pub at: u64,
+    pub nonce: [u8; 16],
+    pub signature: Signature,
+}
+
+impl InvitationAsk {
+    /// An ask to the hub whose key is `hub`, at `at` (seconds since 1970), signed with `key`.
+    pub fn sign(hub: &PublicKey, at: u64, key: &DeviceKey) -> Result<InvitationAsk, KeyError> {
+        let mut ask = InvitationAsk {
+            hub: *hub,
+            member: key.public(),
+            at,
+            nonce: random()?,
+            signature: Signature([0; 64]),
+        };
+        ask.signature =
+            Signature(ed25519_dalek::Signer::sign(&key.0, &ask.signed_bytes()).to_bytes());
+        Ok(ask)
+    }
+
+    /// What the signature covers: the encoding of the module's documentation.
+    pub fn signed_bytes(&self) -> Vec<u8> {
+        let mut bytes = ASK_DOMAIN.to_vec();
+        bytes.extend_from_slice(self.hub.as_bytes());
+        bytes.extend_from_slice(self.member.as_bytes());
+        bytes.extend_from_slice(&self.at.to_be_bytes());
+        bytes.extend_from_slice(&self.nonce);
+        bytes
+    }
+
+    /// Whether the signature is the member's over the signed bytes, strictly as a change's is.
+    pub fn signed(&self) -> bool {
+        let signature = ed25519_dalek::Signature::from_bytes(&self.signature.0);
+        self.member
+            .0
+            .verify_strict(&self.signed_bytes(), &signature)
+            .is_ok()
+    }
+}
 
 /// Whether `url` is a hub URL: `http://` or `https://`, a host, at most `URL_LIMIT` bytes, and
 /// no space, control or invisible character, which would make the address a person checks differ
