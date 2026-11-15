@@ -6384,6 +6384,89 @@ fn the_server_and_its_login_share_one_browser_socket_folder() {
     assert_eq!(login["runtime_files"], json!(["wayland-test"]), "{login}");
 }
 
+#[test]
+fn a_connection_variable_cannot_choose_the_landlock_exception() {
+    // A variable of the connection's own, the user's or an agent's approved request, named
+    // `XDG_RUNTIME_DIR`: the folder the login's reload may reach is the one the daemon made, never
+    // the one this variable names.
+    if common::landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) is not used",
+            common::landlock_abi()
+        );
+        return;
+    }
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "runtime-path", "secret": user.path("runtime").to_str().unwrap()}),
+    )
+    .unwrap();
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"fail": true}),
+        &[],
+        json!({"headed": true, "env": {"XDG_RUNTIME_DIR": {"vault": "runtime-path"}}}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("failed"), "{said}");
+    // The reload ran with the variable, and could read nothing of the folder it names.
+    let opened = logged(&user, "browser", "open");
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    let seen = &opened[0]["display"];
+    assert_eq!(
+        seen["XDG_RUNTIME_DIR"],
+        user.path("runtime").to_str().unwrap(),
+        "{seen}"
+    );
+    assert_eq!(seen["runtime_files"], Value::Null, "{seen}");
+}
+
+#[test]
+fn a_shown_server_cannot_link_the_socket_out_of_its_folder() {
+    // A hard link of the Wayland socket elsewhere would outlive the folder, and be reachable
+    // under a name the folder's rule does not cover.
+    if common::landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) cannot deny a link out of a folder",
+            common::landlock_abi()
+        );
+        return;
+    }
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    let out = user.path("state/flottille/connections/browser/linked-socket");
+    let mut script = agent_browser("0.43.0");
+    script["link_socket_to"] = json!(out.to_str().unwrap());
+    browser_declared(
+        &user,
+        &script,
+        json!({"fail": true}),
+        &[],
+        json!({"headed": true}),
+    );
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let started = logged(&user, "browser", "start");
+    // The socket is in the folder the server got, and the link out of it was refused.
+    assert_eq!(
+        started.last().unwrap()["display"]["runtime_files"],
+        json!(["wayland-test"])
+    );
+    assert_eq!(
+        started.last().unwrap()["linked"],
+        json!(false),
+        "{started:?}"
+    );
+    assert!(!out.exists());
+}
+
 /// The browser on the connection's socket folder, as the fake keeps it: none once it is closed.
 fn browser_running(user: &User) -> Option<Value> {
     std::fs::read_to_string(user.path("state/flottille/connections/browser/browser.json"))

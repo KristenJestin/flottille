@@ -148,9 +148,17 @@ fn main() {
         .rsplit_once(')')
         .map(|(_, rest)| rest.split_whitespace().collect())
         .unwrap_or_default();
+    // `link_socket_to` in the script: tries to hard-link the display's socket out of its folder.
+    let linked = script["link_socket_to"].as_str().map(|to| {
+        let from = std::env::var_os("XDG_RUNTIME_DIR")
+            .zip(std::env::var_os("WAYLAND_DISPLAY"))
+            .map(|(dir, name)| std::path::Path::new(&dir).join(name));
+        let _ = std::fs::remove_file(to);
+        from.is_some_and(|from| std::fs::hard_link(from, to).is_ok())
+    });
     write_log(
         &log,
-        json!({"event": "start", "pid": std::process::id(),
+        json!({"event": "start", "pid": std::process::id(), "linked": linked,
         "pgid": fields.get(2).and_then(|f| f.parse::<u32>().ok()),
         "sid": fields.get(3).and_then(|f| f.parse::<u32>().ok()),
         "cwd": std::env::current_dir().ok(), "args": args, "child": child,
@@ -1040,7 +1048,7 @@ fn open(args: &[String], script: &Value, log: &Option<String>) {
     write_log(
         log,
         json!({"event": "open", "args": args, "config": loaded_config(args),
-            "cwd": std::env::current_dir().ok()}),
+            "cwd": std::env::current_dir().ok(), "display": display_environment()}),
     );
     let behaviour = &script["login"];
     if behaviour["open_fail"] == true {
