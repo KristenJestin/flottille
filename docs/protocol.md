@@ -1530,7 +1530,13 @@ its parent writes to it, and the sentence names its root.
 to the session as it is, whatever the setting `after_expiry`; left out, the setting decides.
 
 `images` is a list of `{"mime", "data"}`, `data` the image's bytes in base64: a pasted or dropped
-picture, sent as ACP image blocks after the message's text. With images, the message may be
+picture, sent as ACP image blocks where the message puts them. The message marks a picture by
+`[Image N: <name>]`, `N` counted from 1 in the message: the prompt is the text up to the marker of
+the first image, that image's block, the text up to the next marker, and so on (the k-th marker
+takes the k-th image). An image without a marker (the message has fewer markers than images) is
+marked after the text, `[Image N: <file name>]`, and its block goes there: the stored message keeps
+the text as it was sent, and the `agent.prompted` event the text with every marker, its images in
+that order. With images, the message may be
 empty. `mime` is `image/png`, `image/jpeg`, `image/gif` or `image/webp`; a message carries 20
 images at most, 5 MiB each (20 is the least of what the providers document: the Claude API takes
 100 or more images per request, the OpenAI API 1500, and OpenCode leaves the count to its

@@ -732,3 +732,100 @@ fn a_big_image_is_scaled_down_before_it_is_stored() {
     assert!(first.len() < big.len());
     assert_eq!(second, small, "one that fits is stored as it came");
 }
+
+/// #773: a message that speaks of several pictures is read by the agent with each one where the
+/// user put it, and the conversation keeps that order.
+#[test]
+fn the_prompt_interleaves_text_markers_and_pictures_in_their_order() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    project(&user);
+    let id = idle_agent(&user);
+    let (first, second) = (
+        [PNG, b"one"].concat().to_vec(),
+        [PNG, b"two"].concat().to_vec(),
+    );
+
+    user.call(
+        "agent.send",
+        json!({"agent": id,
+            "message": "this one [Image 1: a.png] is fine, but in [Image 2: b.png] the text overflows",
+            "images": [image("image/png", &first), image("image/png", &second)]}),
+    )
+    .unwrap();
+    eventually("the second turn ends", || {
+        user.received_requests("session/prompt").len() == 2
+    });
+
+    let prompt = user.received_requests("session/prompt")[1]["params"]["prompt"].clone();
+    let kinds: Vec<&str> = prompt
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["text", "image", "text", "image", "text"],
+        "{prompt}"
+    );
+    assert!(
+        prompt[0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("this one [Image 1: a.png]"),
+        "{prompt}"
+    );
+    assert_eq!(prompt[1]["data"], base64_of(&first));
+    assert_eq!(prompt[2]["text"], " is fine, but in [Image 2: b.png]");
+    assert_eq!(prompt[3]["data"], base64_of(&second));
+    assert_eq!(prompt[4]["text"], " the text overflows");
+
+    // The turn's event keeps the text with its markers and the pictures in their order.
+    let prompted = show(&user, &id)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|e| e["name"] == "agent.prompted")
+        .cloned()
+        .unwrap();
+    let text = prompted["data"]["text"].as_str().unwrap();
+    assert!(
+        text.contains("this one [Image 1: a.png] is fine, but in [Image 2: b.png] the text"),
+        "{text}"
+    );
+    let names = prompted["data"]["images"].as_array().unwrap();
+    assert_eq!(names.len(), 2);
+    let read = |name: &Value| {
+        user.call("agent.image", json!({"agent": id, "name": name}))
+            .unwrap()["data"]
+            .clone()
+    };
+    assert_eq!(read(&names[0]), base64_of(&first));
+    assert_eq!(read(&names[1]), base64_of(&second));
+}
+
+/// #773: a picture sent without a marker (a client that does not place it) goes after the text,
+/// with its marker.
+#[test]
+fn a_picture_without_its_marker_goes_after_the_text_with_one() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    project(&user);
+    let id = idle_agent(&user);
+
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "what is this?", "images": [image("image/png", PNG)]}),
+    )
+    .unwrap();
+    eventually("the second turn ends", || {
+        user.received_requests("session/prompt").len() == 2
+    });
+
+    let prompt = &user.received_requests("session/prompt")[1]["params"]["prompt"];
+    let text = prompt[0]["text"].as_str().unwrap();
+    assert!(text.contains("what is this?\n\n[Image 1: "), "{text}");
+    assert!(text.ends_with(".png]"), "{text}");
+    assert_eq!(prompt[1]["type"], "image");
+}
