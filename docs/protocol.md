@@ -916,6 +916,28 @@ The requests agents made for an entry (`docs/vault.md`, "Asking the user for an 
 - `vault.ask_dismiss {ask}` closes it, answers `{"dismissed": <request>}`, and hands each agent
   `the user dismissed the request …`; `not-found` when no such request is open.
 
+### The remote methods
+
+The link to the user's other machines (`docs/remote.md`, "Architecture", "The transport"), with
+remote on (`[remote] on = true` in `daemon.toml`). With it off, each is `refused` (`remote is off:
+turn it on in daemon.toml ([remote] on = true)`); with a link that could not listen, `unavailable`,
+with the reason. No method answers a private key.
+
+- `remote.machines` answers `{"this": {"key", "fingerprint", "listening", "addresses": [{"address",
+  "how"}]}, "machines": [{"name", "key", "fingerprint", "state", "since", "reason",
+  "addresses"}]}`: this machine's public key, the socket its link listens on, and its addresses,
+  `how` being `found` (the one it listens on, or its interfaces' when it listens on all of them) or
+  `declared` (by hand, with the link's port when it gave none); then each machine it trusts, its
+  `state` `online`, `offline` or `needs an update`, `since` when it is so (milliseconds since the
+  Unix epoch), `reason` why it is not online (`server refused the link: …`, the sentence of
+  `docs/remote.md`, "The version"), or `null`, and `addresses` those it knows it at.
+- `remote.address.add {address}` declares an address of this machine: a host name or an IP
+  address, and its port when it is not the link's own (`100.64.0.7`, `server.example.net:7447`).
+  It answers `this` as above, and is told at once to the machines linked to this one.
+  `invalid-params` for what is not an address; one declared already changes nothing.
+- `remote.address.remove {address}` removes one, answers and tells as `add` does; `not-found` when
+  it was not declared.
+
 ### The skill methods
 
 A project's skills (`docs/skills.md`). The daemon edits the project's file in place, the rest of it
