@@ -3040,10 +3040,11 @@ impl ConnectionsSection {
         let Some(review) = self.review.as_mut() else {
             return;
         };
-        if let Some(Ok(diff)) = review.answer.take() {
-            review.picked.extend(review.tickable_shown(&diff));
-            review.answer = Some(Ok(diff));
-        }
+        let Some(Ok(diff)) = review.answer.as_ref() else {
+            return;
+        };
+        let shown = review.tickable_shown(diff);
+        review.picked.extend(shown);
         cx.notify();
     }
 
