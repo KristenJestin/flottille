@@ -535,15 +535,21 @@ regular file, not a link nor a FIFO, of 256 KiB at most.
     and the project's repositories have commit checks: commit in the repository's folder, with git
     -C <folder> if it is another one; nothing was committed`;
   - the line sets any other `GIT_*` variable before a program (`GIT_COMMON_DIR`,
-    `GIT_INDEX_FILE`): `refused: GIT_INDEX_FILE changes where or how git commits, past the commit
+    `GIT_INDEX_FILE`), but those of who wrote and made the commit (`GIT_AUTHOR_*`,
+    `GIT_COMMITTER_*`): `refused: GIT_INDEX_FILE changes where or how git commits, past the commit
     checks of its repository, …`;
   - a program the gate does not know runs git (`pnpm -C ../web exec git commit`, `uv run
-    --directory ../web git commit`), or one that moves to a folder of its own first (`find
-    -execdir`, `-okdir`, `fd --base-directory`): ``refused: `pnpm` runs git in a folder it chooses
-    itself, where Flottille cannot tell which repository's commit checks to run, …``.
+    --directory ../web git commit`), or `pnpm exec` (`yarn exec`, `dlx`) with an option other
+    than `--package` (`--dir=../web`, `-c '<line>'`), one that moves to a folder of its own first
+    (`find -execdir`, `-okdir`, `fd --base-directory`), or one that fills words in (`find -exec`,
+    `-ok`, `fd -x`, `-X`, `xargs`): ``refused: `pnpm` runs git in a folder it chooses itself,
+    where Flottille cannot tell which repository's commit checks to run, …``. Under these, a git
+    whose command is not on the line (`xargs git`, `fd -x git {}`) is refused too;
+  - a repository with checks that git cannot read: `refused: the repositories' commit checks read
+    each commit before it is made, and git cannot say which repository … is in (…)`.
 
-  A `git merge`, `git commit-tree`, `cherry-pick`
-  or `rebase` runs none of them, as git runs no `pre-commit` for them. A repository without checks
+  A `git merge`, `git commit-tree`, `cherry-pick`, `rebase`, `am`, `revert`, `stash` or `notes`
+  runs none of them, as git runs no `pre-commit` for them. A repository without checks
   commits as before.
 - **`--no-verify`** (`-n`) on an agent's commit in a repository with checks is refused: `refused:
   --no-verify skips the commit checks of the repository api, which are the user's, not the agent's
