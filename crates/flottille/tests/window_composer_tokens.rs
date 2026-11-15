@@ -852,6 +852,11 @@ fn redoing_a_removal_renumbers_the_chips(cx: &mut TestAppContext) {
     );
 
     cx.simulate_keystrokes("ctrl-y");
+    assert_eq!(
+        pieces(&reply, cx),
+        ["chip:Image 1", "chip:Image 2"],
+        "at once, not a frame later"
+    );
     settle(cx);
     assert_eq!(
         pieces(&reply, cx),
@@ -882,6 +887,11 @@ fn cutting_a_chip_renumbers_the_others(cx: &mut TestAppContext) {
             .update(cx, |f, cx| f.set_selected_range(middle, cx))
     });
     cx.simulate_keystrokes("ctrl-x");
+    assert_eq!(
+        pieces(&reply, cx),
+        ["chip:Image 1", "chip:Image 2"],
+        "at once, not a frame later"
+    );
     settle(cx);
     assert_eq!(
         pieces(&reply, cx),
