@@ -1173,8 +1173,8 @@ mod tests {
         );
         assert!(read.windows(2).all(|pair| pair[0].seq < pair[1].seq));
 
-        // An event after them is numbered after them.
-        let emitted = daemon.emit("test.after", json!({})).unwrap();
+        // An event after them (any, the scan of tests/protocol.rs knows this one) is numbered after them.
+        let emitted = daemon.emit("rules.changed", json!({})).unwrap();
         assert!(emitted.seq > read.last().unwrap().seq);
 
         // A subscriber from the start sees each event once: the store's pages and the bus's
