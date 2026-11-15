@@ -578,8 +578,9 @@ unresolved, read them with …`).
   100)` (`id isResolved isOutdated path line startLine originalLine originalStartLine diffSide`,
   and each thread's first 100 `comments`: `author.login body createdAt url`); an outdated thread
   says no `line`, its `originalLine` is said. They are read with `detail: full` alone, and the
-  answer says when the pull request has more than 100. The REST API, which Flottille prefers,
-  says neither a thread's resolution nor keeps a reply in it.
+  answer says when the pull request has more than 100, and a thread with more comments than the
+  100 read (`totalCount`: `130 comments, only the first 100 shown`). The REST API, which
+  Flottille prefers, says neither a thread's resolution nor keeps a reply in it.
 - **Bitbucket Cloud**: the inline comments among those every read already gives (`inline {path,
   from, to, start_from, start_to, outdated}`), a thread being an inline comment that answers none
   with every comment that answers it (`parent.id`), named by its first comment's number; resolved
@@ -599,13 +600,15 @@ the body whole, or `It marks the review thread <id> of pull request #<n> resolve
 `number`, `thread`, the reply's `body` or `resolved`, or whose `thread` is not one id (letters,
 digits, `_`, `-`, `=`), is refused before the user is asked.
 
-- **GitHub**: the pull request's threads are read first, and a thread that is not one of them is
-  refused, nothing written: a node id names a thread anywhere on GitHub, and only one of a
-  repository of the place is written to. A thread already in the state asked is said so, nothing
-  changed. Then `addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId, body})`, whose
-  answer's `comment.url` names the reply recorded as the agent's, or `resolveReviewThread` /
-  `unresolveReviewThread(input: {threadId})`, through `gh api graphql -f query=… -f thread=… [-f
-  body=…]`.
+- **GitHub**: the thread is asked by its id, in one call without a page (`node(id: $thread) { ...
+  on PullRequestReviewThread { isResolved path line … pullRequest { number repository {
+  nameWithOwner } } } }`, the id a variable), so a thread past the first 100 is found; one that is
+  not of this pull request, of a repository of the place, is refused, nothing written: a node id
+  names a thread anywhere on GitHub. A thread already in the state asked is said so, nothing
+  changed. Then `addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId, body})`,
+  whose answer's `comment.url` names the reply recorded as the agent's, or `resolveReviewThread`
+  / `unresolveReviewThread(input: {threadId})`, through `gh api graphql -f query=… -f thread=…
+  [-f body=…]`.
 - **Bitbucket Cloud**: `bkt api /repositories/W/R/pullrequests/<n>/comments --method POST --input
   '{"content": {"raw": …}, "parent": {"id": <thread>}}'`, the answer's `id` recorded; `bkt api
   …/comments/<thread>/resolve --method POST` resolves it, `--method DELETE` opens it again.
@@ -615,9 +618,16 @@ digits, `_`, `-`, `=`), is refused before the user is asked.
   "threadResolved": true|false}'`, or `{"version": …, "state": "RESOLVED"|"OPEN"}` for a task. A
   comment that says neither `threadResolved` nor `severity: BLOCKER` is refused (`… is on a
   Bitbucket Data Center whose comments say no resolved state …: nothing was changed; reply in the
-  thread instead`).
+  thread instead`). The `version` is the one read: an answer without one is a failure, never a
+  `0`; a `409` (the comment changed between the read and the `PUT`) reads it once more and
+  writes once more, else `the comment changed meanwhile: try again`.
+- On both Bitbucket forges the thread is checked as GitHub's is: the pull request's threads are
+  read as `show` reads them (the first 100 comments or activities, said when the forge has more),
+  and an id that is not one of them (a comment of another pull request, a general comment, a
+  reply that is not a thread's first comment) is refused, nothing written; one already in the
+  state asked is said so.
 
-A Bitbucket thread is a number: another is refused once allowed, nothing written. **These shapes
+A Bitbucket thread is a number: another is refused before the user is asked. **These shapes
 (GitHub's GraphQL fields and mutations, Cloud's `inline`, `parent`, `resolution` and `/resolve`,
 Data Center's `commentAnchor`, `threadResolved`, `state` and the `PUT` of a comment) are taken
 from the forges' API documentation, not seen on a real server, and the maintainer checks them.**

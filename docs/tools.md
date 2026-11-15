@@ -724,11 +724,18 @@ pending requests.
   thread and **`resolve {number, repository?, thread, resolved}`** marks it resolved (`true`) or
   not (`false`): writes judged as `comment` is, the card saying `It replies in the review thread
   <id> of pull request #<n>` (and the body) or `It marks the review thread <id> of pull request
-  #<n> resolved`. On GitHub the thread must be one of that pull request's (read first), or it is
-  refused, nothing written; on Bitbucket it is the number of its first comment (Cloud: a comment
-  with `parent`, `/resolve`; Data Center: a comment with `parent`, its `threadResolved`, or a
-  task's `state`, and a server whose comments say neither is refused naming why). A missing
-  `number`, `thread`, `body` (reply) or `resolved` (resolve) is refused before the user is asked.
+  #<n> resolved`. A read gives the first 100 threads of a pull request and says when the forge
+  has more; a write is checked on its own, whatever its place: the thread must be one of that
+  pull request's (GitHub: asked by its id, with the pull request and repository it is on;
+  Bitbucket: among the threads the pull request's read gives, a comment of another pull request,
+  a general comment or a reply being none), or it is refused, nothing written; one already in the
+  state asked is said so, nothing changed. On Bitbucket it is the number of its first comment
+  (Cloud: a comment with `parent`, `/resolve`; Data Center: a comment with `parent`, its
+  `threadResolved`, or a task's `state`, whose `version` the write says: a comment changed
+  between the read and the write is read again once, then `the comment changed meanwhile: try
+  again`; a server whose comments say neither state is refused naming why). A missing `number`,
+  `thread`, `body` (reply) or `resolved` (resolve), or a Bitbucket thread that is not a number, is
+  refused before the user is asked.
 - **`review {number, repository?, verdict, body?, comments?}`** submits a review on a pull
   request of a repository of the place (`docs/forges.md`, "Reviews"). `verdict` is `comment`,
   `approve` or `request_changes`; `body` says the review (needed for `comment` and
