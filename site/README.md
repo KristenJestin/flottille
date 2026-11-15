@@ -4,3 +4,5 @@ The showcase site of Flottille (`docs/remote.md`, "The repository"). It is comin
 here yet.
 
 A change under this folder, like one under `apps/android/`, does not run the Rust suite in CI.
+
+A throwaway line for the proof of #887.
