@@ -647,6 +647,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 "project.ticket",
                 "project.commit_checks",
                 "project.set_commit_checks",
+                "project.progress",
                 "task.run",
             ]
             .contains(&request.method.as_str())
@@ -695,6 +696,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     projects::commit_checks(&daemon, request.params)
                 } else if request.method == "project.set_commit_checks" {
                     projects::set_commit_checks(&daemon, request.params)
+                } else if request.method == "project.progress" {
+                    tickets::progress::call(daemon, request.params).await
                 } else if request.method == "task.run" {
                     tasks::run(&daemon, request.params).await
                 } else if extensions::answers(&request.method) {

@@ -697,7 +697,7 @@ fn running_a_pipeline_goes_through_the_gate_like_any_forge_write() {
 fn a_data_center_repository_is_refused_for_pipelines_naming_why() {
     let (user, _, mcp) = setup();
 
-    for action in ["pipelines", "runs", "run_view"] {
+    for action in ["pipelines", "runs", "run_view", "follow_run"] {
         let answer = mcp.call(
             "forge",
             json!({"action": action, "repository": "dc", "run": 3}),

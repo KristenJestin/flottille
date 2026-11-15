@@ -48,6 +48,10 @@
 //! with 1, saying `✗ Error: fields '<those>' are not allowed`. The test reads the JQL in the record. Without
 //! `--jql` (or `--filter`) or `--json` it ends with 2, as a call Flottille never makes.
 //!
+//! A JQL with `fixVersion = "V"` finds, among the items that give `fields.fixVersions`, those that name V.
+//! A script's `fail.search_jql` (`{"fixVersion = \"2.5\"": "✗ Error: boom"}`) makes a search whose JQL
+//! holds one of its keys end with 1, saying that value: one query fails, the others answer.
+//!
 //! A JQL that names `currentUser()` is answered with the script's `mine_search`, none without:
 //! the work items of the signed-in user. A search whose `--fields` is `key` alone prints `null`
 //! for each work item it finds, as the real one was seen to: `key` is no field of `fields`.
@@ -223,6 +227,25 @@ fn found_by(jql: &str, item: &Value) -> bool {
             .split(',')
             .any(|p| p.trim().trim_matches('"') == project)
         {
+            return false;
+        }
+    }
+    // `fixVersion = "2.4"`: an item that says its fix versions is found in those only. The name
+    // is quoted as JQL does: a backslash before a quote or a backslash.
+    if let (Some((_, rest)), Some(versions)) = (
+        jql.split_once("fixVersion = \""),
+        fields["fixVersions"].as_array(),
+    ) {
+        let mut version = String::new();
+        let mut chars = rest.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => version.extend(chars.next()),
+                '"' => break,
+                c => version.push(c),
+            }
+        }
+        if !versions.iter().any(|v| v["name"] == version.as_str()) {
             return false;
         }
     }
@@ -419,6 +442,15 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             if rest.contains(&"--json") && rest.contains(&"--jql") =>
         {
             if let Some(failure) = script["fail"]["search"].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            let jql = value(rest, "--jql").unwrap_or_default();
+            if let Some(failure) = script["fail"]["search_jql"]
+                .as_object()
+                .and_then(|failing| failing.iter().find(|(part, _)| jql.contains(part.as_str())))
+                .and_then(|(_, why)| why.as_str())
+            {
                 eprintln!("{failure}");
                 return 1;
             }

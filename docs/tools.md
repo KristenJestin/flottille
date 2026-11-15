@@ -551,7 +551,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, query?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, verdict?, comments?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, follow?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, query?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, verdict?, comments?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, follow?, run?, step?, do?, thread?, resolved?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -619,7 +619,7 @@ pending requests.
   carries the line `show` gives about how long the repository's CI runs take, as information
   ([`forges.md`](forges.md), "How long CI takes"). It also says the pull request's checks running as it subscribed
   (`Its checks running as you subscribed: test.`, or that none was), that `checks` is the end of
-  those and that a run started on its branch outside them is followed by `run`, not by the
+  those and that a run started on its branch outside them is followed by `run` or `follow_run`, not by the
   subscription, and each run the agent already follows on that branch (`You already follow the
   run #43 of api (custom: nightly on app/login): its end wakes you on its own.`): a short
   `default` pipeline that ends first no longer hides a long custom one. `checks` delivers how many passed and failed (the CI's own failures and the stopped ones counted apart), with
@@ -639,7 +639,7 @@ pending requests.
   branch, and the one replaces the other when it is the same pull request. **`unsubscribe {workspace?, repository?, number?}`** cancels the agent's
   subscriptions to them (the runs it follows there with them, unless `number` is given: it names a pull
   request, never a run), every one when it names none;
-  **`unsubscribe {run, repository?}`** stops following a run it started (`repository` needed
+  **`unsubscribe {run, repository?}`** stops following a run it started or followed (`repository` needed
   when the project has several); **`unsubscribe
   {session}`** stops following a
   session the agent started, named by its id or its title ("Following a session", under "The tree's tools").
@@ -722,6 +722,27 @@ pending requests.
   anything is written (`refused: the pull request #7 of acme/app is merged, not open; nothing was
   written: …`). A `title` on `comment` is refused before anything is asked (`refused: forge
   comment takes no title: title is for edit and create`).
+- **Review threads** ([`forges.md`](forges.md), "Review threads"): `show` with `detail full`
+  gives each comment on a line of the diff with its replies as a thread: its id, file, line (or
+  range), side (`new` or `old`), whether it is resolved or outdated, then its comments in order
+  with their author and date; without it, a forge whose threads were read counts them (`review
+  threads: 3, 1 unresolved, …`). GitHub's are read with `detail full` alone (`gh api graphql`,
+  the REST API having no thread). **`reply {number, repository?, thread, body}`** answers in a
+  thread and **`resolve {number, repository?, thread, resolved}`** marks it resolved (`true`) or
+  not (`false`): writes judged as `comment` is, the card saying `It replies in the review thread
+  <id> of pull request #<n>` (and the body) or `It marks the review thread <id> of pull request
+  #<n> resolved`. A read gives the first 100 threads of a pull request and says when the forge
+  has more; a write is checked on its own, whatever its place: the thread must be one of that
+  pull request's (GitHub: asked by its id, with the pull request and repository it is on;
+  Bitbucket: among the threads the pull request's read gives, a comment of another pull request,
+  a general comment or a reply being none), or it is refused, nothing written; one already in the
+  state asked is said so, nothing changed. On Bitbucket it is the number of its first comment
+  (Cloud: a comment with `parent`, `/resolve`; Data Center: a comment with `parent`, its
+  `threadResolved`, or a task's `state`, whose `version` the write says: a comment changed
+  between the read and the write is read again once, then `the comment changed meanwhile: try
+  again`; a server whose comments say neither state is refused naming why). A missing `number`,
+  `thread`, `body` (reply) or `resolved` (resolve), or a Bitbucket thread that is not a number, is
+  refused before the user is asked.
 - **`review {number, repository?, verdict, body?, comments?}`** submits a review on a pull
   request of a repository of the place (`docs/forges.md`, "Reviews"). `verdict` is `comment`,
   `approve` or `request_changes`; `body` says the review (needed for `comment` and
@@ -778,13 +799,17 @@ pending requests.
   in every result and record) and follows it unless `follow: false`: a `subscription` delivery
   wakes the agent when it ends (its result, its duration, the failed steps by name) and once when
   it waits on a manual step, read by the rounds of the items ([`forges.md`](forges.md),
-  "Following a run"); the answer says it is followed until it ends and that no `wake` is needed, **`stop {repository?, run}`** stops a run, **`step {repository?, run, step,
+  "Following a run"); the answer says it is followed until it ends and that no `wake` is needed;
+  **`follow_run {repository?, run}`** follows the same way a run the agent did not start (by hand,
+  a push, a schedule), a run that ended answering its result at once and following nothing, a
+  run followed already being followed once, and `runs` says of each run whether the agent
+  follows it; **`stop {repository?, run}`** stops a run, **`step {repository?, run, step,
   do}`** starts a manual step (`do: start`) or runs one again (`do: rerun`) where the forge allows
   it, refused naming why elsewhere. A Bitbucket Data Center repository is refused for all of them.
 
-`list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view` and `run_logs` go
-through the gate like every call, which allows them in every mode; `create`, `comment`, `edit`,
-`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, a merge that waives the checks base, and so is a `review` with the verdict `approve` or `request_changes`, in Full too (`review` with `comment` is to judge). **What a write asks is on the card**: besides its title and body, its reviewers (`Its reviewers, besides the project's: …`), labels, `It adds the reviewers: …`, `It removes the labels: …`, `It moves it onto the base release`, `It marks it ready for review`, `It makes it a draft`, `It deletes the branch when the pull request is merged`, and for a merge `It deletes the source branch on the forge after the merge` (with `(the project's setting Delete the branch after merging)` when that is why). A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
+`list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view`, `run_logs` and `follow_run` go
+through the gate like every call, which allows them in every mode; `create`, `comment`, `reply`,
+`resolve`, `edit`, `merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, a merge that waives the checks base, and so is a `review` with the verdict `approve` or `request_changes`, in Full too (`review` with `comment` is to judge). **What a write asks is on the card**: besides its title and body, its reviewers (`Its reviewers, besides the project's: …`), labels, `It adds the reviewers: …`, `It removes the labels: …`, `It moves it onto the base release`, `It marks it ready for review`, `It makes it a draft`, `It deletes the branch when the pull request is merged`, and for a merge `It deletes the source branch on the forge after the merge` (with `(the project's setting Delete the branch after merging)` when that is why). A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …`, `Its body: …` and `Its message: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
 body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is

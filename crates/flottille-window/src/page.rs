@@ -11,6 +11,7 @@ use gpui_kit::{
 use crate::composer::Composer;
 use crate::extensions::specs::SpecPage;
 use crate::model::Place;
+use crate::progress::ProgressPage;
 use crate::project::{NewWorkspace, ProjectPage};
 use crate::project_settings::ProjectSettingsPage;
 use crate::services::ServicesPage;
@@ -46,6 +47,10 @@ pub enum Page {
     },
     /// The services of the machine.
     Services,
+    /// A project's progress: its milestones and their tickets.
+    Progress {
+        name: String,
+    },
 }
 
 pub struct MainArea {
@@ -62,6 +67,8 @@ pub struct MainArea {
     project_settings: Option<Entity<ProjectSettingsPage>>,
     /// The open spec's page.
     spec: Option<Entity<SpecPage>>,
+    /// The open project's Progress page.
+    progress: Option<Entity<ProgressPage>>,
     /// The services page, one for the window's life.
     services: Entity<ServicesPage>,
     /// Since when Flottille has not answered the window, in ms after the epoch: said in a banner
@@ -92,6 +99,7 @@ impl MainArea {
             settings,
             project_settings: None,
             spec: None,
+            progress: None,
             services,
             not_answering: None,
             restarting: false,
@@ -143,6 +151,11 @@ impl MainArea {
             Page::Spec { .. } => self.spec.as_ref(),
             _ => None,
         }
+    }
+
+    /// The Progress page, when it is the one shown.
+    pub fn progress_page(&self) -> Option<&Entity<ProgressPage>> {
+        self.progress.as_ref()
     }
 
     /// The services page, when it is the one shown.
@@ -213,6 +226,25 @@ impl MainArea {
             Page::Session { .. } => session,
             _ => None,
         };
+        // Another project's progress is a new page, read when it opens.
+        self.progress = match &page {
+            Page::Progress { name } => match self.progress.take() {
+                Some(open) if open.read(cx).project() == name => Some(open),
+                _ => {
+                    let (shell, name) = (self.shell.clone(), name.clone());
+                    let narrow = self.layout == Layout::Narrow;
+                    let made = cx.new(|cx| {
+                        let mut page = ProgressPage::new(shell, name, cx);
+                        page.set_narrow(narrow, cx);
+                        page
+                    });
+                    let reading = made.clone();
+                    cx.defer(move |cx| reading.update(cx, |page, cx| page.read(cx)));
+                    Some(made)
+                }
+            },
+            _ => None,
+        };
         if let Some(spec) = &self.spec {
             let narrow = self.layout == Layout::Narrow;
             spec.update(cx, |page, cx| page.set_narrow(narrow, cx));
@@ -242,6 +274,9 @@ impl MainArea {
                 page.update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             }
             if let Some(page) = &self.spec {
+                page.update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
+            }
+            if let Some(page) = &self.progress {
                 page.update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             }
             cx.notify();
@@ -291,6 +326,7 @@ impl Render for MainArea {
             Page::Services => page.child(self.services.clone()),
             Page::ProjectSettings { .. } => page.children(self.project_settings.clone()),
             Page::Spec { .. } => page.children(self.spec.clone()),
+            Page::Progress { .. } => page.children(self.progress.clone()),
         };
         root.flex()
             .flex_col()

@@ -142,6 +142,8 @@ itself (`gh pr view <n> -R github.com/owner/name --json …`):
   request whose checks were all skipped is refused like one with none); none when there are no
   checks;
 - its comments (their number; `forge` `show` gives their text, and the reviews');
+- with `detail: full`, its **review threads** ("Review threads" below), counted otherwise where
+  they were read;
 - for a merged or closed one, **the comment it was closed with**, when the forge gives one
   ("The closing comment" below).
 
@@ -560,6 +562,76 @@ assumed from the forges' REST documentation and `bkt`'s help (v0.37.0), not seen
 and the maintainer checks them.** What was posted is recorded like a comment (the body and each
 comment on a line), so that it is read back as an agent's.
 
+### Review threads
+
+A comment on a line of the diff and its replies are a **review thread**. `forge show` with
+`detail: full` gives each, after the comments: its id, the file, the line (or `lines 2 to 4`) and
+the side (`new`, the file after the change, or `old`), whether it is resolved, whether it is
+outdated (the code changed since: the line is the one it was written on), then its comments in
+order with their author, their date and their text, cut and masked as the other comments, a
+reply an agent posted said as such. A thread's comments are not said again among the comments.
+Without `detail: full`, a forge whose threads were read counts them (`review threads: 3, 1
+unresolved, read them with …`).
+
+- **GitHub** has its threads in its GraphQL API alone: `gh api graphql --hostname github.com -f
+  query=… -f owner=… -f name=… -F number=…` reads `repository.pullRequest.reviewThreads(first:
+  100)` (`id isResolved isOutdated path line startLine originalLine originalStartLine diffSide`,
+  and each thread's first 100 `comments`: `author.login body createdAt url`); an outdated thread
+  says no `line`, its `originalLine` is said. They are read with `detail: full` alone, and the
+  answer says when the pull request has more than 100, and a thread with more comments than the
+  100 read (`totalCount`: `130 comments, only the first 100 shown`). The REST API, which
+  Flottille prefers, says neither a thread's resolution nor keeps a reply in it.
+- **Bitbucket Cloud**: the inline comments among those every read already gives (`inline {path,
+  from, to, start_from, start_to, outdated}`), a thread being an inline comment that answers none
+  with every comment that answers it (`parent.id`), named by its first comment's number; resolved
+  when that one has a `resolution`. `to` is the new side's line, `from` the old side's.
+- **Bitbucket Data Center**: the `COMMENTED` activities with a `commentAnchor {path, line,
+  lineType, fileType, orphaned}` and their nested replies; `fileType: FROM` or `lineType:
+  REMOVED` is the old side, `orphaned` outdated; resolved by `threadResolved` where the server's
+  version has it, a task (`severity: BLOCKER`) by its `state` (`RESOLVED`), and a thread whose
+  comment says neither has no resolved state, said so.
+
+**`forge reply {number, repository?, thread, body}`** answers in a thread and **`forge resolve
+{number, repository?, thread, resolved}`** marks it resolved (`true`) or not (`false`). Both are
+writes, judged like `comment` (`it replies in a review thread on the forge`, `it resolves a review
+thread on the forge`, `it opens a resolved review thread again on the forge`), answered at once,
+the result later; the card says `It replies in the review thread <id> of pull request #<n>` and
+the body whole, or `It marks the review thread <id> of pull request #<n> resolved`. A call without
+`number`, `thread`, the reply's `body` or `resolved`, or whose `thread` is not one id (letters,
+digits, `_`, `-`, `=`), is refused before the user is asked.
+
+- **GitHub**: the thread is asked by its id, in one call without a page (`node(id: $thread) { ...
+  on PullRequestReviewThread { isResolved path line … pullRequest { number repository {
+  nameWithOwner } } } }`, the id a variable), so a thread past the first 100 is found; one that is
+  not of this pull request, of a repository of the place, is refused, nothing written: a node id
+  names a thread anywhere on GitHub. A thread already in the state asked is said so, nothing
+  changed. Then `addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId, body})`,
+  whose answer's `comment.url` names the reply recorded as the agent's, or `resolveReviewThread`
+  / `unresolveReviewThread(input: {threadId})`, through `gh api graphql -f query=… -f thread=…
+  [-f body=…]`.
+- **Bitbucket Cloud**: `bkt api /repositories/W/R/pullrequests/<n>/comments --method POST --input
+  '{"content": {"raw": …}, "parent": {"id": <thread>}}'`, the answer's `id` recorded; `bkt api
+  …/comments/<thread>/resolve --method POST` resolves it, `--method DELETE` opens it again.
+- **Bitbucket Data Center**: `bkt api /rest/api/1.0/projects/P/repos/R/pull-requests/<n>/comments
+  --method POST --input '{"text": …, "parent": {"id": <thread>}}'`; to resolve, the comment is
+  read (`…/comments/<thread>`) for its `version`, then `--method PUT --input '{"version": …,
+  "threadResolved": true|false}'`, or `{"version": …, "state": "RESOLVED"|"OPEN"}` for a task. A
+  comment that says neither `threadResolved` nor `severity: BLOCKER` is refused (`… is on a
+  Bitbucket Data Center whose comments say no resolved state …: nothing was changed; reply in the
+  thread instead`). The `version` is the one read: an answer without one is a failure, never a
+  `0`; a `409` (the comment changed between the read and the `PUT`) reads it once more and
+  writes once more, else `the comment changed meanwhile: try again`.
+- On both Bitbucket forges the thread is checked as GitHub's is: the pull request's threads are
+  read as `show` reads them (the first 100 comments or activities, said when the forge has more),
+  and an id that is not one of them (a comment of another pull request, a general comment, a
+  reply that is not a thread's first comment) is refused, nothing written; one already in the
+  state asked is said so.
+
+A Bitbucket thread is a number: another is refused before the user is asked. **These shapes
+(GitHub's GraphQL fields and mutations, Cloud's `inline`, `parent`, `resolution` and `/resolve`,
+Data Center's `commentAnchor`, `threadResolved`, `state` and the `PUT` of a comment) are taken
+from the forges' API documentation, not seen on a real server, and the maintainer checks them.**
+
 ### Agents never run `bkt`
 
 The gate refuses every `bkt` line an agent runs, reads included, as it does `acli`
@@ -585,8 +657,8 @@ once the user allowed the call, like `close`'s.
 
 `forge {action, …}` (`docs/tools.md`, "The forge"): `list` the pull requests of the place's
 repositories by state and branch, `show` a workspace's branch's or one by its number with its
-checks, reviews and comments; `create`, `merge`, `checks`, `comment`, `review` and `edit`, each to
-judge (a merge that waives the checks base, and a `review` that approves or requests changes).
+checks, reviews, comments and review threads; `create`, `merge`, `checks`, `comment`, `reply`,
+`resolve`, `review` and `edit`, each to judge (a merge that waives the checks base, and a `review` that approves or requests changes).
 The same `gh` (or `bkt`, for a Bitbucket repository) and the
 same rules: spawned by the daemon, the repository named, its output masked, no token to the agent.
 It never reaches a repository outside the agent's place, and is listed to every agent of a
@@ -631,6 +703,7 @@ run's branch, `run_view` the run's, and the delivery that wakes the agent at a r
 | `run_view {repository?, run}` (read) | `gh run view <run> -R … --json databaseId,workflowName,status,conclusion,headBranch,url,jobs` | `bkt pipeline view <run> --json`: `steps[]` (`name`, `uuid`, `state.name`, `state.result.name`) |
 | `run_logs {repository?, run, step}` (read) | `gh run view --job <id> -R … --log`, the job found by its name or id among the run's | `bkt pipeline logs <run> --step <uuid>`, the step found by its name or uuid |
 | `run {repository?, pipeline, branch?, variables?, follow?}` (write) | `gh workflow run <file> -R … --ref <b> -f k=v…`; the answer is the run's link when `gh` prints it | without variables `bkt pipeline run --ref <b> [--selector-type <t> --selector-pattern <p>]`, the run's number read by its uuid (`bkt api …/pipelines/{uuid}`) when it prints no `#N`; with variables the REST call through `bkt api` (table above); the answer is the run's number and link |
+| `follow_run {repository?, run}` (read) | `gh run view <run> -R … --json status,conclusion,startedAt,updatedAt,jobs,workflowName,headBranch,url` | `bkt pipeline view <run> --json` ("Following a run") |
 | `stop {repository?, run}` (write) | `gh run cancel <run> -R …` | `bkt api …/pipelines/{uuid}/stopPipeline --method POST`, the uuid read with `bkt pipeline view` |
 | `step {repository?, run, step, do: start \| rerun}` (write) | `rerun`: `gh run rerun <run> -R … --job <id>`; `start` is refused | refused, naming why |
 
@@ -716,6 +789,16 @@ names the runs the agent already follows there (`docs/tools.md`, "The forge").
 - **A run that cannot be read** (the forge down, `bkt` without a context, the run gone) is said
   once, `It cannot be read now: <why>`, and the following goes on: nothing more is said of it
   until it is read again.
+- **A run the agent did not start** (by hand on the forge, by a push outside the pull request's
+  checks, by a schedule) is followed with **`follow_run {repository?, run}`**, the same following
+  as `run` makes, its answer ending the same way. The run is read once, in the repository named,
+  one of the agent's place: one that cannot be read there (a number of another repository) is
+  refused, `refused: the run 43 of acme/web cannot be read: …; forge runs lists its runs; nothing
+  is followed`; one that ended answers its result at once, as its delivery would (`It ended failed
+  after 4 min 5 s.`, the failed steps), and follows nothing (`Nothing is followed: it has
+  ended.`); one the agent follows already, started or followed, is followed once (`You already
+  follow the run #43 of api …`). `runs` ends each line of a run the agent follows with `, you
+  follow it`.
 - **It ends** with the run, when the agent ends, or with `unsubscribe {run, repository?}` (or the
   user's Cancel), `repository` needed when the project has several, a run's number being of one
   repository; a following cancelled while a round reads its run is neither written back nor said; `forge show` lists it under `Your subscriptions:` (`- run #43 of api (custom:

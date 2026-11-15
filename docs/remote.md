@@ -338,6 +338,16 @@ cannot change it.
 - **Starting a session on a machine** (from a client, or by an agent: "A tree across machines")
   offers only the runners that have that project, that agent signed in, and a free slot. A
   `controller` or a `viewer` runs no agent: a launch aimed at one is refused, naming it.
+- **Every method is `read` or `drive`**: a `controller` may call every `drive` method on a runner,
+  a `viewer` only `read`.
+- **`workspace.show`, `workspace.forge` and `spec.list` are `read`, though they write**: the branch a
+  worktree moved to, the forge's state, a spec settled as developed are the daemon catching up on
+  facts, not a decision of the user, so a `viewer` sees the workspaces, their pull requests and the
+  specs. A `viewer` that asks `workspace.forge {watch: true}` keeps that forge polled while its
+  connection stays.
+- **A `controller` may add a member of any role, a `runner` too** (a phone accepting a server), **and
+  may remove any member, the root included**: the root is where the member list starts, not a member
+  above the others.
 
 ## The version
 
@@ -462,6 +472,9 @@ For each repository of the caller's place, before the session starts:
   bundle (`git bundle verify`) and fetches it.
 - **Ignored files do not travel**: a `.env` is the machine's own, taken by its setup's `copy` steps
   as today. A setup that misses one fails as it does today, saying which.
+- **An uncommitted file holding a secret that is not ignored** (an `.env` missing from `.gitignore`)
+  travels to the other machine with the rest of the uncommitted work, as it would in a commit:
+  nothing refuses it nor warns.
 - On the receiving machine the workspace is created from those commits, on the same branch name
   (with `-2`, `-3` when that name is taken there), prepared by the project's setup, and the
   uncommitted commit is laid on it as uncommitted changes. A repository the project has there but
@@ -659,15 +672,8 @@ on a real phone, by hand, and reported.
 - The verification words are four, from a fixed list of 2048 words.
 - The first member, the one that used the setup code, is the root every device pins; a reset of the
   hub makes every device set up again.
-- Every method is `read` or `drive`; a `controller` may every `drive` method on a runner, a
-  `viewer` only `read`.
 - `project.detect` is `drive`: it looks through any folder the client names, and serves only
   `project.add`.
-- `workspace.show`, `workspace.forge` and `spec.list` are `read`, though they write: the branch a
-  worktree moved to, the forge's state, a spec settled as developed are the daemon catching up on
-  facts, not a decision of the user, and a viewer must see the workspaces, their pull requests and
-  the specs. A `viewer` that asks `workspace.forge {watch: true}` keeps that forge polled while its
-  connection stays; accepted.
 - In the preparation, `flottille-protocol` types the framing and the parameters; answers and events
   stay `serde_json::Value`, and each later ticket types in Rust the ones it reads (the mobile core,
   the link).
@@ -694,9 +700,6 @@ on a real phone, by hand, and reported.
   members have names that differ in case only; a removed member's name is free again.
 - Any member may remove itself, a viewer too; a viewer may add, remove or rename no other member,
   and may not rename itself.
-- A `controller` may add a member of any role, a `runner` too (a phone accepting a server), and
-  may remove any member, the root included: the root is where the list starts, not a member above
-  the others.
 - A key that is a point of small order is refused wherever it is read (an entry, an invitation's
   hub or inviting key): no device makes one. A hub URL is `http://` or `https://` with a host, at
   most 2048 bytes, and a URL or a name holds no invisible character (Unicode's `Cf`: zero-width
