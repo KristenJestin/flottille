@@ -3271,11 +3271,17 @@ fn opening_a_group_of_the_review_still_unfolds_it(cx: &mut TestAppContext) {
         moving > 0. && moving < open,
         "it unfolds over a panel: {moving}px of {open}px a third in"
     );
-    // And a group of a first review still folds on its header.
+    // And "What changed" still folds on its header: its body, which clips the rows, is neither at
+    // its full height nor gone a third in (a row's own frame keeps its height while it clips).
+    let whole = height(cx, "connection-review-changes-body");
+    assert!(whole > 0., "the group is open");
     press(cx, "connection-review-changes");
     a_third_later(cx);
-    let folding = height(cx, "connection-review-change-browser_click");
-    assert!(folding > 0., "a row still shows while its group folds away");
+    let folding = height(cx, "connection-review-changes-body");
+    assert!(
+        0. < folding && folding < whole,
+        "the group folds over a panel: {folding}px of {whole}px a third in"
+    );
 }
 
 #[gpui_kit::test]
@@ -3319,4 +3325,128 @@ fn a_review_whose_server_is_asked_shows_one_loading_state_then_fades_to_its_cont
         opening.skeleton
     );
     steady(&watched, &opening.heights).unwrap();
+}
+
+/// The heights drawn now of the rows of the form's three lists (the elements that clip them as
+/// they unfold), by the keys the form gave them: only those that are drawn.
+fn form_rows(cx: &mut VisualTestContext) -> Vec<(String, f32)> {
+    let mut rows = Vec::new();
+    for kind in ["variable", "limit", "site"] {
+        for key in 1..=16 {
+            let id = format!("connection-{kind}-item-{key}");
+            if present(cx, &id) {
+                rows.push((id.clone(), height(cx, &id)));
+            }
+        }
+    }
+    rows
+}
+
+#[gpui_kit::test]
+fn the_connection_form_opens_in_its_resting_state(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "browser-token", "secret": SECRET, "description": "The browser's token"}),
+    )
+    .unwrap();
+    agent_browser(&user, &["agent_browser_click"], false);
+    let token = json!("browser-token");
+    user.call(
+        "connection.edit",
+        json!({"name": "browser",
+            "env": {"BROWSER_TOKEN": token, "BROWSER_KEY": token, "BROWSER_SEAT": token},
+            "only": {"url": ["https://shop.example.com"], "app": ["gedit"]},
+            "sites": ["sso.example.com", "id.example.org"]}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| {
+        visible(cx, "connection-browser")
+    });
+    click(cx, "connection-more-browser");
+    press(cx, "edit-connection-browser");
+
+    // What the window draws from the click on Edit, a frame (16 ms) at a time, until the dialog
+    // and its fade are done: every row of the three lists is at its height whenever it is drawn.
+    let mut frames = Vec::new();
+    for _ in 0..(2 * PANEL.as_millis() as u64 / 16) {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        frames.push(form_rows(cx));
+    }
+    let rest = frames.last().unwrap().clone();
+    assert_eq!(rest.len(), 7, "3 variables, 2 limits, 2 sites: {rest:?}");
+    for (id, rest) in &rest {
+        assert!(*rest > 0., "{id} is drawn at rest");
+    }
+    for (at, frame) in frames.iter().enumerate() {
+        for (id, seen) in frame {
+            let rest = rest.iter().find(|(other, _)| other == id).unwrap().1;
+            assert!(
+                (seen - rest).abs() < 0.5,
+                "{id} is {seen}px high on frame {at} and {rest}px at rest"
+            );
+        }
+    }
+
+    // A row added once the form is open still unfolds.
+    press(cx, "connection-new-variable");
+    a_third_later(cx);
+    let arriving = form_rows(cx)
+        .into_iter()
+        .filter(|(id, _)| id.starts_with("connection-variable-item-"))
+        .filter(|(id, _)| !rest.iter().any(|(old, _)| old == id))
+        .collect::<Vec<_>>();
+    assert_eq!(arriving.len(), 1, "one new variable row: {arriving:?}");
+    let moving = arriving[0].1;
+    let whole = rest
+        .iter()
+        .find(|(id, _)| id.starts_with("connection-variable-item-"))
+        .unwrap()
+        .1;
+    assert!(
+        0. < moving && moving < whole,
+        "a row added after the form opened unfolds: {moving}px of {whole}px a third in"
+    );
+}
+
+#[gpui_kit::test]
+fn a_row_that_moves_after_the_review_opened_still_unfolds(cx: &mut TestAppContext) {
+    let user = rereview_user();
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-change-browser_click",
+    );
+    // The unchanged group holds its rows (browser_snapshot is "passes", browser_upload "asked"):
+    // open it, then give browser_open another setting, so that it reaches a group that has no
+    // rest of its own: a slot that is new after the review opened.
+    press(cx, "connection-review-unchanged");
+    settle(cx);
+    let row = row_of(cx, "browser_open");
+    assert_eq!(group_of(cx, "browser_open"), Some("judged"));
+    let whole = height(cx, &row);
+    assert!(whole > 0.);
+    click_pill(cx, &row, "off");
+    a_third_later(cx);
+    let arriving = height(cx, "connection-review-row-2-browser_open");
+    assert!(
+        0. < arriving && arriving < whole,
+        "it unfolds in its new group over a panel's time: {arriving}px of {whole}px"
+    );
+    settle(cx);
+    assert_eq!(group_of(cx, "browser_open"), Some("off"));
+    let rest = height(cx, "connection-review-row-2-browser_open");
+    assert!(
+        (rest - whole).abs() < 0.5,
+        "{rest}px at rest, {whole}px before"
+    );
 }
