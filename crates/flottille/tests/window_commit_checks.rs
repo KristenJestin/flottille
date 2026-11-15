@@ -293,6 +293,27 @@ fn the_project_s_commit_checks_are_listed_proposed_and_saved(cx: &mut TestAppCon
     assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
 }
 
+/// What the hooks propose is a block of its own, which holds the space above it (#884): it sits
+/// where the gap of the repository's column put it, under the Save slot.
+#[gpui_kit::test]
+fn what_the_hooks_propose_sits_where_the_gap_put_it(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    desk(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    open(&shell, cx);
+
+    let (repository, proposals) = cx.update(|window, _| {
+        (
+            window.find("commit-checks-repository-desk-api").bounds(),
+            window.find("commit-checks-proposals-desk-api").bounds(),
+        )
+    });
+    let under = f32::from(proposals.top() - repository.top());
+    // Measured on `origin/dev`.
+    assert_eq!(under, 278.0);
+}
+
 #[gpui_kit::test]
 fn a_refused_pre_commit_line_is_said_under_the_pre_commit_field(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();

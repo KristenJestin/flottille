@@ -27,6 +27,7 @@ use gpui_kit::{
 };
 
 use crate::actions::Answer;
+use crate::commands::spaced;
 use crate::runs::rail_label;
 use crate::session::{ApprovalCard, SessionPage};
 
@@ -346,7 +347,6 @@ impl Waiting {
             .id(id("approval-card"))
             .flex()
             .flex_col()
-            .gap(space::XS)
             .px(space::MD)
             .py(space::SM)
             .rounded(px(12.))
@@ -356,59 +356,69 @@ impl Waiting {
                 true => mix(p.fail, p.card, 0.6),
                 false => mix(p.wait, p.card, 0.7),
             })
-            .child(head)
-            // The whole call, wrapping over as many lines as it takes: what is allowed is read
-            // before it is allowed, never guessed from its start.
-            .children(line.map(|line| {
-                div()
-                    .id(match from_says {
-                        true => ElementId::Name(format!("approval-says-{number}-0").into()),
-                        false => id("approval-call"),
-                    })
-                    .min_w_0()
-                    .whitespace_normal()
-                    .mono(11.5)
-                    .text_color(p.mute)
-                    .aria_label(SharedString::from(line.clone()))
-                    .child(SharedString::from(line))
-                    .test_support()
-            }))
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap(space::SM)
-                    .min_w_0()
+                    .flex_col()
+                    .gap(space::XS)
+                    .child(head)
+                    // The whole call, wrapping over as many lines as it takes: what is allowed is
+                    // read before it is allowed, never guessed from its start.
+                    .children(line.map(|line| {
+                        div()
+                            .id(match from_says {
+                                true => ElementId::Name(format!("approval-says-{number}-0").into()),
+                                false => id("approval-call"),
+                            })
+                            .min_w_0()
+                            .whitespace_normal()
+                            .mono(11.5)
+                            .text_color(p.mute)
+                            .aria_label(SharedString::from(line.clone()))
+                            .child(SharedString::from(line))
+                            .test_support()
+                    }))
                     .child(
                         div()
-                            .id(id("approval-class"))
-                            .flex_none()
-                            .aria_label(class)
-                            .mono(10.)
-                            .medium()
-                            .text_color(ink)
-                            .child(class.to_uppercase())
-                            .test_support(),
-                    )
-                    .child(
-                        one_line(div().id(id("approval-reason")))
-                            .text_size(px(12.))
-                            .text_color(p.faint)
-                            .aria_label(SharedString::from(reason.clone()))
-                            .child(SharedString::from(reason))
-                            .test_support(),
+                            .flex()
+                            .items_center()
+                            .gap(space::SM)
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .id(id("approval-class"))
+                                    .flex_none()
+                                    .aria_label(class)
+                                    .mono(10.)
+                                    .medium()
+                                    .text_color(ink)
+                                    .child(class.to_uppercase())
+                                    .test_support(),
+                            )
+                            .child(
+                                one_line(div().id(id("approval-reason")))
+                                    .text_size(px(12.))
+                                    .text_color(p.faint)
+                                    .aria_label(SharedString::from(reason.clone()))
+                                    .child(SharedString::from(reason))
+                                    .test_support(),
+                            ),
                     ),
             )
-            .child(presence(id("approval-more-block"), open, details).gap(space::XS))
+            .child(presence(id("approval-more-block"), open, details).space(space::XS))
             .children(self.errors.get(&number).cloned().map(|error| {
-                div()
-                    .id(id("approval-error"))
-                    .text_size(px(12.))
-                    .text_color(p.fail)
-                    .child(error)
-                    .test_support()
+                spaced(
+                    space::XS,
+                    div()
+                        .id(id("approval-error"))
+                        .text_size(px(12.))
+                        .text_color(p.fail)
+                        .child(error)
+                        .test_support(),
+                )
             }))
-            .child(
+            .child(spaced(
+                space::XS,
                 div()
                     .pt(space::XS)
                     .flex()
@@ -427,7 +437,7 @@ impl Waiting {
                             })),
                         false => button("allow", "Allow", Answer::Once, true),
                     }),
-            );
+            ));
         // A glow round the card the user was sent to, which fades in and out.
         div()
             .id(id("approval"))
