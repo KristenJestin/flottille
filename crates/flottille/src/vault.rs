@@ -434,10 +434,10 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
             .store(&entry.name, secret)
             .await
             .map_err(unavailable)?;
-    } else if entry.username != username_was {
+    } else if entry.username.is_some() && entry.username != username_was {
         // The daemon reads the secret itself, to mask the new login: it goes nowhere else, and a
-        // keyring that cannot be read (locked) leaves the edit as it is, as the masks of the
-        // other entries do at the start.
+        // keyring that cannot be read (locked) leaves the edit as it is: the login is masked when
+        // a tool uses the entry (`given`). A cleared username leaves no login form to mask.
         match daemon.vault.read(&entry.name).await {
             Ok(Some(secret)) => secrets::add_vault_login(entry.username.as_deref(), &secret),
             Ok(None) => {}
@@ -842,10 +842,14 @@ async fn given(
         return Err(format!("the vault has no entry {name} for this project"));
     };
     entry.usable_for(bound)?;
-    tokio::time::timeout(SECRET_WAIT, keyring.read(name))
+    let secret = tokio::time::timeout(SECRET_WAIT, keyring.read(name))
         .await
         .map_err(|_| format!("the keyring did not answer in time: {LOCKED}"))??
-        .ok_or_else(|| format!("the keyring no longer holds the secret of {name}"))
+        .ok_or_else(|| format!("the keyring no longer holds the secret of {name}"))?;
+    // Masked at the moment of use: a login the edit could not mask (a locked keyring, an edit at
+    // the same time as another) is masked before the tool writes anything.
+    secrets::add_vault_login(entry.username.as_deref(), &secret);
+    Ok(secret)
 }
 
 #[derive(Deserialize)]
@@ -1292,6 +1296,91 @@ mod tests {
         )
         .await);
         assert!(!written(&form_of("grace")).contains(&form_of("grace")));
+    }
+
+    #[tokio::test]
+    async fn a_username_edit_while_the_keyring_is_locked_is_masked_at_use() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let keyring_file = dir.path().join("config/keyring.toml");
+        let secret_of = "l0cked-edit-s3cret-value";
+        let form_of = |user: &str| {
+            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{secret_of}"))
+        };
+        let written = |form: &str| {
+            flottille_core::secrets::mask(
+                // Not in an `Authorization` header, which is masked whatever it holds.
+                &format!("the tool sent {form} and went on"),
+                &Default::default(),
+            )
+        };
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "jira", "secret": secret_of, "username": "ada"}),
+        )
+        .await);
+
+        // The keyring is locked during the edit: it is saved, but the secret cannot be read to
+        // mask the new login.
+        std::fs::write(&keyring_file, "backend = \"memory\"\nlocked = true\n").unwrap();
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "jira", "username": "grace"}),
+        )
+        .await);
+        assert_eq!(listed(&daemon).await[0].username.as_deref(), Some("grace"));
+        assert!(
+            written(&form_of("grace")).contains(&form_of("grace")),
+            "nothing could mask the new form yet"
+        );
+
+        // Unlocked, a tool uses the entry: the secret is read, and the form is masked from then.
+        std::fs::write(&keyring_file, "backend = \"memory\"\n").unwrap();
+        assert_eq!(
+            secret(&daemon, "any", "worklog:any", "jira").await.unwrap(),
+            secret_of
+        );
+        assert!(!written(&form_of("grace")).contains(&form_of("grace")));
+    }
+
+    #[tokio::test]
+    async fn clearing_the_username_reads_no_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let secret_of = "n3ver-read-s3cret-value";
+        // The secret is in the keyring from before the daemon started, so that nothing has
+        // masked it: only a read of it would.
+        std::fs::write(
+            dir.path().join("config/keyring.toml"),
+            format!("backend = \"memory\"\n[kept]\njira = \"{secret_of}\"\n"),
+        )
+        .unwrap();
+        daemon
+            .write(|store| {
+                store.put_vault_entry(&Entry {
+                    username: Some("ada".into()),
+                    ..entry("jira", None)
+                })
+            })
+            .unwrap();
+        let written =
+            || flottille_core::secrets::mask(&format!("it said {secret_of}"), &Default::default());
+        assert!(written().contains(secret_of), "nothing masks it yet");
+
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "jira", "username": ""}),
+        )
+        .await);
+        assert_eq!(listed(&daemon).await[0].username, None);
+        assert!(
+            written().contains(secret_of),
+            "the secret was read though no login form was left to mask"
+        );
     }
 
     #[tokio::test]
