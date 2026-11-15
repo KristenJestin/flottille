@@ -10,6 +10,10 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+// Called by the link once a launch sends a place's code to another machine (#815).
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod bundle;
+
 /// How long a call may take.
 #[derive(Clone, Copy)]
 pub enum Class {
@@ -39,15 +43,19 @@ pub struct Output {
 
 /// Runs `git -C <dir> <args>`. The error is a sentence: git missing, or the call cut.
 pub async fn run<S: AsRef<OsStr>>(dir: &Path, args: &[S], class: Class) -> Result<Output, String> {
-    bounded(
-        command(dir, args),
-        dir,
-        args,
-        class.limit(),
-        OUTPUT_LIMIT,
-        None,
-    )
-    .await
+    run_with(dir, args, class, &[]).await
+}
+
+/// [`run`], with `env` set on git besides the daemon's own environment.
+pub async fn run_with<S: AsRef<OsStr>>(
+    dir: &Path,
+    args: &[S],
+    class: Class,
+    env: &[(&str, &OsStr)],
+) -> Result<Output, String> {
+    let mut command = command(dir, args);
+    command.envs(env.iter().copied());
+    bounded(command, dir, args, class.limit(), OUTPUT_LIMIT, None).await
 }
 
 /// Runs `words` (`git`, its global options, its command) in `dir` with the environment `env` and
@@ -104,6 +112,12 @@ fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
+    // The crate's own tests never read the configuration of the machine they run on.
+    #[cfg(test)]
+    command
+        .env("HOME", tests::home())
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
     command
 }
 
@@ -176,7 +190,17 @@ pub async fn output<S: AsRef<OsStr>>(
     args: &[S],
     class: Class,
 ) -> Result<String, String> {
-    let output = run(dir, args, class).await?;
+    output_with(dir, args, class, &[]).await
+}
+
+/// [`output`], with `env` set on git besides the daemon's own environment.
+pub async fn output_with<S: AsRef<OsStr>>(
+    dir: &Path,
+    args: &[S],
+    class: Class,
+    env: &[(&str, &OsStr)],
+) -> Result<String, String> {
+    let output = run_with(dir, args, class, env).await?;
     if output.success {
         return Ok(output.stdout);
     }
@@ -230,8 +254,15 @@ async fn kill(child: &mut tokio::process::Child) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// An empty home of the tests' own, for every git they run.
+    pub(crate) fn home() -> &'static Path {
+        static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| tempfile::tempdir().expect("a temporary home"))
+            .path()
+    }
 
     /// `git` with no configuration of the user's.
     fn isolated(dir: &Path, args: &[&str]) -> tokio::process::Command {
