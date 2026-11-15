@@ -10,7 +10,7 @@
 //!
 //! With `--http`, it serves Streamable HTTP on a free port of `127.0.0.1` instead of stdio,
 //! written to that file, each request answered with one JSON body (no stream, so no request of
-//! its own to the client), and logs each request's headers (`http`). Over HTTP the script is read
+//! its own to the client), and logs each request's headers and query (`http`). Over HTTP the script is read
 //! again at each request.
 //!
 //! With `oauth` in the script, the HTTP server is protected (MCP authorization): `/mcp` answers
@@ -578,7 +578,7 @@ fn serve(
     } else {
         write_log(
             log,
-            json!({"event": "http", "method": method, "headers": headers}),
+            json!({"event": "http", "method": method, "headers": headers, "query": query}),
         );
     }
     let answer = match method.as_str() {

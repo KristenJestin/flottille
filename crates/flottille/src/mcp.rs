@@ -639,6 +639,7 @@ const SERVED: [Definition; 33] = [
                 "url": {"type": "string", "description": "add, edit: https://, or http:// on this machine; instead of a command."},
                 "env": {"type": ["object", "null"], "additionalProperties": {"type": "string"}, "description": "add, edit, for a command: each variable to the name of a vault entry (vault list); null removes them."},
                 "headers": {"type": ["object", "null"], "additionalProperties": {"type": "string"}, "description": "add, edit, for a URL: each header to the name of a vault entry; null removes them."},
+                "secrets": {"type": ["array", "null"], "items": {"type": "object", "properties": {"in": {"type": "string", "enum": ["header", "query", "cookie", "basic"]}, "name": {"type": "string"}, "prefix": {"type": "string"}, "entry": {"type": "string"}}, "required": ["in", "entry"]}, "description": "add, edit, for a URL: where each vault entry goes: a header (prefix as \"Bearer \"), a query parameter, a cookie, basic (no name); null removes them."},
                 "only": {"type": ["object", "null"], "additionalProperties": {"type": "array", "items": {"type": "string"}}, "description": "add, edit: an argument's name to the only values it may take; null removes them."},
                 "settings": {"type": "object", "additionalProperties": {"type": "string", "enum": ["judged", "passes", "asked", "off"]}, "description": "set: an action's name to its setting."}
             }, "required": ["action"], "additionalProperties": false})
