@@ -26,6 +26,7 @@ pub mod open;
 pub mod page;
 pub mod picture_viewer;
 pub mod programs;
+pub mod progress;
 pub mod project;
 pub mod project_removal;
 pub mod project_settings;
