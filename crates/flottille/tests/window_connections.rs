@@ -2312,7 +2312,7 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
         ],
         false,
     );
-    // An action outside the list the adapter lets stay on beside login, turned on.
+    // An action that reads the page, turned on: login stays offered beside it.
     user.call(
         "connection.accept",
         json!({"name": "browser", "actions": {"agent_browser_get_attr": "judged"}}),
@@ -2321,16 +2321,13 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
     let (shell, cx) = window(&user, cx);
     open_the_review(&shell, cx, "browser", "connection-review-adapter");
 
-    // That it applies, and why login is refused: said above the bar, before Accept.
+    // That it applies: said above the bar, before Accept, and login is refused for no action.
     let said = label(cx, "connection-review-adapter").unwrap();
     assert!(
         said.contains("Flottille's adapter for agent-browser 0.43.x applies"),
         "{said}"
     );
-    assert!(
-        said.contains("login is refused while agent_browser_get_attr is on"),
-        "{said}"
-    );
+    assert!(!said.contains("login is refused while"), "{said}");
     assert!(
         visible(cx, "connection-review-left"),
         "the bar is under the adapter's sentence"

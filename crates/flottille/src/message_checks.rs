@@ -751,8 +751,6 @@ pub fn message_of(git: &[String], folder: &Path) -> Result<Option<String>, Strin
 
 /// A `git commit` as the commit checks of its repository read it (`commit_checks`).
 pub(crate) struct Commit {
-    /// It points git at another repository than its folder's (`--git-dir`, `--work-tree`).
-    pub elsewhere: Option<&'static str>,
     /// It says to skip the hooks (`--no-verify`, `-n`).
     pub no_verify: bool,
     /// Its message, or why it cannot be known before the commit, with what to do instead.
@@ -764,12 +762,7 @@ pub(crate) struct Commit {
 /// cannot be read as git reads them.
 pub(crate) fn commit_of(git: &[String], folder: &Path) -> Result<Option<Commit>, String> {
     let args = &git[1..];
-    let (at, globals) = gate::git_globals(args);
-    let elsewhere = globals.iter().find_map(|(option, _)| match *option {
-        "--git-dir" => Some("--git-dir"),
-        "--work-tree" => Some("--work-tree"),
-        _ => None,
-    });
+    let at = gate::git_globals(args).0;
     if args.get(at).map(String::as_str) != Some("commit") {
         return Ok(None);
     }
@@ -780,11 +773,7 @@ pub(crate) fn commit_of(git: &[String], folder: &Path) -> Result<Option<Commit>,
         None => commit(said, folder),
     }
     .map_err(|why| format!("{why}: give the message with -m or -F"));
-    Ok(Some(Commit {
-        elsewhere,
-        no_verify,
-        message,
-    }))
+    Ok(Some(Commit { no_verify, message }))
 }
 
 /// `git commit`: its `-m`, as git joins them, or its last `-F` file.

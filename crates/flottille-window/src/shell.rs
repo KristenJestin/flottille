@@ -1477,14 +1477,10 @@ impl Shell {
             Outcome::VaultWritten { refused } => {
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.written(refused, cx));
-                // An entry added from a project's Tracker: back to it.
-                if let Some(project) = section.update(cx, |section, _| section.take_return()) {
-                    self.open_project_settings_at(
-                        &project,
-                        crate::project_settings::Reveal::Tracker,
-                        window,
-                        cx,
-                    );
+                // An entry made from a project's Tracker or Vault tab: back to it.
+                if let Some((project, at)) = section.update(cx, |section, _| section.take_return())
+                {
+                    self.open_project_settings_at(&project, at, window, cx);
                 }
             }
             Outcome::Developer { written, shown } => {
@@ -2734,17 +2730,44 @@ impl Shell {
         }
     }
 
-    /// A project's Tracker `New entry in the vault`: Settings, Vault, on a new entry. Closed, it
-    /// goes back to the project's Tracker.
-    pub fn add_vault_entry_for(
+    /// "New entry" in Settings' Vault, its dialog prefilled with `prefill` (a project's Tracker, a
+    /// project's Vault tab, an agent's request), `why` the agent's reason when it is one. Closed,
+    /// the window goes back to `back`, the project page it came from.
+    pub fn add_vault_entry(
         &mut self,
-        project: &str,
+        prefill: &crate::vault::VaultEntry,
+        why: Option<String>,
+        back: Option<(String, crate::project_settings::Reveal)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
         let vault = self.settings.read(cx).vault().clone();
-        vault.update(cx, |vault, cx| vault.add_for(project, window, cx));
+        vault.update(cx, |vault, cx| {
+            vault.add_prefilled(prefill, why, back, window, cx)
+        });
+    }
+
+    /// A row of a project's Vault tab: Settings, Vault, the entry in its own dialog; closed, it
+    /// goes back to that tab. An entry gone since the row was drawn leaves nothing to open: the
+    /// window stays on the tab.
+    pub fn replace_vault_entry_for(
+        &mut self,
+        project: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
+        let vault = self.settings.read(cx).vault().clone();
+        if !vault.update(cx, |vault, cx| vault.replace_in(project, name, window, cx)) {
+            self.open_project_settings_at(
+                project,
+                crate::project_settings::Reveal::Vault,
+                window,
+                cx,
+            );
+        }
     }
 
     /// An agent's request for a vault entry, from its card: Settings, Vault, on a new entry
@@ -2760,7 +2783,7 @@ impl Shell {
         self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
         let vault = self.settings.read(cx).vault().clone();
         vault.update(cx, |vault, cx| {
-            vault.add_prefilled(&entry, Some(why), host, window, cx)
+            vault.add_asked(&entry, why, host, window, cx)
         });
     }
 

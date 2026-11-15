@@ -1284,8 +1284,8 @@ A line of Flottille's own (not the server's) is added to what `help` with `for: 
 gives. The review (`connection.review`, its `adapter`) says that the adapter applies, what it
 changed, what Accept would pin, and, for each action it keeps off, why (`locked`); the window
 shows that sentence under the server's version, above the bar of what is left to the judge, so
-that the user reads why `login` is refused before Accept, and what the adapter changed unfolds
-under it. A kept-off action has its pill disabled (`Off`), no box to tick it with, so that the
+that the user reads why `login` would be refused (a command that sets the browser's sites, an
+entry on plain `http`) before Accept, and what the adapter changed unfolds under it. A kept-off action has its pill disabled (`Off`), no box to tick it with, so that the
 bar never sets it, and the line saying why in its unfolded row instead of the four choices. The
 user can still change every other setting.
 
@@ -1302,37 +1302,42 @@ way in:
   `_auth_show`, `_auth_delete`, `agent_browser_set_credentials` (a password as an argument), its
   plugins `agent_browser_plugin_add`, `_plugin_list`, `_plugin_run`, `_plugin_show` (they run
   commands with its credential providers) and `agent_browser_with_login`, whatever the user set.
-- **Only the actions it knows do not read a typed secret directly stay on beside `login`**: an
-  allowlist, not a list of what may leak, which would miss the next one. Every other action, one it does not
-  know included (a 0.43 patch may add one), is **off at the first pin**, and **`login` is refused
-  while one of them is on**; the review says which. A page script can copy a field into what any
-  other action reads (the title, the text), and a component's state, a field's attributes or its
-  HTML follow what is typed, so masking the exact secret is not enough. The 48 actions of the
-  list, read from 0.43.0's own list and descriptions (a why each in the code), all prefixed
-  `agent_browser_`: `back`, `forward`, `reload`; the inputs (`click`, `dblclick`, `fill`, `type`,
-  `press`, `hover`, `focus`, `check`, `uncheck`, `select`, `scroll`, `scroll_into_view`, `drag`,
-  `keydown`, `keyup`, `keyboard_type`, `keyboard_insert_text`, `mouse_move`/`_down`/`_up`/`_wheel`,
-  `find`); the waits (`wait_ms`, `wait_for_selector`, `wait_for_text`, `wait_for_url`,
-  `wait_for_load`); `screenshot`, `get_text`, `get_url`, `get_title`, `get_count`, `get_box`,
-  `is_visible`, `is_enabled`, `is_checked`; `tab_list`, `tab_switch`, `tab_close`,
-  `frame_switch`, `frame_main`, `dialog_status`, `dialog_accept`, `dialog_dismiss`, `close`. Left
-  out among others: whatever runs a script (`eval`, `wait_for_function`, `batch`, `chat`, …),
-  takes a URL (`open`, `tab_new`, `pushstate`: a `javascript:` URL runs in the page) or extra
-  options, reaches another browser (`connect`, `get_cdp_url`), or gives a field's value, its HTML,
-  its attributes, a component's state or a snapshot (`get_value`, `get_attr`, `get_html`,
-  `react_*`, `snapshot`).
-- **What stays possible.** The list narrows the ways to the secret; it does not close them all,
-  and each call of these actions is still judged by the gate, which is what stands against them:
-  - **a selector oracle**: on a site whose framework copies what is typed into the field's `value`
-    attribute (React does), the allowed actions that take a selector (`get_count`, `is_visible`,
-    `wait_for_selector`, `click`…) can test `input[value^=…]`, one guess at a time;
-  - **a show-password toggle**: clicked, the field shows the secret, which `screenshot` or
-    `get_text` then read;
-  - **a login form sent with GET** puts the secret in the address, where `get_url`, `tab_list` and
-    `wait_for_url` read it;
-  - **another tab of the session** that holds a window handle to the login tab could navigate it
-    between its load and its fill, to another page of the entry's own sites (to another domain,
-    the allowlist below closes it).
+  So are `agent_browser_connect` and `agent_browser_state_load`: they bring a browser, or a
+  session, that someone else controls, and a login would type into it (the start options `--cdp`
+  and `--state` already make `login` refused, below).
+- **`login` is offered beside every other action**, as agent-browser's own login restricts
+  nothing after it: what keeps the secret is that it never reaches the model's context (Flottille's
+  own `auth login` run fills it), the masking of the outputs, and the session kept to the entries'
+  sites (below). The actions that run a script in the page, which no gate can judge, are **off at
+  the first pin**: `eval`, `wait_for_function`, `add_init_script`, `batch` and `flow_run` (which
+  run or replay the others), `network_route` (which serves a body of its own for the page's
+  requests) and `chat` (agent-browser's own model, through an external gateway). So are those that
+  write the page's traffic to a file, which no masking reaches: `network_har_start`,
+  `network_har_stop`, `trace_start`, `trace_stop`. Both are the user's to turn on; every other
+  action is judged at the first pin, as any server's. A connection accepted with one of the first
+  on (`eval`) gets `login` beside it with no new review: the review says so (`agent_browser_eval
+  is on: a page script can read what login types`).
+- **A `url` is a web address.** While the adapter applies, a call whose `url` argument is not
+  `http` or `https` with a host is refused before the server sees it (`open`, `tab_new`,
+  `pushstate`, any action taking one): a `javascript:` or a `data:` URL runs in the page that is
+  open, the login form among them, and a `file:` one reads this machine. `wait_for_url` and
+  `network_route` are left out: their `url` is a pattern matched against an address, never opened.
+- **Every output of the connection's tools is masked** for the vault's secrets, those of the
+  entries bound to it among them, before the agent, the store or a log sees it (`docs/vault.md`),
+  raw and in the forms a page shows a typed secret in: an address (a form sent with GET, encoded),
+  HTML (escaped as a text, as an attribute, or with all five of `&<>"'`), JSON (escaped), and, for
+  an entry with a username, `<username>:<secret>` in base64 (an `Authorization: Basic` header).
+- **What stays possible**, as agent-browser's own docs leave it to its policies. Handled: a
+  `javascript:` or `data:` URL (refused, above), a script-running action (off at the first pin),
+  another browser or a saved session (`connect`, `state_load`, `--cdp`, `--state`: off, or
+  `login` refused), a HAR or a trace (off at the first pin). Left: a page script can copy a field
+  into what another action reads, a show-password toggle shows the secret on a screenshot (pixels
+  are not masked), a selector can test a field's `value` attribute one guess at a time, an action
+  that reads the page (`snapshot`, `get_value`, `eval`…) right after a login may see the secret in
+  a form other than those masked, and **a page saved to a file** (`pdf`, `download`, a HAR or a
+  trace the user turned on) is not masked: Flottille masks what the tools answer, not the files
+  the browser writes. Each call of these actions is judged by the gate, which is what stands
+  against them; the user turns off what they do not want.
 - **The session is kept to the entries' sites.** While the adapter applies and the connection has
   an entry bound with a usable web address, the configuration Flottille writes holds
   `"allowedDomains": [<hosts>]`: the exact hosts of the entries bound to this connection, sorted,
@@ -1452,8 +1457,7 @@ way in:
 - **`agent-browser mcp`** (vercel-labs/agent-browser, a browser for agents): its `eval` runs
   arbitrary script in the page, which no gate can judge, so it is **off** (its adapter sets it so,
   "Adapters"); a limit on `url` names
-  the addresses its `open` may reach (the exact values listed), when the user turns `open` on and
-  does without `login`; the other actions stay **judged**.
+  the addresses its `open` may reach (the exact values listed); the other actions stay **judged**.
 - **`agent-desktop mcp`** (vercel-labs/agent-desktop, driving the desktop through AT-SPI on Linux,
   its tools named `desktop_click`, `desktop_snapshot`…): the most powerful kind, since it acts in
   every application the user has open. It is declared without `--headed` (that flag, a global one
