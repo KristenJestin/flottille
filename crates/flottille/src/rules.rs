@@ -205,9 +205,12 @@ struct Set {
 }
 
 /// Answers a `rules.*` request: `rules.show`, `rules.set`, `rules.reset`, for the user's rules
-/// (no `project`) or one project's.
+/// (no `project`) or one project's, and the rules proposed (`proposals.rs`).
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
     match method {
+        "rules.proposals" | "rules.proposal.accept" | "rules.proposal.dismiss" => {
+            crate::proposals::call(daemon, method, params)
+        }
         "rules.show" => {
             let Which { project } = serde_json::from_value(params)?;
             show(daemon, project.as_deref())

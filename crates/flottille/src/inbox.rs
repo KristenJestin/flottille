@@ -130,6 +130,19 @@ fn unchecked(data: &Value) -> String {
     )
 }
 
+/// What a `rules.proposed` tells the user: the rule, and why it was proposed.
+fn proposed(data: &Value) -> String {
+    format!(
+        "A rule is proposed for the project {}, whose agents had the same call of {} refused {} \
+         times in {} sessions: {}",
+        data["project"].as_str().unwrap_or_default(),
+        data["tool"].as_str().unwrap_or_default(),
+        data["count"],
+        data["sessions"],
+        data["rule"].as_str().unwrap_or_default()
+    )
+}
+
 /// A root's report, its question to the user, or its failure, oldest first. With `after`, the
 /// first `limit` after that number; without, the last `limit` of all.
 fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
@@ -143,6 +156,7 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
         "vault.asked",
         "run.agent_folders_unchecked",
         "run.agent_folders_put_back",
+        "rules.proposed",
     ];
     names.extend(extensions.iter().map(|(event, _, _)| *event));
     let events = daemon.read(|store| store.events_named(&names, asked.after.unwrap_or(0)))?;
@@ -153,8 +167,31 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
     // A request for a vault entry the user answered says so too.
     let answered = daemon
         .read(|store| store.events_named(&["vault.ask_answered"], asked.after.unwrap_or(0)))?;
+    // A proposed rule the user added or dismissed since says so.
+    let decided = daemon.read(|store| {
+        store.events_named(
+            &["rules.proposal_accepted", "rules.proposal_dismissed"],
+            asked.after.unwrap_or(0),
+        )
+    })?;
     let mut entries = Vec::new();
     for event in events {
+        // A rule proposed for a project is no agent's: it comes from the failures of many.
+        if event.name == "rules.proposed" {
+            let mut entry = json!({
+                "seq": event.seq, "at": event.at, "kind": "proposed_rule", "agent": null,
+                "project": event.data["project"], "workspace": null,
+                "text": proposed(&event.data), "proposal": event.data["proposal"],
+            });
+            if decided
+                .iter()
+                .any(|later| later.data["proposal"] == event.data["proposal"])
+            {
+                entry["resolved"] = json!(true);
+            }
+            entries.push(entry);
+            continue;
+        }
         if let Some((_, kind, text)) = extensions.iter().find(|(name, _, _)| *name == event.name) {
             entries.push(json!({
                 "seq": event.seq, "at": event.at, "kind": kind, "agent": null,

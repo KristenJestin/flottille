@@ -1211,6 +1211,7 @@ What your **root** agents sent you, oldest first. An entry is one of:
 |---|---|---|
 | `report` | the root called `report`: it is done, and says what it did | `agent.reported` |
 | `question` | the root called `ask`: it asks you one thing or several (numbered, each with its options) and goes on without waiting; answer each with `flottille agent answer`, which ends its wait for you (`flottille agent send` answers every question open, in one message) | `agent.asked` (`to` is `user`) |
+| `proposed_rule` | a rule is proposed for a project whose agents keep failing the same way (`docs/projects.md`, "Proposed rules"): of no agent, it names the project, the failure and the rule; `flottille rules proposals` lists those that wait | `rules.proposed` |
 | `failure` | the root cannot go on: its process could not start, its session could not open, an option it was asked is not one it offers, it was replaced too often (twice in 30 minutes), or its new workspace could not be prepared (`docs/events.md` also lists "its parent failed", which only concerns a child) | `agent.failed` |
 
 A child's report, question or failure goes to its parent, never to the inbox. The requests a gate
@@ -1230,6 +1231,21 @@ $ flottille inbox
        Options: Yes; Not yet (Keep it local)
     2. Title of the pull request?
 Answer a question with `flottille agent answer <agent> --question <n> --answer "1=…"`, one --answer per question; `flottille inbox --after <n>` lists what came since.
+```
+
+### `flottille rules proposals [--project P] [--json]`
+
+The rules proposed for your projects from the failures their agents keep making, that wait for you
+to add or dismiss them (`docs/projects.md`, "Proposed rules"), the oldest first: each its number,
+its project, the tool whose calls were refused, how many times and in how many sessions, and the
+rule. `--project` lists one project's. `--json` prints `rules.proposals`. The window adds or
+dismisses them (the project's Settings, "Rules"; `rules.proposal.accept`,
+`rules.proposal.dismiss`).
+
+```
+$ flottille rules proposals
+#1 for shop (fs_read refused 4 times in 3 sessions):
+    Never read the login folders of the home such as ~/.ssh: ask the user for what you need.
 ```
 
 ### `flottille runs list [project]`

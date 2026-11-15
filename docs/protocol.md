@@ -413,6 +413,24 @@ own (the `rules` key of its file, where it stands, what is around it kept).
 A change to the user's rules emits `rules.changed {project: null}`; a project's emits
 `project.changed` like any edit of its file.
 
+The rules proposed from the failures agents keep making (`docs/projects.md`, "Proposed rules"):
+
+- `rules.proposals {project?}` answers `{"proposals": [...]}`, those that wait for the user, of one
+  project or of all, the oldest first. A proposal is `{"id", "project", "tool", "pattern", "state",
+  "rule", "count", "sessions", "calls", "at"}`: the tool and the pattern of the refusal, `open`,
+  the rule the judge wrote, how many times and in how many sessions it was seen, and the failures
+  behind it, each `{"seq", "at", "agent", "session", "arguments", "error"}` (its
+  `agent.tool_served` event's number, its agent and that agent's session, what it was called with
+  and what the refusal said, masked).
+- `rules.proposal.accept {proposal, text?}` adds the rule, or `text` as the user edited it, at the
+  end of the project's own rules, and answers the proposal, `accepted`, its `rule` the text added.
+  `refused` for an empty text, a text that would take the rules past their limit, and a proposal
+  answered already; `not-found` for one that does not exist.
+- `rules.proposal.dismiss {proposal}` puts it away for good, and answers it, `dismissed`.
+
+A proposal made emits `rules.proposed`; one answered `rules.proposal_accepted` or
+`rules.proposal_dismissed`.
+
 ### The judge methods
 
 `judge.show`, `judge.set` and `judge.reset` read, write and reset the Auto judge's guidance
@@ -2117,7 +2135,10 @@ of a run's place, a child's too, put back or could not put back what was written
 folders, `text` says which and where they are kept). The daemon's own `unchecked` and `put_back`
 come with `agent` and `workspace` `null` when no agent of the store ran it. A pause that resumed since is `"resolved": true`, its
 `text` ending `It has resumed since.`; a request for a vault entry the user answered is
-`"resolved": true` too.
+`"resolved": true` too. A rule proposed for a project (`proposed_rule`, `rules.proposed`,
+`docs/projects.md`, "Proposed rules") comes with `agent` and `workspace` `null`, its `project`, its
+`proposal` (the id `rules.proposal.accept` takes) and a `text` that says the failure and the rule;
+it is `"resolved": true` once the user added or dismissed it.
 A child's own go to its parent and are not here. Without `after`, the last `limit` entries (50 by
 default); with it, the first `limit` entries numbered after it. Nothing is marked read: the inbox
 is a view of the stored events.

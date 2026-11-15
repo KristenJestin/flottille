@@ -126,6 +126,19 @@ one for a user who never chose (`"picked": true`), or the user saw the notice of
 The user edited the Auto judge's guidance, or reset it to the default (`judge.set`,
 `judge.reset`). It has no field: `judge.show` says the text.
 
+### `rules.proposed`, `rules.proposal_accepted`, `rules.proposal_dismissed`
+
+A rule was proposed for a project whose agents keep failing the same way (`docs/projects.md`,
+"Proposed rules"), and the user added it to the project's rules or dismissed it. `flottille inbox`
+lists a proposal as an entry of kind `proposed_rule`, resolved once it is answered.
+
+| Field | |
+|---|---|
+| `project` | |
+| `proposal` | Its id (`rules.proposals`). |
+| `tool`, `count`, `sessions` | Only on `rules.proposed`: the tool whose calls were refused, how many times and in how many sessions. |
+| `rule` | The rule the judge wrote; on `rules.proposal_accepted`, the text added, as the user edited it; `null` on `rules.proposal_dismissed`. |
+
 ### `developer.changed`
 
 The user switched the developer mode (`developer.set`, `docs/developer.md`).
@@ -695,6 +708,7 @@ activity.
 | `gate` | The gate's verdict on the call: `allow` (harmless, or allowed by the user), `judged` (to judge, allowed by the judge in Auto), `full` (to judge or base, allowed by Full mode), `deny` or `ask`; `null` for a call refused before it, because the agent has no such tool. |
 | `judgement` | The judge's verdict when one was asked, `{"by", "verdict", "reason"}` (`docs/protocol.md`, `approval.list`); else `null`. |
 | `outcome` | `ok`, `refused`, `failed`, or `held` for a call the gate held (`docs/tools.md`, "The gate"). |
+| `error` | Only on a `refused` call: what the refusal said, cut at 500 characters and masked. The rules proposed from the failures that repeat read it (`docs/projects.md`, "Proposed rules"). |
 | `input_refused` | Only on a `refused` call whose input broke the tool's own rule before anything ran (arguments that do not fit its schema, a detail it has none of, a session title of two words): `true`. Said by the daemon, never guessed from the text; a refusal of the gate, of the user or of the state of things (a workspace that is gone, a title the user named) carries none. The window counts such a call as retried, not failed, when a call of the same tool passes later in the same turn. |
 | `duration_ms` | How long it took. |
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
