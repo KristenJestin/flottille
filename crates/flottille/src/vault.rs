@@ -379,6 +379,9 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
             asked.name
         )));
     }
+    // Which username was masked with the secret: an edit without a secret that changes it must
+    // mask the new Basic form too.
+    let username_was = existing.as_ref().and_then(|entry| entry.username.clone());
     let had = existing.and_then(|entry| entry.bound);
     let bound = match (given(asked.bound), had) {
         (Some(new), Some(own)) if new != own => {
@@ -431,6 +434,15 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
             .store(&entry.name, secret)
             .await
             .map_err(unavailable)?;
+    } else if entry.username != username_was {
+        // The daemon reads the secret itself, to mask the new login: it goes nowhere else, and a
+        // keyring that cannot be read (locked) leaves the edit as it is, as the masks of the
+        // other entries do at the start.
+        match daemon.vault.read(&entry.name).await {
+            Ok(Some(secret)) => secrets::add_vault_login(entry.username.as_deref(), &secret),
+            Ok(None) => {}
+            Err(why) => eprintln!("flottille daemon: vault entry {}: {why}", entry.name),
+        }
     }
     daemon.write(|store| store.put_vault_entry(&entry))?;
     retool(daemon);
