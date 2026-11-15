@@ -4575,16 +4575,24 @@ impl Row {
         // One with chips (a picture where it was put, a command) shows them as the composer did,
         // and nothing of what the agent received for a command (#846).
         match &block {
-            Block::Message { text, commands, .. } => {
+            Block::Message {
+                text,
+                commands,
+                images,
+                ..
+            } => {
                 let names: &[String] = commands.as_ref().map_or(&[][..], |c| c.names.as_slice());
+                // A marker typed by hand, with no picture of its place, stays text.
                 let pieces = crate::tokens::pieces_of(
                     text,
                     |name| names.iter().any(|known| known == name),
                     |at, found| {
-                        Some(gpui_design_system::Token::new(
-                            format!("picture-{at}"),
-                            crate::tokens::picture_look(found.number, &found.name, None),
-                        ))
+                        (at < images.len()).then(|| {
+                            gpui_design_system::Token::new(
+                                format!("picture-{at}"),
+                                crate::tokens::picture_look(found.number, &found.name, None),
+                            )
+                        })
                     },
                 );
                 self.pieces = crate::tokens::has_tokens(&pieces).then_some(pieces);

@@ -55,7 +55,7 @@ pub fn size(bytes: usize) -> String {
 
 /// The text of `pieces` as it is sent: a picture's chip as its marker (`marker` gives it, by id,
 /// with its number), any other chip as its label.
-pub fn sent_text(pieces: &[Piece], marker: impl Fn(&str) -> Option<String>) -> String {
+pub fn sent_text(pieces: &[Piece], mut marker: impl FnMut(&str) -> Option<String>) -> String {
     let mut text = String::new();
     for piece in pieces {
         match piece {
@@ -69,19 +69,25 @@ pub fn sent_text(pieces: &[Piece], marker: impl Fn(&str) -> Option<String>) -> S
     text
 }
 
-/// A message's text as pieces: each picture marker a chip (`picture` gives it from the marker's
-/// place among the markers, 0 first, and what it says), each command `known` a chip, the rest
-/// text.
+/// A message's text as pieces: each picture marker a chip (`picture` gives it from the picture the
+/// marker's number names, 0 first, and what it says), each command `known` a chip, the rest text.
+/// Only the first marker of a number is its picture's, as the daemon places it: a copy stays text.
 pub fn pieces_of(
     text: &str,
     known: impl Fn(&str) -> bool,
     mut picture: impl FnMut(usize, &flottille_core::images::Marker) -> Option<Token>,
 ) -> Vec<Piece> {
-    let mut chips: Vec<(Range<usize>, Token)> = flottille_core::images::markers(text)
-        .into_iter()
-        .enumerate()
-        .filter_map(|(at, found)| Some((found.range.clone(), picture(at, &found)?)))
-        .collect();
+    let mut seen = Vec::new();
+    let mut chips: Vec<(Range<usize>, Token)> = Vec::new();
+    for found in flottille_core::images::markers(text) {
+        if found.number == 0 || seen.contains(&found.number) {
+            continue;
+        }
+        seen.push(found.number);
+        if let Some(token) = picture(found.number - 1, &found) {
+            chips.push((found.range.clone(), token));
+        }
+    }
     for (range, name) in flottille_core::commands::used(text, &known) {
         if !chips.iter().any(|(chip, _)| overlaps(chip, &range)) {
             chips.push((range, command(name)));
@@ -187,6 +193,39 @@ mod tests {
                 .strip_prefix('p')
                 .map(|at| format!("[Image {at}]"))),
             "see [Image 0] then /ship it, [Image 1]"
+        );
+    }
+
+    #[test]
+    fn only_the_first_marker_of_a_number_is_its_picture_s_chip() {
+        let text = "[Image 2: b.png] [Image 1: a.png] [Image 1: a.png] [Image 3: c.png]";
+        let pieces = pieces_of(
+            text,
+            |_| false,
+            |picture, found| {
+                (picture < 2).then(|| {
+                    Token::new(
+                        format!("p{picture}"),
+                        picture_look(found.number, &found.name, None),
+                    )
+                })
+            },
+        );
+        let ids: Vec<String> = pieces
+            .iter()
+            .map(|piece| match piece {
+                Piece::Text(text) => format!("text:{text}"),
+                Piece::Token(token) => format!("chip:{}", token.id),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "chip:p1",
+                "text: ",
+                "chip:p0",
+                "text: [Image 1: a.png] [Image 3: c.png]"
+            ]
         );
     }
 

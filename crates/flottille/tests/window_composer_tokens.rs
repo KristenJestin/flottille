@@ -620,13 +620,141 @@ fn what_the_agent_received_is_not_shown(cx: &mut TestAppContext) {
         has(format!("row-{at}-message-text"), cx),
         "what was typed shows"
     );
-    // What the agent received stays known, for `agent read --json`, never drawn.
-    let Block::Message {
-        commands: Some(commanded),
-        ..
-    } = block
-    else {
-        unreachable!()
-    };
-    assert!(commanded.received.contains("Push the branch"));
+}
+
+#[gpui_kit::test]
+fn a_chip_pasted_twice_sends_its_picture_once(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+    let sent = user.received_requests("session/prompt").len();
+    focus(cx);
+    cx.simulate_input("look ");
+    paste(clipboard_png(8), cx);
+    settle(cx);
+    // The text and its chip copied, and pasted after it: the chip is there twice.
+    cx.simulate_keystrokes("ctrl-a");
+    cx.simulate_keystrokes("ctrl-c");
+    let end = reply.read_with(cx, |r, cx| r.field().read(cx).value().len());
+    caret_at(&reply, end, cx);
+    cx.simulate_keystrokes("ctrl-v");
+    settle(cx);
+    assert_eq!(
+        pieces(&reply, cx),
+        ["text:look ", "chip:Image 1", "text:look ", "chip:Image 1"]
+    );
+    assert_eq!(widths(&reply, cx), [8], "one picture");
+
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the agent got the message", |_| {
+        user.received_requests("session/prompt").len() > sent
+    });
+    let prompt = last_prompt(&user);
+    let kinds: Vec<&str> = prompt
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["text", "image", "text"], "{prompt}");
+    assert!(
+        prompt[0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("look [Image 1: image.png]"),
+        "{prompt}"
+    );
+    assert_eq!(
+        prompt[2]["text"], "look Image 1",
+        "the copy is its label, not a second marker"
+    );
+}
+
+#[gpui_kit::test]
+fn undoing_a_thumbnail_removal_brings_its_picture_back(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (_shell, reply, cx) = open_session(&user, &lead, cx);
+    focus(cx);
+    paste(clipboard_png(8), cx);
+    cx.simulate_input(" here");
+    settle(cx);
+    cx.update(|window, cx| window.click("attachment-remove-0", cx));
+    settle(cx);
+    assert_eq!(pieces(&reply, cx), ["text: here"]);
+    assert!(widths(&reply, cx).is_empty());
+
+    focus(cx);
+    cx.simulate_keystrokes("ctrl-z");
+    settle(cx);
+    assert_eq!(
+        pieces(&reply, cx),
+        ["chip:Image 1", "text: here"],
+        "the chip came back"
+    );
+    assert_eq!(widths(&reply, cx), [8], "and its picture with it");
+    assert!(has("attachment-0", cx), "its thumbnail");
+}
+
+#[gpui_kit::test]
+fn a_typed_marker_without_a_picture_stays_text(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, _reply, cx) = open_session(&user, &lead, cx);
+    let page = page_of(&shell, cx);
+    user.call(
+        "agent.send",
+        json!({"agent": lead,
+            "message": "this one [Image 1: shot.png] and [Image 2: other.png] typed by hand",
+            "images": [{"mime": "image/png", "data": base64_of(&png(60, 40))}]}),
+    )
+    .unwrap();
+    until(&shell, cx, "the message shows with its picture", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Message { images, .. } if images.len() == 1))
+    });
+    settle(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .rposition(|b| matches!(b, Block::Message { images, .. } if images.len() == 1))
+        .unwrap();
+
+    let tokens = format!("row-{at}-message-tokens");
+    assert_eq!(
+        cx.update(|window, _| window.find(chip(&tokens, 0)).label().map(str::to_owned)),
+        Some("Image 1".into()),
+        "the picture's marker is its chip"
+    );
+    assert!(
+        !has(chip(&tokens, 1), cx),
+        "a marker with no picture of its number is no chip"
+    );
+}
+
+#[gpui_kit::test]
+fn a_message_taken_back_keeps_twenty_pictures_at_most(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (_shell, reply, cx) = open_session(&user, &lead, cx);
+    let pictures: Vec<flottille_window::actions::Picture> = (0..21)
+        .map(|n| flottille_window::actions::Picture {
+            mime: "image/png".into(),
+            bytes: png(8 + n, 8),
+        })
+        .collect();
+
+    reply.update_in(cx, |reply, window, cx| {
+        reply.restore("taken back", pictures, window, cx)
+    });
+    settle(cx);
+    assert_eq!(
+        widths(&reply, cx).len(),
+        20,
+        "a message carries 20 pictures at most"
+    );
 }

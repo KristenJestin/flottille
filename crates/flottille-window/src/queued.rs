@@ -253,6 +253,7 @@ impl Render for QueuedMessages {
                         .collect(),
                     Entry::Sending(p) => p.images.iter().cloned().map(Some).collect(),
                 };
+                let count = pictures.len();
                 let thumbs = (!pictures.is_empty()).then(|| {
                     div()
                         .id(ElementId::Name(format!("queued-{key}-images").into()))
@@ -282,15 +283,18 @@ impl Render for QueuedMessages {
                             .test_support()
                         }))
                 });
-                // What the user typed, each command and each picture a chip where it was put.
+                // What the user typed, each command and each picture a chip where it was put: a
+                // marker typed by hand, with no picture of its place, stays text.
                 let pieces = crate::tokens::pieces_of(
                     &text,
                     |name| commands.iter().any(|known| known == name),
                     |at, found| {
-                        Some(gpui_design_system::Token::new(
-                            format!("picture-{at}"),
-                            crate::tokens::picture_look(found.number, &found.name, None),
-                        ))
+                        (at < count).then(|| {
+                            gpui_design_system::Token::new(
+                                format!("picture-{at}"),
+                                crate::tokens::picture_look(found.number, &found.name, None),
+                            )
+                        })
                     },
                 );
                 let shown = match crate::tokens::has_tokens(&pieces) {

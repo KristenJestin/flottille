@@ -453,14 +453,20 @@ impl Attachments {
 
     /// The message as it is sent: its text, each picture's chip as its marker
     /// (`[Image 1: photo.png]`), and the pictures in that order. A picture without a chip goes
-    /// after the text, where the daemon marks it.
+    /// after the text, where the daemon marks it. A chip copied again in the text is its label:
+    /// the picture goes once, at its first chip.
     pub fn message(&self, cx: &gpui_kit::App) -> String {
         let Some(field) = &self.field else {
             return String::new();
         };
         let pieces = field.read(cx).value(cx);
+        let mut marked = Vec::new();
         tokens::sent_text(&pieces, |id| {
             let id = tokens::picture_of(id)?;
+            if marked.contains(&id) {
+                return None;
+            }
+            marked.push(id);
             let at = self.images.iter().position(|a| a.id == id)?;
             Some(flottille_core::images::marker(
                 at + 1,
@@ -505,8 +511,8 @@ impl Attachments {
         tokens::pieces_of(
             text,
             |_| false,
-            |at, found| {
-                let id = *ids.get(at)?;
+            |picture, found| {
+                let id = *ids.get(picture)?;
                 let attached = images.iter_mut().find(|a| a.id == id)?;
                 attached.name = found.name.clone();
                 Some(Token::new(
