@@ -61,7 +61,7 @@ fn show(user: &User, name: &str) -> Value {
 
 /// The service runs the daemon runs now, by service.
 fn service_runs(user: &User, name: &str) -> usize {
-    Store::open(&user.path("state/flottille/flottille.db"))
+    Store::open_read_only(&user.path("state/flottille/flottille.db"))
         .unwrap()
         .running_runs()
         .unwrap()
@@ -594,7 +594,7 @@ fn ready_on(user: &User, name: &str, ok: &std::path::Path) -> String {
 
 /// The runs of the project's task, going on now.
 fn task_runs(user: &User, name: &str) -> usize {
-    Store::open(&user.path("state/flottille/flottille.db"))
+    Store::open_read_only(&user.path("state/flottille/flottille.db"))
         .unwrap()
         .running_runs()
         .unwrap()

@@ -116,7 +116,7 @@ fn root_in(user: &User, workspace: Option<&str>) -> (String, Mcp) {
 }
 
 fn store(user: &User) -> Store {
-    Store::open(&user.path("state/flottille/flottille.db")).unwrap()
+    Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
 fn eventually(what: &str, check: impl Fn() -> bool) {

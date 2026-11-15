@@ -119,7 +119,7 @@ fn approve(user: &User, number: u64) -> Delivery {
         String::from_utf8_lossy(&output.stderr)
     );
     let id = format!("approval-{number}");
-    let store = || Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = || Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     eventually("the answer", || store().delivery(&id).unwrap().is_some());
     store().delivery(&id).unwrap().unwrap()
 }
@@ -419,7 +419,7 @@ fn the_user_s_run_from_a_session_s_rail_runs_in_its_workspace_and_is_listed_with
     );
     // The user is never held, and no agent is told of the user's run.
     assert!(no_request(&user));
-    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     let deliveries = store.last_deliveries(&lead, 50).unwrap();
     assert!(
         !deliveries.iter().any(|d| d.body.contains(&run)),

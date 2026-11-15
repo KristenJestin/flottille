@@ -208,17 +208,19 @@ fn the_window_shows_the_brief_without_where_a_question_goes(cx: &mut TestAppCont
     // The daemon's first message holds the paragraph, for the agent.
     eventually("the session's first message", || {
         user.call("agent.show", json!({"agent": launched})).is_ok()
-            && flottille_core::store::Store::open(&user.path("state/flottille/flottille.db"))
-                .unwrap()
-                .last_agent_events(&launched, "agent.prompted", 1)
-                .unwrap()
-                .first()
-                .is_some_and(|e| {
-                    e.data["text"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Where a question goes:")
-                })
+            && flottille_core::store::Store::open_read_only(
+                &user.path("state/flottille/flottille.db"),
+            )
+            .unwrap()
+            .last_agent_events(&launched, "agent.prompted", 1)
+            .unwrap()
+            .first()
+            .is_some_and(|e| {
+                e.data["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Where a question goes:")
+            })
     });
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "the launched session's row", |cx| {

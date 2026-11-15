@@ -902,6 +902,7 @@ fn a_daemon_refuses_to_start_on_a_newer_extension_schema() {
         .create(user.path("state/flottille"))
         .unwrap();
     // The tables of Specs as a later Flottille leaves them: more migrations than this one has.
+    // No daemon runs: the one under test is about to refuse this store.
     flottille_core::store::Store::open(&user.path("state/flottille/flottille.db"))
         .unwrap()
         .migrate_extension("specs", &["SELECT 1;"; 99])

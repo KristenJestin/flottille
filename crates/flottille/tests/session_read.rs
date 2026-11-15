@@ -98,7 +98,7 @@ fn said(user: &User, agent: &str) -> Vec<String> {
 }
 
 fn store(user: &User) -> Store {
-    Store::open(&user.path("state/flottille/flottille.db")).unwrap()
+    Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
 /// A reader and a session it reads, the user's five messages to it, an hour apart, each

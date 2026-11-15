@@ -88,7 +88,7 @@ fn held(answer: Answer) -> u64 {
 }
 
 fn store(user: &User) -> Store {
-    Store::open(&user.path("state/flottille/flottille.db")).unwrap()
+    Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
 /// The user's pending requests, as `flottille approvals --json` gives them.

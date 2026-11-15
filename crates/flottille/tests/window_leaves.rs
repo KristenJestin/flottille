@@ -75,7 +75,7 @@ fn pair(user: &User) -> (String, String) {
     let number = first_send(&mcp, &session);
     user.call("approval.approve", json!({"number": number}))
         .unwrap();
-    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     eventually("the leave", || store.has_leave(&writer, &session).unwrap());
     (writer, session)
 }
