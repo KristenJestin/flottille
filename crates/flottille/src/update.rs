@@ -517,9 +517,12 @@ mod tests {
         // Then the line's stable, which is above its rcs.
         releases.push(release("0.3.1", "2026-11-09T10:00:00Z"));
         assert_eq!(taken(&releases, "0.3.1-rc.3").as_deref(), Some("0.3.1"));
-        // And the next fix's rc after it.
+        // And the next fix's rc, for a build that did not move to the stable in time.
         releases.push(release("0.3.2-rc.1", "2026-11-10T10:00:00Z"));
-        assert_eq!(taken(&releases, "0.3.1").as_deref(), Some("0.3.2-rc.1"));
+        assert_eq!(
+            taken(&releases, "0.3.1-rc.3").as_deref(),
+            Some("0.3.2-rc.1")
+        );
     }
 
     #[test]
