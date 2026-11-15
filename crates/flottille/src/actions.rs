@@ -119,6 +119,9 @@ struct WorkspaceCall {
     ticket: Option<Option<String>>,
     /// rename_branch: only this repository's branch; every one of the workspace's when left out.
     repository: Option<String>,
+    /// create: the branch the repositories start from in place of their base rule, one for every
+    /// repository taken or one by path.
+    base: Option<crate::workspaces::BaseChoice>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1666,10 +1669,17 @@ async fn performed(
                     call.name.as_deref(),
                 )?)),
                 "create" => {
+                    let bases = match call.base.clone() {
+                        Some(base) => base
+                            .by_path(&project, call.repositories.as_deref())
+                            .map_err(refusal)?,
+                        None => BTreeMap::new(),
+                    };
                     let created = answer(
                         "workspace.create",
                         json!({"project": name, "name": call.name, "branch": call.branch,
-                            "repositories": call.repositories, "ticket": call.ticket.flatten()}),
+                            "repositories": call.repositories, "bases": bases,
+                            "ticket": call.ticket.flatten()}),
                     )
                     .await?;
                     let made = created["name"].as_str().unwrap_or_default();
@@ -1950,7 +1960,7 @@ async fn workspace_says(
                 name,
                 &call.repositories,
                 call.branch.as_deref(),
-                &BTreeMap::new(),
+                &bases_of(project, call.base.clone(), call.repositories.as_deref())?,
             )
             .await?;
             if let Some(Some(ticket)) = &call.ticket {
@@ -2033,6 +2043,18 @@ async fn workspace_says(
             }
         }
     }
+}
+
+/// The base an agent chose, by repository path: nothing when it chose none.
+fn bases_of(
+    project: &Project,
+    base: Option<crate::workspaces::BaseChoice>,
+    repositories: Option<&[String]>,
+) -> Result<BTreeMap<String, String>, Outcome> {
+    base.map_or_else(
+        || Ok(BTreeMap::new()),
+        |base| base.by_path(project, repositories).map_err(refusal),
+    )
 }
 
 /// What creating a workspace does, in words, or the refusal of one that cannot be made: the
@@ -2155,8 +2177,11 @@ async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec
             let repositories: Option<Vec<String>> =
                 serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
             let branch = args["branch"].as_str();
-            let bases: BTreeMap<String, String> =
-                serde_json::from_value(args["base"].clone()).unwrap_or_default();
+            let bases = bases_of(
+                &project,
+                serde_json::from_value(args["base"].clone()).unwrap_or_default(),
+                repositories.as_deref(),
+            )?;
             let mut says = create_says(
                 daemon,
                 &grant.place,

@@ -25,7 +25,9 @@ use gpui_kit::{
 
 use crate::actions::{ClaudeKind, Command, SkillWrite};
 use crate::claude::{Found, found_block};
-use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
+use crate::commands::{
+    boxed, line_field, menu_of, perform_later, problem_line, section_blocks, stack,
+};
 use crate::shell::Shell;
 
 /// How many entries of a folder the picker lists.
@@ -816,41 +818,52 @@ impl SkillsSection {
                 )),
         );
         modal
-            .child(Field::new("skill-name-field", "Name", name))
-            .child(Field::new("skill-description", "Read it when", description))
-            .child(Field::new("skill-kind-field", "What it is", kind))
-            // The text and the path with its picker fold into each other with the choice.
             .child(
-                presence(
-                    "skill-path-block",
-                    !self.as_text,
-                    Field::new(
-                        "skill-file",
-                        "File",
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap(space::SM)
-                            .child(boxed("skill-path-field", Input::new(&fields.path), cx))
-                            .child(picker),
-                    ),
-                )
-                .gap(space::LG),
+                            .gap(space::LG)
+                            .child(Field::new("skill-name-field", "Name", name))
+                            .child(Field::new("skill-description", "Read it when", description))
+                            .child(Field::new("skill-kind-field", "What it is", kind)),
+                    )
+                    // The text and the path with its picker fold into each other with the choice.
+                    .child(
+                        presence(
+                            "skill-path-block",
+                            !self.as_text,
+                            Field::new(
+                                "skill-file",
+                                "File",
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(space::SM)
+                                    .child(boxed("skill-path-field", Input::new(&fields.path), cx))
+                                    .child(picker),
+                            ),
+                        )
+                        .space(space::LG),
+                    )
+                    .child(
+                        presence(
+                            "skill-text-block",
+                            self.as_text,
+                            Field::new("skill-text-field", "Text", text),
+                        )
+                        .space(space::LG),
+                    )
+                    .child(problem_line(
+                        "skill-error",
+                        self.form_error.clone(),
+                        space::LG,
+                        cx,
+                    )),
             )
-            .child(
-                presence(
-                    "skill-text-block",
-                    self.as_text,
-                    Field::new("skill-text-field", "Text", text),
-                )
-                .gap(space::LG),
-            )
-            .child(problem_line(
-                "skill-error",
-                self.form_error.clone(),
-                space::LG,
-                cx,
-            ))
             .action(
                 Button::primary(
                     "save-skill",
@@ -912,26 +925,32 @@ impl Render for SkillsSection {
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
             )
-            .child(presence("skill-list-block", count > 0, list).gap(space::MD))
-            .child(
-                presence(
-                    "no-skills-block",
-                    empty,
-                    EmptyLine::new(
-                        "no-skills",
-                        Icon::File,
-                        "No skill yet: add a file of the project, or a text, that your agents \
-                         read when their task needs it.",
-                    ),
-                )
-                .gap(space::MD),
-            )
-            .child(found)
-            .child(problem_line(
-                "skills-problem",
-                self.problem.clone(),
+            .child(section_blocks(
+                "skills-blocks",
+                count > 0 || empty || !self.found_rows.is_empty() || self.problem.is_some(),
                 space::MD,
-                cx,
+                stack(space::MD)
+                    .child(presence("skill-list-block", count > 0, list).space(space::MD))
+                    .child(
+                        presence(
+                            "no-skills-block",
+                            empty,
+                            EmptyLine::new(
+                                "no-skills",
+                                Icon::File,
+                                "No skill yet: add a file of the project, or a text, that your \
+                                 agents read when their task needs it.",
+                            ),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(found)
+                    .child(problem_line(
+                        "skills-problem",
+                        self.problem.clone(),
+                        space::MD,
+                        cx,
+                    )),
             ));
         div()
             .text_color(p.text)

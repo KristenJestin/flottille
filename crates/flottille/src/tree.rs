@@ -133,8 +133,9 @@ struct Launch {
     /// With `new_workspace`: its branch, `<branch prefix>/<name>` when left out; an existing one
     /// is resumed, as `workspace create` does.
     branch: Option<String>,
-    /// With `new_workspace`: the base branch of a repository, by path, in place of its rule.
-    base: Option<BTreeMap<String, String>>,
+    /// With `new_workspace`: the base branch of a repository, by path, or one for every
+    /// repository taken, in place of the rule.
+    base: Option<workspaces::BaseChoice>,
     /// Which agent the launch starts (`docs/tools.md`, "The tree's tools"): never guessed.
     kind: Option<LaunchKind>,
 }
@@ -184,7 +185,7 @@ enum WorkspaceChoice {
         name: String,
         repositories: Option<Vec<String>>,
         branch: Option<String>,
-        base: Option<BTreeMap<String, String>>,
+        base: Option<workspaces::BaseChoice>,
     },
 }
 
@@ -349,12 +350,18 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             branch,
             base,
         } => {
+            let bases = match base {
+                Some(base) => base
+                    .by_path(&project, repositories.as_deref())
+                    .map_err(|f| refused(format!("refused: {}", f.message)))?,
+                None => BTreeMap::new(),
+            };
             let created = workspaces::call(
                 daemon.clone(),
                 "workspace.create",
                 json!({"project": project.name, "name": name,
                     "repositories": repositories, "branch": branch,
-                    "bases": base.unwrap_or_default()}),
+                    "bases": bases}),
             )
             .await
             .map_err(|f| {
