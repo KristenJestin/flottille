@@ -784,58 +784,62 @@ impl Render for RulesEditor {
                     .children(global_body)
                     .children(alone_switch.map(|switch| spaced(space::MD, switch)))
                     .child(spaced(space::MD, text))
-            .child(
-                presence_of(
-                    id("repeats-block"),
-                    self.shown
-                        .as_ref()
-                        .filter(|shown| shown.repeats)
-                        .map(|_| SharedString::from(REPEATS)),
-                    note(id("repeats")),
-                )
-                .space(space::MD),
-            )
-            .child(
-                presence_of(
-                    id("cut-block"),
-                    self.shown
-                        .as_ref()
-                        .and_then(|shown| shown.cut.clone())
-                        .map(|cut| SharedString::from(format!("Cut: {cut}."))),
-                    line(id("cut")),
-                )
-                .space(space::MD),
-            )
-            .child(
-                presence_of(
-                    id("error-block"),
-                    self.shown
-                        .as_ref()
-                        .and_then(|shown| shown.error.clone())
-                        .map(|error| {
-                            SharedString::from(if let Some((_, title)) = &self.part {
-                                format!("{title} does not run until this is fixed: {error}.")
-                            } else if compaction {
-                                format!("Every compaction fails until this is fixed: {error}.")
-                            } else {
-                                format!(
-                                    "The judge asks you about every call until this is fixed: \
-                                     {error}."
-                                )
-                            })
-                        }),
-                    line(id("error")),
-                )
-                .space(space::MD),
-            )
-            .child(
-                presence_of(
-                    id("problem-block"),
-                    self.problem.clone(),
-                    line(id("problem")),
-                )
-                .space(space::MD),
-            )
+                    .child(
+                        presence_of(
+                            id("repeats-block"),
+                            self.shown
+                                .as_ref()
+                                .filter(|shown| shown.repeats)
+                                .map(|_| SharedString::from(REPEATS)),
+                            note(id("repeats")),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(
+                        presence_of(
+                            id("cut-block"),
+                            self.shown
+                                .as_ref()
+                                .and_then(|shown| shown.cut.clone())
+                                .map(|cut| SharedString::from(format!("Cut: {cut}."))),
+                            line(id("cut")),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(
+                        presence_of(
+                            id("error-block"),
+                            self.shown
+                                .as_ref()
+                                .and_then(|shown| shown.error.clone())
+                                .map(|error| {
+                                    SharedString::from(if let Some((_, title)) = &self.part {
+                                        format!(
+                                            "{title} does not run until this is fixed: {error}."
+                                        )
+                                    } else if compaction {
+                                        format!(
+                                            "Every compaction fails until this is fixed: {error}."
+                                        )
+                                    } else {
+                                        format!(
+                                            "The judge asks you about every call until this is \
+                                             fixed: {error}."
+                                        )
+                                    })
+                                }),
+                            line(id("error")),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(
+                        presence_of(
+                            id("problem-block"),
+                            self.problem.clone(),
+                            line(id("problem")),
+                        )
+                        .space(space::MD),
+                    )
                     .child(spaced(space::MD + space::XS, footer)),
             )
             .into_any_element()

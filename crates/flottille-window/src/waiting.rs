@@ -362,8 +362,8 @@ impl Waiting {
                     .flex_col()
                     .gap(space::XS)
                     .child(head)
-                    // The whole call, wrapping over as many lines as it takes: what is allowed is read
-                    // before it is allowed, never guessed from its start.
+                    // The whole call, wrapping over as many lines as it takes: what is allowed is
+                    // read before it is allowed, never guessed from its start.
                     .children(line.map(|line| {
                         div()
                             .id(match from_says {

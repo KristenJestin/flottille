@@ -2287,42 +2287,42 @@ impl ProjectSettingsPage {
                             .flex()
                             .flex_col()
                             .child(Field::new("tracker-kind-field", "Tickets", select))
-                    .child(
-                        presence(
-                            "tracker-github-block",
-                            self.tracker_kind == TrackerKind::Github,
-                            github,
-                        )
-                        .space(space::LG),
-                    )
-                    .child(
-                        presence(
-                            "tracker-jira-block",
-                            self.tracker_kind == TrackerKind::Jira,
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(space::LG)
-                                .child(Field::new(
-                                    "tracker-site-field",
-                                    "Site",
-                                    boxed("tracker-site", Input::new(&fields.site), cx),
-                                ))
-                                .child(
-                                    Field::new(
-                                        "tracker-keys-field",
-                                        "Project keys",
-                                        boxed("tracker-keys", Input::new(&fields.keys), cx),
-                                    )
-                                    .hint(
-                                        "A ticket is a key of one of these projects (ABC-123), \
-                                         read with acli when it is signed in to this site.",
-                                    ),
+                            .child(
+                                presence(
+                                    "tracker-github-block",
+                                    self.tracker_kind == TrackerKind::Github,
+                                    github,
                                 )
-                                .child(worklog),
-                        )
-                        .space(space::LG),
-                    )
+                                .space(space::LG),
+                            )
+                            .child(
+                                presence(
+                                    "tracker-jira-block",
+                                    self.tracker_kind == TrackerKind::Jira,
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(space::LG)
+                                        .child(Field::new(
+                                            "tracker-site-field",
+                                            "Site",
+                                            boxed("tracker-site", Input::new(&fields.site), cx),
+                                        ))
+                                        .child(
+                                            Field::new(
+                                                "tracker-keys-field",
+                                                "Project keys",
+                                                boxed("tracker-keys", Input::new(&fields.keys), cx),
+                                            )
+                                            .hint(
+                                                "A ticket is a key of one of these projects (ABC-123), read \
+                                                 with acli when it is signed in to this site.",
+                                            ),
+                                        )
+                                        .child(worklog),
+                                )
+                                .space(space::LG),
+                            )
                     )
                     .kept(error)
                     .action(save)
