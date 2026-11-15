@@ -133,11 +133,7 @@ fn document(comment: &Comment, body: &str) -> Value {
 
 /// What the card says of a reply: the comment as it goes out, quote and answer, and on Jira whom
 /// it mentions, who is notified. Refused, with why, when the comment cannot be answered.
-pub(super) async fn says(
-    daemon: &Daemon,
-    project: &Project,
-    args: &Value,
-) -> Result<Vec<String>, String> {
+pub async fn says(daemon: &Daemon, project: &Project, args: &Value) -> Result<Vec<String>, String> {
     if args["action"] != "reply" {
         return Ok(Vec::new());
     }
