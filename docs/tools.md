@@ -490,6 +490,13 @@ pending requests.
   what the check said, and nothing is pushed. A call given up stops its
   checks. The checks are the user's lines, run by the daemon in the run's folder and
   environment, never a hook of the repository: git still runs none.
+- **A repository's commit checks run before its commits**: with `commit_checks` on the
+  repository (`docs/projects.md`, "Commit checks"), each `git commit` the line runs in it, at any
+  of its layers and through the user's alias, first runs its `pre-commit` lines in the
+  repository's folder, then its `commit-msg` lines on the commit's message (`{message_file}`); a
+  check that fails or cannot run refuses the run before git does, naming the check, how it ended
+  and the end of its output, masked. `--no-verify` (`-n`) on such a commit is refused: the checks
+  are the user's to skip, not the agent's. The hooks of the repository are never run.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
   the gate read and let through goes out. A harmless command (a task, a test run)
   cannot push from a script the gate never read. A push from a workspace is also refused, before

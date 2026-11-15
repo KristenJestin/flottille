@@ -159,7 +159,9 @@ or the judge let through goes out, so a script cannot push behind the gate (`doc
 **No hook.** Every line an agent runs gets `core.hooksPath=/dev/null`, given through
 `GIT_CONFIG_COUNT` in its environment so that the agent's line is unchanged: the hooks are files of
 the repository or of its configured hooks folder, which the agent writes. The repository's own
-hooks (a commit message check) do not run for an agent's commits.
+hooks (a commit message check) do not run for an agent's commits. What they check comes back as
+the repository's **commit checks**, the user's own lines, run before the agent's `git commit`
+without a shell (`docs/projects.md`, "Commit checks"); the hooks are only read to propose them.
 
 **Where the remote leads.** A workspace records, at its creation, the URLs its repositories'
 remotes lead to (fetch and push, `insteadOf` applied, credentials taken out: the `urls` of each

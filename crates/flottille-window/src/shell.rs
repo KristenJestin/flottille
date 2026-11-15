@@ -1286,6 +1286,20 @@ impl Shell {
                     section.update(cx, |section, cx| section.answered(saved, window, cx));
                 }
             }
+            Outcome::CommitChecks {
+                project,
+                read,
+                saved,
+            } => {
+                let section = self
+                    .project_settings
+                    .clone()
+                    .filter(|page| page.read(cx).name() == project)
+                    .map(|page| page.read(cx).commit_checks().clone());
+                if let Some(section) = section {
+                    section.update(cx, |section, cx| section.answered(read, saved, window, cx));
+                }
+            }
             Outcome::MessageChecks { project, saved } => {
                 let section = self
                     .project_settings

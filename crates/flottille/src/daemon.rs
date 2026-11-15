@@ -645,6 +645,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 "project.programs",
                 "project.set_settings",
                 "project.ticket",
+                "project.commit_checks",
+                "project.set_commit_checks",
                 "project.progress",
                 "task.run",
             ]
@@ -689,6 +691,11 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     projects::set_settings(daemon, request.params).await
                 } else if request.method == "project.ticket" {
                     tickets::preview(daemon, request.params).await
+                } else if request.method == "project.commit_checks" {
+                    // It reads files of the repositories, which may be slow to read.
+                    projects::commit_checks(&daemon, request.params)
+                } else if request.method == "project.set_commit_checks" {
+                    projects::set_commit_checks(&daemon, request.params)
                 } else if request.method == "project.progress" {
                     tickets::progress::call(daemon, request.params).await
                 } else if request.method == "task.run" {

@@ -265,6 +265,15 @@ pub enum Command {
         key: &'static str,
         value: String,
     },
+    /// Reads each repository's commit checks and what its hooks propose (`project.commit_checks`).
+    ReadCommitChecks(String),
+    /// Writes one repository's commit checks (`project.set_commit_checks`).
+    SaveCommitChecks {
+        project: String,
+        repository: String,
+        pre_commit: Vec<String>,
+        commit_msg: Vec<String>,
+    },
     /// Writes the project's message checks (`project.set_message_checks`).
     SaveMessageChecks {
         project: String,
@@ -856,6 +865,13 @@ pub enum Outcome {
         project: String,
         key: &'static str,
         saved: Result<String, String>,
+    },
+    /// Each repository's commit checks and proposals, read or after the save of `saved`'s
+    /// repository, or why nothing was read or written.
+    CommitChecks {
+        project: String,
+        read: Result<Value, String>,
+        saved: Option<String>,
     },
     /// The project's message checks as saved, or why nothing was.
     MessageChecks {
@@ -1736,6 +1752,36 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             .map(|saved| saved[key].as_str().unwrap_or_default().to_owned()),
             project,
             key,
+        },
+        Command::ReadCommitChecks(project) => Outcome::CommitChecks {
+            read: answer(ask_alone(
+                connect,
+                "project.commit_checks",
+                json!({"name": project}),
+                bounds.quick,
+            )),
+            project,
+            saved: None,
+        },
+        Command::SaveCommitChecks {
+            project,
+            repository,
+            pre_commit,
+            commit_msg,
+        } => Outcome::CommitChecks {
+            read: answer(ask_alone(
+                connect,
+                "project.set_commit_checks",
+                json!({
+                    "name": project,
+                    "repository": repository,
+                    "pre_commit": pre_commit,
+                    "commit_msg": commit_msg,
+                }),
+                bounds.quick,
+            )),
+            project,
+            saved: Some(repository),
         },
         Command::SaveMessageChecks { project, checks } => Outcome::MessageChecks {
             saved: answer(ask_alone(

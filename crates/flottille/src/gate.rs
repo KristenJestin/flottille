@@ -2909,25 +2909,63 @@ pub fn pushes(words: &[String]) -> bool {
     })
 }
 
-/// Each git command a line runs, at any of its layers: its words from `git` on, for the
-/// project's message checks (`crate::message_checks`).
-pub fn gits(words: &[String]) -> Vec<Vec<String>> {
+/// A git command a line runs (`gits`).
+#[derive(Debug, PartialEq)]
+pub struct Git {
+    /// Its words from `git` on.
+    pub words: Vec<String>,
+    /// The folder it works in: the run's, moved by the wrappers around it (`env -C`) and its own
+    /// `-C`, as the gate reads them, every link and `..` followed.
+    pub folder: PathBuf,
+    /// A variable a wrapper around it sets that points git at another repository (`GIT_DIR`,
+    /// `GIT_WORK_TREE`).
+    pub elsewhere: Option<String>,
+}
+
+/// The variables that point git at a repository other than its folder's.
+const GIT_ELSEWHERE: [&str; 2] = ["GIT_DIR", "GIT_WORK_TREE"];
+
+/// Each git command a line run in `from` runs, at any of its layers, for the project's message
+/// checks and the repositories' commit checks (`crate::message_checks`, `crate::commit_checks`).
+pub fn gits(place: &place::Place, from: &Path, words: &[String]) -> Vec<Git> {
     let Ok(layers) = lines(words) else {
         return Vec::new();
     };
-    let mut found = Vec::new();
-    for layer in &layers {
+    let starts = folders(place, &place.at(from), &layers);
+    let mut found: Vec<Git> = Vec::new();
+    let mut elsewhere: Option<String> = None;
+    for (layer, start) in layers.iter().zip(&starts) {
         for (_, suffix) in suffixes(layer) {
             let args = &suffix[1..];
-            // A wrapper's layer and the layer it runs say the same command.
-            if base(&suffix[0]) == "git"
-                && args.get(git_globals(args).0).is_some()
-                && !found
-                    .iter()
-                    .any(|seen: &Vec<String>| seen.as_slice() == suffix)
-            {
-                found.push(suffix.to_vec());
+            if base(&suffix[0]) != "git" || args.get(git_globals(args).0).is_none() {
+                continue;
             }
+            let git = Git {
+                words: suffix.to_vec(),
+                folder: moved(place, start, suffix).path,
+                elsewhere: elsewhere.clone(),
+            };
+            // A wrapper's layer and the layer it runs say the same command: the inner one knows
+            // where it runs.
+            match found.iter_mut().find(|seen| seen.words == git.words) {
+                Some(seen) => *seen = git,
+                None => found.push(git),
+            }
+        }
+        // What a wrapper sets before the program it runs holds for the layers after it.
+        if let Ok(Some(inner)) = inner(layer) {
+            let before = &layer[..layer.len().saturating_sub(inner.len())];
+            let before = if before.is_empty() {
+                &layer[..]
+            } else {
+                before
+            };
+            elsewhere = elsewhere.or_else(|| {
+                before.iter().find_map(|word| {
+                    let (name, _) = word.split_once('=')?;
+                    GIT_ELSEWHERE.contains(&name).then(|| name.to_owned())
+                })
+            });
         }
     }
     found
