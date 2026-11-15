@@ -26,7 +26,9 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::{Command, RunAct, RunAnswer, RunFrom};
-use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line, stack};
+use crate::commands::{
+    boxed, line_field, menu_of, perform_later, problem_line, section_blocks, stack,
+};
 use crate::project::{only_at_root, repository_label};
 use crate::runs::{CommandList, CommandOutput, CommandPanel, CommandRow, Watch};
 use crate::shell::Shell;
@@ -1323,7 +1325,10 @@ impl Render for TasksSection {
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.open(None, window, cx))),
             )
-            .child(
+            .child(section_blocks(
+                "tasks-blocks",
+                count > 0 || empty || self.problem.is_some(),
+                space::MD,
                 stack(space::MD)
                     .child(presence("task-list-block", count > 0, list).space(space::MD))
                     .child(
@@ -1346,7 +1351,7 @@ impl Render for TasksSection {
                         space::MD,
                         cx,
                     )),
-            );
+            ));
         div()
             .text_color(p.text)
             .child(section)

@@ -112,9 +112,25 @@ pub(crate) fn problem_line(
 /// A column whose children each hold the space above them themselves: a block with
 /// `.space(gap)`, a child that is always there through [`spaced`]. It is pulled up by `gap`, so
 /// its first child lands where the column's own parent put it (a `Section`'s gap under its
-/// header) and a column of blocks that are all folded takes no room.
+/// header). A column of blocks that are all folded is not nothing: it still takes its slot (the
+/// parent's gap above it, and its pull is not counted in the parent's height); a `Section`'s
+/// column is drawn through [`section_blocks`] for that.
 pub(crate) fn stack(gap: Pixels) -> gpui_kit::Div {
     div().flex().flex_col().mt(-gap)
+}
+
+/// The [`stack`] of blocks under the header of a `Section`, which is drawn while `open` (while one
+/// of its blocks is shown) and folds away with the last: a `Section` puts its own gap above each
+/// child, so a column of blocks that are all folded would leave that gap under the header. It
+/// is the one block of the window that keeps the gap of its parent (`.gap(..)`), because the
+/// kit's `Section` is the parent, and keeps its gap.
+pub(crate) fn section_blocks(
+    id: &'static str,
+    open: bool,
+    gap: Pixels,
+    blocks: gpui_kit::Div,
+) -> impl IntoElement {
+    presence(id, open, blocks).gap(gap)
 }
 
 /// A child that is always there, in a [`stack`] of the same `gap`.
@@ -787,7 +803,10 @@ impl Render for CommandsSection {
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, _, cx| this.add(cx))),
             )
-            .child(
+            .child(section_blocks(
+                "commands-blocks",
+                count > 0 || empty || !self.found_rows.is_empty() || self.problem.is_some(),
+                space::MD,
                 stack(space::MD)
                     .child(presence("command-list-block", count > 0, list).space(space::MD))
                     .child(
@@ -810,7 +829,7 @@ impl Render for CommandsSection {
                         space::MD,
                         cx,
                     )),
-            );
+            ));
         div()
             .text_color(p.text)
             .child(section)

@@ -1273,7 +1273,12 @@ impl ProjectItems {
             .space(LINE_GAP)
             .into_any_element(),
         );
-        let facts = stack(LINE_GAP).children(facts);
+        // In a column of its own: a flex container is never below zero, so that no fact shown
+        // leaves the pull of the stack (`-LINE_GAP`) out of the body's height.
+        let facts = div()
+            .flex()
+            .flex_col()
+            .child(stack(LINE_GAP).children(facts));
         let quiet = |said: &'static str| {
             div()
                 .id("item-detail-description")

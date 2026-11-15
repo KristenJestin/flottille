@@ -26,7 +26,9 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line, stack};
+use crate::commands::{
+    boxed, line_field, menu_of, perform_later, problem_line, section_blocks, stack,
+};
 use crate::runs::{CommandOutput, CommandPanel, address_link, ready_mark};
 use crate::shell::Shell;
 use crate::tasks::{
@@ -1161,7 +1163,10 @@ impl Render for ServicesPage {
                 "The programs every project shares: a database, a cache, an API. Each runs once \
                  for the whole machine; a task that needs one starts it first.",
             )
-            .child(
+            .child(section_blocks(
+                "services-blocks",
+                count > 0 || empty || self.problem.is_some(),
+                space::MD,
                 stack(space::MD)
                     .child(presence("service-list-block", count > 0, list).space(space::MD))
                     .child(
@@ -1184,7 +1189,7 @@ impl Render for ServicesPage {
                         space::MD,
                         cx,
                     )),
-            );
+            ));
         let pad = if self.narrow { space::LG } else { space::XXL };
         let key = |part: &str| ElementId::Name(format!("enter-services-{part}").into());
         let column = div()

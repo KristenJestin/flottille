@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 use super::{Registry, Then as Asked};
 use crate::actions::Command;
-use crate::commands::{menu_of, perform_later, spaced, stack};
+use crate::commands::{menu_of, perform_later, section_blocks, spaced, stack};
 use crate::project_settings::{field_frame, styled_input};
 use crate::shell::{Selection, Shell};
 
@@ -2582,10 +2582,13 @@ impl Render for SpecPage {
                 })
                 .collect();
             let count = rows.len();
-            Section::new("spec-sessions", "Sessions")
+            let section = Section::new("spec-sessions", "Sessions")
                 .count(count.to_string())
                 .sentence("The sessions that worked on the spec; each opens its conversation.")
-                .child(
+                .child(section_blocks(
+                    "spec-sessions-blocks",
+                    count > 0,
+                    space::MD,
                     stack(space::MD).child(
                         presence(
                             "spec-sessions-block",
@@ -2594,7 +2597,9 @@ impl Render for SpecPage {
                         )
                         .space(space::MD),
                     ),
-                )
+                ));
+            // Its own box, which the tests measure: the section's root is not an element they find.
+            div().id("spec-sessions-box").child(section).test_support()
         };
         let overwrite_confirm = Confirm::new(
             "spec-ticket-confirm",

@@ -26,7 +26,9 @@ use gpui_kit::{
 use serde_json::{Map, Value, json};
 
 use crate::actions::Command;
-use crate::commands::{boxed, line_field, perform_later, problem_line, spaced, stack};
+use crate::commands::{
+    boxed, line_field, perform_later, problem_line, section_blocks, spaced, stack,
+};
 use crate::shell::Shell;
 use crate::vault::{VaultEntry, VaultSection};
 
@@ -3128,7 +3130,10 @@ impl Render for ConnectionsSection {
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
             )
-            .child(
+            .child(section_blocks(
+                "connection-blocks",
+                count > 0 || empty || self.problem.is_some(),
+                space::MD,
                 stack(space::MD)
                     .child(presence("connection-list-block", count > 0, list).space(space::MD))
                     .child(
@@ -3145,7 +3150,7 @@ impl Render for ConnectionsSection {
                         space::MD,
                         cx,
                     )),
-            );
+            ));
         div()
             .text_color(p.text)
             .child(section)

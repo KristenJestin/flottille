@@ -32,7 +32,9 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::{CommandsSection, boxed, menu_of, problem_line, spaced, stack};
+use crate::commands::{
+    CommandsSection, boxed, menu_of, problem_line, section_blocks, spaced, stack,
+};
 use crate::conventions::{Convention, Kind};
 use crate::message_checks::MessageChecks;
 use crate::programs::{ProgramChecks, ProgramState, ProgramValue, program_block};
@@ -1691,6 +1693,9 @@ impl ProjectSettingsPage {
             let paths: Vec<_> = read.listed.iter().map(|info| info.path.clone()).collect();
             only_at_root(&paths)
         });
+        let none = read
+            .as_ref()
+            .is_some_and(|read| read.listed.is_empty() && read.new.is_empty());
         let section = Section::new("repositories", "Repositories")
             .when(!alone, |section| section.count(count.to_string()))
             .sentence(if alone {
@@ -1698,7 +1703,10 @@ impl ProjectSettingsPage {
             } else {
                 "The git repositories of the project. Each workspace gets its own copy of each."
             })
-            .child(
+            .child(section_blocks(
+                "repositories-blocks",
+                !self.repository_rows.is_empty() || none || problem.is_some(),
+                space::MD,
                 stack(space::MD)
                     .child(
                         presence(
@@ -1711,8 +1719,7 @@ impl ProjectSettingsPage {
                     .child(
                         presence(
                             "no-repositories-block",
-                            read.as_ref()
-                                .is_some_and(|read| read.listed.is_empty() && read.new.is_empty()),
+                            none,
                             EmptyLine::new(
                                 "no-repositories",
                                 Icon::Repository,
@@ -1723,7 +1730,7 @@ impl ProjectSettingsPage {
                         .space(space::MD),
                     )
                     .child(problem_line("repositories-problem", problem, space::MD, cx)),
-            );
+            ));
         // Adding a second repository (or removing the last other) changes the section's words:
         // it fades back in rather than swapping them at once.
         changing(

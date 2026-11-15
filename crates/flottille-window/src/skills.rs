@@ -25,7 +25,9 @@ use gpui_kit::{
 
 use crate::actions::{ClaudeKind, Command, SkillWrite};
 use crate::claude::{Found, found_block};
-use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line, stack};
+use crate::commands::{
+    boxed, line_field, menu_of, perform_later, problem_line, section_blocks, stack,
+};
 use crate::shell::Shell;
 
 /// How many entries of a folder the picker lists.
@@ -923,7 +925,10 @@ impl Render for SkillsSection {
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
             )
-            .child(
+            .child(section_blocks(
+                "skills-blocks",
+                count > 0 || empty || !self.found_rows.is_empty() || self.problem.is_some(),
+                space::MD,
                 stack(space::MD)
                     .child(presence("skill-list-block", count > 0, list).space(space::MD))
                     .child(
@@ -946,7 +951,7 @@ impl Render for SkillsSection {
                         space::MD,
                         cx,
                     )),
-            );
+            ));
         div()
             .text_color(p.text)
             .child(section)
