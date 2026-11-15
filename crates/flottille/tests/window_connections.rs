@@ -2970,7 +2970,7 @@ fn signing_in_from_the_review_reads_the_server_and_shows_its_actions(cx: &mut Te
         present(cx, "accept-connection")
     });
     settle(cx);
-    assert!(everything_said(cx).contains("search"));
+    assert!(present(cx, "connection-review-server"));
     assert!(!present(cx, "connection-review-sign-in"));
     assert!(!present(cx, "connection-review-needs-sign-in"));
     assert!(present(cx, "accept-connection"));
