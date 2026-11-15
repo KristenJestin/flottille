@@ -5695,9 +5695,19 @@ fn an_entry_whose_host_is_no_usable_site_is_refused() {
 fn user_with_display() -> User {
     let user = User::with_fake_agent()
         .with_env("WAYLAND_DISPLAY", "wayland-test")
-        .with_env("DISPLAY", ":7");
+        .with_env("DISPLAY", ":7")
+        .with_env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus");
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     user
+}
+
+/// The session's Wayland socket, in the user's real runtime folder, with a session bus socket and
+/// the like beside it: what the browser must not reach but the socket.
+fn wayland_socket(user: &User) -> std::os::unix::net::UnixListener {
+    let runtime = user.path("runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::write(runtime.join("bus"), "").unwrap();
+    std::os::unix::net::UnixListener::bind(runtime.join("wayland-test")).unwrap()
 }
 
 /// The display variables the server of `name` got when it last started.
@@ -5708,6 +5718,7 @@ fn display_of(user: &User, name: &str) -> Value {
 #[test]
 fn a_shown_browser_gets_the_display_variables() {
     let user = user_with_display();
+    let _wayland = wayland_socket(&user);
     browser_declared(
         &user,
         &agent_browser("0.43.0"),
@@ -5715,13 +5726,16 @@ fn a_shown_browser_gets_the_display_variables() {
         &[],
         json!({"headed": true}),
     );
-    // Its review starts the server: the daemon's own display, and the file says headed.
+    // Its review starts the server: the session's display through a folder of its own, and the
+    // file says headed.
     user.call("connection.review", json!({"name": "browser"}))
         .unwrap();
+    let folder = user.path("runtime/flottille/display/browser");
     assert_eq!(
         display_of(&user, "browser"),
-        json!({"WAYLAND_DISPLAY": "wayland-test", "DISPLAY": ":7",
-            "XDG_RUNTIME_DIR": user.path("runtime").to_str().unwrap()})
+        json!({"WAYLAND_DISPLAY": "wayland-test", "DISPLAY": null,
+            "XDG_RUNTIME_DIR": folder.to_str().unwrap(),
+            "DBUS_SESSION_BUS_ADDRESS": null, "runtime_files": ["wayland-test"]})
     );
     let started = logged(&user, "browser", "start");
     assert_eq!(started.last().unwrap()["config"]["headed"], json!(true));
@@ -5740,10 +5754,10 @@ fn a_hidden_browser_gets_none() {
     browser(&user, &agent_browser("0.43.0"), json!({"fail": true}));
     user.call("connection.review", json!({"name": "browser"}))
         .unwrap();
-    assert_eq!(
-        display_of(&user, "browser"),
-        json!({"WAYLAND_DISPLAY": null, "DISPLAY": null, "XDG_RUNTIME_DIR": null})
-    );
+    let seen = display_of(&user, "browser");
+    for variable in ["WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR"] {
+        assert_eq!(seen[variable], Value::Null, "{variable}: {seen}");
+    }
     let started = logged(&user, "browser", "start");
     assert_eq!(started.last().unwrap()["config"].get("headed"), None);
     assert_eq!(connection(&user, "browser")["headed"], Value::Null);
@@ -5752,6 +5766,7 @@ fn a_hidden_browser_gets_none() {
 #[test]
 fn showing_the_browser_restarts_its_server() {
     let user = user_with_display();
+    let _wayland = wayland_socket(&user);
     browser(&user, &agent_browser("0.43.0"), json!({}));
     let (_, mcp) = signed_up(&user);
     user.call(
@@ -5780,7 +5795,10 @@ fn showing_the_browser_restarts_its_server() {
         "conn_browser",
         json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
     ));
-    assert_eq!(display_of(&user, "browser")["DISPLAY"], ":7");
+    assert_eq!(
+        display_of(&user, "browser")["WAYLAND_DISPLAY"],
+        "wayland-test"
+    );
     assert_eq!(
         logged(&user, "browser", "start").last().unwrap()["config"]["headed"],
         json!(true)
@@ -5800,4 +5818,73 @@ fn showing_the_browser_restarts_its_server() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(connection(&user, "browser")["headed"], json!(true));
+}
+
+#[test]
+fn a_shown_browser_gets_the_display_socket_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"headed": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let folder = user.path("runtime/flottille/display/browser");
+    let seen = display_of(&user, "browser");
+    // Its own runtime folder, not the user's: the Wayland socket is all it holds, with no session
+    // bus, and no X11 beside a Wayland session.
+    assert_eq!(seen["XDG_RUNTIME_DIR"], folder.to_str().unwrap(), "{seen}");
+    assert_eq!(seen["runtime_files"], json!(["wayland-test"]), "{seen}");
+    assert_eq!(seen["DBUS_SESSION_BUS_ADDRESS"], Value::Null, "{seen}");
+    assert_eq!(seen["DISPLAY"], Value::Null, "{seen}");
+    assert_eq!(
+        std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    // Removed when the server stops.
+    let pid = logged(&user, "browser", "start").last().unwrap()["pid"]
+        .as_u64()
+        .unwrap();
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "enabled": false}),
+    )
+    .unwrap();
+    eventually("the server stops", || !pid_alive(pid));
+    eventually("its folder is removed", || !folder.exists());
+}
+
+#[test]
+fn a_shown_browser_runs_headless_when_the_socket_cannot_be_shared() {
+    // The daemon's session names a socket that is not there: never the real folder instead.
+    let user = user_with_display();
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"fail": true}),
+        &[],
+        json!({"headed": true}),
+    );
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let started = logged(&user, "browser", "start");
+    let seen = &started.last().unwrap()["display"];
+    assert_eq!(seen["XDG_RUNTIME_DIR"], Value::Null, "{seen}");
+    assert_eq!(seen["WAYLAND_DISPLAY"], Value::Null, "{seen}");
+    assert_eq!(started.last().unwrap()["config"].get("headed"), None);
+    assert!(!user.path("runtime/flottille/display/browser").exists());
 }

@@ -141,13 +141,21 @@ fn main() {
     write_log(
         &log,
         json!({"event": "start", "pid": std::process::id(),
-            "pgid": fields.get(2).and_then(|f| f.parse::<u32>().ok()),
-            "sid": fields.get(3).and_then(|f| f.parse::<u32>().ok()),
-            "cwd": std::env::current_dir().ok(), "args": args, "child": child,
-            "config": loaded_config(&args),
-            "display": {"WAYLAND_DISPLAY": std::env::var("WAYLAND_DISPLAY").ok(),
-                "DISPLAY": std::env::var("DISPLAY").ok(),
-                "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok()}}),
+        "pgid": fields.get(2).and_then(|f| f.parse::<u32>().ok()),
+        "sid": fields.get(3).and_then(|f| f.parse::<u32>().ok()),
+        "cwd": std::env::current_dir().ok(), "args": args, "child": child,
+        "config": loaded_config(&args),
+        "display": {"WAYLAND_DISPLAY": std::env::var("WAYLAND_DISPLAY").ok(),
+            "DISPLAY": std::env::var("DISPLAY").ok(),
+            "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok(),
+            "DBUS_SESSION_BUS_ADDRESS": std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
+            // What the runtime folder held when the server started.
+            "runtime_files": std::env::var("XDG_RUNTIME_DIR").ok().and_then(|dir| {
+                let mut names: Vec<String> = std::fs::read_dir(dir).ok()?
+                    .filter_map(|e| e.ok()?.file_name().into_string().ok()).collect();
+                names.sort();
+                Some(names)
+            })}}),
     );
     if let Some(line) = script["stderr"].as_str() {
         eprintln!("{line}");

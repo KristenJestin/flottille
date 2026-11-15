@@ -160,6 +160,9 @@ pub struct Declaration {
     /// Hosts the user adds to the sites an adapter keeps the browser to, beside those of the
     /// vault entries: a single sign-on's, which a sign-in goes through.
     pub sites: Vec<String>,
+    /// Whether an adapter's browser is shown: its server also gets the daemon's display
+    /// variables, and the adapter writes `headed` in the configuration it writes.
+    pub headed: bool,
 }
 
 /// How the daemon reaches the server.
@@ -183,6 +186,7 @@ const KEYS: &[&str] = &[
     "except",
     "client_id",
     "sites",
+    "headed",
 ];
 
 impl Declaration {
@@ -350,6 +354,12 @@ impl Declaration {
                  in lower case, with no scheme, port, path, comma, wildcard or space"
             ));
         }
+        let headed = match table.get("headed") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| format!("{at}.headed: must be true or false"))?,
+        };
         Ok(Declaration {
             name,
             about,
@@ -361,6 +371,7 @@ impl Declaration {
             except,
             client_id,
             sites,
+            headed,
         })
     }
 
@@ -396,11 +407,14 @@ impl Declaration {
         if !self.sites.is_empty() {
             table["sites"] = json!(self.sites);
         }
+        if self.headed {
+            table["headed"] = json!(true);
+        }
         table
     }
 
     /// What trust is given to: how the server is reached, what it is given, the limits, and the
-    /// hosts an adapter adds to the browser's sites. An edit of any of them is another server as
+    /// hosts an adapter adds to the browser's sites, and whether it is shown. An edit of any of them is another server as
     /// far as trust goes; the sentence, the switch and the projects left out are not.
     fn digest(&self) -> String {
         let reach = match &self.reach {
@@ -413,6 +427,10 @@ impl Declaration {
         // they existed, stays the one it was pinned for.
         if !self.sites.is_empty() {
             trusted["sites"] = json!(self.sites);
+        }
+        // As the sites: a connection that is not shown keeps the digest it was pinned for.
+        if self.headed {
+            trusted["headed"] = json!(true);
         }
         crate::files::sha256(trusted.to_string().as_bytes())
     }
@@ -2033,7 +2051,7 @@ fn adapter_said(
             }
             json!({"name": adapter.server, "range": adapter.range, "applies": true,
                 "actions": adapter.actions.iter().map(|own| own.name).collect::<Vec<_>>(),
-                "changed": adapter.changed(config, sites), "said": said})
+                "changed": adapter.changed(config, sites, declaration.headed), "said": said})
         }
         adapters::Found::OtherVersion(adapter) => json!({"name": adapter.server,
         "range": adapter.range, "applies": false,

@@ -186,6 +186,8 @@ struct Running {
     expires_at: Option<u64>,
     /// Set when one of its answers was cut for its size.
     cut: Cut,
+    /// The runtime folder of its shown browser, removed when it stops.
+    _display: Option<crate::display::Folder>,
 }
 
 impl Running {
@@ -461,6 +463,8 @@ async fn start_with(
         start,
     };
     let mut expires_at = None;
+    // The browser's display folder, removed when the server is dropped.
+    let mut display = None;
     let cut = Cut::default();
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
@@ -470,11 +474,15 @@ async fn start_with(
             let options = match adapter {
                 Some(adapter) => {
                     let sites = super::adapters::kept_to(daemon, adapter, declaration);
-                    super::adapters::start_options(&folder, &sites)?
+                    display = super::adapters::shown(daemon, declaration, &declaration.name);
+                    super::adapters::start_options(&folder, &sites, display.is_some())?
                 }
                 None => Vec::new(),
             };
             let mut env = crate::runs::beside(daemon)?;
+            if adapter.is_some() {
+                super::adapters::display(&mut env, display.as_ref());
+            }
             // Every value it was given, masked in what it says whatever its variable is named.
             let mut given = Vec::new();
             for (name, secret) in secrets(daemon, &declaration.name, &declaration.env).await? {
@@ -623,6 +631,7 @@ async fn start_with(
                 start,
                 expires_at,
                 cut: cut.clone(),
+                _display: display.map(|shown| shown.folder),
             })
             .await;
             return Err(why);
@@ -651,6 +660,7 @@ async fn start_with(
         start,
         expires_at,
         cut,
+        _display: display.map(|shown| shown.folder),
     })
 }
 

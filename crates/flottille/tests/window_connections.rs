@@ -2888,3 +2888,39 @@ fn the_window_opens_only_an_https_or_a_local_http_address_to_sign_in(cx: &mut Te
     }
     assert_eq!(opened.lock().unwrap().len(), 5);
 }
+
+#[gpui_kit::test]
+fn the_form_shows_the_browser_when_its_toggle_is_on(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    agent_browser(&user, &["agent_browser_click"], false);
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    // A labelled toggle, off by default.
+    assert_eq!(
+        label(cx, "connection-headed-label").as_deref(),
+        Some("Show the browser")
+    );
+    assert_eq!(connection(&user, "browser").unwrap()["headed"], Value::Null);
+    click(cx, "connection-headed");
+    settle(cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(connection(&user, "browser").unwrap()["headed"], json!(true));
+    // Open again: it is on, and saving another field keeps it.
+    click(cx, "connection-more-browser");
+    click(cx, "edit-connection-browser");
+    until(&shell, cx, "the form opens on it", |cx| {
+        visible(cx, "connection-modal")
+    });
+    settle(cx);
+    let fields = section(&shell, cx).read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.about, "The browser of the user.", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(connection(&user, "browser").unwrap()["headed"], json!(true));
+}

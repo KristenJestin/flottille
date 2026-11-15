@@ -261,8 +261,8 @@ impl Adapter {
     }
 
     /// What it changes, a sentence each, as the review says it; `sites` are those the browser is
-    /// kept to (`sites`).
-    pub fn changed(&self, config: &Path, sites: &[String]) -> Vec<String> {
+    /// kept to (`sites`), and `headed` says whether it is shown.
+    pub fn changed(&self, config: &Path, sites: &[String], headed: bool) -> Vec<String> {
         let mut said = vec![format!(
             "its actions outside these {}, which cannot reach a secret typed into a page, are off \
              at the first review, and login is refused while one of them is on, an action it \
@@ -305,6 +305,15 @@ impl Adapter {
                 sites.join(", ")
             ),
         });
+        if headed {
+            said.push(
+                "its browser is shown on the screen: the server gets the session's display \
+                 (WAYLAND_DISPLAY, or DISPLAY without Wayland) in a runtime folder of its own \
+                 holding the Wayland socket alone, never the user's, and the configuration sets \
+                 headed"
+                    .to_owned(),
+            );
+        }
         said
     }
 
@@ -585,7 +594,7 @@ pub fn kept_to(daemon: &Daemon, adapter: &Adapter, declaration: &Declaration) ->
 /// file (a flag after `mcp` is not theirs), they refuse an agent's own `allowedDomains` argument
 /// only when the configuration already sets the list, and a flag that differed from the file
 /// would relaunch the browser. Flottille's own runs pass the same file, so one list serves all.
-pub fn start_options(folder: &Path, sites: &[String]) -> Result<Vec<String>, String> {
+pub fn start_options(folder: &Path, sites: &[String], headed: bool) -> Result<Vec<String>, String> {
     let program = std::env::current_exe()
         .map_err(|error| format!("cannot find Flottille itself: {error}"))?;
     let mut config = json!({"plugins": [{
@@ -597,10 +606,50 @@ pub fn start_options(folder: &Path, sites: &[String]) -> Result<Vec<String>, Str
     if !sites.is_empty() {
         config["allowedDomains"] = json!(sites);
     }
+    if headed {
+        config["headed"] = json!(true);
+    }
     let file = config_file(folder);
     written(&file, config.to_string().as_bytes())
         .map_err(|error| format!("{}: {error}", file.display()))?;
     Ok(vec!["--config".into(), file.display().to_string()])
+}
+
+/// The display of the browser of `declaration` when the user shows it: a runtime folder of its
+/// own holding the session's Wayland socket alone (`display.rs`), kept while the `owner` that
+/// uses it runs. When it cannot be made the browser runs headless and the daemon says why: never
+/// with the user's real runtime folder.
+pub fn shown(
+    daemon: &Daemon,
+    declaration: &Declaration,
+    owner: &str,
+) -> Option<crate::display::Shown> {
+    if !declaration.headed {
+        return None;
+    }
+    match crate::display::share(&daemon.paths, owner) {
+        Ok(shown) => Some(shown),
+        Err(why) => {
+            eprintln!(
+                "flottille daemon: connection {}: its browser is not shown, it runs headless: \
+                 {why}",
+                declaration.name
+            );
+            None
+        }
+    }
+}
+
+/// The browser's environment: no display of the daemon's own, and the folder's variables when it
+/// is shown, without the session bus (the keyring).
+pub fn display(env: &mut BTreeMap<OsString, OsString>, shown: Option<&crate::display::Shown>) {
+    for name in ["WAYLAND_DISPLAY", "DISPLAY"] {
+        env.remove(&OsString::from(name));
+    }
+    if let Some(shown) = shown {
+        env.remove(&OsString::from("DBUS_SESSION_BUS_ADDRESS"));
+        env.extend(shown.env.clone());
+    }
 }
 
 /// `bytes` in `file`, the user's alone, written whole or not at all. Each write has a temporary
@@ -804,7 +853,9 @@ async fn run(
     let folder = folder(daemon, &declaration.name);
     flottille_core::paths::ensure_private_dir(&folder).map_err(|error| error.to_string())?;
     let sites = sites(daemon, declaration);
-    let options = start_options(&folder, &sites)?;
+    // Its own folder: the server's, when it runs, stays where it is.
+    let shown = shown(daemon, declaration, &format!("{}-login", declaration.name));
+    let options = start_options(&folder, &sites, shown.is_some())?;
     let token = super::oauth::random(32)?;
     let socket = socket_file(&folder);
     // Left by a login that was killed: the folder is the user's alone (0700) and a connection runs
@@ -814,6 +865,7 @@ async fn run(
     let _gone = Removed(socket.clone());
     // The same environment and folder as the server: the same browser session and namespace.
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
+    display(&mut env, shown.as_ref());
     for (variable, secret) in
         super::client::secrets(daemon, &declaration.name, &declaration.env).await?
     {
