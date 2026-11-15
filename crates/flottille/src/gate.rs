@@ -817,8 +817,8 @@ pub const FORGE_ACTIONS: &str = "list, show, people, subscribe, unsubscribe, cre
      step";
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, people, types, link_types, sprints, milestones, subscribe, unsubscribe, \
-     create, comment, edit, close, reopen, status, link, unlink, comment_edit, comment_delete, \
-     milestone_create, milestone_edit, log_time and time_spent";
+     create, comment, reply, edit, close, reopen, status, link, unlink, comment_edit, \
+     comment_delete, milestone_create, milestone_edit, log_time and time_spent";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
@@ -877,6 +877,13 @@ fn tickets(call: &Call) -> Verdict {
             shown("comment"),
             shown("ticket")
         ),
+        // Whom it answers, and its words in full, as a comment shows them.
+        "reply" => format!(
+            "it replies to the comment {} of {} on the tracker, its text: {}",
+            shown("comment"),
+            shown("ticket"),
+            shown("body")
+        ),
         "create" => "it opens a ticket on the tracker".into(),
         "milestone_create" => "it creates a milestone on the tracker".into(),
         "milestone_edit" => {
@@ -899,7 +906,7 @@ fn tickets(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" | "comment_edit" | "log_time" => &["title"],
+        "comment" | "reply" | "comment_edit" | "log_time" => &["title"],
         "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" => &["title", "body"],
         // A milestone's text is its description.
         "milestone_create" | "milestone_edit" => &["body"],
@@ -5527,6 +5534,7 @@ mod tests {
             "unlink",
             "comment_edit",
             "comment_delete",
+            "reply",
         ] {
             let verdict = fixture.judge(
                 "tickets",
@@ -5713,6 +5721,42 @@ mod tests {
             Some(&fixture.never),
         );
         assert!(!reasons(&masked).contains(token), "{masked:?}");
+    }
+
+    #[test]
+    fn a_reply_is_judged_as_a_comment() {
+        let fixture = Fixture::main();
+        let comment = fixture.judge(
+            "tickets",
+            json!({"action": "comment", "ticket": "ABC-1", "body": "Fixed"}),
+            Some(&fixture.never),
+        );
+        let reply = fixture.judge(
+            "tickets",
+            json!({"action": "reply", "ticket": "ABC-1", "comment": "10100", "body": "Fixed"}),
+            Some(&fixture.never),
+        );
+        // The same class as a comment: no new rule, only a card that says whom it answers.
+        assert!(to_judge(&comment) && to_judge(&reply), "{reply:?}");
+        assert_eq!(
+            reasons(&reply),
+            "it replies to the comment 10100 of ABC-1 on the tracker, its text: Fixed"
+        );
+        // A secret in the text is shown masked, and a title, which no comment has, is refused.
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let masked = fixture.judge(
+            "tickets",
+            json!({"action": "reply", "ticket": "ABC-1", "comment": "10100",
+                "body": format!("key {token}")}),
+            Some(&fixture.never),
+        );
+        assert!(!reasons(&masked).contains(token), "{masked:?}");
+        let titled = fixture.judge(
+            "tickets",
+            json!({"action": "reply", "ticket": "ABC-1", "comment": "10100", "title": "x"}),
+            Some(&fixture.never),
+        );
+        assert!(denied(&titled), "{titled:?}");
     }
 
     #[test]

@@ -88,17 +88,25 @@ pub(super) fn unwritable(project: &Project, action: &str, args: &Value) -> Optio
                 ProjectTracker::Jira { .. } => None,
             }
         }
-        "comment_edit" | "comment_delete" => {
+        "comment_edit" | "comment_delete" | "reply" => {
             if text("ticket").is_none() {
                 return Some(needs("ticket, the ticket the comment is on"));
             }
             if text("comment").is_none() {
-                return Some(needs(
-                    "comment, the id `show` with detail full gives a comment an agent posted",
-                ));
+                return Some(needs(match action {
+                    "reply" => "comment, the id `show` with detail full gives a comment",
+                    _ => "comment, the id `show` with detail full gives a comment an agent posted",
+                }));
             }
-            (action == "comment_edit" && text("body").is_none())
-                .then(|| needs("body, the new text of the comment"))
+            match action {
+                "comment_edit" => text("body")
+                    .is_none()
+                    .then(|| needs("body, the new text of the comment")),
+                "reply" => text("body")
+                    .is_none()
+                    .then(|| needs("body, the text of the reply")),
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -264,6 +272,15 @@ fn unknown_kind(site: &str, kind: &str, types: &[LinkType]) -> String {
 /// Before the user is asked: a Jira link kind the site has none of is refused, naming the ones
 /// it has; a comment an agent did not post, or that is not there, is refused too.
 pub async fn checked(daemon: &Daemon, project: &Project, args: &Value) -> Option<String> {
+    if args["action"].as_str() == Some("reply") {
+        let key = super::accepted(project, args["ticket"].as_str()?).ok()?;
+        return match super::replies::answerable(daemon, project, &key, args["comment"].as_str()?)
+            .await
+        {
+            Err(Outcome::Refused(why)) => Some(why),
+            _ => None,
+        };
+    }
     if let Some("comment_edit" | "comment_delete") = args["action"].as_str() {
         let key = super::accepted(project, args["ticket"].as_str()?).ok()?;
         return match owned(daemon, project, &key, args["comment"].as_str()?).await {
@@ -584,7 +601,7 @@ async fn gh_api_bare(path: &str, method: &str) -> Result<String, String> {
 
 /// The id of a comment as the agent names it: GitHub's `issuecomment-501` (or its number), or
 /// Jira's own.
-fn same_comment(have: Option<&str>, named: &str) -> bool {
+pub(super) fn same_comment(have: Option<&str>, named: &str) -> bool {
     let Some(have) = have else {
         return false;
     };

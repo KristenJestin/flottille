@@ -121,6 +121,10 @@
 //! delete --id N --yes` ends with 0 for a link that is there, 1 otherwise, and keeps the ids
 //! deleted in `unlinked.json`.
 //!
+//! `comment create` takes no `--visibility-role` nor `--visibility-group` (acli's reference gives
+//! them to `comment update` only) and ends with 1 on an unknown flag; its `--body-file` may hold a
+//! document, a mention in it kept as it is.
+//!
 //! `comment update --key K --id I (--body | --body-file | --body-adf)` (the first two plain text,
 //! the last a document, refused when it is none) and `comment delete --key K --id I`
 //! change the comments a `comment create` added, which are numbered from 10100 (`id`, in the
@@ -716,6 +720,18 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 change_post(dir, key, at, None);
             }
             done
+        }
+        // As its reference lists them (#934): `comment create` has no visibility flag, only
+        // `comment update` does, so a comment is created with the project's default visibility.
+        ["jira", "workitem", "comment", "create", rest @ ..]
+            if rest.iter().any(|word| word.starts_with("--visibility-")) =>
+        {
+            let flag = rest
+                .iter()
+                .find(|w| w.starts_with("--visibility-"))
+                .unwrap();
+            eprintln!("Error: unknown flag: {flag}");
+            1
         }
         ["jira", "workitem", "comment", "create", rest @ ..]
             if rest.contains(&"--body") || rest.contains(&"--body-file") =>

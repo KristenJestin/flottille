@@ -1146,7 +1146,9 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
   `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a
   comment, **only one Flottille recorded as posted by an agent** (`show` with `detail full` gives
-  the id of those, `[comment 10100]`). A
+  the id of those, `[comment 10100]`); `show` gives the id of every comment, and `reply {ticket,
+  comment, body}` answers any of them, quoting it, judged like `comment` ([`tickets.md`](tickets.md),
+  "Replies"). A
   link reads `ticket kind other`, so the card the user is shown says its direction in words (`ABC-2
   blocks ABC-1`). `ticket` is required, never the workspace's. On Jira, the kinds are the site's
   own link types, in the outward or the inward wording; on GitHub, `parent of`, `sub-task of`,

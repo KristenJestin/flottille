@@ -448,6 +448,29 @@ ticket itself.
   delete --key <K> --id <id>`; on GitHub, `gh api repos/<owner>/<name>/issues/comments/<id>
   --method PATCH -f body=<text>` and `--method DELETE`. An edit replaces the record of the id with the
   new words, so that the comment stays the agent's and has one record; a delete drops it.
+- **Replies** (#934): `reply {ticket, comment, body}` answers any comment of a ticket, an agent's
+  or a person's, found by the id that `show` with `detail full` prints after the author of
+  **every** comment (`[comment 20000]`, GitHub's `issuecomment-500`); `comment_edit` and
+  `comment_delete` still take an agent's own alone. Neither tracker has threads on a ticket, so a
+  reply is a new comment that says whom it answers and quotes it (the first 500 characters),
+  recorded as an agent's comment like `comment` (one record of its id, read right after the post
+  on Jira). The gate judges it as a comment (one card: the ticket, the comment id and the words),
+  and a comment that is not there is refused before the user is asked, checked again right before
+  the write.
+  - GitHub: `gh issue comment <n> --body` of `> @alice wrote:`, the quoted lines, a blank line and
+    the reply.
+  - Jira: `acli jira workitem comment create --key <K> --body-file <file>` of an ADF document: a
+    paragraph with a **mention** of the author (`{"type": "mention", "attrs": {"id": <account id
+    of the comment's author>, "text": "@Name"}}`, plain text when the read gave no account id)
+    and ` wrote:`, a blockquote of the comment, then the reply, as Jira's own Reply does.
+  - **Visibility**: acli's reference gives `--visibility-role` and `--visibility-group` to
+    `comment update` only; `comment create` uses *the project's default visibility*. So a reply
+    cannot be posted in the visibility of the comment it answers, and a comment whose
+    `visibility` (a role or a group, as Jira's REST gives it) is set is refused, saying so, with
+    nothing written: the quote would otherwise go out to everyone.
+  - Not confirmed against a real site (the fake follows acli's published reference): that
+    `view --json` gives each comment's `author.accountId` and `visibility`, and that `comment
+    create` takes a document with a mention node in `--body-file`.
 **Measured on a real Jira Cloud site**: the shapes of `link type --json`, `link list --json` and
 `view --fields issuelinks` above, `link delete --id <link id> --yes`, and `comment list --key <K>
 --json`, whose comments each carry their `id` (their `body` plain text). The view's comments are

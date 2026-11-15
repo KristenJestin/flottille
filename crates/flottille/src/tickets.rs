@@ -38,6 +38,7 @@ mod links;
 mod milestones;
 mod people;
 pub mod progress;
+mod replies;
 mod sprints;
 mod versions;
 mod worklog;
@@ -124,6 +125,10 @@ pub struct Comment {
     /// A record of its id says an agent posted it: `comment_edit` and `comment_delete` take it.
     /// Words alone never say it, a person may write the same.
     pub own: bool,
+    /// Jira: the account id of its author, for a mention in a reply.
+    pub account: Option<String>,
+    /// Jira: whom a comment is restricted to (a role or a group), when it is.
+    pub restricted: Option<String>,
 }
 
 impl Comment {
@@ -146,6 +151,8 @@ fn comment_of(author: String, at: Option<&str>, id: Option<String>, text: &str) 
         agent,
         id,
         own: false,
+        account: None,
+        restricted: None,
     }
 }
 
@@ -250,11 +257,12 @@ impl Ticket {
                     .at
                     .as_deref()
                     .map_or(String::new(), |at| format!(", {at}"));
-                // The id of a comment an agent posted: what `comment_edit` and `comment_delete` take.
-                let id = match (&comment.id, comment.own) {
-                    (Some(id), true) => format!(" [comment {id}]"),
-                    _ => String::new(),
-                };
+                // The id of every comment: what `reply` takes, and `comment_edit` and
+                // `comment_delete` for one an agent posted.
+                let id = comment
+                    .id
+                    .as_ref()
+                    .map_or(String::new(), |id| format!(" [comment {id}]"));
                 text.push_str(&format!(
                     "- {}{id}{at}: {}\n",
                     comment.by(),
@@ -629,12 +637,15 @@ fn work_item_comments(fields: &Value) -> Vec<Comment> {
         .into_iter()
         .flatten()
         .map(|comment| {
-            comment_of(
+            let mut read = comment_of(
                 said(&comment["author"]["displayName"]),
                 comment["created"].as_str(),
                 comment["id"].as_str().map(str::to_owned),
                 &masked(&attached_text(&comment["body"], fields)),
-            )
+            );
+            read.account = comment["author"]["accountId"].as_str().map(str::to_owned);
+            read.restricted = replies::restriction(&comment["visibility"]);
+            read
         })
         .collect()
 }
@@ -904,7 +915,7 @@ struct TicketsCall {
     other: Option<String>,
     #[serde(rename = "kind")]
     link_kind: Option<String>,
-    /// `comment_edit`, `comment_delete`: the id of a comment an agent posted.
+    /// `reply`: the id of a comment. `comment_edit`, `comment_delete`: one an agent posted.
     comment: Option<String>,
     /// `create` on Jira: the open sprint to put the work item in, by its name or its id, and the
     /// work item it goes under.
@@ -1015,10 +1026,11 @@ fn assignable(who: &str) -> bool {
 }
 
 /// The writes of `tickets`.
-const WRITES: [&str; 13] = [
+const WRITES: [&str; 14] = [
     "log_time",
     "create",
     "comment",
+    "reply",
     "edit",
     "close",
     "reopen",
@@ -1385,8 +1397,8 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
             daemon.kept_searches.drop_all();
             created
         }
-        "comment" | "edit" | "close" | "reopen" | "status" | "link" | "unlink" | "comment_edit"
-        | "comment_delete" | "log_time" => {
+        "comment" | "reply" | "edit" | "close" | "reopen" | "status" | "link" | "unlink"
+        | "comment_edit" | "comment_delete" | "log_time" => {
             let key = match key_of(daemon, place, &project, &asked) {
                 Ok(key) => key,
                 Err(refusal) => return refusal,
@@ -1398,6 +1410,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
                 "comment_edit" | "comment_delete" => {
                     links::comment(daemon, &project, &asked, &key).await
                 }
+                "reply" => replies::reply(daemon, &project, &asked, &key).await,
                 _ => write(daemon, &project, &asked, &key).await,
             };
             daemon.kept_tickets.drop_all();

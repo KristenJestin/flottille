@@ -728,13 +728,14 @@ fn an_agent_edits_its_own_comment() {
         &mcp,
         json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
     );
-    // The agent finds the comment by the id the read gives it, and only its own has one shown.
+    // The agent finds the comment by the id the read gives it. Every comment has one shown (#934,
+    // to reply to it); `comment_edit` and `comment_delete` still take an agent's own alone.
     let posted = shown
         .lines()
         .find(|line| line.contains("Fixed on app/login"))
         .unwrap();
     assert!(posted.contains("[comment 10100]"), "{shown}");
-    assert!(!shown.contains("[comment 20000]"), "{shown}");
+    assert!(shown.contains("[comment 20000]"), "{shown}");
 
     let edited = written(
         &user,
@@ -1010,7 +1011,8 @@ fn a_person_s_comment_with_an_agent_s_words_is_not_the_agent_s() {
             .lines()
             .find(|line| line.ends_with(&format!(": {text}")))
             .unwrap_or_else(|| panic!("{shown}"));
-        assert!(!line.contains("[comment"), "{shown}");
+        // Its id is shown like any comment's (#934), what says it is an agent's is the record.
+        assert!(line.contains(&format!("[comment {id}]")), "{shown}");
         assert!(!line.contains("by an agent"), "{shown}");
         let said = refused_at_once(
             &user,
@@ -1161,4 +1163,225 @@ fn a_call_prepared_while_its_agent_is_replaced_is_refused() {
         !calls.iter().any(|call| call.contains("--method PATCH")),
         "{calls:?}"
     );
+}
+
+/// A comment of a person on a Jira work item, with the account id Jira gives its author.
+fn person_with_account(id: &str, text: &str) -> Value {
+    let mut comment = person(id, text);
+    comment["author"]["accountId"] = "5b10ac8d82e05b22cc7d4ef5".into();
+    comment
+}
+
+#[test]
+fn a_ticket_shows_the_ids_of_every_comment() {
+    let user = user();
+    on_jira(&user);
+    jira_script(
+        &user,
+        json!({"items": {"ABC-1": commented("ABC-1", json!([
+            person("20000", "I can reproduce"), person("20001", "Same here")]))}}),
+    );
+    let mcp = root_in(&user);
+    let shown = read(
+        &user,
+        &mcp,
+        json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+    );
+    for (id, text) in [("20000", "I can reproduce"), ("20001", "Same here")] {
+        let line = shown.lines().find(|l| l.contains(text)).unwrap();
+        assert!(line.contains(&format!("[comment {id}]")), "{shown}");
+    }
+
+    let github = self::user();
+    on_github(&github);
+    github.gh_script(json!({"issues": {"acme/app": {"1": {
+    "number": 1, "title": "The login fails", "state": "OPEN", "body": "", "comments": [
+        {"author": {"login": "alice"}, "createdAt": "2026-10-01T10:00:00Z",
+         "body": "I can reproduce", "url": "https://github.com/acme/app/issues/1#issuecomment-500"}
+    ]}}}}));
+    let mcp = root_in(&github);
+    let shown = read(
+        &github,
+        &mcp,
+        json!({"action": "show", "ticket": "#1", "detail": "full"}),
+    );
+    assert!(shown.contains("[comment issuecomment-500]"), "{shown}");
+}
+
+#[test]
+fn a_reply_to_a_jira_comment_answers_it() {
+    let user = user();
+    on_jira(&user);
+    jira_script(
+        &user,
+        json!({"items": {"ABC-1": commented("ABC-1", json!([
+            person_with_account("20000", "I can reproduce")]))}}),
+    );
+    let mcp = root_in(&user);
+
+    let done = written(
+        &user,
+        &mcp,
+        json!({"action": "reply", "ticket": "ABC-1", "comment": "20000",
+            "body": "Thanks, a fix is on app/login"}),
+    );
+
+    assert!(
+        done.contains("The reply to the comment 20000 of ABC-1 was posted"),
+        "{done}"
+    );
+    assert!(
+        acli_calls(&user)
+            .iter()
+            .any(|c| c.starts_with("jira workitem comment create --key ABC-1 --body-file ")),
+        "{:?}",
+        acli_calls(&user)
+    );
+    // What the file held: a document that mentions the author as Jira's Reply does, quotes the
+    // comment it answers, then says the reply.
+    let posted: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("acli/posted.json")).unwrap())
+            .unwrap();
+    let held = &posted["ABC-1"][0];
+    let content = held["content"].as_array().unwrap();
+    assert_eq!(content[0]["content"][0]["type"], "mention", "{held}");
+    assert_eq!(
+        content[0]["content"][0]["attrs"]["id"], "5b10ac8d82e05b22cc7d4ef5",
+        "{held}"
+    );
+    assert_eq!(content[1]["type"], "blockquote", "{held}");
+    assert!(content[1].to_string().contains("I can reproduce"), "{held}");
+    assert!(
+        held.to_string().contains("Thanks, a fix is on app/login"),
+        "{held}"
+    );
+    // No visibility was passed: `comment create` has no flag for one.
+    assert!(
+        acli_calls(&user).iter().all(|c| !c.contains("visibility")),
+        "{:?}",
+        acli_calls(&user)
+    );
+    // The reply reads back as the agent's, with its own id.
+    let shown = read(
+        &user,
+        &mcp,
+        json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+    );
+    // The quote and the answer are lines of the comment, the author and its id are on the first.
+    let reply = shown
+        .lines()
+        .find(|line| line.contains("[comment 10100]"))
+        .unwrap_or_else(|| panic!("{shown}"));
+    assert!(shown.contains("Thanks, a fix is on app/login"), "{shown}");
+    assert!(reply.contains("by an agent"), "{shown}");
+    assert_eq!(comment_records(&user, "ABC-1"), [Some("10100".to_owned())]);
+}
+
+#[test]
+fn a_reply_to_a_jira_comment_that_is_not_there_or_restricted_writes_nothing() {
+    let user = user();
+    on_jira(&user);
+    let mut internal = person_with_account("20001", "Internal: the key is rotated");
+    internal["visibility"] = json!({"type": "role", "value": "Administrators"});
+    jira_script(
+        &user,
+        json!({"items": {"ABC-1": commented("ABC-1", json!([
+            person_with_account("20000", "I can reproduce"), internal]))}}),
+    );
+    let mcp = root_in(&user);
+
+    // Refused before the user is asked, as `comment_edit` is.
+    for (comment, why) in [
+        ("99", "ABC-1 has no comment 99"),
+        ("20001", "restricted to Administrators"),
+    ] {
+        let said = refused_at_once(
+            &user,
+            &mcp,
+            json!({"action": "reply", "ticket": "ABC-1", "comment": comment, "body": "ok"}),
+        );
+        assert!(said.contains(why), "{comment}: {said}");
+    }
+    assert!(
+        acli_calls(&user)
+            .iter()
+            .all(|c| !c.starts_with("jira workitem comment create")),
+        "{:?}",
+        acli_calls(&user)
+    );
+}
+
+#[test]
+fn a_reply_to_a_github_issue_comment_quotes_it() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(json!({"issues": {"acme/app": {"1": {
+        "number": 1, "title": "The login fails", "state": "OPEN", "body": "", "comments": [
+            {"author": {"login": "alice"}, "createdAt": "2026-10-01T10:00:00Z",
+             "body": "I can reproduce\nit fails twice", "url": "https://github.com/acme/app/issues/1#issuecomment-500"}
+        ]}}}, "commented": 501}));
+    let mcp = root_in(&user);
+
+    let done = written(
+        &user,
+        &mcp,
+        json!({"action": "reply", "ticket": "#1", "comment": "issuecomment-500",
+            "body": "Thanks, a fix is on app/login"}),
+    );
+
+    assert!(
+        done.contains("The reply to the comment issuecomment-500 of #1"),
+        "{done}"
+    );
+    let calls = gh_calls(&user);
+    let call = calls
+        .iter()
+        .find(|c| c.starts_with("issue comment 1 -R ") && c.contains(" --body "))
+        .unwrap_or_else(|| panic!("{calls:?}"));
+    assert!(
+        call.ends_with(
+            "> @alice wrote:\n> I can reproduce\n> it fails twice\n\nThanks, a fix is on app/login"
+        ),
+        "{call}"
+    );
+    // Another issue's comment, and a comment that is not there, are refused with nothing written.
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "reply", "ticket": "#1", "comment": "issuecomment-9", "body": "x"}),
+    );
+    assert!(said.contains("#1 has no comment issuecomment-9"), "{said}");
+    assert_eq!(
+        gh_calls(&user)
+            .iter()
+            .filter(|c| c.starts_with("issue comment"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_reply_names_the_ticket_the_comment_and_its_words() {
+    let user = user();
+    on_jira(&user);
+    jira_script(&user, json!({}));
+    let mcp = root_in(&user);
+
+    for (args, missing) in [
+        (
+            json!({"action": "reply", "ticket": "ABC-1", "body": "x"}),
+            "comment",
+        ),
+        (
+            json!({"action": "reply", "ticket": "ABC-1", "comment": "1"}),
+            "body",
+        ),
+        (
+            json!({"action": "reply", "comment": "1", "body": "x"}),
+            "ticket",
+        ),
+    ] {
+        let said = refused_at_once(&user, &mcp, args.clone());
+        assert!(said.contains(missing), "{args}: {said}");
+    }
 }
