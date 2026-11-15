@@ -462,15 +462,24 @@ ticket itself.
   - Jira: `acli jira workitem comment create --key <K> --body-file <file>` of an ADF document: a
     paragraph with a **mention** of the author (`{"type": "mention", "attrs": {"id": <account id
     of the comment's author>, "text": "@Name"}}`, plain text when the read gave no account id)
-    and ` wrote:`, a blockquote of the comment, then the reply, as Jira's own Reply does.
-  - **Visibility**: acli's reference gives `--visibility-role` and `--visibility-group` to
-    `comment update` only; `comment create` uses *the project's default visibility*. So a reply
-    cannot be posted in the visibility of the comment it answers, and a comment whose
-    `visibility` (a role or a group, as Jira's REST gives it) is set is refused, saying so, with
-    nothing written: the quote would otherwise go out to everyone.
+    and ` wrote:`, a blockquote of the comment, then the reply, as Jira's own Reply does. The
+    quote is the comment's first 500 characters written as a Markdown quote and converted like any
+    text, so a quote, a heading, a rule or a table in the comment (a reply to a reply) is written
+    as paragraphs there, which Jira takes in a quote and refuses otherwise.
+  - **The card shows what is posted**: the comment quoted first and the reply, as they go out
+    (on GitHub the Markdown, on Jira the document as Markdown), and on Jira "it mentions <name>,
+    who is notified" when the mention is made.
+  - **A comment not for everyone is not quoted**: acli's reference gives `--visibility-role` and
+    `--visibility-group` to `comment update` only; `comment create` uses *the project's default
+    visibility*, so a reply cannot be posted in the visibility of the comment it answers. A Jira
+    comment whose `visibility` (a role or a group, as Jira's REST gives it) is set, or whose
+    `jsdPublic` is `false` (a Service Management internal note), is refused, saying so, with nothing
+    written. On GitHub a hidden comment (`isMinimized`) is refused too: quoting it would show it
+    again. Refused before the user is asked, and again right before the write.
   - Not confirmed against a real site (the fake follows acli's published reference): that
-    `view --json` gives each comment's `author.accountId` and `visibility`, and that `comment
-    create` takes a document with a mention node in `--body-file`.
+    `view --json` gives each comment's `author.accountId`, and `visibility` and `jsdPublic`
+    (**if it leaves them out, a restricted comment is not seen as one and is quoted to everyone**),
+    and that `comment create` takes a document with a mention node in `--body-file`.
 **Measured on a real Jira Cloud site**: the shapes of `link type --json`, `link list --json` and
 `view --fields issuelinks` above, `link delete --id <link id> --yes`, and `comment list --key <K>
 --json`, whose comments each carry their `id` (their `body` plain text). The view's comments are

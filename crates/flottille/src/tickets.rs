@@ -47,6 +47,7 @@ pub(crate) use events::item_of;
 pub use events::{EVENTS, offer, reference_of, target_named};
 pub use links::checked as checked_links;
 pub use milestones::says as milestone_says;
+pub use replies::says as reply_says;
 pub use worklog::says as worklog_says;
 pub use worklog::unset as worklog_unset;
 
@@ -127,7 +128,8 @@ pub struct Comment {
     pub own: bool,
     /// Jira: the account id of its author, for a mention in a reply.
     pub account: Option<String>,
-    /// Jira: whom a comment is restricted to (a role or a group), when it is.
+    /// Why a reply would quote the comment to people it is not for (restricted, an internal note,
+    /// hidden), when it would.
     pub restricted: Option<String>,
 }
 
@@ -428,12 +430,14 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         .into_iter()
         .flatten()
         .map(|comment| {
-            comment_of(
+            let mut read = comment_of(
                 said(&comment["author"]["login"]),
                 comment["createdAt"].as_str(),
                 comment["url"].as_str().and_then(crate::posts::comment_id),
                 &said(&comment["body"]),
-            )
+            );
+            read.restricted = replies::hidden(&comment);
+            read
         })
         .collect();
     let body = said(&issue["body"]);
@@ -644,7 +648,7 @@ fn work_item_comments(fields: &Value) -> Vec<Comment> {
                 &masked(&attached_text(&comment["body"], fields)),
             );
             read.account = comment["author"]["accountId"].as_str().map(str::to_owned);
-            read.restricted = replies::restriction(&comment["visibility"]);
+            read.restricted = replies::restriction(&comment);
             read
         })
         .collect()

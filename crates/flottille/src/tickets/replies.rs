@@ -5,8 +5,9 @@
 //! and what it quotes. On GitHub the quote is Markdown (`> @alice wrote:`). On Jira it is the
 //! document Jira's own Reply makes: a mention of the author, the comment in a quote, the answer.
 //! `acli jira workitem comment create` has no flag for a visibility (it uses the project's
-//! default), so a comment restricted to a role or a group is not answered: the quote would go out
-//! to everyone.
+//! default), so a comment restricted to a role or a group, or a Service Management internal note,
+//! is not answered: the quote would go out to everyone. Nor is a comment GitHub hides
+//! (minimized).
 
 use flottille_core::declared::ProjectTracker;
 use flottille_core::project::Project;
@@ -20,17 +21,30 @@ use crate::mcp::Outcome;
 /// How much of the comment answered is quoted.
 const QUOTED_CHARS: usize = 500;
 
-/// Whom a Jira comment is restricted to, as its `visibility` says (`{"type": "role", "value":
-/// "Administrators"}`); none for a comment everyone who sees the work item can read.
-pub(super) fn restriction(visibility: &Value) -> Option<String> {
-    if visibility.is_null() {
-        return None;
-    }
-    Some(
-        visibility["value"]
+/// Why a Jira comment is not for everyone, as the refusal says it, from its `visibility` (`{"type":
+/// "role", "value": "Administrators"}`) or its `jsdPublic` (`false`: a Service Management internal
+/// note); none for a comment everyone who sees the work item can read.
+pub(super) fn restriction(comment: &Value) -> Option<String> {
+    let visibility = &comment["visibility"];
+    if !visibility.is_null() {
+        let who = visibility["value"]
             .as_str()
-            .map_or_else(|| "a role or a group".to_owned(), super::masked),
-    )
+            .map_or_else(|| "a role or a group".to_owned(), super::masked);
+        return Some(format!(
+            "restricted to {who}, and acli cannot post a comment in a visibility (its comment \
+             create uses the project's default)"
+        ));
+    }
+    (comment["jsdPublic"] == false).then(|| {
+        "an internal note, and acli cannot post one (its comment create uses the project's \
+         default)"
+            .to_owned()
+    })
+}
+
+/// Why a GitHub comment is not for everyone: it is hidden (minimized), and a quote would show it.
+pub(super) fn hidden(comment: &Value) -> Option<String> {
+    (comment["isMinimized"] == true).then(|| "hidden (minimized) on GitHub".to_owned())
 }
 
 fn blank(text: &Option<String>) -> Option<&str> {
@@ -67,9 +81,8 @@ pub(super) async fn answerable(
     };
     if let Some(who) = &found.restricted {
         return Err(Outcome::Refused(format!(
-            "refused: the comment {named} of {reference} is restricted to {who}, and acli cannot \
-             post a comment in a visibility (its comment create uses the project's default): a \
-             reply would quote it to everyone; nothing was written"
+            "refused: the comment {named} of {reference} is {who}: a reply would quote it to \
+             everyone; nothing was written"
         )));
     }
     let found = found.clone();
@@ -98,7 +111,9 @@ fn markdown(comment: &Comment, body: &str) -> String {
 }
 
 /// A Jira reply as a document: the author mentioned when Jira gave their account, the comment
-/// quoted, then the answer.
+/// quoted, then the answer. The quote is built by the converter, under its rules for the text of
+/// a quote (a quote, a heading, a rule or a table in it is written as paragraphs, which Jira
+/// takes).
 fn document(comment: &Comment, body: &str) -> Value {
     let who = match &comment.account {
         Some(account) => {
@@ -106,15 +121,56 @@ fn document(comment: &Comment, body: &str) -> Value {
         }
         None => json!({"type": "text", "text": comment.author}),
     };
-    let mut content = vec![
-        json!({"type": "paragraph", "content": [who, {"type": "text", "text": " wrote:"}]}),
-        json!({"type": "blockquote",
-            "content": crate::adf::from_markdown(&super::cut(&comment.body, QUOTED_CHARS))["content"]}),
-    ];
-    if let Some(answer) = crate::adf::from_markdown(body)["content"].as_array() {
-        content.extend(answer.iter().cloned());
+    let mut content =
+        vec![json!({"type": "paragraph", "content": [who, {"type": "text", "text": " wrote:"}]})];
+    for part in [quoted(comment).as_str(), body] {
+        if let Some(blocks) = crate::adf::from_markdown(part)["content"].as_array() {
+            content.extend(blocks.iter().cloned());
+        }
     }
     json!({"type": "doc", "version": 1, "content": content})
+}
+
+/// What the card says of a reply: the comment as it goes out, quote and answer, and on Jira whom
+/// it mentions, who is notified. Refused, with why, when the comment cannot be answered.
+pub(super) async fn says(
+    daemon: &Daemon,
+    project: &Project,
+    args: &Value,
+) -> Result<Vec<String>, String> {
+    if args["action"] != "reply" {
+        return Ok(Vec::new());
+    }
+    let (Some(ticket), Some(named), Some(body)) = (
+        args["ticket"].as_str(),
+        args["comment"].as_str(),
+        args["body"]
+            .as_str()
+            .map(str::trim)
+            .filter(|b| !b.is_empty()),
+    ) else {
+        return Ok(Vec::new());
+    };
+    let Ok(key) = super::accepted(project, ticket) else {
+        return Ok(Vec::new());
+    };
+    let (_, comment) = match answerable(daemon, project, &key, named).await {
+        Ok(found) => found,
+        Err(Outcome::Refused(why)) => return Err(why),
+        Err(_) => return Ok(Vec::new()),
+    };
+    let jira = matches!(key, Key::Jira(_));
+    let mut says = vec![format!(
+        "It posts, the comment quoted first: {}",
+        match jira {
+            true => crate::adf::to_markdown(&document(&comment, body)),
+            false => markdown(&comment, body),
+        }
+    )];
+    if jira && comment.account.is_some() {
+        says.push(format!("It mentions {}, who is notified", comment.author));
+    }
+    Ok(says)
 }
 
 /// `tickets reply`: a comment that answers the one named, on the tracker of the project.

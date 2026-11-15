@@ -341,6 +341,13 @@ pub async fn prepared(
             return Err(Outcome::Refused(why));
         }
         let mut says = posted_says(args);
+        // A reply is shown as it goes out, its quote too; a comment that cannot be answered is
+        // refused here.
+        says.extend(
+            crate::tickets::reply_says(daemon, &project, args)
+                .await
+                .map_err(Outcome::Refused)?,
+        );
         // The time a worklog logs, and on which ticket; a vault entry that is not there is
         // refused here, before the user is asked.
         says.extend(
@@ -679,6 +686,8 @@ fn posted_says(args: &Value) -> Vec<String> {
     ) {
         return Vec::new();
     }
+    // A reply's body is shown with its quote, as it goes out (`tickets::reply_says`).
+    let reply = args["action"] == "reply";
     let mut says: Vec<String> = [
         ("title", "Its title"),
         ("body", "Its body"),
@@ -686,6 +695,7 @@ fn posted_says(args: &Value) -> Vec<String> {
         ("message", "Its message"),
     ]
     .into_iter()
+    .filter(|(key, _)| !(reply && *key == "body"))
     .filter_map(|(key, said)| Some(format!("{said}: {}", args[key].as_str()?)))
     .collect();
     // Whom a ticket goes to, where it goes, in words: `me` is the user reading the card.
