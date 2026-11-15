@@ -2251,6 +2251,10 @@ fn reads_every_file(layer: &[String]) -> Option<bool> {
 /// The refusal of a line that reads every file below a folder holding Flottille's keys folder
 /// (`keys`), in every mode: what it prints or copies holds the keys' bytes. The folder may be one
 /// it names (through a link, `..` or `/proc/self/root` too), or the one it runs in.
+///
+/// The other logins' places (`SENSITIVE`, the agents' folders of the home) are still refused only
+/// for a path in them (`credential`): a recursive read of a folder that holds one is held, not
+/// refused, and passes in Full (#899).
 fn reads_the_keys(call: &Call, layers: &[Vec<String>]) -> Option<String> {
     let from = call.paths.first()?;
     let place = &call.grant.place;
