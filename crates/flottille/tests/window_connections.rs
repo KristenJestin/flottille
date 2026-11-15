@@ -2270,7 +2270,7 @@ fn ctrl_a_in_the_search_ticks_no_row(cx: &mut TestAppContext) {
     assert!(!present(cx, "connection-review-bulk"));
 
     // With nothing focused it is nobody's.
-    cx.update(|window, _| window.blur());
+    cx.update(|window, cx| window.blur(cx));
     cx.simulate_keystrokes("ctrl-a");
     settle(cx);
     assert!(ticked_rows(cx).is_empty(), "nothing focused ticks nothing");
