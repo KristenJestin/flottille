@@ -679,6 +679,13 @@ on a real phone, by hand, and reported.
   members have names that differ in case only; a removed member's name is free again.
 - Any member may remove itself, a viewer too; a viewer may add, remove or rename no other member,
   and may not rename itself.
+- A `controller` may add a member of any role, a `runner` too (a phone accepting a server), and
+  may remove any member, the root included: the root is where the list starts, not a member above
+  the others.
+- A key that is a point of small order is refused wherever it is read (an entry, an invitation's
+  hub or inviting key): no device makes one. A hub URL is `http://` or `https://` with a host, at
+  most 2048 bytes, and a URL or a name holds no invisible character (Unicode's `Cf`: zero-width
+  characters, bidirectional overrides), so that two that look the same are the same.
 - A removed key is never added again, so "a role is changed by removing the device and adding it
   again" means that the device joins again with a new key.
 - The invitation holds the inviting member's whole key, not its fingerprint: the new device checks
