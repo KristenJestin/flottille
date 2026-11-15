@@ -2140,7 +2140,7 @@ fn select_all_shown_ticks_what_the_search_shows(cx: &mut TestAppContext) {
     let row = row_of(cx, "browser_back");
     click(cx, &format!("{row}-pick"));
     let field = search_field(&shell, cx);
-    type_in(&field, "cookies", cx);
+    type_in(&field, "cookie", cx);
     settle(cx);
     // The bar shows with a ticked row that shows: tick one of the found rows to bring it.
     let first = shown_rows(cx).remove(0);
