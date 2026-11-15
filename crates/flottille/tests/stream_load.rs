@@ -15,8 +15,11 @@ use serde_json::{Value, json};
 /// The stream: a piece every 10 ms for 15 s at the least, as the window's test of it (#881).
 const PIECES: usize = 1500;
 
-/// How long a request may wait while the session streams: answered in 12 to 19 ms unloaded
-/// (#903), and a window's snapshot asks a dozen of them.
+/// How long 95 requests in 100 may wait while the session streams: answered in 12 to 19 ms
+/// unloaded (#903), and a window's snapshot asks a dozen of them. Not every request: on a busy
+/// disk one commit's `fsync` may wait seconds behind the disk's other writer, and the daemon's
+/// thread with it, which writing the pieces together does not change; a backlog of commits does
+/// fail it (measured: 2.4 s at the 95th before they were written together, 0.18 s after).
 const ANSWERED_WITHIN: Duration = Duration::from_secs(1);
 
 /// How long a piece may take from the agent to the store: past it, the daemon is behind.
@@ -132,27 +135,27 @@ fn agent_list_is_answered_while_another_session_streams() {
         working(&user, &streamer),
         "the session still streamed meanwhile"
     );
-    let slowest_list = part(&mut lists, 1.0);
-    let slowest_status = part(&mut statuses, 1.0);
+    let most_lists = part(&mut lists, 0.95);
+    let most_statuses = part(&mut statuses, 0.95);
     eprintln!(
         "stream-load: agent.list {} requests, median {:?}, p95 {:?}, slowest {:?}; \
          daemon.status median {:?}, p95 {:?}, slowest {:?}; load {}",
         lists.len(),
         part(&mut lists, 0.5),
-        part(&mut lists, 0.95),
-        slowest_list,
+        most_lists,
+        part(&mut lists, 1.0),
         part(&mut statuses, 0.5),
-        part(&mut statuses, 0.95),
-        slowest_status,
+        most_statuses,
+        part(&mut statuses, 1.0),
         load(),
     );
     assert!(
-        slowest_list < ANSWERED_WITHIN,
-        "agent.list waited {slowest_list:?}"
+        most_lists < ANSWERED_WITHIN,
+        "agent.list waited {most_lists:?} at the 95th percentile"
     );
     assert!(
-        slowest_status < ANSWERED_WITHIN,
-        "daemon.status waited {slowest_status:?}"
+        most_statuses < ANSWERED_WITHIN,
+        "daemon.status waited {most_statuses:?} at the 95th percentile"
     );
 }
 
