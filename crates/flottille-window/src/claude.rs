@@ -208,7 +208,7 @@ pub fn found_block(
             .child(list)
             .test_support(),
     )
-    .gap(space::MD)
+    .space(space::MD)
 }
 
 #[cfg(test)]

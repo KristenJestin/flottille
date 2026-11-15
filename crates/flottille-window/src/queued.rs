@@ -447,7 +447,6 @@ impl Render for QueuedMessages {
                     .flex()
                     .flex_col()
                     .items_end()
-                    .gap(space::XS)
                     // A flex item, which shrinks to the room there is: the words under it wrap.
                     .child(div().w_full().flex().justify_end().child(bubble.min_w_0()))
                     .child(
@@ -456,7 +455,7 @@ impl Render for QueuedMessages {
                             has_buttons,
                             buttons,
                         )
-                        .gap(space::XS),
+                        .space(space::XS),
                     );
                 Item::new(
                     ElementId::Name(format!("queued-item-{key}").into()),
