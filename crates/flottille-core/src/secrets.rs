@@ -16,19 +16,48 @@ static VAULT: RwLock<Vec<String>> = RwLock::new(Vec::new());
 pub const VAULT_SHORTEST: usize = 6;
 
 /// Masks `value` from now on, in every text of this process, with the forms a page shows a secret
-/// typed into it in: an address (a form sent with GET) and HTML. A value is never forgotten: one
-/// replaced or removed stays masked until the daemon restarts, and another entry may hold it.
+/// typed into it in: an address (a form sent with GET), HTML and JSON. A value is never forgotten:
+/// one replaced or removed stays masked until the daemon restarts, and another entry may hold it.
 pub fn add_vault_value(value: &str) {
-    let mut values = VAULT
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    for form in [
+    let json = serde_json::Value::from(value).to_string();
+    add_forms([
         value.to_owned(),
         percent_encoded(value, true),
         percent_encoded(value, false),
-        html_escaped(value),
-    ] {
-        if !values.contains(&form) {
+        html_escaped(value, &[('&', "&amp;"), ('<', "&lt;"), ('>', "&gt;")]),
+        html_escaped(value, &[('&', "&amp;"), ('"', "&quot;")]),
+        html_escaped(
+            value,
+            &[
+                ('&', "&amp;"),
+                ('<', "&lt;"),
+                ('>', "&gt;"),
+                ('"', "&quot;"),
+                ('\'', "&#39;"),
+            ],
+        ),
+        json[1..json.len() - 1].to_owned(),
+    ]);
+}
+
+/// `add_vault_value` for an entry's secret, and, when it has a `username`, the two as HTTP Basic
+/// authentication sends them, in base64.
+pub fn add_vault_login(username: Option<&str>, secret: &str) {
+    use base64::Engine as _;
+    add_vault_value(secret);
+    if let Some(username) = username {
+        add_forms([
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{secret}"))
+        ]);
+    }
+}
+
+fn add_forms(forms: impl IntoIterator<Item = String>) {
+    let mut values = VAULT
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for form in forms {
+        if !form.is_empty() && !values.contains(&form) {
             values.push(form);
         }
     }
@@ -51,14 +80,17 @@ fn percent_encoded(value: &str, form: bool) -> String {
     encoded
 }
 
-/// `value` as HTML writes it in a text or an attribute.
-fn html_escaped(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+/// `value` as HTML writes it, with the characters `escapes` replaced: a text escapes `&`, `<` and
+/// `>` alone, an attribute between double quotes `&` and `"` alone, a careful page all five.
+fn html_escaped(value: &str, escapes: &[(char, &str)]) -> String {
+    let mut escaped = String::new();
+    for c in value.chars() {
+        match escapes.iter().find(|(from, _)| *from == c) {
+            Some((_, to)) => escaped.push_str(to),
+            None => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 /// Parts of a variable's name that say its value is a secret (`PASS` covers `PASSWORD` and

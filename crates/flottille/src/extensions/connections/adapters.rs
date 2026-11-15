@@ -1025,7 +1025,7 @@ async fn credential(daemon: &Daemon, login: &Login) -> Result<Value, String> {
             )
         })?;
     let secret = crate::vault::secret(daemon, &login.project, &this, &login.entry).await?;
-    secrets::add_vault_value(&secret);
+    secrets::add_vault_login(entry.username.as_deref(), &secret);
     Ok(json!({"username": entry.username, "password": secret, "url": entry.url}))
 }
 
