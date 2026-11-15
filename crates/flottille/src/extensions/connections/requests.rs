@@ -762,6 +762,21 @@ async fn write(
     };
     let still = || {
         let now = self::proposal(daemon, &args).map_err(Failure::refused)?;
+        // An entry deleted since the Accept: its host is checked once it is made again, by
+        // another Accept, never skipped by this write.
+        if let Some(after) = &now.after
+            && matches!(now.action.as_str(), "add" | "edit")
+        {
+            let missing = missing(daemon, after);
+            if !missing.is_empty() {
+                return Err(Failure::refused(format!(
+                    "the vault entr{} {} it names {} no longer there: nothing is written",
+                    if missing.len() == 1 { "y" } else { "ies" },
+                    missing.join(", "),
+                    if missing.len() == 1 { "is" } else { "are" },
+                )));
+            }
+        }
         let said: Vec<String> = words(daemon, &now)
             .iter()
             .map(|said| mcp::masked(said, place))
