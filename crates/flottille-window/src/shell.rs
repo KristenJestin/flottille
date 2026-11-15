@@ -1474,14 +1474,10 @@ impl Shell {
             Outcome::VaultWritten { refused } => {
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.written(refused, cx));
-                // An entry added from a project's Tracker: back to it.
-                if let Some(project) = section.update(cx, |section, _| section.take_return()) {
-                    self.open_project_settings_at(
-                        &project,
-                        crate::project_settings::Reveal::Tracker,
-                        window,
-                        cx,
-                    );
+                // An entry made from a project's Tracker or Vault tab: back to it.
+                if let Some((project, at)) = section.update(cx, |section, _| section.take_return())
+                {
+                    self.open_project_settings_at(&project, at, window, cx);
                 }
             }
             Outcome::Developer { written, shown } => {
@@ -2742,6 +2738,23 @@ impl Shell {
         self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
         let vault = self.settings.read(cx).vault().clone();
         vault.update(cx, |vault, cx| vault.add_for(project, window, cx));
+    }
+
+    /// A project's Vault tab: "New entry" (`entry` none) or a row. Settings, Vault, in its own
+    /// dialog, the project's as the project; closed, it goes back to that tab.
+    pub fn open_vault_form_for(
+        &mut self,
+        project: &str,
+        entry: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
+        let vault = self.settings.read(cx).vault().clone();
+        vault.update(cx, |vault, cx| match entry {
+            Some(name) => vault.replace_in(project, name, window, cx),
+            None => vault.add_in(project, window, cx),
+        });
     }
 
     /// Opens the dialog of an agent's request to write a connection.

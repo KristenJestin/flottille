@@ -82,13 +82,18 @@ pub fn field_frame(
 }
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 5] = [
+pub const SECTIONS: [(&str, &str); 6] = [
     ("repositories", "Repositories"),
     ("workspaces", "Workspaces"),
     ("tasks", "Tasks"),
     ("instructions", "Instructions"),
     ("features", "Features"),
+    ("vault", "Vault"),
 ];
+
+/// What the Vault tab says it lists.
+pub const VAULT_SENTENCE: &str = "The secrets this project's agents can use: its own first, then \
+                                  every project's. A secret is never shown.";
 
 /// The sections of the Repositories tab, in order: the page's children, which a link scrolls to.
 const REPOSITORIES_SECTIONS: [&str; 2] = ["repositories", "tracker"];
@@ -365,6 +370,7 @@ pub enum Reveal {
     Tracker,
     Tasks,
     Feature(String),
+    Vault,
 }
 
 impl Reveal {
@@ -374,6 +380,7 @@ impl Reveal {
             Reveal::Repository(_) | Reveal::Tracker => "repositories",
             Reveal::Tasks => "tasks",
             Reveal::Feature(_) => "features",
+            Reveal::Vault => "vault",
         };
         SECTIONS
             .iter()
@@ -423,6 +430,10 @@ pub struct ProjectSettingsPage {
     worklog: Option<String>,
     /// The vault's entries as last listed (their metadata, never a secret): the project sees some.
     vault: Vec<VaultEntry>,
+    /// The Vault tab's rows as drawn: an entry added or removed unfolds or folds away.
+    vault_rows: Listing<VaultEntry>,
+    /// The daemon listed the vault once: before, the tab says nothing of an empty list.
+    vault_read: bool,
     /// The repository dialog's base branches and dependencies, as edited and not yet saved.
     bases: Vec<String>,
     base_rows: Listing<String>,
@@ -560,6 +571,8 @@ impl ProjectSettingsPage {
             tracker_repository: None,
             worklog: None,
             vault: Vec::new(),
+            vault_rows: Listing::default(),
+            vault_read: false,
             bases: Vec::new(),
             base_rows: Listing::default(),
             base_error: None,
@@ -1225,7 +1238,26 @@ impl ProjectSettingsPage {
     /// The vault's entries, as the daemon lists them: the select offers those the project sees.
     pub fn vault_listed(&mut self, entries: &[VaultEntry], cx: &mut Context<Self>) {
         self.vault = entries.to_vec();
+        self.vault_read = true;
         cx.notify();
+    }
+
+    /// The entries the project sees, as its Vault tab lists them: its own by name, then every
+    /// project's by name.
+    pub fn vault_seen(&self) -> Vec<VaultEntry> {
+        let mut seen: Vec<VaultEntry> = self
+            .vault
+            .iter()
+            .filter(|entry| entry.project.as_deref().is_none_or(|p| p == self.name))
+            .cloned()
+            .collect();
+        seen.sort_by(|a, b| {
+            a.project
+                .is_none()
+                .cmp(&b.project.is_none())
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        seen
     }
 
     /// What the `Log time with` select offers, each as its key and its label: none first, then
@@ -2421,7 +2453,7 @@ impl ProjectSettingsPage {
     }
 
     /// What each tab counts, once its list is read: the repositories and the tasks.
-    fn counts(&self, cx: &App) -> [Option<usize>; 5] {
+    fn counts(&self, cx: &App) -> [Option<usize>; 6] {
         [
             self.repositories
                 .read(cx)
@@ -2429,6 +2461,7 @@ impl ProjectSettingsPage {
                 .map(|read| read.listed.len()),
             None,
             self.tasks.read(cx).tasks().map(<[_]>::len),
+            None,
             None,
             None,
         ]
@@ -2464,6 +2497,77 @@ impl ProjectSettingsPage {
             self.feature = key;
             cx.notify();
         }
+    }
+
+    /// The Vault tab: the entries the project sees, its own first, then every project's, each
+    /// the row of Settings' Vault (never a value). "New entry" and a row open that page's own
+    /// dialog, and the list follows the vault's changes as the daemon announces them.
+    fn vault_tab(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let seen = self.vault_seen();
+        if self.vault_read {
+            let now = cx.background_executor().now();
+            self.vault_rows.sync(
+                seen.iter().map(|e| (e.name.clone(), e.clone())),
+                now,
+                cx.reduce_motion(),
+            );
+        }
+        let drawn: Vec<_> = self
+            .vault_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
+            .collect();
+        let mut list = ListCard::new("project-vault-list");
+        for (key, placement, entry) in drawn {
+            let (shell, project, name) = (self.shell.clone(), self.name.clone(), key.clone());
+            let row = crate::vault::entry_row(
+                ElementId::Name(format!("project-vault-{key}").into()),
+                &entry,
+                cx,
+            )
+            .on_click(move |_, window, cx| {
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.open_vault_form_for(&project, Some(&name), window, cx)
+                    })
+                    .ok();
+            });
+            list = list.item(
+                ElementId::Name(format!("project-vault-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
+        let (shell, project) = (self.shell.clone(), self.name.clone());
+        Section::new("project-vault", "Vault")
+            .count(self.vault_rows.len().to_string())
+            .sentence(VAULT_SENTENCE)
+            .action(
+                Button::secondary("project-vault-add", "New entry")
+                    .leading(Icon::Plus)
+                    .on_click(move |_, window, cx| {
+                        shell
+                            .update(cx, |shell, cx| {
+                                shell.open_vault_form_for(&project, None, window, cx)
+                            })
+                            .ok();
+                    }),
+            )
+            .child(presence("project-vault-list-block", !self.vault_rows.is_empty(), list).gap(space::MD))
+            .child(
+                presence(
+                    "no-project-vault-block",
+                    self.vault_read && self.vault_rows.is_empty(),
+                    EmptyLine::new(
+                        "no-project-vault",
+                        Icon::Key,
+                        "No entry this project sees yet. Add a secret its agents need, such as \
+                         a tracker's token: they use it through Flottille's tools and never see it.",
+                    ),
+                )
+                .gap(space::MD),
+            )
+            .into_any_element()
     }
 
     /// The Features tab: the parts that touch a project, each a row that opens its page in place
@@ -2717,6 +2821,7 @@ impl Render for ProjectSettingsPage {
                     self.pull_request_template.clone().into_any_element(),
                 ),
             ],
+            "vault" => vec![("vault", self.vault_tab(cx))],
             _ => vec![("features", self.features_tab(cx))],
         };
         let this = cx.entity().downgrade();

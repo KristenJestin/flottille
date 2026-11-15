@@ -1144,7 +1144,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its tickets and its open questions, with "New spec"; a spec's page shows the spec, its
   questions each answered in one click, Ready and Back to draft, and the sessions that worked on
   it (`docs/extensions.md`, "Specs");
-  the project's Settings, in five tabs (`reference/gpui.md`, rule 13), opening on the first.
+  the project's Settings, in six tabs (`reference/gpui.md`, rule 13), opening on the first.
   **Repositories** holds its **Repositories** (a count; "The git repositories of the project. Each
   workspace gets its own copy of each.", or for a project of one, "The project folder is the
   repository."): each a row with **Starts from** (`develop, then main`), **Remote** (`origin ·
@@ -1183,7 +1183,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   (`projects.md`). **Features** holds the same list as Settings', of the features that touch a
   project (Specs, Review, later the handbook): each row opens its page, with the project's switch
   and the values a project may set, each offering As in Settings first (`reference/gpui.md`, rule
-  14); a feature off in Settings is a faded row whose line, Off in Settings, is a link. A field saved
+  14); a feature off in Settings is a faded row whose line, Off in Settings, is a link. **Vault**
+  (the last of the six, Usage later) lists the entries the project sees, its own first, then every
+  project's marked "Every project", each the row of Settings, Vault (its name, its project, what
+  it is for, never a value; one list pattern), with **New entry**, which opens Settings, Vault's
+  own dialog with "Seen by agents of" set to the project (still changeable), and a click on a row,
+  which edits the entry in that same dialog (an entry of every project says so on it); closed, the
+  dialog brings the window back to this tab. The list follows the vault's changes live, its rows
+  unfolding and folding away, and an empty list says so. A field saved
   on its own shows its Save only once it changed (rule 4);
 - Settings, in tabs by subject (`reference/gpui.md`, rule 13): **Agents**, **Approvals**,
   **Features**, **Vault** and **General**, one shown at a time, as in a project's settings. It

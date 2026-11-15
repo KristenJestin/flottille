@@ -12,9 +12,9 @@ use gpui_design_system::{
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    App, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use serde_json::Value;
 
@@ -34,6 +34,10 @@ pub const USAGE: &str = "An agent names an entry; Flottille puts the secret wher
 /// What the dialog says of the secret, under its field.
 pub const SECRET_HINT: &str = "Kept by your keyring and never shown again, here or anywhere. \
                                Replacing the entry means typing it again.";
+
+/// What the form says of an entry of every project, opened from one project's Vault tab.
+pub const EVERY_PROJECT_NOTE: &str = "This entry is every project's: changing it changes it \
+                                      for all of them.";
 
 /// What the project select calls no project.
 pub const EVERY_PROJECT: &str = "Every project";
@@ -107,12 +111,47 @@ pub struct VaultSection {
     writing: Option<Writing>,
     form_error: Option<SharedString>,
     confirming: Option<String>,
-    /// The project whose Tracker the new-entry dialog was opened from: once it is closed, the
-    /// window goes back there.
-    come_back: Option<String>,
+    /// The project page the dialog was opened from (its Tracker, or its Vault tab): once it is
+    /// closed, the window goes back there.
+    come_back: Option<(String, ProjectReveal)>,
+    /// The entry opened from a project's Vault tab is every project's: the form says so.
+    every_project: bool,
     /// The entry the confirmation names, kept while it fades away.
     asked: String,
     _subscriptions: Vec<Subscription>,
+}
+
+/// An entry's row, as Settings' Vault and a project's Vault tab draw it: its name, its project
+/// (or every project's), and one line of what it is for, never a value.
+pub fn entry_row(id: ElementId, entry: &VaultEntry, cx: &App) -> ListRow {
+    let p = palette(cx);
+    let line = [
+        entry.description.clone(),
+        entry.url.clone(),
+        entry.username.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .next();
+    let used = entry
+        .bound
+        .as_deref()
+        .and_then(flottille_core::vault::use_said);
+    let line = match (used, line) {
+        (Some(used), Some(line)) => format!("For {used} alone · {line}"),
+        (Some(used), None) => format!("For {used} alone"),
+        (None, line) => line.unwrap_or_else(|| "No description".to_owned()),
+    };
+    ListRow::new(id, SharedString::from(entry.name.clone()))
+        .mono()
+        .leading(icon(Icon::Key).size(px(14.)).text_color(p.faint))
+        .tag(SharedString::from(
+            entry
+                .project
+                .clone()
+                .unwrap_or_else(|| EVERY_PROJECT.to_owned()),
+        ))
+        .line(SharedString::from(line))
 }
 
 impl VaultSection {
@@ -132,6 +171,7 @@ impl VaultSection {
             form_error: None,
             confirming: None,
             come_back: None,
+            every_project: false,
             asked: String::new(),
             _subscriptions: Vec::new(),
         }
@@ -140,6 +180,11 @@ impl VaultSection {
     /// The entries as last listed; `None` until the daemon has said.
     pub fn entries(&self) -> Option<&[VaultEntry]> {
         self.listed.as_deref()
+    }
+
+    /// The project the dialog sets the entry to; every project's when none.
+    pub fn project(&self) -> Option<&str> {
+        self.project.as_deref()
     }
 
     pub fn is_open(&self) -> bool {
@@ -225,12 +270,36 @@ impl VaultSection {
     /// project's Tracker once it is closed.
     pub fn add_for(&mut self, project: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.fill(None, window, cx);
-        self.come_back = Some(project.to_owned());
+        self.come_back = Some((project.to_owned(), ProjectReveal::Tracker));
         self.bound = Some(flottille_core::vault::worklog(project));
     }
 
-    /// The project to go back to, once the dialog it was opened for is closed (an entry set).
-    pub fn take_return(&mut self) -> Option<String> {
+    /// "New entry" of a project's Vault tab: the dialog, empty, its project this one, and back to
+    /// that tab once it is closed.
+    pub fn add_in(&mut self, project: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.fill(None, window, cx);
+        self.project = Some(project.to_owned());
+        self.come_back = Some((project.to_owned(), ProjectReveal::Vault));
+    }
+
+    /// A row of a project's Vault tab: the entry in the same dialog, and back to that tab once it
+    /// is closed. An entry of every project says so on the form.
+    pub fn replace_in(
+        &mut self,
+        project: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace(name, window, cx);
+        if self.is_open() {
+            self.every_project = self.project.is_none();
+            self.come_back = Some((project.to_owned(), ProjectReveal::Vault));
+        }
+    }
+
+    /// The project page to go back to, once the dialog it was opened for is closed (an entry set).
+    pub fn take_return(&mut self) -> Option<(String, ProjectReveal)> {
         match self.form {
             Form::Closed => self.come_back.take(),
             Form::Editing(_) => None,
@@ -252,6 +321,7 @@ impl VaultSection {
 
     fn fill(&mut self, entry: Option<&VaultEntry>, window: &mut Window, cx: &mut Context<Self>) {
         self.come_back = None;
+        self.every_project = false;
         self.bound = None;
         let fields = self.fields(window, cx);
         let (name, secret, description, url, username) = (
@@ -288,10 +358,10 @@ impl VaultSection {
         self.form_error = None;
         self.clear_secret(window, cx);
         cx.notify();
-        if let Some(project) = self.come_back.take() {
+        if let Some((project, at)) = self.come_back.take() {
             self.shell
                 .update(cx, |shell, cx| {
-                    shell.open_project_settings_at(&project, ProjectReveal::Tracker, window, cx)
+                    shell.open_project_settings_at(&project, at, window, cx)
                 })
                 .ok();
         }
@@ -425,45 +495,16 @@ impl VaultSection {
     }
 
     fn row(&mut self, entry: &VaultEntry, cx: &mut Context<Self>) -> ListRow {
-        let p = palette(cx);
         let name = entry.name.clone();
         let menu = self.menu(&name, cx);
-        let line = [
-            entry.description.clone(),
-            entry.url.clone(),
-            entry.username.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .next();
-        let used = entry
-            .bound
-            .as_deref()
-            .and_then(flottille_core::vault::use_said);
-        let line = match (used, line) {
-            (Some(used), Some(line)) => format!("For {used} alone · {line}"),
-            (Some(used), None) => format!("For {used} alone"),
-            (None, line) => line.unwrap_or_else(|| "No description".to_owned()),
-        };
-        let row = ListRow::new(
-            ElementId::Name(format!("vault-{name}").into()),
-            SharedString::from(name.clone()),
-        )
-        .mono()
-        .leading(icon(Icon::Key).size(px(14.)).text_color(p.faint))
-        .tag(SharedString::from(
-            entry
-                .project
-                .clone()
-                .unwrap_or_else(|| EVERY_PROJECT.to_owned()),
-        ))
-        .line(SharedString::from(line))
-        .more(menu);
-        row.on_click(cx.listener(move |this, _, window, cx| {
-            if !this.saving {
-                this.replace(&name, window, cx)
-            }
-        }))
+        let id = ElementId::Name(format!("vault-{name}").into());
+        entry_row(id, entry, cx)
+            .more(menu)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if !this.saving {
+                    this.replace(&name, window, cx)
+                }
+            }))
     }
 
     /// The confirmation of a removal.
@@ -624,11 +665,14 @@ impl VaultSection {
                 )
                 .optional(),
             )
-            .child(Field::new(
-                "vault-project-field",
-                "Seen by agents of",
-                select,
-            ))
+            .child({
+                let field = Field::new("vault-project-field", "Seen by agents of", select);
+                if self.every_project {
+                    field.hint(EVERY_PROJECT_NOTE)
+                } else {
+                    field
+                }
+            })
             .test_support();
         modal
             .sentence(
