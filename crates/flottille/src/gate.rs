@@ -829,7 +829,7 @@ fn tickets(call: &Call) -> Verdict {
     let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
         "list" | "search" | "show" | "people" | "types" | "link_types" | "sprints"
-        | "milestones" | "subscribe" | "unsubscribe" | "time_spent" => {
+        | "milestones" | "progress" | "subscribe" | "unsubscribe" | "time_spent" => {
             return Verdict::Allow;
         }
         "log_time" => format!(

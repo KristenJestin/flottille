@@ -648,6 +648,7 @@ fn posted_says(args: &Value) -> Vec<String> {
                 | "link_types"
                 | "sprints"
                 | "milestones"
+                | "progress"
                 | "time_spent"
         ) | None
     ) {
