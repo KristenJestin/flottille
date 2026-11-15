@@ -325,15 +325,15 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "forge",
         title: "Pull requests",
-        description: "Pull requests and CI of the project's repositories, through the user's \
+        description: "Pull requests and CI of the repositories, through the user's \
             gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
             as last read. show: a branch's or number's, \
-            with checks (the log's end of each failed job), review and comment counts; detail \
+            with checks (the log's end of each failed job), review, comment counts; detail \
             full: texts. Writes, judged, answered at once, the result maybe later: create, merge \
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
-            user's words) and checks act on a workspace's branch; edit, comment, review (approve and request_changes wait for the user), \
+            user's words) and checks act on a workspace's branch; edit, comment, review (approve, request_changes wait for the user), \
             close (comment first), reopen on number. \
-            subscribe: events wake you until merged or closed; unsubscribe. CI: pipelines lists what can \
+            subscribe: events wake you until merged or closed (maybe already); unsubscribe. CI: pipelines lists what can \
             be run; run starts one by name (custom: <name>) with its variables and follows it unless \
             follow: false; follow_run one you did not start; runs, run_view, \
             run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
@@ -358,6 +358,7 @@ const SERVED: [Definition; 33] = [
                 "query": {"type": "string", "description": "people: lists who can be named a reviewer (a display name, nickname or e-mail does for reviewers); these words narrow it."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels (GitHub only)."},
                 "delete_branch_on_merge": {"type": "boolean", "description": "create: delete the source branch when it is merged."},
+                "subscribe": {"type": "boolean", "description": "create: false opens it without its automatic subscription."},
                 "reviewers_add": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to ask."},
                 "reviewers_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to take off."},
                 "labels_add": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to put on (GitHub only)."},
@@ -405,7 +406,7 @@ const SERVED: [Definition; 33] = [
             Assign only when asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (sprints lists them). \
             Milestones (Jira: versions): milestones; GitHub: milestone_create/_edit. \
-            subscribe: a ticket's events wake you until it is closed; unsubscribe.",
+            subscribe: its events wake you until closed (maybe already); unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,

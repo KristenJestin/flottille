@@ -3532,3 +3532,357 @@ fn a_bitbucket_wake_says_each_failed_job_s_line() {
         "{delivery}"
     );
 }
+
+// Automatic subscriptions (#793): what subscribes a session is the agent, or the subjects set in
+// Settings and per project (`extension.set {name: "subscriptions"}`), from people only.
+
+/// The automatic subscriptions set to `settings`, in Settings, or in `app` when `project` says so.
+fn automatic(user: &User, project: Option<&str>, settings: Value) {
+    let mut params = json!({"name": "autosubscriptions", "settings": settings});
+    if let Some(project) = project {
+        params["project"] = json!(project);
+    }
+    user.call("extension.set", params).unwrap();
+}
+
+/// The project `app`, no pull request yet, and an agent in `login` in Full, its branch pushed: its
+/// id and its MCP session.
+fn opener(user: &User) -> (String, Mcp) {
+    fixture(user);
+    user.gh_script(json!({"pulls": {}}));
+    let (id, mcp) = agent(user);
+    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
+        .unwrap();
+    let worktree = user.path("data/flottille/workspaces/app/login/api");
+    user.git(
+        &worktree,
+        &["update-ref", "refs/remotes/origin/app/login", "HEAD"],
+    );
+    (id, mcp)
+}
+
+/// `forge create` of the branch's pull request, `more` added to its arguments; the fake `gh` then
+/// answers the pull request #12 for the branch, as GitHub does once it is opened.
+fn create(user: &User, mcp: &Mcp, more: Value) -> Answer {
+    user.gh_script(json!({"created": 12, "pulls": {"acme/api": {"app/login": changed(pull())}}}));
+    let mut args = json!({"action": "create", "title": "Add the login page", "body": "Adds it"});
+    for (key, value) in more.as_object().into_iter().flatten() {
+        args[key] = value.clone();
+    }
+    mcp.call("forge", args)
+}
+
+/// The agent's open subscriptions of `source` (`forge`, `tickets`).
+fn of_source(user: &User, agent: &str, source: &str) -> Vec<Value> {
+    listed(user, agent)
+        .into_iter()
+        .filter(|s| s["agent"] == agent && s["source"] == source)
+        .collect()
+}
+
+/// What the automatic subscriptions told the agent on their own.
+fn told_automatically(user: &User) -> Vec<String> {
+    prompts(user)
+        .into_iter()
+        .filter(|p| p.contains("[flottille:autosubscriptions]"))
+        .collect()
+}
+
+/// The pull request #12 opened on `app/login` outside Flottille, seen by a round.
+fn opened_by_hand(user: &User) {
+    script(user, pull());
+    a_round(user);
+}
+
+#[test]
+fn opening_a_pull_request_subscribes_its_agent_with_the_events_set() {
+    let user = user();
+    let (id, mcp) = opener(&user);
+    automatic(&user, None, json!({"created_pull": ["checks", "comment"]}));
+
+    let answer = create(&user, &mcp, json!({}));
+    assert!(!answer.error, "{}", answer.text);
+
+    let subscriptions = of_source(&user, &id, "forge");
+    assert_eq!(subscriptions.len(), 1, "{subscriptions:?}");
+    assert_eq!(subscriptions[0]["events"], json!(["checks", "comment"]));
+    assert_eq!(subscriptions[0]["from"], "people");
+    assert_eq!(subscriptions[0]["target"]["number"], 12);
+    // Opened by the agent: no word of a pull request opened another way.
+    a_round(&user);
+    assert!(told_automatically(&user).is_empty(), "{:?}", prompts(&user));
+    assert_eq!(of_source(&user, &id, "forge").len(), 1);
+}
+
+#[test]
+fn the_answer_of_create_says_the_subscription() {
+    let user = user();
+    let (_, mcp) = opener(&user);
+
+    let answer = create(&user, &mcp, json!({}));
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(
+            "You are subscribed to it until it is merged or closed: checks, approvals, reviews, \
+             people's comments. unsubscribe to stop."
+        ),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn create_with_subscribe_false_subscribes_to_nothing() {
+    let user = user();
+    let (id, mcp) = opener(&user);
+
+    let answer = create(&user, &mcp, json!({"subscribe": false}));
+    assert!(!answer.error, "{}", answer.text);
+    assert!(!answer.text.contains("subscribed"), "{}", answer.text);
+    assert!(of_source(&user, &id, "forge").is_empty());
+    // The round that sees it open does not take it for one opened another way.
+    a_round(&user);
+    assert!(of_source(&user, &id, "forge").is_empty());
+    assert!(told_automatically(&user).is_empty(), "{:?}", prompts(&user));
+}
+
+#[test]
+fn a_pull_request_opened_on_the_session_s_branch_by_hand_subscribes_it_and_says_so() {
+    let user = user();
+    fixture(&user);
+    user.gh_script(json!({"pulls": {}}));
+    let (id, _) = agent(&user);
+
+    opened_by_hand(&user);
+    eventually("the automatic subscription", || {
+        !of_source(&user, &id, "forge").is_empty()
+    });
+    let subscriptions = of_source(&user, &id, "forge");
+    assert_eq!(subscriptions.len(), 1, "{subscriptions:?}");
+    assert_eq!(
+        subscriptions[0]["events"],
+        json!([
+            "checks", "review", "approved", "comment", "merged", "closed"
+        ])
+    );
+    assert_eq!(subscriptions[0]["from"], "people");
+    eventually("it is said", || !told_automatically(&user).is_empty());
+    let told = told_automatically(&user).remove(0);
+    for part in [
+        "pull request #12 of api",
+        "You are subscribed to it until it is merged or closed",
+        "unsubscribe to stop",
+    ] {
+        assert!(told.contains(part), "{part} in {told}");
+    }
+}
+
+#[test]
+fn a_project_s_own_value_wins_over_the_settings() {
+    let user = user();
+    fixture(&user);
+    user.gh_script(json!({"pulls": {}}));
+    automatic(&user, None, json!({"branch_pull": ["checks"]}));
+    automatic(&user, Some("app"), json!({"branch_pull": ["review"]}));
+    let (id, _) = agent(&user);
+
+    opened_by_hand(&user);
+    eventually("the automatic subscription", || {
+        !of_source(&user, &id, "forge").is_empty()
+    });
+    assert_eq!(
+        of_source(&user, &id, "forge")[0]["events"],
+        json!(["review"])
+    );
+}
+
+#[test]
+fn a_subject_set_to_none_subscribes_to_nothing() {
+    let user = user();
+    let (id, mcp) = opener(&user);
+    automatic(&user, None, json!({"created_pull": [], "branch_pull": []}));
+
+    let answer = create(&user, &mcp, json!({}));
+    assert!(!answer.error, "{}", answer.text);
+    assert!(!answer.text.contains("subscribed"), "{}", answer.text);
+    a_round(&user);
+    assert!(of_source(&user, &id, "forge").is_empty());
+
+    // Nor a pull request opened another way: closed, then a new one by hand.
+    let mut other = pull();
+    other["number"] = 13.into();
+    other["url"] = "https://github.com/acme/api/pull/13".into();
+    script(&user, other);
+    a_round(&user);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(of_source(&user, &id, "forge").is_empty());
+    assert!(told_automatically(&user).is_empty(), "{:?}", prompts(&user));
+}
+
+/// The workspace `login` linked to the ticket `ticket`.
+fn link_ticket(user: &User, ticket: &str) {
+    user.call(
+        "workspace.link_ticket",
+        json!({"project": "app", "name": "login", "ticket": ticket}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn by_default_the_ticket_subscribes_to_nothing() {
+    let user = user();
+    fixture(&user);
+    track(&user, json!({"kind": "github", "repository": "api"}));
+    script_issue(&user, issue(json!([])));
+    link_ticket(&user, "#5");
+    let (id, _) = agent(&user);
+
+    // Neither the ticket of the workspace it starts in, nor one linked while it runs.
+    link_ticket(&user, "#5");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(of_source(&user, &id, "tickets").is_empty());
+    assert!(told_automatically(&user).is_empty(), "{:?}", prompts(&user));
+}
+
+#[test]
+fn with_ticket_events_set_the_session_s_ticket_subscribes_it() {
+    let user = user();
+    fixture(&user);
+    track(&user, json!({"kind": "github", "repository": "api"}));
+    script_issue(&user, issue(json!([])));
+    automatic(&user, None, json!({"ticket": ["commented", "status"]}));
+    let (id, _) = agent(&user);
+    assert!(of_source(&user, &id, "tickets").is_empty(), "no ticket yet");
+
+    // The ticket it takes: linked to its workspace while it runs.
+    link_ticket(&user, "#5");
+    eventually("the ticket's subscription", || {
+        !of_source(&user, &id, "tickets").is_empty()
+    });
+    let subscriptions = of_source(&user, &id, "tickets");
+    assert_eq!(subscriptions.len(), 1, "{subscriptions:?}");
+    assert_eq!(subscriptions[0]["events"], json!(["commented", "status"]));
+    assert_eq!(subscriptions[0]["from"], "people");
+    assert_eq!(subscriptions[0]["named"], "ticket #5 of api");
+    eventually("it is said", || !told_automatically(&user).is_empty());
+    let told = told_automatically(&user).remove(0);
+    assert!(told.contains("ticket #5 of api"), "{told}");
+    assert!(told.contains("until it is closed"), "{told}");
+
+    // A person's comment wakes it.
+    script_issue(
+        &user,
+        issue(json!([{"author": {"login": "alice"}, "body": "I can reproduce"}])),
+    );
+    a_round(&user);
+    assert!(the_delivery(&user).contains("comment by alice: I can reproduce"));
+
+    // A session started where the ticket is already linked is subscribed from its start.
+    let (other, _) = agent(&user);
+    eventually("the new session's subscription", || {
+        !of_source(&user, &other, "tickets").is_empty()
+    });
+}
+
+#[test]
+fn a_child_and_a_review_s_agents_are_never_subscribed_automatically() {
+    let user = user();
+    // The review's agents and the child hang in their turn: they are running when the pull
+    // request opens and when the ticket is linked.
+    user.fake_script(json!({"turns": [
+        {"when": "of the change of workspace", "do": [{"hang": true}]},
+        {"when": "The change, in each repository", "do": [{"hang": true}]},
+        {"when": "HANG", "do": [{"hang": true}]}
+    ]}));
+    fixture(&user);
+    track(&user, json!({"kind": "github", "repository": "api"}));
+    user.gh_script(json!({"pulls": {}, "issues": {"acme/api": {"5": issue(json!([]))}}}));
+    automatic(&user, None, json!({"ticket": ["commented"]}));
+    user.call("extension.set", json!({"name": "review", "enabled": true}))
+        .unwrap();
+    // A change for the review to read.
+    let worktree = user.path("data/flottille/workspaces/app/login/api");
+    std::fs::write(worktree.join("login.rs"), "pub fn login() {}\n").unwrap();
+    user.git(&worktree, &["add", "."]);
+    user.git(&worktree, &["commit", "--quiet", "-m", "login"]);
+    let (root, mcp) = agent(&user);
+    user.call("agent.mode", json!({"agent": root, "mode": "full"}))
+        .unwrap();
+
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "Look around", "brief": "HANG"}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    user.call("review.start", json!({"agent": root})).unwrap();
+    let others = || -> Vec<String> {
+        user.call("agent.list", json!({"project": "app"})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["id"] != root.as_str())
+            .map(|a| a["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    eventually("the child and the review's pilot", || others().len() >= 2);
+
+    link_ticket(&user, "#5");
+    script_issue(&user, issue(json!([])));
+    a_round(&user);
+    eventually("the session's own subscriptions", || {
+        of_source(&user, &root, "forge").len() == 1 && of_source(&user, &root, "tickets").len() == 1
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    for other in others() {
+        let theirs: Vec<Value> = listed(&user, &root)
+            .into_iter()
+            .filter(|s| s["agent"] == other.as_str())
+            .collect();
+        assert!(theirs.is_empty(), "{other}: {theirs:?}");
+    }
+}
+
+#[test]
+fn subscribing_after_an_automatic_one_replaces_it_not_adds_one() {
+    let user = user();
+    fixture(&user);
+    user.gh_script(json!({"pulls": {}}));
+    let (id, mcp) = agent(&user);
+    opened_by_hand(&user);
+    eventually("the automatic subscription", || {
+        !of_source(&user, &id, "forge").is_empty()
+    });
+
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    let subscriptions = of_source(&user, &id, "forge");
+    assert_eq!(subscriptions.len(), 1, "{subscriptions:?}");
+    assert_eq!(subscriptions[0]["events"], json!(["checks"]));
+}
+
+#[test]
+fn a_comment_from_the_agent_itself_does_not_wake_it() {
+    let user = user();
+    let (_, mcp) = opener(&user);
+    let answer = create(&user, &mcp, json!({}));
+    assert!(!answer.error, "{}", answer.text);
+
+    // What an agent posted carries Flottille's marker: it wakes nobody.
+    let mut commented = pull();
+    commented["comments"] = json!([
+        {"author": {"login": "kris"}, "body": format!("Rebased on main\n\n{MARKER}")}
+    ]);
+    script(&user, commented.clone());
+    a_round(&user);
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+
+    // A person's does.
+    commented["comments"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"author": {"login": "alice"}, "body": "Looks good"}));
+    script(&user, commented);
+    a_round(&user);
+    let delivery = the_delivery(&user);
+    assert!(delivery.contains("alice"), "{delivery}");
+    assert!(!delivery.contains("Rebased on main"), "{delivery}");
+}

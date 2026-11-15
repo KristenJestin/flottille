@@ -47,6 +47,7 @@ mod review;
 mod yaml;
 
 pub(crate) use events::offer;
+pub(crate) use events::same_pull;
 pub use events::{EVENTS, target_named};
 
 /// How long a state read stays fresh, and how often a watched workspace is read again.
@@ -1116,6 +1117,8 @@ pub(crate) struct ForgeCall {
     delete_branch: Option<bool>,
     /// subscribe: the events it waits for (`EVENTS`).
     events: Option<Vec<String>>,
+    /// create: `false` opens it without the automatic subscription.
+    subscribe: Option<bool>,
     /// subscribe: whose reviews and comments count (`subscriptions::FROM`).
     from: Option<String>,
     /// subscribe: a deadline, in minutes; none when left out.
@@ -1401,7 +1404,23 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         }
         ("subscribe", _) => forge_subscribe(daemon, agent, place, asked).await,
         ("unsubscribe", _) => forge_unsubscribe(daemon, agent, place, asked),
-        ("create" | "merge" | "checks", _) => {
+        ("create", _) => {
+            let (subscribe, workspace, repository) = (
+                asked.subscribe != Some(false),
+                asked.workspace.clone(),
+                asked.repository.clone(),
+            );
+            let written = forge_write(daemon, place, asked).await;
+            daemon.forges.pulls.drop_all();
+            match written {
+                Outcome::Done(text) if subscribe => {
+                    let said = created(daemon, agent, place, workspace, repository).await;
+                    Outcome::Done(text + &said)
+                }
+                other => other,
+            }
+        }
+        ("merge" | "checks", _) => {
             let written = forge_write(daemon, place, asked).await;
             daemon.forges.pulls.drop_all();
             written
@@ -1431,6 +1450,41 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
             "refused: forge has no action {action:?}: its actions are {}",
             crate::gate::FORGE_ACTIONS
         )),
+    }
+}
+
+/// A pull request the agent just opened subscribes it, a session, to the events Settings and the
+/// project set (`docs/extensions.md`, "Automatic subscriptions"), from people: what its answer
+/// says of it, nothing when no event is set or the agent is no session.
+async fn created(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    place: &Place,
+    workspace: Option<String>,
+    repository: Option<String>,
+) -> String {
+    let session = daemon
+        .read(|store| store.agent(agent))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.parent.is_none());
+    let events = crate::extensions::subscribed_on_create(daemon, &place.project);
+    if !session || events.is_empty() {
+        return String::new();
+    }
+    let call = json!({"action": "subscribe", "workspace": workspace, "repository": repository,
+        "events": events, "from": "people"});
+    let asked: ForgeCall = match arguments("forge", call) {
+        Ok(asked) => asked,
+        Err(_) => return String::new(),
+    };
+    match forge_subscribe(daemon, agent, place, asked).await {
+        Outcome::Done(_) => format!("\n{}", crate::extensions::pull_sentence(&events, "")),
+        Outcome::Refused(why) | Outcome::Invalid(why) | Outcome::Failed(why) => format!(
+            "\nYou are not subscribed to it: {}; forge subscribe subscribes you.",
+            why.trim_start_matches("refused: ")
+        ),
+        _ => String::new(),
     }
 }
 
@@ -1482,6 +1536,54 @@ fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
     text
 }
 
+/// The branches whose pull request an agent's own call opens or reads to subscribe to, by
+/// (project, repository, branch), each with how many calls hold it: what the rounds see of that
+/// pull request opening is that call's, never one opened another way (`docs/extensions.md`,
+/// "Automatic subscriptions").
+static OWN: crate::locks::Lock<std::collections::BTreeMap<(String, String, String), usize>> =
+    crate::locks::Lock::named("OWN", std::collections::BTreeMap::new());
+
+/// A branch held by an agent's call: let go when dropped, unless `kept` (a pull request opened),
+/// until the rounds see it open.
+pub(crate) struct Own {
+    key: (String, String, String),
+    kept: bool,
+}
+
+impl Own {
+    fn hold(project: &str, repository: &str, branch: &str) -> Own {
+        let key = (project.to_owned(), repository.to_owned(), branch.to_owned());
+        *OWN.lock().unwrap().entry(key.clone()).or_default() += 1;
+        Own { key, kept: false }
+    }
+
+    fn keep(mut self) {
+        self.kept = true;
+    }
+}
+
+impl Drop for Own {
+    fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
+        let mut own = OWN.lock().unwrap();
+        if let Some(count) = own.get_mut(&self.key) {
+            *count -= 1;
+            if *count == 0 {
+                own.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// Whether an agent's own call opened, or reads, the pull request of `branch` that a round or a
+/// live read just saw open; taken, so that the next one opened on the branch is not.
+pub(crate) fn owned(project: &str, repository: &str, branch: &str) -> bool {
+    let key = (project.to_owned(), repository.to_owned(), branch.to_owned());
+    OWN.lock().unwrap().remove(&key).is_some()
+}
+
 /// `forge subscribe`: the agent is woken at each of the events it names of the pull request of a
 /// workspace's branch, until it is merged or closed; the answer comes at once, the events later as
 /// deliveries. What is already so is not an event: this read is what the next ones are compared
@@ -1525,6 +1627,7 @@ async fn forge_subscribe(
         pull,
         target,
         before,
+        _own,
     } = match found {
         Ok(found) => found,
         Err(refusal) => return refusal,
@@ -1573,6 +1676,9 @@ async fn forge_subscribe(
     if let Err(error) = subscribed {
         return Outcome::Failed(error);
     }
+    // Stored now: no round will see it open, and the next one opened on its branch is not this
+    // call's.
+    owned(&place.project, &path, &pull.head);
     let from = match from {
         "people" => ", from people",
         _ => "",
@@ -1617,6 +1723,8 @@ struct Followed {
     pull: Pull,
     target: Value,
     before: crate::items::Before,
+    /// Held while the call subscribes: the pull request opening, seen by its live read, is its own.
+    _own: Own,
 }
 
 /// The pull request of a workspace's branch, read as the workspace is.
@@ -1640,6 +1748,7 @@ async fn read_of_branch(
     )?
     .remove(0)
     .path;
+    let own = Own::hold(&place.project, &path, &workspace.branch);
     // The read now is stored before the subscription opens, unless a round wrote meanwhile: what
     // is so now is no event of the next rounds.
     let before = crate::items::before_live(daemon, &place.project);
@@ -1670,6 +1779,7 @@ async fn read_of_branch(
         pull: pull.clone(),
         path,
         before,
+        _own: own,
     })
 }
 
@@ -1716,6 +1826,7 @@ async fn read_numbered(
     know_posts(daemon, &place.project, &checkout.path, &forge, &mut pull);
     Ok(Followed {
         target: events::target(&place.project, None, &checkout.path, &pull),
+        _own: Own::hold(&place.project, &checkout.path, &pull.head),
         forge: Some(forge),
         pull,
         path: checkout.path,
@@ -2863,6 +2974,9 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         Err(Some(why)) => return Outcome::Refused(why),
     };
     let branch = head.branch_or(&workspace.branch);
+    // The pull request it opens is this call's: the round that sees it open does not take it for
+    // one opened another way, whether it subscribes or not.
+    let own = (asked.action == "create").then(|| Own::hold(&place.project, &checkout.path, branch));
     if asked.action == "create"
         && let Err(refusal) = on_remote(
             &workspace.folder_of(&checkout.path),
@@ -2938,7 +3052,12 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         let written =
             bitbucket::write(on, &forge, (branch, base), &reviewers, &deletion, asked).await;
         return match written {
-            Outcome::Done(said) => Outcome::Done(said + &reviewers_said),
+            Outcome::Done(said) => {
+                if let Some(own) = own {
+                    own.keep();
+                }
+                Outcome::Done(said + &reviewers_said)
+            }
             other => other,
         };
     }
@@ -2971,6 +3090,9 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             }
             match gh_text(&args).await {
                 Ok(said) => {
+                    if let Some(own) = own {
+                        own.keep();
+                    }
                     // `gh` prints the new pull request's link, which ends with its number.
                     let number = said.trim().rsplit('/').next().unwrap_or_default();
                     let numbered = number.parse::<u64>().is_ok();

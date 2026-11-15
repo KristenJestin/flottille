@@ -83,6 +83,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("review.show", Read),
     ("review.set", Drive),
     ("review.reset", Drive),
+    ("autosubscriptions.events", Read),
     ("appearance.show", Read),
     ("appearance.set", Drive),
     ("tool_results.show", Read),
