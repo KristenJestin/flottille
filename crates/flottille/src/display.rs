@@ -1,8 +1,9 @@
 //! A runtime folder of its own for a program that opens a window on the user's screen: it holds
-//! the session's Wayland socket alone (a hard link of it), so the program reaches the compositor
-//! and nothing else of the user's real `$XDG_RUNTIME_DIR`: not the session bus, hence not the
-//! keyring, nor the other sockets. A connection's browser uses it (`docs/extensions.md`), and a
-//! run that opens windows will.
+//! the session's Wayland socket alone (a hard link of it), so the program is given the compositor
+//! and nothing else of the user's real `$XDG_RUNTIME_DIR`: not the session bus's address, nor the
+//! other sockets. What keeps it from the real folder itself is Landlock's (`landlock.rs`), which
+//! leaves this folder alone within its reach. A connection's browser uses it
+//! (`docs/extensions.md`), and a run that opens windows will.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -14,6 +15,12 @@ use flottille_core::paths::Paths;
 /// The folder of one owner, removed when this is dropped: the program that used it has stopped.
 #[derive(Debug)]
 pub struct Folder(PathBuf);
+
+impl Folder {
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
 
 impl Drop for Folder {
     fn drop(&mut self) {

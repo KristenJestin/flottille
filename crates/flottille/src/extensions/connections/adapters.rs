@@ -132,6 +132,8 @@ const PROTOCOL: &str = "agent-browser.plugin.v1";
 pub const TOKEN_VARIABLE: &str = "FLOTTILLE_VAULT_TOKEN";
 /// How long a login has, as a call of the server has.
 const LOGIN_LIMIT: Duration = Duration::from_secs(120);
+/// How long `agent-browser close` may take.
+const CLOSE_LIMIT: Duration = Duration::from_secs(10);
 /// How long the plugin has to say what it asks, once it reached the daemon.
 const ASK_LIMIT: Duration = Duration::from_secs(5);
 /// What is kept of the command line's output.
@@ -287,8 +289,9 @@ impl Adapter {
                 "its browser is shown on the screen: the server gets the session's display \
                  (WAYLAND_DISPLAY, or DISPLAY without Wayland) in a runtime folder of its own \
                  holding the Wayland socket alone, never the user's, and the configuration sets \
-                 headed; with X11 the browser can read the keys typed in other windows, and on \
-                 some Wayland compositors a client can capture the screen and the clipboard"
+                 headed; with X11 the browser can read the keys typed in other windows and type \
+                 into them (a terminal's included), and on some Wayland compositors a client can \
+                 capture the screen and the clipboard"
                     .to_owned(),
             );
         }
@@ -619,26 +622,90 @@ pub fn shown(
     }
 }
 
-/// The browser's environment: no display of the daemon's own, never the session bus (the
-/// keyring), whether the browser is shown or not, and the folder's variables when it is shown.
-/// agent-browser puts its daemon's socket in `AGENT_BROWSER_SOCKET_DIR`, else under
-/// `$XDG_RUNTIME_DIR`: the server and its login run both name the connection's own `folder`, so
-/// they reach the same browser, and the removal of a display folder never takes a live socket.
+/// The browser's environment: no display of the daemon's own, never the session bus address,
+/// whether the browser is shown or not, and the display folder's variables (`shown`, a
+/// [`crate::display::Shown`]'s) when it is shown. agent-browser puts its daemon's socket in
+/// `AGENT_BROWSER_SOCKET_DIR`, else under `$XDG_RUNTIME_DIR`: the server and its login run both
+/// name the connection's own `folder`, so they reach the same browser, and the removal of a
+/// display folder never takes a live socket.
 pub fn display(
     env: &mut BTreeMap<OsString, OsString>,
-    shown: Option<&crate::display::Shown>,
+    shown: Option<&BTreeMap<OsString, OsString>>,
     folder: &Path,
 ) {
     for name in ["WAYLAND_DISPLAY", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS"] {
         env.remove(&OsString::from(name));
     }
     if let Some(shown) = shown {
-        env.extend(shown.env.clone());
+        env.extend(shown.clone());
     }
     env.insert(
         "AGENT_BROWSER_SOCKET_DIR".into(),
         folder.as_os_str().to_owned(),
     );
+}
+
+/// The display folder an environment [`display`] made names: the one folder of the user's runtime
+/// folder its command may reach (`crate::landlock::confined_but`).
+pub fn display_folder(env: &BTreeMap<OsString, OsString>) -> Option<&Path> {
+    env.get(&OsString::from("XDG_RUNTIME_DIR")).map(Path::new)
+}
+
+/// How the browser agent-browser's daemon runs for a connection is closed: its command line and
+/// the socket folder the daemon answers on.
+#[derive(Clone, Debug)]
+pub struct Browser {
+    program: Vec<String>,
+    folder: PathBuf,
+}
+
+/// The browser of `declaration`, when it runs `agent-browser mcp`.
+pub fn browser(daemon: &Daemon, declaration: &Declaration) -> Option<Browser> {
+    Some(Browser {
+        program: command_line(declaration)?,
+        folder: folder(daemon, &declaration.name),
+    })
+}
+
+/// Closes the browser answering on the connection's socket folder (`agent-browser close`),
+/// whichever of the server and a login started it: it outlives both, in the display folder and
+/// the mode it started with, and the next start must apply the user's switch.
+pub async fn close(daemon: &Daemon, browser: &Browser) {
+    let Ok(mut env) = crate::runs::beside(daemon) else {
+        return;
+    };
+    display(&mut env, None, &browser.folder);
+    let mut command = tokio::process::Command::new(&browser.program[0]);
+    command
+        .args(&browser.program[1..])
+        .arg("close")
+        .env_clear()
+        .envs(&env)
+        .current_dir(&browser.folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = match crate::children::spawn(crate::landlock::confined(
+        crate::children::in_own_session(&mut command),
+    )) {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!(
+                "flottille daemon: cannot close the browser of {}: {error}",
+                browser.folder.display()
+            );
+            return;
+        }
+    };
+    let leader = child.id();
+    if tokio::time::timeout(CLOSE_LIMIT, child.wait())
+        .await
+        .is_err()
+        && let Some(leader) = leader
+    {
+        crate::children::end_session(leader).await;
+    }
 }
 
 /// `bytes` in `file`, the user's alone, written whole or not at all. Each write has a temporary
@@ -749,7 +816,7 @@ pub async fn perform(
              not run `agent-browser mcp`"
         ));
     };
-    super::client::exclusively(daemon, name, async {
+    super::client::exclusively_shown(daemon, name, |served| async move {
         // Read again under the connection's turn: the user may have changed a setting since the
         // gate let the call through.
         let row = super::row(daemon, name);
@@ -768,7 +835,7 @@ pub async fn perform(
             entry: entry_of.name.clone(),
             project: grant.place.project.clone(),
         };
-        match run(daemon, declaration, &program, &login, &url).await {
+        match run(daemon, declaration, &program, &login, &url, served).await {
             Ok(said) => Outcome::Done(format!(
                 "Signed in with the vault entry {entry}: agent-browser typed its username and \
                  secret into the page's login form; the secret never reaches you. What \
@@ -829,20 +896,30 @@ struct Login {
 }
 
 /// Runs `agent-browser auth login` with Flottille as its credential provider, and answers the
-/// plugin's request for this run alone: what it printed, or why it failed.
+/// plugin's request for this run alone: what it printed, or why it failed. `served` is the display
+/// of the server that runs, if it shows its browser.
 async fn run(
     daemon: &Arc<Daemon>,
     declaration: &Declaration,
     program: &[String],
     login: &Login,
     url: &str,
+    served: Option<BTreeMap<OsString, OsString>>,
 ) -> Result<String, String> {
     let folder = folder(daemon, &declaration.name);
     flottille_core::paths::ensure_private_dir(&folder).map_err(|error| error.to_string())?;
     let sites = sites(daemon, declaration);
-    // Its own folder: the server's, when it runs, stays where it is.
-    let (shown, _) = shown(daemon, declaration, &format!("{}-login", declaration.name));
+    // The server's display folder, one browser for both: the server's own while it runs, else
+    // made under its name, the same path the server's next start makes again.
+    let (own, _) = match served {
+        Some(_) => (None, None),
+        None => shown(daemon, declaration, &declaration.name),
+    };
+    let shown = served.or_else(|| own.as_ref().map(|own| own.env.clone()));
     let options = start_options(&folder, &sites, shown.is_some())?;
+    if let Some(browser) = browser(daemon, declaration) {
+        super::client::browser_started(daemon, &declaration.name, browser);
+    }
     let token = super::oauth::random(32)?;
     let socket = socket_file(&folder);
     // Left by a login that was killed: the folder is the user's alone (0700) and a connection runs
@@ -853,6 +930,7 @@ async fn run(
     // The same environment and folder as the server: the same browser session and namespace.
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
     display(&mut env, shown.as_ref(), &folder);
+    let reached = display_folder(&env).map(Path::to_path_buf);
     for (variable, secret) in
         super::client::secrets(daemon, &declaration.name, &declaration.env).await?
     {
@@ -884,8 +962,9 @@ async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = crate::children::spawn(crate::landlock::confined(
+    let mut child = crate::children::spawn(crate::landlock::confined_but(
         crate::children::in_own_session(&mut command),
+        reached.as_deref(),
     ))
     .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();
@@ -921,7 +1000,8 @@ async fn run(
             return Err(why);
         }
     };
-    // Not its session once it ended: the browser it may have started serves the server too.
+    // Not its session once it ended: the browser it may have started serves the server too, and
+    // is closed with it (`close`).
     let said = stdout.await.unwrap_or_default();
     let error = stderr.await.unwrap_or_default();
     if status.success() {
@@ -976,8 +1056,9 @@ async fn reload(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = crate::children::spawn(crate::landlock::confined(
+    let mut child = crate::children::spawn(crate::landlock::confined_but(
         crate::children::in_own_session(&mut command),
+        display_folder(env),
     ))
     .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();

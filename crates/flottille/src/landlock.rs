@@ -103,6 +103,15 @@ fn allowed(dir: &Path, denied: &[PathBuf], out: &mut Vec<CString>) {
 /// The command runs kept out of the user's runtime folders where the kernel has Landlock (its
 /// second ABI or later); elsewhere it runs as before (`docs/vault.md` says the gap).
 pub fn confined(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    confined_but(command, None)
+}
+
+/// [`confined`], `open` (a folder in the runtime folder, made for this command alone) left
+/// within its reach: a shown browser's display folder (`display.rs`).
+pub fn confined_but<'a>(
+    command: &'a mut tokio::process::Command,
+    open: Option<&Path>,
+) -> &'a mut tokio::process::Command {
     let abi = abi();
     let denied = runtime_folders();
     if abi < 2 || denied.is_empty() {
@@ -111,6 +120,7 @@ pub fn confined(command: &mut tokio::process::Command) -> &mut tokio::process::C
     let rights = rights(abi);
     let mut paths = Vec::new();
     allowed(Path::new("/"), &denied, &mut paths);
+    paths.extend(open.and_then(|folder| CString::new(folder.as_os_str().as_bytes()).ok()));
     // SAFETY: the closure allocates nothing and only makes system calls (open, fstat,
     // landlock_*, prctl, close), all async-signal-safe.
     unsafe { command.pre_exec(move || restrict(rights, &paths)) }

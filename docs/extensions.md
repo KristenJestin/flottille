@@ -1380,16 +1380,27 @@ way in:
   of the connection's own, `$XDG_RUNTIME_DIR/flottille/display/<connection>` (mode 0700, removed
   when the server stops), holding a hard link of the session's Wayland socket alone, and the
   server's `XDG_RUNTIME_DIR` is that folder, with `WAYLAND_DISPLAY`; `DISPLAY` is given only when
-  the session has no Wayland, and `DBUS_SESSION_BUS_ADDRESS` never. When the folder cannot be made
+  the session has no Wayland, and `DBUS_SESSION_BUS_ADDRESS` never. That folder is the one part of
+  the user's runtime folder Landlock leaves within the server's and its login's reach
+  (`docs/vault.md`, "The runtime folder"); the bus's address is not given, and the rest of the
+  runtime folder is denied where Landlock allows it. Below Landlock's ninth ABI a process that
+  guesses the bus's path can still connect to it, a gap of every run's (#976). When the folder cannot be made
   (the filesystem refuses the hard link, the socket is not there) the browser runs headless and the
-  daemon says why, in its log and in the form, under the switch, never with the real folder. Off,
-  the server gets no display variable of the daemon's; **whether the browser is shown or not, it
-  never gets `DBUS_SESSION_BUS_ADDRESS`**, and both the server and its login run get
-  `AGENT_BROWSER_SOCKET_DIR` naming the connection's own folder (agent-browser puts its daemon's
-  socket there, else under `$XDG_RUNTIME_DIR`), so they reach the same browser and the removal of
-  a display folder never takes a live socket. **Showing the browser has a risk, said beside the
-  switch and in the review**: with X11 the browser can read the keys typed in other windows, and
-  on some Wayland compositors a client can capture the screen and the clipboard. The daemon
+  daemon says why, in its log and in the form, under the switch (kept there while a call runs),
+  never with the real folder. Off, the server gets no display variable of the daemon's; **whether
+  the browser is shown or not, it is never given `DBUS_SESSION_BUS_ADDRESS`**, and both the server
+  and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's own folder
+  (agent-browser puts its daemon's socket there, else under `$XDG_RUNTIME_DIR`), so they reach the
+  same browser and the removal of a display folder never takes a live socket. One browser per
+  connection, in the mode the switch says: a login uses the server's display folder (the running
+  server's own, else made under the connection's name for the time of the login), and the browser
+  agent-browser's daemon runs, which outlives the command that started it (a login's or the
+  server's), is closed (`agent-browser close`, on that socket folder) when the server is stopped
+  (an edit of what trust is given to, the switch included, turning it off, removing it) and when
+  the daemon stops; the next start, of the server or of a login, starts a browser in the mode the
+  switch says. **Showing the browser has a risk, said beside the switch and in the review**: with
+  X11 the browser can read the keys typed in other windows and type into them (a terminal's
+  included), and on some Wayland compositors a client can capture the screen and the clipboard. The daemon
   removes every display folder when it starts, under its lock, and makes the last folder of a
   connection itself, never taking one over. The folder is
   made by one function (`display.rs`), which a run that opens windows reuses. It is the user's

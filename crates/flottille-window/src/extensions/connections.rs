@@ -58,8 +58,8 @@ pub const LIMITS_HINT: &str = "An argument of that name may take only these valu
 /// What *Show the browser* says: what it gives the server.
 pub const HEADED_HINT: &str = "Shows the browser an agent drives on your screen. A change stops \
      the server that runs, and the next start applies it. With X11 the browser can read the keys \
-     you type in other windows; on some Wayland compositors a client can capture the screen and \
-     the clipboard.";
+     you type in other windows and type into them, a terminal's included; on some Wayland \
+     compositors a client can capture the screen and the clipboard.";
 
 /// What the sites' field says: what a sign-in's extra hosts are for.
 pub const SITES_HINT: &str = "Hosts a sign-in goes through besides the sites of its entries, such \
