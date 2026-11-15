@@ -221,6 +221,13 @@ for example `PACKAGE_STORE = "{workspace.path}/.store"`, `COMPOSE_PROJECT_NAME =
 and `PATH = "{workspace.path}/.bin"` give each workspace its own package store, its own container
 stack and its own wrappers, whatever folder a command runs in.
 
+A setup's `run` line runs what the repositories hold, which an agent may have written (a
+`postinstall` script on a branch it pushed): it gets the environment of a run and is kept from
+what a run is kept from (`docs/tools.md`, "Tasks and runs", and `docs/vault.md`, "The runtime
+folder"). So it finds no forge login: a setup that fetches private dependencies through a forge
+command line's sign-in (`gh`'s credential helper) fails, and one over SSH or with a registry's own
+token in the daemon's environment works.
+
 ### A line, without a shell
 
 Flottille never hands a line to a shell. It is split into words on whitespace; a quoted part
