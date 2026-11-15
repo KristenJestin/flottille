@@ -462,12 +462,19 @@ fn bound_checked(
         }));
     }
     if bound.starts_with("connection:")
-        && let Some(host) = url.and_then(in_clear)
+        && let Some(url) = url
     {
-        return Err(Failure::refused(format!(
-            "an entry for {said} cannot be on plain http to {host}, another machine: its \
-             password would travel in clear. Give its https address"
-        )));
+        if let Some(host) = in_clear(url) {
+            return Err(Failure::refused(format!(
+                "an entry for {said} cannot be on plain http to {host}, another machine: its \
+                 password would travel in clear. Give its https address"
+            )));
+        }
+        // Login reads the URL through `site()`: one it cannot read would be skipped there, long
+        // after it was saved.
+        if crate::extensions::site_of(url).is_none() {
+            return Err(Failure::refused(no_web_address(url)));
+        }
     }
     match (bound.split_once(':'), project) {
         (Some(("worklog", of)), Some(own)) if of != own => Err(Failure::refused(format!(
@@ -496,6 +503,11 @@ fn named_by(daemon: &Daemon, bound: &str, name: &str) -> Result<bool, String> {
         },
         _ => crate::extensions::bound_names(daemon, bound, name),
     }
+}
+
+/// Why `url` is no address a secret may go to: the words of the ask's refusal and of Save's.
+fn no_web_address(url: &str) -> String {
+    format!("{url} is no web address a secret may go to: https, or http on this machine")
 }
 
 /// The host of `url` when it is plain `http` to another machine.
@@ -987,10 +999,7 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
                 ));
             }
             (None, None) => {
-                return Outcome::Refused(format!(
-                    "refused: {url} is no web address a secret may go to: https, or http on \
-                     this machine"
-                ));
+                return Outcome::Refused(format!("refused: {}", no_web_address(url)));
             }
             (None, Some(host)) => Some(host),
         },
