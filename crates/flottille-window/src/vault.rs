@@ -633,9 +633,12 @@ impl VaultSection {
                 .flex_col()
                 .gap(space::XS)
                 .child(line("vault-binding-for", "For", used))
-                .child(presence_of("vault-binding-host-block", host, move |host| {
-                    line("vault-binding-host", "Goes to", host)
-                }))
+                .child(
+                    presence_of("vault-binding-host-block", host, move |host| {
+                        line("vault-binding-host", "Goes to", host)
+                    })
+                    .gap(space::XS),
+                )
                 .child(
                     div().pt(space::XS).child(
                         Button::quiet("vault-binding-remove", "Remove the binding")

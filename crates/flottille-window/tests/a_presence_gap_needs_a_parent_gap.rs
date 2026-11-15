@@ -39,6 +39,11 @@ const KIT_COLUMNS: &[(&str, &str)] = &[
 /// cannot outlive its blocks; a new block next to one of them is checked.
 const UNSEEN: &[(&str, &str, &str)] = &[
     (
+        "vault.rs",
+        "vault-binding-block",
+        "`binding` returns it to `modal`, which puts it in the form's column, gapping `space::LG`",
+    ),
+    (
         "claude.rs",
         "{prefix}-found-block",
         "its callers put it in a `Section`, which gaps `space::MD`",
