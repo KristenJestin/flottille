@@ -22,7 +22,7 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
-use crate::serial::{from_hex_text, to_hex};
+use crate::serial::{from_hex_text, invisible, to_hex};
 use crate::{ListError, MemberList, Members, PublicKey, verification_words};
 
 const VERSION: u8 = 1;
@@ -30,6 +30,8 @@ const CHECKSUM_DOMAIN: &[u8] = b"flottille-invitation-v1\0";
 const CHECKSUM: usize = 4;
 /// The bytes before the hub URL.
 const FIXED: usize = 1 + 32 + 32 + 16;
+/// The longest hub URL, in bytes.
+const URL_LIMIT: usize = 2048;
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// The hub's token for one invitation: valid 5 minutes, once. It lets a device ask to join, so it
@@ -66,8 +68,11 @@ pub struct Invitation {
 }
 
 impl Invitation {
-    /// The code to copy, and the QR's text.
-    pub fn code(&self) -> String {
+    /// The code to copy, and the QR's text; refused when the hub URL is not one (`is_hub_url`).
+    pub fn code(&self) -> Result<String, InvitationError> {
+        if !is_hub_url(&self.hub_url) {
+            return Err(InvitationError::HubUrl);
+        }
         let mut bytes = vec![VERSION];
         bytes.extend_from_slice(self.hub_key.as_bytes());
         bytes.extend_from_slice(self.inviter.as_bytes());
@@ -75,7 +80,7 @@ impl Invitation {
         bytes.extend_from_slice(self.hub_url.as_bytes());
         let checksum = checksum(&bytes);
         bytes.extend_from_slice(&checksum);
-        encode(&bytes)
+        Ok(encode(&bytes))
     }
 
     pub fn from_code(code: &str) -> Result<Invitation, InvitationError> {
@@ -92,12 +97,14 @@ impl Invitation {
         }
         let key = |at: usize| {
             let bytes: [u8; 32] = payload[at..at + 32].try_into().expect("32 bytes");
-            PublicKey::from_bytes(&bytes).ok_or(InvitationError::Damaged)
+            PublicKey::from_bytes(&bytes).map_err(|_| InvitationError::BadKey)
         };
         let hub_url = std::str::from_utf8(&payload[FIXED..])
             .ok()
-            .filter(|url| !url.chars().any(|c| c.is_whitespace() || c.is_control()))
             .ok_or(InvitationError::Damaged)?;
+        if !is_hub_url(hub_url) {
+            return Err(InvitationError::HubUrl);
+        }
         Ok(Invitation {
             hub_url: hub_url.to_owned(),
             hub_key: key(1)?,
@@ -138,6 +145,9 @@ impl Invitation {
 pub enum InvitationError {
     Damaged,
     OtherVersion,
+    /// A key in it is not one, or is a weak one: a code made by hand, not a member.
+    BadKey,
+    HubUrl,
 }
 
 impl fmt::Display for InvitationError {
@@ -148,11 +158,36 @@ impl fmt::Display for InvitationError {
                 "this invitation code comes from another version of Flottille: update the older \
                  device (flottille update)"
             }
+            InvitationError::BadKey => {
+                "this invitation code holds a key no device makes: ask for a new invitation"
+            }
+            InvitationError::HubUrl => {
+                "the hub URL of this invitation is not an http:// or https:// address of at most \
+                 2048 characters, with no space and no invisible character"
+            }
         })
     }
 }
 
 impl std::error::Error for InvitationError {}
+
+/// Whether `url` is a hub URL: `http://` or `https://`, a host, at most `URL_LIMIT` bytes, and
+/// no space, control or invisible character, which would make the address a person checks differ
+/// from the one the device reaches.
+fn is_hub_url(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    url.len() <= URL_LIMIT
+        && !authority.is_empty()
+        && !url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || invisible(c))
+}
 
 fn checksum(payload: &[u8]) -> [u8; CHECKSUM] {
     let mut hasher = Sha256::new();

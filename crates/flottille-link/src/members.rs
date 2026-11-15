@@ -28,7 +28,7 @@ use ed25519_dalek::Signer;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
-use crate::serial::{from_hex_text, to_hex};
+use crate::serial::{from_hex_text, invisible, to_hex};
 use crate::{DeviceKey, PublicKey};
 
 /// The start of every change's signed bytes.
@@ -394,12 +394,12 @@ impl Members {
         let length = name.chars().count();
         if length == 0
             || length > NAME_LIMIT
-            || name.chars().any(char::is_control)
+            || name.chars().any(|c| c.is_control() || invisible(c))
             || name.trim() != name
         {
             return Err(format!(
                 "names a device {name:?}: a name is 1 to {NAME_LIMIT} characters, with no control \
-                 character and no space at either end"
+                 character, no invisible character and no space at either end"
             ));
         }
         let lower = name.to_lowercase();
