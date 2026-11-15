@@ -1344,7 +1344,7 @@ fn a_reply_to_a_github_issue_comment_quotes_it() {
         ),
         "{call}"
     );
-    // Another issue's comment, and a comment that is not there, are refused with nothing written.
+    // A comment that is not there is refused with nothing written.
     let said = refused_at_once(
         &user,
         &mcp,
@@ -1384,4 +1384,251 @@ fn a_reply_names_the_ticket_the_comment_and_its_words() {
         let said = refused_at_once(&user, &mcp, args.clone());
         assert!(said.contains(missing), "{args}: {said}");
     }
+}
+
+/// An ADF comment as Jira gives it back for a reply to a comment: a quote, a heading and a table.
+fn comment_with_a_quote_a_heading_and_a_table() -> Value {
+    let paragraph =
+        |text: &str| json!({"type": "paragraph", "content": [{"type": "text", "text": text}]});
+    let cell =
+        |kind: &str, text: &str| json!({"type": kind, "attrs": {}, "content": [paragraph(text)]});
+    let mut comment = person_with_account("20000", "");
+    comment["body"] = json!({"type": "doc", "version": 1, "content": [
+        paragraph("Alice wrote:"),
+        {"type": "blockquote", "content": [paragraph("I can reproduce")]},
+        {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Steps"}]},
+        {"type": "table", "attrs": {}, "content": [
+            {"type": "tableRow", "content": [cell("tableHeader", "step"), cell("tableHeader", "result")]},
+            {"type": "tableRow", "content": [cell("tableCell", "log in"), cell("tableCell", "fails")]}]},
+        {"type": "rule"},
+        paragraph("Thanks")]});
+    comment
+}
+
+/// The words of the card of the last request, one per line.
+fn card_of_the_last(user: &User) -> String {
+    requests(user).last().unwrap()["says"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|said| said.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_reply_to_a_reply_is_a_document_jira_takes() {
+    let user = user();
+    on_jira(&user);
+    jira_script(
+        &user,
+        json!({"items": {"ABC-1": commented("ABC-1", json!([
+            comment_with_a_quote_a_heading_and_a_table()]))}}),
+    );
+    let mcp = root_in(&user);
+
+    // The fake `acli` refuses a quote that holds a quote, a heading, a rule or a table, as Jira does.
+    let done = written(
+        &user,
+        &mcp,
+        json!({"action": "reply", "ticket": "ABC-1", "comment": "20000", "body": "Agreed"}),
+    );
+
+    assert!(done.contains("was posted"), "{done}");
+    let posted: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("acli/posted.json")).unwrap())
+            .unwrap();
+    let held = &posted["ABC-1"][0];
+    let quote = held["content"][1].to_string();
+    assert_eq!(held["content"][1]["type"], "blockquote", "{held}");
+    for words in ["I can reproduce", "Steps", "log in", "Agreed"] {
+        assert!(held.to_string().contains(words), "{words}: {held}");
+    }
+    assert!(quote.contains("Steps"), "{quote}");
+}
+
+#[test]
+fn the_card_of_a_reply_shows_what_is_posted_and_who_is_notified() {
+    let user = user();
+    on_jira(&user);
+    jira_script(
+        &user,
+        json!({"items": {"ABC-1": commented("ABC-1", json!([
+            person_with_account("20000", "I can reproduce")]))}}),
+    );
+    let mcp = root_in(&user);
+    held(&mcp.call(
+        "tickets",
+        json!({"action": "reply", "ticket": "ABC-1", "comment": "20000", "body": "Fixed"}),
+    ));
+    let card = card_of_the_last(&user);
+    assert!(card.contains("It mentions Ana, who is notified"), "{card}");
+    assert!(
+        card.contains("@Ana wrote:")
+            && card.contains("> I can reproduce")
+            && card.contains("Fixed"),
+        "{card}"
+    );
+    // The reply is not said twice, as a body of its own.
+    assert!(!card.contains("Its body:"), "{card}");
+
+    let github = self::user();
+    on_github(&github);
+    github.gh_script(json!({"issues": {"acme/app": {"1": {
+    "number": 1, "title": "The login fails", "state": "OPEN", "body": "", "comments": [
+        {"author": {"login": "alice"}, "createdAt": "2026-10-01T10:00:00Z",
+         "body": "I can reproduce\nit fails twice",
+         "url": "https://github.com/acme/app/issues/1#issuecomment-500"}
+    ]}}}}));
+    let mcp = root_in(&github);
+    held(&mcp.call(
+        "tickets",
+        json!({"action": "reply", "ticket": "#1", "comment": "issuecomment-500", "body": "Fixed"}),
+    ));
+    let card = card_of_the_last(&github);
+    assert!(
+        card.contains("> @alice wrote:\n> I can reproduce\n> it fails twice\n\nFixed"),
+        "{card}"
+    );
+    assert!(!card.contains("Its body:"), "{card}");
+}
+
+#[test]
+fn a_reply_to_an_internal_note_or_a_hidden_comment_is_refused() {
+    let user = user();
+    on_jira(&user);
+    let mut note = person_with_account("20001", "Internal: the key is rotated");
+    note["jsdPublic"] = json!(false);
+    let mut public = person_with_account("20002", "A public answer");
+    public["jsdPublic"] = json!(true);
+    jira_script(
+        &user,
+        json!({"items": {"ABC-1": commented("ABC-1", json!([note, public]))}}),
+    );
+    let mcp = root_in(&user);
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "reply", "ticket": "ABC-1", "comment": "20001", "body": "ok"}),
+    );
+    assert!(said.contains("an internal note"), "{said}");
+    // A comment the service desk marks public is answered.
+    held(&mcp.call(
+        "tickets",
+        json!({"action": "reply", "ticket": "ABC-1", "comment": "20002", "body": "ok"}),
+    ));
+    assert!(
+        acli_calls(&user)
+            .iter()
+            .all(|c| !c.starts_with("jira workitem comment create")),
+        "{:?}",
+        acli_calls(&user)
+    );
+
+    let github = self::user();
+    on_github(&github);
+    github.gh_script(json!({"issues": {"acme/app": {"1": {
+    "number": 1, "title": "The login fails", "state": "OPEN", "body": "", "comments": [
+        {"author": {"login": "alice"}, "createdAt": "2026-10-01T10:00:00Z",
+         "body": "spam", "isMinimized": true, "minimizedReason": "SPAM",
+         "url": "https://github.com/acme/app/issues/1#issuecomment-500"}
+    ]}}}}));
+    let mcp = root_in(&github);
+    let said = refused_at_once(
+        &github,
+        &mcp,
+        json!({"action": "reply", "ticket": "#1", "comment": "issuecomment-500", "body": "ok"}),
+    );
+    assert!(said.contains("hidden"), "{said}");
+    assert!(
+        gh_calls(&github)
+            .iter()
+            .all(|c| !c.starts_with("issue comment")),
+        "{:?}",
+        gh_calls(&github)
+    );
+}
+
+#[test]
+fn a_comment_of_another_issue_is_not_one_to_reply_to() {
+    let user = user();
+    on_jira(&user);
+    jira_script(
+        &user,
+        json!({"items": {
+            "ABC-1": commented("ABC-1", json!([person_with_account("20000", "On the first")])),
+            "ABC-2": commented("ABC-2", json!([person_with_account("30000", "On the second")]))}}),
+    );
+    let mcp = root_in(&user);
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "reply", "ticket": "ABC-1", "comment": "30000", "body": "ok"}),
+    );
+    assert!(said.contains("ABC-1 has no comment 30000"), "{said}");
+
+    let github = self::user();
+    on_github(&github);
+    let issue = |number: u64, id: u64, text: &str| {
+        json!({"number": number, "title": "An issue", "state": "OPEN", "body": "", "comments": [
+            {"author": {"login": "alice"}, "createdAt": "2026-10-01T10:00:00Z", "body": text,
+             "url": format!("https://github.com/acme/app/issues/{number}#issuecomment-{id}")}]})
+    };
+    github.gh_script(json!({"issues": {"acme/app": {
+        "1": issue(1, 500, "On the first"), "2": issue(2, 600, "On the second")}}}));
+    let mcp = root_in(&github);
+    let said = refused_at_once(
+        &github,
+        &mcp,
+        json!({"action": "reply", "ticket": "#1", "comment": "issuecomment-600", "body": "ok"}),
+    );
+    assert!(
+        said.contains("#1 has no comment issuecomment-600"),
+        "{said}"
+    );
+    assert!(
+        gh_calls(&github)
+            .iter()
+            .all(|c| !c.starts_with("issue comment")),
+        "{:?}",
+        gh_calls(&github)
+    );
+}
+
+#[test]
+fn a_comment_that_goes_or_is_restricted_after_the_card_is_not_answered() {
+    let user = user();
+    on_jira(&user);
+    let script = |comments: Value| {
+        jira_script(
+            &user,
+            json!({"items": {"ABC-1": commented("ABC-1", comments)}}),
+        );
+    };
+    script(json!([person_with_account("20000", "I can reproduce")]));
+    let mcp = root_in(&user);
+    let reply = json!({"action": "reply", "ticket": "ABC-1", "comment": "20000", "body": "Fixed"});
+
+    // The comment is deleted between the card and the user's answer.
+    let number = held(&mcp.call("tickets", reply.clone()));
+    script(json!([]));
+    let answer = allow(&user, number);
+    assert!(answer.contains("has no comment 20000"), "{answer}");
+
+    // It is there again, but restricted to a role.
+    script(json!([person_with_account("20000", "I can reproduce")]));
+    let number = held(&mcp.call("tickets", reply));
+    let mut restricted = person_with_account("20000", "I can reproduce");
+    restricted["visibility"] = json!({"type": "role", "value": "Administrators"});
+    script(json!([restricted]));
+    let answer = allow(&user, number);
+    assert!(answer.contains("restricted to Administrators"), "{answer}");
+
+    assert!(
+        acli_calls(&user)
+            .iter()
+            .all(|c| !c.starts_with("jira workitem comment create")),
+        "{:?}",
+        acli_calls(&user)
+    );
 }
