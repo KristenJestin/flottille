@@ -1028,17 +1028,13 @@ impl Shell {
                     page.update(cx, |page, cx| page.picture_read(name, image, cx));
                 }
             }
-            Outcome::VaultAnswered {
-                session,
-                ask,
-                refused,
-            } => {
-                if let Some(page) = self
-                    .session_page
-                    .clone()
-                    .filter(|page| page.read(cx).id() == session)
-                {
-                    page.update(cx, |page, cx| page.vault_answered(ask, refused, window, cx));
+            Outcome::VaultDismissed { refused } => {
+                if let Some(why) = refused {
+                    gpui_design_system::toast(
+                        gpui_design_system::Toast::failure("The request was not dismissed")
+                            .detail(why),
+                        cx,
+                    );
                 }
             }
             Outcome::QuestionAnswered {
@@ -2742,6 +2738,22 @@ impl Shell {
         self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
         let vault = self.settings.read(cx).vault().clone();
         vault.update(cx, |vault, cx| vault.add_for(project, window, cx));
+    }
+
+    /// An agent's request for a vault entry, from its card: Settings, Vault, on a new entry
+    /// prefilled with it.
+    pub fn add_asked_vault_entry(
+        &mut self,
+        entry: crate::vault::VaultEntry,
+        why: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
+        let vault = self.settings.read(cx).vault().clone();
+        vault.update(cx, |vault, cx| {
+            vault.add_prefilled(&entry, Some(why), window, cx)
+        });
     }
 
     /// Opens the dialog of an agent's request to write a connection.

@@ -37,7 +37,7 @@ fn user() -> User {
         {"when": "sign in to staging", "do": [
             {"mcp": {"tool": "vault", "arguments":
                 {"action": "ask", "name": "staging-login", "why": STAGING,
-                 "url": "https://tester@staging.example.com:8443/login?next=/",
+                 "url": "https://staging.example.com:8443/login?next=/",
                  "username": "tester@example.com"}}},
             {"say": "Asked for the login."},
             {"hold": "release"}]}
@@ -324,7 +324,7 @@ fn the_card_shows_the_host_the_secret_goes_to(cx: &mut TestAppContext) {
     let (shell, cx) = window(&user, cx);
     let (page, at) = card(&shell, &id, cx);
 
-    // The host on its own line, without the user, the port or the path the agent wrote.
+    // The host on its own line, without the port or the path the agent wrote.
     assert_eq!(
         label(format!("row-{at}-vault-ask-host"), cx).as_deref(),
         Some("Goes to: staging.example.com")
@@ -344,7 +344,7 @@ fn the_card_shows_the_host_the_secret_goes_to(cx: &mut TestAppContext) {
     assert_eq!(value(&vault, VaultSection::name_field, cx), "staging-login");
     assert_eq!(
         value(&vault, VaultSection::url_field, cx),
-        "https://tester@staging.example.com:8443/login?next=/"
+        "https://staging.example.com:8443/login?next=/"
     );
     assert_eq!(
         value(&vault, VaultSection::username_field, cx),

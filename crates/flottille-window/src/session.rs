@@ -1798,26 +1798,6 @@ impl SessionPage {
         }
     }
 
-    /// What the daemon answered to the answer of the request `ask` for a vault entry.
-    pub fn vault_answered(
-        &mut self,
-        ask: u64,
-        refused: Option<String>,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let rows = self.conversation.read(cx).rows.clone();
-        let fields = rows.iter().find_map(|row| {
-            let row = row.read(cx);
-            matches!(&*row.block, Block::VaultAsk(a) if a.seq == ask)
-                .then(|| row.vault_ask.clone())
-                .flatten()
-        });
-        if let Some(fields) = fields {
-            fields.update(cx, |fields, cx| fields.answered(refused, cx));
-        }
-    }
-
     /// Whether the session waits for the answer of its pilot, as the daemon says it.
     fn waits_on_pilot(&self) -> bool {
         self.tree
@@ -4129,8 +4109,6 @@ pub struct Row {
     pills: HashMap<String, Entity<Pill>>,
     /// Its question waits for the user's answer, as the daemon says: its card shows.
     asking: bool,
-    /// The fields of its request for a vault entry, made when the card first shows.
-    vault_ask: Option<Entity<crate::vault_ask::VaultAskBox>>,
     /// It is a message the user sent from the composer: being sent, refused, or recorded since.
     sent: Option<Sent>,
     /// The lines of a card of links, and the pictures among them.
@@ -4206,7 +4184,6 @@ impl Row {
                 icons: HashMap::new(),
                 pills: HashMap::new(),
                 asking,
-                vault_ask: None,
                 sent: None,
                 links: LinksCard::default(),
                 renders: 0,
@@ -6319,7 +6296,7 @@ impl Render for Row {
                 ..
             } => self.render_question(*seq, questions, answers.as_deref(), window, cx),
             Block::Asked { moved, .. } => self.render_asked(*moved, cx),
-            Block::VaultAsk(ask) => self.render_vault_ask(ask.clone(), window, cx),
+            Block::VaultAsk(ask) => self.render_vault_ask(ask.clone(), cx),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
             Block::Command(result) => {
@@ -6491,40 +6468,15 @@ impl Row {
         presence(id("asked"), !moved, card).into_any_element()
     }
 
-    /// The agent's request for a vault entry: what Flottille prefilled, the agent's reason, and
-    /// the masked field of the secret; it folds away once answered.
-    fn render_vault_ask(
-        &mut self,
-        ask: VaultAsk,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let fields = match &self.vault_ask {
-            Some(fields) => fields.clone(),
-            None => {
-                let Some((session, shell)) = self.page.upgrade().map(|page| {
-                    let page = page.read(cx);
-                    (page.id().to_owned(), page.shell.clone())
-                }) else {
-                    return div().into_any_element();
-                };
-                let at = self.at;
-                let made = ask.clone();
-                let fields = cx.new(|cx| {
-                    crate::vault_ask::VaultAskBox::new(at, made, session, shell, window, cx)
-                });
-                self.vault_ask = Some(fields.clone());
-                fields
-            }
+    /// The agent's request for a vault entry: what was prefilled, where the secret goes, the
+    /// agent's reason, and the way in to the vault's form; it folds away once answered.
+    fn render_vault_ask(&mut self, ask: VaultAsk, cx: &mut Context<Self>) -> AnyElement {
+        let Some(shell) = self.page.upgrade().map(|page| page.read(cx).shell.clone()) else {
+            return div().into_any_element();
         };
         let when = SharedString::from(self.when.map(clock).unwrap_or_default());
         let title = gpui_design_system::quoted_title(&self.title(cx));
-        crate::vault_ask::card(self.at, &title, when, &ask, fields, cx)
-    }
-
-    /// The fields of its request for a vault entry, once its card showed.
-    pub fn vault_ask(&self) -> Option<&Entity<crate::vault_ask::VaultAskBox>> {
-        self.vault_ask.as_ref()
+        crate::vault_ask::card(self.at, &title, when, &ask, shell, cx)
     }
 
     /// An ask of the agent to the user: while it waits, one line where it was asked, its card

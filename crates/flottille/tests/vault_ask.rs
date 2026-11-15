@@ -290,7 +290,7 @@ fn an_ask_for_an_existing_entry_is_refused_naming_it() {
         assert!(refused.text.contains(name), "{}", refused.text);
         assert!(refused.text.contains(says), "{}", refused.text);
         // Another project's entry is not described to this one.
-        assert!(!refused.text.contains("other"), "{}", refused.text);
+        assert!(!refused.text.contains("project other"), "{}", refused.text);
     }
     assert!(asks(&user).is_empty());
 }

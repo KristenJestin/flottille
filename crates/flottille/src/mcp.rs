@@ -647,17 +647,22 @@ const SERVED: [Definition; 33] = [
             account's login): list gives each entry's name, what it is for, its URL and its \
             username. A secret is never shown: a tool of Flottille's that needs one takes the \
             entry's name and puts the secret where it goes itself. {\"action\": \"list\"}. \
-            ask: only when a refusal says an entry is missing and may be asked for, the user is \
-            asked to set it (answered at once, the user's answer later as a delivery). \
-            {\"action\": \"ask\", \"name\": \"jira-time\", \"why\": \"to log 2h on ABC-1\"}.",
+            ask: when you need an entry the vault lacks, the user is offered its form, \
+            prefilled with what you give; they type the secret (answered at once, their answer \
+            later as a delivery). {\"action\": \"ask\", \"name\": \"staging-login\", \"why\": \
+            \"to sign in to staging\", \"url\": \"https://staging.example.com/login\"}.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["list", "ask"]},
-                "name": {"type": "string", "description": "ask: the entry a refusal said is missing."},
-                "why": {"type": "string", "description": "ask: what you need it for, for the user."}
+                "name": {"type": "string", "description": "ask: the new entry's name."},
+                "why": {"type": "string", "description": "ask: what you need it for, for the user."},
+                "url": {"type": "string", "description": "ask: where the secret goes (a login page)."},
+                "username": {"type": "string", "description": "ask: the account, if known."},
+                "for": {"type": "string", "description": "ask: its one use: worklog, or connection:<name> (a login)."},
+                "project": {"type": "string", "enum": ["this", "every"], "description": "ask: whose it is; a connection's is every project's."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },

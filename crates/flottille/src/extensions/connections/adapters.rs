@@ -671,7 +671,11 @@ pub async fn perform(
         None => {
             return Outcome::Refused(format!(
                 "refused: the vault has no entry {entry}: login takes an entry bound to the \
-                 connection {name}"
+                 connection {name}; or ask the user to add it, who types only the secret: vault \
+                 {{action: \"ask\", name: \"{entry}\", why: \"<what you sign in for>\", url: \
+                 \"<the site's login page>\", username: \"<the account, if you know it>\", for: \
+                 \"connection:{name}\"}}, answered at once, the user's answer coming later as a \
+                 delivery"
             ));
         }
     };

@@ -1264,11 +1264,12 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
 }
 
 /// The tools of an agent of `project`, a root or a child at `depth`, as its provider names them:
-/// what its role has in the project as it is now, whether the project sees an entry of the vault,
-/// and what the extensions active there give it. An agent an extension launched (`launched`, the
-/// extension and the kind of its agent) has a worker's tools whatever its depth, without `ask`,
-/// whose answer would come from an agent that has no tool to give it, and the extension's: never
-/// an `agent_*` tool nor `approval_answer`.
+/// what its role has in the project as it is now, whether the project sees an entry of the vault
+/// (or the agent has a connection, whose login may ask for one), and what the extensions active
+/// there give it. An agent an extension launched (`launched`, the extension and the kind of its
+/// agent) has a worker's tools whatever its depth, without `ask`, whose answer would come from an
+/// agent that has no tool to give it, and the extension's: never an `agent_*` tool nor
+/// `approval_answer`.
 pub fn tools_of(
     daemon: &Daemon,
     provider: &Provider,
@@ -1278,6 +1279,12 @@ pub fn tools_of(
     vault: bool,
     launched: Option<(&str, &str)>,
 ) -> Vec<String> {
+    let given = crate::extensions::tools_for(daemon, project, root, launched);
+    // A connection's login takes an entry the user may have yet to add: its agent may ask for it.
+    let vault = vault
+        || given
+            .iter()
+            .any(|tool| crate::extensions::is_connection(tool));
     let mut tools = provider.tools(
         root && launched.is_none(),
         depth >= DEPTH_LIMIT || launched.is_some(),
@@ -1290,7 +1297,7 @@ pub fn tools_of(
         tools.retain(|tool| *tool != ask);
     }
     tools.extend(
-        crate::extensions::tools_for(daemon, project, root, launched)
+        given
             .into_iter()
             .map(|tool| format!("{}{tool}", provider.tool_prefix)),
     );

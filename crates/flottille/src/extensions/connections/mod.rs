@@ -134,7 +134,7 @@ const START_CHARS: usize = 400;
 const INSTRUCTIONS: &str = "@instructions";
 /// The action answered by Flottille from the pin, never by the server.
 const HELP: &str = "help";
-const PREFIX: &str = "conn_";
+pub(super) const PREFIX: &str = "conn_";
 /// What the user may set an action to; `judged` when they set nothing.
 const SETTINGS: &[&str] = &["judged", "passes", "asked", "off"];
 

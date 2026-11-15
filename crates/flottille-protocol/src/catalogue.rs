@@ -98,7 +98,6 @@ pub const METHODS: &[(&str, Class)] = &[
     ("vault.set", Drive),
     ("vault.remove", Drive),
     ("vault.asks", Read),
-    ("vault.ask_set", Drive),
     ("vault.ask_dismiss", Drive),
     ("skill.list", Read),
     ("skill.show", Read),

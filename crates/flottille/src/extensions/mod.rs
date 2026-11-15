@@ -750,6 +750,11 @@ pub fn rewrite(
     Ok(())
 }
 
+/// Whether `tool` is a connection's (`conn_<name>`).
+pub fn is_connection(tool: &str) -> bool {
+    tool.starts_with(connections::PREFIX)
+}
+
 /// The names of the tools the active extensions give an agent of the project: a root, another
 /// agent, or one an extension launched (`launched`, the extension's name and its agent's kind)
 /// (`agents::tools_of`).

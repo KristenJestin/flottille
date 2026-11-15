@@ -103,6 +103,8 @@ pub struct VaultSection {
     project: Option<String>,
     /// The use a new entry is made for, when the dialog was opened from that feature.
     bound: Option<String>,
+    /// Why an agent asked for the new entry, when the dialog was opened from its request.
+    why: Option<String>,
     saving: bool,
     writing: Option<Writing>,
     form_error: Option<SharedString>,
@@ -127,6 +129,7 @@ impl VaultSection {
             fields: None,
             project: None,
             bound: None,
+            why: None,
             saving: false,
             writing: None,
             form_error: None,
@@ -237,6 +240,21 @@ impl VaultSection {
         self.bound = Some(flottille_core::vault::worklog(project));
     }
 
+    /// "New entry", prefilled with `entry` from an agent's request for it (`vault_ask.rs`), `why`
+    /// under what it is for: the user may change every field before Add, or close it.
+    pub fn add_prefilled(
+        &mut self,
+        entry: &VaultEntry,
+        why: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fill(Some(entry), window, cx);
+        self.form = Form::Editing(None);
+        self.bound = entry.bound.clone();
+        self.why = why;
+    }
+
     /// The project to go back to, once the dialog it was opened for is closed (an entry set).
     pub fn take_return(&mut self) -> Option<String> {
         match self.form {
@@ -261,6 +279,7 @@ impl VaultSection {
     fn fill(&mut self, entry: Option<&VaultEntry>, window: &mut Window, cx: &mut Context<Self>) {
         self.come_back = None;
         self.bound = None;
+        self.why = None;
         let fields = self.fields(window, cx);
         let (name, secret, description, url, username) = (
             fields.name.clone(),
@@ -580,6 +599,16 @@ impl VaultSection {
         let select = self.project_select(cx);
         let error = problem_line("vault-error", self.form_error.clone(), space::LG, cx);
         let fields = self.fields.as_ref().expect("made when the form opens");
+        let description = Field::new(
+            "vault-description-field",
+            "What it is for",
+            boxed("vault-description", Input::new(&fields.description), cx),
+        )
+        .optional();
+        let description = match &self.why {
+            Some(why) => description.hint(SharedString::from(format!("Why the agent asks: {why}"))),
+            None => description,
+        };
         let name = match &original {
             Some(name) => div()
                 .id("vault-name")
@@ -608,14 +637,7 @@ impl VaultSection {
                 )
                 .hint(SECRET_HINT),
             )
-            .child(
-                Field::new(
-                    "vault-description-field",
-                    "What it is for",
-                    boxed("vault-description", Input::new(&fields.description), cx),
-                )
-                .optional(),
-            )
+            .child(description)
             .child(
                 Field::new(
                     "vault-url-field",
