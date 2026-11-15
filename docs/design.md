@@ -1336,7 +1336,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   as many lines as it takes, its class
   and the judge's reason, or the first reason it was held, on one line, "Details" unfolding the
   rest (why it was held, one sentence for each reason, and for a base card the sentence that says
-  why it always comes back), and Deny and Allow; a base card stands apart, in the alarm colour;
+  why it always comes back), and Deny and Allow; a base card stands apart by its "Always asks" tag and its still dot, in the attention tone like the others: a request that waits is never drawn as an error, and a denied one is recorded in the error ink;
   an answered card leaves). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
