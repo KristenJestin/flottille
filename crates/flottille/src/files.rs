@@ -2080,4 +2080,21 @@ mod at_once {
         assert_eq!(scene.text("src/lib.rs"), "ONE\ntwo\nthree\n");
         assert_eq!(scene.text("src/main.rs"), "one\ntwo\nTHREE\n");
     }
+
+    #[test]
+    fn an_unchanged_answer_still_allows_an_edit() {
+        let scene = Scene::new();
+
+        // `Scene::new` read the file: this second read is answered "unchanged".
+        let outcome = fs_read(&scene.cx("a"), json!({"path": "src/lib.rs"}));
+        assert!(
+            said(&outcome).starts_with("unchanged since you read it"),
+            "{}",
+            said(&outcome)
+        );
+        let outcome = fs_edit(&scene.cx("a"), edit("src/lib.rs", "one", "ONE"));
+
+        assert!(matches!(outcome, Outcome::Done(_)), "{}", said(&outcome));
+        assert_eq!(scene.text("src/lib.rs"), "ONE\ntwo\nthree\n");
+    }
 }
