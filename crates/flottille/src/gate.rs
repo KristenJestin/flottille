@@ -2214,10 +2214,11 @@ fn greps_recursively(args: &[String]) -> bool {
 }
 
 /// Whether a layer's program reads every file below the folders it names, or below the folder it
-/// runs in when it names none, and whether its first word that is not an option is a pattern
-/// rather than a folder. A listing (`ls -R`, `find` and `fd` without a program to run, `tree`,
-/// `du`) shows names, never a byte, and is not one.
-fn reads_every_file(layer: &[String]) -> Option<bool> {
+/// runs in when it names none: where its own words start (after git's command), and whether the
+/// first of them that is not an option is a pattern rather than a folder. A listing (`ls -R`,
+/// `find` and `fd` without a program to run, `tree`, `du`) shows names, never a byte, and is not
+/// one.
+fn reads_every_file(layer: &[String]) -> Option<(usize, bool)> {
     let program = base(&layer[0]);
     let args = &layer[1..];
     let short = |letters: &[char]| shorts(args).any(|word| word[1..].contains(letters));
@@ -2226,21 +2227,21 @@ fn reads_every_file(layer: &[String]) -> Option<bool> {
             .any(|word| names.iter().any(|name| abbreviates(word, name, 3)))
     };
     match program {
-        "grep" | "egrep" | "fgrep" if greps_recursively(args) => Some(true),
-        "rg" | "ag" | "ack" => Some(true),
-        "fd" if executed(layer).is_some() => Some(true),
-        "find" if executed(layer).is_some() => Some(false),
-        "diff" if short(&['r']) || long(&["recursive"]) => Some(false),
-        "cp" if short(&['r', 'R', 'a']) || long(&["recursive", "archive"]) => Some(false),
-        "zip" if short(&['r']) || long(&["recurse-paths"]) => Some(false),
-        "tar" | "rsync" => Some(false),
+        "grep" | "egrep" | "fgrep" if greps_recursively(args) => Some((1, true)),
+        "rg" | "ag" | "ack" => Some((1, true)),
+        "fd" if executed(layer).is_some() => Some((1, true)),
+        "find" if executed(layer).is_some() => Some((1, false)),
+        "diff" if short(&['r']) || long(&["recursive"]) => Some((1, false)),
+        "cp" if short(&['r', 'R', 'a']) || long(&["recursive", "archive"]) => Some((1, false)),
+        "zip" if short(&['r']) || long(&["recurse-paths"]) => Some((1, false)),
+        "tar" | "rsync" => Some((1, false)),
         "git" => {
             let (at, _) = git_globals(args);
             let rest = args.get(at + 1..).unwrap_or_default();
             let any = |names: &[&str]| rest.iter().any(|w| names.contains(&w.as_str()));
             match args.get(at).map(String::as_str) {
-                Some("grep") if any(&["--no-index", "--untracked"]) => Some(false),
-                Some("diff") if any(&["--no-index"]) => Some(false),
+                Some("grep") if any(&["--no-index", "--untracked"]) => Some((at + 2, true)),
+                Some("diff") if any(&["--no-index"]) => Some((at + 2, false)),
                 _ => None,
             }
         }
@@ -2268,25 +2269,23 @@ fn reads_the_keys(call: &Call, layers: &[Vec<String>]) -> Option<String> {
             .any(|path| keys.iter().any(|keys| keys.starts_with(path)))
     };
     for layer in layers {
-        let Some(pattern) = reads_every_file(layer) else {
+        let Some((start, pattern)) = reads_every_file(layer) else {
             continue;
         };
+        // A pattern given by an option (`-e`, `-f`, in a cluster too) leaves every word a folder;
+        // a letter taken for one of them only makes the gate look at one word more.
         let mut pattern = pattern
-            && !layer[1..].iter().any(|word| {
-                ["-e", "-f", "--regexp", "--file"]
-                    .iter()
-                    .any(|option| word == option || word.starts_with(&format!("{option}=")))
-            });
+            && !shorts(&layer[start..]).any(|word| word[1..].contains(['e', 'f']))
+            && !layer[start..]
+                .iter()
+                .take_while(|word| *word != "--")
+                .any(|word| abbreviates(word, "regexp", 3) || abbreviates(word, "file", 3));
         let mut named = false;
         let mut found = None;
-        for whole in &layer[1..] {
-            if pattern && !whole.starts_with('-') {
-                // Checked all the same: only a folder it names keeps the run's own from counting.
+        for (at, whole) in layer.iter().enumerate().skip(1) {
+            if pattern && at >= start && !whole.starts_with('-') {
+                // A search's pattern, never read as a path: `rg /home/ src` reads `src`.
                 pattern = false;
-                let folder = place.resolve(&from.path, whole);
-                if found.is_none() && holds(&folder) {
-                    found = Some(folder);
-                }
                 continue;
             }
             for word in named_paths(whole) {
@@ -7831,5 +7830,40 @@ mod tests {
             &state.join("remotes/a.txt").display().to_string(),
         );
         assert!(!denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_search_pattern_is_not_taken_for_a_folder() {
+        // An ordinary workspace; Flottille's state folder in the home.
+        let mut fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        let state = with_keys(&mut fixture, home.join(".local/state/flottille"));
+        let h = home.display();
+        let s = state.display();
+        for line in [
+            format!("rg {h}/ src"),
+            "grep -rn / src".into(),
+            "rg '~' src".into(),
+            "rg -n -i '~'".into(),
+            "git grep --no-index / src".into(),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(!denied(&verdict), "{line}: {verdict:?}");
+        }
+        // The pattern given by an option: the first word is a folder.
+        for line in [
+            format!("grep -r x {s}"),
+            format!("rg '~' {s}"),
+            "rg -e x '~'".into(),
+            "rg --regexp x '~'".into(),
+            "grep -r --regexp=x '~'".into(),
+            "grep -r --reg=x '~'".into(),
+            "grep -rex '~'".into(),
+            "grep -r -f patterns '~'".into(),
+            "grep -r --file=patterns '~'".into(),
+            "git grep --no-index -e x '~'".into(),
+        ] {
+            refused_for_the_keys(&fixture, &line);
+        }
     }
 }
