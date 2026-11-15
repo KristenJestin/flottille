@@ -941,11 +941,16 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("XDG_DATA_HOME", dir.join("data"))
         // Codex's machine settings are the test's own, not the machine's `/etc/codex`.
         .env("FLOTTILLE_CODEX_MACHINE_SETTINGS", dir.join("etc-codex"))
-        // No way to the machine's own session: its bus, its tmux server.
+        // No way to the machine's own session: its tmux server.
         .env("TMUX_TMPDIR", dir.join("runtime"))
+        // A session bus of the test's own, where a machine's is: the daemon keeps it from what
+        // it runs (`docs/vault.md`), not the harness.
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", dir.join("runtime/bus").display()),
+        )
         // No round of the items unless a test asks for it (`with_fetcher`).
         .env("FLOTTILLE_TEST_NO_FETCH", "1")
-        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .env_remove("TMUX");
     // No sign-in of the machine: a provider is signed in only where a test says so, and the
     // daemon picks no Auto judge on the strength of the developer's own.
