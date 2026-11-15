@@ -735,6 +735,24 @@ fn forge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<String> {
                 .map(|base| format!("It moves it onto the base {base}")));
         }
         Some("merge") => say(merge_says(daemon, grant, args)),
+        Some(action @ ("reply" | "resolve")) => {
+            let thread = match &args["thread"] {
+                Value::String(id) => id.trim().to_owned(),
+                other => other.to_string(),
+            };
+            let number = &args["number"];
+            say(Some(match (action, args["resolved"].as_bool()) {
+                ("reply", _) => {
+                    format!("It replies in the review thread {thread} of pull request #{number}")
+                }
+                (_, Some(false)) => format!(
+                    "It marks the review thread {thread} of pull request #{number} unresolved"
+                ),
+                _ => format!(
+                    "It marks the review thread {thread} of pull request #{number} resolved"
+                ),
+            }));
+        }
         Some("review") => {
             say(args["verdict"]
                 .as_str()

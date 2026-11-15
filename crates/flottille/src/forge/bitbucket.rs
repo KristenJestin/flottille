@@ -549,9 +549,11 @@ async fn detailed_with(
                 cloud_values(context, &comments_path, COMMENTS)
             );
             let page = page?;
-            let (comments, _) = comments?;
+            let (values, cut) = comments?;
             let closing = cloud_closing(found.state, &page);
-            Ok::<_, String>((cloud_reviewers(&page), cloud_comments(&comments), closing))
+            let comments = cloud_comments(&values);
+            let threads = super::threads::cloud(&values, &comments);
+            Ok::<_, String>((cloud_reviewers(&page), comments, closing, (threads, cut)))
         } else {
             let Forge::Bitbucket { owner, name, .. } = forge else {
                 unreachable!()
@@ -566,7 +568,9 @@ async fn detailed_with(
             )
             .await?;
             let closing = dc_closing(found.state, &activities);
-            Ok((found.reviewers.clone(), dc_comments(&activities), closing))
+            let comments = dc_comments(&activities);
+            let threads = super::threads::data_center(&activities, &comments);
+            Ok((found.reviewers.clone(), comments, closing, (threads, false)))
         }
     };
     let (statuses, mergeable, people) = futures::join!(
@@ -582,7 +586,7 @@ async fn detailed_with(
         }
         _ => None,
     };
-    let (reviewers, comments, closing) = people?;
+    let (reviewers, comments, closing, threads) = people?;
     let jobs = checks_of_statuses(&statuses)
         .iter()
         .filter(|check| check.state == "failing")
@@ -608,6 +612,7 @@ async fn detailed_with(
         ci: None,
         closing,
         ended: None,
+        threads: Some(Ok(threads)),
     };
     Ok((pull, statuses))
 }
@@ -646,6 +651,7 @@ fn cheap(forge: &Forge, path: &str, found: Listed) -> crate::items::Fetched {
         ci: None,
         closing: None,
         ended: None,
+        threads: None,
     };
     let mut fetched = super::fetched_pull(path, "bitbucket", &pull, false);
     if !cloud(forge) {
