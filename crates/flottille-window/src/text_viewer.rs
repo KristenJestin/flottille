@@ -1,0 +1,115 @@
+//! A pasted text of the conversation read (#848): the file a large paste became, opened by the
+//! click on its chip in the large modal, read-only, in the mono face, line by line.
+//!
+//! One viewer is held by the session's page and drawn once, at the end of it: the modal takes no
+//! room where it is drawn. A chip's click calls [`TextViewer::show`].
+
+use gpui_design_system::{Modal, Type, palette, space};
+use gpui_kit::{
+    Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, TestSupportExt as _, Window, div, px,
+};
+
+/// The lines drawn: a text of a million lines is not a million rows. What follows is counted.
+const MAX_LINES: usize = 2_000;
+
+pub struct TextViewer {
+    name: String,
+    lines: Vec<SharedString>,
+    /// How many lines the text has, those not drawn included.
+    total: usize,
+    bytes: usize,
+    open: bool,
+}
+
+impl TextViewer {
+    pub fn new() -> Self {
+        Self {
+            name: String::new(),
+            lines: Vec::new(),
+            total: 0,
+            bytes: 0,
+            open: false,
+        }
+    }
+
+    /// Opens `text`. What it showed last stays in it while it fades out.
+    pub fn show(&mut self, name: &str, text: &str, cx: &mut Context<Self>) {
+        self.name = name.to_owned();
+        self.bytes = text.len();
+        self.total = text.lines().count();
+        // An empty line keeps its height: a row with no text has none.
+        self.lines = text
+            .lines()
+            .take(MAX_LINES)
+            .map(|line| SharedString::from(if line.is_empty() { " " } else { line }.to_owned()))
+            .collect();
+        self.open = true;
+        cx.notify();
+    }
+
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.open = false;
+        cx.notify();
+    }
+
+    /// Whether it is open.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+}
+
+impl Default for TextViewer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Render for TextViewer {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let viewer = cx.entity().downgrade();
+        let mut sentence = format!(
+            "{} line{} · {}",
+            self.total,
+            if self.total == 1 { "" } else { "s" },
+            crate::tokens::size(self.bytes)
+        );
+        if self.total > self.lines.len() {
+            sentence.push_str(&format!(" · the first {} are shown", self.lines.len()));
+        }
+        let modal = Modal::new("pasted-text-modal", SharedString::from(self.name.clone()))
+            .sentence(sentence)
+            .large()
+            .takes_focus()
+            .open(self.open)
+            .on_close(move |_, cx| {
+                viewer.update(cx, |viewer, cx| viewer.close(cx)).ok();
+            });
+        if self.lines.is_empty() {
+            return modal;
+        }
+        modal.child(
+            div()
+                .id("pasted-text-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .py(space::SM)
+                .px(space::MD)
+                .rounded(px(8.))
+                .bg(p.field)
+                .border_1()
+                .border_color(p.line)
+                .children(self.lines.iter().enumerate().map(|(n, line)| {
+                    div()
+                        .id(ElementId::Name(format!("pasted-text-line-{n}").into()))
+                        .mono(12.)
+                        .text_color(p.text)
+                        .aria_label(line.clone())
+                        .child(line.clone())
+                        .test_support()
+                })),
+        )
+    }
+}

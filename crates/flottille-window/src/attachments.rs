@@ -9,6 +9,10 @@
 //! Each picture is also a chip in the owner's field, where it was put (#773): `Image 1`, its name
 //! and its size, numbered from 1 in the order of the chips, its thumbnail under the same number.
 //! Removing the chip removes the picture, and the thumbnail's remove button removes the chip.
+//!
+//! A large pasted text is the same without a thumbnail (#848): a chip named `pasted-text.txt`
+//! with its size, which the daemon writes as a file the message names. Ctrl+Shift+V pastes the
+//! text inline instead.
 
 use std::sync::Arc;
 
@@ -19,6 +23,7 @@ use gpui_design_system::{
     Badge, Button, Icon, Listing, Piece, Skeleton, Toast, Token, TokenEvent, TokenField, TokenLook,
     enter, fade, hoverable, icon, palette, presence, space, toast,
 };
+use gpui_kit::Action as _;
 use gpui_kit::base::input::Paste;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -27,7 +32,7 @@ use gpui_kit::{
     TestSupportExt as _, Window, div, px,
 };
 
-use crate::actions::Picture;
+use crate::actions::{Pasted, Picture};
 use crate::picture_viewer::PictureViewer;
 use crate::tokens;
 
@@ -79,6 +84,12 @@ fn number(id: ElementId, key: &str, number: usize) -> AnyElement {
         .into_any_element()
 }
 
+/// What a toast says when a pasted text is not attached as a file.
+const TEXT_NOT_ATTACHED: &str = "The text was not attached";
+/// What the toast of a large paste says, in its two lines: said once.
+const LARGE_PASTE: &str = "Large paste attached as a file";
+const LARGE_PASTE_HINT: &str = "Ctrl+Shift+V to paste it inline";
+
 /// How a composer reaches its [`Attachments`].
 pub type Of<T> = fn(&mut T) -> &mut Attachments;
 
@@ -92,12 +103,37 @@ struct Attached {
     placed: bool,
 }
 
+/// A large paste attached as a text file: its chip's id, its name, its text, and whether its chip
+/// is in the field yet.
+#[derive(Clone)]
+struct PastedText {
+    id: u64,
+    name: String,
+    text: Arc<str>,
+    placed: bool,
+}
+
+/// The id of the next chip, unique across composers: a chip copied from one into another is not
+/// taken there for an attachment of its own.
+fn next_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Default)]
 pub struct Attachments {
     /// Pictures pasted or dropped, sent with the next message, in the order of their chips.
     images: Vec<Attached>,
     /// The ones whose chip the user removed: an undo or a paste of the chip brings them back.
     gone: Vec<Attached>,
+    /// Large texts pasted, sent as files with the next message.
+    texts: Vec<PastedText>,
+    /// The texts whose chip the user removed.
+    gone_texts: Vec<PastedText>,
+    /// The toast of a large paste was shown: it says it once.
+    told: bool,
+    /// The next paste is Ctrl+Shift+V's: the text goes in the field as it is.
+    inline: bool,
     /// The field the chips are in, set by the owner.
     field: Option<Entity<TokenField>>,
     /// The ones the message being sent holds: they leave when it is taken, whatever was removed
@@ -146,7 +182,7 @@ impl Attachments {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.images.is_empty()
+        self.images.is_empty() && self.texts.is_empty()
     }
 
     /// A big picture is still being scaled down.
@@ -228,10 +264,7 @@ impl Attachments {
     }
 
     fn push(&mut self, image: Arc<gpui_kit::Image>, name: String, placed: bool) -> u64 {
-        // Unique across composers: a chip copied from one into another is not taken there for
-        // a picture of its own.
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = next_id();
         self.images.push(Attached {
             id,
             image,
@@ -239,6 +272,35 @@ impl Attachments {
             placed,
         });
         id
+    }
+
+    /// Attaches a large pasted text as a file, or says in a toast why not; the field is left as it
+    /// was. Its chip goes in at the caret when the owner is next drawn ([`Attachments::place`]).
+    fn attach_text<T: 'static>(&mut self, text: String, cx: &mut Context<T>) {
+        if text.len() > flottille_core::pasted::MAX_TEXT_BYTES {
+            let detail = format!(
+                "A pasted text can be {} MiB at most.",
+                flottille_core::pasted::MAX_TEXT_BYTES / 1024 / 1024
+            );
+            return toast(Toast::failure(TEXT_NOT_ATTACHED).detail(detail), cx);
+        }
+        if self.texts.len() >= flottille_core::pasted::MAX_TEXTS {
+            let detail = format!(
+                "A message carries {} pasted texts at most.",
+                flottille_core::pasted::MAX_TEXTS
+            );
+            return toast(Toast::failure(TEXT_NOT_ATTACHED).detail(detail), cx);
+        }
+        self.texts.push(PastedText {
+            id: next_id(),
+            name: flottille_core::pasted::NAME.to_owned(),
+            text: text.into(),
+            placed: self.field.is_none(),
+        });
+        if !std::mem::replace(&mut self.told, true) {
+            toast(Toast::success(LARGE_PASTE).detail(LARGE_PASTE_HINT), cx);
+        }
+        cx.notify();
     }
 
     /// Attaches the picture a file holds (a file dropped on the composer, or picked).
@@ -295,6 +357,13 @@ impl Attachments {
     pub fn chip_changed<T: 'static>(&mut self, event: &TokenEvent, cx: &mut Context<T>) {
         match event {
             TokenEvent::Removed(id) => {
+                if let Some(id) = tokens::pasted_of(id) {
+                    if let Some(at) = self.texts.iter().position(|t| t.id == id) {
+                        self.gone_texts.push(self.texts.remove(at));
+                        cx.notify();
+                    }
+                    return;
+                }
                 let Some(id) = tokens::picture_of(id) else {
                     return;
                 };
@@ -309,6 +378,13 @@ impl Attachments {
                 }
             }
             TokenEvent::Added(id) => {
+                if let Some(id) = tokens::pasted_of(id) {
+                    if let Some(at) = self.gone_texts.iter().position(|t| t.id == id) {
+                        self.texts.push(self.gone_texts.remove(at));
+                        cx.notify();
+                    }
+                    return;
+                }
                 let Some(id) = tokens::picture_of(id) else {
                     return;
                 };
@@ -330,12 +406,20 @@ impl Attachments {
     /// as the owner is drawn: it reads the field only when a picture waits, so that the owner is
     /// not drawn again for each key typed.
     pub fn place<T: 'static>(&mut self, window: &mut Window, cx: &mut Context<T>) {
-        if self.images.iter().all(|a| a.placed) {
+        if self.images.iter().all(|a| a.placed) && self.texts.iter().all(|t| t.placed) {
             return;
         }
         let Some(field) = self.field.clone() else {
             return;
         };
+        for pasted in self.texts.iter_mut().filter(|t| !t.placed) {
+            pasted.placed = true;
+            let token = Token::new(
+                tokens::pasted_id(pasted.id),
+                tokens::pasted_look(&pasted.name, Some(pasted.text.len())),
+            );
+            field.update(cx, |field, cx| field.insert(token, window, cx).ok());
+        }
         let waiting: Vec<u64> = self
             .images
             .iter()
@@ -435,7 +519,17 @@ impl Attachments {
         };
         let pieces = field.read(cx).value(cx);
         let mut marked = Vec::new();
+        let mut texts = Vec::new();
         tokens::sent_text(&pieces, |id| {
+            // A pasted text's chip is its marker, numbered in the order of the chips.
+            if let Some(id) = tokens::pasted_of(id) {
+                let pasted = self.texts.iter().find(|t| t.id == id)?;
+                if texts.contains(&id) {
+                    return None;
+                }
+                texts.push(id);
+                return Some(flottille_core::pasted::marker(texts.len(), &pasted.name));
+            }
             let id = tokens::picture_of(id)?;
             if marked.contains(&id) {
                 return None;
@@ -449,6 +543,46 @@ impl Attachments {
         })
     }
 
+    /// The pasted texts that go with the message [`Attachments::message`] makes, in the order of
+    /// their markers: the order of their chips, the ones without a chip after.
+    pub fn texts(&self, cx: &gpui_kit::App) -> Vec<Pasted> {
+        let in_field: Vec<u64> = self
+            .field
+            .as_ref()
+            .map(|field| {
+                field
+                    .read(cx)
+                    .value(cx)
+                    .iter()
+                    .filter_map(|piece| match piece {
+                        Piece::Token(token) => tokens::pasted_of(&token.id),
+                        Piece::Text(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut order: Vec<&PastedText> = Vec::new();
+        for id in &in_field {
+            if let Some(pasted) = self.texts.iter().find(|t| t.id == *id)
+                && !order.iter().any(|seen| seen.id == pasted.id)
+            {
+                order.push(pasted);
+            }
+        }
+        for pasted in &self.texts {
+            if !order.iter().any(|seen| seen.id == pasted.id) {
+                order.push(pasted);
+            }
+        }
+        order
+            .into_iter()
+            .map(|pasted| Pasted {
+                name: pasted.name.clone(),
+                text: pasted.text.to_string(),
+            })
+            .collect()
+    }
+
     /// The pictures a message taken back carries, with its text: each marker of the text is the
     /// chip of the picture of its number, the others go after the text. The pieces for the field.
     /// The limits of an attachment hold: an agent that takes no images gets none back, and a
@@ -458,9 +592,23 @@ impl Attachments {
         &mut self,
         text: &str,
         pictures: Vec<Picture>,
+        pasted: Vec<Pasted>,
         cx: &mut Context<T>,
     ) -> Vec<Piece> {
         let mut ids = Vec::new();
+        // A pasted text comes back as it was: its chip, where its marker is.
+        let room = flottille_core::pasted::MAX_TEXTS.saturating_sub(self.texts.len());
+        let mut kept = Vec::new();
+        for pasted in pasted.into_iter().take(room) {
+            let id = next_id();
+            kept.push((id, pasted.name.clone(), pasted.text.len()));
+            self.texts.push(PastedText {
+                id,
+                name: pasted.name,
+                text: pasted.text.into(),
+                placed: true,
+            });
+        }
         if !pictures.is_empty() && self.takes == Some(false) {
             Self::not_attached(NO_IMAGES, cx);
         }
@@ -482,7 +630,7 @@ impl Attachments {
             ids.push(self.push(image, format!("image.{}", extension(format)), true));
         }
         let images = &mut self.images;
-        tokens::pieces_of(
+        let pieces = tokens::pieces_of(
             text,
             |_| false,
             |picture, found| {
@@ -498,7 +646,20 @@ impl Attachments {
                     ),
                 ))
             },
-        )
+        );
+        // The marker of a number is the text of that number, once.
+        let mut used = Vec::new();
+        tokens::text_chips(pieces, |found| {
+            let (id, name, bytes) = kept.get(found.number.checked_sub(1)?)?;
+            if found.file.is_some() || used.contains(id) {
+                return None;
+            }
+            used.push(*id);
+            Some(Token::new(
+                tokens::pasted_id(*id),
+                tokens::pasted_look(name, Some(*bytes)),
+            ))
+        })
     }
 
     /// Paste: a clipboard that holds a picture attaches it, whatever text comes with it (a copy in
@@ -513,7 +674,20 @@ impl Attachments {
             .iter()
             .any(|entry| matches!(entry, ClipboardEntry::Image(_)));
         if clipboard.text().is_some() && !has_image {
-            return false;
+            // Ctrl+Shift+V asked for this one inline; the next is as any other.
+            if std::mem::take(&mut self.inline) {
+                return false;
+            }
+            return match clipboard
+                .text()
+                .filter(|text| flottille_core::pasted::is_large(text))
+            {
+                Some(text) => {
+                    self.attach_text(text, cx);
+                    true
+                }
+                None => false,
+            };
         }
         let mut taken = false;
         for entry in clipboard.into_entries() {
@@ -568,6 +742,15 @@ impl Attachments {
             .collect()
     }
 
+    /// The pasted texts of a message that leaves the composer at once, in the order of its
+    /// markers: they go with it.
+    pub fn take_texts(&mut self, cx: &gpui_kit::App) -> Vec<Pasted> {
+        let texts = self.texts(cx);
+        self.texts.clear();
+        self.gone_texts.clear();
+        texts
+    }
+
     /// The pictures of a message that leaves the composer at once: they go with it, and fold
     /// away from the strip.
     pub fn take<T: 'static>(&mut self, cx: &mut Context<T>) -> Vec<Arc<gpui_kit::Image>> {
@@ -591,6 +774,8 @@ impl Attachments {
         self.sent.clear();
         self.images.clear();
         self.gone.clear();
+        self.texts.clear();
+        self.gone_texts.clear();
     }
 
     /// The Attach button, which opens the system's file chooser.
@@ -616,6 +801,17 @@ impl Attachments {
                     cx.stop_propagation();
                 }
             }))
+            // Ctrl+Shift+V is a Paste that keeps a large text inline (#848).
+            .capture_key_down(cx.listener(
+                move |this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    let keys = &event.keystroke;
+                    if keys.key == "v" && keys.modifiers.secondary() && keys.modifiers.shift {
+                        of(this).inline = true;
+                        window.dispatch_action(Paste.boxed_clone(), cx);
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             .on_drop(
                 cx.listener(move |this, paths: &gpui_kit::ExternalPaths, _, cx| {
                     for path in paths.paths() {

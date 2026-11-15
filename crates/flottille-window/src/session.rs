@@ -50,7 +50,9 @@ use gpui_kit::{
     px, radians,
 };
 
-use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer, RunFrom};
+use crate::actions::{
+    Answer, Command, Pasted, Picture, RepositoryStatus, RunAct, RunAnswer, RunFrom,
+};
 use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::{CommandInfo, spaced};
 use crate::conversation::{
@@ -77,6 +79,7 @@ use crate::session_link::{
 use crate::session_options::{Runs, SessionOptions};
 use crate::shell::{Layout, Selection, Shell, now_ms};
 use crate::subscriptions::SubscriptionList;
+use crate::text_viewer::TextViewer;
 use crate::to_end::ToEnd;
 use crate::tree::place_name;
 use crate::waiting::{Waiting, sentences};
@@ -326,6 +329,12 @@ pub struct SessionPage {
     asked_pictures: HashSet<String>,
     /// The picture of a bubble opened large.
     viewer: Entity<PictureViewer>,
+    /// The pasted texts of the shown conversation opened so far, read back by the name of their
+    /// file, and the one asked for that opens when it is read (#848).
+    texts: HashMap<String, Arc<str>>,
+    text_wanted: Option<String>,
+    /// The pasted text of a message opened.
+    text_viewer: Entity<TextViewer>,
     needs_you: bool,
     /// The confirmation of ending the session is open.
     ending: bool,
@@ -456,6 +465,9 @@ impl SessionPage {
             pictures: HashMap::new(),
             asked_pictures: HashSet::new(),
             viewer: cx.new(|_| PictureViewer::new()),
+            texts: HashMap::new(),
+            text_wanted: None,
+            text_viewer: cx.new(|_| TextViewer::new()),
             needs_you,
             ending: false,
             end_error: None,
@@ -1539,11 +1551,45 @@ impl SessionPage {
         }
     }
 
-    /// A picture read back from the daemon: the rows that show it draw it.
+    /// The click on the chip of a sent message's pasted text: its file is read back once (the
+    /// daemon gives it as it gives a picture), and opens read-only.
+    pub fn open_text(&mut self, file: &str, cx: &mut Context<Self>) {
+        if let Some(text) = self.texts.get(file).cloned() {
+            self.text_viewer.update(cx, |viewer, cx| {
+                viewer.show(flottille_core::pasted::NAME, &text, cx)
+            });
+            return;
+        }
+        self.text_wanted = Some(file.to_owned());
+        let command = Command::Image {
+            session: self.shown.clone(),
+            name: file.to_owned(),
+        };
+        crate::commands::perform_later(&self.shell, command, cx);
+    }
+
+    /// A picture read back from the daemon: the rows that show it draw it. A pasted text comes
+    /// the same way, and opens if it is the one asked for.
     pub fn picture_read(&mut self, name: String, image: Option<Picture>, cx: &mut Context<Self>) {
+        let wanted = self.text_wanted.as_deref() == Some(name.as_str());
         let Some(image) = image else {
+            if wanted {
+                self.text_wanted = None;
+                toast(Toast::failure("The text could not be opened"), cx);
+            }
             return;
         };
+        if image.mime == "text/plain" {
+            let text: Arc<str> = String::from_utf8_lossy(&image.bytes).into();
+            self.texts.insert(name, text.clone());
+            if wanted {
+                self.text_wanted = None;
+                self.text_viewer.update(cx, |viewer, cx| {
+                    viewer.show(flottille_core::pasted::NAME, &text, cx)
+                });
+            }
+            return;
+        }
         let Some(format) = gpui_kit::ImageFormat::from_mime_type(&image.mime) else {
             return;
         };
@@ -2262,6 +2308,7 @@ impl Render for SessionPage {
             .child(self.run_drawer.clone())
             .child(self.end_modal(cx))
             .child(self.viewer.clone())
+            .child(self.text_viewer.clone())
     }
 }
 
@@ -4572,6 +4619,7 @@ impl Row {
                         })
                     },
                 );
+                let pieces = crate::tokens::text_chips(pieces, crate::tokens::shown_chip);
                 self.pieces = crate::tokens::has_tokens(&pieces).then_some(pieces);
                 self.set_markdown(&as_typed(text), false, false, cx);
             }
@@ -5169,6 +5217,7 @@ impl Render for Row {
                 // A picture's chip opens it large, among the pictures read, as its thumbnail does.
                 let chipped = self.pieces.clone().map(|pieces| {
                     let viewer = page.as_ref().map(|page| page.read(cx).viewer.clone());
+                    let page_of_text = page.clone();
                     let pictures = pictures.clone();
                     TokenText::new(
                         SharedString::from(match pending {
@@ -5178,6 +5227,14 @@ impl Render for Row {
                         pieces,
                     )
                     .on_token_click(move |id, _, cx| {
+                        // A pasted text opens read-only, from its file.
+                        if let Some(file) = crate::tokens::sent_text_of(id) {
+                            if let Some(page) = &page_of_text {
+                                let file = file.to_owned();
+                                page.update(cx, |page, cx| page.open_text(&file, cx));
+                            }
+                            return;
+                        }
                         let Some(at) = id
                             .strip_prefix("picture-")
                             .and_then(|at| at.parse::<usize>().ok())
@@ -8955,6 +9012,8 @@ pub struct Pending {
     pub key: u64,
     pub text: String,
     pub images: Vec<Arc<gpui_kit::Image>>,
+    /// The large pasted texts that go with it, as files.
+    pub texts: Vec<Pasted>,
     /// Why the daemon refused it: it stays, with Retry and Edit.
     pub refused: Option<String>,
     pub accepted: Option<Accepted>,
@@ -9860,7 +9919,8 @@ impl Reply {
     /// Sends what the field holds to the root agent: it leaves the composer at once and shows as
     /// a message being sent until the daemon records it.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Each picture's chip goes as its marker, where the agent finds it (#773).
+        // Each picture's chip goes as its marker, where the agent finds it (#773), and each pasted
+        // text's as its marker with the text as a file (#848).
         let message = self.attached.message(cx).trim().to_owned();
         if self.sending {
             return;
@@ -9878,6 +9938,7 @@ impl Reply {
             key,
             text: message,
             images: self.attached.take(cx),
+            texts: self.attached.take_texts(cx),
             refused: None,
             accepted: None,
             queued: self.running,
@@ -9908,6 +9969,7 @@ impl Reply {
                     bytes: image.bytes.clone(),
                 })
                 .collect(),
+            texts: pending.texts.clone(),
             compact: self.compact_offer(),
         };
         self.shell
@@ -9951,7 +10013,7 @@ impl Reply {
                 bytes: image.bytes.clone(),
             })
             .collect();
-        self.restore(&pending.text, pictures, window, cx);
+        self.restore_all(&pending.text, pictures, pending.texts, window, cx);
     }
 
     /// The message `key` is recorded: it is shown as the daemon has it now.
@@ -9970,8 +10032,21 @@ impl Reply {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.restore_all(text, pictures, Vec::new(), window, cx);
+    }
+
+    /// [`Reply::restore`], with the pasted texts the message carried: their markers become their
+    /// chips again.
+    fn restore_all(
+        &mut self,
+        text: &str,
+        pictures: Vec<Picture>,
+        pasted: Vec<Pasted>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Its pictures' markers become their chips again, its commands once they are known.
-        let restored = self.attached.restore_with(text, pictures, cx);
+        let restored = self.attached.restore_with(text, pictures, pasted, cx);
         let mut pieces = self.tokens.read(cx).value(cx);
         if crate::tokens::sent_text(&pieces, |_| None)
             .trim()
