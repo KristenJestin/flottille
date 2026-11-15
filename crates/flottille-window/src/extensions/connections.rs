@@ -1218,10 +1218,11 @@ impl ConnectionsSection {
                 self.new_site(Some(host), window, cx);
             }
         }
-        // The rows the dialog opens with are there at once.
-        self.variable_rows = Listing::default();
-        self.limit_rows = Listing::default();
-        self.site_rows = Listing::default();
+        // The rows the dialog opens with are there at once, at rest: a plain list plays the
+        // entrance of every row on its first sync. Rows added afterwards still unfold.
+        self.variable_rows = Listing::default().at_rest();
+        self.limit_rows = Listing::default().at_rest();
+        self.site_rows = Listing::default().at_rest();
         self.form = Form::Editing(server.map(|s| s.name.clone()));
         self.form_error = None;
         self.saving = false;
@@ -1490,8 +1491,8 @@ impl ConnectionsSection {
             picked: BTreeSet::new(),
             opened: HashSet::new(),
             folded: HashSet::new(),
-            rows: Grouped::new("connection-review-row"),
-            changes: Listing::default(),
+            rows: Grouped::new("connection-review-row").at_rest(),
+            changes: Listing::default().at_rest(),
             found: Found::default(),
             folding: HashMap::new(),
         });
