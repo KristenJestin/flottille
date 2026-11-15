@@ -597,9 +597,14 @@ async fn start_with(
                     if bearing && let Some(said) = token_refused(daemon, declaration).await {
                         return Err(said);
                     }
+                    // A header the user gave from the vault is what the server refused: a
+                    // sign-in does not change it, the entry does.
+                    if !declaration.headers.is_empty() {
+                        return Err(refused_headers(&declaration.headers));
+                    }
                     return Err(format!(
-                        "the server asks to be signed in: the user signs it in with `flottille \
-                         connection login {name}`"
+                        "{}: the user signs it in with `flottille connection login {name}`",
+                        flottille_core::vault::SIGN_IN_ASKED
                     ));
                 }
                 Err(error) => return Err(error.to_string()),
@@ -694,11 +699,27 @@ async fn token_refused(daemon: &Arc<Daemon>, declaration: &Declaration) -> Optio
     }
 }
 
+/// What a start says of a server that answered `401` to the headers of vault entries: which
+/// header and which entry, never the value.
+fn refused_headers(headers: &std::collections::BTreeMap<String, String>) -> String {
+    let given: Vec<String> = headers
+        .iter()
+        .map(|(header, entry)| format!("{header} from the vault entry {entry}"))
+        .collect();
+    let given = given.join(", the header ");
+    format!(
+        "{} {given}: check the entry's value (its prefix, e.g. \"Bearer \") and that its URL \
+         is of this host",
+        flottille_core::vault::REFUSED_ENTRY
+    )
+}
+
 /// What a start says of a connection whose authorization server refused to refresh its tokens.
 fn signed_out_said(name: &str, why: &str) -> String {
     format!(
-        "the connection {name} is signed out ({why}): the user is asked to sign in again \
-         (`flottille connection login {name}`)"
+        "the connection {name}{}{why}): the user is asked to sign in again \
+         (`flottille connection login {name}`)",
+        flottille_core::vault::SIGNED_OUT
     )
 }
 
