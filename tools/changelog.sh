@@ -2,15 +2,17 @@
 # The changelog of a release (docs/releases.md): the Angular commits since the last release's
 # mark (tools/version.sh) up to `--at` (HEAD by default), or of the range given, grouped by type,
 # oldest first, each with the pull request number its squash kept. A stable release's is the dev
-# commits between the previous stable tag (or its mark) and the commit of dev it releases.
-#   tools/changelog.sh [--at <rev> | <range>]
+# commits between the previous stable tag (or its mark) and the commit of dev it releases; on a
+# maintenance line (`--branch stable/X.Y`), the line's commits since its previous tag.
+#   tools/changelog.sh [--at <rev> [--branch <name>] | <range>]
 set -euo pipefail
 
 range=${1:-}
 if [ -z "$range" ] || [ "$range" = --at ]; then
-  at=HEAD
+  at=HEAD branch=()
   if [ "$range" = --at ]; then at=${2:?changelog.sh: --at needs a commit}; fi
-  read -r _ since <<<"$("$(dirname "$0")/version.sh" base --at "$at")" || true
+  if [ "${3:-}" = --branch ]; then branch=(--branch "${4:?changelog.sh: --branch needs a name}"); fi
+  read -r _ since <<<"$("$(dirname "$0")/version.sh" base "${branch[@]}" --at "$at")" || true
   range=$at
   if [ -n "${since:-}" ]; then range="$since..$at"; fi
 fi

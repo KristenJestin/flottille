@@ -325,16 +325,18 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "forge",
         title: "Pull requests",
-        description: "Pull requests and CI of the project's repositories, through the user's \
+        description: "Project PRs and CI via the user's \
             gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
-            as last read. show: a branch's or number's, \
-            with checks (the log's end of each failed job), review and comment counts; detail \
-            full: texts. Writes, judged, answered at once, the result maybe later: create, merge \
+            as last read. show: a branch's or number's \
+            with checks (the log's end of each failed job), review and comment counts; \
+            detail full: texts, threads (file, line). Writes, judged, answered at \
+            once, the result maybe later: create, merge \
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
-            user's words) and checks act on a workspace's branch; edit, comment, review (approve and request_changes wait for the user), \
+            user's words) and checks on a workspace's branch; edit, comment, reply, \
+            resolve (threads), review (approve, request_changes wait for the user), \
             close (comment first), reopen on number. \
             subscribe: events wake you until merged or closed; unsubscribe. CI: pipelines lists what can \
-            be run; run starts one by name (custom: <name>) with its variables and follows it unless \
+            be run; run starts one by name (custom: <name>) with its variables, follows it unless \
             follow: false; follow_run one you did not start; runs, run_view, \
             run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
             \"api\", \"title\": \"fix\", \"body\": \"...\"}",
@@ -343,16 +345,16 @@ const SERVED: [Definition; 33] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "people", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "review", "pipelines", "runs", "run_view", "run_logs", "run", "follow_run", "stop", "step"]},
+                "action": {"type": "string", "enum": ["list", "show", "people", "subscribe", "unsubscribe", "create", "comment", "reply", "resolve", "edit", "merge", "checks", "close", "reopen", "review", "pipelines", "runs", "run_view", "run_logs", "run", "follow_run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; all of the place's when left out (list, show); the only one is taken without being named."},
-                "number": {"type": "integer", "minimum": 1, "description": "show, comment, review, edit, subscribe, unsubscribe: a pull request. subscribe and unsubscribe take it with repository, without workspace, for one that is not your workspace's branch's."},
+                "number": {"type": "integer", "minimum": 1, "description": "show, comment, reply, resolve, review, edit, subscribe, unsubscribe: a pull request. subscribe and unsubscribe take it with repository, without workspace, for one that is not your workspace's branch's."},
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
                 "branch": {"type": "string", "description": "list: its source branch. pipelines, runs, run: the branch to read or run on; left out, your workspace's, in main the project folder's, which a run says; with a pull request of your own in main, name its branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the pull request again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
-                "body": {"type": "string", "description": "create, edit: description; comment: the comment. review: its words. create without it takes the project's pull request template when it has one (project settings shows it): fill the template in body rather than replace it."},
+                "body": {"type": "string", "description": "create, edit: description; comment: the comment. reply: the reply. review: its words. create without it takes the project's pull request template when it has one (project settings shows it): fill the template in body rather than replace it."},
                 "draft": {"type": "boolean", "description": "create: open as a draft. edit: false marks it ready for review, true makes it a draft again."},
                 "reviewers": {"type": "array", "items": {"type": "string"}, "description": "create: reviewers besides the project's, each by display name, nickname, account id or e-mail; people finds them."},
                 "query": {"type": "string", "description": "people: lists who can be named a reviewer (a display name, nickname or e-mail does for reviewers); these words narrow it."},
@@ -370,6 +372,8 @@ const SERVED: [Definition; 33] = [
                     "line": {"type": "integer", "minimum": 1, "description": "The line in the new file."},
                     "body": {"type": "string"}
                 }, "required": ["path", "line", "body"], "additionalProperties": false}},
+                "thread": {"type": ["string", "integer"], "description": "reply, resolve: a review thread, as show with detail full names it."},
+                "resolved": {"type": "boolean", "description": "resolve: true resolves the thread, false opens it again."},
                 "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork. merge: delete its source branch after the merge; the project's setting when left out; never a branch the workspace resumed."},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
@@ -392,26 +396,26 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "tickets",
         title: "Tickets",
-        description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh or acli \
-            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker: {\"action\": \"search\", \"query\": \"x\"}, \
+        description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh/acli \
+            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker: {\"action\":\"search\",\"query\":\"x\"}, \
             on Jira also in_comments, jql; show: a workspace's ticket (in \
-            main, name workspace) or ticket, with its links; detail full adds the comments, \
-            with the id of yours; Jira images and files are named, not shown; \
+            main, name workspace) or ticket, with links; detail full adds comments, \
+            yours with ids; Jira images and files are named, not shown; \
             types: a Jira project's work item types (never guess); link_types. \
             Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
             reopen, status, link and unlink, comment_edit and \
             comment_delete (yours only); log_time (Jira), \
-            time_spent: this session's work time, to propose). \
-            Assign only when asked (assignee \"me\": the user; \
-            GitHub: assignees). Jira create: parent, sprint (sprints lists them). \
-            Milestones (Jira: versions): milestones; GitHub: milestone_create/_edit. \
-            subscribe: a ticket's events wake you until it is closed; unsubscribe.",
+            time_spent (this session's work time, to propose). \
+            Assign only if asked (assignee \"me\": the user; \
+            GitHub: assignees). Jira create: parent, sprint (see sprints). \
+            Milestones (Jira: versions): milestones, progress (tickets, their work); GitHub: milestone_create/_edit. \
+            subscribe: a ticket's events wake you until it closes; unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "link_types", "sprints", "milestones", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes)."},
                 "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out."},

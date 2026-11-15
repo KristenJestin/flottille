@@ -211,6 +211,7 @@ base = ["develop", "main"]            # the first that exists on the remote wins
 depends_on = ["lib-core"]             # paths of repositories of the project, leaves first; no cycle
 forge = { kind = "github", repository = "acme/app" }   # its forge (docs/forges.md); none when left out
 delete_branch_on_merge = false        # "Delete the branch after merging": a merge by `forge` deletes the source branch on the forge; default false
+commit_checks = { pre_commit = ["lint-staged"], commit_msg = ["npx --no -- commitlint --edit {message_file}"] }   # run before an agent's commit ("Commit checks"); none by default
 
 [variables]                           # name -> templated value, for every command run in a workspace
 STORE = "{workspace.path}/.store"
@@ -483,6 +484,82 @@ run.
 - **A check that cannot run** never counts as passed: a program that is not found, or a check
   that takes longer than 60 s (its process group is then stopped), refuses with that reason.
   A call the agent gives up stops its checks, their process group with them.
+
+## Commit checks
+
+A repository's `commit_checks` are the command lines its `pre-commit` and `commit-msg` hooks would
+run for the user, run before an agent's `git commit` in it: `pre_commit`, in the repository's
+folder, then `commit_msg`, each with `{message_file}` standing for a file that holds the commit's
+message. None by default. Any program the project uses is a check (a commit message linter, a
+secret scanner, a test, a script of the repository such as `./scripts/check-commit.sh
+{message_file}`, spawned itself: its own `#!` line, no shell of Flottille's). They are set in the
+file, in the project's Settings, Instructions tab, "Commit checks" (each repository's two fields,
+one command line per line, Save once changed; `project.set_commit_checks`, `docs/protocol.md`), or
+with `flottille project set-commit-checks` (`docs/cli.md`); an agent never sets them.
+
+**Never read from the hooks at run time.** Git still runs no hook for an agent
+(`core.hooksPath=/dev/null`): a hook is a file the agent can write, run by git through a shell,
+outside the gate. The project's Settings and `flottille project commit-checks`
+(`project.commit_checks`) read the hooks of each repository in the project's folder only to
+**propose** lines, which nothing runs until the user saved them. For each hook, the first of:
+
+- its hook manager's own entry point, so that the whole hook runs as the project wrote it:
+  `lefthook run pre-commit` and `lefthook run commit-msg {message_file}` for a `lefthook.yml` (or
+  `lefthook.yaml`, `.lefthook.yml`, `.lefthook.yaml`) that has the hook,
+  `pre-commit run --hook-stage pre-commit` for a `.pre-commit-config.yaml`, and
+  `pre-commit run --hook-stage commit-msg --commit-msg-filename {message_file}` when one of its
+  `stages`, `default_stages` or `default_install_hook_types` lists `commit-msg`;
+- its hook file, `.husky/<hook>`, `.githooks/<hook>` or `.git/hooks/<hook>` (never a `.sample`):
+  one of the repository's own files with a `#!` line that can be run is proposed as itself
+  (`./.husky/commit-msg {message_file}`), the others by the commands read in them, a line each,
+  comments and husky's loading line left out, `$1` read as `{message_file}`. A command with shell
+  syntax (`pnpm test && pnpm lint`) is left out, and said with why.
+
+Every line is masked (the vault's values, those of the repository's files of secrets, the
+daemon's), and a line already saved is not proposed again. A file is read only when it is a
+regular file, not a link nor a FIFO, of 256 KiB at most.
+
+- **When**: before an agent's `git commit` (a line of `run`, or a task, at any of its layers, and
+  the user's git alias of it, read as the message checks read them, above), in the repository the
+  commit is in: the folder git works in, as the gate reads it, moved by the wrappers around it
+  (`env -C web git commit`) and its own `-C` (`git -C ../web commit`), every link and `..`
+  followed; the `-F` file of the message is read there too. While a repository of the project has
+  checks, a commit that points git at another repository than its folder's (`--git-dir`,
+  `--work-tree`, or `GIT_DIR`, `GIT_WORK_TREE` set by a wrapper) is refused: `refused: --git-dir
+  points the commit at a repository other than its folder's, whose commit checks would not run,
+  and the project's repositories have commit checks: commit in the repository's folder, with git
+  -C <folder> if it is another one; nothing was committed`. A `git merge`, `git commit-tree`, `cherry-pick`
+  or `rebase` runs none of them, as git runs no `pre-commit` for them. A repository without checks
+  commits as before.
+- **`--no-verify`** (`-n`) on an agent's commit in a repository with checks is refused: `refused:
+  --no-verify skips the commit checks of the repository api, which are the user's, not the agent's
+  to skip: commit without it; nothing was committed`.
+- **The message**: a `commit-msg` check gets the commit's `-m` (several are paragraphs, as git
+  joins them) or its `-F` file, written in a private folder of Flottille's state, outside the
+  repository, and removed once the checks ran. A commit whose message cannot be known before it is
+  made (an editor, `-C`, `--fixup`…) is refused while the repository has `commit-msg` checks, as
+  for the message checks; its `pre-commit` checks still run without one.
+- **How**: each line is split without a shell, as a run's line is, and run by the daemon, not as
+  a call of the agent: a check is a line the user saved, so it is not judged again; in the
+  repository's folder of the place, with the environment of a run there (no forge token, no push,
+  no hook), for 300 s at most (its process group is then stopped), longer than a message check
+  since a first `pre-commit run` installs the environments of its hooks. They run in order, the
+  `pre-commit` ones first; the first that fails stops the others.
+- **What runs unjudged**: a saved check is not judged when it runs, and one that names a file of
+  the repository (`./scripts/check-commit.sh`, `lefthook run`, which runs what `lefthook.yml`
+  says, `pre-commit run`, what `.pre-commit-config.yaml` says) runs that file as it is at the
+  commit, which the agent can change, as a workspace's task or setup step runs the repository's
+  files. Saving one is trusting the repository's files as much as its tasks; a check that names
+  only programs of the machine (`commitlint --edit {message_file}`) runs nothing the agent wrote.
+- **A check that fails** refuses the commit before git runs: nothing is committed, and the agent
+  is told which check failed, how it ended and the end of its output (its last 1,200 characters,
+  ANSI colours removed, masked as a run's output is): `refused: the pre-commit check `lint-staged`
+  of the repository api refused the commit (it exited with code 1); nothing was committed: fix
+  what it says and try again. Its output: …`. A check that cannot run (its program is not found,
+  it takes too long) refuses too. All pass, the commit runs, still with no hook.
+- **What they do not see**: a `pre-commit` check runs before git, so it sees the index as the line
+  found it: what `git commit -a` or `git commit <paths>` would stage is not staged yet. The checks
+  at push time are the message checks' (above).
 
 ## Tasks
 

@@ -101,6 +101,8 @@ pub enum Selection {
     },
     /// The services of the machine.
     Services,
+    /// A project's progress: its milestones and their tickets.
+    Progress(String),
 }
 
 /// The links an agent shares in a row: the toast that says them is named by the agent and the
@@ -957,6 +959,11 @@ impl Shell {
             Update::Link(link) => self.linked(link, cx),
             Update::Prompted(agent) => self.spoke(&agent),
             Update::Items { project, item } => {
+                if let Some(page) = self.main.read(cx).progress_page().cloned()
+                    && page.read(cx).project() == project
+                {
+                    page.update(cx, |page, cx| page.changed(cx));
+                }
                 if let Some(items) = self.project_items_of(&project, cx) {
                     items.update(cx, |items, cx| items.changed(item, cx));
                 }
@@ -1277,6 +1284,20 @@ impl Shell {
                     .map(|page| page.read(cx).convention(key).clone());
                 if let Some(section) = section {
                     section.update(cx, |section, cx| section.answered(saved, window, cx));
+                }
+            }
+            Outcome::CommitChecks {
+                project,
+                read,
+                saved,
+            } => {
+                let section = self
+                    .project_settings
+                    .clone()
+                    .filter(|page| page.read(cx).name() == project)
+                    .map(|page| page.read(cx).commit_checks().clone());
+                if let Some(section) = section {
+                    section.update(cx, |section, cx| section.answered(read, saved, window, cx));
                 }
             }
             Outcome::MessageChecks { project, saved } => {
@@ -1723,6 +1744,17 @@ impl Shell {
                     items.update(cx, |items, cx| items.listed(asked, read, cx));
                 }
             }
+            Outcome::Progress {
+                project,
+                asked,
+                read,
+            } => {
+                if let Some(page) = self.main.read(cx).progress_page().cloned()
+                    && page.read(cx).project() == project
+                {
+                    page.update(cx, |page, cx| page.listed(asked, read, cx));
+                }
+            }
             Outcome::Item {
                 project,
                 kind,
@@ -1884,6 +1916,7 @@ impl Shell {
     /// Brings the open project's page up to what the daemon last gave, and asks for its details
     /// again.
     fn refresh_project(&mut self, cx: &mut Context<Self>) {
+        self.feed_progress(cx);
         let Some(page) = self.main.read(cx).project_page().cloned() else {
             // A page opened later is a new one: it asks for its details.
             self.details_of = None;
@@ -2292,6 +2325,9 @@ impl Shell {
             }
             if node.read(cx).commands() != project.commands {
                 node.update(cx, |node, cx| node.set_commands(project.commands, cx));
+            }
+            if node.read(cx).tracked() != project.tracked {
+                node.update(cx, |node, cx| node.set_tracked(project.tracked, cx));
             }
             project_nodes.push(node.clone());
             projects.insert(project.name.clone(), node);
@@ -2797,6 +2833,16 @@ impl Shell {
         {
             row.update(cx, |row, cx| row.set_selected(true, cx));
         }
+        if let Some(Selection::Progress(old)) = &self.selected
+            && let Some(node) = self.projects.get(old)
+        {
+            node.update(cx, |node, cx| node.set_progress_selected(false, cx));
+        }
+        if let Selection::Progress(name) = &selection
+            && let Some(node) = self.projects.get(name)
+        {
+            node.update(cx, |node, cx| node.set_progress_selected(true, cx));
+        }
         // Opened, the session's changes are seen: its mark and its items in the bell go.
         if let Selection::Session(id) = &selection {
             let before = self.forged.len();
@@ -2836,6 +2882,17 @@ impl Shell {
         self.refresh_project(cx);
     }
 
+    /// The Progress page open gets its project's sessions and workspaces as last read.
+    fn feed_progress(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = self.main.read(cx).progress_page().cloned() else {
+            return;
+        };
+        let project = page.read(cx).project().to_owned();
+        let sessions = crate::progress::sessions_of(&self.snapshot, &project);
+        let workspaces = crate::progress::workspaces_of(&self.snapshot, &project);
+        page.update(cx, |page, cx| page.set_sessions(sessions, workspaces, cx));
+    }
+
     /// The page of what is selected, as the daemon last gave it.
     fn page_of(&self, selection: &Selection, cx: &App) -> Page {
         match selection {
@@ -2866,6 +2923,14 @@ impl Shell {
                     }
                 } else {
                     Page::Empty
+                }
+            }
+            Selection::Progress(name) => {
+                match self.snapshot.projects.iter().find(|p| &p.name == name) {
+                    Some(project) => Page::Progress {
+                        name: project.name.clone(),
+                    },
+                    None => Page::Empty,
                 }
             }
             Selection::Project(name) => {
@@ -2910,6 +2975,7 @@ impl Shell {
             Some(Selection::Session(id)) => self.snapshot.session(id).map(|s| s.project.clone()),
             Some(Selection::ProjectSettings(name)) => Some(name.clone()),
             Some(Selection::Spec { project, .. }) => Some(project.clone()),
+            Some(Selection::Progress(name)) => Some(name.clone()),
             Some(Selection::Settings | Selection::Services) | None => None,
         }
         .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));

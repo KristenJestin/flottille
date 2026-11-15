@@ -14,6 +14,7 @@ pub const PULL_REQUEST: Icon = Icon::Lucide("git-pull-request");
 pub const TICKET: Icon = Icon::Lucide("ticket");
 /// A picture of a message: its chip in the text.
 pub const PICTURE: Icon = Icon::Lucide("image");
+pub const MILESTONE: Icon = Icon::Lucide("milestone");
 /// The stop action: a small filled square, not Lucide's square in a circle, which blurs into a
 /// muddy ring when it is drawn at 14 px.
 pub const STOP: Icon = Icon::Filled(STOP_PATH);
@@ -34,7 +35,8 @@ gpui_kit::assets::icon_assets!(
         Power,
         LogIn,
         Blocks,
-        Image
+        Image,
+        Milestone
     ]
 );
 
@@ -80,6 +82,7 @@ mod tests {
             AGENTS,
             PULL_REQUEST,
             TICKET,
+            MILESTONE,
             STOP,
             Icon::Lucide("power"),
             Icon::Lucide("log-in"),

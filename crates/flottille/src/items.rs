@@ -1136,6 +1136,12 @@ fn events_of(old: Option<&Item>, new: &Fetched) -> Vec<(&'static str, Value)> {
     if old.updated_at.is_some() {
         change("assignees", json!(old.assignees), json!(item.assignees));
         change("labels", json!(old.labels), json!(item.labels));
+        // A ticket moved to another milestone: what shows the milestones reads them again.
+        change(
+            "milestone",
+            old.details["milestone"].clone(),
+            item.details["milestone"].clone(),
+        );
     }
     let count = |item: &Item, key: &str| item.details[key].as_u64();
     let newest = |said: &[Said], new: u64, old: u64| -> Value {

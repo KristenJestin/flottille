@@ -37,6 +37,7 @@ mod events;
 mod links;
 mod milestones;
 mod people;
+pub mod progress;
 mod sprints;
 mod versions;
 mod worklog;
@@ -1359,6 +1360,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         "link_types" => links::types(&project).await,
         "sprints" => sprints::listed(&project, &asked).await,
         "milestones" => milestones::listed(&project, &asked).await,
+        "progress" => progress::said(daemon, &project).await,
         "milestone_create" | "milestone_edit" => {
             let written = match asked.action.as_str() {
                 "milestone_create" => milestones::create(&project, &asked).await,
