@@ -1490,8 +1490,8 @@ impl ConnectionsSection {
             picked: BTreeSet::new(),
             opened: HashSet::new(),
             folded: HashSet::new(),
-            rows: Grouped::new("connection-review-row"),
-            changes: Listing::default(),
+            rows: Grouped::new("connection-review-row").at_rest(),
+            changes: Listing::default().at_rest(),
             found: Found::default(),
             folding: HashMap::new(),
         });
