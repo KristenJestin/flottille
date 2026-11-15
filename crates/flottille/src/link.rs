@@ -174,10 +174,11 @@ pub fn start(
     Ok(remote)
 }
 
-/// This build's hello; a test may make it another's.
+/// This build's hello; a test build may make it another's.
 fn hello() -> Hello {
-    std::env::var("FLOTTILLE_TEST_LINK_HELLO")
-        .ok()
+    cfg!(debug_assertions)
+        .then(|| std::env::var("FLOTTILLE_TEST_LINK_HELLO").ok())
+        .flatten()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_else(|| Hello::ours(VERSION))
 }
@@ -408,9 +409,10 @@ async fn tell(link: Link, addresses: Vec<String>) {
 /// The machines that dial this one: kept when trusted, refused otherwise.
 async fn accept(remote: Arc<Remote>) {
     // A test makes both machines take a link they are dialled on late, so that they dial each
-    // other at once.
-    let late = std::env::var("FLOTTILLE_TEST_LINK_ACCEPT_DELAY_MS")
-        .ok()
+    // other at once: in a test build only.
+    let late = cfg!(debug_assertions)
+        .then(|| std::env::var("FLOTTILLE_TEST_LINK_ACCEPT_DELAY_MS").ok())
+        .flatten()
         .and_then(|text| text.parse().ok())
         .map(Duration::from_millis);
     while let Some(accepting) = remote.endpoint.accept().await {
