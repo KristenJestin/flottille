@@ -714,3 +714,57 @@ fn a_binding_to_an_impossible_connection_name_is_refused() {
     .unwrap();
     assert_eq!(listed_names(&user), ["token"]);
 }
+
+#[test]
+fn the_cli_edits_an_entry_without_its_secret() {
+    let user = User::new();
+    set_jira(&user);
+
+    // Nothing is given on the standard input: no secret is read, and the one kept stays.
+    let output = user.run_with_input(
+        &[
+            "vault",
+            "edit",
+            "jira",
+            "--url",
+            "https://tracker.example.org",
+        ],
+        "",
+    );
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("jira"), "{stdout}");
+    let listed = user.call("vault.list", json!({})).unwrap();
+    assert_eq!(listed["entries"][0]["url"], "https://tracker.example.org");
+    // What the flags did not name is kept as it was.
+    assert_eq!(listed["entries"][0]["description"], "Logs time on Jira");
+    assert_eq!(listed["entries"][0]["username"], "dev@example.com");
+
+    // An entry that does not exist cannot be edited into being: it has no secret.
+    let missing = user.run_with_input(
+        &["vault", "edit", "nowhere", "--url", "https://a.example.com"],
+        "",
+    );
+    assert!(!missing.status.success(), "{missing:?}");
+    assert_eq!(listed_names(&user), ["jira"]);
+}
+
+#[test]
+fn the_cli_gives_an_entry_back_to_every_project() {
+    let user = User::new();
+    project(&user, "app");
+    set_jira(&user);
+    let bound = user.run_with_input(&["vault", "edit", "jira", "--project", "app"], "");
+    assert!(bound.status.success(), "{bound:?}");
+    assert_eq!(
+        user.call("vault.list", json!({})).unwrap()["entries"][0]["project"],
+        "app"
+    );
+
+    // An empty project is every project's: the entry is given back, not refused.
+    let given_back = user.run_with_input(&["vault", "edit", "jira", "--project", ""], "");
+    assert!(given_back.status.success(), "{given_back:?}");
+    let listed = user.call("vault.list", json!({})).unwrap();
+    assert!(listed["entries"][0]["project"].is_null(), "{listed}");
+    assert_eq!(listed["entries"][0]["description"], "Logs time on Jira");
+}
