@@ -165,11 +165,24 @@ fn the_daemon_never_reads_the_device_key() {
     let seen = opened(&watcher);
     assert!(seen.iter().any(|name| name == "device.key"), "{seen:?}");
 
-    // Nor does any of the daemon's code name the device key: only a client may load it.
+    // Nor does any of the daemon's code name what reaches the device key: its loader, its file,
+    // its keyring item. Its limit: it reads names, not what the code does; a name built from
+    // parts, or a crate the daemon links that loads the key itself, escapes it, which the watch
+    // above is for. The command line shares these sources: when a client of it loads the device
+    // key, this narrows to the daemon's modules.
     let sources = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     for file in rust_files(&sources) {
         let text = std::fs::read_to_string(&file).unwrap();
-        for name in ["DeviceKey", "device.key"] {
+        for name in [
+            "DeviceKey",
+            "DEVICE_FILE",
+            "DEVICE_LABEL",
+            "DEVICE_ATTRIBUTES",
+            "flottille_link::*",
+            "device.key",
+            "Flottille: device",
+            "flottille-key",
+        ] {
             assert!(
                 !text.contains(name),
                 "{} names {name}: the daemon never reads the device key",
