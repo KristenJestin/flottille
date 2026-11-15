@@ -237,8 +237,27 @@ mod tests {
         let at = |needle: &str| before.find(needle).unwrap_or_else(|| panic!("no {needle}"));
         assert!(at("# What Flottille enforces") < at("# How to work"));
         assert!(at("# How to work") < at("# Your role: worker"));
-        assert!(before.contains("Commit only when your brief or the user asks for it"));
+        assert!(
+            before.contains("Commit only when the task you were given or the user asks for it")
+        );
         assert!(!after.contains("How to work"));
+    }
+
+    #[test]
+    fn the_rules_name_no_brief_a_root_does_not_have() {
+        let folder = Path::new("/work/zebra");
+        // A root's first message is the user's, a child's its parent's brief: the rules are the
+        // same text for both and name the task, not a brief.
+        for name in [LEAD, WORKER] {
+            let text = instructions(role(name).unwrap(), &session(folder), &[]);
+            let rules = text.split("# How to work").nth(1).unwrap();
+            let rules = rules.split("# Your role").next().unwrap();
+            assert!(!rules.to_lowercase().contains("brief"), "{name}: {rules}");
+            assert!(
+                rules.contains("the task you were given or the user"),
+                "{name}"
+            );
+        }
     }
 
     #[test]

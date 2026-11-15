@@ -20,8 +20,7 @@ use serde_json::{Value, json};
 
 const EXPIRED: &str = "Failed to authenticate: OAuth session expired and could not be refreshed";
 
-const LOGIN_LINE: &str =
-    "Claude's login expired: sign in again (run claude and /login), then send your message again";
+const LOGIN_LINE: &str = "Claude's login expired: sign in again (run claude and /login)";
 
 fn user(error: &str) -> User {
     let user = User::with_fake_agent();

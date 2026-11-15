@@ -58,6 +58,8 @@
 //!   agent whose process dies before it takes a prompt.
 //! - `open_error`: answer `session/new`, `session/load` and `session/resume` with an error of that
 //!   message: an agent that cannot open a session at all.
+//! - `exit_after_open_error`: exit with that code once `open_error` is answered: an agent that
+//!   refuses a login and then goes.
 //! - `load_error`: answer `session/load` and `session/resume` with ACP's "resource not found" error
 //!   (-32002) of that message, a new session opening as usual: an agent whose session file is lost
 //!   or corrupt.
@@ -242,9 +244,14 @@ fn main() {
         let answer = agent.handle(&request, &answered, &cancelled);
         match answer {
             Ok(result) => agent.send(json!({"jsonrpc": "2.0", "id": id, "result": result})),
-            Err(message) => agent.send(
-                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": message}}),
-            ),
+            Err(message) => {
+                agent.send(
+                    json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": message}}),
+                );
+                if let Some(code) = agent.script["exit_after_open_error"].as_i64() {
+                    std::process::exit(code as i32);
+                }
+            }
         }
     }
 }

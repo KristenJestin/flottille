@@ -279,14 +279,17 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   the turn `failed`: what it was sent is given back (`delivery.given_back`, queued again), the
   session stays, its process is let go as after an idle release (`agent.released`, reason
   `failed`), and the agent is idle with a `state_reason` that says what to do (`Claude's login
-  expired: sign in again (run claude and /login), then send your message again`), which the
-  session's state line says. Then nothing starts it but the user: what is queued for it waits,
-  however it was rung, until the user writes to it or to its tree's root, which clears that
+  expired: sign in again (run claude and /login)`), which the session's state line says. Then
+  nothing starts it but the user: what is queued for it waits, however it was rung, until the
+  user writes to it or to its tree's root, which clears that
   line on the root and on every agent of its tree waiting on a login, and rings them. Their next
   prompt starts a process that resumes or loads the session, with what waited. A child's parent
   is told (`child-idle`) that the child cannot work until the user signs in again and not to
-  write to it until then: what it sends waits. What makes the session unusable still fails it:
-  the process cannot start, its session cannot be opened, the connection breaks.
+  write to it until then: what it sends waits. A login refused when the session is loaded or
+  resumed is said the same way, as a sign-in, whether or not the process exits after refusing
+  it, and what it was given goes back to the queue, to be sent in one prompt once the user
+  writes. What makes the session unusable still fails it: the process cannot start, its session
+  cannot be opened for any other reason, the connection breaks.
 - **The agent's own permission prompts** (`session/request_permission`) are answered at once:
   a tool of the agent's own list, named by the provider's own field (Claude:
   `_meta.claudeCode.toolName`), is allowed once; anything else is rejected, a request with no tool
@@ -1070,11 +1073,13 @@ last turn's end with its provider's lifetime, established from each CLI and neve
 - **OpenCode**: its cache is the one of whichever model provider the user signed in to: unknown,
   neither trigger.
 
-What a new session needs is all in the store: its brief (the root's first message, or a child's),
-the summary, and its messages, word for word as they were recorded; its tools and instructions
-come from its role at the start of every session, its children and subscriptions are rows of the
-store keyed by the agent's id, and a session id is all the old session held of its own. Nothing of
-what Flottille holds lives only in the CLI's session.
+What a new session needs is all in the store: its brief (the root's first message, or a
+child's; an extension's session keeps the kind `brief` too: its first message is Flottille's,
+never the user's, and is delivered as `[flottille:brief]`), the summary, and its messages, word
+for word as they were recorded; its tools and instructions come from its role at the start of
+every session, its children and subscriptions are rows of the store keyed by the agent's id, and
+a session id is all the old session held of its own. Nothing of what Flottille holds lives only
+in the CLI's session.
 
 ### The sweep
 
