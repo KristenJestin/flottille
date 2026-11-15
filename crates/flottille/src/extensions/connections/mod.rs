@@ -526,15 +526,18 @@ impl Declaration {
             let same = |other: &Secret| {
                 other.place == secret.place && other.name.eq_ignore_ascii_case(&secret.name)
             };
-            let authorization = |other: &Secret| {
-                other.place == Carried::Header && other.name.eq_ignore_ascii_case("authorization")
+            let header = |name: &'static str| {
+                move |other: &Secret| {
+                    other.place == Carried::Header && other.name.eq_ignore_ascii_case(name)
+                }
             };
             if secrets[..n].iter().any(same)
-                || (secret.place == Carried::Basic && secrets.iter().any(authorization))
+                || (secret.place == Carried::Basic && secrets.iter().any(header("authorization")))
+                || (secret.place == Carried::Cookie && secrets.iter().any(header("cookie")))
             {
                 return Err(format!(
                     "{at}.secrets: {} is given twice (basic authentication is the Authorization \
-                     header)",
+                     header, the cookies are the Cookie header)",
                     secret.said()
                 ));
             }
