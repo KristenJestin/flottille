@@ -5245,6 +5245,90 @@ fn a_sign_in_gets_the_extra_hosts_the_user_adds() {
 }
 
 #[test]
+fn removing_a_site_stops_the_running_server_and_its_next_start_lacks_it() {
+    let user = user();
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"sites": ["sso.example.net", "id.example.org"]}),
+    );
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let started = logged(&user, "browser", "start");
+    let first = started.last().unwrap().clone();
+    assert_eq!(
+        allowed(&first),
+        Some(json!([
+            "id.example.org",
+            "shop.example.com",
+            "sso.example.net"
+        ]))
+    );
+    let pid = first["pid"].as_u64().unwrap();
+    // The user takes out a host that was wrong: the server that reaches it stops at once, and
+    // the user's own edit is given again at once, as an edit of the command is.
+    let edited = user
+        .call(
+            "connection.edit",
+            json!({"name": "browser", "sites": ["id.example.org"]}),
+        )
+        .unwrap();
+    assert_eq!(edited["state"], "ready", "{edited}");
+    eventually("the server that reached it stops", || !pid_alive(pid));
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let started = logged(&user, "browser", "start");
+    assert!(started.len() > 1, "{started:?}");
+    let sites = Some(json!(["id.example.org", "shop.example.com"]));
+    assert_eq!(allowed(started.last().unwrap()), sites);
+    // The file the running server's tool calls read lacks it too.
+    let config = std::fs::read_to_string(
+        user.path("state/flottille/connections/browser/agent-browser.json"),
+    )
+    .unwrap();
+    assert!(!config.contains("sso.example.net"), "{config}");
+}
+
+#[test]
+fn a_site_added_in_the_file_waits_for_a_review() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    assert_eq!(connection(&user, "browser")["state"], "ready");
+    let path = user.path("config/flottille/extensions.toml");
+    let file = std::fs::read_to_string(&path).unwrap();
+    assert!(file.contains("name = \"browser\"\n"), "{file}");
+    std::fs::write(
+        &path,
+        file.replace(
+            "name = \"browser\"\n",
+            "name = \"browser\"\nsites = [\"sso.example.net\"]\n",
+        ),
+    )
+    .unwrap();
+    // Not read by anyone yet: the connection waits, and no login reaches the new host.
+    assert_eq!(connection(&user, "browser")["state"], "awaiting review");
+    refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(logged(&user, "browser", "login").is_empty());
+}
+
+#[test]
 fn an_entry_whose_host_is_no_usable_site_is_refused() {
     for url in [
         "https://shop.example.com,evil.example.net/login",

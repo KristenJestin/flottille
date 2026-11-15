@@ -1027,9 +1027,10 @@ read**:
   it): the review proposes exactly that, so a client that answers it back changes nothing. The
   review of a connection that nothing cut off shows no change, its actions folded away, and is the
   place to set them.
-- **A declaration the user edits** (the command, its arguments, the URL, the variables, the limits)
-  is a different server as far as trust goes: what it announces is pinned again at once, as when
-  it was added, against the last pin: the settings of the actions that did not change are kept.
+- **A declaration the user edits** (the command, its arguments, the URL, the variables, the limits,
+  the sites an adapter adds) is a different server as far as trust goes: what it announces is
+  pinned again at once, as when it was added, against the last pin: the settings of the actions
+  that did not change are kept.
   **But never a change nobody read**: a connection that has a pin is pinned at once only if what
   the server announces differs from the pin by its version alone (or not at all). A server that
   changed its instructions or an action since the user read them, and has not restarted since
@@ -1289,9 +1290,10 @@ way in:
   host each, written as a URL's host is (lower case, no scheme, port, path, comma, wildcard or
   space; anything else is refused, saying what a host is), added to the entries' hosts in the
   list, which the review shows where it shows the entries' sites. They are the user's alone (an
-  agent's request sets no `sites`), and not part of what trust is given to: an edit of them does
-  not ask for a new review, and they are in the list from the next start or login, as an entry
-  bound after the server started is. The file is written when the server starts and when
+  agent's request sets no `sites`), and **part of what trust is given to**, as the command and
+  the variables are: the user's own edit (`connection edit`, the window) stops the running server
+  at once and is given again at once by the rule of an edit, the next start writing the new list,
+  while an edit of `sites` made in the file waits for its review. The file is written when
   a login runs, and tool calls read it when they run: an entry bound after the server started is
   in the list from the next of either. **An entry whose URL host holds a comma, a `*`, a space or
   starts with `-` is no usable site** (agent-browser reads the list by commas and `*` as a

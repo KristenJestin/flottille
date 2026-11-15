@@ -396,16 +396,21 @@ impl Declaration {
         table
     }
 
-    /// What trust is given to: how the server is reached, what it is given, and the limits. An
-    /// edit of any of them is another server as far as trust goes; the sentence, the switch and
-    /// the projects left out are not.
+    /// What trust is given to: how the server is reached, what it is given, the limits, and the
+    /// hosts an adapter adds to the browser's sites. An edit of any of them is another server as
+    /// far as trust goes; the sentence, the switch and the projects left out are not.
     fn digest(&self) -> String {
         let reach = match &self.reach {
             Reach::Command(words) => json!({"command": words}),
             Reach::Url(url) => json!({"url": url}),
         };
-        let trusted = json!({"reach": reach, "env": self.env, "headers": self.headers,
+        let mut trusted = json!({"reach": reach, "env": self.env, "headers": self.headers,
             "only": self.only});
+        // Only when there are some: the digest of a connection without sites, pinned before
+        // they existed, stays the one it was pinned for.
+        if !self.sites.is_empty() {
+            trusted["sites"] = json!(self.sites);
+        }
         crate::files::sha256(trusted.to_string().as_bytes())
     }
 

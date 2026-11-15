@@ -278,11 +278,11 @@ extension's switch).
 
 ### `flottille connection edit <name> [--about S] [--command W... | --url U] [--env…] [--header…] [--only…] [--except…] [--client-id ID] [--site…] [--on | --off]`
 
-Replaces what is given. A change of the command, the URL, the variables, the headers or the
-limits is another server as far as trust goes: the daemon lists what it announces and pins it
-again at once, the settings of its actions kept. A connection that was cut off is not pinned by
-an edit, nor one whose server now announces more than another version (changed instructions or
-actions): its diff is read first.
+Replaces what is given. A change of the command, the URL, the variables, the headers, the
+limits or the sites is another server as far as trust goes: the daemon lists what it announces
+and pins it again at once, the settings of its actions kept. A connection that was cut off is not
+pinned by an edit, nor one whose server now announces more than another version (changed
+instructions or actions): its diff is read first.
 
 ### `flottille connection remove <name>`
 
