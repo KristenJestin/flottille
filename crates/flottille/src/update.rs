@@ -86,7 +86,7 @@ pub fn run(
     let channel = channel
         .or(kept.channel.clone())
         .unwrap_or_else(|| match CHANNEL {
-            "beta" | "alpha" => CHANNEL.to_owned(),
+            "beta" | "alpha" | "rc" | "next" => CHANNEL.to_owned(),
             _ => "stable".to_owned(),
         });
     let branch = branch.or_else(|| {
@@ -135,7 +135,7 @@ pub fn run(
             }
             return Ok(ExitCode::SUCCESS);
         }
-        if *new < this {
+        if is_older(new, &this) {
             if !force {
                 return Err(if which.is_empty() {
                     format!("{new} is older than this {this}: --force goes back to it ({NOT_DOWN}).")
@@ -288,14 +288,51 @@ fn archives(release: &Value) -> Vec<String> {
 }
 
 /// The archive an rc or a next build follows: its own line's (`docs/releases.md`, "Updating").
-fn along_line(_releases: &[Value], _this: &Version) -> Option<String> {
-    None
+/// An rc build of `X.Y.Z` takes the highest of the line's `-rc.` builds and stable releases (a
+/// line's stable is above its rcs); a next build of `X.Y.0` the most recently published of the
+/// line's `-next.` builds and, once the line is merged into dev, of dev's betas from `X.Y.0` on.
+/// Other lines' builds, whatever they are, are never taken.
+fn along_line(releases: &[Value], this: &Version) -> Option<String> {
+    let rc = this.pre.as_str().starts_with("rc.");
+    let candidates = releases
+        .iter()
+        .filter(|release| release["published_at"].as_str().is_some())
+        .flat_map(|release| {
+            let at = release["published_at"].as_str().unwrap_or_default();
+            archives(release)
+                .into_iter()
+                .filter_map(move |url| Some((at, version_of(url.rsplit('/').next()?)?, url)))
+        })
+        .filter(|(_, version, _)| {
+            let pre = version.pre.as_str();
+            let line = (version.major, version.minor) == (this.major, this.minor);
+            if rc {
+                line && (pre.is_empty() || pre.starts_with("rc."))
+            } else {
+                (line && pre.starts_with("next."))
+                    || (pre.starts_with("beta.")
+                        && (version.major, version.minor, version.patch)
+                            >= (this.major, this.minor, this.patch))
+            }
+        });
+    if rc {
+        candidates
+            .max_by(|a, b| a.1.cmp(&b.1))
+            .map(|(_, _, url)| url)
+    } else {
+        candidates
+            .max_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)))
+            .map(|(_, _, url)| url)
+    }
 }
 
 /// Whether `new` is older than `this`: by version, but dev's beta of a line is not older than the
 /// next build of that line it was merged from (`0.5.0-beta.1` follows `0.5.0-next.7`).
 fn is_older(new: &Version, this: &Version) -> bool {
-    new < this
+    let merged = this.pre.as_str().starts_with("next.")
+        && new.pre.as_str().starts_with("beta.")
+        && (new.major, new.minor, new.patch) >= (this.major, this.minor, this.patch);
+    new < this && !merged
 }
 
 /// The address of the channel's latest archive for this machine.
@@ -341,6 +378,17 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
                 .into());
             };
             Some(url)
+        }
+        // The build's own line: it says its channel, which `--channel` does not offer.
+        "rc" | "next" => {
+            let this = Version::parse(VERSION)?;
+            along_line(
+                json(&format!("{}/releases?per_page=100", api()))?
+                    .unwrap_or_default()
+                    .as_array()
+                    .map_or(&[], Vec::as_slice),
+                &this,
+            )
         }
         _ => return Err("the channel is stable, beta or alpha".into()),
     };
