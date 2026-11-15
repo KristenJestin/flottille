@@ -88,7 +88,10 @@ sets it, a refused refresh and removing the connection remove it.
 It is set from the window (Settings, Vault) or with `flottille vault set <name>`, which reads it
 from the standard input or a prompt that does not echo it, **never from an argument** (the shell's
 history and the process list would keep it). It can be replaced (the entry is set again, its secret
-typed anew) or removed with its entry: the secret is deleted from the keyring first, so that a
+typed anew), edited while it is kept (`vault.set` without a `secret`, `flottille vault edit <name>
+--url …`, the window's "Edit" with its Secret field left empty: only the metadata is rewritten,
+the keyring item is never read nor touched, and a name the vault does not hold has no secret to
+keep, so it is refused), or removed with its entry: the secret is deleted from the keyring first, so that a
 keyring that refuses (locked) leaves the entry whole, to be removed again once it is unlocked. It
 is **never shown again**: no method, no client, no tool returns it, no event or log line holds it,
 and an error about a call that carried it never repeats it. The window's field is masked, and empty

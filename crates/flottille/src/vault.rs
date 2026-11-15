@@ -226,7 +226,9 @@ struct List {
 #[serde(deny_unknown_fields)]
 struct Set {
     name: String,
-    secret: String,
+    /// Left out, an entry that exists keeps the secret the keyring holds: it is never read to do
+    /// so, only the metadata is rewritten.
+    secret: Option<String>,
     description: Option<String>,
     url: Option<String>,
     username: Option<String>,
@@ -356,7 +358,7 @@ pub async fn call(
 }
 
 async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Failure> {
-    if !params["secret"].is_string() {
+    if !params["secret"].is_string() && !params["secret"].is_null() {
         return Err(Failure::new("invalid-params", "the secret is a text"));
     }
     let asked: Set = serde_json::from_value(params)?;
@@ -367,7 +369,9 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
             asked.name
         )));
     }
-    if asked.secret.chars().count() < VAULT_SHORTEST {
+    if let Some(secret) = &asked.secret
+        && secret.chars().count() < VAULT_SHORTEST
+    {
         return Err(Failure::refused(format!(
             "a secret is {VAULT_SHORTEST} characters at least: a shorter one could not be masked \
              without masking ordinary words"
@@ -381,11 +385,17 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
             .filter(|t| !t.is_empty())
     };
     let project = given(asked.project);
-    let had = daemon
+    let existing = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
-        .find(|entry| entry.name == asked.name)
-        .and_then(|entry| entry.bound);
+        .find(|entry| entry.name == asked.name);
+    if asked.secret.is_none() && existing.is_none() {
+        return Err(Failure::refused(format!(
+            "a new entry needs its secret: the vault has no entry {}",
+            asked.name
+        )));
+    }
+    let had = existing.and_then(|entry| entry.bound);
     let bound = match (given(asked.bound), had) {
         (Some(new), Some(own)) if new != own => {
             return Err(Failure::refused(format!(
@@ -411,13 +421,15 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         updated_at: now_ms(),
         bound,
     };
-    // Masked before it is kept anywhere, so that nothing written after can hold it.
-    secrets::add_vault_value(&asked.secret);
-    daemon
-        .vault
-        .store(&entry.name, &asked.secret)
-        .await
-        .map_err(unavailable)?;
+    if let Some(secret) = &asked.secret {
+        // Masked before it is kept anywhere, so that nothing written after can hold it.
+        secrets::add_vault_value(secret);
+        daemon
+            .vault
+            .store(&entry.name, secret)
+            .await
+            .map_err(unavailable)?;
+    }
     daemon.write(|store| store.put_vault_entry(&entry))?;
     retool(daemon);
     // However it was set, from its request's card or from Settings, what asked for it is told.
@@ -1141,22 +1153,26 @@ mod tests {
         std::sync::Arc::new(Daemon::new(&paths, store, projects, 0, None))
     }
 
+    /// The value of a call that succeeded; a failure says its message.
+    fn ok<T>(result: Result<T, Failure>) -> T {
+        result.unwrap_or_else(|failure| panic!("{}", failure.message))
+    }
+
     async fn listed(daemon: &std::sync::Arc<Daemon>) -> Vec<Entry> {
-        daemon.read(|store| store.vault_entries()).unwrap()
+        ok(daemon.read(|store| store.vault_entries()))
     }
 
     #[tokio::test]
     async fn editing_an_entry_without_a_secret_keeps_it() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = a_daemon(dir.path());
-        call(
+        ok(call(
             daemon.clone(),
             "vault.set",
             json!({"name": "jira", "secret": "k3pt-s3cret-value", "description": "Logs time",
                 "url": "https://tracker.example.com"}),
         )
-        .await
-        .unwrap();
+        .await);
 
         // The secret is absent, or null: the metadata is rewritten, the keyring item stays.
         for absent in [json!({}), json!({"secret": null})] {
@@ -1166,7 +1182,7 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .extend(absent.as_object().unwrap().clone());
-            call(daemon.clone(), "vault.set", params).await.unwrap();
+            ok(call(daemon.clone(), "vault.set", params).await);
             let entries = listed(&daemon).await;
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].description.as_deref(), Some("Logs time on Jira"));
@@ -1195,6 +1211,7 @@ mod tests {
                 json!({"name": "jira", "secret": secret_of, "url": url}),
             )
             .await
+            .map_err(|failure| failure.message)
             .unwrap();
         }
         assert_eq!(

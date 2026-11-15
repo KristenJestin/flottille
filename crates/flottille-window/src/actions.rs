@@ -636,10 +636,10 @@ pub enum SkillWrite {
 /// A change to the vault, as the daemon takes it.
 #[derive(Clone, PartialEq)]
 pub enum VaultWrite {
-    /// A new entry, or one replaced whole.
+    /// A new entry, or one edited: without a secret, the one the keyring holds is kept.
     Set {
         name: String,
-        secret: String,
+        secret: Option<String>,
         description: String,
         url: String,
         username: String,
