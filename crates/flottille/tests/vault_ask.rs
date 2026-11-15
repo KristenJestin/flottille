@@ -634,6 +634,12 @@ fn an_ask_of_another_project_does_not_join() {
     let user = User::with_fake_agent().with_fake_acli();
     project(&user, "jira-time");
     other_project(&user);
+    // An entry every project sees: the agents of both have the tool.
+    user.call(
+        "vault.set",
+        json!({"name": "deploy-key", "secret": "d3ploy-s3cret-key"}),
+    )
+    .unwrap();
     let (app, _) = root_in(&user);
     let (other, theirs) = root_of(&user, "other");
 
