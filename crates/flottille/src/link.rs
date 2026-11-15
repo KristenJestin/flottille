@@ -157,18 +157,7 @@ pub fn start(
             "flottille daemon: the link listens nowhere ([remote] listen in daemon.toml); it dials"
         ),
     }
-    let remote = Arc::new(Remote {
-        endpoint,
-        folder: crate::remote::folder(paths),
-        hello: hello(),
-        peers: Mutex::new(Kept {
-            last: Peers::default(),
-            said: false,
-        }),
-        seen: Mutex::new(HashMap::new()),
-        told: Mutex::new(Vec::new()),
-        links: Default::default(),
-    });
+    let remote = Arc::new(Remote::new(endpoint, crate::remote::folder(paths)));
     tokio::spawn(accept(remote.clone()));
     tokio::spawn(dial(remote.clone(), stopping));
     Ok(remote)
@@ -191,6 +180,21 @@ fn now() -> u64 {
 }
 
 impl Remote {
+    fn new(endpoint: Endpoint, folder: PathBuf) -> Remote {
+        Remote {
+            endpoint,
+            folder,
+            hello: hello(),
+            peers: Mutex::new(Kept {
+                last: Peers::default(),
+                said: false,
+            }),
+            seen: Mutex::new(HashMap::new()),
+            told: Mutex::new(Vec::new()),
+            links: Default::default(),
+        }
+    }
+
     /// Closes every link, telling the other machines.
     pub async fn close(&self) {
         self.endpoint.close().await;
@@ -342,7 +346,8 @@ impl Remote {
 
     /// The addresses another machine told: kept for it in the peers' file, beside those it was
     /// given, so that the two can link again without the hub. A file not read whole is not
-    /// written over.
+    /// written over; one changed by another hand while it is updated is read again, once, rather
+    /// than written over.
     fn learn(&self, key: &PublicKey, addresses: &[String]) {
         let addresses: Vec<String> = addresses
             .iter()
@@ -350,20 +355,36 @@ impl Remote {
             .map(|address| address.to_string())
             .take(MOST_ADDRESSES)
             .collect();
-        let Ok(mut peers) = read_json::<Peers>(&self.folder.join(PEERS_FILE)) else {
-            return;
-        };
-        let Some(peer) = peers.machines.iter_mut().find(|peer| peer.key == *key) else {
-            return;
-        };
-        if peer.told == addresses {
-            return;
+        let file = self.folder.join(PEERS_FILE);
+        // Held across the read and the write: two machines telling at once lose nothing.
+        let _kept = self.peers.lock().unwrap();
+        for _ in 0..2 {
+            let read = stamp(&file);
+            let Ok(mut peers) = read_json::<Peers>(&file) else {
+                return;
+            };
+            let Some(peer) = peers.machines.iter_mut().find(|peer| peer.key == *key) else {
+                return;
+            };
+            if peer.told == addresses {
+                return;
+            }
+            peer.told.clone_from(&addresses);
+            let name = peer.name.clone();
+            let written = write_json_unless(&file, &peers, || stamp(&file) != read);
+            match written {
+                Ok(true) => return,
+                Ok(false) => continue,
+                Err(error) => {
+                    eprintln!("flottille daemon: the addresses {name} told were not kept: {error}");
+                    return;
+                }
+            }
         }
-        peer.told = addresses;
-        let name = peer.name.clone();
-        if let Err(error) = write_json(&self.folder.join(PEERS_FILE), &peers) {
-            eprintln!("flottille daemon: the addresses {name} told were not kept: {error}");
-        }
+        eprintln!(
+            "flottille daemon: {} kept changing, the addresses told were not kept",
+            file.display()
+        );
     }
 
     /// `remote.machines`: this machine, and the others as it sees them.
@@ -564,6 +585,17 @@ fn read_json<T: Default + for<'de> Deserialize<'de>>(file: &Path) -> Result<T, S
 /// Writes a JSON file of the key folder whole: a temporary file, the user's only, renamed into
 /// place.
 fn write_json(file: &Path, value: &impl Serialize) -> std::io::Result<()> {
+    write_json_unless(file, value, || false).map(|_| ())
+}
+
+/// Writes a JSON file of the key folder whole, as `write_json`, unless `changed` says, just
+/// before it is renamed into place, that the file changed since it was read: then it is left
+/// as it is, and `false` said.
+fn write_json_unless(
+    file: &Path,
+    value: &impl Serialize,
+    changed: impl Fn() -> bool,
+) -> std::io::Result<bool> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let temporary = file.with_extension("json.new");
@@ -575,7 +607,22 @@ fn write_json(file: &Path, value: &impl Serialize) -> std::io::Result<()> {
         .open(&temporary)?;
     out.write_all(serde_json::to_string_pretty(value)?.as_bytes())?;
     out.sync_all()?;
-    std::fs::rename(&temporary, file)
+    if changed() {
+        std::fs::remove_file(&temporary)?;
+        return Ok(false);
+    }
+    std::fs::rename(&temporary, file)?;
+    Ok(true)
+}
+
+/// A file's inode, size and time it was modified.
+type Stamp = (u64, u64, Option<SystemTime>);
+
+/// What says a file changed: its inode, size and time it was modified; `None` when it is missing.
+fn stamp(file: &Path) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(file).ok()?;
+    Some((metadata.ino(), metadata.len(), metadata.modified().ok()))
 }
 
 /// The link's methods (`docs/protocol.md`, "Remote").
@@ -679,5 +726,89 @@ mod tests {
         // A key that is not one is refused with the whole file.
         std::fs::write(&file, r#"{"machines": [{"name": "server", "key": "00"}]}"#).unwrap();
         assert!(read_json::<Peers>(&file).is_err());
+    }
+
+    /// A daemon's side of the link over a key folder of a test's, linked to nothing; and the keys
+    /// of `peers` machines it trusts, each with no address.
+    fn remote_in(folder: &Path, peers: usize) -> (Remote, Vec<PublicKey>) {
+        let key = MachineKey::load_or_make(&folder.join("key")).unwrap();
+        let keys: Vec<PublicKey> = (0..peers)
+            .map(|at| {
+                MachineKey::load_or_make(&folder.join(format!("peer-{at}")))
+                    .unwrap()
+                    .public()
+            })
+            .collect();
+        let peers = Peers {
+            machines: keys
+                .iter()
+                .enumerate()
+                .map(|(at, key)| Peer {
+                    name: format!("machine-{at}"),
+                    key: *key,
+                    addresses: vec!["192.0.2.1:7447".to_owned()],
+                    told: Vec::new(),
+                })
+                .collect(),
+        };
+        write_json(&folder.join(PEERS_FILE), &peers).unwrap();
+        let endpoint = Endpoint::dialler(&key).unwrap();
+        (Remote::new(endpoint, folder.to_owned()), keys)
+    }
+
+    fn told(folder: &Path, key: &PublicKey) -> Vec<String> {
+        let peers: Peers = read_json(&folder.join(PEERS_FILE)).unwrap();
+        let peer = peers.machines.iter().find(|peer| peer.key == *key).unwrap();
+        assert_eq!(
+            peer.addresses,
+            ["192.0.2.1:7447"],
+            "the given addresses are kept"
+        );
+        peer.told.clone()
+    }
+
+    #[tokio::test]
+    async fn a_machine_telling_many_addresses_has_64_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, keys) = remote_in(dir.path(), 1);
+        let many: Vec<String> = (0..100).map(|at| format!("192.0.2.{at}:4000")).collect();
+        remote.learn(&keys[0], &many);
+        assert_eq!(told(dir.path(), &keys[0]), many[..MOST_ADDRESSES]);
+    }
+
+    #[tokio::test]
+    async fn learning_leaves_a_broken_peers_file_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, keys) = remote_in(dir.path(), 1);
+        let file = dir.path().join(PEERS_FILE);
+        let broken = br#"{"machines": [{"name": "machine-0", "ke"#;
+        std::fs::write(&file, broken).unwrap();
+        remote.learn(&keys[0], &["192.0.2.7:4000".to_owned()]);
+        assert_eq!(std::fs::read(&file).unwrap(), broken);
+    }
+
+    #[tokio::test]
+    async fn machines_telling_at_once_lose_no_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, keys) = remote_in(dir.path(), 16);
+        for round in 0..5 {
+            let start = std::sync::Barrier::new(keys.len());
+            std::thread::scope(|scope| {
+                for (at, key) in keys.iter().enumerate() {
+                    let (remote, start) = (&remote, &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        remote.learn(key, &[format!("192.0.2.{at}:{}", 4000 + round)]);
+                    });
+                }
+            });
+            for (at, key) in keys.iter().enumerate() {
+                assert_eq!(
+                    told(dir.path(), key),
+                    [format!("192.0.2.{at}:{}", 4000 + round)],
+                    "round {round}, machine {at}"
+                );
+            }
+        }
     }
 }
