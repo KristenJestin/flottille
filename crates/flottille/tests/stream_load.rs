@@ -2,6 +2,16 @@
 //! the daemon still answers them, and each piece reaches the store as it comes, not after a
 //! backlog. The numbers are printed, to be read under a known load (`docs/reference/gpui.md`,
 //! "Testing without a screen": note the load), and the bounds leave room for a loaded machine.
+//!
+//! Both tests are ignored: unloaded they pass with or without the batching, so they catch a
+//! regression only with a busy disk. Run them by hand with one (`docs/reference/daemon.md`, "A
+//! stream and a busy disk"), the way the measures of #903 were:
+//!
+//! ```text
+//! ( while :; do dd if=/dev/zero of=/tmp/busy bs=1M count=1024 conv=fsync 2>/dev/null; done ) &
+//! cargo test -p flottille --test stream_load -- --ignored --nocapture
+//! kill %1; rm /tmp/busy
+//! ```
 
 mod common;
 
@@ -22,7 +32,8 @@ const PIECES: usize = 1500;
 /// fail it (measured: 2.4 s at the 95th before they were written together, 0.18 s after).
 const ANSWERED_WITHIN: Duration = Duration::from_secs(1);
 
-/// How long a piece may take from the agent to the store: past it, the daemon is behind.
+/// How long 95 pieces in 100 may take from the agent to the store: past it, the daemon is behind.
+/// Not every piece, for the reason of `ANSWERED_WITHIN`.
 const STORED_WITHIN_MS: u64 = 1000;
 
 /// A user with the project `app` and a session in it that streams the wall clock, piece by piece:
@@ -120,6 +131,7 @@ fn load() -> String {
 }
 
 #[test]
+#[ignore = "needs a busy disk: run with the dd loop, docs/reference/daemon.md"]
 fn agent_list_is_answered_while_another_session_streams() {
     let user = User::with_fake_agent();
     let streamer = streaming(&user);
@@ -160,6 +172,7 @@ fn agent_list_is_answered_while_another_session_streams() {
 }
 
 #[test]
+#[ignore = "needs a busy disk: run with the dd loop, docs/reference/daemon.md"]
 fn a_streamed_piece_reaches_the_store_while_the_session_streams() {
     let user = User::with_fake_agent();
     let streamer = streaming(&user);
@@ -187,15 +200,16 @@ fn a_streamed_piece_reaches_the_store_while_the_session_streams() {
     assert!(pieces > 100, "only {pieces} pieces were stored");
     let last = *taken.last().unwrap();
     let slowest = part(&mut taken, 1.0);
+    let most = part(&mut taken, 0.95);
     eprintln!(
         "stream-load: {pieces} pieces stored, from the agent to the store median {} ms, p95 {} ms, \
          slowest {slowest} ms, the last {last} ms; load {}",
         part(&mut taken, 0.5),
-        part(&mut taken, 0.95),
+        most,
         load(),
     );
     assert!(
-        slowest < STORED_WITHIN_MS,
-        "a piece took {slowest} ms to the store"
+        most < STORED_WITHIN_MS,
+        "a piece took {most} ms to the store, at the 95th percentile"
     );
 }
