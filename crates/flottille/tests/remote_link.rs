@@ -527,15 +527,17 @@ fn two_machines_dialing_at_once_keep_one_link() {
     laptop.wait_for("server", "online");
     server.wait_for("laptop", "online");
 
-    // Both keep the same one, by a rule both compute: the link the lower key dialled.
-    let lower = if laptop.key() < server.key() {
-        laptop.fingerprint()
+    // Both keep the same one, by a rule both compute: the link the lower key dialled. The side
+    // that takes the other's link first holds two and says so; the other side may see the link
+    // it dialled closed before it takes the second one, and holds one only.
+    let (lower, higher) = if laptop.key() < server.key() {
+        (laptop.fingerprint(), server.fingerprint())
     } else {
-        server.fingerprint()
+        (server.fingerprint(), laptop.fingerprint())
     };
     let kept = format!("kept the link dialled by {lower}");
     let deadline = Instant::now() + WAIT;
-    while !(laptop.log().contains(&kept) && server.log().contains(&kept)) {
+    while !(laptop.log().contains(&kept) || server.log().contains(&kept)) {
         assert!(
             Instant::now() < deadline,
             "{kept}:\n{}\n{}",
@@ -545,10 +547,21 @@ fn two_machines_dialing_at_once_keep_one_link() {
         std::thread::sleep(Duration::from_millis(100));
     }
     std::thread::sleep(Duration::from_secs(3));
+    let linked = |log: &str| log.matches(" (protocol ").count();
+    let before = [linked(&laptop.log()), linked(&server.log())];
+    std::thread::sleep(Duration::from_secs(3));
+    // One link, kept: nobody links again.
+    assert_eq!(before, [linked(&laptop.log()), linked(&server.log())]);
     assert_eq!(laptop.machine("server").unwrap()["state"], "online");
     assert_eq!(server.machine("laptop").unwrap()["state"], "online");
     for log in [laptop.log(), server.log()] {
-        assert!(!log.contains("ended"), "{log}");
+        assert!(
+            !log.contains(&format!("kept the link dialled by {higher}")),
+            "{log}"
+        );
+        for line in log.lines().filter(|line| line.contains("ended")) {
+            assert!(line.ends_with(": linked already"), "{log}");
+        }
     }
 }
 
