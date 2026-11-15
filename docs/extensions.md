@@ -984,7 +984,11 @@ Its cost in the agent's context is about one tool line:
   is not base64 or whose bytes are not the type it says (a page labelled png: a provider
   refuses such an image, and it stays in the history), is left out with one line saying what it
   was, how big and why. One larger than 2000 px on its long side is scaled down, as a message's
-  picture is. The image is kept as a message's picture is: a file in the agent's folder of images in
+  picture is, before the 2 MiB is looked at; one still over it is scaled again, its long side
+  halved down to 500 px, a PNG being tried as a JPEG at each size before the next (a GIF and a
+  WebP are never scaled: past the cap, they are left out). The line says when an image was
+  scaled, from what to what (`[an image scaled from 6.8 MB PNG to 1.4 MB JPEG, 2000×1400, is
+  attached]`), so the agent knows it does not see the full resolution. The image is kept as a message's picture is: a file in the agent's folder of images in
   the data folder (`images/<agent>/`, gone with the agent's session as the pictures of its
   messages are), and its name in `pictures` of the call's `agent.tool_served` (`events.md`); never
   base64 in the store or in an event (what the agent's own provider reports of the call, which
