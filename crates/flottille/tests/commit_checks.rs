@@ -1441,7 +1441,7 @@ fn git_author_variables_do_not_refuse_a_commit() {
 fn an_ordinary_commit_runs_its_checks() {
     let user = with_checks();
     let workspace = two_repositories(&user);
-    declare_in(&user, "web", &["pre-lint"], &["msg-lint"]);
+    declare_in(&user, "web", &["pre-lint"], &["msg-lint {message_file}"]);
     let mcp = agent(&user);
     staged_in_web(&user, &workspace);
 
