@@ -3059,3 +3059,264 @@ fn a_401_with_a_header_from_the_vault_names_the_entry_not_a_sign_in(cx: &mut Tes
     let _ = server.kill();
     let _ = server.wait();
 }
+
+// ── The review opens at rest (#954) ──────────────────────────────────────────────────────────
+
+/// The user of a re-review: `driftbrowser` pinned with settings, then announcing one more tool,
+/// one fewer and a few changed, so that "What changed" and the unchanged line both show.
+fn rereview_user() -> User {
+    let user = user();
+    turn_on(&user);
+    connect(
+        &user,
+        "driftbrowser",
+        &driftbrowser(),
+        json!({"browser_snapshot": "passes", "browser_upload": "asked"}),
+    );
+    let mut now = driftbrowser();
+    now["server"]["version"] = json!("0.10.0");
+    let tools = now["tools"].as_array_mut().unwrap();
+    tools.retain(|t| t["name"] != "browser_pdf");
+    for tool in tools.iter_mut() {
+        if tool["name"] == "browser_click" {
+            tool["description"] = json!("Click an element, then snapshot.");
+        }
+    }
+    tools.push(
+        json!({"name": "browser_wait_for_text", "description": "Wait until a text appears.",
+        "inputSchema": {"type": "object", "properties": {}}}),
+    );
+    write_script(&user, "driftbrowser", &now);
+    user
+}
+
+/// What the window drew from the click on Review of `name` until the data was drawn and for two
+/// panels after it, one frame (16 ms) at a time.
+struct Opening {
+    /// Per frame before the data: whether the loading state was drawn.
+    loading: Vec<bool>,
+    /// Per frame from the one with the data: whether the loading state was still drawn.
+    skeleton: Vec<bool>,
+    /// Per frame from the one with the data: the height drawn of each of the `watched` ids.
+    heights: Vec<Vec<f32>>,
+    /// Per frame from the one with the data: the height drawn of each of the `hidden` ids.
+    hidden: Vec<Vec<f32>>,
+}
+
+fn open_frame_by_frame(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    name: &str,
+    ready: &str,
+    watched: &[&str],
+    hidden: &[&str],
+) -> Opening {
+    open_page(shell, cx);
+    until(shell, cx, "its row", |cx| {
+        visible(cx, &format!("connection-{name}"))
+    });
+    click(cx, &format!("connection-more-{name}"));
+    click(cx, &format!("review-connection-{name}"));
+    let mut opening = Opening {
+        loading: Vec::new(),
+        skeleton: Vec::new(),
+        heights: Vec::new(),
+        hidden: Vec::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut frames_after = 0;
+    while frames_after * 16 < 2 * PANEL.as_millis() as u64 {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let skeleton = present(cx, "connection-review-skeleton-0");
+        if !present(cx, ready) {
+            assert!(Instant::now() < deadline, "the data never came");
+            opening.loading.push(skeleton);
+            std::thread::sleep(Duration::from_millis(25));
+            continue;
+        }
+        frames_after += 1;
+        opening.skeleton.push(skeleton);
+        opening
+            .heights
+            .push(watched.iter().map(|id| height(cx, id)).collect());
+        opening
+            .hidden
+            .push(hidden.iter().map(|id| height(cx, id)).collect());
+    }
+    opening
+}
+
+/// Whether every column of `frames` is the same height on each frame: nothing folds or unfolds.
+fn steady(ids: &[&str], frames: &[Vec<f32>]) -> Result<(), String> {
+    let last = frames.last().expect("a frame with the data");
+    for (at, frame) in frames.iter().enumerate() {
+        for (id, (seen, rest)) in ids.iter().zip(frame.iter().zip(last)) {
+            if (seen - rest).abs() > 0.5 {
+                return Err(format!(
+                    "{id} is {seen}px high on frame {at} and {rest}px at rest"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Frames asked for over a second of the clock once everything settled.
+fn frames_asked_at_rest(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> usize {
+    let mut asked = 0;
+    for _ in 0..60 {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        asked += cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    asked
+}
+
+#[gpui_kit::test]
+fn the_review_opens_in_its_resting_state(cx: &mut TestAppContext) {
+    let user = rereview_user();
+    let (shell, cx) = window(&user, cx);
+    let watched = [
+        "connection-review-changes",
+        "connection-review-change-browser_click",
+        "connection-review-change-browser_wait_for_text",
+        "connection-review-change-browser_pdf",
+        "connection-review-unchanged",
+    ];
+    let hidden = [
+        "connection-review-unchanged-body",
+        "connection-review-none-block",
+        "connection-review-row-1-browser_snapshot",
+        "connection-review-row-2-browser_upload",
+    ];
+    let opening = open_frame_by_frame(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-change-browser_click",
+        &watched,
+        &hidden,
+    );
+    // The first frame with the data is the resting state: the unchanged group is closed on it and
+    // on every frame after, and no block folds or unfolds.
+    for (at, frame) in opening.hidden.iter().enumerate() {
+        assert!(
+            frame.iter().all(|h| *h == 0.),
+            "frame {at}: the unchanged group and the empty blocks have no height: {frame:?}"
+        );
+    }
+    steady(&watched, &opening.heights).unwrap();
+    assert!(
+        opening.heights[0].iter().all(|h| *h > 0.),
+        "the first frame draws the rows: {:?}",
+        opening.heights[0]
+    );
+    // Then the window draws no frame and asks for none.
+    settle(cx);
+    assert_eq!(frames_asked_at_rest(&shell, cx), 0);
+}
+
+#[gpui_kit::test]
+fn a_first_review_opens_in_its_resting_state_too(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "almanac");
+    write_script(&user, "almanac", &almanac());
+    let (shell, cx) = window(&user, cx);
+    let watched = [
+        "connection-review-group-judged",
+        "connection-review-row-3-search",
+        "connection-review-row-3-write",
+        "connection-review-row-3-open",
+    ];
+    let opening = open_frame_by_frame(
+        &shell,
+        cx,
+        "almanac",
+        "connection-review-row-3-search",
+        &watched,
+        &["connection-review-none-block"],
+    );
+    steady(&watched, &opening.heights).unwrap();
+    assert!(opening.heights[0].iter().all(|h| *h > 0.));
+    assert!(opening.hidden.iter().flatten().all(|h| *h == 0.));
+    settle(cx);
+    assert_eq!(frames_asked_at_rest(&shell, cx), 0);
+}
+
+#[gpui_kit::test]
+fn opening_a_group_of_the_review_still_unfolds_it(cx: &mut TestAppContext) {
+    let user = rereview_user();
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-change-browser_click",
+    );
+    assert_eq!(height(cx, "connection-review-unchanged-body"), 0.);
+    press(cx, "connection-review-unchanged");
+    a_third_later(cx);
+    let moving = height(cx, "connection-review-unchanged-body");
+    settle(cx);
+    let open = height(cx, "connection-review-unchanged-body");
+    assert!(open > 0., "the group is open");
+    assert!(
+        moving > 0. && moving < open,
+        "it unfolds over a panel: {moving}px of {open}px a third in"
+    );
+    // And a group of a first review still folds on its header.
+    press(cx, "connection-review-changes");
+    a_third_later(cx);
+    let folding = height(cx, "connection-review-change-browser_click");
+    assert!(folding > 0., "a row still shows while its group folds away");
+}
+
+#[gpui_kit::test]
+fn a_review_whose_server_is_asked_shows_one_loading_state_then_fades_to_its_content(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "almanac");
+    // The server is slow to list its tools, so that frames are drawn while it is asked.
+    let mut slow = almanac();
+    slow["list_sleep_ms"] = json!(500);
+    write_script(&user, "almanac", &slow);
+    let (shell, cx) = window(&user, cx);
+    let watched = [
+        "connection-review-group-judged",
+        "connection-review-row-3-search",
+    ];
+    let opening = open_frame_by_frame(
+        &shell,
+        cx,
+        "almanac",
+        "connection-review-row-3-search",
+        &watched,
+        &[],
+    );
+    // One loading state while the server is asked, from the first frame to the data.
+    assert!(!opening.loading.is_empty(), "the server was asked");
+    assert!(
+        opening.loading.iter().all(|shown| *shown),
+        "{:?}",
+        opening.loading
+    );
+    // Its replacement is one fade: the loading state leaves once, never comes back, and the
+    // blocks of the content are at their size throughout.
+    let gone = opening.skeleton.iter().position(|shown| !shown);
+    assert!(gone.is_some(), "the loading state is gone after two panels");
+    assert!(
+        opening.skeleton[gone.unwrap()..].iter().all(|shown| !shown),
+        "{:?}",
+        opening.skeleton
+    );
+    steady(&watched, &opening.heights).unwrap();
+}
