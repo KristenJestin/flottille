@@ -293,11 +293,17 @@ jobs:
                 exit 1
               fi
               ;;
-            dev | stable/* | next/*) channel=beta ;;
+            dev) channel=beta ;;
+            # A line says its own channel, so that its binary follows the line (docs/releases.md);
+            # its version is computed as a pre-release, the "beta" of version.sh.
+            stable/*) channel=rc ;;
+            next/*) channel=next ;;
             *) channel=alpha ;;
           esac
+          computed=$channel
+          case "$channel" in rc | next) computed=beta ;; esac
           status=0
-          version=$(tools/version.sh "$channel" --branch "$GITHUB_REF_NAME" --at "$at") || status=$?
+          version=$(tools/version.sh "$computed" --branch "$GITHUB_REF_NAME" --at "$at") || status=$?
           # 3: nothing was committed since the last release, which is then this one, run again.
           [ "$status" -ne 3 ] || skip "nothing to release since the last stable release"
           [ "$status" -eq 0 ] || exit "$status"
