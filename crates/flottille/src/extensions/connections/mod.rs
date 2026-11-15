@@ -343,17 +343,32 @@ fn secret_parameter(name: &str) -> bool {
             .any(|end| ends_secret(end))
 }
 
+/// The names of the pairs of a query or a fragment, read as a form whose pairs are split at `&`
+/// and at `;`, which some servers read as `&`.
+fn pair_names(text: &str) -> Vec<String> {
+    text.split(['&', ';'])
+        .flat_map(|pair| {
+            url::form_urlencoded::parse(pair.as_bytes())
+                .map(|(name, _)| name.into_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Why a URL may not be reached as it is: a parameter of its query, or of its fragment
 /// (`#access_token=…`, as some sign-ins hand it), named like a secret, whose value may be one.
 /// Its name only is said. Checked when a connection is added or edited; one already declared that
 /// has one fails, alone, with this reason. Its path is not looked at.
 fn query_secret(text: &str) -> Option<String> {
     let url = url::Url::parse(text).ok()?;
-    let fragment = url::form_urlencoded::parse(url.fragment().unwrap_or_default().as_bytes());
-    let (name, place) = url
-        .query_pairs()
-        .map(|(name, _)| (name, "query"))
-        .chain(fragment.map(|(name, _)| (name, "fragment")))
+    let (name, place) = pair_names(url.query().unwrap_or_default())
+        .into_iter()
+        .map(|name| (name, "query"))
+        .chain(
+            pair_names(url.fragment().unwrap_or_default())
+                .into_iter()
+                .map(|name| (name, "fragment")),
+        )
         .find(|(name, _)| secret_parameter(name))?;
     Some(format!(
         "url: its {place} holds {name}, which looks like a secret: move it to \"Secrets of its \
