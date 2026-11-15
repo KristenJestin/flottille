@@ -230,14 +230,24 @@ fn found_by(jql: &str, item: &Value) -> bool {
             return false;
         }
     }
-    // `fixVersion = "2.4"`: an item that says its fix versions is found in those only.
+    // `fixVersion = "2.4"`: an item that says its fix versions is found in those only. The name
+    // is quoted as JQL does: a backslash before a quote or a backslash.
     if let (Some((_, rest)), Some(versions)) = (
         jql.split_once("fixVersion = \""),
         fields["fixVersions"].as_array(),
-    ) && let Some((version, _)) = rest.split_once('"')
-        && !versions.iter().any(|v| v["name"] == version)
-    {
-        return false;
+    ) {
+        let mut version = String::new();
+        let mut chars = rest.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => version.extend(chars.next()),
+                '"' => break,
+                c => version.push(c),
+            }
+        }
+        if !versions.iter().any(|v| v["name"] == version.as_str()) {
+            return false;
+        }
     }
     if jql.contains("sprint is not EMPTY")
         && !fields
