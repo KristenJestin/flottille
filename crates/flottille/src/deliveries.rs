@@ -529,24 +529,26 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     })
 }
 
-/// A delivery as the agent reads it, and where each of its images goes: after its marker, in the
-/// order of the markers of its text. An image without one (a client that does not place its
-/// pictures, a marker taken out by hand) is marked after the text, and goes there.
+/// A delivery as the agent reads it, and where each of its images goes: image `k` after the first
+/// marker numbered `k` (a copy of a marker is text). An image without one (a client that does not
+/// place its pictures, a marker taken out by hand) is marked after the text, and goes there.
 fn placed(delivery: &Delivery) -> (String, Vec<usize>) {
     use flottille_core::images::{marker, markers};
     let mut text = render(delivery);
     if delivery.images.is_empty() {
         return (text, Vec::new());
     }
-    let mut ends: Vec<usize> = markers(&text)
-        .into_iter()
-        .take(delivery.images.len())
-        .map(|found| found.range.end)
-        .collect();
-    for (at, name) in delivery.images.iter().enumerate().skip(ends.len()) {
-        text.push_str(if text.ends_with('\n') { "\n" } else { "\n\n" });
-        text.push_str(&marker(at + 1, name));
-        ends.push(text.len());
+    let found = markers(&text);
+    let mut ends = Vec::new();
+    for (at, name) in delivery.images.iter().enumerate() {
+        match found.iter().find(|found| found.number == at + 1) {
+            Some(found) => ends.push(found.range.end),
+            None => {
+                text.push_str(if text.ends_with('\n') { "\n" } else { "\n\n" });
+                text.push_str(&marker(at + 1, name));
+                ends.push(text.len());
+            }
+        }
     }
     (text, ends)
 }

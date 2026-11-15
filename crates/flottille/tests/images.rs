@@ -829,3 +829,55 @@ fn a_picture_without_its_marker_goes_after_the_text_with_one() {
     assert!(text.ends_with(".png]"), "{text}");
     assert_eq!(prompt[1]["type"], "image");
 }
+
+/// #773: a picture's chip pasted twice in a message makes two markers of one number: the picture
+/// goes at the first, and the next picture at its own marker, not at the copy.
+#[test]
+fn the_daemon_places_each_picture_at_the_first_marker_of_its_number() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    project(&user);
+    let id = idle_agent(&user);
+    let (first, second) = (
+        [PNG, b"one"].concat().to_vec(),
+        [PNG, b"two"].concat().to_vec(),
+    );
+
+    user.call(
+        "agent.send",
+        json!({"agent": id,
+            "message": "here [Image 1: a.png] and again [Image 1: a.png] then [Image 2: b.png] end",
+            "images": [image("image/png", &first), image("image/png", &second)]}),
+    )
+    .unwrap();
+    eventually("the second turn ends", || {
+        user.received_requests("session/prompt").len() == 2
+    });
+
+    let prompt = user.received_requests("session/prompt")[1]["params"]["prompt"].clone();
+    let kinds: Vec<&str> = prompt
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["text", "image", "text", "image", "text"],
+        "{prompt}"
+    );
+    assert!(
+        prompt[0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("here [Image 1: a.png]"),
+        "{prompt}"
+    );
+    assert_eq!(prompt[1]["data"], base64_of(&first));
+    assert_eq!(
+        prompt[2]["text"],
+        " and again [Image 1: a.png] then [Image 2: b.png]"
+    );
+    assert_eq!(prompt[3]["data"], base64_of(&second));
+    assert_eq!(prompt[4]["text"], " end");
+}
