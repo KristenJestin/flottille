@@ -15,15 +15,50 @@ static VAULT: RwLock<Vec<String>> = RwLock::new(Vec::new());
 /// masking it would mask that word everywhere.
 pub const VAULT_SHORTEST: usize = 6;
 
-/// Masks `value` from now on, in every text of this process. A value is never forgotten: one
+/// Masks `value` from now on, in every text of this process, with the forms a page shows a secret
+/// typed into it in: an address (a form sent with GET) and HTML. A value is never forgotten: one
 /// replaced or removed stays masked until the daemon restarts, and another entry may hold it.
 pub fn add_vault_value(value: &str) {
     let mut values = VAULT
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !values.iter().any(|known| known == value) {
-        values.push(value.to_owned());
+    for form in [
+        value.to_owned(),
+        percent_encoded(value, true),
+        percent_encoded(value, false),
+        html_escaped(value),
+    ] {
+        if !values.contains(&form) {
+            values.push(form);
+        }
     }
+}
+
+/// `value` as a form sent with GET writes it in an address (`form`: a space is `+`), or as
+/// JavaScript's `encodeURIComponent` does.
+fn percent_encoded(value: &str, form: bool) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                encoded.push(byte as char)
+            }
+            b' ' if form => encoded.push('+'),
+            b'!' | b'~' | b'\'' | b'(' | b')' if !form => encoded.push(byte as char),
+            byte => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+/// `value` as HTML writes it in a text or an attribute.
+fn html_escaped(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Parts of a variable's name that say its value is a secret (`PASS` covers `PASSWORD` and

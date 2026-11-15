@@ -2773,8 +2773,8 @@ impl ConnectionsSection {
     }
 
     /// What Flottille's adapter is to this server, in sight above the bar: that it applies (its
-    /// name and range), and why `login` is refused while an action outside its list is on, which
-    /// the user reads before Accept. What it changed unfolds under it.
+    /// name and range), and why `login` would be refused, which the user reads before Accept.
+    /// What it changed unfolds under it.
     fn adapter_block(
         &self,
         adapter: &AdapterSaid,

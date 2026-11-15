@@ -1146,16 +1146,6 @@ fn decide<'a>(
             )
         })?;
         limits(declaration, &action, &arguments)?;
-        if let Some(why) = adapter.and_then(|adapter| {
-            let on = pin
-                .actions
-                .iter()
-                .map(|a| a.name.as_str())
-                .filter(|a| setting_of(row, a) != "off");
-            adapter.refuses(own.name, on)
-        }) {
-            return Err(why);
-        }
         // Flottille's own action is judged as any is: it uses a secret on the page the agent
         // chose.
         return Ok(Some("judged"));
@@ -1989,7 +1979,7 @@ fn diff(
         "actions": actions,
         "refused": now.refused,
         "limits": limits,
-        "adapter": adapter_said(declaration, now, &proposed, config, sites, in_clear),
+        "adapter": adapter_said(declaration, now, config, sites, in_clear),
     })
 }
 
@@ -1999,7 +1989,6 @@ fn diff(
 fn adapter_said(
     declaration: &Declaration,
     now: &Listing,
-    proposed: &BTreeMap<String, String>,
     config: &std::path::Path,
     sites: &[String],
     in_clear: &[String],
@@ -2010,16 +1999,6 @@ fn adapter_said(
                 "Flottille's adapter for {} {} applies.",
                 adapter.server, adapter.range
             );
-            for own in adapter.actions {
-                let on = now
-                    .actions
-                    .iter()
-                    .map(|a| a.name.as_str())
-                    .filter(|a| proposed.get(*a).is_some_and(|setting| setting != "off"));
-                if let Some(why) = adapter.refuses(own.name, on) {
-                    said.push_str(&format!(" {why}."));
-                }
-            }
             if let Reach::Command(words) = &declaration.reach
                 && let Some(why) = adapter
                     .drops_allowlist(words, &declaration.env)
