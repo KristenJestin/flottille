@@ -3342,6 +3342,7 @@ async fn performed_once(
                     place: &grant.place,
                     approved,
                     call: call.as_deref(),
+                    epoch: grant.epoch,
                 };
                 match tool.as_str() {
                     "fs_read" => files::fs_read(&cx, args),

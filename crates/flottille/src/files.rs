@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex};
 
 use flottille_core::glob;
+use flottille_core::paths::Paths;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -59,6 +60,9 @@ struct Shown {
     end: u64,
     size: u64,
     at: String,
+    /// The session that was shown it (`Grant::epoch`): a read still running when its session was
+    /// replaced ends after the new one began, and what it shows is not before the new one.
+    epoch: u64,
 }
 
 /// The texts of the files each agent read, for the diffs of the refusals: the last ones only.
@@ -77,6 +81,10 @@ pub struct Kept {
     /// Run between the check of a file and its write, so that a test makes two calls meet there.
     #[cfg(test)]
     between: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// Run when a read has its page and is about to say it was shown, so that a test replaces
+    /// the session there.
+    #[cfg(test)]
+    before_shown: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Kept {
@@ -98,9 +106,12 @@ impl Kept {
         self.shown.lock().unwrap().remove(agent);
     }
 
+    /// The agent ended: nothing of it is held any more.
+    pub fn ended(&self, _agent: &str) {}
+
     /// The agent's session said it made the tool call `id`. It comes on the pipe a compaction
     /// comes on, so one that came before it has been processed when this is.
-    pub fn called(&self, agent: &str, id: &str) {
+    pub fn called(&self, paths: &Paths, agent: &str, id: &str) {
         let mut calls = self.calls.lock().unwrap();
         let ids = calls.entry(agent.to_owned()).or_default();
         ids.push_back(id.to_owned());
@@ -125,6 +136,13 @@ impl Kept {
     }
 
     fn show(&self, agent: &str, page: Shown) {
+        #[cfg(test)]
+        {
+            let hook = self.before_shown.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let mut shown = self.shown.lock().unwrap();
         let pages = shown.entry(agent.to_owned()).or_default();
         pages.retain(|p| (&p.path, p.offset, p.length) != (&page.path, page.offset, page.length));
@@ -138,6 +156,7 @@ impl Kept {
     fn unchanged(
         &self,
         agent: &str,
+        epoch: u64,
         path: &Path,
         (offset, length): (u64, u64),
         sha: &str,
@@ -211,6 +230,8 @@ pub struct Context<'a> {
     pub approved: Option<Class>,
     /// The id the provider gave the call (`claudecode/toolUseId`), when it came with one.
     pub call: Option<&'a str>,
+    /// The session the call was made by (`Grant::epoch`).
+    pub epoch: u64,
 }
 
 impl Context<'_> {
@@ -674,7 +695,7 @@ fn page(
                 cx.daemon
                     .mcp
                     .kept
-                    .unchanged(cx.agent, &path.path, (offset, length), &sha)
+                    .unchanged(cx.agent, cx.epoch, &path.path, (offset, length), &sha)
         {
             return Ok(Outcome::Done(line));
         }
@@ -759,6 +780,7 @@ fn page(
                 end,
                 size,
                 at: jiff::Zoned::now().strftime("%H:%M").to_string(),
+                epoch: cx.epoch,
             },
         );
     }
@@ -1991,7 +2013,6 @@ mod at_once {
     use std::time::Duration;
 
     use flottille_core::agent::{Agent, AgentState, Choices, GateMode};
-    use flottille_core::paths::Paths;
     use flottille_core::store::Store;
 
     use super::*;
@@ -2057,9 +2078,13 @@ mod at_once {
                 data: base.join("data"),
             };
             let mut store = Store::open_in_memory().unwrap();
-            for id in ["a", "b"] {
+            for id in ["a", "b", "x"] {
+                let mut agent = an_agent(id);
+                if id == "x" {
+                    agent.provider = "codex".into();
+                }
                 store
-                    .create_agent(&an_agent(id), ("agent.created", json!({})))
+                    .create_agent(&agent, ("agent.created", json!({})))
                     .unwrap();
             }
             let projects = Projects::open(&paths).unwrap();
@@ -2095,12 +2120,18 @@ mod at_once {
         }
 
         fn cx_of<'a>(&'a self, agent: &'a str, call: Option<&'a str>) -> Context<'a> {
+            self.cx_in(agent, call, 0)
+        }
+
+        /// The context of a call made by the agent's session number `epoch`.
+        fn cx_in<'a>(&'a self, agent: &'a str, call: Option<&'a str>, epoch: u64) -> Context<'a> {
             Context {
                 daemon: &self.daemon,
                 agent,
                 place: &self.place,
                 approved: None,
                 call,
+                epoch,
             }
         }
 
@@ -2113,7 +2144,7 @@ mod at_once {
                 "unchanged = true\n",
             )
             .unwrap();
-            self.daemon.mcp.kept.called(agent, call);
+            self.daemon.mcp.kept.called(&self.daemon.paths, agent, call);
         }
 
         fn read(&self, agent: &str, path: &str) {
@@ -2294,5 +2325,104 @@ mod at_once {
         );
         // Whole once: shown again, it is unchanged again.
         assert!(said(&read()).starts_with("unchanged since you read it"));
+    }
+
+    #[test]
+    fn a_read_in_flight_during_a_replacement_is_not_kept() {
+        let scene = Scene::new();
+        scene.says_unchanged("a", "t1");
+        // The old session's read holds its page, about to say it was shown, while the agent's
+        // session is replaced.
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let held = gate.clone();
+        *scene.daemon.mcp.kept.before_shown.lock().unwrap() = Some(Arc::new(move || {
+            held.wait();
+            held.wait();
+        }));
+        std::thread::scope(|threads| {
+            let old = threads.spawn(|| {
+                fs_read(
+                    &scene.cx_in("a", Some("t1"), 0),
+                    json!({"path": "src/main.rs"}),
+                )
+            });
+            gate.wait();
+            scene.daemon.mcp.kept.compacted("a");
+            *scene.daemon.mcp.kept.before_shown.lock().unwrap() = None;
+            gate.wait();
+            assert!(matches!(old.join().unwrap(), Outcome::Done(_)));
+        });
+
+        // The new session never saw that page: its first read is whole.
+        let outcome = fs_read(
+            &scene.cx_in("a", Some("t1"), 1),
+            json!({"path": "src/main.rs"}),
+        );
+        assert!(
+            said(&outcome).contains("     1\tone\n"),
+            "{}",
+            said(&outcome)
+        );
+        // Whole once: its own page is then unchanged.
+        let outcome = fs_read(
+            &scene.cx_in("a", Some("t1"), 1),
+            json!({"path": "src/main.rs"}),
+        );
+        assert!(said(&outcome).starts_with("unchanged since you read it"));
+    }
+
+    #[test]
+    fn a_codex_read_keeps_no_page() {
+        let scene = Scene::new();
+        scene.says_unchanged("x", "t1");
+
+        scene.read("x", "src/lib.rs");
+        let outcome = fs_read(&scene.cx_of("x", Some("t1")), json!({"path": "src/lib.rs"}));
+
+        // Codex never gives a call id, so it can never be told "unchanged": nothing is held for it.
+        assert!(
+            said(&outcome).contains("     1\tone\n"),
+            "{}",
+            said(&outcome)
+        );
+        assert!(
+            !scene
+                .daemon
+                .mcp
+                .kept
+                .shown
+                .lock()
+                .unwrap()
+                .contains_key("x")
+        );
+    }
+
+    #[test]
+    fn calls_are_recorded_only_while_the_switch_is_on() {
+        let scene = Scene::new();
+        let kept = &scene.daemon.mcp.kept;
+
+        kept.called(&scene.daemon.paths, "a", "t0");
+        assert!(kept.calls.lock().unwrap().is_empty());
+
+        scene.says_unchanged("a", "t1");
+        assert!(kept.call_seen("a", "t1"));
+        assert!(!kept.call_seen("a", "t0"));
+    }
+
+    #[test]
+    fn an_ended_agent_holds_no_page_nor_call() {
+        let scene = Scene::new();
+        scene.says_unchanged("a", "t1");
+        let outcome = fs_read(&scene.cx_of("a", Some("t1")), json!({"path": "src/lib.rs"}));
+        assert!(said(&outcome).starts_with("unchanged since you read it"));
+        let kept = &scene.daemon.mcp.kept;
+        assert!(kept.shown.lock().unwrap().contains_key("a"));
+        assert!(kept.calls.lock().unwrap().contains_key("a"));
+
+        crate::agents::change(&scene.daemon, "a", AgentState::Ended, None, None);
+
+        assert!(!kept.shown.lock().unwrap().contains_key("a"));
+        assert!(!kept.calls.lock().unwrap().contains_key("a"));
     }
 }

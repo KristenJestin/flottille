@@ -2282,7 +2282,10 @@ impl acp::Events for Recorder {
             && data["update"] == false
             && let Some(id) = data["id"].as_str()
         {
-            self.daemon.mcp.kept.called(&self.agent, id);
+            self.daemon
+                .mcp
+                .kept
+                .called(&self.daemon.paths, &self.agent, id);
         }
         self.record(name, data, activity);
         if name == "agent.compacted" {
