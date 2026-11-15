@@ -188,6 +188,8 @@ struct Running {
     cut: Cut,
     /// The runtime folder of its shown browser, removed when it stops.
     _display: Option<crate::display::Folder>,
+    /// Why its browser runs headless though the user shows it, when it cannot be shown.
+    headless: Option<String>,
 }
 
 impl Running {
@@ -254,6 +256,13 @@ pub(super) async fn exclusively<T>(
 pub fn running(daemon: &Daemon, name: &str) -> bool {
     existing(daemon, name)
         .is_some_and(|server| server.turn.try_lock().map_or(true, |turn| turn.is_some()))
+}
+
+/// Why the browser of its running server is not shown though the user shows it, if it is not.
+pub fn headless(daemon: &Daemon, name: &str) -> Option<String> {
+    let server = existing(daemon, name)?;
+    let turn = server.turn.try_lock().ok()?;
+    turn.as_ref()?.headless.clone()
 }
 
 /// Why its server could not start the last time, if it did not.
@@ -465,6 +474,7 @@ async fn start_with(
     let mut expires_at = None;
     // The browser's display folder, removed when the server is dropped.
     let mut display = None;
+    let mut headless = None;
     let cut = Cut::default();
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
@@ -474,14 +484,15 @@ async fn start_with(
             let options = match adapter {
                 Some(adapter) => {
                     let sites = super::adapters::kept_to(daemon, adapter, declaration);
-                    display = super::adapters::shown(daemon, declaration, &declaration.name);
+                    (display, headless) =
+                        super::adapters::shown(daemon, declaration, &declaration.name);
                     super::adapters::start_options(&folder, &sites, display.is_some())?
                 }
                 None => Vec::new(),
             };
             let mut env = crate::runs::beside(daemon)?;
             if adapter.is_some() {
-                super::adapters::display(&mut env, display.as_ref());
+                super::adapters::display(&mut env, display.as_ref(), &folder);
             }
             // Every value it was given, masked in what it says whatever its variable is named.
             let mut given = Vec::new();
@@ -632,6 +643,7 @@ async fn start_with(
                 expires_at,
                 cut: cut.clone(),
                 _display: display.map(|shown| shown.folder),
+                headless,
             })
             .await;
             return Err(why);
@@ -661,6 +673,7 @@ async fn start_with(
         expires_at,
         cut,
         _display: display.map(|shown| shown.folder),
+        headless,
     })
 }
 

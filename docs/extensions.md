@@ -1316,7 +1316,16 @@ way in:
   server's `XDG_RUNTIME_DIR` is that folder, with `WAYLAND_DISPLAY`; `DISPLAY` is given only when
   the session has no Wayland, and `DBUS_SESSION_BUS_ADDRESS` never. When the folder cannot be made
   (the filesystem refuses the hard link, the socket is not there) the browser runs headless and the
-  daemon says why, never with the real folder. Off, the server gets none of these. The folder is
+  daemon says why, in its log and in the form, under the switch, never with the real folder. Off,
+  the server gets no display variable of the daemon's; **whether the browser is shown or not, it
+  never gets `DBUS_SESSION_BUS_ADDRESS`**, and both the server and its login run get
+  `AGENT_BROWSER_SOCKET_DIR` naming the connection's own folder (agent-browser puts its daemon's
+  socket there, else under `$XDG_RUNTIME_DIR`), so they reach the same browser and the removal of
+  a display folder never takes a live socket. **Showing the browser has a risk, said beside the
+  switch and in the review**: with X11 the browser can read the keys typed in other windows, and
+  on some Wayland compositors a client can capture the screen and the clipboard. The daemon
+  removes every display folder when it starts, under its lock, and makes the last folder of a
+  connection itself, never taking one over. The folder is
   made by one function (`display.rs`), which a run that opens windows reuses. It is the user's
   alone (an agent's request sets no `headed`), **part of what trust is given to** and said in the
   review, and the user's own edit stops the running server at once, the next start applying it,

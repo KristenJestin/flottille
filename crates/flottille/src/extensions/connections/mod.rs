@@ -1579,6 +1579,7 @@ fn connection_json(daemon: &Daemon, declaration: &Declaration, on: bool) -> Valu
     entry["signed_out"] = json!(row.signed_out);
     entry["running"] = json!(client::running(daemon, &declaration.name));
     entry["failing"] = json!(client::failing(daemon, &declaration.name));
+    entry["headless"] = json!(client::headless(daemon, &declaration.name));
     entry["server"] = row
         .pin
         .as_ref()

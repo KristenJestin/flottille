@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use flottille_core::paths::Paths;
@@ -27,6 +28,12 @@ impl Drop for Folder {
 pub struct Shown {
     pub folder: Folder,
     pub env: BTreeMap<OsString, OsString>,
+}
+
+/// Removes every display folder, left by a daemon that died. Called by a daemon that holds the
+/// lock, when it starts: nothing else makes them, so none is in use.
+pub fn clean(paths: &Paths) {
+    let _ = std::fs::remove_dir_all(paths.runtime.join("display"));
 }
 
 /// The folder `$XDG_RUNTIME_DIR/flottille/display/<owner>` (mode 0700, made again if it was left),
@@ -59,8 +66,14 @@ fn share_with(
         return Err(format!("{owner:?} is no name for a display folder"));
     }
     let folder = base.join(owner);
+    // The folders above are made private and checked; the last one is made here and now, never
+    // taken over: one that is there (a link planted in it) fails the creation.
+    flottille_core::paths::ensure_private_dir(base).map_err(|error| error.to_string())?;
     let _ = std::fs::remove_dir_all(&folder);
-    flottille_core::paths::ensure_private_dir(&folder).map_err(|error| error.to_string())?;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&folder)
+        .map_err(|error| error.to_string())?;
     let folder = Folder(folder);
     let mut env = BTreeMap::new();
     env.insert("XDG_RUNTIME_DIR".into(), folder.0.clone().into_os_string());

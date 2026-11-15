@@ -310,7 +310,8 @@ impl Adapter {
                 "its browser is shown on the screen: the server gets the session's display \
                  (WAYLAND_DISPLAY, or DISPLAY without Wayland) in a runtime folder of its own \
                  holding the Wayland socket alone, never the user's, and the configuration sets \
-                 headed"
+                 headed; with X11 the browser can read the keys typed in other windows, and on \
+                 some Wayland compositors a client can capture the screen and the clipboard"
                     .to_owned(),
             );
         }
@@ -617,39 +618,50 @@ pub fn start_options(folder: &Path, sites: &[String], headed: bool) -> Result<Ve
 
 /// The display of the browser of `declaration` when the user shows it: a runtime folder of its
 /// own holding the session's Wayland socket alone (`display.rs`), kept while the `owner` that
-/// uses it runs. When it cannot be made the browser runs headless and the daemon says why: never
-/// with the user's real runtime folder.
+/// uses it runs. When it cannot be made the browser runs headless, never with the user's real
+/// runtime folder: the daemon says why on its stderr and the reason is returned, for the server's
+/// record to keep (the window says it under the switch).
 pub fn shown(
     daemon: &Daemon,
     declaration: &Declaration,
     owner: &str,
-) -> Option<crate::display::Shown> {
+) -> (Option<crate::display::Shown>, Option<String>) {
     if !declaration.headed {
-        return None;
+        return (None, None);
     }
     match crate::display::share(&daemon.paths, owner) {
-        Ok(shown) => Some(shown),
+        Ok(shown) => (Some(shown), None),
         Err(why) => {
             eprintln!(
                 "flottille daemon: connection {}: its browser is not shown, it runs headless: \
                  {why}",
                 declaration.name
             );
-            None
+            (None, Some(why))
         }
     }
 }
 
-/// The browser's environment: no display of the daemon's own, and the folder's variables when it
-/// is shown, without the session bus (the keyring).
-pub fn display(env: &mut BTreeMap<OsString, OsString>, shown: Option<&crate::display::Shown>) {
-    for name in ["WAYLAND_DISPLAY", "DISPLAY"] {
+/// The browser's environment: no display of the daemon's own, never the session bus (the
+/// keyring), whether the browser is shown or not, and the folder's variables when it is shown.
+/// agent-browser puts its daemon's socket in `AGENT_BROWSER_SOCKET_DIR`, else under
+/// `$XDG_RUNTIME_DIR`: the server and its login run both name the connection's own `folder`, so
+/// they reach the same browser, and the removal of a display folder never takes a live socket.
+pub fn display(
+    env: &mut BTreeMap<OsString, OsString>,
+    shown: Option<&crate::display::Shown>,
+    folder: &Path,
+) {
+    for name in ["WAYLAND_DISPLAY", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS"] {
         env.remove(&OsString::from(name));
     }
     if let Some(shown) = shown {
-        env.remove(&OsString::from("DBUS_SESSION_BUS_ADDRESS"));
         env.extend(shown.env.clone());
     }
+    env.insert(
+        "AGENT_BROWSER_SOCKET_DIR".into(),
+        folder.as_os_str().to_owned(),
+    );
 }
 
 /// `bytes` in `file`, the user's alone, written whole or not at all. Each write has a temporary
@@ -854,7 +866,7 @@ async fn run(
     flottille_core::paths::ensure_private_dir(&folder).map_err(|error| error.to_string())?;
     let sites = sites(daemon, declaration);
     // Its own folder: the server's, when it runs, stays where it is.
-    let shown = shown(daemon, declaration, &format!("{}-login", declaration.name));
+    let (shown, _) = shown(daemon, declaration, &format!("{}-login", declaration.name));
     let options = start_options(&folder, &sites, shown.is_some())?;
     let token = super::oauth::random(32)?;
     let socket = socket_file(&folder);
@@ -865,7 +877,7 @@ async fn run(
     let _gone = Removed(socket.clone());
     // The same environment and folder as the server: the same browser session and namespace.
     let mut env: BTreeMap<OsString, OsString> = crate::runs::beside(daemon)?;
-    display(&mut env, shown.as_ref());
+    display(&mut env, shown.as_ref(), &folder);
     for (variable, secret) in
         super::client::secrets(daemon, &declaration.name, &declaration.env).await?
     {

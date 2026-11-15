@@ -55,7 +55,9 @@ pub const LIMITS_HINT: &str = "An argument of that name may take only these valu
 
 /// What *Show the browser* says: what it gives the server.
 pub const HEADED_HINT: &str = "Shows the browser an agent drives on your screen. A change stops \
-     the server that runs, and the next start applies it.";
+     the server that runs, and the next start applies it. With X11 the browser can read the keys \
+     you type in other windows; on some Wayland compositors a client can capture the screen and \
+     the clipboard.";
 
 /// What the sites' field says: what a sign-in's extra hosts are for.
 pub const SITES_HINT: &str = "Hosts a sign-in goes through besides the sites of its entries, such \
@@ -123,6 +125,8 @@ pub struct Server {
     pub sites: Vec<String>,
     /// Whether an adapter's browser is shown on the screen.
     pub headed: bool,
+    /// Why the browser of its running server is not shown though it is meant to be.
+    pub headless: Option<String>,
     /// `off`, `awaiting review`, `cut off` or `ready`.
     pub state: String,
     /// What changed when it was cut off.
@@ -174,6 +178,7 @@ impl Server {
                 .map(text)
                 .collect(),
             headed: value["headed"] == true,
+            headless: value["headless"].as_str().map(str::to_owned),
             state: text(&value["state"]),
             cut_off: value["cut_off"].as_str().map(str::to_owned),
             failing: value["failing"].as_str().map(str::to_owned),
@@ -1998,6 +2003,15 @@ impl ConnectionsSection {
                 this.headed = !this.headed;
                 cx.notify();
             }));
+        // Under the switch, while it is on: why the browser that runs is not shown.
+        let why_headless = original
+            .as_deref()
+            .and_then(|name| self.server(name))
+            .and_then(|server| server.headless)
+            .filter(|_| self.headed && self.reach == Reach::Command)
+            .map(|why| {
+                SharedString::from(format!("The browser is not shown, it runs headless: {why}"))
+            });
         let body = div()
             .id("connection-form")
             .max_h(window.viewport_size().height - px(240.))
@@ -2072,6 +2086,12 @@ impl ConnectionsSection {
                 )
                 .gap(space::LG),
             )
+            .child(problem_line(
+                "connection-headed-why",
+                why_headless,
+                space::LG,
+                cx,
+            ))
             .test_support();
         // What a modal keeps in sight is a column without a gap: nothing to fold but the line.
         let error = problem_line("connection-error", self.form_error.clone(), px(0.), cx);
