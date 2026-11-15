@@ -408,6 +408,28 @@ pub async fn prepared(
         {
             return Err(Outcome::Refused(why));
         }
+        // A Bitbucket thread is the number of its first comment: another id is refused as it is,
+        // before the user is asked.
+        if matches!(args["action"].as_str(), Some("reply" | "resolve"))
+            && let Some((_, path)) = write_target(
+                daemon,
+                &grant.place,
+                args["workspace"].as_str(),
+                args["repository"].as_str(),
+            )
+            && let Ok(project) = projects::load_project(daemon, &grant.place.project)
+            && let Some(repository) = project.repositories.iter().find(|r| r.path == path)
+            && matches!(
+                repository.forge,
+                Some(
+                    RepositoryForge::BitbucketCloud { .. }
+                        | RepositoryForge::BitbucketDataCenter { .. }
+                )
+            )
+            && let Some(why) = crate::forge::bitbucket_thread(&args["thread"])
+        {
+            return Err(Outcome::Refused(why));
+        }
         let mut says = posted_says(args);
         // Without a body, the forge shows the project's template: the card says it whole.
         if args["action"] == "create"

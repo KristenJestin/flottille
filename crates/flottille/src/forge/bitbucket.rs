@@ -558,7 +558,7 @@ async fn detailed_with(
             let Forge::Bitbucket { owner, name, .. } = forge else {
                 unreachable!()
             };
-            let activities = dc_values(
+            let (activities, cut) = dc_values_cut(
                 context,
                 &format!(
                     "/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}/activities"
@@ -570,7 +570,7 @@ async fn detailed_with(
             let closing = dc_closing(found.state, &activities);
             let comments = dc_comments(&activities);
             let threads = super::threads::data_center(&activities, &comments);
-            Ok((found.reviewers.clone(), comments, closing, (threads, false)))
+            Ok((found.reviewers.clone(), comments, closing, (threads, cut)))
         }
     };
     let (statuses, mergeable, people) = futures::join!(

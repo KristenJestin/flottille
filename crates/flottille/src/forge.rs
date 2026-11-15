@@ -70,6 +70,7 @@ pub(crate) use pipelines::{HIDDEN_EVERYWHERE, bitbucket_key, with_branch};
 pub use review::VERDICTS as REVIEW_VERDICTS;
 pub(crate) use review::head_of as review_head;
 pub use threads::Thread;
+pub(crate) use threads::bitbucket_thread;
 
 /// The forge a repository's remote is on: GitHub, or Bitbucket (Cloud, or a Data Center host the
 /// project names).
@@ -3502,8 +3503,16 @@ fn threads_text(text: &mut String, pull: &Pull, full: bool, again: &str) {
          resolve {{thread, resolved}} marks it):\n"
     ));
     for thread in threads {
+        // A thread with more comments than were read says so: its last ones are not shown.
+        let cut = match thread.comments_total {
+            Some(total) if total > thread.comments.len() as u64 => format!(
+                " ({total} comments, only the first {} shown)",
+                thread.comments.len()
+            ),
+            _ => String::new(),
+        };
         text.push_str(&format!(
-            "  - thread {} on {}, {}:\n",
+            "  - thread {} on {}, {}{cut}:\n",
             thread.id,
             thread.place(),
             thread.state()

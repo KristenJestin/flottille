@@ -43,6 +43,8 @@ pub struct Thread {
     pub outdated: bool,
     /// Its comments, the first one first.
     pub comments: Vec<Comment>,
+    /// How many comments the forge says it has, where it says it and `comments` holds fewer.
+    pub comments_total: Option<u64>,
 }
 
 impl Thread {
@@ -127,6 +129,22 @@ pub(super) fn malformed(asked: &ForgeCall) -> Option<String> {
     }
 }
 
+/// Why `thread` is no thread of Bitbucket, whose are numbers (their first comment's): the same
+/// words before the user is asked and after.
+pub(crate) fn bitbucket_thread(thread: &Value) -> Option<String> {
+    let thread = match thread {
+        Value::String(text) => text.trim().to_owned(),
+        Value::Number(number) => number.to_string(),
+        _ => return None,
+    };
+    (!thread.chars().all(|c| c.is_ascii_digit())).then(|| {
+        format!(
+            "refused: thread: {thread:?} is not a thread of Bitbucket, the number of its first \
+             comment as forge show with detail full gives it; nothing was written"
+        )
+    })
+}
+
 /// The review threads of a GitHub pull request, read now: the first `MOST`, each with its first
 /// `MOST` comments, and whether there are more.
 pub(super) async fn github(forge: &Forge, number: u64) -> Result<(Vec<Thread>, bool), String> {
@@ -137,8 +155,8 @@ pub(super) async fn github(forge: &Forge, number: u64) -> Result<(Vec<Thread>, b
         "query($owner: String!, $name: String!, $number: Int!) {{ repository(owner: $owner, \
          name: $name) {{ pullRequest(number: $number) {{ reviewThreads(first: {MOST}) {{ \
          totalCount nodes {{ id isResolved isOutdated path line startLine originalLine \
-         originalStartLine diffSide comments(first: {MOST}) {{ nodes {{ author {{ login }} body \
-         createdAt url }} }} }} }} }} }} }}"
+         originalStartLine diffSide comments(first: {MOST}) {{ totalCount nodes {{ author {{ login }} \
+         body createdAt url }} }} }} }} }} }} }}"
     );
     let (owner, name, number) = (
         format!("owner={owner}"),
@@ -166,6 +184,38 @@ pub(super) async fn github(forge: &Forge, number: u64) -> Result<(Vec<Thread>, b
         .ok_or_else(|| "gh api graphql answered no review threads".to_owned())?;
     let more = threads["totalCount"].as_u64().unwrap_or(0) > nodes.len() as u64;
     Ok((nodes.iter().filter_map(github_thread).collect(), more))
+}
+
+/// One thread of GitHub by its id, whatever its place among the pull request's: `node(id:)` is one
+/// call without a page, and says the pull request and repository the thread is on. None when it is
+/// no thread, or one of another pull request or repository.
+async fn github_thread_of(forge: &Forge, number: u64, id: &str) -> Result<Option<Thread>, String> {
+    let query = "query($thread: ID!) { node(id: $thread) { ... on PullRequestReviewThread { id \
+                 isResolved isOutdated path line startLine originalLine originalStartLine \
+                 diffSide pullRequest { number repository { nameWithOwner } } } } }";
+    let said = gh_json(&[
+        "api",
+        "graphql",
+        "--hostname",
+        flottille_core::declared::GITHUB,
+        "-f",
+        &format!("query={query}"),
+        "-f",
+        &format!("thread={id}"),
+    ])
+    .await;
+    let said = match said {
+        Ok(said) => said,
+        Err(why) if super::not_found(&why) => return Ok(None),
+        Err(why) => return Err(why),
+    };
+    let node = &said["data"]["node"];
+    let on = &node["pullRequest"];
+    let ours = on["number"].as_u64() == Some(number)
+        && on["repository"]["nameWithOwner"]
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(&forge.slug()));
+    Ok(Some(node).filter(|_| ours).and_then(github_thread))
 }
 
 /// A thread of GitHub's GraphQL answer: an outdated one says no `line`, only the one it was
@@ -208,6 +258,7 @@ fn github_thread(node: &Value) -> Option<Thread> {
                 recorded: false,
             })
             .collect(),
+        comments_total: node["comments"]["totalCount"].as_u64(),
     })
 }
 
@@ -271,6 +322,7 @@ pub(super) fn cloud(values: &[Value], comments: &[Comment]) -> Vec<Thread> {
                     .into_iter()
                     .filter_map(|value| by_id(value["id"].as_u64()))
                     .collect(),
+                comments_total: None,
             })
         })
         .collect()
@@ -313,6 +365,7 @@ pub(super) fn data_center(activities: &[Value], comments: &[Comment]) -> Vec<Thr
                     .filter_map(|id| comments.iter().find(|c| c.id.as_deref() == Some(id)))
                     .cloned()
                     .collect(),
+                comments_total: None,
             })
         })
         .collect()
@@ -349,69 +402,58 @@ pub(super) async fn call(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Ou
     };
     let slug = forge.slug();
     let of = format!("pull request #{number} of {slug}");
-    if matches!(forge, Forge::Bitbucket { .. }) && !thread.chars().all(|c| c.is_ascii_digit()) {
-        return Outcome::Refused(format!(
-            "refused: thread: {thread:?} is not a thread of Bitbucket, the number of its first \
-             comment as forge show with detail full gives it; nothing was written"
-        ));
+    if matches!(forge, Forge::Bitbucket { .. })
+        && let Some(why) = bitbucket_thread(&json!(thread))
+    {
+        return Outcome::Refused(why);
     }
-    let done = match (&forge, action) {
-        (Forge::GitHub { .. }, _) => {
-            if let Err(problem) = signed_in().await {
-                return Outcome::Failed(problem);
-            }
-            // A node id names a thread anywhere on GitHub: only one of this pull request, of a
-            // repository of the place, is written to.
-            let found = match github(&forge, number).await {
-                Ok((threads, _)) => threads.into_iter().find(|t| t.id == thread),
-                Err(why) => return Outcome::Failed(why),
+    // Only a thread of this pull request, of a repository of the place, is written to: a GitHub
+    // node id names a thread anywhere on GitHub, a Bitbucket comment number any comment.
+    let found = match thread_of(&forge, number, &thread).await {
+        Ok(Ok(found)) => found,
+        Ok(Err(more)) => {
+            let more = match more {
+                true => ", and the forge has more than were read: it may be past them",
+                false => "",
             };
-            let Some(found) = found else {
-                return Outcome::Refused(format!(
-                    "refused: the {of} has no review thread {thread}: forge show with detail \
-                     full lists its threads; nothing was written"
-                ));
-            };
-            match (action, asked.resolved) {
-                ("resolve", Some(resolved)) if found.resolved == Some(resolved) => {
-                    return Outcome::Done(format!(
-                        "The review thread {thread} on {} of the {of} was already {}; nothing \
-                         was changed.",
-                        found.place(),
-                        resolved_word(resolved)
-                    ));
-                }
-                ("resolve", Some(resolved)) => github_resolve(&thread, resolved)
-                    .await
-                    .map(|()| (None, found.place())),
-                _ => github_reply(&thread, asked.body.as_deref().unwrap_or_default())
-                    .await
-                    .map(|id| (id, found.place())),
-            }
+            return Outcome::Refused(format!(
+                "refused: the {of} has no review thread {thread}{more}: forge show with detail \
+                 full lists its threads; nothing was written"
+            ));
         }
-        (Forge::Bitbucket { .. }, "resolve") => {
-            bitbucket_resolve(&forge, number, &thread, asked.resolved.unwrap_or(true))
-                .await
-                .map(|()| (None, String::new()))
-        }
-        (Forge::Bitbucket { .. }, _) => bitbucket_reply(
-            &forge,
-            number,
-            &thread,
-            asked.body.as_deref().unwrap_or_default(),
-        )
-        .await
-        .map(|id| (id, String::new())),
-    };
-    let (id, on) = match done {
-        Ok(done) => done,
         Err(Refusal::Refused(why)) => return Outcome::Refused(why),
         Err(Refusal::Failed(why)) => return Outcome::Failed(why),
     };
-    let on = match on.is_empty() {
-        true => String::new(),
-        false => format!(" on {on}"),
+    if let ("resolve", Some(resolved)) = (action, asked.resolved)
+        && found.resolved == Some(resolved)
+    {
+        return Outcome::Done(format!(
+            "The review thread {thread} on {} of the {of} was already {}; nothing was changed.",
+            found.place(),
+            resolved_word(resolved)
+        ));
+    }
+    let body = asked.body.as_deref().unwrap_or_default();
+    let done = match (&forge, action) {
+        (Forge::GitHub { .. }, "resolve") => {
+            github_resolve(&thread, asked.resolved.unwrap_or(true))
+                .await
+                .map(|()| None)
+        }
+        (Forge::GitHub { .. }, _) => github_reply(&thread, body).await,
+        (Forge::Bitbucket { .. }, "resolve") => {
+            bitbucket_resolve(&forge, number, &thread, asked.resolved.unwrap_or(true))
+                .await
+                .map(|()| None)
+        }
+        (Forge::Bitbucket { .. }, _) => bitbucket_reply(&forge, number, &thread, body).await,
     };
+    let id = match done {
+        Ok(id) => id,
+        Err(Refusal::Refused(why)) => return Outcome::Refused(why),
+        Err(Refusal::Failed(why)) => return Outcome::Failed(why),
+    };
+    let on = format!(" on {}", found.place());
     match (action, asked.resolved) {
         ("resolve", Some(resolved)) => Outcome::Done(format!(
             "The review thread {thread}{on} of the {of} is now {}.",
@@ -425,13 +467,36 @@ pub(super) async fn call(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Ou
                 checkout.path.as_str(),
                 key.as_str(),
             );
-            let body = asked.body.as_deref().unwrap_or_default();
             crate::posts::record_comment(daemon, record, id, body);
             Outcome::Done(format!(
                 "The reply was posted in the review thread {thread}{on} of the {of}."
             ))
         }
     }
+}
+
+/// The thread `thread` of the pull request `number`, read now, and whether the forge holds more
+/// than was read when it is not one of them (a comment of another pull request, a general
+/// comment, a reply that starts no thread, or one past what was read).
+async fn thread_of(
+    forge: &Forge,
+    number: u64,
+    thread: &str,
+) -> Result<Result<Thread, bool>, Refusal> {
+    if matches!(forge, Forge::GitHub { .. }) {
+        signed_in().await.map_err(Refusal::Failed)?;
+        let found = github_thread_of(forge, number, thread).await?;
+        return Ok(found.ok_or(false));
+    }
+    let context = bitbucket::Contexts::default().of(forge).await?;
+    let Some(pull) = bitbucket::pull_numbered(forge, &context, number).await? else {
+        return Err(Refusal::Refused(format!(
+            "refused: {} has no pull request #{number}: forge list lists them; nothing was written",
+            forge.slug()
+        )));
+    };
+    let (threads, cut) = pull.threads.unwrap_or_else(|| Ok(Default::default()))?;
+    Ok(threads.into_iter().find(|t| t.id == thread).ok_or(cut))
 }
 
 fn resolved_word(resolved: bool) -> &'static str {
@@ -562,32 +627,56 @@ async fn bitbucket_resolve(
         bitbucket::text(&args).await?;
         return Ok(());
     }
-    let comment = bitbucket::json(&["api", &path, "--context", &context]).await?;
-    let version = comment["version"].as_u64().unwrap_or(0);
-    let input = if comment["threadResolved"].is_boolean() {
-        json!({"version": version, "threadResolved": resolved})
-    } else if comment["severity"] == "BLOCKER" {
-        let state = if resolved { "RESOLVED" } else { "OPEN" };
-        json!({"version": version, "state": state})
-    } else {
-        return Err(Refusal::Refused(format!(
-            "refused: {} is on a Bitbucket Data Center whose comments say no resolved state (its \
-             version resolves no thread, only tasks): nothing was changed; reply in the thread \
-             instead",
-            forge.slug()
-        )));
-    };
-    let input = input.to_string();
-    let args = [
-        "api",
-        &path,
-        "--context",
-        &context,
-        "--method",
-        "PUT",
-        "--input",
-        &input,
-    ];
-    bitbucket::text(&args).await?;
-    Ok(())
+    // The comment is read for its version, which the write must say: one edited in between is
+    // refused (409), so it is read once more and written once more, no further.
+    let mut again = true;
+    loop {
+        let comment = bitbucket::json(&["api", &path, "--context", &context]).await?;
+        let Some(version) = comment["version"].as_u64() else {
+            return Err(Refusal::Failed(format!(
+                "Bitbucket Data Center's answer for the comment {thread} says no version, which \
+                 a change needs: nothing was changed"
+            )));
+        };
+        let input = if comment["threadResolved"].is_boolean() {
+            json!({"version": version, "threadResolved": resolved})
+        } else if comment["severity"] == "BLOCKER" {
+            let state = if resolved { "RESOLVED" } else { "OPEN" };
+            json!({"version": version, "state": state})
+        } else {
+            return Err(Refusal::Refused(format!(
+                "refused: {} is on a Bitbucket Data Center whose comments say no resolved state \
+                 (its version resolves no thread, only tasks): nothing was changed; reply in the \
+                 thread instead",
+                forge.slug()
+            )));
+        };
+        let input = input.to_string();
+        let args = [
+            "api",
+            &path,
+            "--context",
+            &context,
+            "--method",
+            "PUT",
+            "--input",
+            &input,
+        ];
+        match bitbucket::text(&args).await {
+            Ok(_) => return Ok(()),
+            // What the server said, not the address it was said for, which may hold the digits.
+            Err(why)
+                if why
+                    .split_once("failed: ")
+                    .is_some_and(|(_, said)| said.contains("409")) =>
+            {
+                if !std::mem::take(&mut again) {
+                    return Err(Refusal::Failed(format!(
+                        "the comment changed meanwhile: try again; nothing was changed ({why})"
+                    )));
+                }
+            }
+            Err(why) => return Err(why.into()),
+        }
+    }
 }
