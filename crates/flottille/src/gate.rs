@@ -1081,7 +1081,7 @@ fn run(call: &Call) -> Verdict {
             return Verdict::Deny(why);
         }
     }
-    if let Some(why) = reads_the_keys(call, &layers) {
+    if let Some(why) = reads_a_login(call, &layers) {
         return Verdict::Deny(why);
     }
     let home = call.grant.place.home.as_deref();
@@ -2289,33 +2289,89 @@ fn reads_every_file(layer: &[String]) -> Option<(usize, bool)> {
     }
 }
 
-/// The refusal of a line that reads every file below a folder holding Flottille's keys folder
-/// (`keys`), in every mode: what it prints or copies holds the keys' bytes. The folder may be one
-/// it names (through a link, `..` or `/proc/self/root` too), or the one it runs in, which a
-/// wrapper (`env -C`) or git's `-C` moves.
-///
-/// The other logins' places (`SENSITIVE`, the agents' folders of the home) are still refused only
-/// for a path in them (`credential`): a recursive read of a folder that holds one is held, not
-/// refused, and passes in Full (#899).
-fn reads_the_keys(call: &Call, layers: &[Vec<String>]) -> Option<String> {
+/// The refusal of a line that reads every file below a folder holding a login's place, in every
+/// mode: what it prints or copies holds the login's bytes. The places are Flottille's keys folder
+/// (`keys`), looked for first, and the home's: each of `SENSITIVE` and the agents' folders, as
+/// named and where they lead. The folder may be one the line names (through a link, `..` or
+/// `/proc/self/root` too), or the one it runs in, which a wrapper (`env -C`) or git's `-C` moves.
+/// A folder that is the home, or above it, holds them all.
+fn reads_a_login(call: &Call, layers: &[Vec<String>]) -> Option<String> {
+    let keys: Vec<Login> = own_folders(call.own)
+        .iter()
+        .map(|own| (own.join(crate::remote::FOLDER), String::new()))
+        .collect();
+    if let Some((layer, folder, _)) = reads_below(call, layers, &keys) {
+        return Some(format!(
+            "refused: {layer} reads every file below {folder}, which holds Flottille's keys, its \
+             {}/ folder, a login's place: an agent never reads nor writes a login, in any mode; \
+             name the folders to read, without it; nothing was done",
+            crate::remote::FOLDER
+        ));
+    }
+    let home = call.grant.place.home.as_deref();
+    let logins: Vec<Login> = home
+        .into_iter()
+        .flat_map(|home| [Some(home.to_owned()), place::real_path(home).ok()])
+        .flatten()
+        .flat_map(|home| {
+            SENSITIVE
+                .iter()
+                .chain(&AGENT_FOLDERS)
+                .flat_map(move |entry| {
+                    let folder = home.join(entry);
+                    [place::real_path(&folder).ok(), Some(folder)]
+                        .into_iter()
+                        .flatten()
+                        .map(move |path| (path, format!("~/{entry}")))
+                })
+        })
+        .collect();
+    let (layer, folder, held) = reads_below(call, layers, &logins)?;
+    // The places that are there say what would be read; the first names the rule when none is.
+    let mut names: Vec<&str> = Vec::new();
+    for (path, name) in &held {
+        if std::fs::symlink_metadata(path).is_ok() && !names.contains(&name.as_str()) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        names.extend(held.first().map(|(_, name)| name.as_str()));
+    }
+    Some(format!(
+        "refused: {layer} reads every file below {folder}, which holds a login's place ({}): an \
+         agent never reads nor writes a login, in any mode; search the folder that holds what \
+         you want instead, one that holds no login; nothing was done",
+        names.join(", ")
+    ))
+}
+
+/// A login's place: where it is, and how a refusal names it.
+type Login = (PathBuf, String);
+
+/// The first layer that reads every file below a folder holding one of the places, as shown,
+/// that folder, and the places it holds.
+fn reads_below<'a>(
+    call: &Call,
+    layers: &[Vec<String>],
+    places: &'a [Login],
+) -> Option<(String, String, Vec<&'a Login>)> {
     let from = call.paths.first()?;
     let place = &call.grant.place;
-    let keys: Vec<PathBuf> = own_folders(call.own)
-        .iter()
-        .map(|own| own.join(crate::remote::FOLDER))
-        .collect();
     // A file system may not tell cases apart: `~/.local/STATE` holds the keys there.
-    let above = |path: &Path, keys: &Path| {
-        let mut keys = keys.components();
+    let above = |path: &Path, login: &Path| {
+        let mut login = login.components();
         path.components().all(|part| {
-            keys.next()
+            login
+                .next()
                 .is_some_and(|key| key.as_os_str().eq_ignore_ascii_case(part.as_os_str()))
         })
     };
-    let holds = |folder: &Resolved| {
-        seen(folder)
+    let held = |folder: &Resolved| -> Vec<&'a Login> {
+        let seen = seen(folder);
+        places
             .iter()
-            .any(|path| keys.iter().any(|keys| above(path, keys)))
+            .filter(|(login, _)| seen.iter().any(|path| above(path, login)))
+            .collect()
     };
     for (layer, starts) in layers.iter().zip(folders(place, from, layers)) {
         let Some((start, pattern)) = reads_every_file(layer) else {
@@ -2344,27 +2400,27 @@ fn reads_the_keys(call: &Call, layers: &[Vec<String>]) -> Option<String> {
             for word in named_paths(whole) {
                 let folder = place.resolve(if own { &moved.path } else { &starts.path }, word);
                 named |= own && std::fs::symlink_metadata(&folder.path).is_ok();
-                if found.is_none() && holds(&folder) {
-                    found = Some(folder);
+                if found.is_none() {
+                    let places = held(&folder);
+                    if !places.is_empty() {
+                        found = Some((folder, places));
+                    }
                 }
             }
         }
-        if found.is_none() && !named && holds(&moved) {
-            found = Some(moved);
+        if found.is_none() && !named {
+            let places = held(&moved);
+            if !places.is_empty() {
+                found = Some((moved, places));
+            }
         }
-        if let Some(folder) = found {
-            return Some(format!(
-                "refused: {} reads every file below {}, which holds Flottille's keys, its {}/ \
-                 folder, a login's place: an agent never reads nor writes a login, in any mode; \
-                 name the folders to read, without it; nothing was done",
-                shown_words(layer),
-                if folder.shown.is_empty() {
-                    "the place's folder"
-                } else {
-                    &folder.shown
-                },
-                crate::remote::FOLDER
-            ));
+        if let Some((folder, places)) = found {
+            let shown = if folder.shown.is_empty() {
+                "the place's folder".to_owned()
+            } else {
+                folder.shown
+            };
+            return Some((shown_words(layer), shown, places));
         }
     }
     None
@@ -4238,7 +4294,7 @@ fn credential(own: &[PathBuf], home: Option<&Path>, path: &Resolved) -> Option<S
 /// `REMOTE` is `remote` there, as for an agent's folder.
 ///
 /// Only what is in it: a folder above it is refused to a program that reads every file below
-/// (`reads_the_keys`), and to a write (`forbidden`), but a listing of it shows names only.
+/// (`reads_a_login`), and to a write (`forbidden`), but a listing of it shows names only.
 fn keys(own: &[PathBuf], path: &Resolved) -> Option<String> {
     let own = own_folders(own);
     let in_keys = |path: &Path| {
@@ -8076,6 +8132,173 @@ mod tests {
             "grep -ra x '~/.Local'",
         ] {
             refused_for_the_keys(&fixture, line);
+        }
+    }
+
+    /// Fake logins in a home, invented bytes: a place of `SENSITIVE` or an agent's folder each,
+    /// and the file in it.
+    const FAKE_LOGINS: [(&str, &str); 6] = [
+        (".ssh", "id_ed25519"),
+        (".aws", "credentials"),
+        (".config/gh", "hosts.yml"),
+        (".local/share/keyrings", "login.keyring"),
+        (".claude", ".credentials.json"),
+        (".codex", "auth.json"),
+    ];
+
+    fn with_logins(home: &Path) {
+        for (place, file) in FAKE_LOGINS {
+            let folder = home.join(place);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(file), "fake-login-bytes\n").unwrap();
+        }
+    }
+
+    /// The line is refused in every mode for the login's place it would read, `place` when given.
+    fn refused_for_a_login(fixture: &Fixture, line: &str, place: Option<&str>) {
+        let verdict = fixture.run(line);
+        assert!(denied(&verdict), "{line}: {verdict:?}");
+        let Verdict::Deny(why) = verdict else {
+            unreachable!()
+        };
+        assert!(why.contains("login's place"), "{line}: {why}");
+        assert!(why.contains("in any mode"), "{line}: {why}");
+        if let Some(place) = place {
+            assert!(why.contains(&format!("~/{place}")), "{line}: {why}");
+        }
+        assert!(!why.contains("fake-login-bytes"), "{line}: {why}");
+    }
+
+    #[test]
+    fn a_recursive_read_of_a_folder_that_holds_a_login_s_place_is_refused() {
+        let fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        with_logins(&home);
+        for (place, _) in FAKE_LOGINS {
+            let parent = home.join(place).parent().unwrap().to_owned();
+            let p = parent.display();
+            for line in [
+                format!("grep -r x {p}"),
+                format!("grep -ra '' {p}"),
+                format!("rg x {p}"),
+                format!("rg -uu -a '' {p}"),
+                format!("diff -r {p} src"),
+                format!("diff -r -a src {p}"),
+            ] {
+                refused_for_a_login(&fixture, &line, Some(place));
+            }
+            // Names, never a byte.
+            for line in [
+                format!("ls -a {p}"),
+                format!("ls -laR {p}"),
+                format!("find {p}"),
+                format!("tree {p}"),
+            ] {
+                let verdict = fixture.run(&line);
+                assert!(!denied(&verdict), "{line}: {verdict:?}");
+            }
+        }
+        // The home's folder holds them all, and so does every folder above it (Flottille's keys
+        // too, which the refusal names first there).
+        refused_for_a_login(&fixture, "rg -uu -a '' '~'", Some(".ssh"));
+        for line in ["grep -r x /", "rg x /proc/self/root/"] {
+            refused_for_a_login(&fixture, line, None);
+        }
+    }
+
+    #[test]
+    fn a_recursive_read_above_a_login_through_a_link_a_wrapper_or_a_copy_is_refused() {
+        let fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        with_logins(&home);
+        std::os::unix::fs::symlink(home.join(".config"), fixture.root.join("conf")).unwrap();
+        let h = home.display();
+        for line in [
+            "grep -r x conf".to_owned(),
+            "rg x conf/".into(),
+            format!("rg x /proc/self/root{h}/.aws/.."),
+            format!("grep -R x {h}/.ssh/.."),
+            format!("env -C {h} grep -ra x"),
+            format!("git -C {h} grep --no-index x"),
+            format!("git diff --no-index {h}/.config src"),
+            format!("find {h}/.config -type f -exec cat {{}} +"),
+            format!("tar cf - {h}/.config"),
+            format!("cp -r {h}/.config copy"),
+            format!("rsync -a {h}/.local/share copy"),
+            format!("zip -r logins.zip {h}/.config"),
+        ] {
+            refused_for_a_login(&fixture, &line, None);
+        }
+    }
+
+    #[test]
+    fn a_folder_that_holds_a_login_s_place_is_found_in_any_case() {
+        let fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        with_logins(&home);
+        for line in [
+            "grep -r x '~/.CONFIG'",
+            "rg x '~/.Local/SHARE'",
+            "grep -ra x '~/.LOCAL'",
+        ] {
+            refused_for_a_login(&fixture, line, None);
+        }
+    }
+
+    #[test]
+    fn a_place_that_is_the_home_refuses_a_recursive_read_of_itself() {
+        let mut fixture = Fixture::main();
+        fixture.grant.place.home = Some(fixture.root.clone());
+        with_logins(&fixture.root);
+        for line in [
+            "grep -r x",
+            "grep -rn x .",
+            "rg x",
+            "rg -uu -a ''",
+            "grep -r x .config",
+            "rg x .local/share",
+            "tar cf - .",
+        ] {
+            refused_for_a_login(&fixture, line, None);
+        }
+        for line in [
+            "grep -r x src",
+            "rg x src",
+            "ls -a",
+            "ls -laR",
+            "find .",
+            "tree",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(!denied(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_workspace_in_the_home_keeps_its_recursive_reads() {
+        // The home holds the project, `~/app`, and the logins beside it.
+        let mut fixture = Fixture::workspace();
+        let home = fixture.root.parent().unwrap().to_owned();
+        fixture.grant.place.home = Some(home.clone());
+        with_logins(&home);
+        std::fs::create_dir_all(fixture.root.join("docs")).unwrap();
+        for line in [
+            "rg foo",
+            "rg -uu foo",
+            "grep -r foo .",
+            "grep -rn foo src",
+            "cp -r src copy",
+            "diff -r src docs",
+            "tar cf - src",
+            "git grep --no-index foo src",
+            "grep -r foo '~/app'",
+            "rg '~' src",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(!denied(&verdict), "{line}: {verdict:?}");
+        }
+        for line in ["grep -r foo ..", "rg foo '~'", "grep -r foo /"] {
+            refused_for_a_login(&fixture, line, None);
         }
     }
 }

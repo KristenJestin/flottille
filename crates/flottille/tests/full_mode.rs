@@ -1469,3 +1469,59 @@ fn a_workspace_setup_line_that_writes_an_agent_folder_is_put_back_and_told() {
     let text = entry["text"].as_str().unwrap();
     assert!(text.contains(".claude/settings.json"), "{text}");
 }
+
+/// Fake logins in the throwaway home, invented bytes: their places, and the file in each.
+const LOGINS: [(&str, &str); 4] = [
+    (".ssh", "id_ed25519"),
+    (".aws", "credentials"),
+    (".config/gh", "hosts.yml"),
+    (".claude", ".credentials.json"),
+];
+
+#[test]
+fn a_recursive_read_of_a_folder_holding_a_login_s_place_is_refused_in_every_mode() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_escalation();
+    let (id, mcp, _) = session(&user);
+    let home = user.path("home");
+    for (place, file) in LOGINS {
+        let folder = home.join(place);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(file), format!("fake-login-{file}\n")).unwrap();
+    }
+
+    for mode in ["ask", "auto", "full"] {
+        set_mode(&user, &id, mode);
+        for (place, _) in LOGINS {
+            let parent = home.join(place).parent().unwrap().to_owned();
+            let p = parent.display();
+            for line in [
+                format!("grep -ra x {p}"),
+                format!("rg -uu -a x {p}"),
+                format!("diff -r -a {p} ."),
+            ] {
+                let what = format!("{mode}: {line}");
+                let said = refused(mcp.call("run", json!({ "line": line })));
+                assert!(said.contains("login's place"), "{what}: {said}");
+                assert!(said.contains(&format!("~/{place}")), "{what}: {said}");
+                assert!(!said.contains("fake-login"), "{what}: {said}");
+            }
+        }
+        assert!(no_request(&user), "{mode}: a call was held");
+    }
+
+    // A listing shows names, never a byte, and a search of the workspace reads none: in Full,
+    // they run.
+    let listed = done(mcp.call("run", json!({"line": format!("ls -a {}", home.display())})));
+    assert!(listed.contains(".ssh"), "{listed}");
+    for line in ["grep -rn app .", "diff -r . ."] {
+        let searched = mcp.call("run", json!({ "line": line }));
+        assert!(
+            !searched.text.starts_with("refused: "),
+            "{line}: {}",
+            searched.text
+        );
+    }
+    assert!(user.escalations().is_empty());
+}

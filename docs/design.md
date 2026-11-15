@@ -769,19 +769,28 @@ line names, every program a wrapper or a runner runs included:
   `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`,
   `~/.local/share/opencode`, wherever they are along a path, and `/etc/shadow`, `/etc/sudoers`,
   `/etc/sudoers.d`; Flottille's keys, the folder `remote/` of its state folder, in any case
-  (`docs/remote.md`, "Identity and keys"), and a program that reads every file below a folder
-  that holds it, in any case (`grep -r`, `rg`, `diff -r`, `git grep --no-index`, `git diff
-  --no-index`, `find` or `fd` that runs a program, `tar`, `cp -r`, `rsync`, `zip -r`), named or
-  the one it runs in (where `env -C`, `sudo -D` or git's `-C` move it), a search's pattern never
-  taken for a folder, where a listing of it (`ls`, `find`, `tree`, `fs_list`) is not refused and `search` leaves the
-  keys out; the agents' own folders of the home (`~/.claude`, `~/.claude.json` and its
-  copies beside it, `~/.claude.json.backup`…, `~/.codex`), whole, where the path leads included (a
-  link to them, a project that is the home folder), and a file of a revision named `rev:path`
-  (`git show HEAD:.claude/.credentials.json`, `git cat-file`, `git diff`) as the path it names;
-  and the open files of any process, the agent's own command line and runs included
-  (`/proc/<pid>/fd`, `map_files`, `/dev/fd/3`), which may be one. These refusals of paths are
-  what keeps a login from an agent. The masking of outputs (a token key's value in a diff of a
-  staged login file, `docs/tools.md`) is not a boundary: a line that reshapes the bytes (`xxd`,
+  (`docs/remote.md`, "Identity and keys"); the agents' own folders of the home (`~/.claude`,
+  `~/.claude.json` and its copies beside it, `~/.claude.json.backup`…, `~/.codex`), whole, where
+  the path leads included (a link to them, a project that is the home folder); a file of a
+  revision named `rev:path` (`git show HEAD:.claude/.credentials.json`, `git cat-file`, `git
+  diff`) as the path it names; and the open files of any process, the agent's own command line
+  and runs included (`/proc/<pid>/fd`, `map_files`, `/dev/fd/3`), which may be one. **A program
+  that reads every file below a folder that holds one** of these places of the home, or the
+  keys, is refused too, in any case (`grep -r`, `rg`, `diff -r`, `git grep --no-index`, `git
+  diff --no-index`, `find` or `fd` that runs a program, `tar`, `cp -r`, `rsync`, `zip -r`), the
+  folder named or the one it runs in (where `env -C`, `sudo -D` or git's `-C` move it), a
+  search's pattern never taken for a folder: `rg -uu -a "" ~` would print `~/.ssh`. The home and
+  every folder above it hold them all, so a recursive read of the home, of `~/.config` or
+  `~/.local/share`, or of a project that is the home folder, is refused, naming the login's
+  places it would read, and the agent searches the folder that holds what it wants instead. A
+  project in the home (`~/code/app`) holds none: its own recursive reads are untouched. A listing
+  (`ls`, `find`, `tree`, `fs_list`) is not refused, and `search` leaves the logins out. This rule
+  keeps an agent from dumping a login by accident; it does not know every program and every
+  spelling (a list of folders given through a file, a recursive program not named here), and
+  code an agent runs in Full can read a login with a program of its own (`docs/remote.md`, "What
+  this does not cover"). These refusals of paths are what keeps a login from an agent. The
+  masking of outputs (a token key's value in a diff of a staged login file, `docs/tools.md`) is
+  not a boundary: a line that reshapes the bytes (`xxd`,
   `od`, `base64`) gets them past it;
 - **an agent's folder anywhere else** (`.claude`, `.claude.json`, `.codex`, and `.mcp.json`,
   whose servers Claude's command line starts once the user agrees, of a repository, a
