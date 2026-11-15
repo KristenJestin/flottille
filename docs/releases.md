@@ -7,6 +7,8 @@ Every branch that matters publishes its own build, with a version that says wher
 |---|---|---|---|
 | `main` | stable | `0.3.0` | a GitHub release, tagged `v0.3.0` |
 | `dev` | beta | `0.3.0-beta.12` | a pre-release, tagged `v0.3.0-beta.12` |
+| `stable/X.Y` | none: its builds install by `--version` | `0.3.2-beta.1`, then `0.3.2` | a pre-release per push; its release, never marked latest (see "Stable lines") |
+| `next/X.Y` | none: its builds install by `--version` | `0.5.0-beta.7` | a pre-release per push and per merge of dev (see "The next version") |
 | `feat/*`, `fix/*` | alpha | `0.3.0-alpha.feat-46-packages.4` | a pre-release per push, tagged `v0.3.0-alpha.feat-46-packages.4` like a beta, all deleted with the branch |
 
 Nothing is published anywhere but GitHub's releases of the repository. **Releases are immutable**
@@ -25,8 +27,9 @@ Branches reach `dev` by squash. A release does not: **`main` moves forward to a 
   commit of `dev` to release as its input, a full SHA or `dev` for its head (the default). Once
   `main` is the pull request's head, GitHub shows it merged. Releasing an older commit of `dev`
   leaves the pull request open.
-- **What it checks**: it runs from `dev` only; the input is a full SHA or `dev`, nothing else;
-  the commit is on `dev`; `main` is its ancestor. Then it moves `main` through GitHub's API,
+- **What it checks**: it runs from `dev` only; the branch is `dev` or a stable line
+  `stable/X.Y` (never `next/*`), and the commit a full SHA or that branch's name, nothing else;
+  the commit is on the branch named; for `dev`, `main` is its ancestor. Then it moves `main` through GitHub's API,
   not forced: GitHub refuses anything but a fast-forward, so nothing can be overwritten. Any of
   these refused, nothing moves and the run fails, saying why. Its job holds the token that
   writes `main` and runs no code of any branch: no checkout, no git, only `gh`.
@@ -42,13 +45,23 @@ Branches reach `dev` by squash. A release does not: **`main` moves forward to a 
   such run, a failed one, an error of the API), `verify` runs on `main` itself. `publish` runs
   only when `verify` passed in the run, or was skipped because that run on `dev` was found: never
   on a commit no `verify` passed on.
+- **A stable line's commit** (`gh workflow run release.yml --ref dev -f branch=stable/0.3 -f
+  commit=stable/0.3`, or a full SHA of the line) **is tagged, and `main` does not move**. The
+  version is the one of that commit's beta, which CI published on its push once its `verify`
+  passed (`v0.3.2-beta.1` releases `0.3.2`): a commit without one is refused. The workflow makes
+  the annotated tag `v0.3.2` on it, its message naming the line (`stable/0.3`), through GitHub's
+  API (a ref made, never one moved: a tag of that name on another commit is refused), then starts
+  `ci.yml` on the tag, which builds and publishes it, not marked latest. Run again when the tag is
+  there on that commit, it makes nothing and starts the build again. On its tag, `verified-on-dev`
+  asks for the successful push run of that commit on its line.
 - **The tag `vX.Y.Z` is put on the released commit**, the same commit on `main` and on `dev`. No
   tag is pushed by hand.
 - **The stable version is the one dev already had**: the version of the beta of that commit,
   without its pre-release (`0.3.0-beta.12` releases `0.3.0`). **Its changelog** lists the commits
   of `dev` between the previous stable tag and it.
 - A push to `main` that is not a commit of `dev` (none should happen) publishes nothing and
-  fails its run, saying why. A run on a commit already released publishes nothing.
+  fails its run, saying why. A run on a commit already released publishes nothing. So does a run
+  on a tag `vX.Y.Z` whose commit is not on `stable/X.Y`, or has no beta of `X.Y.Z`.
 
 **The two first releases were made by squash** (0.1.0 and 0.1.1): each squash on `main` was
 tagged `vX.Y.Z`, the head of `dev` it squashed was marked `released/vX.Y.Z`, and a merge of the
@@ -59,10 +72,10 @@ read (below); no new release makes either.
 ## The version
 
 Computed, never typed (`tools/version.sh stable|beta|alpha [--branch <name>] [--at <commit>]`,
-for HEAD by default):
+for HEAD and its branch by default):
 
 - **It counts from the last release**: the highest stable tag `vX.Y.Z`, compared as versions,
-  wherever it is, and from its own commit on, the commit of `dev` it released (a release made by
+  wherever it is, but the releases of the stable lines (below), and from its own commit on, the commit of `dev` it released (a release made by
   squash: from its mark `released/vX.Y.Z`). The commits counted are those of the build's own
   history that the release does not hold, so a feature branch started before a release counts
   only its own commits after it, and the next version is the one `dev` gets.
@@ -83,6 +96,17 @@ for HEAD by default):
   the commit is fixed. Example: the Specs pull request is developed on `feat/specs` and reaches
   `dev` as one squash whose body ends with `Release-As: 0.2.0`; the next stable is `0.2.0`
   instead of `0.1.x`, the betas after it `0.2.0-beta.N`, and the release after that `0.2.1`.
+- **Above every stable line.** A version of `dev` (and of its branches) is never at or below a
+  release a stable line made: when it would be, it is the next minor above the highest of them,
+  so a `v0.3.1` made on `stable/0.3` never makes `dev` compute `0.3.x`. A stable line's releases
+  are told from `dev`'s by their tag, annotated and naming the line.
+- **On a stable line `stable/X.Y`**, it counts from the highest `vX.Y.*` tag of the line's own
+  history (the one it started from, or its latest release), and only the patch moves, whatever
+  the commits say: `X.Y.(P+1)-beta.N`, then `X.Y.(P+1)`. `Release-As` is refused there (exit 1,
+  naming the commit).
+- **On `next/X.Y`** it is `X.Y.0-beta.N`, `N` counted as for `dev`, and refused (exit 1) when
+  `X.Y.0` is not above the version computed as for `dev`: `next` is always above `dev`.
+- Several lines at once each count their own (`stable/0.3`, `dev` at `0.4.0`, `next/0.5`).
 - **Only the build's own line is read**: the commits counted, the types that bump and the
   changelog follow first parents only, so a release squash that a record of the releases made by
   squash reaches through its second parent is neither counted nor listed, and a merge is one
@@ -109,7 +133,9 @@ for HEAD by default):
 
 ## What CI publishes
 
-On a push to `dev`, `feat/**` or `fix/**`, and on `main` when the `Release` workflow starts it,
+On a push to `dev`, `stable/*`, `next/*`, `feat/**` or `fix/**`, on `main` or a stable line's
+release tag when the `Release` workflow starts it, and on `next/X.Y` when `forward.yml` merged
+`dev` into it,
 `.github/workflows/ci.yml` runs two jobs beside its checks:
 
 - **`build`** runs the branch's code with a token that can only read. On Ubuntu 22.04, old
@@ -137,6 +163,9 @@ On a push to `dev`, `feat/**` or `fix/**`, and on `main` when the `Release` work
   itself). Then:
   - on `main`, the release `vX.Y.Z` on the commit released, marked latest;
   - on `dev`, the pre-release `vX.Y.Z-beta.N`;
+  - on `stable/X.Y` and `next/X.Y`, the pre-release `vX.Y.Z-beta.N` too, its notes installing
+    that very version (`--version`); on a stable line's release tag, the release `vX.Y.Z`, never
+    marked latest, so that the stable channel keeps `main`'s;
   - on a feature branch, the pre-release `vX.Y.Z-alpha.<branch>.N`, one per push, marked
     pre-release and never latest.
 
@@ -152,6 +181,64 @@ release of the former design when one is still there. It shares the branch's `pu
 which then finds the branch gone, or publishes what the cleanup then deletes.
 
 Other targets (aarch64, macOS) come later.
+
+## The branches
+
+| Branch | What it is |
+|---|---|
+| `main` | the latest stable released |
+| `stable/X.Y` | the fix line of a released `X.Y` (see "Stable lines") |
+| `dev` | the next version, `X.Y.0-beta.N` (its minor set by `Release-As`) |
+| `next/X.Y` | the version after `dev`'s, started early (see "The next version") |
+| `feat/<n>-<topic>`, `fix/<n>-<topic>` | a ticket, from the branch its pull request targets; its alphas as on any branch |
+
+`dev`, `stable/*` and `next/*` take pull requests only, merged by squash (but the merges forward
+into `next/*`, below): the `pre-commit` hook refuses a commit on them.
+
+## Stable lines
+
+- **`stable/X.Y` is made from the tag `vX.Y.0` (or the latest `vX.Y.*`) only when a fix must
+  reach a released `X.Y`.** Only the latest stable line is kept: it ends (is deleted) when
+  `X.(Y+1).0` is released, and its users move up with `flottille update`. The machinery counts
+  several lines at once right; the policy is what keeps one.
+- **It receives only backports of fixes already merged into `dev`**: nothing reaches a line that
+  is not in `dev`. Its versions and its release: "The version" and "Releasing" above. Its
+  changelog lists the line's commits since its previous tag.
+- **A backport by label.** A pull request into `dev` labelled `backport X.Y`, once merged (or
+  labelled after its merge), is brought by `.github/workflows/backport.yml`: the cherry-pick of
+  its squash (`-x`: its message ends with where it was picked from) on `backport/<pr>-X.Y`, a
+  branch from `stable/X.Y`, and a pull request into the line, titled as the one it brings, merged
+  by squash with the same CI. When the pick does not apply, a comment on the pull request merged
+  says so, and nothing is opened. The job holds a token that writes the repository and runs no
+  code of any branch: no checkout, no git, the cherry-pick made through GitHub's API (a commit with
+  the line's files on the squash's parent, the squash merged into it, the files that gives put on
+  the line's tip). A pull request opened with the workflow's token starts no run of its own, so the
+  workflow starts `ci.yml` on the branch (`workflow_dispatch`), whose `verify` is the check of the
+  pull request's head.
+- **A backport by hand**, when the pick does not apply: `git switch -c backport/<pr>-X.Y
+  origin/stable/X.Y`, `git cherry-pick -x <squash>`, the conflicts solved, pushed, and a pull
+  request into `stable/X.Y`.
+
+## The next version
+
+- **`next/X.Y` is made from `dev` only when the maintainer starts the version after `dev`'s
+  early.** It receives the pull requests aimed at that version (squash, the same CI) **and every
+  commit of `dev`**, merged forward by `.github/workflows/forward.yml` after each push to `dev`:
+  a merge commit `dev → next/X.Y` (`chore(repo): merge dev into next/X.Y`), never a squash, made
+  through GitHub's API (no checkout, no code of any branch), then `ci.yml` started on `next/X.Y`.
+- **When `dev` does not merge**, the workflow makes the branch `forward/<dev's commit, 12
+  characters>-X.Y` at `dev`'s commit and a pull request from it into `next/X.Y`, and says so in its
+  run. The conflict is left to resolve there: on that branch, the merge of `dev`'s commit made with
+  `next/X.Y` as its first parent (`git switch -C forward/… origin/next/X.Y`, `git merge <dev's
+  commit>`, the conflicts solved, `git push origin HEAD:forward/…`, a push forward since the branch
+  is at `dev`'s commit), then the pull request merged with a merge commit, never a squash.
+- **The `Release` workflow never releases a commit of `next/*`.**
+- **When `dev`'s version is released**, `next/X.Y` is merged into `dev` once and deleted, and
+  `dev` becomes that version:
+  1. release `dev` (`vX.(Y-1).0`, say), as always;
+  2. open the pull request `next/X.Y → dev`; its squash's body ends with `Release-As: X.Y.0`, so
+     `dev`'s betas are `X.Y.0-beta.N` from it on;
+  3. once merged, delete `next/X.Y` (and any `forward/*-X.Y` left).
 
 ## Installing
 
@@ -271,4 +358,9 @@ a throwaway home. What they cannot run is the workflows themselves on GitHub. A 
 GitHub's API answering as the scripts read it. Deleting the branch proves its cleanup. The first merge into `dev` proves the
 beta's, and the first `Release` run the move of `main` with the workflow's token, the pull
 request shown merged, `ci.yml` started on `main` by it, the stable tag on the commit released and
-the release marked latest.
+the release marked latest. The first stable line proves the rest of it: its first push a beta,
+its first `Release` run the annotated tag made through the API and `ci.yml` started on the tag,
+`verified-on-dev` finding the line's run, the release published not latest; the first label
+`backport X.Y` the workflow on `pull_request_target`, the cherry-pick through the API, its pull
+request and the `ci.yml` it starts taken as that pull request's check; the first `next/X.Y` the
+merges forward through the API and the `ci.yml` they start.
