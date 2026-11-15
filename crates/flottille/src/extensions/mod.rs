@@ -765,9 +765,14 @@ pub fn logs_in(daemon: &Daemon, tool: &str) -> bool {
         .is_some_and(|name| connections::logs_in(daemon, name))
 }
 
-/// Whether the connection `name` is declared; why it cannot be told when its files cannot be read.
-pub fn connection_exists(daemon: &Daemon, name: &str) -> Result<bool, String> {
-    connections::exists(daemon, name)
+/// Whether the feature of an extension a vault entry would be bound to (`bound`,
+/// `connection:<name>`) is declared: a connection by its name; why it cannot be told when its
+/// files cannot be read.
+pub fn bound_exists(daemon: &Daemon, bound: &str) -> Result<bool, String> {
+    match bound.split_once(':') {
+        Some(("connection", name)) => connections::exists(daemon, name),
+        _ => Ok(true),
+    }
 }
 
 /// The host a secret given for `url` goes to as a connection's login reads it (in ASCII, a

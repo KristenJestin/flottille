@@ -930,7 +930,7 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
             if bound.starts_with("connection:") && crate::extensions::bound_possible(bound) =>
         {
             let connection = &bound["connection:".len()..];
-            match crate::extensions::connection_exists(daemon, connection) {
+            match crate::extensions::bound_exists(daemon, bound) {
                 Ok(true) => Some(bound.to_owned()),
                 Ok(false) => {
                     return Outcome::Refused(format!(
