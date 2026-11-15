@@ -2152,6 +2152,7 @@ dependencies = [
  "clap",
  "dom_smoothie",
  "flate2",
+ "flottille-client",
  "flottille-core",
  "flottille-protocol",
  "flottille-window",
