@@ -87,7 +87,8 @@
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
 //! the child's pid with `--child`), `initialize` (the client's capabilities), `list` (the cursor
 //! asked), `call` (the tool, the arguments, when it started and ended, in milliseconds since the
-//! epoch).
+//! epoch), written once the call is answered; `received` (the tool) is written as a call arrives,
+//! before it sleeps or answers, so a test can wait for a call in progress.
 
 use std::io::{BufRead, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -242,6 +243,7 @@ fn main() {
             "tools/call" => {
                 let tool = params["name"].as_str().unwrap_or_default().to_owned();
                 let started = now_ms();
+                write_log(&log, json!({"event": "received", "tool": tool}));
                 let answer = script["answers"][&tool].clone();
                 if let Some(message) = answer["rpc_error"].as_str() {
                     send(&json!({"jsonrpc": "2.0", "id": id,
