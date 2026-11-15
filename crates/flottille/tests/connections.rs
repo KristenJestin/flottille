@@ -2031,6 +2031,131 @@ fn a_large_image_of_a_result_is_scaled_like_a_message_picture() {
     assert_eq!((width, height), (2000, 1000), "scaled to 2000 px a side");
 }
 
+/// A PNG of `width` by `height`: a gradient and `noise_bits` bits of deterministic noise on each
+/// channel, which a PNG cannot squeeze, so its weight is told by the size and the noise.
+fn noisy_png(width: u32, height: u32, noise_bits: u32) -> Vec<u8> {
+    let mut state = 0x2545_F491u32;
+    let mut noise = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        (state >> 8) as u8 >> (8 - noise_bits)
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_fn(width, height, |x, y| {
+        let base = |v: u32| (v / 16) as u8;
+        image::Rgb([
+            base(x).saturating_add(noise()),
+            base(y).saturating_add(noise()),
+            base(x + y).saturating_add(noise()),
+        ])
+    })
+    .write_to(&mut out, image::ImageFormat::Png)
+    .unwrap();
+    out.into_inner()
+}
+
+/// What a call gave of a picture: its bytes, and the width and height they declare.
+fn picture_of(data: &str) -> (Vec<u8>, (u32, u32)) {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap();
+    let size = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap();
+    (bytes, size)
+}
+
+fn encoded(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[test]
+fn a_large_png_from_a_connection_reaches_the_agent_scaled() {
+    let user = user();
+    let big = noisy_png(4000, 2000, 2);
+    assert!(
+        big.len() > 2 * MIB as usize,
+        "the test's picture is over the cap"
+    );
+    let (_, text, images) = pictured(
+        &user,
+        json!({"text": "a board", "image_data": encoded(&big)}),
+    );
+    assert_eq!(images.len(), 1, "it is not left out: {text}");
+    let (bytes, size) = picture_of(&images[0].1);
+    assert_eq!(size, (2000, 1000), "2000 px on its long side");
+    assert_eq!(images[0].0, "image/png");
+    assert!(bytes.len() <= 2 * MIB as usize, "within the cap");
+    assert!(!text.contains("left out"), "{text}");
+}
+
+#[test]
+fn an_image_still_too_big_after_scaling_is_scaled_again() {
+    let user = user();
+    // Noise a PNG cannot squeeze: at 2000 px it still weighs several MiB.
+    let big = noisy_png(2400, 1200, 8);
+    let (_, text, images) = pictured(
+        &user,
+        json!({"text": "a board", "image_data": encoded(&big)}),
+    );
+    assert_eq!(images.len(), 1, "it is not left out: {text}");
+    let (bytes, (width, _)) = picture_of(&images[0].1);
+    assert!(bytes.len() <= 2 * MIB as usize, "within the cap");
+    assert!(
+        (500..2000).contains(&width),
+        "its long side was halved, not under 500: {width}"
+    );
+    assert!(text.contains("scaled from"), "{text}");
+}
+
+#[test]
+fn a_scaled_image_says_its_original_and_final_size() {
+    let user = user();
+    let big = noisy_png(4000, 2000, 2);
+    let from = format!("{:.1} MB PNG", big.len() as f64 / 1_000_000.0);
+    let (_, text, images) = pictured(
+        &user,
+        json!({"text": "a board", "image_data": encoded(&big)}),
+    );
+    assert_eq!(images.len(), 1, "{text}");
+    let (bytes, _) = picture_of(&images[0].1);
+    let to = if bytes.len() >= 1_000_000 {
+        format!("{:.1} MB PNG", bytes.len() as f64 / 1_000_000.0)
+    } else {
+        format!("{} KB PNG", bytes.len() / 1000)
+    };
+    assert!(
+        text.contains(&format!(
+            "[an image scaled from {from} to {to}, 2000×1000, is attached]"
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_gif_over_the_cap_is_still_left_out() {
+    let user = user();
+    let mut gif = b"GIF89a".to_vec();
+    gif.resize(3 * MIB as usize, 0);
+    let (_, text, images) = pictured(
+        &user,
+        json!({"text": "a loop", "image_data": encoded(&gif), "image_mime": "image/gif"}),
+    );
+    assert!(images.is_empty(), "no image goes");
+    assert!(
+        text.contains(&format!(
+            "[an image (image/gif, about {} bytes) left out: over 2 MiB]",
+            3 * MIB
+        )),
+        "{text}"
+    );
+}
+
 #[test]
 fn an_image_of_a_call_allowed_later_reaches_the_agent() {
     let user = User::with_fake_agent();

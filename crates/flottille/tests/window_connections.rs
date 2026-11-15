@@ -2888,3 +2888,177 @@ fn the_window_opens_only_an_https_or_a_local_http_address_to_sign_in(cx: &mut Te
     }
     assert_eq!(opened.lock().unwrap().len(), 5);
 }
+
+// ── A review that needs a sign-in ────────────────────────────────────────────────────────────
+
+/// The review of `notes`, behind its authorization server and not signed in, opened from its row.
+fn review_of_unsigned<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    &'a mut VisualTestContext,
+    common::Spawned,
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    turn_on(user);
+    let (server, url) = protected_server(user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url}),
+    )
+    .unwrap();
+    let (shell, cx) = window(user, cx);
+    let opened = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let opened = opened.clone();
+        shell.update(cx, |s, _| {
+            s.set_opener(Arc::new(move |path: &Path| {
+                opened.lock().unwrap().push(path.display().to_string());
+            }))
+        });
+    }
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-notes"));
+    click(cx, "connection-more-notes");
+    click(cx, "review-connection-notes");
+    until(&shell, cx, "what the review says", |cx| {
+        present(cx, "connection-review-sign-in") || present(cx, "connection-review-error")
+    });
+    settle(cx);
+    (shell, cx, server, opened)
+}
+
+#[gpui_kit::test]
+fn a_review_that_needs_a_sign_in_offers_the_button(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, cx, mut server, _) = review_of_unsigned(&user, cx);
+    assert!(
+        present(cx, "connection-review-sign-in"),
+        "the review offers Sign in"
+    );
+    assert_eq!(
+        label(cx, "connection-review-sign-in").as_deref(),
+        Some("Sign in")
+    );
+    // A state, not an error: the error line is not drawn, and there is nothing to accept yet.
+    assert!(!present(cx, "connection-review-error"));
+    assert!(present(cx, "connection-review-needs-sign-in"));
+    assert!(!present(cx, "accept-connection"));
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[gpui_kit::test]
+fn signing_in_from_the_review_reads_the_server_and_shows_its_actions(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx, mut server, opened) = review_of_unsigned(&user, cx);
+    click(cx, "connection-review-sign-in");
+    until(&shell, cx, "the browser is opened on the sign-in", |_| {
+        !opened.lock().unwrap().is_empty()
+    });
+    let address = opened.lock().unwrap()[0].clone();
+    assert!(address.contains("/as/authorize"), "{address}");
+    let (status, location) = browse(&address);
+    assert_eq!(status, 302);
+    let (status, _) = browse(&location.unwrap());
+    assert_eq!(status, 200);
+    // Nobody presses anything more: the review reads the server again and shows what it announces.
+    // The server is given at once once signed in, so its actions are the pinned ones: the review
+    // is ready when it can be accepted, whatever group each row is in.
+    until(&shell, cx, "the actions of the server", |cx| {
+        present(cx, "accept-connection")
+    });
+    settle(cx);
+    assert!(present(cx, "connection-review-server"));
+    assert!(!present(cx, "connection-review-sign-in"));
+    assert!(!present(cx, "connection-review-needs-sign-in"));
+    assert!(present(cx, "accept-connection"));
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[gpui_kit::test]
+fn no_window_message_tells_the_user_to_run_connection_login(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx, mut server, _) = review_of_unsigned(&user, cx);
+    let section = section(&shell, cx);
+    for said in ["signed_out", "sign_in_failed", "tokens_unsaved"] {
+        cx.update(|_, cx| {
+            section.update(cx, |s, cx| {
+                s.sign_in_said(said, "notes", Some("the vault said no".into()), cx)
+            })
+        });
+        settle(cx);
+    }
+    let toasts: Vec<String> = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|t| format!("{} {:?}", t.title(), t.second_line()))
+            .collect()
+    });
+    let said = format!("{}\n{}", everything_said(cx), toasts.join("\n"));
+    assert!(!said.contains("connection login"), "{said}");
+    assert!(!said.contains("flottille connection"), "{said}");
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[gpui_kit::test]
+fn a_401_with_a_header_from_the_vault_names_the_entry_not_a_sign_in(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "hippo-token", "secret": SECRET, "description": "Hippo's token"}),
+    )
+    .unwrap();
+    let (mut server, url) = protected_server(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url,
+            "headers": {"Authorization": {"vault": "hippo-token"}}}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-notes"));
+    click(cx, "connection-more-notes");
+    click(cx, "review-connection-notes");
+    until(&shell, cx, "what the review says", |cx| {
+        present(cx, "connection-review-edit-entry") || present(cx, "connection-review-sign-in")
+    });
+    settle(cx);
+    // The server refused what it was given: the entry is named, never its value, and the way out
+    // is the entry, not a sign-in.
+    assert!(!present(cx, "connection-review-sign-in"));
+    assert!(!present(cx, "connection-review-error"));
+    assert_eq!(
+        label(cx, "connection-review-edit-entry").as_deref(),
+        Some("Edit entry")
+    );
+    let said = label(cx, "connection-review-needs-entry").unwrap_or_default();
+    assert!(
+        said.contains("Authorization") && said.contains("hippo-token"),
+        "{said}"
+    );
+    let all = everything_said(cx);
+    assert!(!all.contains(SECRET), "{all}");
+    assert!(!all.contains("connection login"), "{all}");
+    assert!(!all.contains("sign in"), "{all}");
+    // Edit entry opens the entry's dialog in the vault, its secret to type again.
+    click(cx, "connection-review-edit-entry");
+    let vault = shell.read_with(cx, |s, cx| {
+        s.main()
+            .read(cx)
+            .settings_page()
+            .map(|page| page.read(cx).vault().clone())
+            .unwrap()
+    });
+    until(&shell, cx, "the entry's dialog", |cx| {
+        vault.read_with(cx, |v, _| v.is_open())
+    });
+    let _ = server.kill();
+    let _ = server.wait();
+}
