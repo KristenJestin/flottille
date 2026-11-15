@@ -2551,7 +2551,7 @@ mod tests {
         let declared = parse(
             json!({"name": "a", "about": "a", "url": "https://x.example",
             "headers": {"X-Key": {"vault": "k"}},
-            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+            "secrets": [{"in": "header", "name": "X-Token", "prefix": "Bearer ",
                 "entry": "t"}, {"in": "basic", "entry": "b"}]}),
         )
         .unwrap();
@@ -2560,7 +2560,7 @@ mod tests {
         assert_eq!(json["headers"], json!({"X-Key": {"vault": "k"}}));
         assert_eq!(
             json["secrets"],
-            json!([{"in": "header", "name": "Authorization", "prefix": "Bearer ", "entry": "t"},
+            json!([{"in": "header", "name": "X-Token", "prefix": "Bearer ", "entry": "t"},
                 {"in": "basic", "entry": "b"}])
         );
         assert_eq!(parse(json).unwrap(), declared);
