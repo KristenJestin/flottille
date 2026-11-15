@@ -109,15 +109,35 @@ impl<R: AsyncRead + Unpin> AsyncRead for Lines<R> {
 /// The HTTP client of a connection's server: reqwest's, but for the answer to a message it sends,
 /// which is read up to `ANSWER_LIMIT` bytes. The stream a server keeps open for what it says of
 /// itself, which has no end, is left to rmcp's own limit on one event of it (set to the same).
+///
+/// It also adds the connection's query secrets to each request's URL, here and never in rmcp's
+/// configuration, and drops the URL from its errors: no error, log or event says them.
 #[derive(Clone)]
 pub(super) struct Bounded {
     client: reqwest::Client,
     cut: Cut,
+    query: Arc<Vec<(String, String)>>,
 }
 
 impl Bounded {
-    pub(super) fn new(client: reqwest::Client, cut: Cut) -> Self {
-        Self { client, cut }
+    pub(super) fn new(client: reqwest::Client, cut: Cut, query: Vec<(String, String)>) -> Self {
+        Self {
+            client,
+            cut,
+            query: Arc::new(query),
+        }
+    }
+
+    /// `uri` with the query secrets, URL-encoded.
+    fn at(&self, uri: Arc<str>) -> Arc<str> {
+        if self.query.is_empty() {
+            return uri;
+        }
+        let Ok(mut url) = url::Url::parse(&uri) else {
+            return uri;
+        };
+        url.query_pairs_mut().extend_pairs(self.query.iter());
+        Arc::from(url.as_str())
     }
 
     /// The error of an answer that passed the limit.
@@ -170,7 +190,10 @@ fn chunks(response: reqwest::Response, cut: Cut) -> impl Stream<Item = io::Resul
                         Some((Ok(chunk), (response, taken, false)))
                     }
                     Ok(None) => None,
-                    Err(error) => Some((Err(io::Error::other(error)), (response, taken, true))),
+                    Err(error) => Some((
+                        Err(io::Error::other(error.without_url())),
+                        (response, taken, true),
+                    )),
                 }
             }
         },
@@ -188,16 +211,15 @@ impl StreamableHttpClient for Bounded {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        self.client
-            .get_stream_with_max_sse_event_size(
-                uri,
-                session_id,
-                last_event_id,
-                auth_token,
-                custom_headers,
-                ANSWER_LIMIT,
-            )
-            .await
+        self.get_stream_with_max_sse_event_size(
+            uri,
+            session_id,
+            last_event_id,
+            auth_token,
+            custom_headers,
+            ANSWER_LIMIT,
+        )
+        .await
     }
 
     async fn get_stream_with_max_sse_event_size(
@@ -211,7 +233,7 @@ impl StreamableHttpClient for Bounded {
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
         self.client
             .get_stream_with_max_sse_event_size(
-                uri,
+                self.at(uri),
                 session_id,
                 last_event_id,
                 auth_token,
@@ -219,6 +241,7 @@ impl StreamableHttpClient for Bounded {
                 max_sse_event_size,
             )
             .await
+            .map_err(hidden)
     }
 
     async fn delete_session(
@@ -229,8 +252,9 @@ impl StreamableHttpClient for Bounded {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<(), StreamableHttpError<Self::Error>> {
         self.client
-            .delete_session(uri, session, auth_token, custom_headers)
+            .delete_session(self.at(uri), session, auth_token, custom_headers)
             .await
+            .map_err(hidden)
     }
 
     async fn post_message(
@@ -265,6 +289,35 @@ impl StreamableHttpClient for Bounded {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         _max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        self.post(
+            self.at(uri),
+            message,
+            session_id,
+            auth_token,
+            custom_headers,
+        )
+        .await
+        .map_err(hidden)
+    }
+}
+
+/// An error of the client without its URL, which may hold a query secret.
+fn hidden(error: StreamableHttpError<reqwest::Error>) -> StreamableHttpError<reqwest::Error> {
+    match error {
+        StreamableHttpError::Client(error) => StreamableHttpError::Client(error.without_url()),
+        other => other,
+    }
+}
+
+impl Bounded {
+    async fn post(
+        &self,
+        uri: Arc<str>,
+        message: ClientJsonRpcMessage,
+        session_id: Option<Arc<str>>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<reqwest::Error>> {
         use reqwest::StatusCode;
         use reqwest::header::{ACCEPT, CONTENT_TYPE, WWW_AUTHENTICATE};
         let mut request = self

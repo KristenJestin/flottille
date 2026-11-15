@@ -826,7 +826,19 @@ sentence on what it is for, and how to reach the server, either
 - a **local URL** (`http://127.0.0.1:…`, `localhost` or `[::1]`, Streamable HTTP, no redirect
   followed), for a server the user runs themselves; or
 - an **`https://` URL** (Streamable HTTP, the system's certificates, no redirect followed), for a
-  server elsewhere (decision 21). Its `headers` name vault entries, as `env` does.
+  server elsewhere (decision 21). Its `secrets` name vault entries, as `env` does, and say where
+  each goes in the requests: `secrets = [{in = "header"|"query"|"cookie"|"basic", name?, prefix?,
+  entry}]`. A **header** is `<name>: <prefix><secret>` (a prefix such as `Bearer ` is written in
+  the declaration, not in the entry); a **query parameter** `?<name>=<secret>` is added,
+  URL-encoded, to every request's URL by the daemon's client alone (never written in the URL
+  declared, never on an OAuth sign-in's own requests, and the URL is dropped from the client's
+  errors, its encoded value masked as the secret is); a **cookie** is `Cookie: <name>=<secret>`,
+  the cookies of a connection in one header; **basic** is `Authorization: Basic
+  base64(<entry's username>:<secret>)` and takes no name. The old `headers = { Name = { vault =
+  "<entry>" } }` is read as header lines with no prefix and written back as it was, so that a
+  connection pinned with it keeps its digest. A URL whose query holds a parameter whose name looks
+  like a secret (`token`, `key`, `secret`, `password` or `auth`, in any case, inside its name) is
+  refused, saying to move it to "Secrets of its requests".
 
 A plain `http://` URL to any other address is refused: what crosses a network is encrypted.
 
@@ -863,12 +875,12 @@ what is written is what the card showed: the request's words are made again from
 as it is then and compared with those the user read, and one that differs is not done. Once
 accepted it goes through the path of the user's own Save (added = given at once, every action
 judged). An agent's declaration is checked as the form's fields are (a command is one line split
-without a shell, shell syntax refused; a variable or a header names a vault entry that exists).
-**An agent sends a vault entry only to the entry's own host**: a header of a URL connection it
+without a shell, shell syntax refused; a variable or a secret names a vault entry that exists).
+**An agent sends a vault entry only to the entry's own host**: a secret of a URL connection it
 proposes names an entry whose `url` has the connection URL's host (over `https://`, or `http://`
 on this machine); an entry with no `url`, or of another host, is refused before the user is asked,
 with a sentence naming both hosts and saying the user can bind it in their own form, which keeps
-its freedom. A header the user bound already to the same host stays when an agent edits the
+its freedom. A secret the user bound already to the same host stays when an agent edits the
 rest; an edit that moves the URL elsewhere is refused the same way, since the entry would follow
 it. A command's variables may name any entry: they are the program's, and the card says each
 loudly. The words are compared once more where they are written, under the file's lock (a `set`
@@ -881,9 +893,10 @@ A connection's name is lower-case letters, digits and `_`, 24 at most; the tool 
 so that no core tool, now or later, can take its name, and the gate's card says plainly that the
 tool is a third party's.
 
-**Secrets come from the vault** (`vault.md`). `env` (and, for a URL, `headers`) names an entry
+**Secrets come from the vault** (`vault.md`). `env` (and, for a URL, `secrets`) names an entry
 instead of holding a value: the daemon reads it when it starts the server and puts it where it goes
-(a variable of the server's environment, a header of every request to the URL).
+(a variable of the server's environment; a header, a query parameter, a cookie or basic
+authentication of every request to the URL).
 The entry must be one of every project (`vault.md`: no `project` on it), since the server is given
 to all; an entry tied to one project is refused, and so is one bound to another use than this
 connection (`vault.md`, "Bound to one use": `for = "connection:<name>"` makes it this one's alone). The agent sees neither the variable nor its

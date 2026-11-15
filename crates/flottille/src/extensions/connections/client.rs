@@ -382,6 +382,69 @@ pub(super) async fn secrets(
     Ok(read)
 }
 
+/// What a URL connection's requests carry of its secrets: its headers (a header, the cookies
+/// together, basic authentication), and the query parameters `Bounded` adds to each request.
+async fn carried(
+    daemon: &Daemon,
+    declaration: &Declaration,
+) -> Result<
+    (
+        HashMap<http::HeaderName, http::HeaderValue>,
+        Vec<(String, String)>,
+    ),
+    String,
+> {
+    use super::Place;
+    use base64::Engine;
+    let mut headers = HashMap::new();
+    let mut cookies = Vec::new();
+    let mut query = Vec::new();
+    let mut header = |name: &str, value: String, of: &str| -> Result<(), String> {
+        let name = http::HeaderName::from_bytes(name.as_bytes()).map_err(|e| e.to_string())?;
+        let mut value = http::HeaderValue::from_str(&value)
+            .map_err(|_| format!("the vault entry {of} is no header's value"))?;
+        value.set_sensitive(true);
+        headers.insert(name, value);
+        Ok(())
+    };
+    for line in &declaration.secrets {
+        let secret = crate::vault::every_project_s(daemon, &declaration.name, &line.entry).await?;
+        match line.place {
+            Place::Header => header(&line.name, format!("{}{secret}", line.prefix), &line.entry)?,
+            Place::Cookie => cookies.push(format!("{}={secret}", line.name)),
+            Place::Basic => {
+                let username = daemon
+                    .read(|store| store.vault_entries())
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .find(|entry| entry.name == line.entry)
+                    .and_then(|entry| entry.username)
+                    .ok_or_else(|| {
+                        format!(
+                            "the vault entry {} has no username, which basic authentication needs",
+                            line.entry
+                        )
+                    })?;
+                let pair = base64::engine::general_purpose::STANDARD
+                    .encode(format!("{username}:{secret}"));
+                flottille_core::secrets::add_vault_value(&pair);
+                header("authorization", format!("Basic {pair}"), &line.entry)?;
+            }
+            Place::Query => {
+                // As the URL carries it, masked too wherever it is said.
+                let encoded: String =
+                    url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+                flottille_core::secrets::add_vault_value(&encoded);
+                query.push((line.name.clone(), secret));
+            }
+        }
+    }
+    if !cookies.is_empty() {
+        header("cookie", cookies.join("; "), "of a cookie")?;
+    }
+    Ok((headers, query))
+}
+
 /// The lines of its error output a server that stopped during its start is asked about.
 const ERROR_LINES: usize = 3;
 
@@ -553,15 +616,7 @@ async fn start_with(
             }
         }
         Reach::Url(url) => {
-            let mut headers = HashMap::new();
-            for (name, secret) in secrets(daemon, &declaration.name, &declaration.headers).await? {
-                let name = http::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|error| error.to_string())?;
-                let mut value = http::HeaderValue::from_str(&secret)
-                    .map_err(|_| format!("the vault entry for {name} is no header's value"))?;
-                value.set_sensitive(true);
-                headers.insert(name, value);
-            }
+            let (headers, query) = carried(daemon, declaration).await?;
             let client = http_client(url)?;
             let mut config =
                 StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(headers);
@@ -582,7 +637,7 @@ async fn start_with(
                 }
             }
             let transport = StreamableHttpClientTransport::with_client(
-                Bounded::new(client, cut.clone()),
+                Bounded::new(client, cut.clone(), query),
                 config,
             );
             let served = tokio::time::timeout(

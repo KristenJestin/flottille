@@ -93,6 +93,11 @@ pub struct Given {
     /// Header=entry: a vault entry sent as a header to the URL; again for each
     #[arg(long = "header", value_name = "HEADER=ENTRY")]
     headers: Vec<String>,
+    /// Where a vault entry goes in the URL's requests: header:NAME=ENTRY, with a prefix before
+    /// the entry's name ("header:Authorization=Bearer notes-token"), query:NAME=ENTRY,
+    /// cookie:NAME=ENTRY or basic=ENTRY (the entry's username and secret); again for each
+    #[arg(long = "secret", value_name = "IN:NAME=ENTRY")]
+    secrets: Vec<String>,
     /// argument=v1,v2: the values an argument of that name may take; again for each
     #[arg(long = "only", value_name = "ARGUMENT=VALUES")]
     only: Vec<String>,
@@ -131,6 +136,25 @@ fn vault(given: &[String], what: &str) -> Result<Option<Value>> {
     )))
 }
 
+/// `--secret`, as a line of `secrets`.
+fn secret_line(given: &str) -> Result<Value> {
+    let wrong = || format!("{given}: a secret is IN:NAME=ENTRY or basic=ENTRY");
+    let (place, value) = given.split_once('=').ok_or_else(wrong)?;
+    if place == "basic" {
+        return Ok(json!({"in": "basic", "entry": value}));
+    }
+    let (place, name) = place.split_once(':').ok_or_else(wrong)?;
+    let mut line = json!({"in": place, "name": name});
+    match value.rsplit_once(' ') {
+        Some((prefix, entry)) => {
+            line["prefix"] = json!(format!("{prefix} "));
+            line["entry"] = json!(entry);
+        }
+        None => line["entry"] = json!(value),
+    }
+    Ok(line)
+}
+
 fn declared(params: &mut Map<String, Value>, reach: Reach, given: Given) -> Result<()> {
     if let Some(command) = reach.command {
         params.insert("command".into(), json!(command));
@@ -143,6 +167,14 @@ fn declared(params: &mut Map<String, Value>, reach: Reach, given: Given) -> Resu
     }
     if let Some(headers) = vault(&given.headers, "header")? {
         params.insert("headers".into(), headers);
+    }
+    if !given.secrets.is_empty() {
+        let lines = given
+            .secrets
+            .iter()
+            .map(|line| secret_line(line))
+            .collect::<Result<Vec<_>>>()?;
+        params.insert("secrets".into(), json!(lines));
     }
     if !given.only.is_empty() {
         let only: Map<String, Value> = pairs(&given.only, "limit")?

@@ -149,8 +149,9 @@ pub struct Declaration {
     pub reach: Reach,
     /// Variable → vault entry.
     pub env: BTreeMap<String, String>,
-    /// Header → vault entry, for a URL.
-    pub headers: BTreeMap<String, String>,
+    /// Where each vault entry goes in the requests, for a URL: `secrets`, and the old `headers`
+    /// read as header lines.
+    pub secrets: Vec<Secret>,
     /// Argument → the values it may take.
     pub only: BTreeMap<String, Vec<String>>,
     /// The projects whose agents do not get it.
@@ -160,6 +161,146 @@ pub struct Declaration {
     /// Hosts the user adds to the sites an adapter keeps the browser to, beside those of the
     /// vault entries: a single sign-on's, which a sign-in goes through.
     pub sites: Vec<String>,
+}
+
+/// A vault entry a URL connection's requests carry, and where.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Secret {
+    pub place: Place,
+    /// The header's, the query parameter's or the cookie's name; empty for basic authentication.
+    pub name: String,
+    /// Written before the secret in a header (`Bearer `).
+    pub prefix: String,
+    pub entry: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Place {
+    Header,
+    Query,
+    Cookie,
+    /// `Authorization: Basic`, of the entry's username and its secret.
+    Basic,
+}
+
+impl Place {
+    const WORDS: [&str; 4] = ["header", "query", "cookie", "basic"];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Place::Header => "header",
+            Place::Query => "query",
+            Place::Cookie => "cookie",
+            Place::Basic => "basic",
+        }
+    }
+
+    fn of(word: &str) -> Option<Place> {
+        [Place::Header, Place::Query, Place::Cookie, Place::Basic]
+            .into_iter()
+            .find(|place| place.word() == word)
+    }
+}
+
+impl Secret {
+    /// A line of the old `headers`, which `json` writes back there.
+    fn plain_header(&self) -> bool {
+        self.place == Place::Header && self.prefix.is_empty()
+    }
+
+    fn json(&self) -> Value {
+        let mut line = json!({"in": self.place.word()});
+        if self.place != Place::Basic {
+            line["name"] = json!(self.name);
+        }
+        if !self.prefix.is_empty() {
+            line["prefix"] = json!(self.prefix);
+        }
+        line["entry"] = json!(self.entry);
+        line
+    }
+
+    /// What the review and the card say of it.
+    pub fn said(&self) -> String {
+        match self.place {
+            Place::Header => format!("the header {}", self.name),
+            Place::Query => format!("the query parameter {}", self.name),
+            Place::Cookie => format!("the cookie {}", self.name),
+            Place::Basic => "basic authentication".to_owned(),
+        }
+    }
+}
+
+/// The parts of a query parameter's name that say its value is a secret.
+const SECRET_PARAMETERS: [&str; 5] = ["token", "key", "secret", "password", "auth"];
+
+/// `secrets = [{in, name, prefix, entry}]`, checked line by line.
+fn secrets_of(value: &Value, at: &str) -> std::result::Result<Vec<Secret>, String> {
+    let lines = value
+        .as_array()
+        .ok_or_else(|| format!("{at}.secrets: must be a list of tables, not {value}"))?;
+    let mut secrets = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        let at = format!("{at}.secrets[{n}]");
+        let line = line
+            .as_object()
+            .ok_or_else(|| format!("{at}: must be a table, {{in, name, prefix, entry}}"))?;
+        if let Some(key) = line
+            .keys()
+            .find(|key| !["in", "name", "prefix", "entry"].contains(&key.as_str()))
+        {
+            return Err(format!(
+                "{at}.{key}: unknown key: the keys are in, name, prefix, entry"
+            ));
+        }
+        let text = |key: &str| match line.get(key) {
+            None => Ok(None),
+            Some(Value::String(text)) => Ok(Some(text.clone())),
+            Some(_) => Err(format!("{at}.{key}: must be a text")),
+        };
+        let place = text("in")?
+            .as_deref()
+            .and_then(Place::of)
+            .ok_or_else(|| format!("{at}.in: must be one of {}", Place::WORDS.join(", ")))?;
+        let entry = text("entry")?
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| {
+                format!("{at}.entry: must name a vault entry: a secret is never written here")
+            })?;
+        let name = text("name")?.unwrap_or_default();
+        let named_ok = match place {
+            Place::Basic => name.is_empty(),
+            Place::Header => http::HeaderName::from_bytes(name.as_bytes()).is_ok(),
+            Place::Query => !name.is_empty() && !name.chars().any(char::is_control),
+            Place::Cookie => {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_graphic() && !"()<>@,;:\\\"/[]?={}".contains(c))
+            }
+        };
+        if !named_ok {
+            return Err(match place {
+                Place::Basic => format!("{at}.name: basic authentication takes no name"),
+                _ => format!("{at}.name: not a {}'s name: {name:?}", place.word()),
+            });
+        }
+        let prefix = text("prefix")?.unwrap_or_default();
+        if !prefix.is_empty()
+            && (place != Place::Header || prefix.chars().any(|c| c.is_control() || !c.is_ascii()))
+        {
+            return Err(format!(
+                "{at}.prefix: only a header takes a prefix, on one line, as \"Bearer \""
+            ));
+        }
+        secrets.push(Secret {
+            place,
+            name,
+            prefix,
+            entry,
+        });
+    }
+    Ok(secrets)
 }
 
 /// How the daemon reaches the server.
@@ -179,6 +320,7 @@ const KEYS: &[&str] = &[
     "url",
     "env",
     "headers",
+    "secrets",
     "only",
     "except",
     "client_id",
@@ -283,9 +425,43 @@ impl Declaration {
         {
             return Err(format!("{at}.headers.{name}: not a header's name"));
         }
+        let mut secrets: Vec<Secret> = headers
+            .into_iter()
+            .map(|(name, entry)| Secret {
+                place: Place::Header,
+                name,
+                prefix: String::new(),
+                entry,
+            })
+            .collect();
+        if let Some(value) = table.get("secrets") {
+            if matches!(reach, Reach::Command(_)) {
+                return Err(format!(
+                    "{at}.secrets: only a url takes secrets; a command takes env"
+                ));
+            }
+            secrets.extend(secrets_of(value, at)?);
+        }
+        for (n, secret) in secrets.iter().enumerate() {
+            let same = |other: &Secret| {
+                other.place == secret.place && other.name.eq_ignore_ascii_case(&secret.name)
+            };
+            let authorization = |other: &Secret| {
+                other.place == Place::Header && other.name.eq_ignore_ascii_case("authorization")
+            };
+            if secrets[..n].iter().any(same)
+                || (secret.place == Place::Basic && secrets.iter().any(authorization))
+            {
+                return Err(format!(
+                    "{at}.secrets: {} is given twice (basic authentication is the Authorization \
+                     header)",
+                    secret.said()
+                ));
+            }
+        }
         if !env.is_empty() && matches!(reach, Reach::Url(_)) {
             return Err(format!(
-                "{at}.env: only a command takes env; a url takes headers"
+                "{at}.env: only a command takes env; a url takes secrets"
             ));
         }
         let mut only = BTreeMap::new();
@@ -356,7 +532,7 @@ impl Declaration {
             enabled,
             reach,
             env,
-            headers,
+            secrets,
             only,
             except,
             client_id,
@@ -381,8 +557,23 @@ impl Declaration {
         if !self.env.is_empty() {
             table["env"] = vault(&self.env);
         }
-        if !self.headers.is_empty() {
-            table["headers"] = vault(&self.headers);
+        let headers: BTreeMap<String, String> = self
+            .secrets
+            .iter()
+            .filter(|secret| secret.plain_header())
+            .map(|secret| (secret.name.clone(), secret.entry.clone()))
+            .collect();
+        if !headers.is_empty() {
+            table["headers"] = vault(&headers);
+        }
+        let others: Vec<Value> = self
+            .secrets
+            .iter()
+            .filter(|secret| !secret.plain_header())
+            .map(Secret::json)
+            .collect();
+        if !others.is_empty() {
+            table["secrets"] = json!(others);
         }
         if !self.only.is_empty() {
             table["only"] = json!(self.only);
@@ -407,8 +598,20 @@ impl Declaration {
             Reach::Command(words) => json!({"command": words}),
             Reach::Url(url) => json!({"url": url}),
         };
-        let mut trusted = json!({"reach": reach, "env": self.env, "headers": self.headers,
+        // The plain headers as `headers` always were: a connection pinned before the other places
+        // existed keeps its digest.
+        let json = self.json();
+        let headers: BTreeMap<&String, &String> = self
+            .secrets
+            .iter()
+            .filter(|secret| secret.plain_header())
+            .map(|secret| (&secret.name, &secret.entry))
+            .collect();
+        let mut trusted = json!({"reach": reach, "env": self.env, "headers": headers,
             "only": self.only});
+        if let Some(others) = json.get("secrets") {
+            trusted["secrets"] = others.clone();
+        }
         // Only when there are some: the digest of a connection without sites, pinned before
         // they existed, stays the one it was pinned for.
         if !self.sites.is_empty() {
@@ -423,7 +626,9 @@ impl Declaration {
 
     /// The vault entries it names.
     fn entries(&self) -> impl Iterator<Item = &String> {
-        self.env.values().chain(self.headers.values())
+        self.env
+            .values()
+            .chain(self.secrets.iter().map(|secret| &secret.entry))
     }
 }
 
@@ -457,7 +662,17 @@ fn checked_url(text: &str) -> std::result::Result<String, String> {
     let url = url::Url::parse(text).map_err(|error| format!("{text:?}: {error}"))?;
     if !url.username().is_empty() || url.password().is_some() {
         return Err(format!(
-            "{text:?}: holds a login: name a vault entry in headers instead"
+            "{text:?}: holds a login: name a vault entry in secrets instead"
+        ));
+    }
+    // Its name only: the value may be the secret.
+    if let Some((name, _)) = url.query_pairs().find(|(name, _)| {
+        let name = name.to_lowercase();
+        SECRET_PARAMETERS.iter().any(|part| name.contains(part))
+    }) {
+        return Err(format!(
+            "its query holds {name}, which looks like a secret: move it to \"Secrets of its \
+             requests\", a query parameter from a vault entry (secrets, in = \"query\")"
         ));
     }
     match url.scheme() {

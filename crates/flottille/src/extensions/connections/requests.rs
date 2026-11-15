@@ -22,7 +22,9 @@ const ACTIONS: [&str; 8] = ["list", "show", "add", "edit", "remove", "set", "on"
 const WRITES: [&str; 6] = ["add", "edit", "remove", "set", "on", "off"];
 /// What an agent may declare; the projects a connection leaves out, its OAuth client and its
 /// switch are the user's (the switch through `on` and `off`).
-const AGENT_KEYS: [&str; 7] = ["name", "about", "command", "url", "env", "headers", "only"];
+const AGENT_KEYS: [&str; 8] = [
+    "name", "about", "command", "url", "env", "headers", "secrets", "only",
+];
 
 /// Whether a call writes a connection: held for the user every time, in every mode.
 pub fn writes(tool: &str, args: &Value) -> bool {
@@ -117,7 +119,26 @@ fn fields(declaration: &Declaration) -> Vec<(&'static str, &'static str, String)
         }
         Reach::Url(url) => {
             fields.push(("url", "Its URL", url.clone()));
-            fields.push(("headers", "Its headers", entries(&declaration.headers)));
+            let secrets = match declaration.secrets.is_empty() {
+                true => "none".to_owned(),
+                false => declaration
+                    .secrets
+                    .iter()
+                    .map(|secret| {
+                        let prefix = match secret.prefix.is_empty() {
+                            true => String::new(),
+                            false => format!(" after {:?}", secret.prefix),
+                        };
+                        format!(
+                            "{}{prefix} from the vault entry {}",
+                            secret.said(),
+                            secret.entry
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            };
+            fields.push(("secrets", "Its secrets", secrets));
         }
     }
     let only = match declaration.only.is_empty() {
@@ -181,7 +202,23 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
             ));
         }
         let value = match (key.as_str(), value) {
-            ("env" | "headers" | "only", Value::Null) if editing => Value::Null,
+            ("env" | "headers" | "secrets" | "only", Value::Null) if editing => Value::Null,
+            ("secrets", Value::Array(lines)) => {
+                for (n, line) in lines.iter().enumerate() {
+                    let entry = line["entry"].as_str().unwrap_or_default();
+                    if !entries.iter().any(|known| known.name == entry) {
+                        // The value is not said back: it may be a secret written where a name goes.
+                        return Err(format!(
+                            "secrets[{n}].entry: names no vault entry: a secret is never written \
+                             here, only the name of an entry the vault list gives"
+                        ));
+                    }
+                }
+                value.clone()
+            }
+            ("secrets", _) => {
+                return Err("secrets: must be a list of {in, name, prefix, entry}".into());
+            }
             ("command", Value::String(text)) => json!(flottille_core::command::split_line(text)?),
             ("command", _) => {
                 return Err("command: one line, the program and its arguments, as a task's".into());
@@ -273,10 +310,11 @@ fn headers_checked(
     let kept = before.filter(|before| host_of_reach(before).as_deref() == Some(host.as_str()));
     let theirs = "an agent binds an entry only to a connection on the entry's own host (its url); \
                   the user can bind it in their own form, in Settings, Connections";
-    for (header, entry) in &after.headers {
-        if kept.is_some_and(|before| before.headers.get(header) == Some(entry)) {
+    for secret in &after.secrets {
+        if kept.is_some_and(|before| before.secrets.contains(secret)) {
             continue;
         }
+        let (said, entry) = (secret.said(), &secret.entry);
         let entry_host = entries
             .iter()
             .find(|known| &known.name == entry)
@@ -286,13 +324,13 @@ fn headers_checked(
             Some(entry_host) if entry_host == host => {}
             Some(entry_host) => {
                 return Err(format!(
-                    "headers.{header}: the vault entry {entry} is for {entry_host}, and this \
+                    "secrets: {said}: the vault entry {entry} is for {entry_host}, and this \
                      connection would send it to {host}: {theirs}"
                 ));
             }
             None => {
                 return Err(format!(
-                    "headers.{header}: the vault entry {entry} has no address (its url, \
+                    "secrets: {said}: the vault entry {entry} has no address (its url, \
                      https://), so nothing says it is for {host}, where this connection would \
                      send it: {theirs}"
                 ));
@@ -311,17 +349,27 @@ fn secrets(daemon: &Daemon, declaration: &Declaration) -> Value {
         .unwrap_or_default();
     let host = host_of_reach(declaration);
     let mut secrets = Vec::new();
-    for (key, named) in [("env", &declaration.env), ("headers", &declaration.headers)] {
-        for (name, entry) in named {
-            let entry_host = entries
-                .iter()
-                .find(|known| &known.name == entry)
-                .and_then(|known| known.url.as_deref())
-                .and_then(host_of);
-            let differs = host.is_none() || entry_host != host;
-            secrets.push(json!({"key": key, "name": name, "entry": entry,
-                "entry_host": entry_host, "host": host, "differs": differs}));
-        }
+    let lines = declaration
+        .env
+        .iter()
+        .map(|(name, entry)| ("env", name.clone(), entry))
+        .chain(declaration.secrets.iter().map(|secret| {
+            // A header's key is the one `headers` always had.
+            let key = match secret.place {
+                super::Place::Header => "headers",
+                place => place.word(),
+            };
+            (key, secret.name.clone(), &secret.entry)
+        }));
+    for (key, name, entry) in lines {
+        let entry_host = entries
+            .iter()
+            .find(|known| &known.name == entry)
+            .and_then(|known| known.url.as_deref())
+            .and_then(host_of);
+        let differs = host.is_none() || entry_host != host;
+        secrets.push(json!({"key": key, "name": name, "entry": entry,
+            "entry_host": entry_host, "host": host, "differs": differs}));
     }
     Value::Array(secrets)
 }
