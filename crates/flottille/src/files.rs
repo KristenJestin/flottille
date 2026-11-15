@@ -2343,7 +2343,7 @@ mod at_once {
             let old = threads.spawn(|| {
                 fs_read(
                     &scene.cx_in("a", Some("t1"), 0),
-                    json!({"path": "src/main.rs"}),
+                    json!({"path": "src/main.rs", "again": true}),
                 )
             });
             gate.wait();
