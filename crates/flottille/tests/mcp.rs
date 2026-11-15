@@ -1431,6 +1431,13 @@ fn daemon_stop_from_a_run_never_ends_a_stuck_daemon() {
             .unwrap();
     let hold = json!({"id": "hold", "method": "test.hold", "params": {"ms": 600_000}});
     std::io::Write::write_all(&mut held, format!("{hold}\n").as_bytes()).unwrap();
+    // Asked is not held: a client accepted before the runtime reads the hold is refused by the
+    // daemon, which still answers.
+    let log = user.path("state/flottille/daemon.log");
+    eventually("the daemon is held", || {
+        std::fs::read_to_string(&log)
+            .is_ok_and(|log| log.contains("test.hold: the runtime is held"))
+    });
     std::fs::write(folder.join("go"), "").unwrap();
 
     // Ended, the daemon takes the client with it, in its run's session, before it says a word.
