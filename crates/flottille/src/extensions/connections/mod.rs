@@ -237,41 +237,59 @@ impl Secret {
 }
 
 /// The names of a query parameter whose value is a secret, in words (`userToken`, `user_token`
-/// and `UserToken` are `["user", "token"]`), or run together (`usertoken`): a name that is one of
-/// them, whole, or ends with one of `SECRET_SUFFIXES`.
-const SECRET_PARAMETERS: [&[&str]; 12] = [
-    &["token"],
-    &["user", "token"],
-    &["id", "token"],
-    &["refresh", "token"],
+/// and `UserToken` are `["user", "token"]`), or run together (`usertoken`), whole. Beside those
+/// that end with one of `SECRET_ENDS`.
+const SECRET_PARAMETERS: [&[&str]; 5] = [
     &["session", "id"],
-    &["key"],
     &["auth"],
     &["authorization"],
-    &["sig"],
-    &["jwt"],
     &["bearer"],
     &["sid"],
 ];
 
-/// The ends of a name that say its value is a secret, whatever comes before (`x_api_key`,
-/// `client_secret`, `clientsecret`, `X-Amz-Security-Token`). Not `token` or `key` alone:
-/// `pageToken` and `project_key` are no secrets.
-const SECRET_SUFFIXES: [&[&str]; 14] = [
-    &["access", "token"],
-    &["auth", "token"],
-    &["api", "token"],
-    &["session", "token"],
-    &["security", "token"],
-    &["private", "token"],
-    &["api", "key"],
-    &["secret", "key"],
-    &["private", "key"],
-    &["access", "key"],
-    &["secret"],
-    &["password"],
-    &["passwd"],
-    &["signature"],
+/// The last words of a name that say its value is a secret, whatever comes before
+/// (`x_user_token`, `subscription-key`, `client_secret`), unless the words before are of
+/// `HARMLESS`.
+const SECRET_ENDS: [&str; 10] = [
+    "token",
+    "key",
+    "sig",
+    "jwt",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "signature",
+];
+
+/// The ends that also count at the end of a word run together (`clientsecret`, `xaccesstoken`,
+/// `secretkey`): not `key` nor the short ones alone, which end ordinary words (`monkey`).
+const RUN_TOGETHER_ENDS: [&str; 10] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "passphrase",
+    "signature",
+    "apikey",
+    "accesskey",
+    "secretkey",
+    "privatekey",
+];
+
+/// The words before a secret's end that make it none, run together: a page's or a cursor's
+/// position (`pageToken`, `next_page_token`, `cursor_key`), a sync's state, a project's key, an
+/// idempotency key.
+const HARMLESS: [&str; 8] = [
+    "page",
+    "next",
+    "nextpage",
+    "continuation",
+    "cursor",
+    "sync",
+    "project",
+    "idempotency",
 ];
 
 /// A parameter's name in lowercase words: split at `_`, `-`, `.` and where a capital follows a
@@ -300,19 +318,29 @@ fn words_of(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether a parameter named `name` would carry a secret.
+/// Whether a parameter named `name` would carry a secret: it ends with a secret's word, and what
+/// comes before is not `HARMLESS`; or it is one of `SECRET_PARAMETERS`.
 fn secret_parameter(name: &str) -> bool {
     let words = words_of(name);
-    let Some(last) = words.last() else {
+    let Some((last, before)) = words.split_last() else {
         return false;
+    };
+    let before = before.concat();
+    let ends_secret = |end: &str| {
+        let rest = match last == end {
+            true => Some(""),
+            false if RUN_TOGETHER_ENDS.contains(&end) => last.strip_suffix(end),
+            false => None,
+        };
+        rest.is_some_and(|rest| !HARMLESS.contains(&format!("{before}{rest}").as_str()))
     };
     SECRET_PARAMETERS
         .iter()
         .any(|whole| words == *whole || (words.len() == 1 && *last == whole.concat()))
-        || SECRET_SUFFIXES.iter().any(|end| {
-            (words.len() >= end.len() && words[words.len() - end.len()..] == **end)
-                || last.ends_with(&end.concat())
-        })
+        || SECRET_ENDS
+            .iter()
+            .chain(RUN_TOGETHER_ENDS.iter())
+            .any(|end| ends_secret(end))
 }
 
 /// Why a URL may not be reached as it is: a parameter of its query, or of its fragment
