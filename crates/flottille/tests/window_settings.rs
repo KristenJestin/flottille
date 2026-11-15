@@ -845,3 +845,117 @@ fn not_found_links_to_how_to_install(cx: &mut TestAppContext) {
     assert!(page.starts_with("https://"), "{page}");
     assert_eq!(*opened.lock().unwrap(), [page], "the system opens it");
 }
+
+/// What `extension.list` says of the automatic subscriptions.
+fn subscriptions_listed(user: &User) -> serde_json::Value {
+    user.call("extension.list", json!({})).unwrap()["extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "autosubscriptions")
+        .cloned()
+        .unwrap()
+}
+
+/// The subjects of the automatic subscriptions: the key of each, its label, its events and those
+/// on by default.
+const SUBJECTS: [(&str, &str, &[&str], &[&str]); 3] = [
+    (
+        "created_pull",
+        "A pull request the session opens",
+        &[
+            "checks", "review", "approved", "comment", "merged", "closed",
+        ],
+        &[
+            "checks", "review", "approved", "comment", "merged", "closed",
+        ],
+    ),
+    (
+        "branch_pull",
+        "The session's pull request opened another way",
+        &[
+            "checks", "review", "approved", "comment", "merged", "closed",
+        ],
+        &[
+            "checks", "review", "approved", "comment", "merged", "closed",
+        ],
+    ),
+    (
+        "ticket",
+        "The ticket the session works on",
+        &["commented", "status", "assigned", "closed"],
+        &[],
+    ),
+];
+
+#[gpui_kit::test]
+fn the_settings_page_has_the_subjects_with_their_events(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, cx);
+    tab(&shell, cx, "features");
+    until(&shell, cx, "the row is offered", |cx| {
+        present(cx, "features-autosubscriptions")
+    });
+    assert_eq!(
+        label(cx, "features-autosubscriptions").as_deref(),
+        Some("Automatic subscriptions")
+    );
+    settle(cx);
+    click(cx, "features-autosubscriptions");
+    until(&shell, cx, "its page is in", |cx| {
+        visible(cx, "autosubscriptions-switch")
+    });
+    until(&shell, cx, "its subjects are in", |cx| {
+        visible(cx, "autosubscriptions-setting-ticket-commented")
+    });
+    settle(cx);
+
+    // On by default: its switch, then a field per subject, a switch per event, on as by default.
+    assert_eq!(
+        label(cx, "autosubscriptions-switch-label").as_deref(),
+        Some("Subscribe sessions automatically")
+    );
+    let knob_right = |cx: &mut VisualTestContext, id: &str| {
+        let knob = cx.update(|window, _| window.find(format!("{id}-knob")).bounds());
+        let track = cx.update(|window, _| window.find(format!("{id}-track")).bounds());
+        knob.left() - track.left() > track.size.width / 3.
+    };
+    assert!(knob_right(cx, "autosubscriptions-switch"));
+    for (key, name, events, on) in SUBJECTS {
+        let id = format!("autosubscriptions-setting-{key}");
+        assert_eq!(label(cx, &format!("{id}-label")).as_deref(), Some(name));
+        for event in events {
+            let switch = format!("{id}-{event}");
+            assert!(visible(cx, &switch), "{switch}");
+            assert_eq!(knob_right(cx, &switch), on.contains(event), "{switch}");
+        }
+    }
+
+    // An event switched on is the daemon's; its switch slides.
+    cx.update(|window, cx| window.click("autosubscriptions-setting-ticket-commented", cx));
+    until(&shell, cx, "the ticket's events are kept", |_| {
+        subscriptions_listed(&user)["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["key"] == "ticket" && s["value"] == json!(["commented"]))
+    });
+    cx.executor().advance_clock(Duration::from_millis(16));
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the switch moves"
+    );
+    // The window takes the daemon's answer at a poll, then the knob slides as time passes.
+    until(&shell, cx, "the switch is on", |cx| {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        knob_right(cx, "autosubscriptions-setting-ticket-commented")
+    });
+    settle(cx);
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves at rest"
+    );
+}
