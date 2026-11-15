@@ -929,12 +929,14 @@ with the reason. No method answers a private key.
 
 - `remote.machines` answers `{"this": {"key", "fingerprint", "listening", "addresses": [{"address",
   "how"}]}, "machines": [{"name", "key", "fingerprint", "state", "since", "reason",
-  "addresses"}]}`: this machine's public key, the socket its link listens on, and its addresses,
+  "addresses"}]}`: this machine's public key, the socket its link listens on (`null` until
+  `[remote] listen` is set), and its addresses,
   `how` being `found` (the one it listens on, or its interfaces' when it listens on all of them) or
   `declared` (by hand, with the link's port when it gave none); then each machine it trusts, its
   `state` `online`, `offline` or `needs an update`, `since` when it is so (milliseconds since the
   Unix epoch), `reason` why it is not online (`server refused the link: …`, the sentence of
-  `docs/remote.md`, "The version"), or `null`, and `addresses` those it knows it at.
+  `docs/remote.md`, "The version"), or `null`, and `addresses` those it knows it at: given (by
+  the hub, by hand), then told by it.
 - `remote.address.add {address}` declares an address of this machine: a host name or an IP
   address, and its port when it is not the link's own (`100.64.0.7`, `server.example.net:7447`).
   It answers `this` as above, and is told at once to the machines linked to this one.

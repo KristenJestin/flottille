@@ -227,8 +227,8 @@ $ flottille update --channel alpha --branch feat/specs
 ### `flottille remote address list [--json]`
 
 With remote on (`docs/remote.md`, "Identity and keys"), the addresses another machine reaches this
-one at: the one its link listens on, `found` (its interfaces' when it listens on all of them), and
-those declared by hand, `declared`. Flottille finds no path by itself, and relays nothing: how two
+one at: the one its link listens on, `found` (its interfaces' when it listens on all of them; none
+until `[remote] listen` is set), and those declared by hand, `declared`. Flottille finds no path by itself, and relays nothing: how two
 machines reach each other (a LAN, a VPN, a public address, a tunnel) is the user's to arrange.
 `remote.machines` (`docs/protocol.md`).
 

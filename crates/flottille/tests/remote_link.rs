@@ -25,11 +25,19 @@ impl Machine {
     }
 
     fn with(user: User, listen: &str) -> Machine {
-        std::fs::write(
-            user.path("config/flottille/daemon.toml"),
-            format!("[remote]\non = true\nlisten = \"{listen}\"\n"),
+        Machine::configured(
+            user,
+            &format!("[remote]\non = true\nlisten = \"{listen}\"\n"),
         )
-        .unwrap();
+    }
+
+    /// A machine with remote on and no address to listen on: it only dials.
+    fn dialling_only() -> Machine {
+        Machine::configured(User::new(), "[remote]\non = true\n")
+    }
+
+    fn configured(user: User, daemon_toml: &str) -> Machine {
+        std::fs::write(user.path("config/flottille/daemon.toml"), daemon_toml).unwrap();
         // Started at once: its key and its key folder are made.
         user.status();
         Machine { user }
@@ -137,21 +145,30 @@ impl Machine {
         }
     }
 
-    fn known_addresses(&self, key: &str) -> Vec<String> {
+    /// What this machine keeps of `key` in its file.
+    fn peer(&self, key: &str) -> Value {
         self.peers()["machines"]
             .as_array()
             .unwrap()
             .iter()
             .find(|machine| machine["key"] == key)
-            .map(|machine| {
-                machine["addresses"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|address| address.as_str().unwrap().to_owned())
-                    .collect()
-            })
-            .unwrap_or_default()
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
+    /// The addresses it knows for `key`: those it was given, then those `key` told it.
+    fn known_addresses(&self, key: &str) -> Vec<String> {
+        let peer = self.peer(key);
+        let mut known = Vec::new();
+        for field in ["addresses", "told"] {
+            for address in peer[field].as_array().into_iter().flatten() {
+                let address = address.as_str().unwrap().to_owned();
+                if !known.contains(&address) {
+                    known.push(address);
+                }
+            }
+        }
+        known
     }
 
     fn log(&self) -> String {
@@ -170,6 +187,35 @@ fn strings(value: &Value) -> Vec<String> {
         .iter()
         .map(|item| item.as_str().unwrap().to_owned())
         .collect()
+}
+
+/// The UDP sockets the user's daemon holds open, read from `/proc`.
+fn udp_sockets(user: &User) -> usize {
+    let pid = user.status()["pid"].as_u64().unwrap();
+    let held: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .unwrap()
+        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+        .filter_map(|target| {
+            let target = target.to_string_lossy().into_owned();
+            Some(
+                target
+                    .strip_prefix("socket:[")?
+                    .strip_suffix(']')?
+                    .to_owned(),
+            )
+        })
+        .collect();
+    ["udp", "udp6"]
+        .into_iter()
+        .filter_map(|table| std::fs::read_to_string(format!("/proc/{pid}/net/{table}")).ok())
+        .flat_map(|text| {
+            text.lines()
+                .skip(1)
+                .filter_map(|line| line.split_whitespace().nth(9).map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .filter(|inode| held.contains(inode))
+        .count()
 }
 
 /// A port nobody uses now on loopback: the system's choice, let go at once.
@@ -308,8 +354,9 @@ fn a_machine_tells_the_other_its_new_addresses() {
     let laptop = Machine::with(User::new(), &format!("127.0.0.1:{}", free_port()));
     let server = Machine::new();
     let (laptop_key, server_key) = (laptop.key(), server.key());
+    let given = server.addresses("found");
     // Only the laptop is given an address: the server learns the laptop's from the laptop.
-    laptop.trust("server", &server, &server.addresses("found"));
+    laptop.trust("server", &server, &given);
     server.trust("laptop", &laptop, &[]);
     laptop.wait_for("server", "online");
     server.wait_for("laptop", "online");
@@ -338,6 +385,13 @@ fn a_machine_tells_the_other_its_new_addresses() {
         laptop
             .known_addresses(&server_key)
             .contains(&"192.0.2.7:4000".to_owned())
+    );
+    // Told addresses add to those the laptop was given, which stay as they were.
+    let kept = laptop.peer(&server_key);
+    assert_eq!(strings(&kept["addresses"]), given, "{kept}");
+    assert!(
+        strings(&kept["told"]).contains(&"192.0.2.7:4000".to_owned()),
+        "{kept}"
     );
     // Removed, it is told too.
     assert!(
@@ -403,4 +457,130 @@ fn remote_off_has_no_link() {
     assert_eq!(code, "refused");
     assert!(message.contains("remote is off"), "{message}");
     assert!(!user.path("state/flottille/remote").exists());
+    assert_eq!(udp_sockets(&user), 0);
+}
+
+#[test]
+fn no_listener_until_an_address_is_set() {
+    let laptop = Machine::dialling_only();
+    // Remote on, no `[remote] listen`: nothing listens, not even a socket is open.
+    assert_eq!(udp_sockets(&laptop.user), 0);
+    assert_eq!(laptop.this()["listening"], Value::Null);
+    assert!(laptop.addresses("found").is_empty());
+
+    // It still links to a machine that listens, which reaches it over that link.
+    let server = Machine::new();
+    laptop.trust("server", &server, &server.addresses("found"));
+    server.trust("laptop", &laptop, &[]);
+    laptop.wait_for("server", "online");
+    server.wait_for("laptop", "online");
+    assert_eq!(laptop.this()["listening"], Value::Null);
+}
+
+#[test]
+fn a_half_written_peers_file_keeps_the_links() {
+    let (laptop, server) = (Machine::new(), Machine::new());
+    laptop.trust("server", &server, &server.addresses("found"));
+    server.trust("laptop", &laptop, &laptop.addresses("found"));
+    laptop.wait_for("server", "online");
+    server.wait_for("laptop", "online");
+
+    // Caught half written (a hand edit, a writer that stopped): the last file read is kept.
+    std::fs::write(laptop.peers_file(), r#"{"machines": [{"name": "ser"#).unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    let seen = laptop
+        .machine("server")
+        .expect("the server is still trusted");
+    assert_eq!(seen["state"], "online", "{seen}");
+    assert_eq!(server.machine("laptop").unwrap()["state"], "online");
+    // Said once, not at every round.
+    let log = laptop.log();
+    assert_eq!(log.matches("peers.json is not read").count(), 1, "{log}");
+    assert!(!log.contains("the link to server ended"), "{log}");
+}
+
+#[test]
+fn two_machines_dialing_at_once_keep_one_link() {
+    // Each takes a link it is dialled on only after it dialled the other: two links, one each
+    // way, on both sides.
+    let late = || User::new().with_env("FLOTTILLE_TEST_LINK_ACCEPT_DELAY_MS", "2500");
+    let laptop = Machine::with(late(), "127.0.0.1:0");
+    let server = Machine::with(late(), "127.0.0.1:0");
+    laptop.trust("server", &server, &server.addresses("found"));
+    server.trust("laptop", &laptop, &laptop.addresses("found"));
+    laptop.wait_for("server", "online");
+    server.wait_for("laptop", "online");
+
+    // Both keep the same one, by a rule both compute: the link the lower key dialled.
+    let lower = if laptop.key() < server.key() {
+        laptop.fingerprint()
+    } else {
+        server.fingerprint()
+    };
+    let kept = format!("kept the link dialled by {lower}");
+    let deadline = Instant::now() + WAIT;
+    while !(laptop.log().contains(&kept) && server.log().contains(&kept)) {
+        assert!(
+            Instant::now() < deadline,
+            "{kept}:\n{}\n{}",
+            laptop.log(),
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(laptop.machine("server").unwrap()["state"], "online");
+    assert_eq!(server.machine("laptop").unwrap()["state"], "online");
+    for log in [laptop.log(), server.log()] {
+        assert!(!log.contains("ended"), "{log}");
+    }
+}
+
+#[test]
+fn a_client_link_s_requests_are_refused_until_they_are_served() {
+    use flottille_link::{Endpoint, Hello, MachineKey, Message, PublicKey, Traffic};
+    let server = Machine::new();
+    let addresses: Vec<std::net::SocketAddr> = server
+        .addresses("found")
+        .iter()
+        .map(|address| address.parse().unwrap())
+        .collect();
+    let server_key: PublicKey = serde_json::from_value(json!(server.key())).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        // A client of another machine, whose key the server trusts.
+        let key = MachineKey::load_or_make(&folder.path().join("remote")).unwrap();
+        let client = Endpoint::bind(&key, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let client_key = serde_json::to_value(client.key()).unwrap();
+        server.trust_key("laptop", client_key.as_str().unwrap(), &[]);
+
+        let link = tokio::time::timeout(
+            WAIT,
+            client.connect(
+                server_key,
+                &addresses,
+                Traffic::Client,
+                &Hello::ours("0.4.1"),
+                "server",
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let refused = link
+            .send(&Message::Client(
+                json!({"id": 1, "method": "daemon.status"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "server refused: requests from another machine's clients are not served yet"
+        );
+        client.close().await;
+    });
 }

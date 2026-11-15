@@ -165,8 +165,8 @@ library that gives it, chosen in #811, is hidden in `flottille-link`:
   the key it was dialed for is refused;
 - **encrypted end to end and authenticated by the devices' keys**, on both sides, with nothing
   between the two devices that can read or change it;
-- **direct to a known address**: a device listens on the addresses it is configured with (by
-  default every interface, one port) and a peer dials an address it knows for that key, told by the
+- **direct to a known address**: a device listens on the address it is configured with (none
+  until the user sets one: it then only dials) and a peer dials an address it knows for that key, told by the
   hub or given by the user ("Paths"); nothing else is tried: no relay, no NAT traversal, no hole
   punching, no port mapping (UPnP, NAT-PMP, PCP), no address discovery service, and no server of a
   third party in the path;
@@ -196,8 +196,9 @@ version"). The protocol names are `flottille-machine` and `flottille-client`; a 
 other kind is refused by the receiver, the link going on (`a machine's message is not taken on a
 client link`).
 
-**Paths.** A device listens on the addresses it is configured with, in the daemon's remote
-configuration (by default all its interfaces, on one port). It tells the hub those addresses
+**Paths.** A device listens on the address it is configured with, in the daemon's remote
+configuration (`[remote] listen`; none until the user sets one, and a device that listens nowhere
+still dials the others). It tells the hub those addresses
 whenever they change, and the hub tells the other members; the user may also give an address by
 hand (`flottille remote address add 100.64.0.7`, Settings, Machines): a tailnet address, a DNS name,
 a forwarded port, a public address. Members linked to each other tell each other too, so that two
@@ -219,6 +220,8 @@ link.
   ```toml
   [remote]
   on = true
+  # Where other devices reach this one: nowhere until it is set. An example, not a default.
+  # listen = "0.0.0.0:7447"
   ```
 
   Off, nothing of it is made or read.
@@ -712,15 +715,26 @@ on a real phone, by hand, and reported.
   the agent's tool description lists no machine.
 - A notification waits 30 seconds and is dropped when a client had an input in the last 2 minutes.
 
-- The link listens on every interface, port 7447, when `[remote] listen` says nothing; an address
-  declared without a port takes the link's. The machines a daemon trusts, and the addresses it
-  knows them at, are in `remote/peers.json` (`{"machines": [{"name", "key", "addresses"}]}`),
+- The link listens nowhere until the user sets `[remote] listen` (an IP address and a port,
+  `0.0.0.0:7447` in the examples): how a machine is reached is the user's business, and a laptop
+  with remote on does not open a port on every network it joins. Listening nowhere, it opens no
+  socket until it dials, and links to every machine that listens. Reversible: listening on
+  `0.0.0.0:7447` by default again is one line. An address declared without a port takes the link's,
+  7447 when it listens nowhere. A link that came in is asked to prove its address (a QUIC retry),
+  takes at most 5 seconds to finish its TLS, 16 at once, each apart, so that one that stalls holds
+  no other back. The machines a daemon trusts, and the addresses it knows them at, are in
+  `remote/peers.json` (`{"machines": [{"name", "key", "addresses", "told"}]}`),
   which the hub will keep (#820) and a test writes until then; the addresses declared by hand in
   `remote/addresses.json`. Both are read at every round (each second): the daemon dials each
   machine it trusts and is not linked to, waiting longer after each failure (5 seconds at most).
+  A file caught half written, or broken by hand, leaves the last one read whole in use (said once
+  in the log), and a told address is not written over it.
+- Two machines that dial each other at once each hold two links: both keep the one the machine of
+  the lower key dialled, and close the other (`linked already`).
 - Two machines linked tell each other their addresses at once, then whenever they change (a
-  machine message `{"machine": {"addresses": […]}}`); the one told keeps them in `peers.json` in
-  place of those it had, 64 at most, so that the two link again without the hub.
+  machine message `{"machine": {"addresses": […]}}`); the one told keeps them in `peers.json`,
+  under `told`, in place of those told before, 64 at most, beside the `addresses` it was given
+  (by the hub, by hand), which it never changes: the two link again without the hub.
 - The version handshake is the first stream of a link: the dialler sends its hello, the other
   answers its own, and each chooses or refuses by itself; the dialler closes a refused link. A
   link that hears nothing for 15 seconds is lost (each side says something every 5).

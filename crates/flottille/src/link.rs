@@ -41,11 +41,13 @@ const LONGEST_WAIT: Duration = Duration::from_secs(5);
 const MOST_ADDRESSES: usize = 64;
 /// What a machine this one does not trust is told.
 const NOT_TRUSTED: &str = "refused: this machine's key is not one of the user's";
+/// What closes the second link two machines that dialled each other at once made.
+const LINKED_ALREADY: &str = "linked already";
 /// What a client's request over a link is answered, until they are served (#813).
 const NOT_SERVED: &str = "requests from another machine's clients are not served yet";
 
 /// What `remote/peers.json` holds.
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Peers {
     #[serde(default)]
     machines: Vec<Peer>,
@@ -55,8 +57,32 @@ struct Peers {
 struct Peer {
     name: String,
     key: PublicKey,
+    /// The addresses it was given, by the hub or by hand: a machine never changes them.
     #[serde(default)]
     addresses: Vec<String>,
+    /// The addresses the machine itself told, beside them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    told: Vec<String>,
+}
+
+impl Peer {
+    /// Every address known for it: those it was given, then those it told.
+    fn known(&self) -> Vec<String> {
+        let mut known = self.addresses.clone();
+        for address in &self.told {
+            if !known.contains(address) {
+                known.push(address.clone());
+            }
+        }
+        known
+    }
+}
+
+/// The peers' file as last read whole: one caught half written, or broken by hand, leaves it as
+/// it was, and is said once.
+struct Kept {
+    last: Peers,
+    said: bool,
 }
 
 /// What `remote/addresses.json` holds.
@@ -72,7 +98,8 @@ struct Seen {
     /// Since when, in milliseconds since the Unix epoch.
     since: u64,
     reason: Option<String>,
-    link: Option<(u64, Link)>,
+    /// The link, its generation, and whether this machine dialled it.
+    link: Option<(u64, Link, bool)>,
     dialling: bool,
     next_try: Instant,
     wait: Duration,
@@ -105,6 +132,7 @@ pub struct Remote {
     endpoint: Endpoint,
     folder: PathBuf,
     hello: Hello,
+    peers: Mutex<Kept>,
     seen: Mutex<HashMap<[u8; 32], Seen>>,
     /// The addresses last told to the other machines.
     told: Mutex<Vec<String>>,
@@ -133,6 +161,10 @@ pub fn start(
         endpoint,
         folder: crate::remote::folder(paths),
         hello: hello(),
+        peers: Mutex::new(Kept {
+            last: Peers::default(),
+            said: false,
+        }),
         seen: Mutex::new(HashMap::new()),
         told: Mutex::new(Vec::new()),
         links: Default::default(),
@@ -163,12 +195,31 @@ impl Remote {
         self.endpoint.close().await;
     }
 
+    /// The machines this one trusts: the file as last read whole.
     fn peers(&self) -> Peers {
-        read_json(&self.folder.join(PEERS_FILE))
+        let file = self.folder.join(PEERS_FILE);
+        let mut kept = self.peers.lock().unwrap();
+        match read_json::<Peers>(&file) {
+            Ok(peers) => {
+                kept.said = false;
+                kept.last = peers.clone();
+                peers
+            }
+            Err(error) => {
+                if !kept.said {
+                    eprintln!(
+                        "flottille daemon: {} is not read, the last one read is kept: {error}",
+                        file.display()
+                    );
+                    kept.said = true;
+                }
+                kept.last.clone()
+            }
+        }
     }
 
     fn declared(&self) -> Declared {
-        read_json(&self.folder.join(ADDRESSES_FILE))
+        read_json(&self.folder.join(ADDRESSES_FILE)).unwrap_or_default()
     }
 
     /// This machine's addresses: those it listens on, then those declared by hand, which take
@@ -220,15 +271,17 @@ impl Remote {
             .lock()
             .unwrap()
             .values()
-            .filter_map(|seen| seen.link.as_ref().map(|(_, link)| link.clone()))
+            .filter_map(|seen| seen.link.as_ref().map(|(_, link, _)| link.clone()))
             .collect();
         for link in links {
             tokio::spawn(tell(link, now.clone()));
         }
     }
 
-    /// A link made, either way: kept, told this machine's addresses, and served.
-    fn linked(self: &Arc<Self>, link: Link, name: String) {
+    /// A link made, `dialled` by this machine or by the other: kept, told this machine's
+    /// addresses, and served. When the two dialled each other at once, each holds two links: both
+    /// keep the one the machine of the lower key dialled, and close the other.
+    fn linked(self: &Arc<Self>, link: Link, name: String, dialled: bool) {
         let generation = self
             .links
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -236,8 +289,32 @@ impl Remote {
         {
             let mut seen = self.seen.lock().unwrap();
             let seen = seen.entry(key).or_insert_with(Seen::new);
+            if let Some((_, old, old_dialled)) = &seen.link
+                && *old_dialled != dialled
+            {
+                let ours_lower = self.endpoint.key().as_bytes() < link.peer().as_bytes();
+                // The lower key's link is the one this side dialled when its key is the lower.
+                let keep_new = dialled == ours_lower;
+                let dialler = if ours_lower {
+                    self.endpoint.key()
+                } else {
+                    link.peer()
+                };
+                eprintln!(
+                    "flottille daemon: linked to {name} twice; kept the link dialled by {}",
+                    dialler.fingerprint()
+                );
+                if !keep_new {
+                    link.close(LINKED_ALREADY);
+                    return;
+                }
+                old.close(LINKED_ALREADY);
+            } else if let Some((_, old, _)) = &seen.link {
+                // A link of the same way again: the old one is gone and not noticed yet.
+                old.close(LINKED_ALREADY);
+            }
             seen.set(PeerState::Online, None);
-            seen.link = Some((generation, link.clone()));
+            seen.link = Some((generation, link.clone(), dialled));
             seen.wait = ROUND;
         }
         eprintln!(
@@ -262,8 +339,9 @@ impl Remote {
         seen.wait = (seen.wait * 2).min(LONGEST_WAIT);
     }
 
-    /// The addresses another machine told: kept for it in the peers' file, so that the two can
-    /// link again without the hub.
+    /// The addresses another machine told: kept for it in the peers' file, beside those it was
+    /// given, so that the two can link again without the hub. A file not read whole is not
+    /// written over.
     fn learn(&self, key: &PublicKey, addresses: &[String]) {
         let addresses: Vec<String> = addresses
             .iter()
@@ -271,14 +349,16 @@ impl Remote {
             .map(|address| address.to_string())
             .take(MOST_ADDRESSES)
             .collect();
-        let mut peers = self.peers();
+        let Ok(mut peers) = read_json::<Peers>(&self.folder.join(PEERS_FILE)) else {
+            return;
+        };
         let Some(peer) = peers.machines.iter_mut().find(|peer| peer.key == *key) else {
             return;
         };
-        if peer.addresses == addresses {
+        if peer.told == addresses {
             return;
         }
-        peer.addresses = addresses;
+        peer.told = addresses;
         let name = peer.name.clone();
         if let Err(error) = write_json(&self.folder.join(PEERS_FILE), &peers) {
             eprintln!("flottille daemon: the addresses {name} told were not kept: {error}");
@@ -310,7 +390,7 @@ impl Remote {
                     "state": seen.state.to_string(),
                     "since": seen.since,
                     "reason": seen.reason,
-                    "addresses": peer.addresses,
+                    "addresses": peer.known(),
                 })
             })
             .collect();
@@ -327,6 +407,12 @@ async fn tell(link: Link, addresses: Vec<String>) {
 
 /// The machines that dial this one: kept when trusted, refused otherwise.
 async fn accept(remote: Arc<Remote>) {
+    // A test makes both machines take a link they are dialled on late, so that they dial each
+    // other at once.
+    let late = std::env::var("FLOTTILLE_TEST_LINK_ACCEPT_DELAY_MS")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .map(Duration::from_millis);
     while let Some(accepting) = remote.endpoint.accept().await {
         let key = accepting.peer();
         let Some(peer) = remote
@@ -346,7 +432,12 @@ async fn accept(remote: Arc<Remote>) {
         tokio::spawn(async move {
             let traffic = accepting.traffic();
             match accepting.handshake(&remote.hello, &peer.name).await {
-                Ok(link) if traffic == Traffic::Machine => remote.linked(link, peer.name),
+                Ok(link) if traffic == Traffic::Machine => {
+                    if let Some(late) = late {
+                        tokio::time::sleep(late).await;
+                    }
+                    remote.linked(link, peer.name, false)
+                }
                 Ok(link) => serve_clients(link).await,
                 Err(error) => remote.failed(*key.as_bytes(), &peer.name, &error),
             }
@@ -368,7 +459,10 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
     let why = link.closed().await;
     let mut seen = remote.seen.lock().unwrap();
     if let Some(seen) = seen.get_mut(link.peer().as_bytes())
-        && seen.link.as_ref().is_some_and(|(at, _)| *at == generation)
+        && seen
+            .link
+            .as_ref()
+            .is_some_and(|(at, _, _)| *at == generation)
     {
         eprintln!("flottille daemon: the link to {name} ended: {why}");
         seen.link = None;
@@ -401,7 +495,7 @@ async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bo
             // A machine no longer trusted is let go.
             seen.retain(|key, seen| {
                 let trusted = peers.iter().any(|peer| peer.key.as_bytes() == key);
-                if !trusted && let Some((_, link)) = &seen.link {
+                if !trusted && let Some((_, link, _)) = &seen.link {
                     link.close(NOT_TRUSTED);
                 }
                 trusted
@@ -422,7 +516,7 @@ async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bo
 
 async fn dial_one(remote: Arc<Remote>, peer: Peer) {
     let mut sockets: Vec<SocketAddr> = Vec::new();
-    for text in &peer.addresses {
+    for text in &peer.known() {
         if let Ok(address) = Address::parse(text) {
             // An address told always has its port; one the user gave without uses the default.
             for socket in address.resolve(crate::remote::PORT).await {
@@ -445,35 +539,24 @@ async fn dial_one(remote: Arc<Remote>, peer: Peer) {
         .await;
     match made {
         Ok(link) => {
-            // Linked meanwhile by the other side: one link is enough.
-            let already = remote
-                .seen
-                .lock()
-                .unwrap()
-                .get(&key)
-                .is_some_and(|seen| seen.link.is_some());
             if let Some(seen) = remote.seen.lock().unwrap().get_mut(&key) {
                 seen.dialling = false;
             }
-            if already {
-                link.close("linked already");
-            } else {
-                remote.linked(link, peer.name);
-            }
+            remote.linked(link, peer.name, true);
         }
         Err(error) => remote.failed(key, &peer.name, &error),
     }
 }
 
-/// What a JSON file of the key folder holds: nothing when it is missing or unreadable.
-fn read_json<T: Default + for<'de> Deserialize<'de>>(file: &Path) -> T {
-    let Ok(text) = std::fs::read_to_string(file) else {
-        return T::default();
+/// What a JSON file of the key folder holds: nothing when it is missing; why, when it cannot be
+/// read or is not what it should be.
+fn read_json<T: Default + for<'de> Deserialize<'de>>(file: &Path) -> Result<T, String> {
+    let text = match std::fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(error) => return Err(error.to_string()),
     };
-    serde_json::from_str(&text).unwrap_or_else(|error| {
-        eprintln!("flottille daemon: {} is not read: {error}", file.display());
-        T::default()
-    })
+    serde_json::from_str(&text).map_err(|error| error.to_string())
 }
 
 /// Writes a JSON file of the key folder whole: a temporary file, the user's only, renamed into
@@ -504,7 +587,12 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
             let address = Address::parse(text)
                 .map_err(|why| Failure::new(flottille_protocol::code::INVALID_PARAMS, why))?;
             let file = remote.folder.join(ADDRESSES_FILE);
-            let mut declared: Declared = read_json(&file);
+            let mut declared: Declared = read_json(&file).map_err(|error| {
+                Failure::new(
+                    flottille_protocol::code::UNAVAILABLE,
+                    format!("{} is not read: {error}", file.display()),
+                )
+            })?;
             let at = declared
                 .addresses
                 .iter()
@@ -565,7 +653,7 @@ mod tests {
             format!(r#"{{"machines": [{{"name": "server", "key": "{key}"}}]}}"#),
         )
         .unwrap();
-        let peers: Peers = read_json(&file);
+        let peers: Peers = read_json(&file).unwrap();
         assert_eq!(peers.machines.len(), 1);
         assert_eq!(peers.machines[0].name, "server");
         assert!(peers.machines[0].addresses.is_empty());
@@ -575,7 +663,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-        let again: Peers = read_json(&file);
+        let again: Peers = read_json(&file).unwrap();
         assert_eq!(again.machines[0].key, peers.machines[0].key);
     }
 
@@ -583,11 +671,11 @@ mod tests {
     fn the_link_reads_nothing_from_a_file_that_is_not_its() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(PEERS_FILE);
-        assert!(read_json::<Peers>(&file).machines.is_empty());
+        assert!(read_json::<Peers>(&file).unwrap().machines.is_empty());
         std::fs::write(&file, "not json").unwrap();
-        assert!(read_json::<Peers>(&file).machines.is_empty());
+        assert!(read_json::<Peers>(&file).is_err());
         // A key that is not one is refused with the whole file.
         std::fs::write(&file, r#"{"machines": [{"name": "server", "key": "00"}]}"#).unwrap();
-        assert!(read_json::<Peers>(&file).machines.is_empty());
+        assert!(read_json::<Peers>(&file).is_err());
     }
 }
