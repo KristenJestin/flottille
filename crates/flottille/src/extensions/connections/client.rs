@@ -4,9 +4,10 @@
 //! declares no capability: a request for sampling, elicitation or roots is answered with an
 //! error, and the server is offered nothing but its tools.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsString;
-use std::process::Stdio;
+use std::os::unix::process::ExitStatusExt;
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -17,7 +18,9 @@ use rmcp::model::{
     ElicitRequestParams, ElicitResult, ErrorCode, Implementation, ListRootsResult,
     PaginatedRequestParams,
 };
-use rmcp::service::{NotificationContext, Peer, RequestContext, RunningService};
+use rmcp::service::{
+    ClientInitializeError, NotificationContext, Peer, RequestContext, RunningService,
+};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::async_rw::AsyncRwTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -379,6 +382,41 @@ pub(super) async fn secrets(
     Ok(read)
 }
 
+/// The lines of its error output a server that stopped during its start is asked about.
+const ERROR_LINES: usize = 3;
+
+/// What happened to a server cut during its start, in the words of whoever ended it: how its
+/// process ended (its exit code or the signal that killed it; alive, when it only closed its
+/// streams or did not answer), then the last lines of its error output, as it wrote them: masked
+/// and cut here, a line at a time, so that no secret is cut in two.
+fn cut_during_start(
+    status: Option<ExitStatus>,
+    error: Option<ClientInitializeError>,
+    last: &[String],
+) -> String {
+    let what = match (status, error) {
+        (Some(status), _) => match (status.code(), status.signal()) {
+            (Some(code), _) => format!("the server exited with {code}"),
+            (None, Some(signal)) => format!("the server was killed by signal {signal}"),
+            (None, None) => "the server ended".to_owned(),
+        },
+        (None, None) => "it did not answer within 30 seconds".to_owned(),
+        (None, Some(error)) => match error {
+            ClientInitializeError::ConnectionClosed(_)
+            | ClientInitializeError::TransportError { .. } => {
+                "the server closed its streams but is still running".to_owned()
+            }
+            other => other.to_string(),
+        },
+    };
+    let masked = flottille_core::secrets::mask(&last.join("\n"), &std::env::vars_os().collect());
+    let lines: Vec<String> = masked.lines().map(super::short).collect();
+    match lines.is_empty() {
+        true => what,
+        false => format!("{what}: {}", lines.join(" | ")),
+    }
+}
+
 /// Starts the server as declared, with the options of the adapter that applies to it, and reads
 /// what it announces; why it could not, in its own words when it said them, neither masked nor
 /// cut. The adapter is known only once the server said what it is: it is taken from the pin, and
@@ -456,20 +494,21 @@ async fn start_with(
             else {
                 return Err("its streams could not be opened".into());
             };
-            // The first line of its error output says why it failed, when it does.
-            let first = Arc::new(Mutex::new(None::<String>));
-            let kept = first.clone();
-            tokio::spawn(async move {
+            // The last lines of its error output say why it stopped, when it does.
+            let last = Arc::new(Mutex::new(VecDeque::<String>::new()));
+            let kept = last.clone();
+            let reading = tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let mut first = kept.lock().unwrap();
-                    if first.is_none() && !line.trim().is_empty() {
-                        *first = Some(line);
+                    if line.trim().is_empty() {
+                        continue;
                     }
+                    let mut last = kept.lock().unwrap();
+                    if last.len() == ERROR_LINES {
+                        last.pop_front();
+                    }
+                    last.push_back(line);
                 }
-            });
-            tokio::spawn(async move {
-                let _ = child.wait().await;
             });
             // rmcp drops a line past its own limit and the call waits for nothing: the reader fails
             // first, at the limit, and rmcp's is left a little above it.
@@ -481,20 +520,29 @@ async fn start_with(
             )
             .await;
             match served {
-                Ok(Ok(service)) => (service, leader),
+                Ok(Ok(service)) => {
+                    tokio::spawn(async move {
+                        let _ = child.wait().await;
+                    });
+                    (service, leader)
+                }
                 failed => {
                     tokio::time::sleep(Duration::from_millis(200)).await;
+                    // Read before the session is ended: a status after that is our own kill's.
+                    let status = child.try_wait().ok().flatten();
                     if let Some(leader) = leader {
                         crate::children::end_session(leader).await;
                     }
-                    let said = first.lock().unwrap().clone();
-                    let why = match (said, failed) {
-                        (Some(line), _) => line,
-                        (None, Err(_)) => "it did not answer within 30 seconds".into(),
-                        (None, Ok(Err(error))) => error.to_string(),
-                        (None, Ok(Ok(_))) => unreachable!("matched above"),
+                    // The pipe is closed once the session is gone: what it wrote is all there.
+                    let _ = tokio::time::timeout(Duration::from_secs(1), reading).await;
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    let last: Vec<String> = last.lock().unwrap().iter().cloned().collect();
+                    let error = match failed {
+                        Ok(Err(error)) => Some(error),
+                        _ => None,
                     };
-                    return Err(why);
+                    return Err(cut_during_start(status, error, &last));
                 }
             }
         }
@@ -816,7 +864,7 @@ pub async fn stop_all(daemon: &Arc<Daemon>) {
 fn not_started(why: &str, mask: impl FnOnce(&str) -> String) -> String {
     format!(
         "the connection could not start: {}",
-        super::short(&mask(why))
+        super::short_to(&mask(why), super::START_CHARS)
     )
 }
 
