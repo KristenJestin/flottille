@@ -421,8 +421,12 @@ review) subscribes to it instead of reading again and again. Four parts, each it
 - **A subscription** is (agent, source, target, the events chosen, whose events count, a
   deadline when the agent gave one), stored, so that it survives a restart of the daemon; nothing that happened meanwhile
   is lost, since the next round compares with what the store kept
-  (`crates/flottille/src/subscriptions.rs`). The agent subscribes itself (`forge` `subscribe`,
-  `tickets` `subscribe`, `wake`, `docs/tools.md`); nothing subscribes it.
+  (`crates/flottille/src/subscriptions.rs`). What subscribes an agent is the agent itself
+  (`forge` `subscribe`, `tickets` `subscribe`, `wake`, `docs/tools.md`), or, for a session, the
+  automatic subscriptions the user set in Settings and per project (`docs/extensions.md`,
+  "Automatic subscriptions"): a pull request it opens, its own opened another way, the ticket it
+  works on, each with the events chosen, from people only, said where it starts; a `subscribe` of
+  its own replaces one. Nothing else subscribes it, and never a child nor an extension's agent.
 - **Until the target ends.** Each read that holds events the subscription waits for is
   delivered, every such event of that read in one delivery, and the subscription goes on: the
   agent subscribes once, and never renews it nor adds a timed wake "as a safety net". Since it
@@ -1144,7 +1148,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its tickets and its open questions, with "New spec"; a spec's page shows the spec, its
   questions each answered in one click, Ready and Back to draft, and the sessions that worked on
   it (`docs/extensions.md`, "Specs");
-  the project's Settings, in five tabs (`reference/gpui.md`, rule 13), opening on the first.
+  the project's Settings, in six tabs (`reference/gpui.md`, rule 13), opening on the first.
   **Repositories** holds its **Repositories** (a count; "The git repositories of the project. Each
   workspace gets its own copy of each.", or for a project of one, "The project folder is the
   repository."): each a row with **Starts from** (`develop, then main`), **Remote** (`origin ·
@@ -1183,7 +1187,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   (`projects.md`). **Features** holds the same list as Settings', of the features that touch a
   project (Specs, Review, later the handbook): each row opens its page, with the project's switch
   and the values a project may set, each offering As in Settings first (`reference/gpui.md`, rule
-  14); a feature off in Settings is a faded row whose line, Off in Settings, is a link. A field saved
+  14); a feature off in Settings is a faded row whose line, Off in Settings, is a link. **Vault**
+  (the last of the six, Usage later) lists the entries the project sees, its own first, then every
+  project's marked "Every project", each the row of Settings, Vault (its name, its project, what
+  it is for, never a value; one list pattern), with **New entry**, which opens Settings, Vault's
+  own dialog with "Seen by agents of" set to the project (still changeable), and a click on a row,
+  which edits the entry in that same dialog (an entry of every project says so on it); closed, the
+  dialog brings the window back to this tab. The list follows the vault's changes live, its rows
+  unfolding and folding away, and an empty list says so. A field saved
   on its own shows its Save only once it changed (rule 4);
 - Settings, in tabs by subject (`reference/gpui.md`, rule 13): **Agents**, **Approvals**,
   **Features**, **Vault** and **General**, one shown at a time, as in a project's settings. It
@@ -1332,7 +1343,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   as many lines as it takes, its class
   and the judge's reason, or the first reason it was held, on one line, "Details" unfolding the
   rest (why it was held, one sentence for each reason, and for a base card the sentence that says
-  why it always comes back), and Deny and Allow; a base card stands apart, in the alarm colour;
+  why it always comes back), and Deny and Allow; a base card stands apart by its "Always asks" tag and its still dot, in the attention tone like the others: a request that waits is never drawn as an error, and a denied one is recorded in the error ink;
   an answered card leaves). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its

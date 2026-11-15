@@ -2031,6 +2031,131 @@ fn a_large_image_of_a_result_is_scaled_like_a_message_picture() {
     assert_eq!((width, height), (2000, 1000), "scaled to 2000 px a side");
 }
 
+/// A PNG of `width` by `height`: a gradient and `noise_bits` bits of deterministic noise on each
+/// channel, which a PNG cannot squeeze, so its weight is told by the size and the noise.
+fn noisy_png(width: u32, height: u32, noise_bits: u32) -> Vec<u8> {
+    let mut state = 0x2545_F491u32;
+    let mut noise = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        (state >> 8) as u8 >> (8 - noise_bits)
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_fn(width, height, |x, y| {
+        let base = |v: u32| (v / 16) as u8;
+        image::Rgb([
+            base(x).saturating_add(noise()),
+            base(y).saturating_add(noise()),
+            base(x + y).saturating_add(noise()),
+        ])
+    })
+    .write_to(&mut out, image::ImageFormat::Png)
+    .unwrap();
+    out.into_inner()
+}
+
+/// What a call gave of a picture: its bytes, and the width and height they declare.
+fn picture_of(data: &str) -> (Vec<u8>, (u32, u32)) {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap();
+    let size = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap();
+    (bytes, size)
+}
+
+fn encoded(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[test]
+fn a_large_png_from_a_connection_reaches_the_agent_scaled() {
+    let user = user();
+    let big = noisy_png(4000, 2000, 2);
+    assert!(
+        big.len() > 2 * MIB as usize,
+        "the test's picture is over the cap"
+    );
+    let (_, text, images) = pictured(
+        &user,
+        json!({"text": "a board", "image_data": encoded(&big)}),
+    );
+    assert_eq!(images.len(), 1, "it is not left out: {text}");
+    let (bytes, size) = picture_of(&images[0].1);
+    assert_eq!(size, (2000, 1000), "2000 px on its long side");
+    assert_eq!(images[0].0, "image/png");
+    assert!(bytes.len() <= 2 * MIB as usize, "within the cap");
+    assert!(!text.contains("left out"), "{text}");
+}
+
+#[test]
+fn an_image_still_too_big_after_scaling_is_scaled_again() {
+    let user = user();
+    // Noise a PNG cannot squeeze: at 2000 px it still weighs several MiB.
+    let big = noisy_png(2400, 1200, 8);
+    let (_, text, images) = pictured(
+        &user,
+        json!({"text": "a board", "image_data": encoded(&big)}),
+    );
+    assert_eq!(images.len(), 1, "it is not left out: {text}");
+    let (bytes, (width, _)) = picture_of(&images[0].1);
+    assert!(bytes.len() <= 2 * MIB as usize, "within the cap");
+    assert!(
+        (500..2000).contains(&width),
+        "its long side was halved, not under 500: {width}"
+    );
+    assert!(text.contains("scaled from"), "{text}");
+}
+
+#[test]
+fn a_scaled_image_says_its_original_and_final_size() {
+    let user = user();
+    let big = noisy_png(4000, 2000, 2);
+    let from = format!("{:.1} MB PNG", big.len() as f64 / 1_000_000.0);
+    let (_, text, images) = pictured(
+        &user,
+        json!({"text": "a board", "image_data": encoded(&big)}),
+    );
+    assert_eq!(images.len(), 1, "{text}");
+    let (bytes, _) = picture_of(&images[0].1);
+    let to = if bytes.len() >= 1_000_000 {
+        format!("{:.1} MB PNG", bytes.len() as f64 / 1_000_000.0)
+    } else {
+        format!("{} KB PNG", bytes.len() / 1000)
+    };
+    assert!(
+        text.contains(&format!(
+            "[an image scaled from {from} to {to}, 2000×1000, is attached]"
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_gif_over_the_cap_is_still_left_out() {
+    let user = user();
+    let mut gif = b"GIF89a".to_vec();
+    gif.resize(3 * MIB as usize, 0);
+    let (_, text, images) = pictured(
+        &user,
+        json!({"text": "a loop", "image_data": encoded(&gif), "image_mime": "image/gif"}),
+    );
+    assert!(images.is_empty(), "no image goes");
+    assert!(
+        text.contains(&format!(
+            "[an image (image/gif, about {} bytes) left out: over 2 MiB]",
+            3 * MIB
+        )),
+        "{text}"
+    );
+}
+
 #[test]
 fn an_image_of_a_call_allowed_later_reaches_the_agent() {
     let user = User::with_fake_agent();
@@ -4225,8 +4350,11 @@ const OWN_LOGINS: [&str; 6] = [
 ];
 
 /// Actions its adapter keeps off as well: plugins run commands and read agent-browser's config,
-/// and `with_login` is named should a 0.43 patch serve it.
-const LOCKED_TOO: [&str; 5] = [
+/// `connect` and `state_load` bring a browser or a session someone else controls, and
+/// `with_login` is named should a 0.43 patch serve it.
+const LOCKED_TOO: [&str; 7] = [
+    "agent_browser_connect",
+    "agent_browser_state_load",
     "agent_browser_plugin_add",
     "agent_browser_plugin_list",
     "agent_browser_plugin_run",
@@ -4234,32 +4362,42 @@ const LOCKED_TOO: [&str; 5] = [
     "agent_browser_with_login",
 ];
 
-/// Actions outside the list the adapter lets stay on beside `login`: off at the first pin, and
-/// `login` is refused while one is on. Those the review named, and one of each kind.
-const OUTSIDE: [&str; 13] = [
+/// Actions that run a script in the page, which no gate can judge: off at the first pin, as
+/// `eval` is, and the user's to turn on.
+const SCRIPTS: [&str; 6] = [
+    "agent_browser_add_init_script",
+    "agent_browser_wait_for_function",
+    "agent_browser_batch",
+    "agent_browser_network_route",
+    "agent_browser_chat",
+    "agent_browser_flow_run",
+];
+
+/// Actions that write the page's traffic to a file, which no masking reaches: off at the first
+/// pin, and the user's to turn on.
+const FILES: [&str; 4] = [
+    "agent_browser_network_har_start",
+    "agent_browser_network_har_stop",
+    "agent_browser_trace_start",
+    "agent_browser_trace_stop",
+];
+
+/// Other actions of agent-browser's, judged at the first pin: `login` is offered beside every one
+/// of them, as agent-browser's own login restricts nothing after it.
+const OTHERS: [&str; 11] = [
     "agent_browser_react_inspect",
     "agent_browser_react_tree",
     "agent_browser_get_attr",
     "agent_browser_get_html",
-    "agent_browser_connect",
-    "agent_browser_add_init_script",
-    "agent_browser_wait_for_function",
-    "agent_browser_batch",
     "agent_browser_get_value",
     "agent_browser_network_requests",
-    "agent_browser_network_har_start",
-    "agent_browser_trace_start",
+    "agent_browser_pdf",
     "agent_browser_storage_get",
-];
-
-/// Actions the adapter lets stay on beside `login`: judged at the first pin.
-const ALLOWED: [&str; 3] = [
     "agent_browser_click",
     "agent_browser_fill",
     "agent_browser_get_text",
 ];
 
-/// A server that says it is agent-browser `version`, with some of its MCP tools.
 fn agent_browser(version: &str) -> Value {
     let tool = |name: &str, properties: Value| {
         json!({"name": name, "description": format!("{name} of the browser."),
@@ -4267,14 +4405,20 @@ fn agent_browser(version: &str) -> Value {
     };
     let mut tools = vec![
         tool("agent_browser_open", json!({"url": {"type": "string"}})),
+        tool("agent_browser_tab_new", json!({"url": {"type": "string"}})),
+        tool(
+            "agent_browser_wait_for_url",
+            json!({"url": {"type": "string"}}),
+        ),
         tool("agent_browser_snapshot", json!({})),
         tool("agent_browser_eval", json!({"script": {"type": "string"}})),
     ];
     for name in OWN_LOGINS
         .iter()
         .chain(&LOCKED_TOO)
-        .chain(&OUTSIDE)
-        .chain(&ALLOWED)
+        .chain(&SCRIPTS)
+        .chain(&FILES)
+        .chain(&OTHERS)
     {
         tools.push(tool(name, json!({"name": {"type": "string"}})));
     }
@@ -4366,7 +4510,7 @@ fn an_adapter_applies_to_its_server_by_name_and_version() {
     let user = user();
     let added = browser(&user, &agent_browser("0.43.0"), json!({}));
     assert_eq!(added["given"], true, "{added}");
-    // Its defaults at the first pin: eval and its own logins off, what it lets beside login judged.
+    // Its defaults at the first pin: eval and its own logins off, the rest judged.
     assert_eq!(setting(&user, "agent_browser_eval"), "off");
     for action in OWN_LOGINS {
         assert_eq!(setting(&user, action), "off", "{action}");
@@ -4381,7 +4525,7 @@ fn an_adapter_applies_to_its_server_by_name_and_version() {
     assert_eq!(adapter["name"], "agent-browser", "{review}");
     assert_eq!(adapter["actions"], json!(["login"]), "{review}");
     let said = adapter["changed"].to_string();
-    assert!(said.contains("agent_browser_click"), "{said}");
+    assert!(said.contains("agent_browser_eval"), "{said}");
     assert!(said.contains("--config"), "{said}");
     let started = logged(&user, "browser", "start");
     let args = started.last().unwrap()["args"].clone();
@@ -4602,6 +4746,56 @@ fn a_login_entry_of_another_use_is_refused() {
 }
 
 #[test]
+fn a_browser_login_without_an_entry_offers_the_ask() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    project(&user, "app");
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+
+    // The project sees no entry: the connection alone lists the tool to ask with.
+    assert!(
+        mcp.names().iter().any(|n| n == "vault"),
+        "{:?}",
+        mcp.names()
+    );
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    for says in [
+        "no entry shop-test",
+        "vault {action: \"ask\", name: \"shop-test\"",
+        "for: \"connection:browser\"",
+        "url",
+    ] {
+        assert!(answer.contains(says), "{says} is not said: {answer}");
+    }
+
+    // The call it says is taken, and opens the user's form of the vault.
+    let asked = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "shop-test", "why": "to sign in to the shop",
+            "url": "https://shop.example.com/login", "for": "connection:browser"}),
+    );
+    assert!(!asked.error, "{}", asked.text);
+    let open = user.call("vault.asks", json!({})).unwrap();
+    assert_eq!(open["asks"][0]["for"], "connection:browser", "{open}");
+    assert!(form(&user).is_none());
+}
+
+#[test]
+fn a_connection_without_login_does_not_list_the_vault() {
+    let user = user();
+    project(&user, "app");
+    connect(&user, "almanac", &almanac(), json!({}));
+    let (_, mcp) = session(&user, "app");
+    // No login of its own takes an entry: nothing it does may ask for one.
+    assert!(has(&mcp, "conn_almanac"));
+    assert!(!has(&mcp, "vault"), "{:?}", mcp.names());
+}
+
+#[test]
 fn a_plugin_request_without_its_runs_token_is_refused() {
     // The fake command line asks the plugin without the token Flottille gave the run, or with
     // another one.
@@ -4692,32 +4886,341 @@ fn agent_browsers_own_credential_actions_cannot_be_turned_on() {
     assert!(logged(&user, "browser", "call").is_empty());
 }
 
+/// A secret of an entry bound to the browser, with what a URL and a page's HTML change in it.
+const ODD_SECRET: &str = "s3cret & <pa55> w\u{f6}rd";
+
 #[test]
-fn login_is_refused_while_eval_is_offered() {
+fn login_works_while_open_and_snapshot_are_on() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    for action in ["agent_browser_open", "agent_browser_snapshot"] {
+        assert_eq!(setting(&user, action), "judged", "{action}");
+    }
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open", "arguments": {"url": "https://shop.example.com/"}}),
+    ));
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert_eq!(form(&user).unwrap()["password"], PASSWORD);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_snapshot", "arguments": {}}),
+    ));
+}
+
+#[test]
+fn an_accepted_browser_connection_signs_in_without_switching_anything_off() {
+    let user = user();
+    let script = agent_browser("0.43.0");
+    browser(&user, &script, json!({}));
+    // The user accepted it with every action judged that a setting can turn on, as a connection
+    // reviewed before this change may be.
+    let locked: Vec<&str> = OWN_LOGINS.iter().chain(&LOCKED_TOO).copied().collect();
+    let mut actions = serde_json::Map::new();
+    for tool in script["tools"].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
+        if !locked.contains(&name) {
+            actions.insert(name.to_owned(), json!("judged"));
+        }
+    }
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": actions}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    assert_eq!(connection(&user, "browser")["state"], "ready");
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert_eq!(form(&user).unwrap()["password"], PASSWORD);
+    // Nothing was switched off, and no new review is asked.
+    for name in actions.keys() {
+        assert_eq!(setting(&user, name), "judged", "{name}");
+    }
+    assert_eq!(connection(&user, "browser")["state"], "ready");
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let said = review["adapter"].to_string();
+    assert!(!said.contains("refused while"), "{said}");
+    assert!(!said.contains("turns it off"), "{said}");
+}
+
+#[test]
+fn a_secret_in_a_browser_output_is_masked() {
+    let user = user();
+    let mut script = agent_browser("0.43.0");
+    // A page that shows what was typed into its form: raw, in an address its form sent with GET,
+    // and in its HTML.
+    let in_url =
+        |secret: &str| url::form_urlencoded::byte_serialize(secret.as_bytes()).collect::<String>();
+    let in_html = |secret: &str| {
+        secret
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let page = format!(
+        "password: {PASSWORD}; field: {ODD_SECRET}; \
+         address: https://shop.example.com/login?password={}; html: <input value=\"{}\">",
+        in_url(ODD_SECRET),
+        in_html(ODD_SECRET)
+    );
+    script["answers"]["agent_browser_snapshot"] = json!({"text": page});
+    browser(&user, &script, json!({}));
+    let (id, mcp) = signed_up(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "odd-test", "secret": ODD_SECRET, "username": "tester",
+            "url": "https://shop.example.com/odd", "for": "connection:browser"}),
+    )
+    .unwrap();
+    let said = done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_snapshot", "arguments": {}}),
+    ));
+    let forms = [
+        PASSWORD.to_owned(),
+        ODD_SECRET.to_owned(),
+        in_url(ODD_SECRET),
+        in_html(ODD_SECRET),
+    ];
+    assert!(said.contains("[masked]"), "{said}");
+    let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+    for secret in &forms {
+        assert!(!said.contains(secret.as_str()), "{secret}: {said}");
+        assert!(!shown.to_string().contains(secret.as_str()), "{secret}");
+        for folder in ["state", "data"] {
+            let found = files_holding(&user.path(folder), secret);
+            assert!(found.is_empty(), "{secret} in {folder}: {found:?}");
+        }
+    }
+}
+
+#[test]
+fn eval_stays_off_by_default() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    for action in SCRIPTS.iter().chain(&["agent_browser_eval"]) {
+        assert_eq!(setting(&user, action), "off", "{action}");
+    }
+    for action in OTHERS
+        .iter()
+        .chain(&["agent_browser_open", "agent_browser_snapshot"])
+    {
+        assert_eq!(setting(&user, action), "judged", "{action}");
+    }
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let changed = review["adapter"]["changed"].to_string();
+    assert!(changed.contains("agent_browser_eval"), "{changed}");
+    // A call of it is refused while it is off; the server sees nothing.
+    let (_, mcp) = signed_up(&user);
+    refused(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_eval", "arguments": {"script": "1"}}),
+    ));
+    assert!(logged(&user, "browser", "call").is_empty());
+}
+
+#[test]
+fn open_with_a_javascript_url_is_refused() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    // A javascript: URL runs in the page that is open, the login form among them.
+    for url in [
+        "javascript:alert(document.querySelector('input[type=password]').value)",
+        "JavaScript:void(0)",
+        "file:///etc/passwd",
+        "https://",
+    ] {
+        let answer = refused(mcp.call(
+            "conn_browser",
+            json!({"action": "agent_browser_open", "arguments": {"url": url}}),
+        ));
+        assert!(answer.contains("http or https"), "{answer}");
+    }
+    assert!(logged(&user, "browser", "call").is_empty());
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_open", "arguments": {"url": "https://shop.example.com/"}}),
+    ));
+}
+
+#[test]
+fn tab_new_with_a_data_url_is_refused() {
+    let user = user();
+    let mut script = agent_browser("0.43.0");
+    script["answers"]["agent_browser_tab_new"] = json!({"text": "a new tab"});
+    script["answers"]["agent_browser_wait_for_url"] = json!({"text": "matched"});
+    browser(&user, &script, json!({}));
+    let (_, mcp) = signed_up(&user);
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_tab_new",
+            "arguments": {"url": "data:text/html,<script>opener.location='javascript:1'</script>"}}),
+    ));
+    assert!(answer.contains("http or https"), "{answer}");
+    assert!(logged(&user, "browser", "call").is_empty());
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_tab_new", "arguments": {"url": "https://shop.example.com/"}}),
+    ));
+    // wait_for_url's url is a pattern matched against the address, never opened.
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_wait_for_url", "arguments": {"url": "**/account"}}),
+    ));
+}
+
+#[test]
+fn connect_and_state_load_stay_off_with_the_adapter() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    for action in ["agent_browser_connect", "agent_browser_state_load"] {
+        assert_eq!(setting(&user, action), "off", "{action}");
+        let refused = user
+            .call(
+                "connection.accept",
+                json!({"name": "browser", "actions": {action: "judged"}}),
+            )
+            .unwrap_err();
+        assert!(refused.1.contains(action), "{refused:?}");
+        assert_eq!(setting(&user, action), "off", "{action}");
+    }
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let locked = review["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "agent_browser_connect")
+        .unwrap()["locked"]
+        .to_string();
+    assert!(locked.contains("someone else controls"), "{locked}");
+    let (_, mcp) = signed_up(&user);
+    refused(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_connect", "arguments": {"name": "9222"}}),
+    ));
+    assert!(logged(&user, "browser", "call").is_empty());
+}
+
+#[test]
+fn har_and_trace_are_off_at_the_first_pin() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    for action in FILES {
+        assert_eq!(setting(&user, action), "off", "{action}");
+    }
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let changed = review["adapter"]["changed"].to_string();
+    assert!(
+        changed.contains("agent_browser_network_har_start"),
+        "{changed}"
+    );
+    assert!(changed.contains("not masked"), "{changed}");
+    // The user's to turn on.
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_trace_start": "judged"}}),
+    )
+    .unwrap();
+    assert_eq!(setting(&user, "agent_browser_trace_start"), "judged");
+}
+
+/// A secret holding both quotes, which HTML and JSON escape.
+const QUOTED_SECRET: &str = "it's a \"pa55\" & more\\";
+
+#[test]
+fn a_secret_with_quotes_is_masked_in_html_and_json() {
+    use base64::Engine as _;
+    let user = user();
+    let mut script = agent_browser("0.43.0");
+    let text_only = QUOTED_SECRET
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let attribute = QUOTED_SECRET.replace('&', "&amp;").replace('"', "&quot;");
+    let in_json = serde_json::to_string(QUOTED_SECRET).unwrap();
+    let in_json = in_json[1..in_json.len() - 1].to_owned();
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("quoter:{QUOTED_SECRET}"));
+    let page = format!(
+        "text: <p>{text_only}</p>; attribute: <input value=\"{attribute}\">; \
+         json: {{\"note\":\"{in_json}\"}}; seen as {basic}."
+    );
+    script["answers"]["agent_browser_snapshot"] = json!({"text": page});
+    browser(&user, &script, json!({}));
+    let (id, mcp) = signed_up(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "quoted-test", "secret": QUOTED_SECRET, "username": "quoter",
+            "url": "https://shop.example.com/quoted", "for": "connection:browser"}),
+    )
+    .unwrap();
+    let said = done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_snapshot", "arguments": {}}),
+    ));
+    // The page reached the agent, framed (`&` and `<` escaped), its secrets masked.
+    assert!(said.contains("text: &lt;p>"), "{said}");
+    assert!(said.contains("seen as "), "{said}");
+    let framed = |text: &str| text.replace('&', "&amp;").replace('<', "&lt;");
+    let shown = user
+        .call("agent.show", json!({"agent": id}))
+        .unwrap()
+        .to_string();
+    for secret in [&text_only, &attribute, &in_json, &basic] {
+        assert!(!said.contains(&framed(secret)), "{secret}: {said}");
+        // The answer and the store keep it as JSON, where its quotes are escaped.
+        let stored = serde_json::to_string(secret.as_str()).unwrap();
+        for kept in [secret.as_str(), &stored[1..stored.len() - 1]] {
+            assert!(!shown.contains(kept), "{kept}");
+            for folder in ["state", "data"] {
+                let found = files_holding(&user.path(folder), kept);
+                assert!(found.is_empty(), "{kept} in {folder}: {found:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_review_no_longer_says_login_is_refused() {
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));
     user.call(
         "connection.accept",
-        json!({"name": "browser", "actions": {"agent_browser_eval": "asked"}}),
+        json!({"name": "browser", "actions": {
+            "agent_browser_eval": "judged", "agent_browser_get_attr": "judged"}}),
     )
     .unwrap();
-    let (_, mcp) = signed_up(&user);
-    let answer = refused(mcp.call(
-        "conn_browser",
-        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
-    ));
-    assert!(answer.contains("agent_browser_eval"), "{answer}");
-    assert!(form(&user).is_none());
-    // The review says it too.
     let review = user
         .call("connection.review", json!({"name": "browser"}))
         .unwrap();
+    let adapter = review["adapter"].to_string();
+    assert!(!adapter.contains("login is refused while"), "{adapter}");
+    assert!(!adapter.contains("outside"), "{adapter}");
     assert!(
-        review["adapter"]["said"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("agent_browser_eval"),
-        "{review}"
+        adapter.contains("login is Flottille's own action"),
+        "{adapter}"
+    );
+    // Accepted with eval on, login comes beside it with no new review: the review says what that
+    // lets a page script do.
+    assert!(
+        adapter.contains("agent_browser_eval is on: a page script can read what login types"),
+        "{adapter}"
     );
 }
 
@@ -4756,73 +5259,6 @@ fn the_secret_never_reaches_an_agent_nor_the_store() {
     }
     let log = std::fs::read_to_string(log_file(&user, "browser")).unwrap();
     assert!(!log.contains(PASSWORD), "{log}");
-}
-
-#[test]
-fn the_first_pin_turns_off_everything_outside_the_allowlist() {
-    let user = user();
-    browser(&user, &agent_browser("0.43.0"), json!({}));
-    for action in OUTSIDE.iter().chain(&[
-        "agent_browser_open",
-        "agent_browser_snapshot",
-        "agent_browser_eval",
-    ]) {
-        assert_eq!(setting(&user, action), "off", "{action}");
-    }
-    for action in ALLOWED {
-        assert_eq!(setting(&user, action), "judged", "{action}");
-    }
-    // The review says so.
-    let review = user
-        .call("connection.review", json!({"name": "browser"}))
-        .unwrap();
-    let changed = review["adapter"]["changed"].to_string();
-    assert!(changed.contains("agent_browser_click"), "{changed}");
-    assert!(changed.contains("outside"), "{changed}");
-}
-
-#[test]
-fn login_is_refused_while_an_action_outside_the_allowlist_is_on() {
-    let user = user();
-    browser(&user, &agent_browser("0.43.0"), json!({}));
-    // Off at the first pin, each, and the login works.
-    for action in OUTSIDE {
-        assert_eq!(setting(&user, action), "off", "{action}");
-    }
-    let (_, mcp) = signed_up(&user);
-    done(mcp.call(
-        "conn_browser",
-        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
-    ));
-    std::fs::remove_file(form_file(&user)).unwrap();
-    for &action in OUTSIDE.iter().chain(&["agent_browser_open"]) {
-        user.call(
-            "connection.accept",
-            json!({"name": "browser", "actions": {action: "judged"}}),
-        )
-        .unwrap();
-        let answer = refused(mcp.call(
-            "conn_browser",
-            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
-        ));
-        assert!(answer.contains(action), "{action}: {answer}");
-        assert!(form(&user).is_none(), "{action}: the form was filled");
-        let review = user
-            .call("connection.review", json!({"name": "browser"}))
-            .unwrap();
-        assert!(
-            review["adapter"]["said"]
-                .as_str()
-                .unwrap_or_default()
-                .contains(action),
-            "{action}: {review}"
-        );
-        user.call(
-            "connection.accept",
-            json!({"name": "browser", "actions": {action: "off"}}),
-        )
-        .unwrap();
-    }
 }
 
 #[test]
@@ -4894,52 +5330,6 @@ fn login_with_an_entry_whose_url_is_no_web_address_is_refused() {
     }
     assert!(form(&user).is_none());
     assert!(logged(&user, "browser", "login").is_empty());
-}
-
-#[test]
-fn an_unknown_new_action_blocks_login() {
-    let user = user();
-    let mut script = agent_browser("0.43.0");
-    browser(&user, &script, json!({}));
-    let (_, mcp) = signed_up(&user);
-    done(mcp.call(
-        "conn_browser",
-        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
-    ));
-    std::fs::remove_file(form_file(&user)).unwrap();
-    // A patch of the same minor version serves an action no list of the adapter's knows.
-    restart(&user, "browser");
-    script["tools"].as_array_mut().unwrap().push(json!({
-        "name": "agent_browser_teleport",
-        "description": "Does something new.",
-        "inputSchema": {"type": "object", "properties": {}}}));
-    script["login"] = json!({"form": form_file(&user)});
-    write_script(&user, "browser", &script);
-    let answer = mcp.call(
-        "conn_browser",
-        json!({"action": "agent_browser_click", "arguments": {"name": "x"}}),
-    );
-    assert!(answer.error, "{}", answer.text);
-    assert_eq!(connection(&user, "browser")["state"], "cut off");
-    let review = user
-        .call("connection.review", json!({"name": "browser"}))
-        .unwrap();
-    assert!(
-        review["adapter"]["said"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("agent_browser_teleport"),
-        "{review}"
-    );
-    user.call("connection.accept", json!({"name": "browser"}))
-        .unwrap();
-    assert_eq!(setting(&user, "agent_browser_teleport"), "judged");
-    let answer = refused(mcp.call(
-        "conn_browser",
-        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
-    ));
-    assert!(answer.contains("agent_browser_teleport"), "{answer}");
-    assert!(form(&user).is_none(), "the form was filled");
 }
 
 #[test]
@@ -5572,9 +5962,22 @@ fn an_entry_bound_to_plain_http_on_another_host_is_refused_for_a_sign_in() {
     user.call(
         "vault.set",
         json!({"name": "intranet-test", "secret": "s3cret-of-the-intranet", "username": "tester",
-            "url": "http://intranet.example.test/login", "for": "connection:browser"}),
+            "url": "https://intranet.example.test/login", "for": "connection:browser"}),
     )
     .unwrap();
+    // The vault refuses plain http to another machine for a connection's entry at save: one kept
+    // before it did is still refused when it is used.
+    let mut store =
+        flottille_core::store::Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let mut kept = store
+        .vault_entries()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.name == "intranet-test")
+        .unwrap();
+    kept.url = Some("http://intranet.example.test/login".into());
+    store.put_vault_entry(&kept).unwrap();
+    drop(store);
     let said = refused(mcp.call(
         "conn_browser",
         json!({"action": "login", "arguments": {"entry": "intranet-test"}}),

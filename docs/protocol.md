@@ -784,6 +784,10 @@ and the findings it delivers are told to the session (`docs/tools.md`, "Review")
   check's own instructions, which that check's agent reads after the shared guidance, in a block of
   its own. A check's instructions that cannot be read whole fail that check alone: `run_pass`
   refuses it, saying it did not run and naming the file, never its content.
+- `autosubscriptions.events {project}`: `{"project", "subjects": {"created_pull",
+  "branch_pull", "ticket"}}`, the events each subject of the automatic subscriptions subscribes a
+  session of the project to now, Settings' value or the project's own; each empty while they are
+  off there (`docs/extensions.md`, "Automatic subscriptions").
 
 ### The appearance methods
 
@@ -894,28 +898,23 @@ for an entry a feature names and that is missing.
   (locked), the entry then left whole.
 
 Both writes emit `vault.changed`, and give the agents of every project the tools their roles have
-now (`vault` is listed to an agent whose project sees an entry, or misses one a feature names). A
-set answers the open requests for that entry whose project now sees it (`set`).
+now (`vault` is listed to an agent whose project sees an entry, misses one a feature names, or has
+a connection whose `login` takes one). A set answers the open requests for that entry's name
+(`set`), telling only the agents whose project sees the entry; an entry bound to a connection on
+plain `http` to another machine is refused, and so is an entry an open request with
+`takes_username` asks for, saved without a username.
 
-The requests agents made for a missing entry (`docs/vault.md`, "Asking the user for an entry"):
+The requests agents made for an entry (`docs/vault.md`, "Asking the user for an entry"):
 
 - `vault.asks` answers `{"asks": [{"ask", "at", "agent", "project", "name", "why", "description",
-  "takes_username", "taken", "joined"}]}`, the open requests, oldest first; `ask` is the number of
-  its `vault.asked` event, `taken` why its name cannot be set for the project (another project
-  uses it), `null` otherwise, `joined` the agents whose ask joined it.
-- `vault.ask_set {ask, secret, username?, name?}` sets the entry as `vault.set` does, with the
-  description and the project the request holds, under `name` when given, else the name it
-  holds; `refused` without a username when `takes_username`, and as `vault.set`; `refused` with
-  `` `<name>` is used by the project <other>: choose another name`` (`every project` for a global
-  entry) when an entry of that name exists and is not the project's, or `` `<name>` is bound to
-  <its use>: choose another name`` when it is bound to another use than the project's worklog: a
-  request never changes an existing entry's project nor its use. The entry is bound to the
-  project's worklog; `not-found` when no such request is open. Each agent that asked is
-  handed a `vault` delivery, `the user set the vault entry <name>`, which says the project's
-  setting still names the entry asked when the user chose another name.
+  "url", "host", "username", "for", "every", "takes_username", "joined"}]}`, the open requests,
+  oldest first; `ask` is the number of its `vault.asked` event, `project` the asking agent's,
+  `every` whether the entry is every project's, `description`, `url`, `username` and `for` what
+  prefills the form of a new entry (`null` when not given), `host` where the secret goes as the
+  daemon read `url`, `joined` the agents whose ask joined it. The
+  entry is set with `vault.set`, which answers the open requests for its name.
 - `vault.ask_dismiss {ask}` closes it, answers `{"dismissed": <request>}`, and hands each agent
-  `the user dismissed the request …`. The entry is not asked for again by this project until the
-  project's settings change (`project.changed`) or the entry is set (`vault.changed`).
+  `the user dismissed the request …`; `not-found` when no such request is open.
 
 ### The skill methods
 

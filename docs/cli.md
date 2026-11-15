@@ -200,7 +200,10 @@ Replaces Flottille with the latest build of a channel (`docs/releases.md`): the 
 last, not the highest version. `--channel stable`, `beta` or `alpha` moves to that channel, and with
 `--channel alpha`, `--branch <name>` names the branch (by default the one last chosen, else the
 one this build came from); the channel last chosen is remembered, so a plain `flottille update`
-stays on it (by default the channel this build is on; a local build takes stable).
+stays on it (by default the channel this build is on; a local build takes stable). `--channel`
+offers no rc and no next, so a build of one of those lines that chose a channel goes back to its
+line by deleting `update-channel.json` in `$XDG_STATE_HOME/flottille/` (`~/.local/state/flottille/`
+by default).
 `--version <X.Y.Z[-pre]>` installs that release exactly, of any channel (not with `--channel`
 or `--branch`), and is refused with the nearest published versions when it does not exist. The
 archive's SHA-256 sum is checked before anything is replaced. It refuses while the daemon runs:

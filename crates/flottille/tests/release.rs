@@ -860,8 +860,27 @@ fn a_next_line_publishes_next_pre_releases() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         outputs,
-        "channel=beta\nversion=0.5.0-next.3\ntag=v0.5.0-next.3\n"
+        "channel=next\nversion=0.5.0-next.3\ntag=v0.5.0-next.3\n"
     );
+}
+
+#[test]
+fn an_rc_build_says_its_channel() {
+    let repo = a_line_of_0_3();
+    let sha = repo.head();
+    repo.git(&["checkout", "--quiet", "dev"]);
+    let (output, outputs, _) = version_step(&repo, "stable/0.3", "branch", &sha);
+    assert!(output.status.success(), "{output:?}");
+    assert!(outputs.starts_with("channel=rc\n"), "{outputs}");
+
+    // The build is given that channel, and dev's stays the beta.
+    let ci = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    assert!(
+        ci.contains("FLOTTILLE_BUILD_CHANNEL: ${{ steps.version.outputs.channel }}"),
+        "{ci}"
+    );
+    let (_, outputs, _) = version_step(&repo, "dev", "branch", &repo.head());
+    assert!(outputs.starts_with("channel=beta\n"), "{outputs}");
 }
 
 #[test]
@@ -875,10 +894,7 @@ fn a_stable_line_publishes_rc_pre_releases() {
 
     let (output, outputs, _) = version_step(&repo, "stable/0.3", "branch", &sha);
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        outputs,
-        "channel=beta\nversion=0.3.1-rc.1\ntag=v0.3.1-rc.1\n"
-    );
+    assert_eq!(outputs, "channel=rc\nversion=0.3.1-rc.1\ntag=v0.3.1-rc.1\n");
 
     // A line's release takes its rc, nothing else of that version.
     repo.git(&["tag", "v0.3.1-beta.1", &sha]);
@@ -2909,10 +2925,7 @@ fn the_pushes_of_a_line_are_published_as_its_rcs() {
     let (output, outputs, changelog) = version_step(&repo, "stable/0.3", "branch", &sha);
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        outputs,
-        "channel=beta\nversion=0.3.1-rc.1\ntag=v0.3.1-rc.1\n"
-    );
+    assert_eq!(outputs, "channel=rc\nversion=0.3.1-rc.1\ntag=v0.3.1-rc.1\n");
     assert_eq!(changelog, "### Fixes\n\n- **store**: a lock (#13)\n");
 }
 

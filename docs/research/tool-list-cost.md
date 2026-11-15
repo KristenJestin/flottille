@@ -204,7 +204,7 @@ What is not in the lists of the first note and is in a session today, each a mea
 
 | What | Adds to a root | Why it is there |
 |---|---|---|
-| the `vault` tool | 232 (140 description, 90 schema) | a project that sees an entry of the vault, or that a feature may ask for one (`vault::listed_to`). Its definition did not change since 085d955; #711 (`181267d3`) changed what an entry is bound to, not the tool. |
+| the `vault` tool | 232 (140 description, 90 schema) | a project that sees an entry of the vault, or that a feature may ask for one (`vault::listed_to`), or an agent with a connection whose `login` takes an entry (#947). Its definition did not change from 085d955 to this run; #711 (`181267d3`) changed what an entry is bound to, not the tool. Since, #947 made `ask` take `url`, `username`, `for` and `project`: the tool costs more than these 232, not measured again. |
 | one connection, `conn_<name>` | 215 for twelve actions (115 description, 95 schema) | #681 (`1a50d48a`): a server of the user's, one tool whatever its number of actions, with the schema `action`, `arguments`, `for`. The description is the user's sentence, a fixed text and the actions' names, **capped at 1,200 characters**, so about 400 tokens is the most one costs; nothing caps the number of connections. |
 
 The prompts changed by a few tokens (the root's with Specs and Review is 8 more than a plain
