@@ -450,6 +450,15 @@ fn run_a_task_here_runs_it_in_that_workspace(cx: &mut TestAppContext) {
     until(&shell, cx, "the place is drawn", |cx| {
         has("place-alpha", cx)
     });
+    // ▶ offers the tasks the daemon listed, an answer of its own that may land after the place.
+    until(&shell, cx, "the project's tasks are read", |cx| {
+        page_of(&shell, cx).read_with(cx, |page, cx| {
+            page.tasks()
+                .read(cx)
+                .tasks()
+                .is_some_and(|tasks| tasks.iter().any(|task| task.name == "say"))
+        })
+    });
     settle(cx);
 
     cx.update(|window, cx| window.hover("place-row-alpha", cx));

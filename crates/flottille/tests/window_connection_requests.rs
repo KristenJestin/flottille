@@ -245,12 +245,18 @@ fn an_agents_request_opens_as_the_form_filled_and_read_only_and_accept_writes_it
     assert!(!present(cx, &format!("allow-{number}")));
     assert!(present(cx, &format!("deny-{number}")));
     press(cx, &format!("open-request-{number}"));
-    until(&shell, cx, "the dialog opens", |cx| {
-        present(cx, "connection-request")
-    });
+    // The window reads what the daemon answers in its poll alone: without one, the dialog opens
+    // on its skeleton, which nothing of the daemon's can have replaced yet.
+    settle(cx);
+    assert!(present(cx, "connection-request"), "the dialog opens");
+    assert!(
+        !present(cx, "connection-request-name"),
+        "read without a poll"
+    );
+    assert!(height(cx, "connection-request-fields") > 0., "the skeleton");
     // What the daemon answers crossfades from its skeleton.
     until(&shell, cx, "the declaration begins to show", |cx| {
-        height(cx, "connection-request-fields") > 0.
+        present(cx, "connection-request-name")
     });
     a_third_later(cx);
     let showing = height(cx, "connection-request-fields");

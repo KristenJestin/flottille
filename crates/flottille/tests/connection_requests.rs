@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Answer, Mcp, server_of};
-use flottille_core::store::Store;
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 
 /// The secret of the vault entry `almanac-token`, which nothing may give back.
@@ -169,12 +169,29 @@ fn pending(user: &User) -> usize {
         .len()
 }
 
-/// The text the agent is handed once the request `number` is answered.
+/// The text the agent is handed once the request `number` is answered, read from the store
+/// opened read-only: `Store::open` writes it (its migrations), and a write of the test's that
+/// lands between the read and the write of one of the daemon's transactions fails that one, the
+/// very write the user accepted among them.
 fn delivered(user: &User, number: u64) -> String {
-    let store = || Store::open(&user.path("state/flottille/flottille.db")).unwrap();
-    let id = format!("approval-{number}");
-    eventually("the answer", || store().delivery(&id).unwrap().is_some());
-    store().delivery(&id).unwrap().unwrap().body
+    let store = rusqlite::Connection::open_with_flags(
+        user.path("state/flottille/flottille.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    store.busy_timeout(Duration::from_secs(10)).unwrap();
+    let body = || {
+        store
+            .query_row(
+                "SELECT body FROM deliveries WHERE id = ?1",
+                [format!("approval-{number}")],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap()
+    };
+    eventually("the answer", || body().is_some());
+    body().unwrap()
 }
 
 fn approve(user: &User, number: u64) -> String {
