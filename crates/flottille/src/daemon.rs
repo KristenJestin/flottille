@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use flottille_core::paths::{Paths, ensure_private_dir};
 use flottille_core::protocol::{Event, Message, Request, WatchParams, WorkspaceForge};
 use flottille_core::store::Store;
+use flottille_protocol::{PROTOCOL, code};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
@@ -593,6 +594,14 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 continue;
             }
         };
+        // Whatever module its prefix leads to, a method the catalogue leaves out is unknown: the
+        // daemon answers no method without a class (`docs/remote.md`, "Roles").
+        if flottille_protocol::class(&request.method).is_none() {
+            let message = format!("unknown method `{}`", request.method);
+            let unknown = Message::error(Some(request.id), code::UNKNOWN_METHOD, message);
+            let _ = out.send(unknown).await;
+            continue;
+        }
         if request.method == "workspace.forge"
             && let Ok(asked) = serde_json::from_value::<WorkspaceForge>(request.params.clone())
             && asked.watch
@@ -898,6 +907,7 @@ fn status(daemon: &Daemon) -> flottille_core::Result<Value> {
     let count = |states: &[AgentState]| agents.iter().filter(|a| states.contains(&a.state)).count();
     Ok(json!({
         "version": VERSION,
+        "protocol": PROTOCOL,
         "pid": std::process::id(),
         "uptime_s": daemon.started.elapsed().as_secs(),
         "agents": {

@@ -2233,6 +2233,7 @@ dependencies = [
  "flate2",
  "flottille-core",
  "flottille-link",
+ "flottille-protocol",
  "flottille-window",
  "futures",
  "gpui-design-system",
@@ -2272,6 +2273,7 @@ dependencies = [
 name = "flottille-core"
 version = "0.1.0"
 dependencies = [
+ "flottille-protocol",
  "image",
  "libc",
  "regex",
@@ -2361,6 +2363,14 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "zeroize",
+]
+
+[[package]]
+name = "flottille-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

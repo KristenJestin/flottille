@@ -72,7 +72,7 @@ without an `id`.
 |---|---|
 | `invalid-request` | The line is not a request object. |
 | `invalid-params` | The parameters do not fit the method. |
-| `unknown-method` | No such method. |
+| `unknown-method` | No such method: the catalogue does not name it (["Methods"](#methods)). |
 | `unavailable` | The daemon cannot do it now (for example, it is stopping, or its files cannot be written). |
 | `refused` | The request is understood and cannot be done; the message is a sentence the user can act on (for example, a folder with no repository). |
 | `not-found` | What the request names does not exist (for example, no project of that name). |
@@ -89,6 +89,12 @@ Sent only on a connection that subscribed with `events.watch`. The event's field
 
 ## Methods
 
+Every method the daemon answers is in the catalogue of `flottille-protocol`
+(`crates/flottille-protocol/src/catalogue.rs`), each with its class: `read` for one that changes
+nothing (a list, a show, a read, `events.watch`), `drive` for any other (`docs/remote.md`,
+"Roles"). A method the catalogue does not name is answered `unknown-method` before anything reads
+it.
+
 ### `daemon.status`
 
 No parameters. The result:
@@ -96,6 +102,7 @@ No parameters. The result:
 ```json
 {
   "version": "0.1.0 (local, dd939a5ec692)",
+  "protocol": 1,
   "pid": 4242,
   "uptime_s": 192,
   "agents": {"running": 0, "waiting_for_user": 0, "failed": 0}
@@ -103,6 +110,8 @@ No parameters. The result:
 ```
 
 `version` is the full version: the release and, for a build from a git checkout, its commit.
+`protocol` is the version of the protocol, raised by any change of a method, an answer or an event
+that an older client would misread (`docs/remote.md`, "The version").
 `agents` counts the agents running (starting or in a turn), the root agents waiting for the user
 (with a request the user holds, `approval.list`, or a question not answered yet), and the agents
 that failed (`docs/agents.md`).
