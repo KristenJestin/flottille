@@ -199,9 +199,10 @@ impl Waiting {
                 .disabled(busy)
                 .on_click(cx.listener(move |this, _, _, cx| this.answer(number, answer, cx)))
         };
+        let tones = held_tones(card.base, p);
         let (class, ink) = match card.base {
-            true => ("Always asks", p.fail),
-            false => ("To judge", p.wait),
+            true => ("Always asks", tones.ink),
+            false => ("To judge", tones.ink),
         };
         // The reason in one line: the judge's when one was asked, else the first reason it was
         // held.
@@ -352,10 +353,7 @@ impl Waiting {
             .rounded(px(12.))
             .bg(p.card)
             .border_1()
-            .border_color(match card.base {
-                true => mix(p.fail, p.card, 0.6),
-                false => mix(p.wait, p.card, 0.7),
-            })
+            .border_color(tones.card_edge)
             .child(head)
             // The whole call, wrapping over as many lines as it takes: what is allowed is read
             // before it is allowed, never guessed from its start.
@@ -445,7 +443,7 @@ impl Waiting {
             true => div()
                 .size(px(8.))
                 .rounded_full()
-                .bg(p.fail)
+                .bg(held_tones(base, p).ink)
                 .into_any_element(),
             false => self.dot.clone().into_any_element(),
         }
@@ -525,9 +523,82 @@ impl Render for Waiting {
 /// The most the cards take of the rail's height before they scroll.
 const WAITING_HEIGHT: f32 = 420.;
 
+/// The tones of a request held for the user, on the rail's card and on the conversation's line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HeldTones {
+    /// The dot and the class tag.
+    pub ink: gpui_kit::Hsla,
+    /// The card's border, over the card.
+    pub card_edge: gpui_kit::Hsla,
+    /// The conversation line's border once pointed at.
+    pub line_edge: gpui_kit::Hsla,
+}
+
+pub(crate) fn held_tones(base: bool, p: Palette) -> HeldTones {
+    match base {
+        true => HeldTones {
+            ink: p.fail,
+            card_edge: mix(p.fail, p.card, 0.6),
+            line_edge: p.fail,
+        },
+        false => HeldTones {
+            ink: p.wait,
+            card_edge: mix(p.wait, p.card, 0.7),
+            line_edge: p.wait_line,
+        },
+    }
+}
+
+/// The ink of the one-line record a decided request folds into.
+pub(crate) fn record_ink(_decision: Option<&str>, p: Palette) -> gpui_kit::Hsla {
+    p.faint
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sentences;
+    use super::{HeldTones, held_tones, record_ink, sentences};
+    use gpui_design_system::{Palette, theme::Shade};
+
+    fn palettes() -> [Palette; 2] {
+        [Palette::own(Shade::Light), Palette::own(Shade::Dark)]
+    }
+
+    #[test]
+    fn a_request_waiting_for_the_user_is_not_drawn_as_an_error() {
+        for p in palettes() {
+            for base in [true, false] {
+                let HeldTones {
+                    ink,
+                    card_edge,
+                    line_edge,
+                } = held_tones(base, p);
+                assert_eq!(ink, p.wait, "the dot and the tag, base {base}");
+                assert_ne!(ink, p.fail);
+                assert_ne!(
+                    card_edge,
+                    gpui_design_system::color::mix(p.fail, p.card, 0.6)
+                );
+                assert_ne!(line_edge, p.fail, "the line's border, base {base}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_rail_card_and_the_conversation_line_agree() {
+        for p in palettes() {
+            assert_eq!(held_tones(true, p), held_tones(false, p));
+            assert_eq!(held_tones(true, p).line_edge, p.wait_line);
+        }
+    }
+
+    #[test]
+    fn a_denied_request_is_drawn_as_refused() {
+        for p in palettes() {
+            assert_eq!(record_ink(Some("deny"), p), p.fail);
+            assert_ne!(record_ink(Some("once"), p), p.fail);
+            assert_ne!(record_ink(None, p), p.fail);
+        }
+    }
 
     #[test]
     fn two_reasons_are_two_sentences_with_no_doubled_word() {

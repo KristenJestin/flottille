@@ -6372,7 +6372,8 @@ impl Row {
             None => format!("Request #{number}"),
         };
         let page = self.page.clone();
-        let ink = if card.base { p.fail } else { p.wait };
+        let tones = crate::waiting::held_tones(card.base, p);
+        let ink = tones.ink;
         let line = div()
             .id(ElementId::Name(format!("approval-line-{number}").into()))
             .h(px(34.))
@@ -6412,7 +6413,7 @@ impl Row {
                 page.update(cx, |page, cx| page.reveal_waiting(number, cx))
                     .ok();
             });
-        let edge = if card.base { p.fail } else { p.wait_line };
+        let edge = tones.line_edge;
         let waiting = hoverable(line, move |d, t| {
             d.bg(p.hover.opacity(t))
                 .border_color(mix(p.line, edge, t))
@@ -6422,7 +6423,7 @@ impl Row {
             .id(ElementId::Name(format!("approval-record-{number}").into()))
             .aria_label(SharedString::from(record.clone().unwrap_or_default()))
             .mono(12.)
-            .text_color(p.faint)
+            .text_color(crate::waiting::record_ink(card.decision.as_deref(), p))
             .child(SharedString::from(record.clone().unwrap_or_default()))
             .test_support();
         // The waiting line folds away and the record unfolds in its place.
