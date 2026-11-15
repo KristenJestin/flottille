@@ -121,7 +121,7 @@ fn fields(declaration: &Declaration) -> Vec<(&'static str, &'static str, String)
             fields.push((
                 "url",
                 "Its URL",
-                declaration.served_url().unwrap_or_default(),
+                declaration.marked_url().unwrap_or_default(),
             ));
             let secrets = match declaration.secrets.is_empty() {
                 true => "none".to_owned(),

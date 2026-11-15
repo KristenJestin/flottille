@@ -823,6 +823,20 @@ impl Declaration {
         }
     }
 
+    /// Its URL as a card or a show says it: as it is served, marked when it is served cleaned, so
+    /// that an edit of it is never taken for one that keeps what was dropped.
+    pub(super) fn marked_url(&self) -> Option<String> {
+        let served = self.served_url()?;
+        let Reach::Url(url) = &self.reach else {
+            return Some(served);
+        };
+        Some(match self.url_fault().and_then(|_| cleaned(url)) {
+            Some(note) if served.is_empty() => format!("({note})"),
+            Some(note) => format!("{served} ({note})"),
+            None => served,
+        })
+    }
+
     /// `json`, its URL as it is served.
     pub(super) fn served(&self) -> Value {
         let mut json = self.json();
@@ -925,6 +939,33 @@ fn said_text(text: &str) -> String {
         Ok(url) if matches!(url.scheme(), "http" | "https") => said_url(&url),
         Ok(url) if KNOWN_SCHEMES.contains(&url.scheme()) => format!("{}:", url.scheme()),
         _ => String::new(),
+    }
+}
+
+/// What `said_text` leaves out of `text`, in words: `None` when nothing.
+fn cleaned(text: &str) -> Option<String> {
+    let url = match url::Url::parse(text) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => url,
+        Ok(url) if KNOWN_SCHEMES.contains(&url.scheme()) => {
+            return Some("cleaned: only its scheme is shown".into());
+        }
+        _ => return Some("cleaned: it is not shown".into()),
+    };
+    let parts: Vec<&str> = [
+        (!url.username().is_empty() || url.password().is_some()).then_some("login"),
+        url.query().map(|_| "query"),
+        url.fragment().map(|_| "fragment"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    match parts.as_slice() {
+        [] => None,
+        [one] => Some(format!("cleaned: its {one} is dropped")),
+        [first @ .., last] => Some(format!(
+            "cleaned: its {} and {last} are dropped",
+            first.join(", ")
+        )),
     }
 }
 
