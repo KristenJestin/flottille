@@ -96,7 +96,8 @@ again as soon as the secret is sent.
 
 Every value of every entry is added to the masking of everything the daemon stores and shows
 (`flottille_core::secrets`): an agent that came across a secret some other way and writes it in a
-message, a command's output, a tool's arguments, finds it `[masked]` there. The values are read
+message, a command's output, a tool's arguments, finds it `[masked]` there, raw and in the forms
+a page shows a typed secret in (percent-encoded in an address, escaped in HTML). The values are read
 from the keyring when the daemon starts, before any agent resumes (the start waits 5 seconds at
 most for a keyring that asks to be unlocked, then goes on), and a new secret is masked as soon as
 it is set. A secret replaced or removed stays masked until the daemon restarts: another entry may
