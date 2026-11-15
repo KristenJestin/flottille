@@ -103,7 +103,11 @@ const ALIASES_MAX: usize = 10;
 /// alias of `ci` to `commit` makes `git ci -m x` a commit. A command git has, built in or a
 /// `git-<command>` it finds, is never an alias; one that is neither is refused, since git may
 /// run another in its place (`help.autocorrect`), which would commit unread.
-async fn unaliased(mut git: Vec<String>, folder: &Path, env: &Env) -> Result<Vec<String>, String> {
+pub(crate) async fn unaliased(
+    mut git: Vec<String>,
+    folder: &Path,
+    env: &Env,
+) -> Result<Vec<String>, String> {
     for _ in 0..ALIASES_MAX {
         let args = &git[1..];
         let (at, globals) = gate::git_globals(args);
@@ -172,7 +176,7 @@ async fn unaliased(mut git: Vec<String>, folder: &Path, env: &Env) -> Result<Vec
 }
 
 /// The environment of a run.
-type Env = BTreeMap<OsString, OsString>;
+pub(crate) type Env = BTreeMap<OsString, OsString>;
 
 /// What a push is checked against before it goes, as the project's file says it now: its message
 /// checks, run on each commit it sends, and its branch format, which each branch it makes on a
@@ -536,10 +540,10 @@ async fn run_all(
 
 /// The file a check reads the message in, in the daemon's own state folder, removed once the
 /// checks ran.
-struct MessageFile(PathBuf);
+pub(crate) struct MessageFile(pub PathBuf);
 
 impl MessageFile {
-    fn write(daemon: &Daemon, message: &str) -> Result<MessageFile, String> {
+    pub(crate) fn write(daemon: &Daemon, message: &str) -> Result<MessageFile, String> {
         let folder = daemon.paths.state.join("messages");
         flottille_core::paths::ensure_private_dir(&folder).map_err(|e| e.to_string())?;
         let path = folder.join(new_id().map_err(|e| e.to_string())?);
@@ -572,23 +576,67 @@ impl Drop for Group {
 /// One check: split without a shell, `{message}` filled with the file, run in the place's run
 /// environment, bounded in time.
 async fn run_one(at: &Where<'_>, line: &str, file: &Path, checked: Checked) -> Result<(), String> {
+    let check = Check {
+        named: "the message check",
+        of: String::new(),
+        what: checked.what(),
+        nothing: checked.nothing(),
+        again: "change it and try again",
+        fill: Some((MESSAGE, file)),
+    };
+    run_check(at, line, &check).await
+}
+
+/// What a check is, for its refusal's words, and the file it is given.
+pub(crate) struct Check<'a> {
+    /// Its kind: `the message check`.
+    pub named: &'a str,
+    /// Said after its line: ` of the repository api`; empty for none.
+    pub of: String,
+    /// What it refuses: `the commit message`.
+    pub what: &'a str,
+    /// What was not done: `nothing was committed`.
+    pub nothing: &'a str,
+    /// What to do then: `change it and try again`.
+    pub again: &'a str,
+    /// The word that stands for the file in its line, and the file.
+    pub fill: Option<(&'a str, &'a Path)>,
+}
+
+/// One check: split without a shell, its file filled in, run in the place's run environment in
+/// `at`'s folder, bounded in time. A program named by a relative path (`./scripts/check.sh`) is
+/// the folder's.
+pub(crate) async fn run_check(at: &Where<'_>, line: &str, check: &Check<'_>) -> Result<(), String> {
+    let Check {
+        named,
+        of,
+        what,
+        nothing,
+        again,
+        fill,
+    } = check;
     let shown = crate::mcp::masked(line, at.place);
     let not_run = |why: String| {
         format!(
-            "refused: the message check `{shown}` could not run ({why}); a check that does not \
-             run never succeeds: {}",
-            checked.nothing()
+            "refused: {named} `{shown}`{of} could not run ({why}); a check that does not run \
+             never succeeds: {nothing}"
         )
     };
-    let file = file.to_string_lossy();
     let words: Vec<String> = split_line(line)
         .map_err(not_run)?
         .iter()
-        .map(|word| word.replace(MESSAGE, &file))
+        .map(|word| match fill {
+            Some((stands, file)) => word.replace(stands, &file.to_string_lossy()),
+            None => word.clone(),
+        })
         .collect();
     let env =
         crate::runs::environment(at.daemon, at.place, at.repository, false).map_err(not_run)?;
-    let mut command = tokio::process::Command::new(&words[0]);
+    let program = match words[0].contains('/') {
+        true => at.folder.join(&words[0]),
+        false => PathBuf::from(&words[0]),
+    };
+    let mut command = tokio::process::Command::new(&program);
     command
         .args(&words[1..])
         .env_clear()
@@ -629,10 +677,8 @@ async fn run_one(at: &Where<'_>, line: &str, file: &Path, checked: Checked) -> R
     said.push_str(&String::from_utf8_lossy(&output.stderr));
     let said = secrets::mask_also(&ansi::strip(&said), &env, &at.place.secret_values());
     Err(format!(
-        "refused: the message check `{shown}` refused {} ({ended}); {}: change it and try \
-         again. Its output:\n{}",
-        checked.what(),
-        checked.nothing(),
+        "refused: {named} `{shown}`{of} refused {what} ({ended}); {nothing}: {again}. Its \
+         output:\n{}",
         end_of(said.trim())
     ))
 }
@@ -675,9 +721,15 @@ pub fn message_of(git: &[String], folder: &Path) -> Result<Option<String>, Strin
     };
     let rest = &args[at + 1..];
     match command.as_str() {
-        "commit" => commit(read(rest, &COMMIT)?, &folder)
-            .map(Some)
-            .map_err(|why| format!("{why}: give the message with -m or -F")),
+        "commit" => {
+            let said = read(rest, &COMMIT)?;
+            if let Some(why) = said.elsewhere {
+                return Err(why.into());
+            }
+            commit(said, &folder)
+                .map(Some)
+                .map_err(|why| format!("{why}: give the message with -m or -F"))
+        }
         "merge" => merge(read(rest, &MERGE)?, &folder).map_err(|why| {
             format!(
                 "{why}: give the message with -m or -F, or merge with --no-commit and commit with \
@@ -695,6 +747,44 @@ pub fn message_of(git: &[String], folder: &Path) -> Result<Option<String>, Strin
         "revert" => revert(&read(rest, &REVERT)?),
         _ => Ok(None),
     }
+}
+
+/// A `git commit` as the commit checks of its repository read it (`commit_checks`).
+pub(crate) struct Commit {
+    /// Where it commits: the line's folder, with its `-C`.
+    pub folder: PathBuf,
+    /// It says to skip the hooks (`--no-verify`, `-n`).
+    pub no_verify: bool,
+    /// Its message, or why it cannot be known before the commit, with what to do instead.
+    pub message: Result<String, String>,
+}
+
+/// What a git command (its words from `git` on) run in `folder` is as a `git commit`: none when
+/// it is another command, an error when its options cannot be read as git reads them.
+pub(crate) fn commit_of(git: &[String], folder: &Path) -> Result<Option<Commit>, String> {
+    let args = &git[1..];
+    let (at, globals) = gate::git_globals(args);
+    let mut folder = folder.to_path_buf();
+    for (option, value) in globals {
+        if let ("-C", Some(value)) = (option, value) {
+            folder = folder.join(value);
+        }
+    }
+    if args.get(at).map(String::as_str) != Some("commit") {
+        return Ok(None);
+    }
+    let said = read(&args[at + 1..], &COMMIT)?;
+    let no_verify = said.no_verify;
+    let message = match said.elsewhere {
+        Some(why) => Err(why.to_owned()),
+        None => commit(said, &folder),
+    }
+    .map_err(|why| format!("{why}: give the message with -m or -F"));
+    Ok(Some(Commit {
+        folder,
+        no_verify,
+        message,
+    }))
 }
 
 /// `git commit`: its `-m`, as git joins them, or its last `-F` file.
@@ -788,6 +878,10 @@ struct Said {
     switches: Vec<&'static str>,
     /// The last `--recurse-submodules` of a push (empty for `--no-recurse-submodules`).
     submodules: Option<String>,
+    /// A commit says to skip its hooks (`--no-verify`, `-n`), the last of them said.
+    no_verify: bool,
+    /// Why the message comes from elsewhere than the line, the first said.
+    elsewhere: Option<&'static str>,
 }
 
 enum Part {
@@ -816,6 +910,8 @@ enum Opt {
     Switch(&'static str),
     /// Says which submodules a push sends too: whether it takes a value.
     Submodules(bool),
+    /// Says whether a commit runs its hooks (`--verify`, `--no-verify`).
+    Verify(bool),
     Flag,
 }
 
@@ -854,10 +950,13 @@ const COMMIT: Options = Options {
             "squash",
             Opt::Elsewhere("git writes the message of a squash commit"),
         ),
+        ("verify", Opt::Verify(true)),
+        ("no-verify", Opt::Verify(false)),
     ],
     letters: &[
         ('m', Opt::Message),
         ('F', Opt::File),
+        ('n', Opt::Verify(false)),
         ('C', OTHER_COMMIT),
         ('c', OTHER_COMMIT),
         ('t', Opt::Valued),
@@ -1003,7 +1102,10 @@ fn take(said: &mut Said, opt: Opt, value: &str) -> Result<(), String> {
         Opt::NoMessage => said.parts.retain(|p| !matches!(p, Part::Text(_))),
         Opt::NoFile => said.parts.retain(|p| !matches!(p, Part::File(_))),
         Opt::Edit(on) => said.edit = on,
-        Opt::Elsewhere(why) => return Err(why.into()),
+        Opt::Elsewhere(why) => {
+            said.elsewhere.get_or_insert(why);
+        }
+        Opt::Verify(on) => said.no_verify = !on,
         Opt::Switch(name) => said.switches.push(name),
         Opt::Submodules(_) => said.submodules = Some(value.to_owned()),
         Opt::Valued | Opt::Stuck | Opt::Flag => {}

@@ -63,6 +63,29 @@ pub struct Repository {
     /// on the forge, unless the merge says otherwise (`docs/projects.md`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub delete_branch_on_merge: bool,
+    /// The checks an agent's `git commit` in it runs first, the user's own, never read from its
+    /// hooks (`docs/projects.md`, "Commit checks").
+    #[serde(default, skip_serializing_if = "CommitChecks::is_empty")]
+    pub commit_checks: CommitChecks,
+}
+
+/// A repository's commit checks: command lines run without a shell before an agent's commit in
+/// it, as its `pre-commit` and `commit-msg` hooks would run for the user.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitChecks {
+    /// Run in the repository's folder before the commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre_commit: Vec<String>,
+    /// Run on the commit's message, the file `{message_file}`, before the commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commit_msg: Vec<String>,
+}
+
+impl CommitChecks {
+    pub fn is_empty(&self) -> bool {
+        self.pre_commit.is_empty() && self.commit_msg.is_empty()
+    }
 }
 
 fn default_remote() -> String {
@@ -560,6 +583,7 @@ impl Project {
                     depends_on: Vec::new(),
                     forge: None,
                     delete_branch_on_merge: false,
+                    commit_checks: CommitChecks::default(),
                 })
                 .collect(),
             variables: BTreeMap::new(),
@@ -1212,6 +1236,9 @@ pub fn check_step(
 /// What stands for the file holding the message in a message check.
 pub const MESSAGE: &str = "{message}";
 
+/// What stands for the file holding the commit's message in a `commit-msg` commit check.
+pub const MESSAGE_FILE: &str = "{message_file}";
+
 /// Why `format` cannot be a branch format: it is empty, or not a regular expression, said with
 /// the reason of the regex crate (`unclosed group`).
 pub fn check_branch_format(format: &str) -> Result<(), String> {
@@ -1246,6 +1273,23 @@ pub fn check_message_check(line: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Why a commit check cannot be run, none when it can: one line split without a shell; a
+/// `commit-msg` check (`message`) names the file that holds the message, a `pre-commit` one has
+/// none to name.
+pub fn check_commit_check(line: &str, message: bool) -> Result<(), String> {
+    let words = crate::command::split_line(line)?;
+    let named = words.iter().any(|word| word.contains(MESSAGE_FILE));
+    match (message, named) {
+        (true, false) => Err(format!(
+            "must name {MESSAGE_FILE}, the file that holds the commit's message"
+        )),
+        (false, true) => Err(format!(
+            "names {MESSAGE_FILE}, which only a commit-msg check is given"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// What each repository holds by itself: a path that is its own, a remote, a base rule.
@@ -1283,6 +1327,16 @@ fn check_repositories(repositories: &[Repository]) -> Result<(), String> {
             .any(|branch| branch.is_empty() || branch.contains(char::is_whitespace))
         {
             return Err(format!("{key}.base: must name branches without spaces"));
+        }
+        let checks = &repository.commit_checks;
+        for (hook, lines, message) in [
+            ("pre_commit", &checks.pre_commit, false),
+            ("commit_msg", &checks.commit_msg, true),
+        ] {
+            for (at, line) in lines.iter().enumerate() {
+                check_commit_check(line, message)
+                    .map_err(|error| format!("{key}.commit_checks.{hook}[{at}]: {error}"))?;
+            }
         }
     }
     Ok(())
@@ -1988,6 +2042,41 @@ line = \"serve\"
             ),
         ] {
             let refused = refusal(&format!("message_checks = {checks}\n{MINIMAL}"));
+            assert!(refused.contains(said), "{checks}: {refused}");
+        }
+    }
+
+    #[test]
+    fn a_repository_s_commit_checks_are_read_and_checked() {
+        let text = format!(
+            "{MINIMAL}\n        commit_checks = {{ pre_commit = [\"lint-staged\"], commit_msg = \
+             [\"commitlint --edit {{message_file}}\"] }}\n"
+        );
+        let checks = parse(&text).unwrap().repositories[0].commit_checks.clone();
+        assert_eq!(checks.pre_commit, ["lint-staged"]);
+        assert_eq!(checks.commit_msg, ["commitlint --edit {message_file}"]);
+        assert!(
+            parse(MINIMAL).unwrap().repositories[0]
+                .commit_checks
+                .is_empty()
+        );
+
+        for (checks, said) in [
+            (
+                "{ pre_commit = [\"lint && test\"] }",
+                "repositories[0].commit_checks.pre_commit[0]: ",
+            ),
+            (
+                "{ commit_msg = [\"commitlint --edit msg\"] }",
+                "repositories[0].commit_checks.commit_msg[0]: must name {message_file}",
+            ),
+            (
+                "{ pre_commit = [\"lint {message_file}\"] }",
+                "repositories[0].commit_checks.pre_commit[0]: names {message_file}",
+            ),
+            ("{ pre_push = [\"x\"] }", "pre_push"),
+        ] {
+            let refused = refusal(&format!("{MINIMAL}\n        commit_checks = {checks}\n"));
             assert!(refused.contains(said), "{checks}: {refused}");
         }
     }

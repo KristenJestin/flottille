@@ -848,6 +848,20 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
             },
             None,
         ),
+        "project.commit_checks" => (
+            match projects::commit_checks(daemon, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        "project.set_commit_checks" => (
+            match projects::set_commit_checks(daemon, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
         "project.set_message_checks" => (
             match projects::set_message_checks(daemon, request.params) {
                 Ok(result) => Message::result(id, result),
