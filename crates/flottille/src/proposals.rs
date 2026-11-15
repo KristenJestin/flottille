@@ -41,8 +41,13 @@ const PATTERN_CHARS: usize = 300;
 
 /// The projects whose patterns are being put to the judge now, and when each last was: the judge
 /// is asked at most once an hour per project.
-static ASKED: LazyLock<Mutex<(HashSet<String>, HashMap<String, Instant>)>> =
-    LazyLock::new(Mutex::default);
+#[derive(Default)]
+struct Asked {
+    asking: HashSet<String>,
+    last: HashMap<String, Instant>,
+}
+
+static ASKED: LazyLock<Mutex<Asked>> = LazyLock::new(Mutex::default);
 
 /// How long a project waits between two askings of the judge.
 fn every() -> Duration {
@@ -222,7 +227,7 @@ async fn check(daemon: &Arc<Daemon>, project: &str) {
     }
     {
         let mut asked = ASKED.lock().unwrap();
-        let (asking, last) = &mut *asked;
+        let Asked { asking, last } = &mut *asked;
         if asking.contains(project) || last.get(project).is_some_and(|at| at.elapsed() < every()) {
             return;
         }
@@ -232,7 +237,7 @@ async fn check(daemon: &Arc<Daemon>, project: &str) {
         ASKED
             .lock()
             .unwrap()
-            .1
+            .last
             .insert(project.to_owned(), Instant::now());
         for ((tool, pattern), seen) in found {
             match propose(daemon, &judge, project, &tool, &pattern, &seen).await {
@@ -244,7 +249,7 @@ async fn check(daemon: &Arc<Daemon>, project: &str) {
             }
         }
     }
-    ASKED.lock().unwrap().0.remove(project);
+    ASKED.lock().unwrap().asking.remove(project);
 }
 
 /// The judge writes the rule of one pattern, which waits for the user.
