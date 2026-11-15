@@ -806,14 +806,89 @@ fn a_copied_chip_pasted_after_a_renumbering_keeps_its_new_number(cx: &mut TestAp
     focus(cx);
     let end = reply.read_with(cx, |r, cx| r.field().read(cx).value().len());
     caret_at(&reply, end, cx);
+    let copied = chip_id(&reply, 1, cx);
     cx.simulate_keystrokes("ctrl-v");
+    // Frame by frame, as the paste settles: neither copy's ink ever dips, so no frame shows
+    // the "Image 3" it was copied as.
+    let inks = [1, 2].map(|n| format!("reply-text-{copied}-{n}-ink"));
+    let mut sampled = false;
+    for _ in 0..90 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        for ink in &inks {
+            if let Some(v) = gpui_design_system::seen::seen(ink.clone()) {
+                sampled = true;
+                assert!(v >= 1.0, "{ink} dipped to {v}: a flash of the old number");
+            }
+        }
+    }
     settle(cx);
+    assert!(sampled, "the ink notes were looked at");
     assert_eq!(
         pieces(&reply, cx),
         ["chip:Image 1", "chip:Image 2", "chip:Image 2"],
         "the copy is the number the chip has now, not the one it had when it was copied"
     );
     assert_eq!(widths(&reply, cx), [9, 10], "no picture was added");
+}
+
+#[gpui_kit::test]
+fn redoing_a_removal_renumbers_the_chips(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (_shell, reply, cx) = open_session(&user, &lead, cx);
+    three_pictures(&reply, cx);
+
+    cx.update(|window, cx| window.click("attachment-remove-1", cx));
+    settle(cx);
+    focus(cx);
+    cx.simulate_keystrokes("ctrl-z");
+    settle(cx);
+    assert_eq!(
+        pieces(&reply, cx),
+        ["chip:Image 1", "chip:Image 2", "chip:Image 3"]
+    );
+
+    cx.simulate_keystrokes("ctrl-y");
+    settle(cx);
+    assert_eq!(
+        pieces(&reply, cx),
+        ["chip:Image 1", "chip:Image 2"],
+        "the chip after the removed one is renumbered again by the redo"
+    );
+    assert_eq!(
+        widths(&reply, cx),
+        [8, 10],
+        "and the picture left with its chip"
+    );
+}
+
+#[gpui_kit::test]
+fn cutting_a_chip_renumbers_the_others(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (_shell, reply, cx) = open_session(&user, &lead, cx);
+    three_pictures(&reply, cx);
+
+    let middle = reply.read_with(cx, |r, cx| {
+        r.tokens().read(cx).input().read(cx).tokens()[1].range()
+    });
+    reply.update_in(cx, |r, _, cx| {
+        r.field()
+            .clone()
+            .update(cx, |f, cx| f.set_selected_range(middle, cx))
+    });
+    cx.simulate_keystrokes("ctrl-x");
+    settle(cx);
+    assert_eq!(
+        pieces(&reply, cx),
+        ["chip:Image 1", "chip:Image 2"],
+        "the chip after the cut one is renumbered"
+    );
+    assert_eq!(widths(&reply, cx), [8, 10]);
 }
 
 #[gpui_kit::test]
