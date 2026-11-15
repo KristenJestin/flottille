@@ -489,6 +489,10 @@ fn cut_during_start(
 /// a server that turns out to be another (its first review, a version that moved) is started
 /// once more with the options of its own.
 async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Running, String> {
+    // Declared before the check of its URL existed: it fails alone until it is edited.
+    if let Some(why) = declaration.query_secret() {
+        return Err(why);
+    }
     let pinned = super::row(daemon, &declaration.name)
         .pin
         .as_ref()

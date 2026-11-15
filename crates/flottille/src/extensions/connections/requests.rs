@@ -11,7 +11,7 @@ use flottille_core::approval::{self, Decision, RequestState};
 use serde_json::{Map, Value, json};
 
 use super::{
-    Declaration, EXTENSION, KEYS, Reach, SETTINGS, State, Still, client, declaration, declarations,
+    Declaration, EXTENSION, KEYS, Reach, SETTINGS, State, Still, declaration, declarations,
     entries_checked, row, setting_of, settings_only, state_of,
 };
 use crate::daemon::Daemon;
@@ -456,6 +456,9 @@ fn proposal(daemon: &Daemon, args: &Value) -> Result<Proposal, String> {
             }
             let params = params_of(daemon, args, false)?;
             let declaration = Declaration::of(&params, "connection")?;
+            if let Some(why) = declaration.query_secret() {
+                return Err(why);
+            }
             entries_checked(daemon, &declaration).map_err(|f| f.message)?;
             headers_checked(daemon, None, &declaration)?;
             (None, Some(declaration))
@@ -661,7 +664,7 @@ fn listed(daemon: &Daemon, declaration: &Declaration, on: bool) -> String {
         declaration.name,
         declaration.about
     );
-    if let Some(failing) = client::failing(daemon, &declaration.name) {
+    if let Some(failing) = super::failing(daemon, declaration) {
         line.push_str(&format!(" Failing: {failing}"));
     }
     line

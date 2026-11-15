@@ -236,8 +236,82 @@ impl Secret {
     }
 }
 
-/// The parts of a query parameter's name that say its value is a secret.
-const SECRET_PARAMETERS: [&str; 5] = ["token", "key", "secret", "password", "auth"];
+/// The names of a query parameter whose value is a secret, in words (`userToken`, `user_token`
+/// and `UserToken` are `["user", "token"]`): a name that is one of them, whole.
+const SECRET_PARAMETERS: [&[&str]; 18] = [
+    &["token"],
+    &["access", "token"],
+    &["auth", "token"],
+    &["user", "token"],
+    &["api", "token"],
+    &["id", "token"],
+    &["refresh", "token"],
+    &["session", "token"],
+    &["private", "token"],
+    &["key"],
+    &["apikey"],
+    &["auth"],
+    &["authorization"],
+    &["secret"],
+    &["password"],
+    &["passwd"],
+    &["access", "key"],
+    &["private", "key"],
+];
+
+/// The ends of a name that say its value is a secret, whatever comes before (`x_api_key`,
+/// `client_secret`). Not `token` or `key` alone: `pageToken` and `project_key` are no secrets.
+const SECRET_SUFFIXES: [&[&str]; 9] = [
+    &["access", "token"],
+    &["auth", "token"],
+    &["api", "token"],
+    &["api", "key"],
+    &["apikey"],
+    &["secret", "key"],
+    &["private", "key"],
+    &["secret"],
+    &["password"],
+];
+
+/// A parameter's name in lowercase words: split at `_`, `-`, `.` and where a capital follows a
+/// small letter or a digit.
+fn words_of(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut small = false;
+    for c in name.chars() {
+        if !c.is_alphanumeric() {
+            words.extend((!word.is_empty()).then(|| std::mem::take(&mut word)));
+            small = false;
+            continue;
+        }
+        if c.is_uppercase() && small {
+            words.push(std::mem::take(&mut word));
+        }
+        small = c.is_lowercase() || c.is_numeric();
+        word.extend(c.to_lowercase());
+    }
+    words.extend((!word.is_empty()).then_some(word));
+    words
+}
+
+/// Why a URL may not be reached as it is: a query parameter named like a secret, whose value may
+/// be one. Its name only is said. Checked when a connection is added or edited; one already
+/// declared that has one fails, alone, with this reason.
+fn query_secret(text: &str) -> Option<String> {
+    let url = url::Url::parse(text).ok()?;
+    let (name, _) = url.query_pairs().find(|(name, _)| {
+        let words = words_of(name);
+        SECRET_PARAMETERS.iter().any(|whole| words == *whole)
+            || SECRET_SUFFIXES
+                .iter()
+                .any(|end| words.len() >= end.len() && words[words.len() - end.len()..] == **end)
+    })?;
+    Some(format!(
+        "url: its query holds {name}, which looks like a secret: move it to \"Secrets of its \
+         requests\", a query parameter from a vault entry (secrets, in = \"query\")"
+    ))
+}
 
 /// `secrets = [{in, name, prefix, entry}]`, checked line by line.
 fn secrets_of(value: &Value, at: &str) -> std::result::Result<Vec<Secret>, String> {
@@ -630,6 +704,14 @@ impl Declaration {
         format!("{PREFIX}{}", self.name)
     }
 
+    /// Why its URL is not reached: `query_secret`.
+    pub(super) fn query_secret(&self) -> Option<String> {
+        match &self.reach {
+            Reach::Url(url) => query_secret(url),
+            Reach::Command(_) => None,
+        }
+    }
+
     /// The vault entries it names.
     fn entries(&self) -> impl Iterator<Item = &String> {
         self.env
@@ -669,16 +751,6 @@ fn checked_url(text: &str) -> std::result::Result<String, String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(format!(
             "{text:?}: holds a login: name a vault entry in secrets instead"
-        ));
-    }
-    // Its name only: the value may be the secret.
-    if let Some((name, _)) = url.query_pairs().find(|(name, _)| {
-        let name = name.to_lowercase();
-        SECRET_PARAMETERS.iter().any(|part| name.contains(part))
-    }) {
-        return Err(format!(
-            "its query holds {name}, which looks like a secret: move it to \"Secrets of its \
-             requests\", a query parameter from a vault entry (secrets, in = \"query\")"
         ));
     }
     match url.scheme() {
@@ -1781,7 +1853,7 @@ fn connection_json(daemon: &Daemon, declaration: &Declaration, on: bool) -> Valu
     entry["cut_off"] = json!(row.cut_off);
     entry["signed_out"] = json!(row.signed_out);
     entry["running"] = json!(client::running(daemon, &declaration.name));
-    entry["failing"] = json!(client::failing(daemon, &declaration.name));
+    entry["failing"] = json!(failing(daemon, declaration));
     entry["server"] = row
         .pin
         .as_ref()
@@ -1796,6 +1868,13 @@ fn connection_json(daemon: &Daemon, declaration: &Declaration, on: bool) -> Valu
         )
     });
     entry
+}
+
+/// Why its server does not start: its URL, or what the last start said.
+fn failing(daemon: &Daemon, declaration: &Declaration) -> Option<String> {
+    declaration
+        .query_secret()
+        .or_else(|| client::failing(daemon, &declaration.name))
 }
 
 fn list(daemon: &Daemon) -> std::result::Result<Value, Failure> {
@@ -1882,6 +1961,9 @@ async fn add_if(
         .as_object()
         .ok_or_else(|| Failure::refused("connection.add takes an object"))?;
     let declaration = Declaration::of(table, "connection").map_err(Failure::refused)?;
+    if let Some(why) = declaration.query_secret() {
+        return Err(Failure::refused(format!("connection.{why}")));
+    }
     entries_checked(daemon, &declaration)?;
     let name = declaration.name.clone();
     if declaration_exists(daemon, &name) {
@@ -2079,7 +2161,11 @@ fn edited(old: &Declaration, params: &Value) -> std::result::Result<Declaration,
             }
         }
     }
-    Declaration::of(&table, "connection").map_err(Failure::refused)
+    let new = Declaration::of(&table, "connection").map_err(Failure::refused)?;
+    if let Some(why) = new.query_secret() {
+        return Err(Failure::refused(format!("connection.{why}")));
+    }
+    Ok(new)
 }
 
 async fn remove(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
