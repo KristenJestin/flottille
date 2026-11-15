@@ -108,8 +108,6 @@ pub struct Attachments {
     gone: Vec<Attached>,
     /// The field the chips are in, set by the owner.
     field: Option<Entity<TokenField>>,
-    /// The id the next picture takes.
-    next: u64,
     /// The ones the message being sent holds: they leave when it is taken, whatever was removed
     /// or added meanwhile.
     sent: Vec<Arc<gpui_kit::Image>>,
@@ -236,8 +234,10 @@ impl Attachments {
     }
 
     fn push(&mut self, image: Arc<gpui_kit::Image>, name: String, placed: bool) -> u64 {
-        let id = self.next;
-        self.next += 1;
+        // Unique across composers: a chip copied from one into another is not taken there for
+        // a picture of its own.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.images.push(Attached {
             id,
             image,
