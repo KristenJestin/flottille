@@ -24,6 +24,11 @@ use crate::{Hello, MachineKey, NeedsUpdate, PeerState, PublicKey, choose};
 pub const FRAME_LIMIT: usize = 1 << 20;
 /// How long dialling one address, or a handshake, may take.
 const WAIT: Duration = Duration::from_secs(10);
+/// How long the TLS of a link that came in may take: on loopback or a LAN it takes milliseconds.
+const HANDSHAKE: Duration = Duration::from_secs(5);
+/// The most links that came in whose TLS is under way at once: one that stalls holds a place,
+/// not the others.
+const HANDSHAKES: usize = 16;
 /// The codes a side closes a link with.
 const CLOSE_REFUSED: u32 = 1;
 const CLOSE_NEEDS_UPDATE: u32 = 2;
@@ -137,6 +142,8 @@ impl std::error::Error for LinkError {}
 pub struct Endpoint {
     transport: Arc<Transport>,
     key: PublicKey,
+    /// The links that came in, their keys proved, in the order their TLS finished.
+    accepted: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Accepting>>>,
 }
 
 impl Endpoint {
@@ -148,10 +155,27 @@ impl Endpoint {
         let alpns = [Traffic::Machine.alpn(), Traffic::Client.alpn()];
         let transport =
             Transport::bind(&seed, public.as_bytes(), listen, &alpns).map_err(LinkError::Listen)?;
-        Ok(Endpoint {
-            transport: Arc::new(transport),
-            key: public,
-        })
+        Ok(Endpoint::over(transport, public))
+    }
+
+    /// Listens nowhere, and dials: no socket is open until the first link it dials. Within a
+    /// Tokio runtime.
+    pub fn dialler(key: &MachineKey) -> Result<Endpoint, LinkError> {
+        let seed = Zeroizing::new(key.0.to_bytes());
+        let public = key.public();
+        let transport = Transport::dialler(&seed, public.as_bytes()).map_err(LinkError::Listen)?;
+        Ok(Endpoint::over(transport, public))
+    }
+
+    fn over(transport: Transport, key: PublicKey) -> Endpoint {
+        let transport = Arc::new(transport);
+        let (sender, accepted) = tokio::sync::mpsc::channel(HANDSHAKES);
+        tokio::spawn(take_in(transport.clone(), sender));
+        Endpoint {
+            transport,
+            key,
+            accepted: Arc::new(tokio::sync::Mutex::new(accepted)),
+        }
     }
 
     pub fn key(&self) -> PublicKey {
@@ -214,12 +238,38 @@ impl Endpoint {
         }
     }
 
-    /// The next machine that dials this one, its key proved; `None` once the endpoint is closed.
+    /// The next machine that dials this one, its key proved; `None` once the endpoint is closed,
+    /// at once when it listens nowhere.
     pub async fn accept(&self) -> Option<Accepting> {
-        loop {
-            let incoming = self.transport.accept().await?;
-            let Ok(Ok(conn)) = tokio::time::timeout(WAIT, incoming.finish()).await else {
-                continue;
+        self.accepted.lock().await.recv().await
+    }
+
+    /// Closes every link, telling the other sides.
+    pub async fn close(&self) {
+        self.transport.close().await;
+    }
+}
+
+/// Takes the links that come in, each TLS in a task of its own, so that one that stalls stops
+/// no other; until the endpoint is closed, or every copy of it dropped.
+async fn take_in(transport: Arc<Transport>, accepted: tokio::sync::mpsc::Sender<Accepting>) {
+    let places = Arc::new(tokio::sync::Semaphore::new(HANDSHAKES));
+    loop {
+        let incoming = tokio::select! {
+            incoming = transport.accept() => incoming,
+            _ = accepted.closed() => None,
+        };
+        let Some(incoming) = incoming else {
+            return;
+        };
+        let Ok(place) = places.clone().acquire_owned().await else {
+            return;
+        };
+        let accepted = accepted.clone();
+        tokio::spawn(async move {
+            let _place = place;
+            let Ok(Ok(conn)) = tokio::time::timeout(HANDSHAKE, incoming.finish()).await else {
+                return;
             };
             let peer = conn
                 .peer()
@@ -227,23 +277,20 @@ impl Endpoint {
             let traffic = conn.alpn().and_then(|alpn| Traffic::of(&alpn));
             match (peer, traffic) {
                 (Some(peer), Some(traffic)) => {
-                    return Some(Accepting {
-                        conn,
-                        peer,
-                        traffic,
-                    });
+                    let _ = accepted
+                        .send(Accepting {
+                            conn,
+                            peer,
+                            traffic,
+                        })
+                        .await;
                 }
                 _ => conn.close(
                     CLOSE_REFUSED,
                     "refused: not a key or a traffic of Flottille's",
                 ),
             }
-        }
-    }
-
-    /// Closes every link, telling the other sides.
-    pub async fn close(&self) {
-        self.transport.close().await;
+        });
     }
 }
 

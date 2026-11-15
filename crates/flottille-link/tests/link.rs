@@ -168,8 +168,71 @@ async fn a_machine_answering_with_another_key_is_refused() {
         ),
     )
     .await
+    .unwrap()
+    .unwrap_err();
+    // Refused by the dialler's own check of the key, not by anything the server said.
+    assert!(matches!(failed, LinkError::Unreachable { .. }), "{failed}");
+    assert!(
+        failed.to_string().contains("invalid peer certificate"),
+        "{failed}"
+    );
+}
+
+#[tokio::test]
+async fn a_stalled_handshake_does_not_stop_a_trusted_pair_from_linking() {
+    let (laptop, server) = (Machine::new().await, Machine::new().await);
+    let ours = Hello::ours("0.4.1");
+    // The start of a handshake, as a machine sends it when it dials: caught on a socket that
+    // never answers.
+    let trap = tokio::net::UdpSocket::bind(loopback()).await.unwrap();
+    let dialling = {
+        let (endpoint, key, at) = (
+            laptop.endpoint.clone(),
+            server.key(),
+            trap.local_addr().unwrap(),
+        );
+        let ours = ours.clone();
+        tokio::spawn(async move {
+            let _ = endpoint
+                .connect(key, &[at], Traffic::Machine, &ours, "trap")
+                .await;
+        })
+    };
+    let mut start = vec![0u8; 4096];
+    let size = tokio::time::timeout(WAIT, trap.recv(&mut start))
+        .await
+        .unwrap()
+        .unwrap();
+    dialling.abort();
+    // Sent to the server from a socket that says nothing more: a handshake that stalls.
+    let staller = std::net::UdpSocket::bind(loopback()).unwrap();
+    staller
+        .send_to(&start[..size], server.addresses()[0])
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let serving = serve(&server, laptop.key(), ours.clone());
+    let started = Instant::now();
+    let link = tokio::time::timeout(
+        WAIT,
+        laptop.endpoint.connect(
+            server.key(),
+            &server.addresses(),
+            Traffic::Machine,
+            &ours,
+            "server",
+        ),
+    )
+    .await
+    .unwrap()
     .unwrap();
-    assert!(failed.is_err(), "a link to the wrong key was made");
+    serving.await.unwrap().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "the trusted pair waited {:?}",
+        started.elapsed()
+    );
+    assert_eq!(link.peer(), server.key());
 }
 
 #[tokio::test]

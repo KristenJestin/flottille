@@ -37,6 +37,10 @@ const KEEP_ALIVE: Duration = Duration::from_secs(5);
 const IDLE: Duration = Duration::from_secs(15);
 /// The name a client gives in its hello. Nothing checks it: the key is the identity.
 const SERVER_NAME: &str = "flottille";
+/// The most connections that came in and are not taken yet, and what they may hold buffered all
+/// together: a host that opens many and finishes none cannot fill the machine's memory.
+const MOST_INCOMING: usize = 32;
+const INCOMING_BUFFERED: u64 = 1 << 20;
 
 /// Why the transport failed: the other side closed with a reason of its own, or the connection
 /// was lost or never made.
@@ -45,14 +49,28 @@ pub(crate) enum Failure {
     Lost(String),
 }
 
-/// One machine's endpoint: a UDP socket that accepts links and dials them.
+/// One machine's endpoint: a UDP socket that accepts links and dials them; or, when it listens
+/// nowhere, a socket opened at its first dial, which accepts nothing.
 pub(crate) struct Transport {
-    endpoint: quinn::Endpoint,
+    endpoint: std::sync::Mutex<Option<quinn::Endpoint>>,
+    listens: bool,
     key: Arc<CertifiedKey>,
     provider: Arc<CryptoProvider>,
 }
 
 impl Transport {
+    /// Listens nowhere: it only dials, with the key whose private half is `seed`.
+    pub(crate) fn dialler(seed: &[u8; 32], public: &[u8; 32]) -> Result<Transport, String> {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let key = certified(seed, public, &provider)?;
+        Ok(Transport {
+            endpoint: std::sync::Mutex::new(None),
+            listens: false,
+            key,
+            provider,
+        })
+    }
+
     /// Listens at `listen` with the key whose private half is `seed`, for the protocol names
     /// `alpns`.
     pub(crate) fn bind(
@@ -74,10 +92,14 @@ impl Transport {
         let quic = QuicServerConfig::try_from(tls).map_err(|error| error.to_string())?;
         let mut server = quinn::ServerConfig::with_crypto(Arc::new(quic));
         server.transport_config(Arc::new(transport_config()));
+        server
+            .max_incoming(MOST_INCOMING)
+            .incoming_buffer_size_total(INCOMING_BUFFERED);
         let endpoint = quinn::Endpoint::server(server, listen)
             .map_err(|error| format!("cannot listen on {listen}: {error}"))?;
         Ok(Transport {
-            endpoint,
+            endpoint: std::sync::Mutex::new(Some(endpoint)),
+            listens: true,
             key,
             provider,
         })
@@ -85,7 +107,24 @@ impl Transport {
 
     /// The socket it listens on.
     pub(crate) fn local(&self) -> Option<SocketAddr> {
-        self.endpoint.local_addr().ok()
+        if !self.listens {
+            return None;
+        }
+        self.endpoint.lock().unwrap().as_ref()?.local_addr().ok()
+    }
+
+    /// The endpoint, its socket opened now when it listens nowhere and never dialled yet.
+    fn endpoint(&self) -> Result<quinn::Endpoint, String> {
+        let mut endpoint = self.endpoint.lock().unwrap();
+        if let Some(endpoint) = endpoint.as_ref() {
+            return Ok(endpoint.clone());
+        }
+        // Both families when the system allows it, IPv4 alone otherwise.
+        let opened = quinn::Endpoint::client(SocketAddr::from(([0u16; 8], 0)))
+            .or_else(|_| quinn::Endpoint::client(SocketAddr::from(([0u8; 4], 0))))
+            .map_err(|error| format!("cannot open a socket to dial: {error}"))?;
+        *endpoint = Some(opened.clone());
+        Ok(opened)
     }
 
     /// A connection to the key `peer` at `address`, for the protocol name `alpn`: refused unless
@@ -114,21 +153,40 @@ impl Transport {
         let mut client = quinn::ClientConfig::new(Arc::new(quic));
         client.transport_config(Arc::new(transport_config()));
         let connecting = self
-            .endpoint
+            .endpoint()
+            .map_err(Failure::Lost)?
             .connect_with(client, address, SERVER_NAME)
             .map_err(|error| Failure::Lost(error.to_string()))?;
         connecting.await.map(Conn).map_err(failure)
     }
 
-    /// The next connection that comes, `None` once the endpoint is closed.
+    /// The next connection that comes from an address that proved it is the sender's, `None`
+    /// once the endpoint is closed or when it listens nowhere. One from an address not proved yet
+    /// is asked to prove it (a QUIC retry) and is not handed over: a forged source costs nothing
+    /// but one packet.
     pub(crate) async fn accept(&self) -> Option<Incoming> {
-        self.endpoint.accept().await.map(Incoming)
+        if !self.listens {
+            return None;
+        }
+        let endpoint = self.endpoint.lock().unwrap().clone()?;
+        loop {
+            let incoming = endpoint.accept().await?;
+            if incoming.remote_address_validated() {
+                return Some(Incoming(incoming));
+            }
+            if let Err(error) = incoming.retry() {
+                error.into_incoming().ignore();
+            }
+        }
     }
 
     /// Closes every connection, and waits a little for the other sides to be told.
     pub(crate) async fn close(&self) {
-        self.endpoint.close(0u32.into(), b"this machine stops");
-        let _ = tokio::time::timeout(Duration::from_secs(1), self.endpoint.wait_idle()).await;
+        let Some(endpoint) = self.endpoint.lock().unwrap().clone() else {
+            return;
+        };
+        endpoint.close(0u32.into(), b"this machine stops");
+        let _ = tokio::time::timeout(Duration::from_secs(1), endpoint.wait_idle()).await;
     }
 }
 
