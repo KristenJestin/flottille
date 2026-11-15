@@ -30,7 +30,7 @@ use flottille_protocol::{Class, class};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-use crate::serial::{from_hex_text, to_hex};
+use crate::serial::{from_hex_text, invisible, to_hex};
 use crate::{DeviceKey, KeyError, Member, Members, PublicKey, Role, Signature};
 
 /// The start of every request's signed bytes.
@@ -97,35 +97,42 @@ impl Request {
             },
             sig: Signature([0; 64]),
         };
-        request.sig = Signature(key.0.sign(&request.signed_bytes()).to_bytes());
+        let bytes = request.signed_bytes().ok_or_else(|| {
+            KeyError("a field of this request is longer than 4 GB: it cannot be signed".to_owned())
+        })?;
+        request.sig = Signature(key.0.sign(&bytes).to_bytes());
         Ok(request)
     }
 
-    /// What the signature covers: the encoding of the module's documentation.
-    pub fn signed_bytes(&self) -> Vec<u8> {
-        // A text longer than 4 GB cannot be signed; no link carries one.
-        let text = |bytes: &mut Vec<u8>, text: &str| {
-            bytes.extend_from_slice(&(text.len() as u32).to_be_bytes());
+    /// What the signature covers: the encoding of the module's documentation. None when a field
+    /// is longer than its length prefix says (4 GB): such a request is neither signed nor taken.
+    pub fn signed_bytes(&self) -> Option<Vec<u8>> {
+        let text = |bytes: &mut Vec<u8>, text: &str| -> Option<()> {
+            bytes.extend_from_slice(&prefix(text.len())?);
             bytes.extend_from_slice(text.as_bytes());
+            Some(())
         };
         let mut bytes = DOMAIN.to_vec();
-        text(&mut bytes, &self.id);
-        text(&mut bytes, &self.machine);
+        text(&mut bytes, &self.id)?;
+        text(&mut bytes, &self.machine)?;
         bytes.extend_from_slice(self.signed.device.as_bytes());
         bytes.extend_from_slice(&self.signed.nonce.0);
         bytes.extend_from_slice(&self.signed.at.to_be_bytes());
-        text(&mut bytes, &self.signed.method);
-        text(&mut bytes, &self.signed.params);
-        bytes
+        text(&mut bytes, &self.signed.method)?;
+        text(&mut bytes, &self.signed.params)?;
+        Some(bytes)
     }
 
     /// Whether the signature is the device's over the signed bytes; strict, as a member change's.
     fn signed(&self) -> bool {
+        let Some(bytes) = self.signed_bytes() else {
+            return false;
+        };
         let signature = ed25519_dalek::Signature::from_bytes(&self.sig.0);
         self.signed
             .device
             .0
-            .verify_strict(&self.signed_bytes(), &signature)
+            .verify_strict(&bytes, &signature)
             .is_ok()
     }
 }
@@ -152,24 +159,40 @@ impl fmt::Display for RequestError {
 
 impl std::error::Error for RequestError {}
 
-/// The receiving machine's memory of the nonces it accepted within the window, per device.
-#[derive(Debug, Default)]
+/// The receiving machine's memory of the nonces it accepted within the window, per device. It is
+/// kept in memory only: the daemon keeps one for all its links, never one per connection, which
+/// would let a request be played again on another, and starts it again at each start, refusing
+/// what was signed before (`new`).
+#[derive(Debug)]
 pub struct Requests {
     seen: HashMap<[u8; 32], Vec<(u64, Nonce)>>,
-    /// The latest time of the clock this memory was given: a nonce is forgotten only once it is
-    /// out of the window of that time, so that a clock set back does not bring a request back.
+    /// When this machine started: a request signed before may have been served by the memory a
+    /// restart lost.
+    started: u64,
+    /// The latest time of the clock this memory was given: a nonce is forgotten once it is out of
+    /// the window of that time. Only the forgetting reads it, never the time check, so that a
+    /// clock read far ahead once locks no device out; the cost is that a clock set back by more
+    /// than the window may let a forgotten request in again.
     latest: u64,
 }
 
 impl Requests {
-    pub fn new() -> Requests {
-        Requests::default()
+    /// The memory of a machine that started at `started`.
+    pub fn new(started: SystemTime) -> Requests {
+        let started = milliseconds(started);
+        Requests {
+            seen: HashMap::new(),
+            started,
+            latest: started,
+        }
     }
 
     /// Checks `text`, a request as the link carried it, on the machine named `machine` whose
-    /// checked member list is `members`, at `now`: the device is a member; its role allows the
-    /// method's class; the signature; the time within the window of `now`; the nonce not seen in
-    /// that window. An accepted request's nonce is remembered.
+    /// checked member list is `members`, at `now`, in this order: it is a request for this
+    /// machine; its device is a member, and the signature is the device's; the time is within the
+    /// window of `now`, and not before this machine started; the nonce was not seen in the window;
+    /// the device's role allows the method's class. Until the signature passes, a refusal names
+    /// nothing of the list. An accepted request's nonce is remembered.
     pub fn check(
         &mut self,
         text: &str,
@@ -180,40 +203,26 @@ impl Requests {
         let refused = |why: String| Err(RequestError(why));
         let request: Request = match serde_json::from_str(text) {
             Ok(request) => request,
-            Err(error) => return refused(format!("this is not a signed request: {error}")),
+            Err(error) => {
+                return refused(format!(
+                    "this is not a signed request: {}",
+                    shown(&error.to_string())
+                ));
+            }
         };
         if request.machine != machine {
             return refused(format!(
                 "this request is for {}, not for {machine}",
-                request.machine
+                shown(&request.machine)
             ));
         }
         let signed = &request.signed;
-        let Some(member) = members.get(&signed.device) else {
-            return refused(format!(
-                "the device {} is not a member",
-                signed.device.fingerprint()
-            ));
+        let Some(member) = members.get(&signed.device).filter(|_| request.signed()) else {
+            return refused("this request is not signed by a member".to_owned());
         };
-        let Some(class) = class(&signed.method) else {
-            return refused(format!("{} is not a method of Flottille's", signed.method));
-        };
-        if member.role == Role::Viewer && class == Class::Drive {
-            return refused(format!(
-                "{} may only view: a controller or a runner may call {}",
-                member.name, signed.method
-            ));
-        }
-        if !request.signed() {
-            return refused(format!(
-                "this request does not carry the signature of {}",
-                member.name
-            ));
-        }
         let window = REQUEST_WINDOW.as_millis() as u64;
         let now = milliseconds(now);
-        self.latest = self.latest.max(now);
-        if signed.at < self.latest.saturating_sub(window) {
+        if signed.at < now.saturating_sub(window) {
             return refused("this request is older than five minutes".to_owned());
         }
         if signed.at > now.saturating_add(window) {
@@ -222,10 +231,28 @@ impl Requests {
                     .to_owned(),
             );
         }
+        if signed.at < self.started {
+            return refused(
+                "this request was signed before this machine started: send it again".to_owned(),
+            );
+        }
+        self.latest = self.latest.max(now);
         self.forget(self.latest.saturating_sub(window));
         let seen = self.seen.entry(*signed.device.as_bytes()).or_default();
         if seen.iter().any(|(_, nonce)| *nonce == signed.nonce) {
             return refused("this request was received already".to_owned());
+        }
+        let Some(class) = class(&signed.method) else {
+            return refused(format!(
+                "{} is not a method of Flottille's",
+                shown(&signed.method)
+            ));
+        };
+        if member.role == Role::Viewer && class == Class::Drive {
+            return refused(format!(
+                "{} may only view: a controller or a runner may call {}",
+                member.name, signed.method
+            ));
         }
         if seen.len() >= NONCES_PER_DEVICE {
             return refused(format!(
@@ -235,7 +262,12 @@ impl Requests {
         }
         let params = match serde_json::from_str(&signed.params) {
             Ok(params) => params,
-            Err(error) => return refused(format!("its params are not JSON: {error}")),
+            Err(error) => {
+                return refused(format!(
+                    "its params are not JSON: {}",
+                    shown(&error.to_string())
+                ));
+            }
         };
         seen.push((signed.at, signed.nonce));
         Ok(Accepted {
@@ -246,7 +278,8 @@ impl Requests {
         })
     }
 
-    /// Forgets the nonces of requests signed before `floor`, which the time check refuses anyway.
+    /// Forgets the nonces of requests signed before `floor`, which the time check refuses while the
+    /// clock goes forward.
     fn forget(&mut self, floor: u64) {
         self.seen.retain(|_, seen| {
             seen.retain(|(at, _)| *at >= floor);
@@ -271,5 +304,44 @@ impl Serialize for Nonce {
 impl<'de> Deserialize<'de> for Nonce {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Nonce, D::Error> {
         from_hex_text(deserializer, "a nonce").map(Nonce)
+    }
+}
+
+/// The 4-byte big-endian length prefix of a field `length` bytes long.
+fn prefix(length: usize) -> Option<[u8; 4]> {
+    u32::try_from(length).ok().map(u32::to_be_bytes)
+}
+
+/// The longest part of a text a refusal shows.
+const SHOWN: usize = 64;
+
+/// `text` as a refusal shows it, the sender's: its first 64 characters, a control or format
+/// character as `\u{fffd}`, so that it can neither forge lines of a log nor drive a terminal.
+fn shown(text: &str) -> String {
+    let mut shown: String = text
+        .chars()
+        .take(SHOWN)
+        .map(|c| {
+            if c.is_control() || invisible(c) {
+                '\u{fffd}'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if text.chars().nth(SHOWN).is_some() {
+        shown.push('…');
+    }
+    shown
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_field_longer_than_its_length_prefix_is_refused() {
+        assert_eq!(prefix(u32::MAX as usize), Some([0xff; 4]));
+        assert_eq!(prefix(u32::MAX as usize + 1), None);
     }
 }
