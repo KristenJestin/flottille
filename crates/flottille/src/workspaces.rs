@@ -2790,24 +2790,28 @@ pub async fn integrated_into(dir: &Path, commit: &str, own: &str) -> Option<Stri
 }
 
 /// How often the forge is asked whether a workspace's work is integrated: the reminder checks at
-/// the end of every turn, and each check is a call to `gh` or `bkt`.
-const INTEGRATION_READ_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+/// the end of every turn, and each check is a call to `gh` or `bkt`. By the store's clock, which a
+/// test moves ahead.
+const INTEGRATION_READ_EVERY_MS: u64 = 5 * 60 * 1000;
 
 /// When the forge was last asked for each workspace (project, name).
 static INTEGRATION_READS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
+    std::sync::Mutex<std::collections::HashMap<(String, String), u64>>,
 > = std::sync::LazyLock::new(Default::default);
 
-/// Whether the forge may be asked for this workspace now, noting it when it may.
-fn may_read_integration(project: &str, name: &str) -> bool {
+/// Whether the forge may be asked for this workspace now, noting it when it may; when it may not,
+/// the time it may again.
+fn may_read_integration(project: &str, name: &str) -> Result<(), u64> {
     let mut reads = INTEGRATION_READS.lock().unwrap_or_else(|e| e.into_inner());
     let key = (project.to_owned(), name.to_owned());
-    let now = std::time::Instant::now();
+    let now = now_ms();
     match reads.get(&key) {
-        Some(at) if now.duration_since(*at) < INTEGRATION_READ_EVERY => false,
+        Some(at) if now < at.saturating_add(INTEGRATION_READ_EVERY_MS) => {
+            Err(at.saturating_add(INTEGRATION_READ_EVERY_MS))
+        }
         _ => {
             reads.insert(key, now);
-            true
+            Ok(())
         }
     }
 }
@@ -2819,9 +2823,16 @@ fn may_read_integration(project: &str, name: &str) -> bool {
 /// happens to hold it: a second session's branch started from this one holds it too. Closed on
 /// doubt: one repository whose pull request is open, a draft or closed, merged but with commits
 /// made after, or whose forge cannot be read, is no integration. `None` when no repository has
-/// work of its own, the workspace is gone, or the forge was asked less than five minutes ago.
-pub async fn integrated(daemon: &Daemon, project: &str, name: &str) -> Option<String> {
-    let workspace = daemon.read(|store| store.workspace(project, name)).ok()??;
+/// work of its own or the workspace is gone; the time the forge may be asked again when it was
+/// asked less than five minutes ago.
+pub async fn integrated(daemon: &Daemon, project: &str, name: &str) -> Result<Option<String>, u64> {
+    let Some(workspace) = daemon
+        .read(|store| store.workspace(project, name))
+        .ok()
+        .flatten()
+    else {
+        return Ok(None);
+    };
     let local = format!("refs/heads/{}", workspace.branch);
     let mut own = Vec::new();
     for worktree in &workspace.repositories {
@@ -2837,10 +2848,22 @@ pub async fn integrated(daemon: &Daemon, project: &str, name: &str) -> Option<St
             own.push((worktree, dir));
         }
     }
-    if own.is_empty() || !may_read_integration(project, name) {
-        return None;
+    if own.is_empty() {
+        return Ok(None);
     }
-    let read = forge_read(daemon, &workspace).await;
+    may_read_integration(project, name)?;
+    Ok(integrated_by_forge(daemon, &workspace, &local, own).await)
+}
+
+/// `integrated` once the forge may be asked: the repositories with work of their own, each with
+/// its folder.
+async fn integrated_by_forge(
+    daemon: &Daemon,
+    workspace: &Workspace,
+    local: &str,
+    own: Vec<(&Worktree, PathBuf)>,
+) -> Option<String> {
+    let read = forge_read(daemon, workspace).await;
     let mut into = None;
     for (worktree, dir) in own {
         let said = read.repositories.iter().find(|r| r.path == worktree.path)?;
@@ -2854,14 +2877,14 @@ pub async fn integrated(daemon: &Daemon, project: &str, name: &str) -> Option<St
                     "merge-base",
                     "--is-ancestor",
                     "--end-of-options",
-                    &local,
+                    local,
                     head,
                 ];
                 git::output(&dir, &in_head, Class::Read).await.ok()?;
                 pull.base.clone()
             }
             Some(_) => return None,
-            None => contained_in_base(&dir, &local, &worktree.base).await?,
+            None => contained_in_base(&dir, local, &worktree.base).await?,
         };
         into.get_or_insert(base);
     }

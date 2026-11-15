@@ -1444,7 +1444,8 @@ is no further than the commit it merged (the base is the branch the pull request
 has none and the branch is contained in the base the workspace started from. Another branch
 holding it, a pull request that is open, a draft or closed, commits made after the merge, a forge
 that cannot be read or `gh` missing is no integration, in any one repository. The forge is asked
-at most once every five minutes for a session, since the check runs at the end of every turn.
+at most once every five minutes for a session, since the check runs at the end of every turn; a
+check that came sooner runs again once the five minutes are over, even if neither ends a turn.
 
 #### Where a question goes
 

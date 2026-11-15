@@ -1165,3 +1165,45 @@ fn a_workspace_is_integrated_only_when_every_repository_is() {
 
     assert!(reminders(&user, &lead).is_empty());
 }
+
+#[test]
+fn the_reminder_arrives_after_a_capped_check_when_both_stay_idle() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
+    let (lead, session, _folder, branch, _) = reported_with_a_commit(&user);
+    // The forge is asked, and the branch is not in its base yet.
+    end_a_turn_of(&user, &lead);
+    let project = user.path("work/app");
+    user.git(
+        &project,
+        &["merge", "--quiet", "--no-ff", "-m", "merge", &branch],
+    );
+    let main = user.git_output(&project, &["branch", "--show-current"]);
+    // Asked again less than five minutes later: the check waits, and no turn ends after it.
+    end_a_turn_of(&user, &lead);
+    assert!(reminders(&user, &lead).is_empty());
+    let turns_before = turns(&user, &lead);
+
+    user.call("test.advance", json!({"ms": 5 * 60 * 1000}))
+        .unwrap();
+
+    eventually("the reminder", || reminders(&user, &lead).len() == 1);
+    assert_eq!(
+        reminders(&user, &lead),
+        vec![format!(
+            "\"Login\" (agent {session}) reported and its branch is in {}: stop it and remove \
+             its workspace?",
+            main.trim()
+        )]
+    );
+    // It came from the clock, not from a turn: the only turn since is the one it woke.
+    assert!(turns(&user, &lead) <= turns_before + 1);
+    // Never a second one, after the cap again nor at the end of a turn.
+    eventually("the lead's turn on the reminder", || {
+        turns(&user, &lead) == turns_before + 1
+    });
+    settle();
+    user.call("test.advance", json!({"ms": 5 * 60 * 1000}))
+        .unwrap();
+    end_a_turn_of(&user, &lead);
+    assert_eq!(reminders(&user, &lead).len(), 1);
+}
