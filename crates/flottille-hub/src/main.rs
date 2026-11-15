@@ -48,6 +48,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(folder) => folder,
         None => default_state()?,
     };
+    if let Some(Command::SetupCode { reset: true }) = cli.command {
+        println!("{}", flottille_hub::reset(&folder)?);
+        return Ok(());
+    }
     let mut hub = Hub::open(&folder, SystemClock)?;
     match cli.command {
         None => {
@@ -63,8 +67,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 "flottille-hub: this version serves nothing yet: its listener comes with the transport"
             );
         }
-        Some(Command::SetupCode { reset: false }) => println!("{}", hub.setup_code()?),
-        Some(Command::SetupCode { reset: true }) => println!("{}", hub.reset()?),
+        Some(Command::SetupCode { .. }) => println!("{}", hub.setup_code()?),
     }
     Ok(())
 }

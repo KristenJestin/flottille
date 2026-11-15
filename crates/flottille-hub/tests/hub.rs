@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use flottille_hub::{Clock, Hub, HubError, JoinRequest, Presence};
+use flottille_hub::{Clock, Hub, HubError, JoinRequest, Presence, reset};
 use flottille_link::{
     Action, Change, ChangeHash, DeviceKey, InvitationAsk, Keyring, KeyringError, ListError,
     MemberList, Role, Signature, Token,
@@ -239,15 +239,17 @@ fn a_reset_empties_the_list_and_makes_a_new_code() {
     let old = hub.setup_code().unwrap().to_owned();
     let (pc, pixel) = (key(1), key(2));
     set_up(&mut hub, &pc);
+    let made = hub.key();
 
-    let new = hub.reset().unwrap();
-    assert_ne!(new, old);
-    assert!(hub.list().changes().is_empty());
-    assert_eq!(hub.setup_code().unwrap(), new);
-
-    // Kept: started again, the hub has no member and the new code, printed by the reset already.
+    // A reset is `flottille-hub setup-code --reset`, a process of its own: the hub is stopped.
     drop(hub);
+    let new = reset(&folder).unwrap();
+    assert_ne!(new, old);
+
+    // Started again, the hub has no member, the new code, printed by the reset already, and its
+    // key.
     let mut hub = open(&folder, &time);
+    assert_eq!(hub.key(), made);
     assert!(hub.list().changes().is_empty());
     assert_eq!(hub.setup_code().unwrap(), new);
     assert_eq!(hub.take_announcement(), None);
@@ -375,10 +377,63 @@ fn the_hub_cannot_add_a_member_or_change_a_role() {
         format!(
             "the member list in {} does not check: change 2 does not carry its signer's \
              signature; the hub stores only what members signed, so the file was changed or \
-             damaged",
+             damaged: run flottille-hub setup-code --reset on this machine to start again",
             file.display()
         )
     );
+}
+
+#[test]
+fn a_reset_works_on_a_state_that_does_not_check() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let made = hub.key();
+    set_up(&mut hub, &key(1));
+    drop(hub);
+
+    let file = folder.join("hub.json");
+    // A role changed by hand, which does not check, and a file that is not the hub's state.
+    let tampered = std::fs::read_to_string(&file)
+        .unwrap()
+        .replace("\"runner\"", "\"viewer\"");
+    for broken in [tampered.as_str(), "not the hub's state"] {
+        std::fs::write(&file, broken).unwrap();
+        assert!(Hub::open(&folder, time.clone()).is_err());
+
+        let code = reset(&folder).unwrap();
+        let hub = open(&folder, &time);
+        assert_eq!(hub.setup_code().unwrap(), code);
+        assert!(hub.list().changes().is_empty());
+        assert_eq!(hub.key(), made);
+    }
+    assert_eq!(mode(&file), 0o600);
+}
+
+#[test]
+fn a_second_hub_on_the_same_folder_is_refused_until_the_first_is_dropped() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let code = hub.setup_code().unwrap().to_owned();
+
+    // Another process, or `setup-code` and `setup-code --reset`, while the hub runs: refused, so
+    // that a reset is never undone by the running hub's next write, nor its old code left valid.
+    let another = format!(
+        "another flottille-hub uses {}: stop it first",
+        folder.display()
+    );
+    assert_eq!(error(Hub::open(&folder, time.clone())), another);
+    assert_eq!(error(reset(&folder)), another);
+    assert_eq!(hub.setup_code().unwrap(), code);
+    hub.setup(&code, &key(1).public(), root_entry(&key(1), "pc"))
+        .unwrap();
+
+    drop(hub);
+    let hub = open(&folder, &time);
+    assert_eq!(hub.list().changes().len(), 1);
+    drop(hub);
+    reset(&folder).unwrap();
 }
 
 #[test]

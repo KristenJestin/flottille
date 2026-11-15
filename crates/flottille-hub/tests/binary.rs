@@ -137,3 +137,34 @@ fn the_state_folder_is_under_xdg_state_home_by_default() {
             .is_file()
     );
 }
+
+#[test]
+fn the_binary_refuses_its_state_folder_while_a_hub_uses_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("hub");
+    let running = Hub::open(&state, SystemClock).unwrap();
+    let code = running.setup_code().unwrap().to_owned();
+
+    let state_arg = state.to_str().unwrap();
+    for args in [
+        &["--state", state_arg][..],
+        &["--state", state_arg, "setup-code"],
+        &["--state", state_arg, "setup-code", "--reset"],
+    ] {
+        let refused = hub(dir.path(), true, args);
+        assert!(!refused.status.success(), "{args:?}");
+        assert!(refused.stdout.is_empty(), "{args:?}");
+        assert_eq!(
+            text(&refused.stderr),
+            format!(
+                "flottille-hub: another flottille-hub uses {}: stop it first\n",
+                state.display()
+            )
+        );
+    }
+    assert_eq!(running.setup_code().unwrap(), code);
+
+    drop(running);
+    let after = hub(dir.path(), true, &["--state", state_arg, "setup-code"]);
+    assert_eq!(text(&after.stdout), format!("{code}\n"));
+}

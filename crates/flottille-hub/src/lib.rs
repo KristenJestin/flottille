@@ -6,8 +6,9 @@
 //! member's, checked by `flottille-link`'s list check against the list it holds, before it is
 //! stored. An addition answers a join request and is signed by the member that invited.
 //!
-//! On disk, its state folder (700) holds `hub.key` (600, `flottille-link`'s `HubKey`) and
-//! `hub.json` (600), written whole under a temporary name and renamed over the old one:
+//! On disk, its state folder (700) holds `hub.key` (600, `flottille-link`'s `HubKey`), `hub.lock`,
+//! which one process holds while it uses the folder, and `hub.json` (600), written whole under a
+//! temporary name and renamed over the old one:
 //!
 //! ```json
 //! {"version": 1, "setup_code": "7KQ2-M4XP-9TRW-H3CD", "members": [/* the list's changes */]}
@@ -34,6 +35,9 @@ pub const FIVE_MINUTES: u64 = 5 * 60;
 
 /// The state's file in the hub's state folder.
 pub const STATE_FILE: &str = "hub.json";
+
+/// The file whose lock one process holds while it uses the state folder.
+pub const LOCK_FILE: &str = "hub.lock";
 
 const VERSION: u32 = 1;
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -106,6 +110,8 @@ struct Stored {
 }
 
 pub struct Hub<C: Clock = SystemClock> {
+    /// Held for the hub's life: no other process writes its state meanwhile.
+    _lock: File,
     file: PathBuf,
     key: HubKey,
     clock: C,
@@ -123,10 +129,12 @@ pub struct Hub<C: Clock = SystemClock> {
 
 impl<C: Clock> Hub<C> {
     /// The hub of the state `folder`, made there the first time: its key, and with an empty member
-    /// list a setup code, announced once (`take_announcement`). A stored list that does not check
-    /// is refused, and so is the start.
+    /// list a setup code, announced once (`take_announcement`). The folder is locked while the hub
+    /// lives: another process using it is refused. A stored list that does not check is refused,
+    /// and so is the start.
     pub fn open(folder: &Path, clock: C) -> Result<Hub<C>, HubError> {
         let key = HubKey::load_or_make(folder).map_err(|error| HubError(error.to_string()))?;
+        let lock = lock(folder)?;
         let file = folder.join(STATE_FILE);
         let mut stored = read(&file)?.unwrap_or(Stored {
             version: VERSION,
@@ -136,7 +144,8 @@ impl<C: Clock> Hub<C> {
             Some(root) => Some(stored.members.check(&root).map_err(|error| {
                 HubError(format!(
                     "the member list in {} does not check: {}; the hub stores only what members \
-                     signed, so the file was changed or damaged",
+                     signed, so the file was changed or damaged: run flottille-hub setup-code \
+                     --reset on this machine to start again",
                     file.display(),
                     why(error)
                 ))
@@ -153,6 +162,7 @@ impl<C: Clock> Hub<C> {
             ));
         }
         Ok(Hub {
+            _lock: lock,
             file,
             key,
             clock,
@@ -183,24 +193,6 @@ impl<C: Clock> Hub<C> {
             (None, Some(code)) => Ok(code),
             _ => Err(has_members()),
         }
-    }
-
-    /// Empties the member list and makes a new setup code, which it returns (`docs/remote.md`,
-    /// "Recovery"). Every invitation ends with the list.
-    pub fn reset(&mut self) -> Result<String, HubError> {
-        let code = new_code()?;
-        let stored = Stored {
-            version: VERSION,
-            setup_code: Some(code.clone()),
-            members: MemberList::default(),
-        };
-        write(&self.file, &stored)?;
-        self.stored = stored;
-        self.checked = None;
-        self.open.clear();
-        self.presence.clear();
-        self.addresses.clear();
-        Ok(code)
     }
 
     /// The first member: `from`, the device that presents `code`, with its own entry `root`, a
@@ -442,6 +434,58 @@ impl<C: Clock> Hub<C> {
         self.asks.retain(|(_, _, at)| now < at + FIVE_MINUTES);
         now
     }
+}
+
+/// `flottille-hub setup-code --reset` (`docs/remote.md`, "Recovery"): empties the member list of
+/// the state `folder` and makes a new setup code, which it returns. It reads nothing of the state,
+/// so that a list that does not check, or a damaged file, is no obstacle; the hub's key stays. The
+/// folder's lock is taken: refused while a hub uses it, whose next write would undo the reset.
+pub fn reset(folder: &Path) -> Result<String, HubError> {
+    HubKey::load_or_make(folder).map_err(|error| HubError(error.to_string()))?;
+    let _lock = lock(folder)?;
+    let code = new_code()?;
+    let stored = Stored {
+        version: VERSION,
+        setup_code: Some(code.clone()),
+        members: MemberList::default(),
+    };
+    write(&folder.join(STATE_FILE), &stored)?;
+    Ok(code)
+}
+
+/// The lock of the state `folder`, taken without waiting: held until the file is closed.
+fn lock(folder: &Path) -> Result<File, HubError> {
+    let path = folder.join(LOCK_FILE);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(&path)
+        .map_err(|error| HubError(format!("{} cannot be opened: {error}", path.display())))?;
+    // SAFETY: flock has no precondition on an open descriptor, which `file` owns.
+    if unsafe {
+        libc::flock(
+            std::os::fd::AsRawFd::as_raw_fd(&file),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )
+    } != 0
+    {
+        let error = std::io::Error::last_os_error();
+        return Err(HubError(
+            if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                format!(
+                    "another flottille-hub uses {}: stop it first",
+                    folder.display()
+                )
+            } else {
+                format!("{} cannot be locked: {error}", path.display())
+            },
+        ));
+    }
+    Ok(file)
 }
 
 impl<C: Clock> fmt::Debug for Hub<C> {
