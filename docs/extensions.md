@@ -901,32 +901,45 @@ sentence on what it is for, and how to reach the server, either
   refused when the connection is added or edited, saying to move it to "Secrets of its requests";
   its name is said, never its value. Its pairs are split at `&` and at `;`, which some servers
   read as `&` (`?page=1;access_token=…` is refused). The name is read as words (`userToken`,
-  `user_token` and `UserToken` alike, a number at a word's end left out: `token2` is `token`): it
-  is refused when its last word is `token`, `key`, `sig`, `jwt`, `secret`, `password`, `passwd`,
-  `pwd`, `passphrase` or `signature` (`x_user_token`, `google_id_token`, `bearer_token`,
-  `subscription-key`, `app_key`, `X-Amz-Signature`), or when a last word run together ends with
-  `token`, `secret`, `password`, `passwd`, `passphrase`, `signature`, `apikey`, `accesskey`,
-  `secretkey` or `privatekey` (`usertoken`, `clientsecret`), unless the words before it are one of
-  `page`, `next`, `next_page`, `continuation`, `cursor`, `sync`, `project` or `idempotency`, a
-  position, a state or an identifier the server hands out and no credential (`pageToken`,
-  `next_page_token`, `cursor_key`, `project_key`, `idempotency_key`, `pagetoken`). It is refused
-  too when it is `session_id`, `auth`, `authorization`, `bearer` or `sid`, whole or run together
-  (`sessionid`). A word that only holds one of them is allowed: `author`, `oauth_state`,
-  `keyword`, `monkey`. A name ending in `key` for something else (`sort_key`) is refused too: the
-  user writes such a parameter from a vault entry, a reversible cost against a credential sent in
-  clear. The path is not looked at: a token written in it is the user's to move. An error about a
-  URL (its host, a login in it) says it without its login, query and fragment; one whose scheme
-  is no `http` or `https` says its scheme alone, what follows it being maybe a login pasted
-  without `https://` (`ada:…@host`).
+  `user_token` and `UserToken` alike, a number at a word's end left out: `token2` is `token`, a
+  plural is its word: `access_tokens`, `apiKeys`, `secrets`, `passwords`): it is refused when its
+  last word is `token`, `key`, `sig`, `jwt`, `secret`, `password`, `passwd`, `pwd`, `passphrase`
+  or `signature` (`x_user_token`, `google_id_token`, `bearer_token`, `subscription-key`,
+  `app_key`, `X-Amz-Signature`, plain `key`), or when a last word run together ends with `token`,
+  `secret`, `password`, `passwd`, `passphrase`, `signature`, `apikey`, `accesskey`, `secretkey`
+  or `privatekey` (`usertoken`, `clientsecret`). A token or a key alone is excused by the words
+  before it, run together, a position, a state or an identifier the server hands out and no
+  credential:
+  - before `token`: `page`, `next`, `next_page`, `continuation`, `cursor`, `sync`, `pagination`,
+    `resume` (`pageToken`, `next_page_token`, `pagetoken`, `pagination_token`, `resume_token`);
+  - before `key`: `cursor`, `project`, `idempotency`, `issue`, `space`, `partition`, `cache`,
+    `object`, `public`, `publishable`, `site`, `sort`, `last_evaluated`, `page`, `next`
+    (`cursor_key`, `project_key`, `issueKey`, `spaceKey`, `partition_key`, `sort_key`,
+    `object_key`, `public_key`, `publishable_key`, `site_key`, `last_evaluated_key`).
+
+  No word excuses the others: `project_secret`, `sync_password`, `page_passphrase` and
+  `cursor_signature` are refused. It is refused too when it is `session_id`, `auth`,
+  `authorization`, `bearer` or `sid`, whole or run together (`sessionid`). A word that only holds
+  one of them is allowed: `author`, `oauth_state`, `keyword`, `monkey`. Another name ending in
+  `key` or `token` for no credential is refused too: the user writes such a parameter from a
+  vault entry, a reversible cost against a credential sent in clear. The path is not looked at: a
+  token written in it is the user's to move. An error about a URL (its host, a login in it) says
+  it without its login, query and fragment. One whose scheme is no `http` or `https` says its
+  scheme alone when it is `ws`, `wss`, `ftp` or `file`, and otherwise only that it "is no http(s)
+  URL": what is read as the scheme may be a token pasted as a login without `https://`
+  (`xoxb-…:x@host`, a hex token).
   A connection already declared with such a URL, or with one that is no `https://` URL nor
   `http://` on this machine (written before this check, or by hand), is not refused with the file:
-  it is listed with `failing` saying why, and its URL is served (`connection.list`, the window,
-  an agent's `connections list` and `show`, a request's before and after) as an error says it:
-  without its login, query and fragment, its scheme alone for another scheme. Its server never
-  starts, `login` is refused with the
-  same reason, and it is edited (its URL mended) or removed as any other; an edit that keeps the
-  URL, and its on or off, are refused with that reason until the URL is mended. The other
-  connections are untouched.
+  it is listed with `failing` and `url_fault` saying why, and its URL is served
+  (`connection.list`, the window, an agent's `connections list` and `show`, a request's before and
+  after) as an error says it: without its login, query and fragment, its scheme alone for a known
+  other scheme, empty for an unknown one. A card and an agent's `show` mark it ("cleaned: its
+  query is dropped"), so that an edit to the URL served is not taken for one that keeps the rest.
+  The window's form leaves such a URL's field empty, its fault under it, for the user to type it
+  again: Save never writes the cleaned URL back by itself. Its server never starts, `login` is
+  refused with the same reason, and it is edited (its URL mended) or removed as any other; an edit
+  that keeps the URL, and its on or off, are refused with that reason until the URL is mended.
+  The other connections are untouched.
 
 A plain `http://` URL to any other address is refused: what crosses a network is encrypted.
 
