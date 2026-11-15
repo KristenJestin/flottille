@@ -2799,9 +2799,9 @@ static INTEGRATION_READS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<(String, String), u64>>,
 > = std::sync::LazyLock::new(Default::default);
 
-/// Whether the forge may be asked for this workspace now, noting it when it may; when it may not,
-/// the time it may again.
-fn may_read_integration(project: &str, name: &str) -> Result<(), u64> {
+/// Whether the forge may be asked for this workspace now, noting it when it may: either way, the
+/// time it may be asked again.
+fn may_read_integration(project: &str, name: &str) -> Result<u64, u64> {
     let mut reads = INTEGRATION_READS.lock().unwrap_or_else(|e| e.into_inner());
     let key = (project.to_owned(), name.to_owned());
     let now = now_ms();
@@ -2811,7 +2811,7 @@ fn may_read_integration(project: &str, name: &str) -> Result<(), u64> {
         }
         _ => {
             reads.insert(key, now);
-            Ok(())
+            Ok(now.saturating_add(INTEGRATION_READ_EVERY_MS))
         }
     }
 }
@@ -2823,8 +2823,8 @@ fn may_read_integration(project: &str, name: &str) -> Result<(), u64> {
 /// happens to hold it: a second session's branch started from this one holds it too. Closed on
 /// doubt: one repository whose pull request is open, a draft or closed, merged but with commits
 /// made after, or whose forge cannot be read, is no integration. `None` when no repository has
-/// work of its own or the workspace is gone; the time the forge may be asked again when it was
-/// asked less than five minutes ago.
+/// work of its own or the workspace is gone; when it is not integrated (yet), or the forge was
+/// asked less than five minutes ago, the time it may be asked again.
 pub async fn integrated(daemon: &Daemon, project: &str, name: &str) -> Result<Option<String>, u64> {
     let Some(workspace) = daemon
         .read(|store| store.workspace(project, name))
@@ -2851,8 +2851,11 @@ pub async fn integrated(daemon: &Daemon, project: &str, name: &str) -> Result<Op
     if own.is_empty() {
         return Ok(None);
     }
-    may_read_integration(project, name)?;
-    Ok(integrated_by_forge(daemon, &workspace, &local, own).await)
+    let again = may_read_integration(project, name)?;
+    integrated_by_forge(daemon, &workspace, &local, own)
+        .await
+        .map(Some)
+        .ok_or(again)
 }
 
 /// `integrated` once the forge may be asked: the repositories with work of their own, each with

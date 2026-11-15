@@ -1207,3 +1207,74 @@ fn the_reminder_arrives_after_a_capped_check_when_both_stay_idle() {
     end_a_turn_of(&user, &lead);
     assert_eq!(reminders(&user, &lead).len(), 1);
 }
+
+#[test]
+fn the_reminder_arrives_when_the_pull_request_is_merged_after_the_check_while_both_stay_idle() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    let (lead, session, _folder, branch, commit) = reported_with_a_commit(&user);
+    let main = user.git_output(&user.path("work/app"), &["branch", "--show-current"]);
+    app_on_github(&user, &branch, "OPEN", main.trim(), &commit);
+    // The forge is asked, and the pull request is still open.
+    end_a_turn_of(&user, &lead);
+    assert!(reminders(&user, &lead).is_empty());
+    let reads = user.gh_received().len();
+    assert!(reads > 0, "the forge was never asked");
+    let turns_before = turns(&user, &lead);
+    // The user merges it later; neither of the two ends a turn.
+    user.gh_script(json!({"pulls": {"acme/app": {&branch: {
+        "number": 7, "title": "Fix the login", "state": "MERGED", "baseRefName": main.trim(),
+        "headRefOid": commit, "url": "https://github.com/acme/app/pull/7"
+    }}}}));
+
+    // Not asked again before the five minutes are over.
+    user.call("test.advance", json!({"ms": 4 * 60 * 1000}))
+        .unwrap();
+    settle();
+    assert_eq!(user.gh_received().len(), reads);
+    assert!(reminders(&user, &lead).is_empty());
+    user.call("test.advance", json!({"ms": 60 * 1000})).unwrap();
+
+    eventually("the reminder", || reminders(&user, &lead).len() == 1);
+    assert_eq!(
+        reminders(&user, &lead),
+        vec![format!(
+            "\"Login\" (agent {session}) reported and its branch is in {}: stop it and remove \
+             its workspace?",
+            main.trim()
+        )]
+    );
+    eventually("the lead's turn on the reminder", || {
+        turns(&user, &lead) == turns_before + 1
+    });
+    settle();
+    // Once: integrated, the forge is not asked again, and no second reminder comes.
+    let reads = user.gh_received().len();
+    user.call("test.advance", json!({"ms": 5 * 60 * 1000}))
+        .unwrap();
+    settle();
+    assert_eq!(user.gh_received().len(), reads);
+    assert_eq!(reminders(&user, &lead).len(), 1);
+}
+
+#[test]
+fn a_session_stopped_before_its_pull_request_is_merged_is_not_checked_again() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    let (lead, session, _folder, branch, commit) = reported_with_a_commit(&user);
+    let main = user.git_output(&user.path("work/app"), &["branch", "--show-current"]);
+    app_on_github(&user, &branch, "OPEN", main.trim(), &commit);
+    end_a_turn_of(&user, &lead);
+    user.call("agent.stop", json!({"agent": session})).unwrap();
+    settle();
+    let reads = user.gh_received().len();
+
+    user.call("test.advance", json!({"ms": 5 * 60 * 1000}))
+        .unwrap();
+    settle();
+
+    assert_eq!(user.gh_received().len(), reads);
+    assert!(reminders(&user, &lead).is_empty());
+}

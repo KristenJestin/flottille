@@ -1445,7 +1445,10 @@ has none and the branch is contained in the base the workspace started from. Ano
 holding it, a pull request that is open, a draft or closed, commits made after the merge, a forge
 that cannot be read or `gh` missing is no integration, in any one repository. The forge is asked
 at most once every five minutes for a session, since the check runs at the end of every turn; a
-check that came sooner runs again once the five minutes are over, even if neither ends a turn.
+check that came sooner, or found the work not integrated yet, runs again once the five minutes are
+over, even if neither ends a turn: a pull request merged an hour later is said within five minutes
+of it. It stops once the work is integrated, the session ends or either of the two starts a turn
+(whose end checks again).
 
 #### Where a question goes
 
