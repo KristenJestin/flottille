@@ -422,6 +422,72 @@ pub(super) async fn secrets(
     Ok(read)
 }
 
+/// What a URL connection's requests carry of its secrets: its headers (a header, the cookies
+/// together, basic authentication), and the query parameters `Bounded` adds to each request.
+async fn carried(
+    daemon: &Daemon,
+    declaration: &Declaration,
+) -> Result<
+    (
+        HashMap<http::HeaderName, http::HeaderValue>,
+        Vec<(String, String)>,
+    ),
+    String,
+> {
+    use super::Carried;
+    use base64::Engine;
+    let mut headers = HashMap::new();
+    let mut cookies = Vec::new();
+    let mut query = Vec::new();
+    let mut header = |name: &str, value: String, of: &str| -> Result<(), String> {
+        let name = http::HeaderName::from_bytes(name.as_bytes()).map_err(|e| e.to_string())?;
+        let mut value = http::HeaderValue::from_str(&value)
+            .map_err(|_| format!("the vault entry {of} is no header's value"))?;
+        value.set_sensitive(true);
+        headers.insert(name, value);
+        Ok(())
+    };
+    // Each entry is looked up again at each start: one removed since the declaration was written
+    // fails it. Its host is not compared with the URL's here: the user's own form binds an entry
+    // of any host; an agent's request had it compared before its write, under the file's lock.
+    for line in &declaration.secrets {
+        let secret = crate::vault::every_project_s(daemon, &declaration.name, &line.entry).await?;
+        match line.place {
+            Carried::Header => header(&line.name, format!("{}{secret}", line.prefix), &line.entry)?,
+            Carried::Cookie => cookies.push(format!("{}={secret}", line.name)),
+            Carried::Basic => {
+                let username = daemon
+                    .read(|store| store.vault_entries())
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .find(|entry| entry.name == line.entry)
+                    .and_then(|entry| entry.username)
+                    .ok_or_else(|| {
+                        format!(
+                            "the vault entry {} has no username, which basic authentication needs",
+                            line.entry
+                        )
+                    })?;
+                let pair = base64::engine::general_purpose::STANDARD
+                    .encode(format!("{username}:{secret}"));
+                flottille_core::secrets::add_vault_value(&pair);
+                header("authorization", format!("Basic {pair}"), &line.entry)?;
+            }
+            Carried::Query => {
+                // As the URL carries it, masked too wherever it is said.
+                let encoded: String =
+                    url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+                flottille_core::secrets::add_vault_value(&encoded);
+                query.push((line.name.clone(), secret));
+            }
+        }
+    }
+    if !cookies.is_empty() {
+        header("cookie", cookies.join("; "), "of a cookie")?;
+    }
+    Ok((headers, query))
+}
+
 /// The lines of its error output a server that stopped during its start is asked about.
 const ERROR_LINES: usize = 3;
 
@@ -466,6 +532,11 @@ fn cut_during_start(
 /// a server that turns out to be another (its first review, a version that moved) is started
 /// once more with the options of its own.
 async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Running, String> {
+    // Declared before the check of its URL existed, or by hand: it fails alone until it is
+    // edited.
+    if let Some(why) = declaration.url_fault() {
+        return Err(why);
+    }
     let pinned = super::row(daemon, &declaration.name)
         .pin
         .as_ref()
@@ -611,15 +682,7 @@ async fn start_with(
             }
         }
         Reach::Url(url) => {
-            let mut headers = HashMap::new();
-            for (name, secret) in secrets(daemon, &declaration.name, &declaration.headers).await? {
-                let name = http::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|error| error.to_string())?;
-                let mut value = http::HeaderValue::from_str(&secret)
-                    .map_err(|_| format!("the vault entry for {name} is no header's value"))?;
-                value.set_sensitive(true);
-                headers.insert(name, value);
-            }
+            let (headers, query) = carried(daemon, declaration).await?;
             let client = http_client(url)?;
             let mut config =
                 StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(headers);
@@ -640,7 +703,7 @@ async fn start_with(
                 }
             }
             let transport = StreamableHttpClientTransport::with_client(
-                Bounded::new(client, cut.clone()),
+                Bounded::new(client, cut.clone(), query),
                 config,
             );
             let served = tokio::time::timeout(
@@ -655,10 +718,10 @@ async fn start_with(
                     if bearing && let Some(said) = token_refused(daemon, declaration).await {
                         return Err(said);
                     }
-                    // A header the user gave from the vault is what the server refused: a
+                    // A secret the user gave from the vault is what the server refused: a
                     // sign-in does not change it, the entry does.
-                    if !declaration.headers.is_empty() {
-                        return Err(refused_headers(&declaration.headers));
+                    if !declaration.secrets.is_empty() {
+                        return Err(refused_secrets(&declaration.secrets));
                     }
                     return Err(format!(
                         "{}: the user signs it in with `flottille connection login {name}`",
@@ -761,14 +824,15 @@ async fn token_refused(daemon: &Arc<Daemon>, declaration: &Declaration) -> Optio
     }
 }
 
-/// What a start says of a server that answered `401` to the headers of vault entries: which
-/// header and which entry, never the value.
-fn refused_headers(headers: &std::collections::BTreeMap<String, String>) -> String {
-    let given: Vec<String> = headers
+/// What a start says of a server that answered `401` to the secrets of vault entries its requests
+/// carried: where each went (a header, a query parameter, a cookie, basic authentication) and
+/// which entry, never the value.
+fn refused_secrets(secrets: &[super::Secret]) -> String {
+    let given: Vec<String> = secrets
         .iter()
-        .map(|(header, entry)| format!("{header} from the vault entry {entry}"))
+        .map(|secret| format!("{} from the vault entry {}", secret.said(), secret.entry))
         .collect();
-    let given = given.join(", the header ");
+    let given = given.join(", ");
     format!(
         "{} {given}: check the entry's value (its prefix, e.g. \"Bearer \") and that its URL \
          is of this host",
@@ -971,7 +1035,8 @@ pub async fn stop_all(daemon: &Arc<Daemon>) {
 /// two, half of it left unmasked.
 fn not_started(why: &str, mask: impl FnOnce(&str) -> String) -> String {
     format!(
-        "the connection could not start: {}",
+        "{}{}",
+        flottille_core::vault::NOT_STARTED,
         super::short_to(&mask(why), super::START_CHARS)
     )
 }

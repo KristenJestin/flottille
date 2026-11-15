@@ -188,6 +188,20 @@ fn refused(answer: Answer) -> String {
     answer.text
 }
 
+/// Sets the URL of the entry `name` in the store to `url`, as an entry saved before `vault.set`
+/// refused a URL `site()` cannot read holds it: the save cannot write it any more, login still
+/// refuses it.
+fn url_as_stored_before(user: &User, name: &str, url: &str) {
+    let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    let moved = db
+        .execute(
+            "UPDATE vault_entries SET url = ?1 WHERE name = ?2",
+            rusqlite::params![url, name],
+        )
+        .unwrap();
+    assert_eq!(moved, 1, "no entry {name}");
+}
+
 fn judge_prompts(user: &User) -> Vec<String> {
     user.judge_received()
         .iter()
@@ -5345,12 +5359,26 @@ fn login_with_an_entry_whose_url_is_no_web_address_is_refused() {
     .enumerate()
     {
         let entry = format!("odd-{n}");
+        let (_, said) = user
+            .call(
+                "vault.set",
+                json!({"name": entry, "secret": "s3cret-of-an-odd-site", "username": "tester",
+                    "url": url, "for": "connection:browser"}),
+            )
+            .unwrap_err();
+        assert!(
+            said.contains(&format!("{url} is no web address")),
+            "{url}: {said}"
+        );
+        // Save refuses such a URL now: the entry was saved before, with a readable one, and
+        // login still refuses it, as it would any entry the store holds with that URL.
         user.call(
             "vault.set",
             json!({"name": entry, "secret": "s3cret-of-an-odd-site", "username": "tester",
-                "url": url, "for": "connection:browser"}),
+                "url": "https://shop.example.com/login", "for": "connection:browser"}),
         )
         .unwrap();
+        url_as_stored_before(&user, &entry, url);
         let answer = refused(mcp.call(
             "conn_browser",
             json!({"action": "login", "arguments": {"entry": entry}}),
@@ -6094,12 +6122,26 @@ fn an_entry_whose_host_is_no_usable_site_is_refused() {
         let user = user();
         browser(&user, &agent_browser("0.43.0"), json!({}));
         let (_, mcp) = signed_up(&user);
+        let (_, refusal) = user
+            .call(
+                "vault.set",
+                json!({"name": "odd-test", "secret": "s3cret-of-the-odd-site", "url": url,
+                    "for": "connection:browser"}),
+            )
+            .unwrap_err();
+        assert!(
+            refusal.contains(&format!("{url} is no web address")),
+            "{url}: {refusal}"
+        );
+        // An entry saved before that refusal held this URL: it was saved with a readable one, and
+        // the store now holds the odd one, which login must refuse.
         user.call(
             "vault.set",
-            json!({"name": "odd-test", "secret": "s3cret-of-the-odd-site", "url": url,
-                "for": "connection:browser"}),
+            json!({"name": "odd-test", "secret": "s3cret-of-the-odd-site",
+                "url": "https://shop.example.com/login", "for": "connection:browser"}),
         )
         .unwrap();
+        url_as_stored_before(&user, "odd-test", url);
         let said = refused(mcp.call(
             "conn_browser",
             json!({"action": "login", "arguments": {"entry": "odd-test"}}),

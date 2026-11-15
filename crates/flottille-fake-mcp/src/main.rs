@@ -10,7 +10,7 @@
 //!
 //! With `--http`, it serves Streamable HTTP on a free port of `127.0.0.1` instead of stdio,
 //! written to that file, each request answered with one JSON body (no stream, so no request of
-//! its own to the client), and logs each request's headers (`http`). Over HTTP the script is read
+//! its own to the client), and logs each request's headers and query (`http`). Over HTTP the script is read
 //! again at each request.
 //!
 //! With `oauth` in the script, the HTTP server is protected (MCP authorization): `/mcp` answers
@@ -42,6 +42,7 @@
 //!  "close_streams": true,
 //!  "notify": {"when": "<file>", "times": 50},
 //!  "list_sleep_ms": 100,
+//!  "list_when": "<file>",
 //!  "endless_listing": true,
 //!  "list_error": "the text of a JSON-RPC error answered to every listing"}
 //! ```
@@ -50,9 +51,11 @@
 //! by writing it. `exit` ends it with that code at the start and `abort` by the signal of an abort,
 //! after the `stderr` line; `close_streams` closes its input and output at the start and stays
 //! alive. `notify` says its tools changed `times` times, at once, when the file `when`
-//! appears; `list_sleep_ms` slows each listing; `endless_listing` answers every page with a next
-//! one; `list_error` fails each listing with that text; `echo_env` ends its instructions and every
-//! tool's description with the value of that variable, as a careless server echoes its configuration.
+//! appears; `list_sleep_ms` slows each listing; `list_when` holds each listing until that file
+//! exists, so a test answers when it chooses and not after a delay; `endless_listing` answers
+//! every page with a next one; `list_error` fails each listing with that text; `echo_env` ends
+//! its instructions and every tool's description with the value of that variable, as a careless
+//! server echoes its configuration.
 //!
 //! An answer is, in this order of precedence, any of: `sleep_ms` (waits first), `ask`
 //! (`"sampling"`, `"elicitation"` or `"roots"`: sends that request to the client and answers with
@@ -237,6 +240,11 @@ fn main() {
                 write_log(&log, json!({"event": "list", "cursor": params["cursor"]}));
                 if let Some(ms) = script["list_sleep_ms"].as_u64() {
                     std::thread::sleep(Duration::from_millis(ms));
+                }
+                if let Some(file) = script["list_when"].as_str() {
+                    while !std::path::Path::new(file).exists() {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
                 }
                 if let Some(message) = script["list_error"].as_str() {
                     send(&json!({"jsonrpc": "2.0", "id": id,
@@ -639,7 +647,7 @@ fn serve(
     } else {
         write_log(
             log,
-            json!({"event": "http", "method": method, "headers": headers}),
+            json!({"event": "http", "method": method, "headers": headers, "query": query}),
         );
     }
     let answer = match method.as_str() {

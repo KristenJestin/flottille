@@ -156,15 +156,18 @@ an entry to the vault, not a request with rules of its own.
   its project and the agent's reason, with **New entry** and **Dismiss** (disabled while
   its call runs). New entry opens Settings, Vault's form of a new entry, prefilled with all
   of it, the agent's reason under what it is for, and what it will be bound to ("For …") with the
-  host its secret goes to ("Goes to …", while the URL is the one asked) and **Remove the
-  binding**: the user changes any field, types the secret and saves, with the checks of that form
-  (plain `http` to another machine refused for a connection's entry; the username required when
-  the feature that asked reads it, the worklog's), or closes it and nothing is stored. There is
-  no second form.
+  host its secret goes to ("Goes to …", under the URL's field, bound or not, while the URL is the
+  one asked) and **Remove the binding**: the user changes any field, types the secret and saves,
+  with the checks of that form (a connection's entry refused for a URL login cannot read, in the
+  words of the ask's refusal, or plain `http` to another machine; the username required when the
+  feature that asked reads it, the worklog's), or closes it and nothing is stored. There is no
+  second form.
 - **One request a name.** While a request for a name is open, another ask for it joins it when it
   is the same project's or the request is every project's; another project's agent is refused
-  (`ask under another name`), and told nothing of it. Dismiss closes the request; the name may be
-  asked for again.
+  (`ask under another name`). Entry names are shared across projects, so an agent of another
+  project that asks for a name a request holds can learn that the request is open and how it
+  ended (taken or not): that is inherent to shared names. Dismiss closes the request; the name
+  may be asked for again.
 - **Answered when the entry is saved**, from that form or any other way: each agent that asked
   and whose project sees the entry is handed a delivery, `the user set the vault entry <name>`,
   never the secret; on Dismiss each is handed `the user dismissed …`.
@@ -180,13 +183,16 @@ field), with `vault::secret`, which only a tool's own code calls and whose value
 use. It never waits for the user: an item of a locked keyring is answered at once that the keyring
 is locked and the user must unlock it, and a keyring that does not answer within 3 seconds is
 answered the same. The first users: `tickets log_time` (`docs/tickets.md`, "Logging time") and
-Connections (`docs/extensions.md`, "Connections"): a connection's `env` and `headers` name entries
+Connections (`docs/extensions.md`, "Connections"): a connection's `env` and `secrets` name entries
 of every project, read when its server starts and put in its environment or on its requests,
 never shown to an agent; an entry tied to one project, or bound to another use, is refused for
-it. A connection an agent proposes (`docs/extensions.md`, "Connections") puts an entry in a header
+it. A connection an agent proposes (`docs/extensions.md`, "Connections") puts an entry in its requests
 only when the entry's `url` has the connection's host: the `url` is where the secret may go, and
-an entry without one goes in no header an agent chose; the user's own form binds freely, and the
-card of the request says where each entry goes. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
+an entry without one goes in no request an agent chose; the user's own form binds freely, and the
+card of the request says where each entry goes. An agent's connection may name an entry that does
+not exist yet, for the user to save (never one that looks like a secret): the request waits, its
+Accept refused while the entry is missing, and once saved the entry's host is checked as any
+other's. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
 another.
 
 ## The runtime folder

@@ -19,9 +19,10 @@ use gpui_design_system::{
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, px, relative,
+    AnyElement, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _,
+    WeakEntity, Window, div, px, relative,
 };
 use serde_json::{Map, Value, json};
 
@@ -122,6 +123,8 @@ pub struct Server {
     /// Each variable (or header, for a URL) and the vault entry it names.
     pub env: BTreeMap<String, String>,
     pub headers: BTreeMap<String, String>,
+    /// The vault entries of its other secrets: a query parameter, a cookie, basic authentication.
+    pub secrets: Vec<String>,
     pub only: BTreeMap<String, Vec<String>>,
     /// The hosts a sign-in also needs.
     pub sites: Vec<String>,
@@ -135,6 +138,8 @@ pub struct Server {
     pub cut_off: Option<String>,
     /// Why its server did not start.
     pub failing: Option<String>,
+    /// Why its URL is not reached: the URL it was served is a cleaned one, never saved back.
+    pub url_fault: Option<String>,
     /// Why it must sign in again.
     pub signed_out: Option<String>,
     /// The version accepted, once it was.
@@ -164,6 +169,12 @@ impl Server {
             url: value["url"].as_str().map(str::to_owned),
             env: entries(&value["env"]),
             headers: entries(&value["headers"]),
+            secrets: value["secrets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|secret| text(&secret["entry"]))
+                .collect(),
             only: value["only"]
                 .as_object()
                 .into_iter()
@@ -184,6 +195,7 @@ impl Server {
             state: text(&value["state"]),
             cut_off: value["cut_off"].as_str().map(str::to_owned),
             failing: value["failing"].as_str().map(str::to_owned),
+            url_fault: value["url_fault"].as_str().map(str::to_owned),
             signed_out: value["signed_out"].as_str().map(str::to_owned),
             version: value["server"]["version"].as_str().map(str::to_owned),
             actions: value["actions"]
@@ -632,6 +644,8 @@ struct Review {
     filter: String,
     /// The actions ticked, which a pill or the bar sets together.
     picked: BTreeSet<String>,
+    /// The list of rows, which takes Ctrl+A once a click has put the focus in it.
+    list_focus: Option<FocusHandle>,
     /// The actions whose row is unfolded, whichever group they are in.
     opened: HashSet<String>,
     /// The groups folded by a click on their header.
@@ -727,6 +741,61 @@ impl Review {
             .collect()
     }
 
+    /// Whether the row of the action at `at` has a box: a locked or a removed row has none.
+    fn tickable(&self, at: usize, action: &ActionDiff) -> bool {
+        self.shows(at, action) && action.locked.is_none() && action.change != "removed"
+    }
+
+    /// The names of every row that shows and has a box: what Select all shown and Ctrl+A tick.
+    fn tickable_shown(&self, diff: &Diff) -> Vec<String> {
+        diff.actions
+            .iter()
+            .enumerate()
+            .filter(|(at, action)| self.tickable(*at, action))
+            .map(|(_, action)| action.name.clone())
+            .collect()
+    }
+
+    /// The names of the rows of a group that have a box, from the actions it holds.
+    fn tickable_in(&self, diff: &Diff, rows: impl Iterator<Item = usize>) -> Vec<String> {
+        rows.filter_map(|at| diff.actions.get(at).map(|action| (at, action)))
+            .filter(|(at, action)| self.tickable(*at, action))
+            .map(|(_, action)| action.name.clone())
+            .collect()
+    }
+
+    /// The list an action is drawn in: "changes" for a changed one of a re-review, else the group
+    /// of its setting.
+    fn home_of(&self, diff: &Diff, action: &ActionDiff) -> &'static str {
+        match !diff.first && action.change != "unchanged" {
+            true => "changes",
+            false => GROUPS
+                .iter()
+                .find(|(key, ..)| *key == self.setting_of(&action.name))
+                .map_or("judged", |(key, ..)| *key),
+        }
+    }
+
+    /// Whether any action of the list `home` has a box, whatever the search shows: a header keeps
+    /// its tick while a search leaves the group only rows without one, so that its title stays.
+    fn has_boxes(&self, diff: &Diff, home: &str) -> bool {
+        diff.actions.iter().any(|action| {
+            action.locked.is_none()
+                && action.change != "removed"
+                && self.home_of(diff, action) == home
+        })
+    }
+
+    /// What the tick of a group says of its `names`: none, some or all of them ticked.
+    fn tick_of(&self, names: &[String]) -> CheckState {
+        let ticked = names.iter().filter(|n| self.picked.contains(*n)).count();
+        match ticked {
+            0 => CheckState::Empty,
+            n if n == names.len() => CheckState::Checked,
+            _ => CheckState::Mixed,
+        }
+    }
+
     /// What the action will be: what was chosen, else what the daemon proposes.
     fn setting_of(&self, name: &str) -> &str {
         self.settings.get(name).map_or("judged", String::as_str)
@@ -776,6 +845,9 @@ pub struct ConnectionsSection {
     made: u64,
     saving: bool,
     form_error: Option<SharedString>,
+    /// Why the URL of the connection edited is not reached: under its field, left empty, until
+    /// the user types one.
+    url_fault: Option<SharedString>,
     review: Option<Review>,
     review_open: bool,
     confirming: Option<String>,
@@ -812,6 +884,7 @@ impl ConnectionsSection {
             made: 0,
             saving: false,
             form_error: None,
+            url_fault: None,
             review: None,
             review_open: false,
             confirming: None,
@@ -1180,7 +1253,9 @@ impl ConnectionsSection {
     fn watch(&mut self, input: &Entity<InputState>, cx: &mut Context<Self>) {
         self._subscriptions
             .push(cx.subscribe(input, |this, _, event, cx| {
-                if matches!(event, InputEvent::Change) && this.form_error.take().is_some() {
+                if matches!(event, InputEvent::Change)
+                    && (this.form_error.take().is_some() || this.url_fault.is_some())
+                {
                     cx.notify();
                 }
             }));
@@ -1216,7 +1291,10 @@ impl ConnectionsSection {
             (&fields.command, line),
             (
                 &fields.url,
-                server.and_then(|s| s.url.clone()).unwrap_or_default(),
+                server
+                    .filter(|s| s.url_fault.is_none())
+                    .and_then(|s| s.url.clone())
+                    .unwrap_or_default(),
             ),
         ] {
             field.update(cx, |f, cx| f.set_value(value, window, cx));
@@ -1251,6 +1329,9 @@ impl ConnectionsSection {
         self.site_rows = Listing::default().at_rest();
         self.form = Form::Editing(server.map(|s| s.name.clone()));
         self.form_error = None;
+        self.url_fault = server
+            .and_then(|s| s.url_fault.clone())
+            .map(SharedString::from);
         self.saving = false;
         self.request = None;
         self.vault.update(cx, |vault, cx| vault.read(cx));
@@ -1441,6 +1522,7 @@ impl ConnectionsSection {
                 }
                 if editing {
                     params["headers"] = json!({});
+                    params["secrets"] = json!([]);
                 }
             }
             Reach::Url => {
@@ -1519,6 +1601,7 @@ impl ConnectionsSection {
             search: None,
             filter: "all".into(),
             picked: BTreeSet::new(),
+            list_focus: None,
             opened: HashSet::new(),
             folded: HashSet::new(),
             rows: Grouped::new("connection-review-row").at_rest(),
@@ -1939,12 +2022,24 @@ impl ConnectionsSection {
             boxed("connection-command", Input::new(&fields.command), cx),
         )
         .hint("The program and its arguments, run without a shell.");
+        // The fault of the URL saved stays under its field while the field is left empty.
+        let url_fault = self
+            .url_fault
+            .clone()
+            .filter(|_| fields.url.read(cx).value().trim().is_empty())
+            .map(|fault| {
+                let why = fault.strip_prefix("url: ").unwrap_or(&fault);
+                SharedString::from(format!(
+                    "The URL saved is not reached ({why}). Type it again."
+                ))
+            });
         let url = Field::new(
             "connection-url-field",
             "URL",
             boxed("connection-url", Input::new(&fields.url), cx),
         )
-        .hint("https://, or http:// on this machine.");
+        .hint("https://, or http:// on this machine.")
+        .error(url_fault);
         let offered = self.offered(original.as_deref().unwrap_or_default(), cx);
         let mut variables = div().flex().flex_col();
         for row in self
@@ -2169,15 +2264,9 @@ impl ConnectionsSection {
             if !review.shows(at, action) {
                 continue;
             }
-            match !diff.first && action.change != "unchanged" {
-                true => changes.push((action.name.clone(), at)),
-                false => {
-                    let group = GROUPS
-                        .iter()
-                        .find(|(key, ..)| *key == review.setting_of(&action.name))
-                        .map_or("judged", |(key, ..)| *key);
-                    grouped.push((action.name.clone(), group, at));
-                }
+            match review.home_of(diff, action) {
+                "changes" => changes.push((action.name.clone(), at)),
+                group => grouped.push((action.name.clone(), group, at)),
             }
         }
         review
@@ -2536,6 +2625,7 @@ impl ConnectionsSection {
                 .pinned
                 .as_deref()
                 .map(|pinned| format!("since {}", pinned.rsplit(' ').next().unwrap_or(pinned)));
+            let names = review.tickable_in(diff, review.changes.rows().map(|row| *row.value));
             let mut group = Group::new(
                 "connection-review-changes",
                 "What changed",
@@ -2549,6 +2639,9 @@ impl ConnectionsSection {
             .children(items);
             if let Some(since) = since {
                 group = group.sentence(since);
+            }
+            if review.has_boxes(diff, "changes") {
+                group = group.select(review.tick_of(&names), self.tick_group(names, cx));
             }
             group.gap(space::SM)
         });
@@ -2566,17 +2659,20 @@ impl ConnectionsSection {
                 })
                 .collect();
             let this = cx.entity().downgrade();
-            groups.push(
-                Group::new(format!("connection-review-group-{key}"), title, rows.len())
-                    .sentence(sentence)
-                    .open(!review.folded.contains(key))
-                    .on_toggle(move |open, _, cx| {
-                        this.update(cx, |this, cx| this.fold_group(key, !open, cx))
-                            .ok();
-                    })
-                    .children(items)
-                    .gap(space::SM),
-            );
+            let names = review.tickable_in(diff, rows.rows().map(|row| *row.value));
+            let mut group = Group::new(format!("connection-review-group-{key}"), title, rows.len())
+                .sentence(sentence)
+                .open(!review.folded.contains(key))
+                .on_toggle(move |open, _, cx| {
+                    this.update(cx, |this, cx| this.fold_group(key, !open, cx))
+                        .ok();
+                })
+                .children(items)
+                .gap(space::SM);
+            if review.has_boxes(diff, key) {
+                group = group.select(review.tick_of(&names), self.tick_group(names, cx));
+            }
+            groups.push(group);
         }
         let in_groups: usize = review.rows.groups().map(|g| g.len()).sum();
         let unchanged = diff
@@ -2942,6 +3038,10 @@ impl ConnectionsSection {
             );
         }
         let this = cx.entity().downgrade();
+        let bar = bar.on_select_all(move |_, cx| {
+            this.update(cx, |this, cx| this.select_all_shown(cx)).ok();
+        });
+        let this = cx.entity().downgrade();
         let bar = bar.on_clear(move |_, cx| {
             this.update(cx, |this, cx| {
                 if let Some(review) = this.review.as_mut() {
@@ -2996,6 +3096,42 @@ impl ConnectionsSection {
             review.picked.remove(&name);
             review.settings.insert(name, setting.to_owned());
         }
+        cx.notify();
+    }
+
+    /// What a click on the tick of a group does to its rows: ticks them all, or unticks them all.
+    fn tick_group(
+        &self,
+        names: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(CheckState, &mut Window, &mut gpui_kit::App) + 'static {
+        let this = cx.entity().downgrade();
+        move |state, _, cx| {
+            this.update(cx, |this, cx| {
+                if let Some(review) = this.review.as_mut() {
+                    for name in &names {
+                        match state {
+                            CheckState::Checked => review.picked.insert(name.clone()),
+                            _ => review.picked.remove(name),
+                        };
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }
+    }
+
+    /// Ticks every row that shows: what the search and the chip leave out is left as it was.
+    fn select_all_shown(&mut self, cx: &mut Context<Self>) {
+        let Some(review) = self.review.as_mut() else {
+            return;
+        };
+        let Some(Ok(diff)) = review.answer.as_ref() else {
+            return;
+        };
+        let shown = review.tickable_shown(diff);
+        review.picked.extend(shown);
         cx.notify();
     }
 
@@ -3174,6 +3310,10 @@ impl ConnectionsSection {
             cx,
         );
         let accepting = review.accepting;
+        let focus = review
+            .list_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
         let signing = self.signing.contains(&review.name);
         let sign_in = match &answer {
             Some(Err(why)) if flottille_core::vault::asks_sign_in(why) => Some(review.name.clone()),
@@ -3181,19 +3321,41 @@ impl ConnectionsSection {
         };
         let entries: Vec<String> = match &answer {
             Some(Err(why)) if flottille_core::vault::refused_entry(why) => {
-                let mut kept: Vec<String> = self
+                let mut kept: Vec<String> = Vec::new();
+                for entry in self
                     .server(&review.name)
-                    .map(|server| server.headers.values().cloned().collect())
-                    .unwrap_or_default();
-                kept.dedup();
+                    .map(|server| {
+                        let headers = server.headers.values().cloned();
+                        headers.chain(server.secrets.clone()).collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+                {
+                    if !kept.contains(&entry) {
+                        kept.push(entry);
+                    }
+                }
                 kept
             }
             _ => Vec::new(),
         };
         review.answer = answer;
         self.review = Some(review);
+        let clicked = focus.clone();
         let body = div()
             .id("connection-review-body")
+            .track_focus(&focus)
+            // A click anywhere in the list puts the focus in it, so that Ctrl+A is the list's and
+            // not the text field's.
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.focus(&clicked, cx);
+            })
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                let keys = &event.keystroke;
+                if keys.key == "a" && keys.modifiers.secondary() && !keys.modifiers.shift {
+                    cx.stop_propagation();
+                    this.select_all_shown(cx);
+                }
+            }))
             .w_full()
             .flex()
             .flex_col()
