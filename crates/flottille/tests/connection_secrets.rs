@@ -1015,6 +1015,109 @@ fn common_names_ending_in_key_or_token_are_allowed() {
 }
 
 #[test]
+fn max_tokens_is_allowed() {
+    let user = user();
+    let url = "https://design.example.com/mcp?max_tokens=100&maxTokens=100";
+    user.call(
+        "connection.add",
+        json!({"name": "design", "about": "Designs.", "url": url}),
+    )
+    .unwrap();
+    assert_eq!(connection_named(&user, "design")["url"], url);
+    // Any other plural of a secret word stays refused, on purpose.
+    let refused = user
+        .call(
+            "connection.add",
+            json!({"name": "sketch", "about": "Sketches.",
+                "url": "https://sketch.example.com/mcp?input_tokens=abc123"}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("input_tokens"), "{refused:?}");
+    assert!(!refused.1.contains("abc123"), "{refused:?}");
+}
+
+/// The request `number` as the window's dialog reads it.
+fn proposed(user: &User, number: u64) -> Value {
+    user.call("connection.proposed", json!({"number": number}))
+        .unwrap()
+}
+
+#[test]
+fn a_proposal_marks_a_url_served_cleaned() {
+    let user = user();
+    written_by_hand(
+        &user,
+        &format!(
+            "\n[[connections.server]]\nname = \"design\"\nabout = \"Designs.\"\n\
+             url = \"https://design.example.com/mcp?project=p&access_token={IN_A_URL}\"\n"
+        ),
+    );
+    let mcp = session(&user);
+    let held = mcp.call(
+        "connections",
+        json!({"action": "edit", "name": "design",
+            "url": "https://design.example.com/mcp?project=p"}),
+    );
+    assert!(!held.error, "{}", held.text);
+    let proposal = proposed(&user, held_number(&held.text));
+    assert!(!proposal.to_string().contains(IN_A_URL), "{proposal}");
+    assert_eq!(
+        proposal["before"]["url"], "https://design.example.com/mcp (cleaned: its query is dropped)",
+        "{proposal}"
+    );
+    assert_eq!(
+        proposal["after"]["url"], "https://design.example.com/mcp?project=p",
+        "{proposal}"
+    );
+}
+
+#[test]
+fn a_proposal_says_an_unknown_scheme_is_not_shown() {
+    let user = user();
+    written_by_hand(
+        &user,
+        &format!(
+            "\n[[connections.server]]\nname = \"slack\"\nabout = \"Chat.\"\n\
+             url = \"{SLACK_LIKE}:x@slack.example.com/mcp\"\n"
+        ),
+    );
+    let mcp = session(&user);
+    let held = mcp.call(
+        "connections",
+        json!({"action": "edit", "name": "slack",
+            "url": "https://slack.example.com/mcp"}),
+    );
+    assert!(!held.error, "{}", held.text);
+    let proposal = proposed(&user, held_number(&held.text));
+    assert!(!proposal.to_string().contains(SLACK_LIKE), "{proposal}");
+    assert_eq!(
+        proposal["before"]["url"], "(cleaned: it is not shown)",
+        "{proposal}"
+    );
+}
+
+#[test]
+fn the_agents_show_marks_a_url_served_cleaned() {
+    let user = user();
+    written_by_hand(
+        &user,
+        &format!(
+            "\n[[connections.server]]\nname = \"design\"\nabout = \"Designs.\"\n\
+             url = \"https://design.example.com/mcp?project=p&access_token={IN_A_URL}\"\n"
+        ),
+    );
+    let shown = session(&user).call("connections", json!({"action": "show", "name": "design"}));
+    assert!(!shown.text.contains(IN_A_URL), "{}", shown.text);
+    assert!(
+        shown
+            .text
+            .contains("https://design.example.com/mcp (cleaned: its query is dropped)"),
+        "{}",
+        shown.text
+    );
+}
+
+#[test]
 fn an_edit_card_marks_a_url_served_cleaned() {
     let user = user();
     written_by_hand(

@@ -3404,19 +3404,23 @@ fn a_401_with_a_header_from_the_vault_names_the_entry_not_a_sign_in(cx: &mut Tes
 fn a_401_with_query_and_cookie_secrets_offers_to_edit_each_entry(cx: &mut TestAppContext) {
     let user = user();
     turn_on(&user);
-    for name in ["notes-query", "notes-cookie"] {
+    for name in ["notes-query", "notes-cookie", "notes-login"] {
         user.call(
             "vault.set",
-            json!({"name": name, "secret": SECRET, "description": "Notes' secret"}),
+            json!({"name": name, "secret": SECRET, "description": "Notes' secret",
+                "username": "ada@example.com"}),
         )
         .unwrap();
     }
     let (mut server, url) = protected_server(&user);
+    // The cookie's entry is used twice (a cookie and a query parameter): offered once.
     user.call(
         "connection.add",
         json!({"name": "notes", "about": "A notes server.", "url": url,
             "secrets": [{"in": "query", "name": "userToken", "entry": "notes-query"},
-                {"in": "cookie", "name": "session", "entry": "notes-cookie"}]}),
+                {"in": "cookie", "name": "session", "entry": "notes-cookie"},
+                {"in": "query", "name": "again", "entry": "notes-cookie"},
+                {"in": "basic", "entry": "notes-login"}]}),
     )
     .unwrap();
     let (shell, cx) = window(&user, cx);
@@ -3432,7 +3436,7 @@ fn a_401_with_query_and_cookie_secrets_offers_to_edit_each_entry(cx: &mut TestAp
     settle(cx);
     assert!(present(cx, "connection-review-needs-entry"));
     // Each entry the server refused is offered, not only a header's.
-    for entry in ["notes-query", "notes-cookie"] {
+    for entry in ["notes-query", "notes-cookie", "notes-login"] {
         assert_eq!(
             label(cx, &format!("connection-review-edit-{entry}")),
             Some(format!("Edit {entry}")),
@@ -3441,6 +3445,11 @@ fn a_401_with_query_and_cookie_secrets_offers_to_edit_each_entry(cx: &mut TestAp
         );
     }
     let all = everything_said(cx);
+    assert_eq!(
+        all.matches("Edit notes-cookie").count(),
+        1,
+        "an entry used twice is offered once: {all}"
+    );
     assert!(!all.contains(SECRET), "{all}");
     let _ = server.kill();
     let _ = server.wait();
