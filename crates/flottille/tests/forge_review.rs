@@ -136,7 +136,7 @@ fn says(user: &User, number: u64) -> Vec<String> {
 
 /// The text the agent is handed once the request `number` is answered.
 fn delivered(user: &User, number: u64) -> String {
-    let store = || Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = || Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     let id = format!("approval-{number}");
     eventually("the answer", || store().delivery(&id).unwrap().is_some());
     store().delivery(&id).unwrap().unwrap().body
@@ -704,7 +704,7 @@ fn a_bitbucket_review_that_fails_half_way_records_and_counts_what_was_posted() {
         answer.text
     );
     // The body and the line comment that did post are recorded as the agent's, not the other.
-    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     let posts = store.posts("app", "bitbucket", ".", "12").unwrap();
     assert_eq!(posts.len(), 2, "{posts:?}");
 }

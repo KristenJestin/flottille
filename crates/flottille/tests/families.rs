@@ -116,7 +116,7 @@ fn root_in(user: &User, workspace: Option<&str>) -> (String, Mcp) {
 }
 
 fn store(user: &User) -> Store {
-    Store::open(&user.path("state/flottille/flottille.db")).unwrap()
+    Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
 fn eventually(what: &str, check: impl Fn() -> bool) {
@@ -5981,7 +5981,9 @@ fn a_project_with_an_old_workspace_named_main_keeps_it() {
     old.name = "main".into();
     old.branch = "app/old-main".into();
     old.steps.clear();
-    store(&user)
+    // Written with the daemon running: it must meet a workspace made before the name was reserved.
+    Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
         .create_workspace(&old, ("workspace.created", json!({"name": "main"})))
         .unwrap();
     let (lead, mcp) = root_in(&user, None);

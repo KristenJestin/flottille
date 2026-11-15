@@ -214,7 +214,7 @@ fn a_round(user: &User) {
 
 /// The bodies of the subscription deliveries made to the agent, oldest first, as stored.
 fn delivered(user: &User, agent: &str) -> Vec<String> {
-    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     let mut bodies: Vec<String> = store
         .last_deliveries_of(agent, "subscription", 100)
         .unwrap()

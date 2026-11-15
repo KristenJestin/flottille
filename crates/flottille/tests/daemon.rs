@@ -463,6 +463,8 @@ fn a_daemon_stopping_kills_only_the_processes_it_started_never_another_s_of_the_
         .process_group(0)
         .spawn()
         .unwrap();
+    // Written with the daemon running, on purpose: the row is the process of another daemon,
+    // which the daemon under test must find in its table and leave alone.
     flottille_core::store::Store::open(&user.path("state/flottille/flottille.db"))
         .unwrap()
         .add_process(other.id(), start_time(other.id()), &held)

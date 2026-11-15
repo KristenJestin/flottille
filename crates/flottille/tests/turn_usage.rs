@@ -47,7 +47,7 @@ fn agent(user: &User, id: &str) -> Value {
 }
 
 fn rows(user: &User) -> Vec<TurnUsage> {
-    Store::open(&user.path("state/flottille/flottille.db"))
+    Store::open_read_only(&user.path("state/flottille/flottille.db"))
         .unwrap()
         .turn_usage()
         .unwrap()

@@ -266,7 +266,7 @@ fn allowed(user: &User, answer: Answer) -> Answer {
     let number = held(&answer);
     user.call("approval.approve", json!({"number": number}))
         .unwrap();
-    let store = || Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = || Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     let id = format!("approval-{number}");
     eventually("the answer", || store().delivery(&id).unwrap().is_some());
     let text = store().delivery(&id).unwrap().unwrap().body;
@@ -1337,7 +1337,7 @@ fn the_event_of_a_run_carries_the_link_of_the_run() {
                 "variables": variables, "follow": false}),
         );
         assert!(!answer.error, "{}", answer.text);
-        let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+        let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
         let events = store.agent_events(&id, 0, 500).unwrap();
         let served = events
             .iter()

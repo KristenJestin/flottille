@@ -114,7 +114,8 @@ fn launched(user: &User, mcp: &Mcp, title: &str, arguments: Value) -> (String, S
 /// The deliveries of `kind` stored for `agent`, newest first.
 fn delivered(user: &User, agent: &str, kind: &str) -> Vec<String> {
     let store =
-        flottille_core::store::Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+        flottille_core::store::Store::open_read_only(&user.path("state/flottille/flottille.db"))
+            .unwrap();
     store
         .last_deliveries(agent, 64)
         .unwrap()

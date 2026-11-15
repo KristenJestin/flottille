@@ -86,7 +86,7 @@ fn served(answer: Answer) -> String {
 
 /// The calls the gate served of an agent: their tool and the gate's word.
 fn tools_served(user: &User, agent: &str) -> Vec<(String, Option<String>)> {
-    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     store
         .agent_events(agent, 0, 1000)
         .unwrap()

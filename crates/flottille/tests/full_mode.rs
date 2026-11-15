@@ -445,7 +445,7 @@ fn in_full_a_child_s_call_is_allowed_without_asking_its_parent() {
     assert!(pushed.contains("exited with code 0"), "{pushed}");
     assert!(remote_has(&user, "child"));
     // No request was made, not even one its parent would hold.
-    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     assert!(store.request(1).unwrap().is_none(), "a request was made");
 }
 
@@ -1167,7 +1167,7 @@ fn a_staged_credentials_file_is_masked_in_a_diff() {
     }
     assert!(shown[0].contains("accessToken"), "{}", shown[0]);
     assert!(shown[0].contains("refresh_token"), "{}", shown[0]);
-    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     let runs = store.ended_runs_of(&[id], 10, 1_000).unwrap();
     assert_eq!(runs.len(), 4);
     for run in runs {
