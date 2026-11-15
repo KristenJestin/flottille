@@ -631,6 +631,7 @@ run's branch, `run_view` the run's, and the delivery that wakes the agent at a r
 | `run_view {repository?, run}` (read) | `gh run view <run> -R … --json databaseId,workflowName,status,conclusion,headBranch,url,jobs` | `bkt pipeline view <run> --json`: `steps[]` (`name`, `uuid`, `state.name`, `state.result.name`) |
 | `run_logs {repository?, run, step}` (read) | `gh run view --job <id> -R … --log`, the job found by its name or id among the run's | `bkt pipeline logs <run> --step <uuid>`, the step found by its name or uuid |
 | `run {repository?, pipeline, branch?, variables?, follow?}` (write) | `gh workflow run <file> -R … --ref <b> -f k=v…`; the answer is the run's link when `gh` prints it | without variables `bkt pipeline run --ref <b> [--selector-type <t> --selector-pattern <p>]`, the run's number read by its uuid (`bkt api …/pipelines/{uuid}`) when it prints no `#N`; with variables the REST call through `bkt api` (table above); the answer is the run's number and link |
+| `follow_run {repository?, run}` (read) | `gh run view <run> -R … --json status,conclusion,startedAt,updatedAt,jobs,workflowName,headBranch,url` | `bkt pipeline view <run> --json` ("Following a run") |
 | `stop {repository?, run}` (write) | `gh run cancel <run> -R …` | `bkt api …/pipelines/{uuid}/stopPipeline --method POST`, the uuid read with `bkt pipeline view` |
 | `step {repository?, run, step, do: start \| rerun}` (write) | `rerun`: `gh run rerun <run> -R … --job <id>`; `start` is refused | refused, naming why |
 
@@ -716,6 +717,16 @@ names the runs the agent already follows there (`docs/tools.md`, "The forge").
 - **A run that cannot be read** (the forge down, `bkt` without a context, the run gone) is said
   once, `It cannot be read now: <why>`, and the following goes on: nothing more is said of it
   until it is read again.
+- **A run the agent did not start** (by hand on the forge, by a push outside the pull request's
+  checks, by a schedule) is followed with **`follow_run {repository?, run}`**, the same following
+  as `run` makes, its answer ending the same way. The run is read once, in the repository named,
+  one of the agent's place: one that cannot be read there (a number of another repository) is
+  refused, `refused: the run 43 of acme/web cannot be read: …; forge runs lists its runs; nothing
+  is followed`; one that ended answers its result at once, as its delivery would (`It ended failed
+  after 4 min 5 s.`, the failed steps), and follows nothing (`Nothing is followed: it has
+  ended.`); one the agent follows already, started or followed, is followed once (`You already
+  follow the run #43 of api …`). `runs` ends each line of a run the agent follows with `, you
+  follow it`.
 - **It ends** with the run, when the agent ends, or with `unsubscribe {run, repository?}` (or the
   user's Cancel), `repository` needed when the project has several, a run's number being of one
   repository; a following cancelled while a round reads its run is neither written back nor said; `forge show` lists it under `Your subscriptions:` (`- run #43 of api (custom:

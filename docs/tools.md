@@ -612,7 +612,7 @@ pending requests.
   carries the line `show` gives about how long the repository's CI runs take, as information
   ([`forges.md`](forges.md), "How long CI takes"). It also says the pull request's checks running as it subscribed
   (`Its checks running as you subscribed: test.`, or that none was), that `checks` is the end of
-  those and that a run started on its branch outside them is followed by `run`, not by the
+  those and that a run started on its branch outside them is followed by `run` or `follow_run`, not by the
   subscription, and each run the agent already follows on that branch (`You already follow the
   run #43 of api (custom: nightly on app/login): its end wakes you on its own.`): a short
   `default` pipeline that ends first no longer hides a long custom one. `checks` delivers how many passed and failed (the CI's own failures and the stopped ones counted apart), with
@@ -632,7 +632,7 @@ pending requests.
   branch, and the one replaces the other when it is the same pull request. **`unsubscribe {workspace?, repository?, number?}`** cancels the agent's
   subscriptions to them (the runs it follows there with them, unless `number` is given: it names a pull
   request, never a run), every one when it names none;
-  **`unsubscribe {run, repository?}`** stops following a run it started (`repository` needed
+  **`unsubscribe {run, repository?}`** stops following a run it started or followed (`repository` needed
   when the project has several); **`unsubscribe
   {session}`** stops following a
   session the agent started, named by its id or its title ("Following a session", under "The tree's tools").
@@ -771,11 +771,15 @@ pending requests.
   in every result and record) and follows it unless `follow: false`: a `subscription` delivery
   wakes the agent when it ends (its result, its duration, the failed steps by name) and once when
   it waits on a manual step, read by the rounds of the items ([`forges.md`](forges.md),
-  "Following a run"); the answer says it is followed until it ends and that no `wake` is needed, **`stop {repository?, run}`** stops a run, **`step {repository?, run, step,
+  "Following a run"); the answer says it is followed until it ends and that no `wake` is needed;
+  **`follow_run {repository?, run}`** follows the same way a run the agent did not start (by hand,
+  a push, a schedule), a run that ended answering its result at once and following nothing, a
+  run followed already being followed once, and `runs` says of each run whether the agent
+  follows it; **`stop {repository?, run}`** stops a run, **`step {repository?, run, step,
   do}`** starts a manual step (`do: start`) or runs one again (`do: rerun`) where the forge allows
   it, refused naming why elsewhere. A Bitbucket Data Center repository is refused for all of them.
 
-`list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view` and `run_logs` go
+`list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view`, `run_logs` and `follow_run` go
 through the gate like every call, which allows them in every mode; `create`, `comment`, `edit`,
 `merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, a merge that waives the checks base, and so is a `review` with the verdict `approve` or `request_changes`, in Full too (`review` with `comment` is to judge). **What a write asks is on the card**: besides its title and body, its reviewers (`Its reviewers, besides the project's: …`), labels, `It adds the reviewers: …`, `It removes the labels: …`, `It moves it onto the base release`, `It marks it ready for review`, `It makes it a draft`, `It deletes the branch when the pull request is merged`, and for a merge `It deletes the source branch on the forge after the merge` (with `(the project's setting Delete the branch after merging)` when that is why). A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …`, `Its body: …` and `Its message: …` in full (the
