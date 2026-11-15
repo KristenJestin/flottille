@@ -388,11 +388,13 @@ const ERROR_LINES: usize = 3;
 /// What happened to a server cut during its start, in the words of whoever ended it: how its
 /// process ended (its exit code or the signal that killed it; alive, when it only closed its
 /// streams or did not answer), then the last lines of its error output, as it wrote them: masked
-/// and cut here, a line at a time, so that no secret is cut in two.
+/// and cut here, a line at a time, so that no secret is cut in two: the secrets it was `given`
+/// are masked whatever their variables are named.
 fn cut_during_start(
     status: Option<ExitStatus>,
     error: Option<ClientInitializeError>,
     last: &[String],
+    given: &[String],
 ) -> String {
     let what = match (status, error) {
         (Some(status), _) => match (status.code(), status.signal()) {
@@ -409,7 +411,8 @@ fn cut_during_start(
             other => other.to_string(),
         },
     };
-    let masked = flottille_core::secrets::mask(&last.join("\n"), &std::env::vars_os().collect());
+    let masked =
+        flottille_core::secrets::mask_also(&last.join("\n"), &std::env::vars_os().collect(), given);
     let lines: Vec<String> = masked.lines().map(super::short).collect();
     match lines.is_empty() {
         true => what,
@@ -472,7 +475,10 @@ async fn start_with(
                 None => Vec::new(),
             };
             let mut env = crate::runs::beside(daemon)?;
+            // Every value it was given, masked in what it says whatever its variable is named.
+            let mut given = Vec::new();
             for (name, secret) in secrets(daemon, &declaration.name, &declaration.env).await? {
+                given.push(secret.clone());
                 env.insert(OsString::from(name), OsString::from(secret));
             }
             let mut command = tokio::process::Command::new(&words[0]);
@@ -542,7 +548,7 @@ async fn start_with(
                         Ok(Err(error)) => Some(error),
                         _ => None,
                     };
-                    return Err(cut_during_start(status, error, &last));
+                    return Err(cut_during_start(status, error, &last, &given));
                 }
             }
         }
