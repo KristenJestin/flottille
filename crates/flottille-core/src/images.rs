@@ -383,8 +383,8 @@ mod tests {
         DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
             let noise = ((x * 7919 + y * 104_729) % 13) as u8;
             image::Rgb([
-                (x / 4) as u8 + noise,
-                (y / 4) as u8 + noise,
+                ((x / 4) as u8).wrapping_add(noise),
+                ((y / 4) as u8).wrapping_add(noise),
                 ((x + y) / 8) as u8,
             ])
         }))
