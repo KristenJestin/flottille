@@ -576,11 +576,173 @@ fn a_connection_whose_server_does_not_start_is_added_and_waits() {
         .unwrap();
     assert_eq!(added["state"], "awaiting review", "{added}");
     assert!(
-        added["failing"]
-            .as_str()
-            .is_some_and(|why| why.contains("could not start")),
+        added["failing"].as_str().is_some_and(
+            |why| why.contains("could not start") && why.contains("flottille-no-such-server")
+        ),
         "{added}"
     );
+}
+
+/// A connection that was accepted, its server then made to fail at its start by `broken`: what
+/// the review says of it.
+fn why_it_stopped(broken: impl FnOnce(&mut Value)) -> String {
+    let user = user();
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET}),
+    )
+    .unwrap();
+    connect(&user, "almanac", &almanac(), json!({"search": "passes"}));
+    let mut script = almanac();
+    broken(&mut script);
+    write_script(&user, "almanac", &script);
+    let review = user
+        .call("connection.review", json!({"name": "almanac"}))
+        .unwrap_err()
+        .1;
+    let listed = connection(&user, "almanac")["failing"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(review, listed, "the review and the list say the same");
+    review
+}
+
+#[test]
+fn a_server_that_exits_with_an_error_during_its_start_says_the_exit_and_its_last_lines() {
+    let said = why_it_stopped(|script| {
+        script["stderr"] = json!("loading its data\nfatal: the data folder is not writable");
+        script["exit"] = json!(2);
+    });
+    assert!(said.contains("exited with 2"), "{said}");
+    assert!(
+        said.contains("fatal: the data folder is not writable"),
+        "{said}"
+    );
+    assert!(said.contains("loading its data"), "{said}");
+    assert!(!said.contains("transport closed"), "{said}");
+}
+
+#[test]
+fn a_server_that_exits_without_a_word_says_only_the_exit() {
+    let said = why_it_stopped(|script| script["exit"] = json!(7));
+    assert!(said.contains("exited with 7"), "{said}");
+    assert!(!said.contains("transport closed"), "{said}");
+}
+
+#[test]
+fn a_secret_in_the_error_output_of_a_server_cut_during_its_start_is_masked() {
+    let said = why_it_stopped(|script| {
+        script["stderr"] = json!(format!("first line\nno login for {SECRET}"));
+        script["exit"] = json!(3);
+    });
+    assert!(said.contains("exited with 3"), "{said}");
+    assert!(
+        !said.contains(&SECRET[..6]) && said.contains("no login for [masked]"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_server_killed_during_its_start_says_the_signal() {
+    let said = why_it_stopped(|script| {
+        script["stderr"] = json!("about to crash");
+        script["abort"] = json!(true);
+    });
+    assert!(said.contains("killed by signal 6"), "{said}");
+    assert!(said.contains("about to crash"), "{said}");
+}
+
+/// What the list, the event and the review say of a server given a vault entry (under a name
+/// that does not look like a secret's) that prints `stderr` and exits with an error at its start.
+fn said_of_a_given_secret(stderr: String) -> [(&'static str, String); 3] {
+    let user = user();
+    project(&user, "app");
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET, "for": "connection:almanac"}),
+    )
+    .unwrap();
+    turn_on(&user);
+    declare(
+        &user,
+        "almanac",
+        &almanac(),
+        json!({"env": {"ALMANAC_SETTING": {"vault": "almanac-token"}}}),
+    );
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes"}}),
+    )
+    .unwrap();
+    let (_, mcp) = session(&user, "app");
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    restart(&user, "almanac");
+    let mut broken = almanac();
+    broken["stderr"] = json!(stderr);
+    broken["exit"] = json!(3);
+    write_script(&user, "almanac", &broken);
+    let watch = user.watch(&[]);
+    refused(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+    let changed = watch.until(|e| e["name"] == "connection.changed" && !e["data"]["why"].is_null());
+    let event = changed.last().unwrap()["data"]["why"].to_string();
+    let listed = connection(&user, "almanac")["failing"].to_string();
+    let review = user
+        .call("connection.review", json!({"name": "almanac"}))
+        .unwrap_err()
+        .1;
+    [
+        ("the list", listed),
+        ("the event", event),
+        ("the review", review),
+    ]
+}
+
+#[test]
+fn a_secret_a_server_was_given_is_masked_in_its_last_lines_when_it_is_cut_during_its_start() {
+    let said = said_of_a_given_secret(format!("Error: token {SECRET} rejected"));
+    for (what, said) in &said {
+        assert!(!said.contains(SECRET), "{what}: {said}");
+        assert!(!said.contains(&SECRET[..12]), "{what}: {said}");
+        assert!(said.contains("exited with 3"), "{what}: {said}");
+        assert!(said.contains("[masked]"), "{what}: {said}");
+    }
+}
+
+#[test]
+fn a_secret_a_server_was_given_across_the_cut_of_a_last_line_is_masked_first() {
+    let said = said_of_a_given_secret(format!(
+        "Error: {}{SECRET}{}",
+        "y".repeat(85),
+        "y".repeat(5_000)
+    ));
+    for (what, said) in &said {
+        assert!(!said.contains(&SECRET[..12]), "{what}: {said}");
+        assert!(said.contains("[masked]"), "{what}: {said}");
+        assert!(!said.contains(&"y".repeat(200)), "{what}: {said}");
+    }
+}
+
+#[test]
+fn a_server_that_closes_its_streams_and_stays_alive_says_so() {
+    let said = why_it_stopped(|script| {
+        script["stderr"] = json!("giving up on its streams");
+        script["close_streams"] = json!(true);
+    });
+    assert!(
+        said.contains("closed its streams") && said.contains("still running"),
+        "{said}"
+    );
+    assert!(said.contains("giving up on its streams"), "{said}");
 }
 
 // ── help ─────────────────────────────────────────────────────────────────────────────────────
