@@ -123,7 +123,8 @@
 //!
 //! `comment create` takes no `--visibility-role` nor `--visibility-group` (acli's reference gives
 //! them to `comment update` only) and ends with 1 on an unknown flag; its `--body-file` may hold a
-//! document, a mention in it kept as it is.
+//! document, a mention in it kept as it is, and ends with 1 for a document Jira refuses (a
+//! `blockquote` that holds a `blockquote`, a `heading`, a `rule` or a `table`, for one).
 //!
 //! `comment update --key K --id I (--body | --body-file | --body-adf)` (the first two plain text,
 //! the last a document, refused when it is none) and `comment delete --key K --id I`
@@ -741,6 +742,14 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 Some(text) => Some(Value::from(text)),
                 None => value(rest, "--body-file").and_then(file_text),
             };
+            // A document is refused as Jira refuses it: a quote that holds a quote, a heading, a
+            // rule or a table (#934), among the rest.
+            if let Some(doc) = body.as_ref().filter(|body| body.is_object())
+                && let Err(why) = check(doc)
+            {
+                eprintln!("✗ Error: --body-file holds no Atlassian Document Format: {why}");
+                return 1;
+            }
             if let (0, Some(key), Some(body)) = (done, value(rest, "--key"), body) {
                 post(dir, key, body);
             }
