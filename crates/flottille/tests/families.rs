@@ -5269,7 +5269,11 @@ fn show_says_posted_by_an_agent_from_the_record() {
         ),
     );
     assert!(ticket.contains("kris (posted by an agent)"), "{ticket}");
-    assert!(ticket.contains("- kris: Fixed on app/login"), "{ticket}");
+    // Every comment shows its id (#934), the agent's or not: the record is what tells them apart.
+    assert!(
+        ticket.contains("- kris [comment issuecomment-502]: Fixed on app/login"),
+        "{ticket}"
+    );
 }
 
 #[test]
