@@ -142,6 +142,8 @@ itself (`gh pr view <n> -R github.com/owner/name --json …`):
   request whose checks were all skipped is refused like one with none); none when there are no
   checks;
 - its comments (their number; `forge` `show` gives their text, and the reviews');
+- with `detail: full`, its **review threads** ("Review threads" below), counted otherwise where
+  they were read;
 - for a merged or closed one, **the comment it was closed with**, when the forge gives one
   ("The closing comment" below).
 
@@ -560,6 +562,66 @@ assumed from the forges' REST documentation and `bkt`'s help (v0.37.0), not seen
 and the maintainer checks them.** What was posted is recorded like a comment (the body and each
 comment on a line), so that it is read back as an agent's.
 
+### Review threads
+
+A comment on a line of the diff and its replies are a **review thread**. `forge show` with
+`detail: full` gives each, after the comments: its id, the file, the line (or `lines 2 to 4`) and
+the side (`new`, the file after the change, or `old`), whether it is resolved, whether it is
+outdated (the code changed since: the line is the one it was written on), then its comments in
+order with their author, their date and their text, cut and masked as the other comments, a
+reply an agent posted said as such. A thread's comments are not said again among the comments.
+Without `detail: full`, a forge whose threads were read counts them (`review threads: 3, 1
+unresolved, read them with …`).
+
+- **GitHub** has its threads in its GraphQL API alone: `gh api graphql --hostname github.com -f
+  query=… -f owner=… -f name=… -F number=…` reads `repository.pullRequest.reviewThreads(first:
+  100)` (`id isResolved isOutdated path line startLine originalLine originalStartLine diffSide`,
+  and each thread's first 100 `comments`: `author.login body createdAt url`); an outdated thread
+  says no `line`, its `originalLine` is said. They are read with `detail: full` alone, and the
+  answer says when the pull request has more than 100. The REST API, which Flottille prefers,
+  says neither a thread's resolution nor keeps a reply in it.
+- **Bitbucket Cloud**: the inline comments among those every read already gives (`inline {path,
+  from, to, start_from, start_to, outdated}`), a thread being an inline comment that answers none
+  with every comment that answers it (`parent.id`), named by its first comment's number; resolved
+  when that one has a `resolution`. `to` is the new side's line, `from` the old side's.
+- **Bitbucket Data Center**: the `COMMENTED` activities with a `commentAnchor {path, line,
+  lineType, fileType, orphaned}` and their nested replies; `fileType: FROM` or `lineType:
+  REMOVED` is the old side, `orphaned` outdated; resolved by `threadResolved` where the server's
+  version has it, a task (`severity: BLOCKER`) by its `state` (`RESOLVED`), and a thread whose
+  comment says neither has no resolved state, said so.
+
+**`forge reply {number, repository?, thread, body}`** answers in a thread and **`forge resolve
+{number, repository?, thread, resolved}`** marks it resolved (`true`) or not (`false`). Both are
+writes, judged like `comment` (`it replies in a review thread on the forge`, `it resolves a review
+thread on the forge`, `it opens a resolved review thread again on the forge`), answered at once,
+the result later; the card says `It replies in the review thread <id> of pull request #<n>` and
+the body whole, or `It marks the review thread <id> of pull request #<n> resolved`. A call without
+`number`, `thread`, the reply's `body` or `resolved`, or whose `thread` is not one id (letters,
+digits, `_`, `-`, `=`), is refused before the user is asked.
+
+- **GitHub**: the pull request's threads are read first, and a thread that is not one of them is
+  refused, nothing written: a node id names a thread anywhere on GitHub, and only one of a
+  repository of the place is written to. A thread already in the state asked is said so, nothing
+  changed. Then `addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId, body})`, whose
+  answer's `comment.url` names the reply recorded as the agent's, or `resolveReviewThread` /
+  `unresolveReviewThread(input: {threadId})`, through `gh api graphql -f query=… -f thread=… [-f
+  body=…]`.
+- **Bitbucket Cloud**: `bkt api /repositories/W/R/pullrequests/<n>/comments --method POST --input
+  '{"content": {"raw": …}, "parent": {"id": <thread>}}'`, the answer's `id` recorded; `bkt api
+  …/comments/<thread>/resolve --method POST` resolves it, `--method DELETE` opens it again.
+- **Bitbucket Data Center**: `bkt api /rest/api/1.0/projects/P/repos/R/pull-requests/<n>/comments
+  --method POST --input '{"text": …, "parent": {"id": <thread>}}'`; to resolve, the comment is
+  read (`…/comments/<thread>`) for its `version`, then `--method PUT --input '{"version": …,
+  "threadResolved": true|false}'`, or `{"version": …, "state": "RESOLVED"|"OPEN"}` for a task. A
+  comment that says neither `threadResolved` nor `severity: BLOCKER` is refused (`… is on a
+  Bitbucket Data Center whose comments say no resolved state …: nothing was changed; reply in the
+  thread instead`).
+
+A Bitbucket thread is a number: another is refused once allowed, nothing written. **These shapes
+(GitHub's GraphQL fields and mutations, Cloud's `inline`, `parent`, `resolution` and `/resolve`,
+Data Center's `commentAnchor`, `threadResolved`, `state` and the `PUT` of a comment) are taken
+from the forges' API documentation, not seen on a real server, and the maintainer checks them.**
+
 ### Agents never run `bkt`
 
 The gate refuses every `bkt` line an agent runs, reads included, as it does `acli`
@@ -585,8 +647,8 @@ once the user allowed the call, like `close`'s.
 
 `forge {action, …}` (`docs/tools.md`, "The forge"): `list` the pull requests of the place's
 repositories by state and branch, `show` a workspace's branch's or one by its number with its
-checks, reviews and comments; `create`, `merge`, `checks`, `comment`, `review` and `edit`, each to
-judge (a merge that waives the checks base, and a `review` that approves or requests changes).
+checks, reviews, comments and review threads; `create`, `merge`, `checks`, `comment`, `reply`,
+`resolve`, `review` and `edit`, each to judge (a merge that waives the checks base, and a `review` that approves or requests changes).
 The same `gh` (or `bkt`, for a Bitbucket repository) and the
 same rules: spawned by the daemon, the repository named, its output masked, no token to the agent.
 It never reaches a repository outside the agent's place, and is listed to every agent of a
