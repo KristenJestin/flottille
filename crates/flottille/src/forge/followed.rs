@@ -1,9 +1,10 @@
 //! The runs an agent follows (`docs/forges.md`, "Following a run"): `forge` `run` follows the run
-//! it started unless told `follow: false`, as a subscription of the source `run`
-//! (`crate::subscriptions`). The daemon's rounds of the items read each followed run with the
-//! pull requests of its repository, one request a run, as rarely as they come: the agent is woken
-//! when it ends, which ends the following, and once when it waits on a manual step (GitHub: on
-//! its environment's reviewers). A run that cannot be read is said once, until it can again.
+//! it started unless told `follow: false`, and `follow_run` one it did not start, as a
+//! subscription of the source `run` (`crate::subscriptions`). The daemon's rounds of the items
+//! read each followed run with the pull requests of its repository, one request a run, as rarely
+//! as they come: the agent is woken when it ends, which ends the following, and once when it waits
+//! on a manual step (GitHub: on its environment's reviewers). A run that cannot be read is said
+//! once, until it can again.
 
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ use serde_json::{Value, json};
 
 use super::{Checkout, Forge, bitbucket, ci, declared_forge, events, gh_json, pipelines};
 use crate::daemon::Daemon;
+use crate::mcp::Outcome;
 use crate::place::Place;
 use crate::subscriptions::{self, RUN};
 
@@ -42,9 +44,7 @@ pub(super) fn follow(
         id: subscriptions::new_subscription_id(),
         agent: agent.to_owned(),
         source: RUN.into(),
-        target: json!({"project": place.project, "workspace": place.workspace,
-            "repository": repository, "forge": forge.kind(), "run": started.number,
-            "pipeline": started.pipeline, "branch": started.branch, "link": started.link}),
+        target: target(place, repository, forge, &started),
         events: vec!["ended".into()],
         from: "anyone".into(),
         seen: json!({}),
@@ -68,6 +68,103 @@ pub(super) fn follow(
          it.",
         started.number
     )
+}
+
+/// What a following of `started` holds of it.
+fn target(place: &Place, repository: &str, forge: &Forge, started: &Started) -> Value {
+    json!({"project": place.project, "workspace": place.workspace,
+        "repository": repository, "forge": forge.kind(), "run": started.number,
+        "pipeline": started.pipeline, "branch": started.branch, "link": started.link})
+}
+
+/// `follow_run`: the agent follows a run it did not start (by hand, a push, a schedule) as `run`
+/// follows the one it starts. The run is read once now, in the repository named: a run that ended
+/// is answered at once and not followed, one the agent follows already is followed once.
+/// `context` is `bkt`'s for a Bitbucket repository.
+pub(super) async fn follow_run(
+    daemon: &Daemon,
+    agent: &str,
+    place: &Place,
+    repository: &str,
+    forge: &Forge,
+    context: &str,
+    run: u64,
+) -> Outcome {
+    if let Some(followed) = of(daemon, agent, Some(repository), Some(run)).first() {
+        return Outcome::Done(format!(
+            "You already follow the {}: its end wakes you on its own; nothing more is followed.",
+            named(&followed.target)
+        ));
+    }
+    let id = run.to_string();
+    let view = match forge {
+        Forge::Bitbucket { .. } => pipelines::bitbucket_seen(forge, context, run).await,
+        Forge::GitHub { .. } => {
+            gh_json(&[
+                "run",
+                "view",
+                &id,
+                "-R",
+                &forge.gh_repository(),
+                "--json",
+                "status,conclusion,startedAt,updatedAt,jobs,workflowName,headBranch,url",
+            ])
+            .await
+        }
+    };
+    let view = match view {
+        Ok(view) => view,
+        Err(why) => {
+            return Outcome::Refused(format!(
+                "refused: the run {run} of {} cannot be read: {}; forge runs lists its runs; \
+                 nothing is followed",
+                forge.slug(),
+                super::masked(&why)
+            ));
+        }
+    };
+    let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+    let (seen, started) = match forge {
+        Forge::Bitbucket { owner, name, .. } => (
+            bitbucket_seen(&view),
+            Started {
+                number: run,
+                pipeline: pipelines::pipeline_named(&view["pipeline"]),
+                branch: bitbucket::pipeline_branch(&view["pipeline"])
+                    .unwrap_or_default()
+                    .to_owned(),
+                link: format!("https://bitbucket.org/{owner}/{name}/pipelines/results/{run}"),
+            },
+        ),
+        Forge::GitHub { .. } => (
+            github_seen(&view),
+            Started {
+                number: run,
+                pipeline: text(&view["workflowName"]),
+                branch: text(&view["headBranch"]),
+                link: text(&view["url"]),
+            },
+        ),
+    };
+    let said = format!(
+        "The {}, {}",
+        named(&target(place, repository, forge, &started)),
+        started.link
+    );
+    match seen {
+        Seen::Ended {
+            result,
+            seconds,
+            failed,
+        } => Outcome::Done(super::masked(&format!(
+            "{said}: {}\nNothing is followed: it has ended.",
+            ended(&result, seconds, &failed)
+        ))),
+        _ => {
+            let said = super::masked(&format!("{said}, has not ended."));
+            Outcome::Done(said + &follow(daemon, agent, place, repository, forge, Some(started)))
+        }
+    }
 }
 
 /// A followed run as the agent and the window read it: `run #43 of api (custom: nightly on
@@ -270,18 +367,10 @@ fn said(daemon: &Arc<Daemon>, subscription: &Subscription, seen: Result<Seen, St
             seconds,
             failed,
         } => {
-            let mut body = format!("{head}It ended {result}");
-            if let Some(seconds) = seconds {
-                body.push_str(&format!(" after {}", events::lasted(seconds)));
-            }
-            body.push('.');
-            if !failed.is_empty() {
-                body.push_str(&format!(
-                    "\nFailed steps: {}. Read a step's log with forge run_logs.",
-                    super::masked(&failed.join(", "))
-                ));
-            }
-            body.push_str("\nYour following of it is over.");
+            let body = format!(
+                "{head}{}\nYour following of it is over.",
+                ended(&result, seconds, &failed)
+            );
             subscriptions::delivered(daemon, subscription, &body);
         }
         Seen::Waiting(why) => {
@@ -310,6 +399,22 @@ fn said(daemon: &Arc<Daemon>, subscription: &Subscription, seen: Result<Seen, St
             }
         }
     }
+}
+
+/// What the agent is told of a run that ended: its result, its duration, its failed steps.
+fn ended(result: &str, seconds: Option<u64>, failed: &[String]) -> String {
+    let mut body = format!("It ended {result}");
+    if let Some(seconds) = seconds {
+        body.push_str(&format!(" after {}", events::lasted(seconds)));
+    }
+    body.push('.');
+    if !failed.is_empty() {
+        body.push_str(&format!(
+            "\nFailed steps: {}. Read a step's log with forge run_logs.",
+            super::masked(&failed.join(", "))
+        ));
+    }
+    body
 }
 
 /// What the following saw last, stored with it; false when it ended meanwhile (the user's

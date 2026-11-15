@@ -331,12 +331,11 @@ const SERVED: [Definition; 33] = [
             with checks (the log's end of each failed job), review and comment counts; detail \
             full: texts. Writes, judged, answered at once, the result maybe later: create, merge \
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
-            user's words) and checks act on a workspace's branch (create, no body: \
-            the template); edit, comment, review (approve and request_changes wait for the user), \
+            user's words) and checks act on a workspace's branch; edit, comment, review (approve and request_changes wait for the user), \
             close (comment first), reopen on number. \
             subscribe: events wake you until merged or closed; unsubscribe. CI: pipelines lists what can \
             be run; run starts one by name (custom: <name>) with its variables and follows it unless \
-            follow: false; runs, run_view, \
+            follow: false; follow_run one you did not start; runs, run_view, \
             run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
             \"api\", \"title\": \"fix\", \"body\": \"...\"}",
         read_only: false,
@@ -344,7 +343,7 @@ const SERVED: [Definition; 33] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "people", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "review", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
+                "action": {"type": "string", "enum": ["list", "show", "people", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "review", "pipelines", "runs", "run_view", "run_logs", "run", "follow_run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; all of the place's when left out (list, show); the only one is taken without being named."},
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, review, edit, subscribe, unsubscribe: a pull request. subscribe and unsubscribe take it with repository, without workspace, for one that is not your workspace's branch's."},
@@ -384,7 +383,7 @@ const SERVED: [Definition; 33] = [
                     "key": {"type": "string"}, "value": {"type": "string"}, "secured": {"type": "boolean"}
                 }, "required": ["key", "value"], "additionalProperties": false}},
                 "follow": {"type": "boolean", "description": "run: true (the default) follows the run started: a delivery wakes you when it ends (successful, failed with its failed steps, stopped) or waits on a manual step; false starts it alone. forge unsubscribe {run} stops following it."},
-                "run": {"type": "integer", "minimum": 1, "description": "run_view, run_logs, stop, step: as runs lists it; unsubscribe: a run you follow."},
+                "run": {"type": "integer", "minimum": 1, "description": "run_view, run_logs, follow_run, stop, step: as runs lists it; unsubscribe: a run you follow."},
                 "step": {"type": "string", "description": "run_logs, step: a step's (job's) name, as run_view lists it."},
                 "do": {"type": "string", "enum": ["start", "rerun"], "description": "step: start a manual step, or run one again."}
             }, "required": ["action"], "additionalProperties": false})
@@ -3750,6 +3749,7 @@ mod tests {
             "pipelines lists what can be run",
             "run starts one by name (custom: <name>) with its variables",
             "follows it unless follow: false",
+            "follow_run one you did not start",
         ] {
             assert!(forge.contains(said), "{said:?} in {forge}");
         }

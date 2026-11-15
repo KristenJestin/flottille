@@ -1128,7 +1128,7 @@ pub(crate) struct ForgeCall {
     variables: Option<Vec<pipelines::Variable>>,
     /// run: follow the run started, which wakes the agent when it ends (the default).
     follow: Option<bool>,
-    /// run_view, run_logs, stop, step, unsubscribe: the run's number.
+    /// run_view, run_logs, follow_run, stop, step, unsubscribe: the run's number.
     run: Option<u64>,
     /// run_logs, step: a step's (a job's) name or id.
     step: Option<String>,
@@ -1741,7 +1741,7 @@ fn checks_when_subscribed(daemon: &Daemon, agent: &str, path: &str, pull: &Pull)
     };
     text.push_str(
         " checks is the end of the pull request's checks: a run started on its branch outside \
-         them is followed by forge run, not by this subscription.",
+         them is followed by forge run or follow_run, not by this subscription.",
     );
     for run in followed::of(daemon, agent, Some(path), None)
         .into_iter()

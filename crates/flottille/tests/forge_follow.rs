@@ -522,8 +522,8 @@ fn a_subscription_to_a_pull_request_says_its_running_checks_and_the_run_followed
 
     for said in [
         "Its checks running as you subscribed: test.",
-        "a run started on its branch outside them is followed by forge run, not by this \
-         subscription",
+        "a run started on its branch outside them is followed by forge run or follow_run, \
+         not by this subscription",
         "You already follow the run 78 of web (e2e.yml on app/login)",
     ] {
         assert!(answer.contains(said), "{said:?} in {answer}");
@@ -704,4 +704,270 @@ fn runs_and_the_end_of_a_run_say_its_branch() {
         json!({"action": "run_view", "repository": "web", "run": 78}),
     );
     assert!(view.contains("E2E on app/login"), "{view}");
+}
+
+/// `forge follow_run` of the run `run` of `repository`, once the agent's first turn ended: a call
+/// the gate allows in every mode.
+fn follow_run(user: &User, id: &str, mcp: &Mcp, repository: &str, run: u64) -> String {
+    idle(user, id);
+    read(
+        mcp,
+        json!({"action": "follow_run", "repository": repository, "run": run}),
+    )
+}
+
+#[test]
+fn following_a_run_started_by_hand_wakes_the_agent_when_it_ends() {
+    let (user, id, mcp) = setup();
+    // Started by hand on Bitbucket's page: no forge run of the agent's.
+    bkt_with_run(
+        &user,
+        running(),
+        json!([step("{step-e2e}", "e2e", "IN_PROGRESS", "")]),
+    );
+
+    let answer = follow_run(&user, &id, &mcp, "api", 43);
+
+    for said in [
+        "run #43 of api (custom: nightly on app/login)",
+        "Followed until it ends",
+        "no wake is needed",
+        r#"forge unsubscribe {"run": 43, "repository": "api"}"#,
+    ] {
+        assert!(answer.contains(said), "{said} in {answer}");
+    }
+    let listed = subscriptions(&user);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["source"], "run");
+    assert!(
+        listed[0]["named"]
+            .as_str()
+            .unwrap()
+            .contains("run #43 of api"),
+        "{listed:?}"
+    );
+    a_round(&user);
+    assert!(delivered(&user, &id).is_empty(), "still running is no news");
+
+    bkt_with_run(
+        &user,
+        completed("SUCCESSFUL"),
+        json!([step("{step-e2e}", "e2e", "COMPLETED", "SUCCESSFUL")]),
+    );
+    a_round(&user);
+    let all = delivered(&user, &id);
+    assert_eq!(all.len(), 1, "{all:?}");
+    for part in [
+        "run #43 of api",
+        "custom: nightly",
+        "app/login",
+        "https://bitbucket.org/acme/api/pipelines/results/43",
+        "successful",
+        "4 min 5 s",
+    ] {
+        assert!(all[0].contains(part), "{part} in {}", all[0]);
+    }
+    assert!(subscriptions(&user).is_empty());
+
+    // The same on GitHub: a run pushed outside the pull request's checks.
+    let gh_with = |status: &str, conclusion: &str| {
+        let mut script = gh_script();
+        script["run_views"]["acme/web"]["91"] = json!({
+            "databaseId": 91, "workflowName": "Nightly", "status": status,
+            "conclusion": conclusion, "headBranch": "app/login",
+            "url": "https://github.com/acme/web/actions/runs/91",
+            "startedAt": "2026-11-01T11:00:00Z", "updatedAt": "2026-11-01T11:02:05Z",
+            "jobs": [{"databaseId": 901, "name": "e2e", "status": status,
+                "conclusion": conclusion}]
+        });
+        user.gh_script(script);
+    };
+    gh_with("in_progress", "");
+    let answer = follow_run(&user, &id, &mcp, "web", 91);
+    assert!(answer.contains("Followed until it ends"), "{answer}");
+    gh_with("completed", "failure");
+    a_round(&user);
+    let all = delivered(&user, &id);
+    assert_eq!(all.len(), 2, "{all:?}");
+    for part in [
+        "run 91 of web (Nightly on app/login)",
+        "https://github.com/acme/web/actions/runs/91",
+        "failure",
+        "2 min 5 s",
+        "Failed steps: e2e",
+    ] {
+        assert!(all[1].contains(part), "{part} in {}", all[1]);
+    }
+    assert!(subscriptions(&user).is_empty());
+}
+
+#[test]
+fn following_an_ended_run_answers_its_result_at_once() {
+    let (user, id, mcp) = setup();
+    bkt_with_run(
+        &user,
+        completed("FAILED"),
+        json!([
+            step("{step-build}", "build", "COMPLETED", "SUCCESSFUL"),
+            step("{step-e2e}", "e2e", "COMPLETED", "FAILED")
+        ]),
+    );
+
+    let answer = follow_run(&user, &id, &mcp, "api", 43);
+
+    for said in [
+        "run #43 of api (custom: nightly on app/login)",
+        "It ended failed after 4 min 5 s.",
+        "Failed steps: e2e. Read a step's log with forge run_logs.",
+        "Nothing is followed: it has ended.",
+    ] {
+        assert!(answer.contains(said), "{said} in {answer}");
+    }
+    assert!(!answer.contains("Followed until"), "{answer}");
+    assert!(subscriptions(&user).is_empty());
+    a_round(&user);
+    assert!(delivered(&user, &id).is_empty());
+}
+
+#[test]
+fn a_run_followed_twice_wakes_once() {
+    let (user, id, mcp) = setup();
+    bkt_with_run(&user, running(), json!([]));
+    follow_run(&user, &id, &mcp, "api", 43);
+
+    let again = follow_run(&user, &id, &mcp, "api", 43);
+
+    assert!(
+        again.contains("You already follow the run #43 of api"),
+        "{again}"
+    );
+    assert_eq!(subscriptions(&user).len(), 1, "{:?}", subscriptions(&user));
+    bkt_with_run(&user, completed("SUCCESSFUL"), json!([]));
+    a_round(&user);
+    a_round(&user);
+    assert_eq!(
+        delivered(&user, &id).len(),
+        1,
+        "{:?}",
+        delivered(&user, &id)
+    );
+}
+
+#[test]
+fn runs_says_which_runs_are_followed() {
+    let (user, id, mcp) = setup();
+    bkt_with_run(&user, running(), json!([]));
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    let mut other = bitbucket_run(running());
+    other["uuid"] = "{44}".into();
+    other["build_number"] = 44.into();
+    script["pipelines"]["acme/api"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, other);
+    script["steps"]["acme/api"]["44"] = json!([]);
+    user.bkt_script(script);
+    follow_run(&user, &id, &mcp, "api", 43);
+
+    let runs = read(&mcp, json!({"action": "runs", "repository": "api"}));
+
+    let line = |number: &str| {
+        runs.lines()
+            .find(|line| line.starts_with(&format!("- #{number} ")))
+            .unwrap_or_else(|| panic!("#{number} in {runs}"))
+            .to_owned()
+    };
+    assert!(line("43").ends_with(", you follow it"), "{runs}");
+    assert!(!line("44").contains("you follow it"), "{runs}");
+    assert!(
+        runs.contains(r#"{"action": "follow_run", "run": <its number>}"#),
+        "{runs}"
+    );
+}
+
+#[test]
+fn a_followed_run_waiting_on_a_manual_step_wakes_once() {
+    let (user, id, mcp) = setup();
+    bkt_with_run(&user, running(), json!([]));
+    follow_run(&user, &id, &mcp, "api", 43);
+
+    let paused = json!({"name": "IN_PROGRESS", "stage": {"name": "PAUSED"}});
+    let steps = json!([
+        step("{step-build}", "build", "COMPLETED", "SUCCESSFUL"),
+        step("{step-deploy}", "deploy", "PENDING", "")
+    ]);
+    bkt_with_run(&user, paused, steps);
+    a_round(&user);
+    a_round(&user);
+
+    let all = delivered(&user, &id);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(all[0].contains("manual step deploy"), "{}", all[0]);
+    assert_eq!(subscriptions(&user).len(), 1);
+    bkt_with_run(&user, completed("SUCCESSFUL"), json!([]));
+    a_round(&user);
+    assert_eq!(
+        delivered(&user, &id).len(),
+        2,
+        "{:?}",
+        delivered(&user, &id)
+    );
+    assert!(subscriptions(&user).is_empty());
+}
+
+#[test]
+fn unsubscribing_a_run_stops_its_wake() {
+    let (user, id, mcp) = setup();
+    bkt_with_run(&user, running(), json!([]));
+    follow_run(&user, &id, &mcp, "api", 43);
+
+    let answer = read(
+        &mcp,
+        json!({"action": "unsubscribe", "repository": "api", "run": 43}),
+    );
+
+    assert!(answer.contains("run #43 of api"), "{answer}");
+    assert!(subscriptions(&user).is_empty());
+    bkt_with_run(&user, completed("SUCCESSFUL"), json!([]));
+    a_round(&user);
+    assert!(
+        delivered(&user, &id).is_empty(),
+        "{:?}",
+        delivered(&user, &id)
+    );
+}
+
+#[test]
+fn following_a_run_its_repository_does_not_have_is_refused() {
+    let (user, id, mcp) = setup();
+    // 43 is a run of api: web, on GitHub, has none of that number.
+    bkt_with_run(&user, running(), json!([]));
+    idle(&user, &id);
+
+    let refused = mcp.call(
+        "forge",
+        json!({"action": "follow_run", "repository": "web", "run": 43}),
+    );
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .contains("the run 43 of acme/web cannot be read")
+            && refused.text.contains("nothing is followed"),
+        "{}",
+        refused.text
+    );
+    assert!(subscriptions(&user).is_empty());
+    let refused = mcp.call(
+        "forge",
+        json!({"action": "follow_run", "repository": "api"}),
+    );
+    assert!(
+        refused.text.contains("forge follow_run needs run"),
+        "{}",
+        refused.text
+    );
 }

@@ -680,7 +680,7 @@ fn forge(call: &Call) -> Verdict {
     let merged = format!("it merges a pull request on the forge, by {by}");
     let said = match action {
         "list" | "show" | "people" | "subscribe" | "unsubscribe" | "pipelines" | "runs"
-        | "run_view" | "run_logs" => return Verdict::Allow,
+        | "run_view" | "run_logs" | "follow_run" => return Verdict::Allow,
         "create" => "it opens a pull request on the forge",
         "comment" => "it comments on a pull request on the forge",
         "review" => match call.args["verdict"].as_str() {
@@ -803,7 +803,7 @@ const FORGE_ONLY: [(&str, &[&str]); 13] = [
 
 /// The actions of `forge`, as a refusal names them.
 pub const FORGE_ACTIONS: &str = "list, show, people, subscribe, unsubscribe, create, comment, review, edit, merge, checks, close, \
-     reopen, pipelines, runs, run_view, run_logs, run, stop and step";
+     reopen, pipelines, runs, run_view, run_logs, run, follow_run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, people, types, link_types, sprints, milestones, subscribe, unsubscribe, \
      create, comment, edit, close, reopen, status, link, unlink, comment_edit, comment_delete, \
@@ -4776,6 +4776,7 @@ mod tests {
                 ("forge", "runs"),
                 ("forge", "run_view"),
                 ("forge", "run_logs"),
+                ("forge", "follow_run"),
                 ("tickets", "list"),
                 ("tickets", "search"),
                 ("tickets", "show"),

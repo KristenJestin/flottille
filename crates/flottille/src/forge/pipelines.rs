@@ -22,15 +22,18 @@ use crate::subscriptions;
 use crate::workspaces::{self, Head};
 
 /// The actions of the family.
-pub(super) const ACTIONS: [&str; 7] = [
+pub(super) const ACTIONS: [&str; 8] = [
     "pipelines",
     "runs",
     "run_view",
     "run_logs",
     "run",
+    "follow_run",
     "stop",
     "step",
 ];
+/// What a line of `runs` ends with for a run the agent follows.
+const FOLLOWED: &str = ", you follow it";
 /// How many runs `runs` lists.
 const RUNS: usize = 20;
 /// Bitbucket's file of pipelines, at the root of the repository.
@@ -266,7 +269,9 @@ async fn acted(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) ->
     let path = checkout.path.clone();
     // The branch: the one named, else the workspace's; `runs` in main reads the repository's.
     let (branch, source) = match (action, &asked.branch, &place.workspace) {
-        ("runs", None, None) | ("run_view" | "run_logs" | "stop" | "step", _, _) => (None, None),
+        ("runs", None, None) | ("run_view" | "run_logs" | "follow_run" | "stop" | "step", _, _) => {
+            (None, None)
+        }
         _ => match branch_of(daemon, place, &checkout, asked.branch.as_deref()).await {
             // A branch `with_branch` put in the call is not one the agent named.
             Ok((branch, source)) => (
@@ -285,6 +290,11 @@ async fn acted(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) ->
     let why = source.map_or("", Source::said);
     let run = asked.run.unwrap_or_default();
     let step = asked.step.as_deref().unwrap_or_default();
+    // The runs `runs` says the agent follows.
+    let mine: Vec<u64> = followed::of(daemon, agent, Some(&path), None)
+        .iter()
+        .filter_map(|s| s.target["run"].as_u64())
+        .collect();
     // A run started is followed unless the agent said no.
     let follow = |(outcome, started): (Outcome, Option<Started>)| match outcome {
         Outcome::Done(text) if asked.follow != Some(false) => {
@@ -301,9 +311,12 @@ async fn acted(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) ->
             };
             let context = context.as_str();
             match action {
-                "runs" => bitbucket_runs(&forge, context, branch.as_deref()).await,
+                "runs" => bitbucket_runs(&forge, context, branch.as_deref(), &mine).await,
                 "run_view" => bitbucket_view(&forge, context, run, &path).await,
                 "run_logs" => bitbucket_log(&forge, context, run, step).await,
+                "follow_run" => {
+                    followed::follow_run(daemon, agent, place, &path, &forge, context, run).await
+                }
                 "run" => {
                     let pipeline = asked.pipeline.as_deref().unwrap_or_default();
                     let variables = asked.variables.unwrap_or_default();
@@ -315,9 +328,12 @@ async fn acted(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) ->
                 _ => bitbucket_stop(&forge, context, run).await,
             }
         }
-        (Forge::GitHub { .. }, "runs") => github_runs(&forge, branch.as_deref()).await,
+        (Forge::GitHub { .. }, "runs") => github_runs(&forge, branch.as_deref(), &mine).await,
         (Forge::GitHub { .. }, "run_view") => github_view(&forge, run, &path).await,
         (Forge::GitHub { .. }, "run_logs") => github_log(&forge, run, step).await,
+        (Forge::GitHub { .. }, "follow_run") => {
+            followed::follow_run(daemon, agent, place, &path, &forge, "", run).await
+        }
         (Forge::GitHub { .. }, "run") => {
             let pipeline = asked.pipeline.as_deref().unwrap_or_default();
             let variables = asked.variables.unwrap_or_default();
@@ -366,7 +382,7 @@ fn malformed(asked: &ForgeCall) -> Option<String> {
     {
         return Some(refusal);
     }
-    let needs_run = ["run_view", "run_logs", "stop", "step"].contains(&action);
+    let needs_run = ["run_view", "run_logs", "follow_run", "stop", "step"].contains(&action);
     if needs_run && asked.run.is_none() {
         return Some(format!(
             "refused: forge {action} needs run, the run's number: forge runs lists them"
@@ -869,8 +885,14 @@ pub(super) fn pipeline_named(pipeline: &Value) -> String {
     }
 }
 
-/// `runs` on Bitbucket: the newest pipelines of the repository, of the branch when there is one.
-async fn bitbucket_runs(forge: &Forge, context: &str, branch: Option<&str>) -> Outcome {
+/// `runs` on Bitbucket: the newest pipelines of the repository, of the branch when there is one;
+/// those of `mine` the agent follows.
+async fn bitbucket_runs(
+    forge: &Forge,
+    context: &str,
+    branch: Option<&str>,
+    mine: &[u64],
+) -> Outcome {
     let slug = forge.slug();
     let path = format!("{}/pipelines/", bitbucket::cloud_repository(forge));
     // The branch is asked of the API: the repository's newest 50 hold none of a quiet branch's
@@ -906,6 +928,12 @@ async fn bitbucket_runs(forge: &Forge, context: &str, branch: Option<&str>) -> O
             if let Some(on) = bitbucket::pipeline_branch(p) {
                 line.push_str(&format!(", on {on}"));
             }
+            if p["build_number"]
+                .as_u64()
+                .is_some_and(|n| mine.contains(&n))
+            {
+                line.push_str(FOLLOWED);
+            }
             line
         })
         .collect();
@@ -931,7 +959,8 @@ fn runs_text(slug: &str, branch: Option<&str>, lines: Vec<String>, among: &str) 
     }
     Outcome::Done(super::masked(&format!(
         "The recent runs of {of}, newest first:\n{}\nRead one with forge {{\"action\": \
-         \"run_view\", \"run\": <its number>}}.",
+         \"run_view\", \"run\": <its number>}}; follow one you did not start with forge \
+         {{\"action\": \"follow_run\", \"run\": <its number>}}: its end wakes you.",
         lines.join("\n")
     )))
 }
@@ -1251,8 +1280,8 @@ async fn bitbucket_stop(forge: &Forge, context: &str, run: u64) -> Outcome {
     }
 }
 
-/// `runs` on GitHub.
-async fn github_runs(forge: &Forge, branch: Option<&str>) -> Outcome {
+/// `runs` on GitHub; those of `mine` the agent follows.
+async fn github_runs(forge: &Forge, branch: Option<&str>, mine: &[u64]) -> Outcome {
     let repo = forge.gh_repository();
     let limit = RUNS.to_string();
     let mut args = vec!["run", "list", "-R", &repo];
@@ -1297,6 +1326,12 @@ async fn github_runs(forge: &Forge, branch: Option<&str>) -> Outcome {
             }
             if let Some(on) = run["headBranch"].as_str() {
                 line.push_str(&format!(", on {on}"));
+            }
+            if run["databaseId"]
+                .as_u64()
+                .is_some_and(|n| mine.contains(&n))
+            {
+                line.push_str(FOLLOWED);
             }
             if let Some(url) = run["url"].as_str() {
                 line.push_str(&format!("  {url}"));
