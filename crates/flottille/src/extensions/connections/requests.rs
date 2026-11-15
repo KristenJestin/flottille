@@ -117,8 +117,12 @@ fn fields(declaration: &Declaration) -> Vec<(&'static str, &'static str, String)
             ));
             fields.push(("env", "Its variables", entries(&declaration.env)));
         }
-        Reach::Url(url) => {
-            fields.push(("url", "Its URL", url.clone()));
+        Reach::Url(_) => {
+            fields.push((
+                "url",
+                "Its URL",
+                declaration.served_url().unwrap_or_default(),
+            ));
             let secrets = match declaration.secrets.is_empty() {
                 true => "none".to_owned(),
                 false => declaration
@@ -995,7 +999,7 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
             return Ok(
                 json!({"number": number, "action": args["action"], "name": args["name"],
                 "before": declaration(&daemon.paths, args["name"].as_str().unwrap_or_default())
-                    .ok().map(|d| d.json()),
+                    .ok().map(|d| d.served()),
                 "after": null, "changed": [], "settings": {}, "secrets": [], "current": false,
                 "why": why}),
             );
@@ -1022,8 +1026,8 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
         "number": number,
         "action": proposal.action,
         "name": proposal.name,
-        "before": proposal.before.as_ref().map(Declaration::json),
-        "after": proposal.after.as_ref().map(Declaration::json),
+        "before": proposal.before.as_ref().map(Declaration::served),
+        "after": proposal.after.as_ref().map(Declaration::served),
         "changed": changed,
         "settings": proposal.settings,
         "secrets": proposal.after.as_ref().or(proposal.before.as_ref())

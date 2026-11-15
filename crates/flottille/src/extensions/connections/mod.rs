@@ -739,6 +739,25 @@ impl Declaration {
         }
     }
 
+    /// Its URL as it is served (listed, shown, proposed): as written, or, when it is not reached
+    /// for a fault (`url_fault`), as an error says it, without what may be a secret.
+    pub(super) fn served_url(&self) -> Option<String> {
+        match &self.reach {
+            Reach::Url(url) if self.url_fault().is_some() => Some(said_text(url)),
+            Reach::Url(url) => Some(url.clone()),
+            Reach::Command(_) => None,
+        }
+    }
+
+    /// `json`, its URL as it is served.
+    pub(super) fn served(&self) -> Value {
+        let mut json = self.json();
+        if let Some(url) = self.served_url() {
+            json["url"] = json!(url);
+        }
+        json
+    }
+
     /// The vault entries it names.
     fn entries(&self) -> impl Iterator<Item = &String> {
         self.env
@@ -803,6 +822,16 @@ fn checked_url(text: &str) -> std::result::Result<String, String> {
         _ => Err(format!(
             "{said:?}: must be an https:// URL, or http:// on this machine"
         )),
+    }
+}
+
+/// `text` as Flottille says a URL it does not reach: as an error says it (`said_url`); its scheme
+/// alone when it is no http(s) one; nothing when it is no URL.
+fn said_text(text: &str) -> String {
+    match url::Url::parse(text) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => said_url(&url),
+        Ok(url) => format!("{}:", url.scheme()),
+        Err(_) => String::new(),
     }
 }
 
@@ -1876,7 +1905,7 @@ fn named(params: &Value) -> std::result::Result<String, Failure> {
 fn connection_json(daemon: &Daemon, declaration: &Declaration, on: bool) -> Value {
     let row = row(daemon, &declaration.name);
     let state = state_of(on, declaration, &row);
-    let mut entry = declaration.json();
+    let mut entry = declaration.served();
     entry["tool"] = json!(declaration.tool());
     entry["state"] = json!(state.word());
     entry["review_due"] = json!(
