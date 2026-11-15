@@ -443,6 +443,11 @@ impl ProgressPage {
             .unwrap_or_default()
     }
 
+    /// How many milestones the page keeps tickets' groups and a scroll for.
+    pub fn kept(&self) -> (usize, usize) {
+        (self.grouped.len(), self.scrolls.len())
+    }
+
     fn toggle(&mut self, id: String, open: bool, now: Instant, cx: &mut Context<Self>) {
         match open {
             true => {

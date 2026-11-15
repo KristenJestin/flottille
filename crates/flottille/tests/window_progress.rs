@@ -6,7 +6,8 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -522,7 +523,7 @@ fn an_unfolded_milestone_scrolls_inside_its_maximum_height(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn a_ticket_that_changes_group_moves_and_the_bar_follows(cx: &mut TestAppContext) {
+fn a_ticket_that_changes_group_folds_out_and_in_and_the_bar_follows(cx: &mut TestAppContext) {
     let user = user();
     on_github(&user);
     user.gh_script(github_script(review_pull()));
@@ -633,4 +634,235 @@ fn a_chip_opens_its_session(cx: &mut TestAppContext) {
             s.selected() == Some(&Selection::Session(session.clone()))
         })
     });
+}
+
+#[gpui_kit::test]
+fn the_line_between_two_milestones_folds_with_the_one_that_leaves(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    user.gh_script(github_script(json!({})));
+    refresh(&user);
+
+    let (shell, page, cx) = open_progress(&user, cx);
+    // One line, between the two open milestones.
+    assert!(present(cx, "progress-open-separator-1"));
+    assert!(!present(cx, "progress-open-separator-2"));
+    let before = height(cx, "progress-open");
+
+    // Feedback is closed on the tracker (its issue is touched, so that the round says so).
+    let mut script = github_script(json!({}));
+    script["milestones"]["acme/app"][1]["state"] = json!("closed");
+    script["issues"]["acme/app"]["5"]["title"] = json!("A CI run starts on its branch, again");
+    script["issues"]["acme/app"]["5"]["updatedAt"] = json!(NEW);
+    user.gh_script(script);
+    refresh(&user);
+    until(&shell, cx, "the page reads the change", |cx| {
+        page.read_with(cx, |page, _| page.open_names()) == ["v0.3"]
+    });
+
+    // Mid-way: the row is still there, folding with its line, the card shrinking by degrees.
+    a_frame(cx);
+    a_frame(cx);
+    assert!(present(cx, "progress-milestone-github-2"), "it folds away");
+    let mid = height(cx, "progress-open");
+    assert!(mid < before - 0.5, "the card has begun to fold: {mid}");
+    settle(cx);
+    let after = height(cx, "progress-open");
+    assert!(after < mid - 0.5, "it kept folding: {after} after {mid}");
+    assert!(!present(cx, "progress-milestone-github-2"));
+    assert!(
+        !present(cx, "progress-open-separator-1"),
+        "a line between two milestones is drawn only while there are two"
+    );
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+}
+
+fn opened_links(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Arc<Mutex<Vec<PathBuf>>> {
+    let opened: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+    let given = opened.clone();
+    shell.update(cx, |s, _| {
+        s.set_opener(Arc::new(move |path: &Path| {
+            given.lock().unwrap().push(path.to_owned())
+        }))
+    });
+    opened
+}
+
+#[gpui_kit::test]
+fn a_ticket_key_opens_the_ticket(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    user.gh_script(github_script(json!({})));
+    refresh(&user);
+
+    let (shell, _page, cx) = open_progress(&user, cx);
+    unfold(cx, "github-1");
+    let opened = opened_links(&shell, cx);
+
+    cx.update(|window, cx| window.click("progress-github-1-0-1-key", cx));
+
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [PathBuf::from("https://github.com/acme/app/issues/1")]
+    );
+}
+
+#[gpui_kit::test]
+fn jira_s_other_tickets_have_a_colour_of_their_own_in_the_bar_and_the_legend(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    on_jira(&user);
+    let item = |key: &str, status: &str, category: Option<&str>| {
+        json!({"key": key, "self": format!("https://{SITE}/rest/api/3/issue/1"),
+            "fields": {"summary": format!("Work {key}"),
+                "status": {"name": status,
+                    "statusCategory": category.map(|key| json!({"key": key}))},
+                "fixVersions": [{"name": "2.4"}], "labels": [], "updated": OLD}})
+    };
+    user.acli_script(json!({
+        "site": SITE,
+        "versions": {"ABC": [
+            {"id": "10001", "name": "2.4", "released": false, "releaseDate": "2026-11-28"}
+        ]},
+        "items": {
+            "ABC-1": item("ABC-1", "Building", Some("indeterminate")),
+            "ABC-2": item("ABC-2", "Backlog", Some("new")),
+            "ABC-3": item("ABC-3", "Shipped", Some("done")),
+            "ABC-4": item("ABC-4", "Building", Some("indeterminate")),
+            "ABC-5": item("ABC-5", "Limbo", None),
+        }
+    }));
+    refresh(&user);
+
+    let (_shell, _page, cx) = open_progress(&user, cx);
+
+    assert!(present(cx, "progress-legend-other"));
+    let whole = width(cx, "progress-milestone-jira-ABC-10001-bar");
+    let other = width(cx, "progress-milestone-jira-ABC-10001-bar-other");
+    assert!((other - whole / 5.).abs() < 1.5, "{other} of {whole}");
+}
+
+#[gpui_kit::test]
+fn no_other_in_the_legend_when_no_ticket_is_other(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    user.gh_script(github_script(review_pull()));
+    refresh(&user);
+
+    let (_shell, _page, cx) = open_progress(&user, cx);
+
+    assert!(!present(cx, "progress-legend-other"));
+}
+
+#[gpui_kit::test]
+fn a_version_whose_search_fails_says_so_on_its_row(cx: &mut TestAppContext) {
+    let user = user();
+    on_jira(&user);
+    let item = |key: &str, version: &str| {
+        json!({"key": key, "self": format!("https://{SITE}/rest/api/3/issue/1"),
+            "fields": {"summary": format!("Work {key}"),
+                "status": {"name": "Building", "statusCategory": {"key": "indeterminate"}},
+                "fixVersions": [{"name": version}], "labels": [], "updated": OLD}})
+    };
+    user.acli_script(json!({
+        "site": SITE,
+        "versions": {"ABC": [
+            {"id": "10001", "name": "2.4", "released": false, "releaseDate": "2026-11-28"},
+            {"id": "10002", "name": "2.5", "released": false, "releaseDate": "2026-12-20"}
+        ]},
+        "items": {"ABC-1": item("ABC-1", "2.4"), "ABC-2": item("ABC-2", "2.5")},
+        "fail": {"search_jql": {"fixVersion = \"2.5\"": "✗ Error: the search broke"}},
+    }));
+    refresh(&user);
+
+    let (_shell, _page, cx) = open_progress(&user, cx);
+
+    assert_eq!(
+        label(cx, "progress-milestone-jira-ABC-10001-counts").as_deref(),
+        Some("0 done · 1 in progress · 0 to do")
+    );
+    let said = label(cx, "progress-milestone-jira-ABC-10002-counts").unwrap();
+    assert!(said.contains("could not be read"), "{said}");
+    assert!(!present(cx, "progress-problem"), "the page still shows");
+}
+
+#[gpui_kit::test]
+fn an_open_issue_whose_only_pull_request_was_closed_unmerged_is_to_do(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    // Read open first: a pull request first read closed is listed without its description.
+    user.gh_script(github_script(json!({
+        "bind-vault": pull(9, "bind-vault", "OPEN", "Closes #3", json!([]))
+    })));
+    refresh(&user);
+    let mut closed = pull(9, "bind-vault", "CLOSED", "Closes #3", json!([]));
+    closed["updatedAt"] = json!(NEW);
+    user.gh_script(github_script(json!({"bind-vault": closed})));
+    refresh(&user);
+
+    let (_shell, page, cx) = open_progress(&user, cx);
+
+    assert_eq!(
+        groups(&page, cx, "github-1"),
+        [
+            ("To do".to_owned(), vec!["1".to_owned(), "3".to_owned()]),
+            ("Done".to_owned(), vec!["4".to_owned()]),
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn closed_milestones_are_sorted_by_when_they_closed(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    let mut script = github_script(json!({}));
+    // v0.2 is due after v0.1 but was closed before it.
+    script["milestones"]["acme/app"][2]["closed_at"] = json!("2026-09-01T00:00:00Z");
+    script["milestones"]["acme/app"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"number": 4, "title": "v0.1", "state": "closed",
+            "due_on": "2026-08-01T00:00:00Z", "closed_at": "2026-11-01T00:00:00Z",
+            "open_issues": 0, "closed_issues": 0,
+            "html_url": "https://github.com/acme/app/milestone/4"}));
+    user.gh_script(script);
+    refresh(&user);
+
+    let (_shell, page, cx) = open_progress(&user, cx);
+
+    assert_eq!(
+        page.read_with(cx, |page, _| page.closed_names()),
+        ["v0.1", "v0.2"],
+        "the last closed first"
+    );
+}
+
+#[gpui_kit::test]
+fn a_milestone_that_goes_leaves_nothing_kept_of_it(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    user.gh_script(github_script(json!({})));
+    refresh(&user);
+
+    let (shell, page, cx) = open_progress(&user, cx);
+    unfold(cx, "github-2");
+    assert_eq!(page.read_with(cx, |page, _| page.kept()), (3, 3));
+
+    // Feedback is deleted on the tracker (its issue is touched, so that the round says so).
+    let mut script = github_script(json!({}));
+    script["milestones"]["acme/app"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+    script["issues"]["acme/app"]["5"]["milestone"] = json!(null);
+    script["issues"]["acme/app"]["5"]["updatedAt"] = json!(NEW);
+    user.gh_script(script);
+    refresh(&user);
+    until(&shell, cx, "the page reads the change", |cx| {
+        page.read_with(cx, |page, _| page.open_names()) == ["v0.3"]
+    });
+    settle(cx);
+
+    assert_eq!(page.read_with(cx, |page, _| page.kept()), (2, 2));
 }

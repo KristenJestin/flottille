@@ -737,3 +737,44 @@ fn the_lead_agent_reads_the_progress_of_the_milestones_through_tickets() {
     assert_eq!(first["counts"]["done"], 1, "{first}");
     assert_eq!(first["groups"][0]["tickets"][0]["key"], "1", "{first}");
 }
+
+#[test]
+fn two_reads_at_once_reach_the_tracker_once() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(json!({
+        "milestones": {"acme/app": milestones()},
+        "issues": {"acme/app": {"1": issue(1, "Sign in", Some((1, "v0.1")))}},
+        // Slow enough that the second caller comes while the first is still reading.
+        "milestones_delay_ms": 1500,
+    }));
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+
+    let listed = |user: &User| {
+        gh_calls(user)
+            .iter()
+            .filter(|call| call.contains("/milestones"))
+            .count()
+    };
+    let before = listed(&user);
+    let answers: Vec<Value> = std::thread::scope(|scope| {
+        let reads: Vec<_> = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    user.call("project.progress", json!({"project": "app"}))
+                        .unwrap()
+                })
+            })
+            .collect();
+        reads.into_iter().map(|read| read.join().unwrap()).collect()
+    });
+
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(answers[0]["milestones"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        listed(&user) - before,
+        1,
+        "the tracker's milestones were read once"
+    );
+}

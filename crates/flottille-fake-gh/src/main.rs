@@ -56,7 +56,8 @@
 //! `listing_wait_for` (a path) the same list until that file exists, 20 s at most: a round held
 //! for as long as a test wants, whatever the machine's load,
 //! `view_delay_ms` `pr view`. `read_delay_ms` makes every `pr` and `issue` call wait that long
-//! before it answers or fails, as a network of seconds does.
+//! before it answers or fails, as a network of seconds does. `milestones_delay_ms` does the same for
+//! the `api` call that lists the milestones of a repository.
 //!
 //! A `--search` of `pr list` and `issue list` keeps, for each `updated:>=<time>` it holds, the
 //! objects whose `updatedAt` is that time or later (compared as the RFC 3339 texts they are, as
@@ -228,6 +229,9 @@ fn milestones(script: &Value, path: &str, rest: &[&str]) -> i32 {
         }
     };
     let repository = format!("{owner}/{name}");
+    if let Some(ms) = script["milestones_delay_ms"].as_u64() {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     if let Some(failure) = script["fail"][&repository].as_str() {
         eprintln!("{failure}");
         return 1;
