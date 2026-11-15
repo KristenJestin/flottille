@@ -19,7 +19,8 @@ pub const METHODS: &[(&str, Class)] = &[
     ("events.watch", Read),
     ("project.list", Read),
     ("project.show", Read),
-    ("project.detect", Read),
+    // It looks through any folder the client names, and serves only `project.add`.
+    ("project.detect", Drive),
     ("project.add", Drive),
     ("project.removal", Read),
     ("project.remove", Drive),
@@ -61,6 +62,8 @@ pub const METHODS: &[(&str, Class)] = &[
     ("spec.new", Drive),
     ("spec.from_ticket", Drive),
     ("spec.answer", Drive),
+    // Settling a spec as developed is the daemon catching up on facts, not a decision of the
+    // user: a viewer sees the specs.
     ("spec.list", Read),
     ("spec.show", Read),
     ("spec.write", Drive),
@@ -122,9 +125,14 @@ pub const METHODS: &[(&str, Class)] = &[
     ("setup.move", Drive),
     ("workspace.create", Drive),
     ("workspace.list", Read),
+    // Storing the branch a worktree moved to is the daemon catching up on facts, not a decision
+    // of the user: a viewer sees the workspaces.
     ("workspace.show", Read),
     ("workspace.step_output", Read),
-    // A read of the forge; `watch` reads it again while the connection stays, as `events.watch`.
+    // A read of the forge; storing its state is the daemon catching up on facts, not a decision of
+    // the user, and a viewer sees the pull requests. With `watch`, the forge is read again while
+    // the connection stays, a viewer's too: accepted (`docs/remote.md`, "Defaults taken, to
+    // confirm").
     ("workspace.forge", Read),
     ("workspace.ticket", Read),
     ("workspace.link_ticket", Drive),
