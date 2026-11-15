@@ -5690,3 +5690,114 @@ fn an_entry_whose_host_is_no_usable_site_is_refused() {
         );
     }
 }
+
+/// A user whose daemon has a display, as a desktop session gives it.
+fn user_with_display() -> User {
+    let user = User::with_fake_agent()
+        .with_env("WAYLAND_DISPLAY", "wayland-test")
+        .with_env("DISPLAY", ":7");
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    user
+}
+
+/// The display variables the server of `name` got when it last started.
+fn display_of(user: &User, name: &str) -> Value {
+    logged(user, name, "start").last().unwrap()["display"].clone()
+}
+
+#[test]
+fn a_shown_browser_gets_the_display_variables() {
+    let user = user_with_display();
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"fail": true}),
+        &[],
+        json!({"headed": true}),
+    );
+    // Its review starts the server: the daemon's own display, and the file says headed.
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    assert_eq!(
+        display_of(&user, "browser"),
+        json!({"WAYLAND_DISPLAY": "wayland-test", "DISPLAY": ":7",
+            "XDG_RUNTIME_DIR": user.path("runtime").to_str().unwrap()})
+    );
+    let started = logged(&user, "browser", "start");
+    assert_eq!(started.last().unwrap()["config"]["headed"], json!(true));
+    assert_eq!(connection(&user, "browser")["headed"], json!(true));
+    // The review says it, where it says what the adapter changes.
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let changed = review["adapter"]["changed"].to_string();
+    assert!(changed.contains("is shown on the screen"), "{changed}");
+}
+
+#[test]
+fn a_hidden_browser_gets_none() {
+    let user = user_with_display();
+    browser(&user, &agent_browser("0.43.0"), json!({"fail": true}));
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    assert_eq!(
+        display_of(&user, "browser"),
+        json!({"WAYLAND_DISPLAY": null, "DISPLAY": null, "XDG_RUNTIME_DIR": null})
+    );
+    let started = logged(&user, "browser", "start");
+    assert_eq!(started.last().unwrap()["config"].get("headed"), None);
+    assert_eq!(connection(&user, "browser")["headed"], Value::Null);
+}
+
+#[test]
+fn showing_the_browser_restarts_its_server() {
+    let user = user_with_display();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let first = logged(&user, "browser", "start").last().unwrap().clone();
+    assert_eq!(first["display"]["DISPLAY"], Value::Null);
+    let pid = first["pid"].as_u64().unwrap();
+    // The user's edit stops the server that runs, and gives the new one at once.
+    let edited = user
+        .call(
+            "connection.edit",
+            json!({"name": "browser", "headed": true}),
+        )
+        .unwrap();
+    assert_eq!(edited["state"], "ready", "{edited}");
+    eventually("the server that was hidden stops", || !pid_alive(pid));
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    assert_eq!(display_of(&user, "browser")["DISPLAY"], ":7");
+    assert_eq!(
+        logged(&user, "browser", "start").last().unwrap()["config"]["headed"],
+        json!(true)
+    );
+    // The command line says it both ways, and hiding it stops the server again.
+    let output = user.run(&["connection", "edit", "browser", "--headless"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(connection(&user, "browser")["headed"], Value::Null);
+    let output = user.run(&["connection", "edit", "browser", "--headed"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(connection(&user, "browser")["headed"], json!(true));
+}

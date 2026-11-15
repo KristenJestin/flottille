@@ -144,7 +144,10 @@ fn main() {
             "pgid": fields.get(2).and_then(|f| f.parse::<u32>().ok()),
             "sid": fields.get(3).and_then(|f| f.parse::<u32>().ok()),
             "cwd": std::env::current_dir().ok(), "args": args, "child": child,
-            "config": loaded_config(&args)}),
+            "config": loaded_config(&args),
+            "display": {"WAYLAND_DISPLAY": std::env::var("WAYLAND_DISPLAY").ok(),
+                "DISPLAY": std::env::var("DISPLAY").ok(),
+                "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok()}}),
     );
     if let Some(line) = script["stderr"].as_str() {
         eprintln!("{line}");

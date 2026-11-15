@@ -689,3 +689,26 @@ fn a_request_accepted_is_not_answered_again_by_the_users_save() {
     assert!(again.contains("already decided"), "{again}");
     assert!(connection(&user, "jotter").is_none());
 }
+
+#[test]
+fn an_agent_s_request_cannot_show_the_browser() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    declare(&user, "almanac", json!({}));
+    let (_, mcp) = root(&user);
+
+    let added = refused(mcp.call(
+        "connections",
+        json!({"action": "add", "name": "jotter", "about": "Notes.",
+            "command": "jotter mcp", "headed": true}),
+    ));
+    assert!(added.contains("not a key an agent sets"), "{added}");
+    let edited = refused(mcp.call(
+        "connections",
+        json!({"action": "edit", "name": "almanac", "headed": true}),
+    ));
+    assert!(edited.contains("not a key an agent sets"), "{edited}");
+    assert_eq!(pending(&user), 0);
+    assert_eq!(connection(&user, "almanac").unwrap()["headed"], Value::Null);
+}
