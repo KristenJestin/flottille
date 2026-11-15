@@ -7,6 +7,10 @@
 //! and hands its keyring in.
 
 mod hello;
+mod invitation;
+mod members;
+mod serial;
+mod words;
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -20,6 +24,11 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 pub use hello::{Hello, NeedsUpdate, PeerState, choose};
+pub use invitation::{Invitation, InvitationError, Token};
+pub use members::{
+    Action, Change, ChangeHash, ListError, Member, MemberList, Members, Role, Signature,
+};
+pub use words::verification_words;
 
 /// The machine key's file in the key folder: the daemon's alone.
 pub const MACHINE_FILE: &str = "machine.key";

@@ -8,7 +8,8 @@ app) reads and answers the sessions of every machine of the user. It is the mile
 `v0.4 - Remote` (`docs/design.md` §12, §13).
 
 **Status: the design of v0.4, decided with the maintainer on 2026-11-12, 2026-11-13 and 2026-11-14.** Nothing
-here is built but the keys (`crates/flottille-link`). What is decided is said as such; the defaults taken are in "Defaults taken, to
+here is built but the keys, and the member list, the invitation code and the four words as data
+and their checks (`crates/flottille-link`). What is decided is said as such; the defaults taken are in "Defaults taken, to
 confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
@@ -666,6 +667,33 @@ on a real phone, by hand, and reported.
   device would get a second identity.
 - A machine key that is refused stops the daemon's start with its sentence, rather than starting
   with remote off.
+
+- The member list is an ordered log of signed changes (add, remove, rename), each naming the
+  SHA-256 of the change before it: a change the hub drops, reorders or plays again breaks the
+  chain, and a device refuses a list that lacks a change it has already checked. Two members
+  changing the list at the same moment: the hub keeps the first, the second signs again.
+- What a change signs is a fixed encoding that starts with `flottille-member-change-v1` and a
+  zero byte (`crates/flottille-link/src/members.rs`), never a JSON text; nothing else a device key
+  signs starts so.
+- A name is 1 to 64 characters, with no control character and no space at either end, and no two
+  members have names that differ in case only; a removed member's name is free again.
+- Any member may remove itself, a viewer too; a viewer may add, remove or rename no other member,
+  and may not rename itself.
+- A `controller` may add a member of any role, a `runner` too (a phone accepting a server), and
+  may remove any member, the root included: the root is where the list starts, not a member above
+  the others.
+- A key that is a point of small order is refused wherever it is read (an entry, an invitation's
+  hub or inviting key): no device makes one. A hub URL is `http://` or `https://` with a host, at
+  most 2048 bytes, and a URL or a name holds no invisible character (Unicode's `Cf`: zero-width
+  characters, bidirectional overrides), so that two that look the same are the same.
+- A removed key is never added again, so "a role is changed by removing the device and adding it
+  again" means that the device joins again with a new key.
+- The invitation holds the inviting member's whole key, not its fingerprint: the new device checks
+  its entry's signature against that key, and a fingerprint of 8 bytes is a match one could
+  search for. The code is Crockford's base32 with a checksum of 4 bytes, about 180 characters with
+  a short hub URL, and the QR holds the same text. The token is 16 bytes.
+- The four words are BIP-39's English list (MIT licence), drawn from the first 44 bits of a
+  SHA-256 of the two keys and the token.
 
 ## Open questions
 
