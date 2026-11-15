@@ -195,7 +195,10 @@ mod tests {
     fn a_link_or_a_folder_planted_at_the_owner_is_never_taken_over() {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().join("display");
-        std::fs::create_dir(&base).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&base)
+            .unwrap();
         // A link to a folder of someone's choosing: it is replaced, what it leads to untouched.
         let elsewhere = temp.path().join("elsewhere");
         std::fs::create_dir(&elsewhere).unwrap();
