@@ -212,12 +212,13 @@ fn value(
     field.read_with(cx, |f, _| f.value().to_string())
 }
 
-/// Types the secret in the open form, saves it, and waits for the card to fold away.
+/// Types the secret in the open form and saves it; once the daemon closed the request, back in
+/// the session `id`, the card folds away.
 fn save(
+    user: &User,
     shell: &Entity<Shell>,
     vault: &Entity<VaultSection>,
-    page: &Entity<SessionPage>,
-    at: usize,
+    (id, at): (&str, usize),
     cx: &mut VisualTestContext,
 ) {
     let secret = vault
@@ -229,17 +230,33 @@ fn save(
     );
     cx.update(|window, cx| secret.update(cx, |f, cx| f.set_value(SECRET, window, cx)));
     cx.update(|window, cx| window.click("save-vault-entry", cx));
-    until(
-        shell,
-        cx,
-        "the entry is set and the card folds away",
-        |cx| {
-            settle(cx);
-            page.read_with(cx, |page, cx| {
-            matches!(&page.conversation().read(cx).blocks()[at], Block::VaultAsk(ask) if !ask.open)
-        })
-        },
-    );
+    until(shell, cx, "the entry is saved", |cx| {
+        if let Some(why) = vault.read_with(cx, |v, _| v.form_error().map(str::to_owned)) {
+            panic!("the form refused: {why}");
+        }
+        user.call("vault.asks", json!({})).unwrap()["asks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(id), cx));
+    until(shell, cx, "the card folds away", |cx| {
+        settle(cx);
+        // The page shown again, whichever entity draws it.
+        let Some(page) = shell.read_with(cx, |s, cx| s.main().read(cx).session_page().cloned())
+        else {
+            cx.update(|window, cx| window.click(session_id(id), cx));
+            return false;
+        };
+        page.read_with(cx, |page, cx| {
+            page.conversation()
+                .read(cx)
+                .blocks()
+                .iter()
+                .any(|block| matches!(block, Block::VaultAsk(ask) if !ask.open))
+        }) && !has(format!("row-{at}-vault-ask-add"), cx)
+    });
 }
 
 #[gpui_kit::test]
@@ -247,7 +264,7 @@ fn the_card_of_a_vault_ask_opens_the_vault_form_prefilled(cx: &mut TestAppContex
     let user = user();
     let id = session(&user, "log my time");
     let (shell, cx) = window(&user, cx);
-    let (page, at) = card(&shell, &id, cx);
+    let (_, at) = card(&shell, &id, cx);
 
     // What the feature prefilled and the agent's reason, each with its visible label.
     assert_eq!(
@@ -299,7 +316,7 @@ fn the_card_of_a_vault_ask_opens_the_vault_form_prefilled(cx: &mut TestAppContex
             .clone()
             .update(cx, |f, cx| f.set_value("dev@example.com", window, cx))
     });
-    save(&shell, &vault, &page, at, cx);
+    save(&user, &shell, &vault, (&id, at), cx);
 
     std::fs::write(user.path("fake/release"), "").unwrap();
     let set = user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
@@ -322,7 +339,7 @@ fn the_card_shows_the_host_the_secret_goes_to(cx: &mut TestAppContext) {
     let user = user();
     let id = session(&user, "sign in to staging");
     let (shell, cx) = window(&user, cx);
-    let (page, at) = card(&shell, &id, cx);
+    let (_, at) = card(&shell, &id, cx);
 
     // The host on its own line, without the port or the path the agent wrote.
     assert_eq!(
@@ -361,7 +378,7 @@ fn the_card_shows_the_host_the_secret_goes_to(cx: &mut TestAppContext) {
                 f.set_value("https://staging.example.com/login", window, cx)
             })
     });
-    save(&shell, &vault, &page, at, cx);
+    save(&user, &shell, &vault, (&id, at), cx);
 
     std::fs::write(user.path("fake/release"), "").unwrap();
     let set = user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
