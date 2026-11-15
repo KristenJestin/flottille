@@ -1146,16 +1146,6 @@ fn decide<'a>(
             )
         })?;
         limits(declaration, &action, &arguments)?;
-        if let Some(why) = adapter.and_then(|adapter| {
-            let on = pin
-                .actions
-                .iter()
-                .map(|a| a.name.as_str())
-                .filter(|a| setting_of(row, a) != "off");
-            adapter.refuses(own.name, on)
-        }) {
-            return Err(why);
-        }
         // Flottille's own action is judged as any is: it uses a secret on the page the agent
         // chose.
         return Ok(Some("judged"));
@@ -1180,6 +1170,9 @@ fn decide<'a>(
             action.name, action.name
         )
     })?;
+    if let Some(why) = adapter.and_then(|adapter| adapter.refuses_url(&action.name, &arguments)) {
+        return Err(why);
+    }
     limits(declaration, action, &arguments)?;
     Ok(Some(setting))
 }
@@ -2010,15 +2003,19 @@ fn adapter_said(
                 "Flottille's adapter for {} {} applies.",
                 adapter.server, adapter.range
             );
-            for own in adapter.actions {
-                let on = now
-                    .actions
+            // login comes beside an action the user turned on before it, with no new review.
+            let scripts_on = adapter.scripts_on(
+                proposed
                     .iter()
-                    .map(|a| a.name.as_str())
-                    .filter(|a| proposed.get(*a).is_some_and(|setting| setting != "off"));
-                if let Some(why) = adapter.refuses(own.name, on) {
-                    said.push_str(&format!(" {why}."));
-                }
+                    .filter(|(_, setting)| *setting != "off")
+                    .map(|(action, _)| action.as_str()),
+            );
+            if !scripts_on.is_empty() {
+                let verb = if scripts_on.len() == 1 { "is" } else { "are" };
+                said.push_str(&format!(
+                    " {} {verb} on: a page script can read what login types.",
+                    scripts_on.join(", ")
+                ));
             }
             if let Reach::Command(words) = &declaration.reach
                 && let Some(why) = adapter
