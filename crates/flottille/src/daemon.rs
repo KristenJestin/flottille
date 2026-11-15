@@ -77,6 +77,8 @@ pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.runtime)?;
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
+    // Nothing signs with it yet: the link comes with the transport (#839).
+    let _machine_key = crate::remote::machine_key(paths)?;
     children::say_sessions_in(paths.sessions())?;
     let _store_lock = hold_store(paths)?;
     extensions::check_tools(extensions::ALL)?;
