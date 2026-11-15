@@ -695,6 +695,26 @@ on a real phone, by hand, and reported.
 - The four words are BIP-39's English list (MIT licence), drawn from the first 44 bits of a
   SHA-256 of the two keys and the token.
 
+- What a request's signature covers is a fixed encoding that starts with `flottille-request-v1`
+  and a zero byte (`crates/flottille-link/src/request.rs`), never a member change's: `id`,
+  `machine`, `device`, `nonce`, `at` and `method`, then `params`. `machine` and `id` sit outside
+  `signed` in the JSON and are signed all the same: a request signed for one machine is refused by
+  another, and its answer cannot be sent under another id. `machine` is the target's name; a name
+  freed by a removal and taken within five minutes by a new member could take a request meant for
+  the old one: accepted.
+- `params` travels as the JSON text the client wrote, in a string; the receiver checks the
+  signature over those very bytes, then parses them, so that no side serialises JSON again. `at` is
+  in milliseconds since the Unix epoch, `nonce` 16 random bytes in hexadecimal.
+- A request is refused when its time is more than five minutes from the receiver's clock, either
+  way. The receiver remembers each accepted nonce until it leaves the window of the latest time its
+  clock gave, so that a clock set back brings no request back, and at most 4096 per device: past
+  that, the device's requests are refused until the oldest leave the window, never forgotten early.
+- A method the catalogue lacks is refused, whoever asks. The role is checked before the
+  signature, as the order of the checks says: a refusal for a role names the device, to whoever
+  sent a request in its name.
+- A request for another machine, or one that is not a signed request at all, is refused before
+  the checks.
+
 ## Open questions
 
 1. **The transport**: the hub and its relay are decided; iroh is the candidate, to be proved by the
