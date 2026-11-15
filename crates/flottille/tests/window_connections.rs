@@ -935,6 +935,221 @@ fn every_control_of_the_form_has_a_visible_label(cx: &mut TestAppContext) {
     );
 }
 
+// ── The sites a sign-in also needs ───────────────────────────────────────────────────────────
+
+/// The form of the connection `name`, open on its declaration.
+fn open_the_form_of(shell: &Entity<Shell>, cx: &mut VisualTestContext, name: &str) {
+    open_page(shell, cx);
+    until(shell, cx, "its row", |cx| {
+        visible(cx, &format!("connection-{name}"))
+    });
+    click(cx, &format!("connection-more-{name}"));
+    click(cx, &format!("edit-connection-{name}"));
+    until(shell, cx, "the form opens on it", |cx| {
+        visible(cx, "connection-modal")
+    });
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn the_form_sets_the_sites_a_sign_in_needs(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "shop-test", "secret": "s3cret-of-the-shop", "username": "tester",
+            "url": "https://shop.example.com/login", "for": "connection:browser"}),
+    )
+    .unwrap();
+    agent_browser(&user, &["agent_browser_click"], false);
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    let line = label(cx, "connection-browser-line").unwrap();
+    assert!(line.starts_with("On"), "{line}");
+
+    // A field of its own, under its label, with the line that says what it is for.
+    assert_eq!(
+        label(cx, "connection-sites-field-label").as_deref(),
+        Some("Sites a sign-in also needs")
+    );
+    assert!(visible(cx, "connection-sites-field-label"));
+    assert!(
+        label(cx, "connection-sites-field-hint")
+            .unwrap()
+            .contains("single sign-on")
+    );
+    click(cx, "connection-new-site");
+    until(&shell, cx, "a site's row unfolds", |cx| {
+        visible(cx, "connection-site-0-host")
+    });
+    assert_eq!(
+        label(cx, "connection-site-0-host-field-label").as_deref(),
+        Some("Host")
+    );
+    let section = section(&shell, cx);
+    let host = section.read_with(cx, |s, _| s.site_field(0).unwrap());
+    type_in(&host, " sso.example.com ", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+
+    // Saved as `sites`, trimmed; the server restarted and was pinned again at once: the row says
+    // what it said before, and no toast says a review waits.
+    let saved = connection(&user, "browser").unwrap();
+    assert_eq!(saved["sites"], json!(["sso.example.com"]));
+    assert_eq!(saved["state"], "ready");
+    until(&shell, cx, "its row says what it said", |cx| {
+        label(cx, "connection-browser-line").as_deref() == Some(line.as_str())
+    });
+    for second in second_lines(&shell, cx).into_iter().flatten() {
+        assert!(!second.contains("review"), "{second}");
+    }
+    // The review lists it among the browser's sites, beside the entry's.
+    click(cx, "connection-more-browser");
+    click(cx, "review-connection-browser");
+    until(&shell, cx, "what the server announces", |cx| {
+        present(cx, "connection-review-adapter")
+    });
+    settle(cx);
+    click(cx, "connection-review-adapter-changes");
+    let changed = everything_said(cx);
+    assert!(changed.contains("sso.example.com"), "{changed}");
+    assert!(changed.contains("shop.example.com"), "{changed}");
+}
+
+#[gpui_kit::test]
+fn the_form_keeps_the_sites_it_did_not_touch(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    agent_browser(&user, &["agent_browser_click"], false);
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "sites": ["sso.example.com", "id.example.org"]}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    // The field is filled from the list.
+    let section = section(&shell, cx);
+    let hosts: Vec<String> = (0..3)
+        .filter_map(|at| section.read_with(cx, |s, _| s.site_field(at)))
+        .map(|field| field.read_with(cx, |f, _| f.value().to_string()))
+        .collect();
+    assert_eq!(hosts, ["sso.example.com", "id.example.org"]);
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.about, "The browser of the user.", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    let saved = connection(&user, "browser").unwrap();
+    assert_eq!(saved["about"], "The browser of the user.");
+    assert_eq!(saved["sites"], json!(["sso.example.com", "id.example.org"]));
+}
+
+#[gpui_kit::test]
+fn removing_the_last_site_takes_them_all_away(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    agent_browser(&user, &["agent_browser_click"], false);
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "sites": ["sso.example.com"]}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    click(cx, "connection-site-0-remove");
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    let saved = connection(&user, "browser").unwrap();
+    assert!(saved.get("sites").is_none_or(Value::is_null), "{saved}");
+}
+
+#[gpui_kit::test]
+fn the_form_says_why_a_site_is_refused(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    agent_browser(&user, &["agent_browser_click"], false);
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    click(cx, "connection-new-site");
+    let section = section(&shell, cx);
+    let host = section.read_with(cx, |s, _| s.site_field(0).unwrap());
+    type_in(&host, "https://sso.example.com", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the refusal", |cx| {
+        visible(cx, "connection-error")
+    });
+    // The daemon's own sentence, under the field: the form stays open and nothing was saved.
+    let said = section.read_with(cx, |s, _| s.form_error()).unwrap();
+    assert!(said.contains("is no host of a site"), "{said}");
+    assert!(said.contains("https://sso.example.com"), "{said}");
+    assert!(visible(cx, "connection-modal"));
+    assert!(
+        connection(&user, "browser")
+            .unwrap()
+            .get("sites")
+            .is_none_or(Value::is_null)
+    );
+    // Set right, the host is saved.
+    type_in(&host, "sso.example.com", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(
+        connection(&user, "browser").unwrap()["sites"],
+        json!(["sso.example.com"])
+    );
+}
+
+#[gpui_kit::test]
+fn a_site_row_unfolds_when_added_and_folds_away_when_removed(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    agent_browser(&user, &["agent_browser_click"], false);
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    // The first row the section makes is the form's own: its key is 1.
+    assert!(!present(cx, "connection-site-item-1"));
+    press(cx, "connection-new-site");
+    a_third_later(cx);
+    let unfolding = height(cx, "connection-site-item-1");
+    settle(cx);
+    let whole = height(cx, "connection-site-item-1");
+    assert!(
+        0. < unfolding && unfolding < whole,
+        "its row unfolds, over a panel's time: {unfolding} of {whole}"
+    );
+    press(cx, "connection-site-0-remove");
+    a_third_later(cx);
+    let folding = height(cx, "connection-site-item-1");
+    assert!(
+        0. < folding && folding < whole,
+        "its row folds away, over a panel's time: {folding} of {whole}"
+    );
+    settle(cx);
+    assert!(!present(cx, "connection-site-0-host"));
+}
+
+#[gpui_kit::test]
+fn a_url_has_no_sites_field(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    agent_browser(&user, &["agent_browser_click"], false);
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    assert!(visible(cx, "connection-new-site"));
+    click(cx, "connection-reach-url");
+    until(&shell, cx, "the sites' field folds away", |cx| {
+        !visible(cx, "connection-new-site")
+    });
+}
+
 #[gpui_kit::test]
 fn editing_the_command_pins_the_server_again_with_no_review(cx: &mut TestAppContext) {
     let user = user();
