@@ -839,10 +839,25 @@ launches no agent and reads nothing of its own: it opens subscriptions as `forge
   descriptions say a subscription may be there already (`maybe already`), so that an agent does
   not subscribe again. `forge create {…, subscribe: false}` opens one without it.
 - **Only a session**: a root, led or handed; never a child, nor an extension's agents (a
-  review's pilot, its passes), which all have a parent.
+  review's pilot, its passes), which all have a parent. The sessions Specs starts are root
+  sessions: they are subscribed.
+- **Its own pull request, in its own repository**: one opened on a workspace's branch subscribes
+  that workspace's sessions only when it is in a repository the workspace holds and is not from a
+  fork (GitHub's `isCrossRepository`, a Bitbucket source repository other than the destination):
+  another repository's branch of the same name, or a fork's, subscribes nobody. The review's
+  `auto_on_pull_request` reads it the same way.
 - **A pull request the agent opens is its own**: the round that then sees it open does not take
-  it for one opened another way, whether `create` subscribed or not (`forge::Own`, kept in memory
-  until a round or a live read sees it open).
+  it for one opened another way, whether `create` subscribed or not. `forge create` records it in
+  the store (`opened_pulls`, with the posts' records, `forges.md`), so that it survives a restart;
+  a round that sees the pull request open takes the record, once, and a record no round took in
+  half an hour is dropped (a live read stored the pull request first, so no round will see it open),
+  so that it never hides one opened by hand later. A `create` that fails leaves none. While a call
+  reads or opens a pull request, the rounds also leave it to that call.
+- **A ticket the agent subscribed to itself is left as it made it**: linking the workspace to a
+  ticket it is subscribed to changes nothing and says nothing, nor does linking the same ticket
+  again. Linking another ticket, or none, ends the automatic subscription to the previous one
+  (marked as automatic: `seen` of the subscription holds `{"automatic": true}`), never the
+  agent's own.
 
 In the window, its page is the generic one, drawn from the declaration: its switch, its usage
 line, then one field per subject with a switch per event (the control of a `subset`); in a

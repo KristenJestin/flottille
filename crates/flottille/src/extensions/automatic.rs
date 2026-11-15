@@ -235,7 +235,7 @@ fn pull_opened(daemon: &Arc<Daemon>, data: &Value) {
     };
     let head = pull.details["head"].as_str().unwrap_or_default().to_owned();
     // One an agent opens, or reads to subscribe to, is its own call's to subscribe.
-    if head.is_empty() || crate::forge::owned(project, repository, &head) {
+    if head.is_empty() || crate::forge::owned(daemon, project, repository, &head) {
         return;
     }
     let Ok(number) = key.parse::<u64>() else {
@@ -248,7 +248,7 @@ fn pull_opened(daemon: &Arc<Daemon>, data: &Value) {
     let Ok(workspaces) = daemon.read(|store| store.workspaces(Some(project))) else {
         return;
     };
-    for workspace in workspaces.into_iter().filter(|w| w.branch == head) {
+    for workspace in crate::forge::workspaces_of(&pull, workspaces) {
         let target = json!({"project": project, "repository": repository, "number": number,
             "head": head, "base": pull.details["base"], "workspace": workspace.name});
         for session in sessions_in(daemon, project, &workspace.name) {
@@ -277,7 +277,14 @@ fn pull_opened(daemon: &Arc<Daemon>, data: &Value) {
     }
 }
 
-/// A subscription of `agent` to `target`, from people, until the target ends.
+/// Whether the subscription is one of these (`new`), not one the agent made itself.
+fn is_automatic(subscription: &Subscription) -> bool {
+    subscription.seen["automatic"] == true
+}
+
+/// A subscription of `agent` to `target`, from people, until the target ends. It says it is
+/// automatic in `seen`, which no source writes any more, so that what ends it later leaves the
+/// agent's own subscriptions alone.
 fn new(agent: &str, source: &str, target: Value, events: &[String]) -> Subscription {
     Subscription {
         id: subscriptions::new_subscription_id(),
@@ -286,7 +293,7 @@ fn new(agent: &str, source: &str, target: Value, events: &[String]) -> Subscript
         target,
         events: events.to_vec(),
         from: "people".into(),
-        seen: json!({}),
+        seen: json!({"automatic": true}),
         created_at: now_ms(),
         expires_at: subscriptions::NO_DEADLINE,
     }
@@ -321,33 +328,66 @@ fn session_created(daemon: &Arc<Daemon>, data: &Value) {
 }
 
 /// The Core event trigger on `workspace.ticket`: the sessions of a workspace linked to a ticket
-/// are subscribed to it, and told.
+/// are subscribed to it, and told; when the ticket changes or is unlinked, what these subscribed
+/// them to of the ticket before ends (the agent's own subscriptions stay).
 fn ticket_linked(daemon: &Arc<Daemon>, data: &Value) {
-    let (Some(project), Some(workspace), Some(ticket)) = (
-        data["project"].as_str(),
-        data["workspace"].as_str(),
-        data["ticket"].as_str(),
-    ) else {
+    let (Some(project), Some(workspace)) = (data["project"].as_str(), data["workspace"].as_str())
+    else {
         return;
     };
+    let ticket = data["ticket"].as_str();
+    let now = ticket.and_then(|ticket| {
+        let project = crate::projects::load_project(daemon, project).ok()?;
+        ticket_target(&project, ticket)
+    });
     for session in sessions_in(daemon, project, workspace) {
-        if let Some(told) = subscribe_ticket(daemon, &session, ticket) {
+        for old in subscriptions::of(daemon, &session.id) {
+            if old.source == subscriptions::TICKETS
+                && is_automatic(&old)
+                && !now
+                    .as_ref()
+                    .is_some_and(|now| same_ticket(&old.target, now))
+            {
+                subscriptions::end(daemon, &old, "cancelled");
+            }
+        }
+        if let Some(ticket) = ticket
+            && let Some(told) = subscribe_ticket(daemon, &session, ticket)
+        {
             super::tell(daemon, &EXTENSION, &session.id, &told);
         }
     }
 }
 
-/// Subscribes the session to the ticket `ticket` (`#5`, `ABC-1`) with the project's events, in
-/// place of a subscription it had to it: what it is told, or none when nothing was subscribed (no
-/// event set, a ticket of no tracker of the project's, one already closed).
+/// The target of a subscription to the ticket `ticket` (`#5`, `ABC-1`): none for one of no tracker
+/// of the project's.
+fn ticket_target(project: &flottille_core::project::Project, ticket: &str) -> Option<Value> {
+    let key = crate::tickets::accepted(project, ticket).ok()?;
+    let (repository, item) = crate::tickets::item_of(project, &key)?;
+    Some(json!({"project": project.name, "repository": repository, "key": item}))
+}
+
+/// Whether two targets are the same ticket.
+fn same_ticket(one: &Value, other: &Value) -> bool {
+    ["project", "repository", "key"]
+        .iter()
+        .all(|key| one[key] == other[key])
+}
+
+/// Subscribes the session to the ticket `ticket` (`#5`, `ABC-1`) with the project's events: what it
+/// is told, or none when nothing was subscribed (no event set, a ticket of no tracker of the
+/// project's, one already closed, one it is subscribed to already: its own or this one's).
 fn subscribe_ticket(daemon: &Daemon, session: &Agent, ticket: &str) -> Option<String> {
     let events = events(daemon, &session.project, TICKET);
     if events.is_empty() {
         return None;
     }
     let project = crate::projects::load_project(daemon, &session.project).ok()?;
-    let key = crate::tickets::accepted(&project, ticket).ok()?;
-    let (repository, item) = crate::tickets::item_of(&project, &key)?;
+    let target = ticket_target(&project, ticket)?;
+    let (repository, item) = (
+        target["repository"].as_str().unwrap_or_default(),
+        target["key"].as_str().unwrap_or_default(),
+    );
     let filter = flottille_core::item::Filter {
         kind: Some("ticket".to_owned()),
         ..Default::default()
@@ -363,11 +403,13 @@ fn subscribe_ticket(daemon: &Daemon, session: &Agent, ticket: &str) -> Option<St
     if closed {
         return None;
     }
-    let target = json!({"project": project.name, "repository": repository, "key": item});
-    for old in subscriptions::of(daemon, &session.id) {
-        if old.source == subscriptions::TICKETS && old.target == target {
-            subscriptions::end(daemon, &old, "cancelled");
-        }
+    // What the agent subscribed to itself stays as it made it, and what is so already says nothing
+    // again.
+    if subscriptions::of(daemon, &session.id)
+        .iter()
+        .any(|old| old.source == subscriptions::TICKETS && same_ticket(&old.target, &target))
+    {
+        return None;
     }
     let subscription = new(&session.id, subscriptions::TICKETS, target, &events);
     subscriptions::subscribe(daemon, &subscription).ok()?;

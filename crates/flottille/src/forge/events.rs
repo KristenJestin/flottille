@@ -346,6 +346,7 @@ pub(crate) fn offer(
             head: String::new(),
             head_commit: None,
             base: String::new(),
+            cross: false,
             url: String::new(),
             description: String::new(),
             mergeable: None,

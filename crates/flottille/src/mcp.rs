@@ -326,9 +326,9 @@ const SERVED: [Definition; 33] = [
         name: "forge",
         title: "Pull requests",
         description: "PRs and CI via the user's \
-            gh/bkt (no forge sign-in here: never run them). list: by state and branch, \
+            gh/bkt (no forge sign-in here: never run them). list: by state, branch, \
             as last read. show: a branch's or number's \
-            with checks (the log's end of each failed job), review, comment counts; \
+            with checks (each failed job's log end), review verdict, comment count; \
             detail full: texts, threads (file, line). Writes, judged, answered at \
             once, the result maybe later: create, merge \
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
@@ -405,12 +405,12 @@ const SERVED: [Definition; 33] = [
             types: a Jira project's work item types (never guess); link_types. \
             Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
             reopen, status, link, unlink, comment_edit, \
-            comment_delete (yours only); log_time (Jira), \
-            time_spent (this session's work time, to propose). \
+            comment_delete (both yours only); log_time (Jira), \
+            time_spent (this session's time, to propose). \
             Assign only if asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (see sprints). \
-            Milestones (Jira: versions): milestones, progress (tickets, their work); GitHub: milestone_create/_edit. \
-            subscribe: its events wake you until it closes (maybe already); unsubscribe.",
+            Milestones (Jira: versions): milestones, progress (tickets and work); GitHub: milestone_create/_edit. \
+            subscribe: a ticket's events wake you until it closes (maybe already); unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
