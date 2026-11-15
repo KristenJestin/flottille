@@ -2164,6 +2164,11 @@ fn edited(old: &Declaration, params: &Value) -> std::result::Result<Declaration,
             }
         }
     }
+    // `secrets` given are all the lines of its requests: the plain header lines it read from
+    // `headers` among them, unless `headers` is given too.
+    if params.get("secrets").is_some() && params.get("headers").is_none() {
+        table.remove("headers");
+    }
     let new = Declaration::of(&table, "connection").map_err(Failure::refused)?;
     if let Some(why) = new.query_secret() {
         return Err(Failure::refused(format!("connection.{why}")));
