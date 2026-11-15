@@ -89,11 +89,11 @@ pub(crate) fn boxed(
 }
 
 /// A line that says what went wrong, in the alarm colour: it unfolds when there is one and folds
-/// away when it is cleared. `id` is the line's; `gap` is what the parent puts between its children.
+/// away when it is cleared. `id` is the line's; `above` is the space above it, folded with it.
 pub(crate) fn problem_line(
     id: &'static str,
     problem: Option<SharedString>,
-    gap: Pixels,
+    above: Pixels,
     cx: &App,
 ) -> impl IntoElement {
     let p = palette(cx);
@@ -106,7 +106,20 @@ pub(crate) fn problem_line(
             .test_support()
             .into_any_element()
     })
-    .gap(gap)
+    .space(above)
+}
+
+/// A column whose children each hold the space above them themselves: a block with
+/// `.space(gap)`, a child that is always there through [`spaced`]. It is pulled up by `gap`, so
+/// its first child lands where the column's own parent put it (a `Section`'s gap under its
+/// header) and a column of blocks that are all folded takes no room.
+pub(crate) fn stack(gap: Pixels) -> gpui_kit::Div {
+    div().flex().flex_col().mt(-gap)
+}
+
+/// A child that is always there, in a [`stack`] of the same `gap`.
+pub(crate) fn spaced(gap: Pixels, child: impl IntoElement) -> gpui_kit::Div {
+    div().mt(gap).child(child)
 }
 
 /// The "⋯" menu of a row of a list, made once per row and kept: its button is
@@ -643,19 +656,22 @@ impl CommandsSection {
                         "A name, one line on what it does, and the instructions the agent is sent.",
                     )
                     .on_click(cx.listener(|this, _, window, cx| this.blank(window, cx)));
-                modal
-                    .sentence(EXPLAINED)
-                    .child(
-                        div()
-                            .id("command-templates")
-                            .flex()
-                            .flex_col()
-                            .gap(space::XS)
-                            .children(templates)
-                            .child(blank)
-                            .test_support(),
-                    )
-                    .child(error)
+                modal.sentence(EXPLAINED).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .id("command-templates")
+                                .flex()
+                                .flex_col()
+                                .gap(space::XS)
+                                .children(templates)
+                                .child(blank)
+                                .test_support(),
+                        )
+                        .child(error),
+                )
             }
             Form::Editing(original) => {
                 let fields = self.fields.as_ref().expect("made when the form opens");
@@ -711,8 +727,7 @@ impl CommandsSection {
                     .test_support();
                 modal
                     .sentence("Instructions you send to a session by typing /name in its composer.")
-                    .child(body)
-                    .child(error)
+                    .child(div().flex().flex_col().child(body).child(error))
                     .action(
                         Button::primary(
                             "save-command",
@@ -772,27 +787,30 @@ impl Render for CommandsSection {
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, _, cx| this.add(cx))),
             )
-            .child(presence("command-list-block", count > 0, list).gap(space::MD))
             .child(
-                presence(
-                    "no-commands-block",
-                    empty,
-                    EmptyLine::new(
-                        "no-commands",
-                        Icon::Slash,
-                        "No command yet. Start from a template (open the pull requests, merge a \
-                         stack, close a workspace) or write your own.",
-                    ),
-                )
-                .gap(space::MD),
-            )
-            .child(found)
-            .child(problem_line(
-                "commands-problem",
-                self.problem.clone(),
-                space::MD,
-                cx,
-            ));
+                stack(space::MD)
+                    .child(presence("command-list-block", count > 0, list).space(space::MD))
+                    .child(
+                        presence(
+                            "no-commands-block",
+                            empty,
+                            EmptyLine::new(
+                                "no-commands",
+                                Icon::Slash,
+                                "No command yet. Start from a template (open the pull requests, \
+                                 merge a stack, close a workspace) or write your own.",
+                            ),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(found)
+                    .child(problem_line(
+                        "commands-problem",
+                        self.problem.clone(),
+                        space::MD,
+                        cx,
+                    )),
+            );
         div()
             .text_color(p.text)
             .child(section)

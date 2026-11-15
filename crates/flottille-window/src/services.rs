@@ -26,7 +26,7 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
+use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line, stack};
 use crate::runs::{CommandOutput, CommandPanel, address_link, ready_mark};
 use crate::shell::Shell;
 use crate::tasks::{
@@ -387,44 +387,49 @@ impl Render for ServiceForm {
             .id("service-form")
             .flex()
             .flex_col()
-            .gap(space::LG)
             .child(
-                Field::new("service-name-field", "Name", name)
-                    .hint("Tasks and agents name it by this name."),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::LG)
+                    .child(
+                        Field::new("service-name-field", "Name", name)
+                            .hint("Tasks and agents name it by this name."),
+                    )
+                    .child(Field::new(
+                        "service-line-field",
+                        "Command line",
+                        boxed("service-line", Input::new(&fields.line), cx),
+                    ))
+                    .child(
+                        Field::new(
+                            "service-folder-field",
+                            "Folder",
+                            boxed("service-folder", Input::new(&fields.folder), cx),
+                        )
+                        .optional()
+                        .hint("Where it runs: absolute, or ~/…. The home when left empty."),
+                    )
+                    .child(needs_field(
+                        "service",
+                        Some(Ok(&self.services)),
+                        original.as_deref().or(Some(self.shown.name.as_str())),
+                        &self.shown.needs,
+                        |this: &mut Self, name, cx| this.toggle_need(name, cx),
+                        cx,
+                    ))
+                    .child(ready_and_url(
+                        "service",
+                        true,
+                        &fields.ready,
+                        self.shown.ready.as_ref().map(|(kind, _)| *kind),
+                        self.shown.url.as_ref().map(|(kind, _)| *kind),
+                        |this: &mut Self, kind, cx| this.choose_ready(kind, cx),
+                        |this: &mut Self, kind, cx| this.choose_url(kind, cx),
+                        cx,
+                    ))
+                    .child(Field::new("service-kind", "When an agent starts it", ask)),
             )
-            .child(Field::new(
-                "service-line-field",
-                "Command line",
-                boxed("service-line", Input::new(&fields.line), cx),
-            ))
-            .child(
-                Field::new(
-                    "service-folder-field",
-                    "Folder",
-                    boxed("service-folder", Input::new(&fields.folder), cx),
-                )
-                .optional()
-                .hint("Where it runs: absolute, or ~/…. The home when left empty."),
-            )
-            .child(needs_field(
-                "service",
-                Some(Ok(&self.services)),
-                original.as_deref().or(Some(self.shown.name.as_str())),
-                &self.shown.needs,
-                |this: &mut Self, name, cx| this.toggle_need(name, cx),
-                cx,
-            ))
-            .child(ready_and_url(
-                "service",
-                true,
-                &fields.ready,
-                self.shown.ready.as_ref().map(|(kind, _)| *kind),
-                self.shown.url.as_ref().map(|(kind, _)| *kind),
-                |this: &mut Self, kind, cx| this.choose_ready(kind, cx),
-                |this: &mut Self, kind, cx| this.choose_url(kind, cx),
-                cx,
-            ))
-            .child(Field::new("service-kind", "When an agent starts it", ask))
             .child(problem_line(
                 "service-error",
                 self.form_error.clone(),
@@ -1156,26 +1161,30 @@ impl Render for ServicesPage {
                 "The programs every project shares: a database, a cache, an API. Each runs once \
                  for the whole machine; a task that needs one starts it first.",
             )
-            .child(presence("service-list-block", count > 0, list).gap(space::MD))
             .child(
-                presence(
-                    "no-services-block",
-                    empty,
-                    EmptyLine::new(
-                        "no-services",
-                        Icon::Service,
-                        "No service yet: add the programs your projects lean on (a database, a \
-                         cache, an API), so that their tasks start them when they need them.",
-                    ),
-                )
-                .gap(space::MD),
-            )
-            .child(problem_line(
-                "services-problem",
-                self.problem.clone(),
-                space::MD,
-                cx,
-            ));
+                stack(space::MD)
+                    .child(presence("service-list-block", count > 0, list).space(space::MD))
+                    .child(
+                        presence(
+                            "no-services-block",
+                            empty,
+                            EmptyLine::new(
+                                "no-services",
+                                Icon::Service,
+                                "No service yet: add the programs your projects lean on (a \
+                                 database, a cache, an API), so that their tasks start them when \
+                                 they need them.",
+                            ),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(problem_line(
+                        "services-problem",
+                        self.problem.clone(),
+                        space::MD,
+                        cx,
+                    )),
+            );
         let pad = if self.narrow { space::LG } else { space::XXL };
         let key = |part: &str| ElementId::Name(format!("enter-services-{part}").into());
         let column = div()

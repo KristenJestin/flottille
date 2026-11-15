@@ -26,7 +26,7 @@ use gpui_kit::{
 use serde_json::{Map, Value, json};
 
 use crate::actions::Command;
-use crate::commands::{boxed, line_field, perform_later, problem_line};
+use crate::commands::{boxed, line_field, perform_later, problem_line, spaced, stack};
 use crate::shell::Shell;
 use crate::vault::{VaultEntry, VaultSection};
 
@@ -1983,65 +1983,78 @@ impl ConnectionsSection {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(space::LG)
             .child(
-                Field::new("connection-name-field", "Name", name)
-                    .hint("Lower-case letters, digits and _; its tool is conn_ and this name."),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::LG)
+                    .child(
+                        Field::new("connection-name-field", "Name", name).hint(
+                            "Lower-case letters, digits and _; its tool is conn_ and this name.",
+                        ),
+                    )
+                    .child(Field::new(
+                        "connection-about-field",
+                        "What it is for",
+                        boxed("connection-about", Input::new(&fields.about), cx),
+                    ))
+                    .child(Field::new(
+                        "connection-reach-field",
+                        "How it is reached",
+                        reach,
+                    )),
             )
-            .child(Field::new(
-                "connection-about-field",
-                "What it is for",
-                boxed("connection-about", Input::new(&fields.about), cx),
-            ))
-            .child(Field::new(
-                "connection-reach-field",
-                "How it is reached",
-                reach,
-            ))
             .child(
                 presence(
                     "connection-command-block",
                     self.reach == Reach::Command,
                     command,
                 )
-                .gap(space::LG),
+                .space(space::LG),
             )
-            .child(presence("connection-url-block", self.reach == Reach::Url, url).gap(space::LG))
-            .child(
-                Field::new(
-                    "connection-variables-field",
-                    variables_label,
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_start()
-                        .child(div().w_full().child(variables))
-                        .child(div().pt(space::SM).child(new_variable)),
-                )
-                .optional()
-                .hint(VARIABLES_HINT),
-            )
-            .child(
-                Field::new(
-                    "connection-limits-field",
-                    "Limits on arguments",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_start()
-                        .child(div().w_full().child(limits))
-                        .child(div().pt(space::SM).child(new_limit)),
-                )
-                .optional()
-                .hint(LIMITS_HINT),
-            )
+            .child(presence("connection-url-block", self.reach == Reach::Url, url).space(space::LG))
+            .child(spaced(
+                space::LG,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::LG)
+                    .child(
+                        Field::new(
+                            "connection-variables-field",
+                            variables_label,
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_start()
+                                .child(div().w_full().child(variables))
+                                .child(div().pt(space::SM).child(new_variable)),
+                        )
+                        .optional()
+                        .hint(VARIABLES_HINT),
+                    )
+                    .child(
+                        Field::new(
+                            "connection-limits-field",
+                            "Limits on arguments",
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_start()
+                                .child(div().w_full().child(limits))
+                                .child(div().pt(space::SM).child(new_limit)),
+                        )
+                        .optional()
+                        .hint(LIMITS_HINT),
+                    ),
+            ))
             .child(
                 presence(
                     "connection-sites-block",
                     self.reach == Reach::Command,
                     sites,
                 )
-                .gap(space::LG),
+                .space(space::LG),
             )
             .test_support();
         // What a modal keeps in sight is a column without a gap: nothing to fold but the line.
@@ -2541,7 +2554,7 @@ impl ConnectionsSection {
                     .into_any_element()
             },
         )
-        .gap(space::MD);
+        .space(space::MD);
 
         let limits = diff.limits.iter().map(|limit| {
             let LimitCover {
@@ -2580,23 +2593,23 @@ impl ConnectionsSection {
                 .child(SharedString::from(said))
                 .test_support()
         });
-        div()
-            .flex()
-            .flex_col()
-            .gap(space::MD)
-            .child(self.instructions_row(diff, review, cx))
-            .children(changes)
-            .child(listed)
+        stack(space::MD)
+            .child(spaced(space::MD, self.instructions_row(diff, review, cx)))
+            .children(changes.map(|changes| spaced(space::MD, changes)))
+            .child(spaced(space::MD, listed))
             .child(none)
             .children((!diff.limits.is_empty()).then(|| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .child(heading("connection-review-limits-title", "Its limits"))
-                    .children(limits)
+                spaced(
+                    space::MD,
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(space::SM)
+                        .child(heading("connection-review-limits-title", "Its limits"))
+                        .children(limits),
+                )
             }))
-            .children(refused)
+            .children(refused.map(|refused| spaced(space::MD, refused)))
             .into_any_element()
     }
 
@@ -3049,7 +3062,6 @@ impl ConnectionsSection {
             .w_full()
             .flex()
             .flex_col()
-            .gap(space::MD)
             .child(awaiting(
                 "connection-review-waiting",
                 pending,
@@ -3116,21 +3128,24 @@ impl Render for ConnectionsSection {
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
             )
-            .child(presence("connection-list-block", count > 0, list).gap(space::MD))
             .child(
-                presence(
-                    "no-connection-block",
-                    empty,
-                    EmptyLine::new("no-connection", Icon::Lucide("plug"), EMPTY),
-                )
-                .gap(space::MD),
-            )
-            .child(problem_line(
-                "connection-problem",
-                self.problem.clone(),
-                space::MD,
-                cx,
-            ));
+                stack(space::MD)
+                    .child(presence("connection-list-block", count > 0, list).space(space::MD))
+                    .child(
+                        presence(
+                            "no-connection-block",
+                            empty,
+                            EmptyLine::new("no-connection", Icon::Lucide("plug"), EMPTY),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(problem_line(
+                        "connection-problem",
+                        self.problem.clone(),
+                        space::MD,
+                        cx,
+                    )),
+            );
         div()
             .text_color(p.text)
             .child(section)

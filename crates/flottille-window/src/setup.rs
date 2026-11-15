@@ -21,7 +21,7 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
+use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line, stack};
 use crate::project::repository_label;
 use crate::shell::Shell;
 
@@ -806,7 +806,6 @@ impl SetupSection {
             .id("setup-form")
             .flex()
             .flex_col()
-            .gap(space::LG)
             .child(Field::new("setup-kind-field", "What it does", kind))
             // What the kind needs unfolds as it is chosen and the rest folds away.
             .child(
@@ -820,7 +819,7 @@ impl SetupSection {
                     )
                     .hint(hint),
                 )
-                .gap(space::LG),
+                .space(space::LG),
             )
             .child(
                 presence(
@@ -831,7 +830,7 @@ impl SetupSection {
                          folder that is not a repository, .git or .gitignore.",
                     ),
                 )
-                .gap(space::LG),
+                .space(space::LG),
             )
             .child(
                 presence(
@@ -851,7 +850,7 @@ impl SetupSection {
                             Field::new("setup-repository-field", "Repository", repository),
                         ))),
                 )
-                .gap(space::LG),
+                .space(space::LG),
             )
             .child(
                 presence(
@@ -861,7 +860,7 @@ impl SetupSection {
                         .optional()
                         .hint("The project's limit when none is chosen."),
                 )
-                .gap(space::LG),
+                .space(space::LG),
             )
             .child(problem_line(
                 "setup-error",
@@ -922,26 +921,30 @@ impl Render for SetupSection {
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.open(None, window, cx))),
             )
-            .child(presence("setup-list-block", count > 0, list).gap(space::MD))
             .child(
-                presence(
-                    "no-setup-block",
-                    empty,
-                    EmptyLine::new(
-                        "no-setup",
-                        Icon::Folder,
-                        "No step yet: a new workspace is a copy of the repositories alone. Copy the .env \
-                         files, link what is shared, run the install.",
-                    ),
-                )
-                .gap(space::MD),
-            )
-            .child(problem_line(
-                "setup-problem",
-                self.problem.clone(),
-                space::MD,
-                cx,
-            ));
+                stack(space::MD)
+                    .child(presence("setup-list-block", count > 0, list).space(space::MD))
+                    .child(
+                        presence(
+                            "no-setup-block",
+                            empty,
+                            EmptyLine::new(
+                                "no-setup",
+                                Icon::Folder,
+                                "No step yet: a new workspace is a copy of the repositories \
+                                 alone. Copy the .env files, link what is shared, run the \
+                                 install.",
+                            ),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(problem_line(
+                        "setup-problem",
+                        self.problem.clone(),
+                        space::MD,
+                        cx,
+                    )),
+            );
         div()
             .text_color(p.text)
             .child(section)

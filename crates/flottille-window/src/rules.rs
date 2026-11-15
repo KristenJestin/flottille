@@ -24,7 +24,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::Command;
-use crate::commands::perform_later;
+use crate::commands::{perform_later, spaced, stack};
 use crate::settings::Reveal;
 use crate::shell::Shell;
 
@@ -549,8 +549,8 @@ impl Render for RulesEditor {
                 .into(),
             )
         };
+        // Under the field with the gap of whatever column holds it, and `XS` more.
         let footer = div()
-            .mt(space::XS)
             .flex()
             .items_center()
             .gap(space::SM)
@@ -624,7 +624,6 @@ impl Render for RulesEditor {
             return div()
                 .flex()
                 .flex_col()
-                .gap(space::SM)
                 .child(text)
                 .child(
                     presence_of(
@@ -639,7 +638,7 @@ impl Render for RulesEditor {
                             }),
                         line(id("error")),
                     )
-                    .gap(space::SM),
+                    .space(space::SM),
                 )
                 .child(
                     presence_of(
@@ -647,9 +646,9 @@ impl Render for RulesEditor {
                         self.problem.clone(),
                         line(id("problem")),
                     )
-                    .gap(space::SM),
+                    .space(space::SM),
                 )
-                .child(footer)
+                .child(spaced(space::SM + space::XS, footer))
                 .into_any_element();
         }
         let (title, sentence, section): (String, String, String) = match (judge, &self.project) {
@@ -756,7 +755,7 @@ impl Render for RulesEditor {
                 .on_click(cx.listener(move |this, _, _, cx| this.set_alone(!alone, cx)));
             (
                 toggle,
-                presence(id("global-block"), open, body).gap(space::MD),
+                presence(id("global-block"), open, body).space(space::MD),
                 switch,
             )
         });
@@ -779,10 +778,12 @@ impl Render for RulesEditor {
         Section::new(section, title)
             .tag(self.origin())
             .sentence(sentence)
-            .children(global_toggle)
-            .children(global_body)
-            .children(alone_switch)
-            .child(text)
+            .child(
+                stack(space::MD)
+                    .children(global_toggle.map(|toggle| spaced(space::MD, toggle)))
+                    .children(global_body)
+                    .children(alone_switch.map(|switch| spaced(space::MD, switch)))
+                    .child(spaced(space::MD, text))
             .child(
                 presence_of(
                     id("repeats-block"),
@@ -792,7 +793,7 @@ impl Render for RulesEditor {
                         .map(|_| SharedString::from(REPEATS)),
                     note(id("repeats")),
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .child(
                 presence_of(
@@ -803,7 +804,7 @@ impl Render for RulesEditor {
                         .map(|cut| SharedString::from(format!("Cut: {cut}."))),
                     line(id("cut")),
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .child(
                 presence_of(
@@ -825,7 +826,7 @@ impl Render for RulesEditor {
                         }),
                     line(id("error")),
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .child(
                 presence_of(
@@ -833,9 +834,10 @@ impl Render for RulesEditor {
                     self.problem.clone(),
                     line(id("problem")),
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
-            .child(footer)
+                    .child(spaced(space::MD + space::XS, footer)),
+            )
             .into_any_element()
     }
 }
