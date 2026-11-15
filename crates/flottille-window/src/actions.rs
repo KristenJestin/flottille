@@ -354,6 +354,12 @@ pub enum Command {
         project: String,
         asked: u64,
     },
+    /// The project's milestones and their tickets (`project.progress`); `asked` numbers the
+    /// reads.
+    Progress {
+        project: String,
+        asked: u64,
+    },
     /// One pull request or ticket in full (`items.show`).
     Item {
         project: String,
@@ -1051,6 +1057,11 @@ pub enum Outcome {
         project: String,
         asked: u64,
         read: Result<crate::items::Read, String>,
+    },
+    Progress {
+        project: String,
+        asked: u64,
+        read: Result<crate::progress::Progress, String>,
     },
     Item {
         project: String,
@@ -2153,6 +2164,17 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                         .map(|settings| crate::items::Read::of(&listed, &settings))
                 });
             Outcome::Items {
+                project,
+                asked,
+                read,
+            }
+        }
+        Command::Progress { project, asked } => {
+            let params = json!({"project": project});
+            let read = ask_alone(connect, "project.progress", params, bounds.quick)
+                .and_then(|read| read)
+                .map(|read| crate::progress::Progress::of(&read));
+            Outcome::Progress {
                 project,
                 asked,
                 read,

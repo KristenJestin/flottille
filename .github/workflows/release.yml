@@ -1,12 +1,17 @@
 # A release (docs/releases.md): main moves forward to a commit of dev, never a squash nor a merge
-# of its own, then ci.yml builds and publishes it as the stable release.
+# of its own, then ci.yml builds and publishes it as the stable release. A commit of a stable
+# line `stable/X.Y` is tagged instead, main left where it is, and ci.yml builds it on its tag.
 name: release
 
 on:
   workflow_dispatch:
     inputs:
+      branch:
+        description: The branch to release from, dev or a stable line stable/X.Y (never next/*)
+        required: true
+        default: dev
       commit:
-        description: The commit of dev to release, its full SHA, or dev for its head
+        description: The commit to release, its full SHA, or the branch's name for its head
         required: true
         default: dev
 
@@ -20,19 +25,21 @@ jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
-      # To move main.
+      # To move main, or to tag a line's commit.
       contents: write
-      # To start ci.yml on main: a ref moved with this token starts no push run, a
+      # To start ci.yml on main or on the tag: a ref moved with this token starts no push run, a
       # workflow_dispatch started with it does.
       actions: write
-    # This job holds a token that writes main: no checkout, no git, no code of any branch. Only
-    # `gh`, through GitHub's API, and the input reaches the script through its environment only.
+    # This job holds a token that writes main and the tags: no checkout, no git, no code of any
+    # branch. Only `gh`, through GitHub's API, and the inputs reach the script through its
+    # environment only.
     steps:
-      - name: Move main forward to the commit, then build it
+      - name: Move main forward to the commit, or tag the line's, then build it
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ inputs.branch }}
           COMMIT: ${{ inputs.commit }}
         run: |
           # The workflow of dev is the one that releases: another branch's copy may say anything.
@@ -40,27 +47,77 @@ jobs:
             echo "::error::The release is started from dev, not $GITHUB_REF: nothing was released."
             exit 1
           fi
-          # A full SHA or dev, nothing else reaches a command.
-          if [ "$COMMIT" != dev ] && ! [[ $COMMIT =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::The commit to release is a full SHA of dev, or dev for its head: nothing was released."
+          # dev or a line stable/X.Y, then a full SHA or that branch's name, nothing else reaches
+          # a command.
+          line=
+          if [[ $BRANCH =~ ^stable/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} line=$BRANCH
+          elif [ "$BRANCH" != dev ]; then
+            echo "::error::The branch to release from is dev or a line stable/X.Y: nothing was released."
             exit 1
           fi
-          dev=$(gh api "repos/$GH_REPO/git/ref/heads/dev" --jq .object.sha)
-          main=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+          if [ "$COMMIT" != "$BRANCH" ] && ! [[ $COMMIT =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The commit to release is a full SHA of $BRANCH, or $BRANCH for its head: nothing was released."
+            exit 1
+          fi
+          if ! tip=$(gh api "repos/$GH_REPO/git/ref/heads/$BRANCH" --jq .object.sha); then
+            echo "::error::$GH_REPO has no branch $BRANCH: nothing was released."
+            exit 1
+          fi
           commit=$COMMIT
-          if [ "$commit" = dev ]; then commit=$dev; fi
-          # On dev: dev is the commit, or ahead of it.
-          if ! status=$(gh api "repos/$GH_REPO/compare/$commit...$dev" --jq .status); then
+          if [ "$commit" = "$BRANCH" ]; then commit=$tip; fi
+          # On the branch: the branch is the commit, or ahead of it.
+          if ! status=$(gh api "repos/$GH_REPO/compare/$commit...$tip" --jq .status); then
             echo "::error::$commit is not a commit of $GH_REPO: nothing was released."
             exit 1
           fi
           case "$status" in
             identical | ahead) ;;
             *)
-              echo "::error::$commit is not a commit of dev: nothing was released."
+              echo "::error::$commit is not a commit of $BRANCH: nothing was released."
               exit 1
               ;;
           esac
+          if [ -n "$line" ]; then
+            # The version is the one of its release candidate, which CI published on this very
+            # commit once its verify passed: a lightweight tag vX.Y.Z-rc.N, of this line.
+            versions=$(gh api "repos/$GH_REPO/git/matching-refs/tags/v$major.$minor." --paginate --jq '.[] | "\(.object.sha) \(.ref)"' |
+              while read -r sha ref; do
+                if [ "$sha" = "$commit" ] && [[ $ref =~ ^refs/tags/(v$major\.$minor\.(0|[1-9][0-9]*))-rc\.[0-9]+$ ]]; then
+                  echo "${BASH_REMATCH[1]}"
+                fi
+              done | sort -u)
+            if [ -z "$versions" ]; then
+              echo "::error::No release candidate (-rc) of $commit was published on $line (its push run did not publish one): nothing was released."
+              exit 1
+            fi
+            if [ "$(wc -l <<< "$versions")" -ne 1 ]; then
+              echo "::error::$commit is the release candidate of several versions ($(tr '\n' ' ' <<< "$versions")): nothing was released."
+              exit 1
+            fi
+            tag=$versions
+            if gh api "repos/$GH_REPO/git/ref/tags/$tag" > /dev/null 2> "$RUNNER_TEMP/tag.err"; then
+              # Run again after a build that did not start: the tag is there already.
+              tagged=$(gh api "repos/$GH_REPO/commits/$tag" --jq .sha)
+              if [ "$tagged" != "$commit" ]; then
+                echo "::error::$tag is on $tagged already, not on $commit: nothing was released."
+                exit 1
+              fi
+              echo "::notice::$tag is on $commit already: it is built again."
+            elif grep -q 'HTTP 404' "$RUNNER_TEMP/tag.err"; then
+              # An annotated tag naming its line, so that the versions tell the line's releases
+              # from dev's (tools/version.sh). A ref made, never one moved.
+              object=$(gh api "repos/$GH_REPO/git/tags" -f tag="$tag" -f message="$line" -f object="$commit" -f type=commit --jq .sha)
+              gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$tag" -f sha="$object" > /dev/null
+              echo "::notice::$tag put on $commit, of $line; main does not move."
+            else
+              cat "$RUNNER_TEMP/tag.err" >&2
+              exit 1
+            fi
+            gh workflow run ci.yml --ref "$tag"
+            exit 0
+          fi
+          main=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
           status=$(gh api "repos/$GH_REPO/compare/$main...$commit" --jq .status)
           case "$status" in
             ahead)

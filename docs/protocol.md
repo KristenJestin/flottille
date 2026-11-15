@@ -358,6 +358,21 @@ the new-workspace form's preview (`docs/tickets.md`): `{"project", "ticket", "tr
 "tracker_said", "problem"}` and, once read, the fields of `workspace.ticket`. `problem` says why it
 is not taken or not read; it is not a refusal.
 
+
+#### `project.progress`
+
+`{"project"}`. The milestones of the project's tracker and their tickets, for the window's
+Progress page (`docs/tickets.md`, "Progress"): `{"project", "tracker" (github or jira),
+"milestones", "problem"}`. Each milestone is `{"id", "name", "source", "jira_project", "state"
+(open or closed), "due", "closed_at" (the day GitHub closed it, when it says so), "url", "read",
+"problem" (why a Jira version's tickets could not be read), "counts": {"done", "review", "progress", "todo", "other",
+"total"}, "groups"}`, each group `{"name", "category" (new, indeterminate, review, done or
+other), "tickets"}`, each ticket `{"key", "title", "state", "status", "url", "workspaces",
+"pulls"}`, each pull request `{"repository", "key", "title", "state", "ci", "url"}`. `read` is
+false for a released Jira version, whose tickets are not read, or whose search failed (its own
+`problem` says why). The top-level `problem` says why the milestones
+could not be read (`milestones` is then empty); it is not a refusal. `refused` for a project that
+declares no tracker.
 ### The rules methods
 
 `rules.show`, `rules.set` and `rules.reset` read, write and reset how agents are told to work

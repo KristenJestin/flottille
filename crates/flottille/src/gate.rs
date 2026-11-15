@@ -641,10 +641,11 @@ pub fn too_long(key: &str, text: &Value) -> Option<Verdict> {
 fn untexted(tool: &str, action: &str, args: &Value, keys: &[&str]) -> Result<(), Verdict> {
     for key in keys {
         if args.get(*key).is_some_and(|text| !text.is_null()) {
-            let takers = match *key {
-                "title" => "edit and create",
-                "comment" => "close and reopen",
-                "message" => "a merge by squash",
+            let takers = match (*key, tool) {
+                ("title", _) => "edit and create",
+                ("comment", _) => "close and reopen",
+                ("message", _) => "a merge by squash",
+                (_, "forge") => "create, comment, edit, reply and review",
                 _ => "create, comment and edit",
             };
             return Err(Verdict::Deny(format!(
@@ -683,6 +684,11 @@ fn forge(call: &Call) -> Verdict {
         | "run_view" | "run_logs" | "follow_run" => return Verdict::Allow,
         "create" => "it opens a pull request on the forge",
         "comment" => "it comments on a pull request on the forge",
+        "reply" => "it replies in a review thread on the forge",
+        "resolve" => match call.args["resolved"].as_bool() {
+            Some(false) => "it opens a resolved review thread again on the forge",
+            _ => "it resolves a review thread on the forge",
+        },
         "review" => match call.args["verdict"].as_str() {
             Some(verdict) if crate::forge::REVIEW_VERDICTS.contains(&verdict) => {
                 "it posts a review on a pull request on the forge"
@@ -712,7 +718,8 @@ fn forge(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" | "review" => &["title", "comment", "message"],
+        "comment" | "review" | "reply" => &["title", "comment", "message"],
+        "resolve" => &["title", "body", "comment", "message"],
         "merge" => &["title", "body", "comment"],
         "checks" | "run" | "stop" | "step" => &["title", "body", "comment", "message"],
         "close" | "reopen" => &["title", "body", "message"],
@@ -785,7 +792,7 @@ fn forge(call: &Call) -> Verdict {
 }
 
 /// The arguments of `forge` that belong to some actions alone, and those.
-const FORGE_ONLY: [(&str, &[&str]); 14] = [
+const FORGE_ONLY: [(&str, &[&str]); 16] = [
     ("draft", &["create", "edit"]),
     ("reviewers", &["create"]),
     ("labels", &["create"]),
@@ -800,11 +807,14 @@ const FORGE_ONLY: [(&str, &[&str]); 14] = [
     ("verdict", &["review"]),
     ("comments", &["review"]),
     ("query", &["people"]),
+    ("thread", &["reply", "resolve"]),
+    ("resolved", &["resolve"]),
 ];
 
 /// The actions of `forge`, as a refusal names them.
-pub const FORGE_ACTIONS: &str = "list, show, people, subscribe, unsubscribe, create, comment, review, edit, merge, checks, close, \
-     reopen, pipelines, runs, run_view, run_logs, run, follow_run, stop and step";
+pub const FORGE_ACTIONS: &str = "list, show, people, subscribe, unsubscribe, create, comment, reply, resolve, review, edit, \
+     merge, checks, close, reopen, pipelines, runs, run_view, run_logs, run, follow_run, stop and \
+     step";
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, people, types, link_types, sprints, milestones, subscribe, unsubscribe, \
      create, comment, edit, close, reopen, status, link, unlink, comment_edit, comment_delete, \
@@ -830,7 +840,7 @@ fn tickets(call: &Call) -> Verdict {
     let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
         "list" | "search" | "show" | "people" | "types" | "link_types" | "sprints"
-        | "milestones" | "subscribe" | "unsubscribe" | "time_spent" => {
+        | "milestones" | "progress" | "subscribe" | "unsubscribe" | "time_spent" => {
             return Verdict::Allow;
         }
         "log_time" => format!(
@@ -5018,6 +5028,58 @@ mod tests {
             );
             assert!(to_judge(&verdict), "{action}");
         }
+    }
+
+    #[test]
+    fn a_reply_in_a_review_thread_and_its_resolution_are_judged_as_a_comment() {
+        let fixture = Fixture::workspace();
+        for (args, said) in [
+            (
+                json!({"action": "reply", "thread": "PRRT_1", "body": "Done."}),
+                "it replies in a review thread on the forge",
+            ),
+            (
+                json!({"action": "resolve", "thread": 7, "resolved": true}),
+                "it resolves a review thread on the forge",
+            ),
+            (
+                json!({"action": "resolve", "thread": 7, "resolved": false}),
+                "it opens a resolved review thread again on the forge",
+            ),
+        ] {
+            let mut args = args;
+            args["repository"] = json!(".");
+            args["number"] = json!(1);
+            let verdict = fixture.judge("forge", args.clone(), Some(&fixture.never));
+            assert!(to_judge(&verdict), "{args}");
+            assert!(format!("{verdict:?}").contains(said), "{said}: {verdict:?}");
+        }
+        // A thread or a resolution given to another action is refused, as the other arguments.
+        for args in [
+            json!({"action": "comment", "number": 1, "body": "x", "thread": "PRRT_1"}),
+            json!({"action": "reply", "number": 1, "body": "x", "thread": "PRRT_1",
+                "resolved": true}),
+            json!({"action": "resolve", "number": 1, "thread": 7, "resolved": true,
+                "body": "x"}),
+        ] {
+            let verdict = fixture.judge("forge", args.clone(), Some(&fixture.never));
+            assert!(matches!(verdict, Verdict::Deny(_)), "{args}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_body_on_a_resolve_names_every_action_that_takes_one() {
+        let fixture = Fixture::workspace();
+        let args = json!({"action": "resolve", "repository": ".", "number": 1, "thread": 7,
+            "resolved": true, "body": "x"});
+        let verdict = fixture.judge("forge", args, Some(&fixture.never));
+        let Verdict::Deny(said) = verdict else {
+            panic!("not refused: {verdict:?}");
+        };
+        assert!(
+            said.contains("body is for create, comment, edit, reply and review"),
+            "{said}"
+        );
     }
 
     #[test]

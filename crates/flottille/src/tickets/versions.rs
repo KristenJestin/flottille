@@ -25,14 +25,14 @@ pub(super) const IN_JIRA: &str = "the user does it in Jira, on the project's Rel
 #[derive(Clone)]
 pub(super) struct Version {
     pub project: String,
-    id: String,
+    pub id: String,
     /// As Jira holds it: what is looked up, put in JQL and sent back is this, never its masked
     /// form, which only what is shown uses (`shown`).
     pub name: String,
-    released: bool,
+    pub released: bool,
     /// The day it was released or is due, when it has one.
-    date: Option<String>,
-    archived: bool,
+    pub date: Option<String>,
+    pub archived: bool,
 }
 
 impl Version {
@@ -87,7 +87,7 @@ impl Version {
 }
 
 /// The versions of `project`, from the view `acli` prints of it.
-async fn read(project: &str) -> Result<Vec<Version>, String> {
+pub(super) async fn read(project: &str) -> Result<Vec<Version>, String> {
     let said = acli_run(&["jira", "project", "view", "--key", project, "--json"]).await?;
     let view: Value = serde_json::from_str(&said)
         .map_err(|error| format!("acli jira project view answered what is not JSON: {error}"))?;

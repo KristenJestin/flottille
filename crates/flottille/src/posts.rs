@@ -236,6 +236,24 @@ impl Known {
         }
     }
 
+    /// Marks the comments of review threads an agent posted: a reply is recorded by its id.
+    pub(crate) fn mark_threads(&self, threads: &mut [forge::Thread]) {
+        let comments = threads.iter_mut().flat_map(|t| t.comments.iter_mut());
+        let mut comments: Vec<&mut forge::Comment> = comments.collect();
+        let read: Vec<Heard> = comments
+            .iter()
+            .map(|comment| Heard {
+                id: comment.id.as_deref(),
+                at: comment.at,
+                text: comment.body.as_str(),
+            })
+            .collect();
+        let marks = self.marks(&read);
+        for (comment, mark) in comments.iter_mut().zip(marks) {
+            comment.recorded |= mark;
+        }
+    }
+
     /// Marks the comments and the description of a ticket an agent posted.
     pub(crate) fn mark_ticket(&self, ticket: &mut Ticket) {
         ticket.description_by_agent |= self.body(&ticket.description);

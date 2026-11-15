@@ -359,6 +359,7 @@ pub(crate) fn offer(
             ci: None,
             closing: None,
             ended: None,
+            threads: None,
         };
         logs::attach(&forge, &mut pull.jobs).await;
         // The logs may say a failed check was the CI's: the head counts it so.

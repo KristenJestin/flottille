@@ -34,6 +34,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("project.set_conventions", Drive),
     ("project.set_message_checks", Drive),
     ("project.ticket", Read),
+    ("project.progress", Read),
     ("rules.show", Read),
     ("rules.set", Drive),
     ("rules.reset", Drive),

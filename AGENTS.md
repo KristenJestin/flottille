@@ -165,13 +165,16 @@ stack"). Nothing of Flottille goes into the kit, and no component is drawn here 
   `area:*`. A milestone ends on something the maintainer can use, and they accept it on their
   machine.
 - **`dev` is the integration branch** and the default branch: a branch starts from
-  `origin/dev` and its pull request targets it. `main` holds released versions.
+  `origin/dev` and its pull request targets it. `main` holds released versions. Beside them,
+  `stable/X.Y` is the fix line of a released `X.Y` (backports only, by the label `backport X.Y`),
+  and `next/X.Y` the version after dev's, which dev is merged forward into; a ticket branch starts
+  from the branch its pull request targets (`docs/releases.md`, "The branches").
 
 ## Git and pull requests (non-negotiable)
 
-- **Never commit, merge, rebase, push or force-push on `main` or `dev` directly.** If you are
-  on one of these branches, create a branch first (`feat/<n>-<topic>`, `fix/<n>-<topic>`). The
-  `pre-commit` hook refuses it.
+- **Never commit, merge, rebase, push or force-push on `main`, `dev`, `stable/*` or `next/*`
+  directly.** If you are on one of these branches, create a branch first (`feat/<n>-<topic>`,
+  `fix/<n>-<topic>`). The `pre-commit` hook refuses it.
 - Never rewrite published history. No `--no-verify`.
 - One commit = one intent. No `wip` commits. Don't mix formatting and logic in one commit.
 - Commits use the Git user configured on the machine.

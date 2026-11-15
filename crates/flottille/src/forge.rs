@@ -44,6 +44,7 @@ mod logs;
 pub(crate) mod people;
 mod pipelines;
 mod review;
+mod threads;
 mod yaml;
 
 pub(crate) use events::offer;
@@ -69,6 +70,8 @@ pub(crate) use pipelines::{HIDDEN_EVERYWHERE, bitbucket_key, with_branch};
 /// What `forge review` posts: a comment, an approval or a request for changes.
 pub use review::VERDICTS as REVIEW_VERDICTS;
 pub(crate) use review::head_of as review_head;
+pub use threads::Thread;
+pub(crate) use threads::bitbucket_thread;
 
 /// The forge a repository's remote is on: GitHub, or Bitbucket (Cloud, or a Data Center host the
 /// project names).
@@ -326,6 +329,9 @@ pub struct Pull {
     /// Who merged it and when (milliseconds), when `gh pr view` says it: the closing comment is
     /// then found without asking the issue's events (`closing`).
     pub ended: Option<(String, u64)>,
+    /// Its review threads and whether it has more than were read, or why they could not be read;
+    /// none when they were not read (GitHub's are read for `detail: full` alone).
+    pub threads: Option<Result<(Vec<Thread>, bool), String>>,
 }
 
 /// A reviewer: the name Bitbucket shows, their verdict, and the handle an agent names them by
@@ -528,6 +534,7 @@ impl Pull {
                         .and_then(crate::session_read::form),
                 )
                 .map(|(login, at)| (masked(login), at)),
+            threads: None,
         })
     }
 }
@@ -1138,6 +1145,10 @@ pub(crate) struct ForgeCall {
     /// step: `start` or `rerun`.
     #[serde(rename = "do")]
     verb: Option<String>,
+    /// reply, resolve: the review thread, as `show` with `detail: full` names it.
+    thread: Option<threads::ThreadId>,
+    /// resolve: `true` resolves the thread, `false` opens it again.
+    resolved: Option<bool>,
 }
 
 impl ForgeCall {
@@ -1186,6 +1197,11 @@ impl ForgeCall {
         }
         if self.action == "review"
             && let Some(why) = review::malformed(self)
+        {
+            return Some(why);
+        }
+        if matches!(self.action.as_str(), "reply" | "resolve")
+            && let Some(why) = threads::malformed(self)
         {
             return Some(why);
         }
@@ -1437,6 +1453,11 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         }
         ("review", _) => {
             let written = review::review(daemon, place, asked).await;
+            daemon.forges.pulls.drop_all();
+            written
+        }
+        ("reply" | "resolve", _) => {
+            let written = threads::call(daemon, place, asked).await;
             daemon.forges.pulls.drop_all();
             written
         }
@@ -1879,6 +1900,20 @@ fn know_posts(daemon: &Daemon, project: &str, path: &str, forge: &Forge, pull: &
     .mark_pull(pull);
 }
 
+/// Marks the comments of a pull request's review threads that an agent posted (`posts`).
+fn know_threads(daemon: &Daemon, project: &str, path: &str, forge: &Forge, pull: &mut Pull) {
+    if let Some(Ok((threads, _))) = &mut pull.threads {
+        crate::posts::Known::of(
+            daemon,
+            project,
+            forge.kind(),
+            path,
+            &pull.number.to_string(),
+        )
+        .mark_threads(threads);
+    }
+}
+
 /// What a live read found of a pull request, stored over what the items keep of it.
 fn remember(daemon: &Arc<Daemon>, project: &str, path: &str, forge: &Forge, pull: &Pull) {
     let mut fetched = fetched_pull(path, forge.kind(), pull, true);
@@ -2255,7 +2290,8 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
                 remember(daemon, &place.project, &checkout.path, &forge, &pull);
             }
             drop(held);
-            attached(&forge, &mut pull).await;
+            attached(&forge, &mut pull, full).await;
+            know_threads(daemon, &place.project, &checkout.path, &forge, &mut pull);
             daemon.forges.pulls.put(key, pull.clone(), generation);
             shown_pull(&checkout, &forge, &pull, full, None)
         }
@@ -2315,19 +2351,30 @@ fn kept_key(forge: &Forge, number: u64) -> String {
 }
 
 /// What a pull request is still told once read: the logs of its failed checks, how long its CI
-/// usually takes and the comment it was closed with. They do not depend on one another, so they
-/// are read together.
-async fn attached(forge: &Forge, pull: &mut Pull) {
+/// usually takes, the comment it was closed with and, for `full` on GitHub, its review threads.
+/// They do not depend on one another, so they are read together.
+async fn attached(forge: &Forge, pull: &mut Pull, full: bool) {
     let mut jobs = std::mem::take(&mut pull.jobs);
-    let (_, ci, closing) = futures::join!(
+    let number = pull.number;
+    let github_threads = async move {
+        match (forge, full) {
+            (Forge::GitHub { .. }, true) => Some(threads::github(forge, number).await),
+            _ => None,
+        }
+    };
+    let (_, ci, closing, threads) = futures::join!(
         logs::attach(forge, &mut jobs),
         ci::recent(forge),
-        closing::of(forge, pull)
+        closing::of(forge, pull),
+        github_threads
     );
     pull.jobs = jobs;
     pull.ci = ci;
     if let Some(closing) = closing {
         pull.closing = closing;
+    }
+    if threads.is_some() {
+        pull.threads = threads;
     }
 }
 
@@ -2807,11 +2854,16 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
     drop(held);
     futures::future::join_all(read.repositories.iter_mut().filter_map(|repository| {
         match (&repository.forge, &mut repository.pull) {
-            (Some(forge), Some(pull)) => Some(attached(forge, pull)),
+            (Some(forge), Some(pull)) => Some(attached(forge, pull, full)),
             _ => None,
         }
     }))
     .await;
+    for repository in &mut read.repositories {
+        if let (Some(forge), Some(pull)) = (&repository.forge, &mut repository.pull) {
+            know_threads(daemon, &place.project, &repository.path, forge, pull);
+        }
+    }
     for repository in &read.repositories {
         if let (Some(forge), Some(pull)) = (&repository.forge, &repository.pull) {
             daemon
@@ -3499,7 +3551,22 @@ fn pull_text(
         };
         text.push_str(&format!("  closing comment{who}: {body}\n"));
     }
-    for (title, comments) in [("comments", &pull.comments), ("reviews", &pull.reviews)] {
+    // Bitbucket gives a thread's comments among the others: they are said in their thread.
+    let in_threads: Vec<&str> = match &pull.threads {
+        Some(Ok((threads, _))) => threads
+            .iter()
+            .flat_map(|t| &t.comments)
+            .filter_map(|c| c.id.as_deref())
+            .collect(),
+        _ => Vec::new(),
+    };
+    let comments: Vec<Comment> = pull
+        .comments
+        .iter()
+        .filter(|c| !full || c.id.as_deref().is_none_or(|id| !in_threads.contains(&id)))
+        .cloned()
+        .collect();
+    for (title, comments) in [("comments", &comments), ("reviews", &pull.reviews)] {
         let said: Vec<&Comment> = comments.iter().filter(|c| !c.body.is_empty()).collect();
         if said.is_empty() {
             continue;
@@ -3524,6 +3591,65 @@ fn pull_text(
                 String::new()
             };
             text.push_str(&format!("  - {}{agent}{state}: {body}\n", comment.author));
+        }
+    }
+    threads_text(text, pull, full, again);
+}
+
+/// A pull request's review threads, as `forge show` says them: with `full`, each with its file,
+/// line, side and state, then its comments with their author and date; otherwise how many, and
+/// how many are unresolved.
+fn threads_text(text: &mut String, pull: &Pull, full: bool, again: &str) {
+    let (threads, more) = match &pull.threads {
+        None => return,
+        Some(Err(why)) => {
+            text.push_str(&format!("  review threads: could not be read: {why}\n"));
+            return;
+        }
+        Some(Ok((threads, _))) if threads.is_empty() => return,
+        Some(Ok((threads, more))) => (threads, *more),
+    };
+    let open = threads.iter().filter(|t| t.resolved == Some(false)).count();
+    let counted = match more {
+        true => format!("{} read, the forge has more", threads.len()),
+        false => threads.len().to_string(),
+    };
+    if !full {
+        text.push_str(&format!(
+            "  review threads: {counted}, {open} unresolved, read them with forge {again}\n"
+        ));
+        return;
+    }
+    text.push_str(&format!(
+        "  review threads ({counted}, {open} unresolved; reply {{thread, body}} answers in one, \
+         resolve {{thread, resolved}} marks it):\n"
+    ));
+    for thread in threads {
+        // A thread with more comments than were read says so: its last ones are not shown.
+        let cut = match thread.comments_total {
+            Some(total) if total > thread.comments.len() as u64 => format!(
+                " ({total} comments, only the first {} shown)",
+                thread.comments.len()
+            ),
+            _ => String::new(),
+        };
+        text.push_str(&format!(
+            "  - thread {} on {}, {}{cut}:\n",
+            thread.id,
+            thread.place(),
+            thread.state()
+        ));
+        for comment in &thread.comments {
+            let (body, agent) = comment_body(comment);
+            let agent = match agent {
+                true => format!(" ({BY_AGENT})"),
+                false => String::new(),
+            };
+            let at = comment.at.map_or(String::new(), |at| {
+                format!(", {}", crate::session_read::shown_date(at))
+            });
+            let body = body.replace("\n    ", "\n      ");
+            text.push_str(&format!("    - {}{agent}{at}: {body}\n", comment.author));
         }
     }
 }
