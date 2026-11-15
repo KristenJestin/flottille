@@ -4112,15 +4112,25 @@ fn credential(own: &[PathBuf], home: Option<&Path>, path: &Resolved) -> Option<S
 /// Flottille's keys folder, `remote/` (`docs/remote.md`, "Identity and keys"), when a path is in
 /// it: the machine key, and the clients' device key on a machine with no keyring. It is in the
 /// state folder; it is looked for in each of Flottille's own folders, which hold no other
-/// `remote`, so that no order of `own` can leave it out.
+/// `remote`, so that no order of `own` can leave it out. A file system may not tell cases apart:
+/// `REMOTE` is `remote` there, as for an agent's folder.
+///
+/// Only what is in it: a folder above it is refused to a program that reads every file below
+/// (`reads_the_keys`), and to a write (`forbidden`), but a listing of it shows names only.
 fn keys(own: &[PathBuf], path: &Resolved) -> Option<String> {
-    let folders: Vec<PathBuf> = own_folders(own)
-        .iter()
-        .map(|own| own.join(crate::remote::FOLDER))
-        .collect();
+    let own = own_folders(own);
+    let in_keys = |path: &Path| {
+        own.iter().any(|own| {
+            path.strip_prefix(own)
+                .ok()
+                .and_then(|rest| rest.components().next())
+                .and_then(|name| name.as_os_str().to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(crate::remote::FOLDER))
+        })
+    };
     seen(path)
         .iter()
-        .any(|path| folders.iter().any(|keys| path.starts_with(keys)))
+        .any(|path| in_keys(path))
         .then(|| format!("Flottille's keys, its {}/ folder", crate::remote::FOLDER))
 }
 
@@ -7790,5 +7800,32 @@ mod tests {
             let verdict = fixture.run(line);
             assert!(!denied(&verdict), "{line}: {verdict:?}");
         }
+    }
+
+    #[test]
+    fn the_keys_folder_is_found_in_any_case() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let state = with_keys(&mut fixture, base.join("xdg/state/flottille"));
+        for name in ["REMOTE", "Remote", "rEmOtE"] {
+            let key = state.join(name).join("machine.key");
+            let key = key.display();
+            for verdict in [
+                fixture.file("fs_read", &key.to_string()),
+                fixture.file("fs_write", &key.to_string()),
+                fixture.run(&format!("cat {key}")),
+            ] {
+                let Verdict::Deny(why) = &verdict else {
+                    panic!("{name}: not refused: {verdict:?}");
+                };
+                assert!(why.contains("Flottille's keys"), "{name}: {why}");
+            }
+        }
+        // Only `remote`, in any case: a folder whose name only starts so is Flottille's state.
+        let verdict = fixture.file(
+            "fs_read",
+            &state.join("remotes/a.txt").display().to_string(),
+        );
+        assert!(!denied(&verdict), "{verdict:?}");
     }
 }

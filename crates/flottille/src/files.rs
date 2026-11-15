@@ -1546,6 +1546,42 @@ mod tests {
     }
 
     #[test]
+    fn search_over_the_state_folder_skips_flottille_s_keys_in_any_case() {
+        let mut scene = Scene::new();
+        scene.place.home = Some(scene.base.join("home"));
+        // A place that holds Flottille's state folder: a project in the home folder.
+        let state = scene.root.join(".local/state/flottille");
+        for file in [
+            "remote/machine.key",
+            "remote/client.key",
+            "Remote/machine.key",
+            "REMOTE/client.key",
+            "logs/daemon.log",
+        ] {
+            let path = state.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "token = hunter2\n").unwrap();
+        }
+        let args = SearchArguments {
+            pattern: "token".into(),
+            repository: None,
+            glob: None,
+            cursor: None,
+        };
+        for base in [scene.root.clone(), state.clone()] {
+            let base = scene.resolve(&base);
+            let Outcome::Done(found) =
+                search_in(&scene.place, std::slice::from_ref(&state), &base, &args)
+            else {
+                panic!("the search failed");
+            };
+            assert!(found.starts_with("1 match(es)"), "{found}");
+            assert!(found.contains("logs/daemon.log:1"), "{found}");
+            assert!(!found.contains(".key"), "{found}");
+        }
+    }
+
+    #[test]
     fn search_skips_a_sensitive_file_inside_a_repository() {
         let mut scene = Scene::new();
         let found = found_tokens(
