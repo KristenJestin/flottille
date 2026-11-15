@@ -2296,6 +2296,10 @@ fn reads_every_file(layer: &[String]) -> Option<(usize, bool)> {
 /// `/proc/self/root` too), or the one it runs in, which a wrapper (`env -C`) or git's `-C` moves.
 /// A folder that is the home, or above it, holds them all.
 fn reads_a_login(call: &Call, layers: &[Vec<String>]) -> Option<String> {
+    // The places are found on the disk: only for a line that may read one.
+    if !layers.iter().any(|layer| reads_every_file(layer).is_some()) {
+        return None;
+    }
     let keys: Vec<Login> = own_folders(call.own)
         .iter()
         .map(|own| (own.join(crate::remote::FOLDER), String::new()))
