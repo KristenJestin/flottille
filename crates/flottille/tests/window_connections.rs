@@ -3001,3 +3001,61 @@ fn no_window_message_tells_the_user_to_run_connection_login(cx: &mut TestAppCont
     let _ = server.kill();
     let _ = server.wait();
 }
+
+#[gpui_kit::test]
+fn a_401_with_a_header_from_the_vault_names_the_entry_not_a_sign_in(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "hippo-token", "secret": SECRET, "description": "Hippo's token"}),
+    )
+    .unwrap();
+    let (mut server, url) = protected_server(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url,
+            "headers": {"Authorization": {"vault": "hippo-token"}}}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-notes"));
+    click(cx, "connection-more-notes");
+    click(cx, "review-connection-notes");
+    until(&shell, cx, "what the review says", |cx| {
+        present(cx, "connection-review-edit-entry") || present(cx, "connection-review-sign-in")
+    });
+    settle(cx);
+    // The server refused what it was given: the entry is named, never its value, and the way out
+    // is the entry, not a sign-in.
+    assert!(!present(cx, "connection-review-sign-in"));
+    assert!(!present(cx, "connection-review-error"));
+    assert_eq!(
+        label(cx, "connection-review-edit-entry").as_deref(),
+        Some("Edit entry")
+    );
+    let said = label(cx, "connection-review-needs-entry").unwrap_or_default();
+    assert!(
+        said.contains("Authorization") && said.contains("hippo-token"),
+        "{said}"
+    );
+    let all = everything_said(cx);
+    assert!(!all.contains(SECRET), "{all}");
+    assert!(!all.contains("connection login"), "{all}");
+    assert!(!all.contains("sign in"), "{all}");
+    // Edit entry opens the entry's dialog in the vault, its secret to type again.
+    click(cx, "connection-review-edit-entry");
+    let vault = shell.read_with(cx, |s, cx| {
+        s.main()
+            .read(cx)
+            .settings_page()
+            .map(|page| page.read(cx).vault().clone())
+            .unwrap()
+    });
+    until(&shell, cx, "the entry's dialog", |cx| {
+        vault.read_with(cx, |v, _| v.is_open())
+    });
+    let _ = server.kill();
+    let _ = server.wait();
+}
