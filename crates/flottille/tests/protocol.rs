@@ -59,17 +59,17 @@ fn every_method_the_sources_name_is_catalogued() {
         .flat_map(|line| line.split('`').skip(1).step_by(2))
         .collect();
     let daemon = fs::read_to_string(crates.join("flottille/src/daemon.rs")).unwrap();
-    // The catalogue's families, and the prefixes the daemon routes by: a family left wholly out
-    // of the catalogue is still read.
+    // The catalogue's families, and each one `daemon.rs` routes, by a prefix (`"agent."`) or a
+    // method (`"daemon.status"`): a family left wholly out of the catalogue is still read.
     let mut families: HashSet<String> = METHODS
         .iter()
         .map(|(name, _)| name.split_once('.').unwrap().0.to_owned())
         .collect();
     families.extend(
         quoted(&daemon)
-            .filter_map(|literal| literal.strip_suffix('.'))
-            .filter(|family| is_word(family))
-            .map(str::to_owned),
+            .filter_map(|literal| literal.split_once('.'))
+            .filter(|(family, verb)| is_word(family) && (verb.is_empty() || is_word(verb)))
+            .map(|(family, _)| family.to_owned()),
     );
     // Not methods, and not in `docs/events.md`.
     let besides = [
