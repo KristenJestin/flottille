@@ -2386,10 +2386,13 @@ dependencies = [
  "flottille-protocol",
  "getrandom 0.3.4",
  "libc",
+ "quinn",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "zeroize",
 ]
 
