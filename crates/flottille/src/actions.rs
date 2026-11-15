@@ -341,8 +341,11 @@ pub async fn prepared(
             return Err(Outcome::Refused(why));
         }
         let mut says = posted_says(args);
-        // A reply is shown as it goes out, its quote too; a comment that cannot be answered is
-        // refused here.
+        // A reply is shown as it goes out, its quote too, instead of its body alone; a comment
+        // that cannot be answered is refused here. (`forge reply` keeps its body.)
+        if args["action"] == "reply" {
+            says.retain(|said| !said.starts_with("Its body: "));
+        }
         says.extend(
             crate::tickets::reply_says(daemon, &project, args)
                 .await
@@ -686,8 +689,6 @@ fn posted_says(args: &Value) -> Vec<String> {
     ) {
         return Vec::new();
     }
-    // A reply's body is shown with its quote, as it goes out (`tickets::reply_says`).
-    let reply = args["action"] == "reply";
     let mut says: Vec<String> = [
         ("title", "Its title"),
         ("body", "Its body"),
@@ -695,7 +696,6 @@ fn posted_says(args: &Value) -> Vec<String> {
         ("message", "Its message"),
     ]
     .into_iter()
-    .filter(|(key, _)| !(reply && *key == "body"))
     .filter_map(|(key, said)| Some(format!("{said}: {}", args[key].as_str()?)))
     .collect();
     // Whom a ticket goes to, where it goes, in words: `me` is the user reading the card.

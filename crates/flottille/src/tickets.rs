@@ -436,7 +436,7 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
                 comment["url"].as_str().and_then(crate::posts::comment_id),
                 &said(&comment["body"]),
             );
-            read.restricted = replies::hidden(&comment);
+            read.restricted = replies::hidden(comment);
             read
         })
         .collect();
@@ -648,7 +648,7 @@ fn work_item_comments(fields: &Value) -> Vec<Comment> {
                 &masked(&attached_text(&comment["body"], fields)),
             );
             read.account = comment["author"]["accountId"].as_str().map(str::to_owned);
-            read.restricted = replies::restriction(&comment);
+            read.restricted = replies::restriction(comment);
             read
         })
         .collect()
