@@ -2190,6 +2190,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "flottille-client"
+version = "0.1.0"
+dependencies = [
+ "flottille-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "flottille-core"
 version = "0.1.0"
 dependencies = [
