@@ -6398,9 +6398,11 @@ fn a_connection_variable_cannot_choose_the_landlock_exception() {
     }
     let user = user_with_display();
     let _wayland = wayland_socket(&user);
+    // The folder itself, not the test's link to it: Landlock's rule is on a path that is no link.
+    let runtime = user.path("runtime").canonicalize().unwrap();
     user.call(
         "vault.set",
-        json!({"name": "runtime-path", "secret": user.path("runtime").to_str().unwrap()}),
+        json!({"name": "runtime-path", "secret": runtime.to_str().unwrap()}),
     )
     .unwrap();
     browser_declared(
@@ -6420,11 +6422,7 @@ fn a_connection_variable_cannot_choose_the_landlock_exception() {
     let opened = logged(&user, "browser", "open");
     assert_eq!(opened.len(), 1, "{opened:?}");
     let seen = &opened[0]["display"];
-    assert_eq!(
-        seen["XDG_RUNTIME_DIR"],
-        user.path("runtime").to_str().unwrap(),
-        "{seen}"
-    );
+    assert_eq!(seen["XDG_RUNTIME_DIR"], runtime.to_str().unwrap(), "{seen}");
     assert_eq!(seen["runtime_files"], Value::Null, "{seen}");
 }
 
