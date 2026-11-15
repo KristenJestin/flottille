@@ -16,8 +16,8 @@ use flottille_core::images::{MAX_IMAGE_BYTES, MAX_IMAGES};
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
-    Badge, Button, Icon, Listing, Piece, Skeleton, Toast, Token, TokenEvent, TokenField, enter,
-    fade, hoverable, icon, palette, presence, space, toast,
+    Badge, Button, Icon, Listing, Piece, Skeleton, Toast, Token, TokenEvent, TokenField, TokenLook,
+    enter, fade, hoverable, icon, palette, presence, space, toast,
 };
 use gpui_kit::base::input::Paste;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -301,6 +301,11 @@ impl Attachments {
                 if let Some(at) = self.images.iter().position(|a| a.id == id) {
                     self.gone.push(self.images.remove(at));
                     cx.notify();
+                    // The text's change may have come before its picture left (an undo, a redo,
+                    // a cut): the chips after it are numbered again now.
+                    if let Some(field) = self.field.clone() {
+                        self.follow_chips(&field, cx);
+                    }
                 }
             }
             TokenEvent::Added(id) => {
@@ -311,6 +316,11 @@ impl Attachments {
                     let back = self.gone.remove(at);
                     self.images.push(back);
                     cx.notify();
+                    // The text's change may have come before its picture did: the numbers and
+                    // the order are settled now.
+                    if let Some(field) = self.field.clone() {
+                        self.follow_chips(&field, cx);
+                    }
                 }
             }
         }
@@ -358,20 +368,15 @@ impl Attachments {
     }
 
     /// The text changed: the numbers and the thumbnails follow the order of the chips.
-    pub fn follow<T: 'static>(&mut self, window: &mut Window, cx: &mut Context<T>) {
+    pub fn follow<T: 'static>(&mut self, cx: &mut Context<T>) {
         if let Some(field) = self.field.clone() {
-            self.follow_chips(&field, window, cx);
+            self.follow_chips(&field, cx);
         }
     }
 
     /// The thumbnails in the order of the chips (those without one after them), and each chip
-    /// numbered by its place. A chip still folding away waits: the text is not set under it.
-    fn follow_chips<T: 'static>(
-        &mut self,
-        field: &Entity<TokenField>,
-        window: &mut Window,
-        cx: &mut Context<T>,
-    ) {
+    /// numbered by its place. A chip still folding away waits: the numbers are not set under it.
+    fn follow_chips<T: 'static>(&mut self, field: &Entity<TokenField>, cx: &mut Context<T>) {
         let value = field.read(cx).value(cx);
         let chips = value
             .iter()
@@ -397,52 +402,27 @@ impl Attachments {
             self.images.sort_by_key(rank);
             cx.notify();
         }
-        let mut renumbered = false;
-        let pieces: Vec<Piece> = value
+        // A chip is renumbered in place: no undo step of its own, so the person's undo still
+        // reaches what they did (a removed picture comes back with its number).
+        let renumbered: Vec<(SharedString, TokenLook)> = value
             .into_iter()
-            .map(|piece| match piece {
-                Piece::Token(token) => match tokens::picture_of(&token.id)
-                    .and_then(|id| self.images.iter().position(|a| a.id == id))
-                {
-                    Some(at) => {
-                        let attached = &self.images[at];
-                        let look = tokens::picture_look(
-                            at + 1,
-                            &attached.name,
-                            Some(attached.image.bytes.len()),
-                        );
-                        renumbered |= look != token.look;
-                        Piece::Token(Token::new(token.id, look))
-                    }
-                    None => Piece::Token(token),
-                },
-                text => text,
+            .filter_map(|piece| {
+                let Piece::Token(token) = piece else {
+                    return None;
+                };
+                let at = tokens::picture_of(&token.id)
+                    .and_then(|id| self.images.iter().position(|a| a.id == id))?;
+                let attached = &self.images[at];
+                let look =
+                    tokens::picture_look(at + 1, &attached.name, Some(attached.image.bytes.len()));
+                (look != token.look).then_some((token.id, look))
             })
             .collect();
-        if !renumbered {
-            return;
-        }
-        // A number is in the chip's text: the text is set again, the caret moved by what the
-        // numbers before it gained or lost.
-        let input = field.read(cx).input().clone();
-        let (caret, before) = {
-            let input = input.read(cx);
-            let caret = input.cursor();
-            let gained: isize = input
-                .tokens()
-                .iter()
-                .zip(pieces.iter().filter_map(|piece| match piece {
-                    Piece::Token(token) => Some(token),
-                    Piece::Text(_) => None,
-                }))
-                .filter(|(span, _)| span.range().end <= caret)
-                .map(|(span, token)| token.look.label.len() as isize - span.range().len() as isize)
-                .sum();
-            (caret, gained)
-        };
-        let caret = (caret as isize + before).max(0) as usize;
-        field.update(cx, |field, cx| field.set_value(pieces, window, cx).ok());
-        input.update(cx, |input, cx| input.set_selected_range(caret..caret, cx));
+        field.update(cx, |field, cx| {
+            for (id, look) in renumbered {
+                field.relabel(&id, look, cx);
+            }
+        });
     }
 
     /// The message as it is sent: its text, each picture's chip as its marker

@@ -9093,7 +9093,7 @@ impl Reply {
                         }
                         let cursor = field.read(cx).cursor();
                         this.typed_at(&text, cursor, cx);
-                        this.attached.follow(window, cx);
+                        this.attached.follow(cx);
                         this.chip_commands(false, window, cx);
                     }
                     InputEvent::PressEnter { shift: false, .. } => this.enter(window, cx),
