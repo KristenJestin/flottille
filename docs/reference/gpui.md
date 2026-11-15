@@ -208,20 +208,20 @@ the wrong code first).
    constants, and a scan refusing any other gap or padding literal in the window crate. A page's
    column is 880 px at most with 32 px between its sections; a dialog is 520 px (640 wide) with
    24 px of padding.
-   **A gap given to a block that comes and goes is not a margin**: `presence(..).gap(g)` (and
-   `presence_of`, and `problem_line`'s gap) only tells the block how much of the parent's gap to
-   fold away with itself, so the column it is a child of has the same `.gap(g)` (a kit `Section`
-   has `MD`, a `Modal`'s body `LG`); a column without one draws the space nowhere, and a block
-   without the gap of a column that has one makes that gap appear at once when it comes and the
-   column jump when it goes: every block of a column has the column's gap, the same value, and is
-   the column's child itself (not inside an `enter`, whose own box would keep the gap). Where one gap
-   does not fit all the children, the block holds its space itself, a `.pt(..)` that folds with
-   it, and asks for no gap. **[test]** `a_presence_gap_needs_a_parent_gap`
-   (`crates/flottille-window/tests/`) reads the window's sources as syntax trees and refuses a
-   block whose parent is no column, has no gap, has another one, or has one the block does
-   not have, and a gapped block wrapped in a call; a block it cannot follow (one a helper
-   returns) is on its `UNSEEN` list, one entry per block, with who checks it, and each screen
-   that lost a space is measured in its own window test.
+   **A block that comes and goes holds the space above it itself**: `presence(..).space(g)` (and
+   `presence_of`, and `problem_line`'s `above`) is a margin that unfolds and folds away with the
+   block, whatever its parent is. The parent is a column without a gap: a gap it had would show at
+   once when the block comes and leave with a jump when it goes. What is always there is spaced by
+   a column of its own with the gap (the kit's `Field` does it for its label, control and hint),
+   or by `spaced(g, child)`; `stack(g)` is the column whose children all hold their space above
+   them, pulled up by `g` so that the first lands where its parent (a `Section`'s gap under its
+   header, a modal's body) put it. A kit `Section` gaps `MD` between its children and a modal's
+   body `LG`, so what a block of theirs needs goes in one column that is their only child. The old
+   `presence(..).gap(g)` is the parent's gap, only folded with the block, and the window does not
+   use it: a block that keeps it (its column holds the rows of a `Listing`, whose `Item::gap` is
+   the column's) is on `KEPT` in **[test]** `a_block_has_its_own_space`
+   (`crates/flottille-window/tests/`), which reads the window's sources as syntax trees and refuses
+   any other.
 10. **Motion**, as above: everything that appears, leaves, opens, folds or changes state moves
     with the shared durations; a drawer slides from the right; a select's list fades in; a
     radio's dot scales in. **[test]** each component's scenario.
