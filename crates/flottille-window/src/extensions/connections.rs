@@ -1494,6 +1494,8 @@ impl ConnectionsSection {
             folding: HashMap::new(),
         });
         self.review_open = true;
+        // The entry a refused header names is listed by the time its dialog is asked for.
+        self.vault.update(cx, |vault, cx| vault.read(cx));
         self.ask(
             "connection.review",
             json!({"name": name}),
@@ -1502,6 +1504,23 @@ impl ConnectionsSection {
             },
             cx,
         );
+        cx.notify();
+    }
+
+    /// "Edit entry": the review closes, and the vault's dialog opens on the entry, its secret to
+    /// type again. The review is opened again from the row once it is replaced.
+    fn edit_entry(&mut self, entry: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.review_open = false;
+        let entry = entry.to_owned();
+        // After this update: the shell opens Settings, which holds this section.
+        let shell = self.shell.clone();
+        window.defer(cx, move |window, cx| {
+            shell
+                .update(cx, |shell, cx| {
+                    shell.replace_vault_entry(&entry, window, cx)
+                })
+                .ok();
+        });
         cx.notify();
     }
 
@@ -3025,6 +3044,24 @@ impl ConnectionsSection {
                     true,
                 )
             }
+            Some(Err(why)) if flottille_core::vault::refused_entry(why) => (
+                // The server refused what the user's entries gave it: the way out is an entry.
+                Some(
+                    "Its server refused what it was given, so there is nothing to read yet."
+                        .to_owned(),
+                ),
+                div()
+                    .id("connection-review-needs-entry")
+                    .aria_label(SharedString::from(why.clone()))
+                    .text_size(px(12.5))
+                    .text_color(p.wait)
+                    .child(SharedString::from(why.clone()))
+                    .test_support()
+                    .into_any_element(),
+                None,
+                None,
+                false,
+            ),
             Some(Err(why)) if flottille_core::vault::asks_sign_in(why) => {
                 // A state, in the attention tone, not an error: the way out is a button.
                 let name = review.name.clone();
@@ -3075,6 +3112,17 @@ impl ConnectionsSection {
             Some(Err(why)) if flottille_core::vault::asks_sign_in(why) => Some(review.name.clone()),
             _ => None,
         };
+        let entries: Vec<String> = match &answer {
+            Some(Err(why)) if flottille_core::vault::refused_entry(why) => {
+                let mut kept: Vec<String> = self
+                    .server(&review.name)
+                    .map(|server| server.headers.values().cloned().collect())
+                    .unwrap_or_default();
+                kept.dedup();
+                kept
+            }
+            _ => Vec::new(),
+        };
         review.answer = answer;
         self.review = Some(review);
         let body = div()
@@ -3109,6 +3157,26 @@ impl ConnectionsSection {
                     .leading(Icon::Lucide("log-in"))
                     .disabled(signing)
                     .on_click(cx.listener(move |this, _, _, cx| this.sign_in(&name, cx))),
+            );
+        }
+        let several = entries.len() > 1;
+        for entry in entries {
+            let (label, id) = match several {
+                true => (
+                    format!("Edit {entry}"),
+                    format!("connection-review-edit-{entry}"),
+                ),
+                false => (
+                    "Edit entry".to_owned(),
+                    "connection-review-edit-entry".to_owned(),
+                ),
+            };
+            modal = modal.action(
+                Button::primary(SharedString::from(id), SharedString::from(label))
+                    .leading(Icon::Lucide("key-round"))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.edit_entry(&entry, window, cx)),
+                    ),
             );
         }
         if ready {

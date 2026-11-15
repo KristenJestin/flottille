@@ -2964,10 +2964,13 @@ fn signing_in_from_the_review_reads_the_server_and_shows_its_actions(cx: &mut Te
     let (status, _) = browse(&location.unwrap());
     assert_eq!(status, 200);
     // Nobody presses anything more: the review reads the server again and shows what it announces.
+    // The server is given at once once signed in, so its actions are the pinned ones: the review
+    // is ready when it can be accepted, whatever group each row is in.
     until(&shell, cx, "the actions of the server", |cx| {
-        present(cx, "connection-review-row-3-search")
+        present(cx, "accept-connection")
     });
     settle(cx);
+    assert!(everything_said(cx).contains("search"));
     assert!(!present(cx, "connection-review-sign-in"));
     assert!(!present(cx, "connection-review-needs-sign-in"));
     assert!(present(cx, "accept-connection"));

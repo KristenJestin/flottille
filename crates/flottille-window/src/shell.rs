@@ -2744,6 +2744,13 @@ impl Shell {
         vault.update(cx, |vault, cx| vault.add_for(project, window, cx));
     }
 
+    /// A connection's review `Edit entry`: Settings, Vault, on the entry's dialog.
+    pub fn replace_vault_entry(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
+        let vault = self.settings.read(cx).vault().clone();
+        vault.update(cx, |vault, cx| vault.replace(name, window, cx));
+    }
+
     /// Opens the dialog of an agent's request to write a connection.
     pub fn open_connection_request(&mut self, number: u64, cx: &mut Context<Self>) {
         self.connection_request

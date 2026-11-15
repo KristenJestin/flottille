@@ -41,6 +41,16 @@ pub fn connection(name: &str) -> String {
 pub const SIGN_IN_ASKED: &str = "the server asks to be signed in";
 pub const SIGNED_OUT: &str = " is signed out (";
 
+/// What the daemon says when a connection's server answers `401` to the headers its vault entries
+/// gave: the server refused what it was given, which no sign-in changes. It names the header and
+/// the entry, never the value.
+pub const REFUSED_ENTRY: &str = "the server refused the request (401) with the header";
+
+/// Whether what the daemon said is that the server refused the vault entries of its headers.
+pub fn refused_entry(said: &str) -> bool {
+    said.contains(REFUSED_ENTRY)
+}
+
 /// Whether what the daemon said of a connection's server is that a sign-in is missing.
 pub fn asks_sign_in(said: &str) -> bool {
     said.contains(SIGN_IN_ASKED) || said.contains(SIGNED_OUT)
