@@ -6,7 +6,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
-use super::{Class, output, output_with, run};
+use super::{Class, Output};
 
 /// The uncommitted work of one repository, made a commit on top of `HEAD`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,21 +58,26 @@ pub fn machines_ref(machine: &str, branch: &str) -> String {
 pub async fn snapshot(repository: &Path, launch: &str) -> Result<Snapshot, String> {
     let reference = outgoing_ref(launch);
     one_component(repository, "launch", launch, &reference).await?;
-    let on = run(
+    whole(repository).await?;
+    let on = run_git(
         repository,
-        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        &["symbolic-ref", "--quiet", "HEAD"],
         Class::Read,
     )
     .await?;
     if !on.success {
         return Err(format!("{} is not on a branch", repository.display()));
     }
-    let branch = on.stdout.trim().to_owned();
+    // `--short` would say `heads/<branch>` when a tag has the branch's name.
+    let Some(branch) = on.stdout.trim().strip_prefix("refs/heads/") else {
+        return Err(format!("{} is not on a branch", repository.display()));
+    };
+    let branch = branch.to_owned();
     let head = commit_of(repository, "HEAD")
         .await?
         .ok_or_else(|| format!("{} has no commit yet", repository.display()))?;
     // A linked worktree's index is in its own git folder.
-    let index = output(
+    let index = output_git(
         repository,
         &["rev-parse", "--path-format=absolute", "--git-path", "index"],
         Class::Read,
@@ -88,8 +93,8 @@ pub async fn snapshot(repository: &Path, launch: &str) -> Result<Snapshot, Strin
             .map_err(|error| format!("cannot copy {}: {error}", index.display()))?;
     }
     let env = [("GIT_INDEX_FILE", copy.as_os_str())];
-    output_with(repository, &["add", "--all"], Class::Work, &env).await?;
-    let tree = output_with(repository, &["write-tree"], Class::Work, &env).await?;
+    output_git_with(repository, &["add", "--all"], Class::Work, &env).await?;
+    let tree = output_git_with(repository, &["write-tree"], Class::Work, &env).await?;
     // The snapshot is laid as uncommitted changes, never kept as a commit: it carries Flottille's
     // name rather than needing the user's, and is never signed.
     let name = OsStr::new("Flottille");
@@ -101,7 +106,7 @@ pub async fn snapshot(repository: &Path, launch: &str) -> Result<Snapshot, Strin
         ("GIT_COMMITTER_EMAIL", email),
     ];
     let message = format!("Uncommitted work of {branch}");
-    let commit = output_with(
+    let commit = output_git_with(
         repository,
         &[
             "commit-tree",
@@ -117,7 +122,7 @@ pub async fn snapshot(repository: &Path, launch: &str) -> Result<Snapshot, Strin
     )
     .await?;
     let commit = commit.trim().to_owned();
-    output(
+    output_git(
         repository,
         &["update-ref", "--end-of-options", &reference, &commit],
         Class::Read,
@@ -141,6 +146,7 @@ pub async fn outgoing(
 ) -> Result<Bundled, String> {
     let reference = outgoing_ref(launch);
     one_component(repository, "launch", launch, &reference).await?;
+    whole(repository).await?;
     if commit_of(repository, &reference).await?.is_none() {
         return Err(format!("launch {launch} has no snapshot"));
     }
@@ -156,6 +162,7 @@ pub async fn returning(
     file: &Path,
 ) -> Result<Bundled, String> {
     check_branch(repository, branch).await?;
+    whole(repository).await?;
     let reference = format!("refs/heads/{branch}");
     if commit_of(repository, &reference).await?.is_none() {
         return Err(format!("{} has no branch {branch}", repository.display()));
@@ -182,26 +189,30 @@ async fn bundle(
     }
     let mut count = vec!["rev-list", "--count"];
     count.extend(&revisions);
-    if output(repository, &count, Class::Work).await?.trim() == "0" {
+    if output_git(repository, &count, Class::Work).await?.trim() == "0" {
         return Ok(Bundled::NothingNew);
     }
-    let mut create: Vec<OsString> = ["bundle", "create", "--quiet"].map(OsString::from).into();
+    let mut create: Vec<OsString> = ["bundle", "create", "--quiet", "--end-of-options"]
+        .map(OsString::from)
+        .into();
     create.push(file.as_os_str().to_owned());
     create.extend(revisions.iter().map(OsString::from));
-    output(repository, &create, Class::Work).await?;
+    output_git(repository, &create, Class::Work).await?;
     Ok(Bundled::Written)
 }
 
 /// Whether `bundle` can be fetched in `repository`: a bundle git can read, whose prerequisites
 /// the repository has.
 pub async fn verify(repository: &Path, bundle: &Path) -> Result<(), String> {
-    let args: [&OsStr; 4] = [
+    whole(repository).await?;
+    let args: [&OsStr; 5] = [
         "bundle".as_ref(),
         "verify".as_ref(),
         "--quiet".as_ref(),
+        "--end-of-options".as_ref(),
         bundle.as_os_str(),
     ];
-    output(repository, &args, Class::Work)
+    output_git(repository, &args, Class::Work)
         .await
         .map(drop)
         .map_err(|reason| format!("the bundle is refused: {reason}"))
@@ -230,7 +241,7 @@ pub async fn clone(folder: &Path, bundle: &Path, launch: &str) -> Result<Receive
     std::fs::create_dir(folder)
         .map_err(|error| format!("cannot make {}: {error}", folder.display()))?;
     let made = async {
-        output(folder, &["init", "--quiet"], Class::Read).await?;
+        output_git(folder, &["init", "--quiet"], Class::Read).await?;
         receive(folder, bundle, launch).await
     }
     .await;
@@ -269,13 +280,21 @@ pub async fn lay_snapshot(worktree: &Path, snapshot: &str) -> Result<(), String>
             worktree.display()
         ));
     }
-    output(
+    // A change already there would be mixed with the sender's, or half laid over.
+    let changed = output_git(worktree, &["status", "--porcelain"], Class::Work).await?;
+    if !changed.trim().is_empty() {
+        return Err(format!(
+            "{} has changes of its own: the snapshot is not laid on them",
+            worktree.display()
+        ));
+    }
+    output_git(
         worktree,
         &["read-tree", "-m", "-u", "HEAD", snapshot],
         Class::Work,
     )
     .await?;
-    output(worktree, &["reset", "--quiet"], Class::Work).await?;
+    output_git(worktree, &["reset", "--quiet"], Class::Work).await?;
     Ok(())
 }
 
@@ -291,8 +310,13 @@ pub async fn fetch_returned(
     let into = machines_ref(machine, branch);
     one_component(repository, "machine", machine, &into).await?;
     check_branch(repository, branch).await?;
-    let list: [&OsStr; 3] = ["bundle".as_ref(), "list-heads".as_ref(), bundle.as_os_str()];
-    let heads = output(repository, &list, Class::Read)
+    let list: [&OsStr; 4] = [
+        "bundle".as_ref(),
+        "list-heads".as_ref(),
+        "--end-of-options".as_ref(),
+        bundle.as_os_str(),
+    ];
+    let heads = output_git(repository, &list, Class::Read)
         .await
         .map_err(|reason| format!("the bundle is refused: {reason}"))?;
     let sent: Vec<&str> = heads
@@ -325,16 +349,83 @@ async fn fetch(repository: &Path, bundle: &Path, refspec: &str) -> Result<(), St
         "--no-tags",
         "--no-write-fetch-head",
         "--no-recurse-submodules",
+        // The user's repository is maintained when they say so, not by a launch's fetch.
+        "--no-auto-maintenance",
         "--end-of-options",
     ]
     .map(OsString::from)
     .into();
     args.push(bundle.as_os_str().to_owned());
     args.push(refspec.into());
-    output(repository, &args, Class::Work)
+    output_git(repository, &args, Class::Work)
         .await
         .map(drop)
         .map_err(|reason| format!("the bundle could not be fetched: {reason}"))
+}
+
+/// Set on every git this module runs: none of it reaches the network. A partial clone fetches
+/// a missing object from its remote when asked about it, and the ids asked about come from the
+/// other machine. Git LFS objects do not travel ("What this does not cover"), their pointers do:
+/// the receiver's smudge filter downloads nothing and leaves the pointer. Clean filters still run
+/// on the sending side, locally, as the user's own `git add` would run them.
+fn offline() -> [(&'static str, &'static OsStr); 2] {
+    [
+        ("GIT_NO_LAZY_FETCH", OsStr::new("1")),
+        ("GIT_LFS_SKIP_SMUDGE", OsStr::new("1")),
+    ]
+}
+
+async fn run_git<S: AsRef<OsStr>>(dir: &Path, args: &[S], class: Class) -> Result<Output, String> {
+    super::run_with(dir, args, class, &offline()).await
+}
+
+async fn output_git<S: AsRef<OsStr>>(
+    dir: &Path,
+    args: &[S],
+    class: Class,
+) -> Result<String, String> {
+    output_git_with(dir, args, class, &[]).await
+}
+
+async fn output_git_with<S: AsRef<OsStr>>(
+    dir: &Path,
+    args: &[S],
+    class: Class,
+    env: &[(&str, &OsStr)],
+) -> Result<String, String> {
+    let mut all = offline().to_vec();
+    all.extend_from_slice(env);
+    super::output_with(dir, args, class, &all).await
+}
+
+/// Refuses a partial clone: its missing objects are on its remote, which nothing here contacts,
+/// and a bundle of it would lack them.
+async fn whole(repository: &Path) -> Result<(), String> {
+    let partial = run_git(
+        repository,
+        &["config", "--get", "extensions.partialClone"],
+        Class::Read,
+    )
+    .await?
+    .success;
+    let promisors = run_git(
+        repository,
+        &[
+            "config",
+            "--type=bool",
+            "--get-regexp",
+            r"^remote\..*\.promisor$",
+        ],
+        Class::Read,
+    )
+    .await?;
+    if partial || promisors.stdout.lines().any(|line| line.ends_with(" true")) {
+        return Err(format!(
+            "{} is a partial clone: what it lacks is on its remote, and nothing is fetched from it",
+            repository.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Refuses `name` unless it is one component of a ref name, `reference` being the ref it makes.
@@ -357,14 +448,14 @@ async fn check_branch(dir: &Path, branch: &str) -> Result<(), String> {
 }
 
 async fn valid_ref(dir: &Path, reference: &str) -> Result<bool, String> {
-    Ok(run(dir, &["check-ref-format", reference], Class::Read)
+    Ok(run_git(dir, &["check-ref-format", reference], Class::Read)
         .await?
         .success)
 }
 
 /// The commit `revision` leads to; none when it leads to none.
 async fn commit_of(dir: &Path, revision: &str) -> Result<Option<String>, String> {
-    let shown = run(
+    let shown = run_git(
         dir,
         &[
             "rev-parse",
@@ -954,5 +1045,129 @@ mod tests {
         assert_eq!(git(&sender, &["rev-parse", &landed]), tip);
         assert_eq!(git(&sender, &["for-each-ref", "refs/heads"]), heads);
         assert_eq!(user_state(&sender), before);
+    }
+
+    #[tokio::test]
+    async fn a_partial_clone_is_refused_and_its_remote_never_contacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = repository(dir.path());
+        commit(&server, "old.txt", "old\n");
+        git(&server, &["rm", "--quiet", "old.txt"]);
+        git(&server, &["commit", "--quiet", "-m", "no old"]);
+        git(&server, &["config", "uploadpack.allowFilter", "true"]);
+        let url = format!("file://{}", server.display());
+        git(
+            dir.path(),
+            &["clone", "--quiet", "--filter=blob:none", &url, "partial"],
+        );
+        let partial = dir.path().join("partial");
+        // Its remote leaves a mark when git contacts it: a blob it never fetched does.
+        let mark = dir.path().join("contacted");
+        git(&partial, &["config", "protocol.ext.allow", "always"]);
+        let remote = format!("ext::sh -c touch% {}", mark.display());
+        git(&partial, &["remote", "set-url", "origin", &remote]);
+        let missing = git(&partial, &["rev-parse", "HEAD~1:old.txt"]);
+        let _ = git_command(&partial, &["cat-file", "-p", &missing])
+            .output()
+            .unwrap();
+        assert!(mark.exists(), "the remote leaves its mark");
+        std::fs::remove_file(&mark).unwrap();
+        write(&partial.join("a.txt"), "changed\n");
+        // Ids the other machine names, one of them only the remote has.
+        let has = [
+            missing,
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+        ];
+        let file = dir.path().join("l1.bundle");
+
+        let snapshot = snapshot(&partial, "l1").await;
+        let outgoing = outgoing(&partial, "l1", &has, &file).await;
+        let returning = returning(&partial, "feature", &has, &file).await;
+
+        let refused = snapshot.expect_err("a snapshot of a partial clone is refused");
+        assert!(refused.contains("partial clone"), "{refused}");
+        assert!(outgoing.is_err() && returning.is_err());
+        assert!(!mark.exists(), "the remote was contacted");
+        assert!(!file.exists());
+        assert_eq!(git(&partial, &["for-each-ref", "refs/flottille"]), "");
+    }
+
+    #[tokio::test]
+    async fn the_receiver_s_lfs_smudge_downloads_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = repository(dir.path());
+        let pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:0\nsize 1\n";
+        write(&sender.join("model.bin"), pointer);
+        snapshot(&sender, "l1").await.unwrap();
+        let file = dir.path().join("l1.bundle");
+        outgoing(&sender, "l1", &[], &file).await.unwrap();
+        let receiver = dir.path().join("receiver");
+        let received = clone(&receiver, &file, "l1").await.unwrap();
+        // git-lfs as the user's configuration installs it: its smudge downloads the object
+        // unless it is told to skip.
+        let mark = dir.path().join("downloaded");
+        let smudge = format!(
+            "test -n \"$GIT_LFS_SKIP_SMUDGE\" || touch {}; cat",
+            mark.display()
+        );
+        git(&receiver, &["config", "filter.lfs.smudge", &smudge]);
+        write(&receiver.join(".git/info/attributes"), "*.bin filter=lfs\n");
+        let worktree = dir.path().join("workspace");
+
+        make_workspace(&receiver, "feature", &received, &worktree).await;
+
+        assert!(!mark.exists(), "the smudge downloaded");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("model.bin")).unwrap(),
+            pointer
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tag_with_the_branch_s_name_leaves_the_branch_s_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = repository(dir.path());
+        git(&sender, &["tag", "feature"]);
+
+        let made = snapshot(&sender, "l1").await.unwrap();
+
+        assert_eq!(made.branch, "feature");
+    }
+
+    #[tokio::test]
+    async fn a_workspace_that_is_not_clean_is_refused_and_nothing_is_laid() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = repository(dir.path());
+        write(&sender.join("a.txt"), "changed\n");
+        snapshot(&sender, "l1").await.unwrap();
+        let file = dir.path().join("l1.bundle");
+        outgoing(&sender, "l1", &[], &file).await.unwrap();
+        let receiver = dir.path().join("receiver");
+        let received = clone(&receiver, &file, "l1").await.unwrap();
+        let worktree = dir.path().join("workspace");
+        let target = worktree.to_str().unwrap();
+        git(
+            &receiver,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature",
+                target,
+                &received.tip,
+            ],
+        );
+        write(&worktree.join("left.txt"), "left by a setup\n");
+        let before = (files(&worktree), status(&worktree));
+
+        let refused = lay_snapshot(&worktree, &received.snapshot).await;
+
+        assert!(refused.is_err(), "a workspace with changes was laid on");
+        assert_eq!((files(&worktree), status(&worktree)), before);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("a.txt")).unwrap(),
+            "a\n"
+        );
     }
 }
