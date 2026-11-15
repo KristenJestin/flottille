@@ -1181,6 +1181,101 @@ fn editing_the_command_pins_the_server_again_with_no_review(cx: &mut TestAppCont
     );
 }
 
+/// Opens the form of the connection `name`, removes the entry `gone` (a variable or a limit),
+/// saves, and waits for the dialog to close.
+fn save_without(shell: &Entity<Shell>, cx: &mut VisualTestContext, name: &str, gone: &str) {
+    until(shell, cx, "its row", |cx| {
+        visible(cx, &format!("connection-{name}"))
+    });
+    click(cx, &format!("connection-more-{name}"));
+    click(cx, &format!("edit-connection-{name}"));
+    until(shell, cx, "the entry is in the form", |cx| {
+        visible(cx, gone)
+    });
+    click(cx, gone);
+    click(cx, "save-connection");
+    until(shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+}
+
+#[gpui_kit::test]
+fn removing_the_last_variable_of_a_command_clears_it_on_the_daemon(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET, "description": "Almanac's token"}),
+    )
+    .unwrap();
+    write_script(&user, "almanac", &almanac());
+    user.call(
+        "connection.add",
+        json!({"name": "almanac", "about": "The almanac of the user.",
+            "command": command_of(&user, "almanac"),
+            "env": {"ALMANAC_TOKEN": {"vault": "almanac-token"}}}),
+    )
+    .unwrap();
+    assert!(connection(&user, "almanac").unwrap()["env"].is_object());
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    save_without(&shell, cx, "almanac", "connection-variable-0-remove");
+    assert!(
+        connection(&user, "almanac").unwrap().get("env").is_none(),
+        "{:?}",
+        connection(&user, "almanac")
+    );
+}
+
+#[gpui_kit::test]
+fn removing_the_last_header_of_a_url_clears_it_on_the_daemon(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call("vault.set", json!({"name": "notes-key", "secret": SECRET}))
+        .unwrap();
+    user.call(
+        "connection.add",
+        json!({"name": "remote", "about": "A notes server elsewhere.",
+            "url": "https://notes.example.com/mcp",
+            "headers": {"Authorization": {"vault": "notes-key"}}}),
+    )
+    .unwrap();
+    assert!(connection(&user, "remote").unwrap()["headers"].is_object());
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    save_without(&shell, cx, "remote", "connection-variable-0-remove");
+    assert!(
+        connection(&user, "remote")
+            .unwrap()
+            .get("headers")
+            .is_none(),
+        "{:?}",
+        connection(&user, "remote")
+    );
+}
+
+#[gpui_kit::test]
+fn removing_the_last_limit_clears_it_on_the_daemon(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    write_script(&user, "almanac", &almanac());
+    user.call(
+        "connection.add",
+        json!({"name": "almanac", "about": "The almanac of the user.",
+            "command": command_of(&user, "almanac"), "only": {"app": ["gedit"]}}),
+    )
+    .unwrap();
+    assert!(connection(&user, "almanac").unwrap()["only"].is_object());
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    save_without(&shell, cx, "almanac", "connection-limit-0-remove");
+    assert!(
+        connection(&user, "almanac").unwrap().get("only").is_none(),
+        "{:?}",
+        connection(&user, "almanac")
+    );
+}
+
 /// The second lines of the toasts shown, in the order of `toasts`.
 fn second_lines(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<Option<String>> {
     shell.read_with(cx, |s, cx| {

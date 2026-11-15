@@ -1383,11 +1383,8 @@ impl ConnectionsSection {
             .filter(|host| !host.is_empty())
             .collect();
         let editing = original.is_some();
-        // In an edit, an empty table removes what was there.
-        let table = |map: Map<String, Value>| match (map.is_empty(), editing) {
-            (true, true) => Value::Null,
-            _ => Value::Object(map),
-        };
+        // In an edit, an empty table removes what was there: the link drops a `null`, so `{}` is
+        // what says "none".
         let mut params = json!({"name": name, "about": about});
         match self.reach {
             Reach::Command => {
@@ -1397,14 +1394,14 @@ impl ConnectionsSection {
                 }
                 let words = flottille_core::command::split_line(&line)?;
                 params["command"] = json!(words);
-                params["env"] = table(entries);
+                params["env"] = Value::Object(entries);
                 // An empty list in an edit takes the sites away: the window's link leaves a
                 // `null` out of the request, so the list is what says it.
                 if editing || !sites.is_empty() {
                     params["sites"] = json!(sites);
                 }
                 if editing {
-                    params["headers"] = Value::Null;
+                    params["headers"] = json!({});
                 }
             }
             Reach::Url => {
@@ -1413,14 +1410,14 @@ impl ConnectionsSection {
                     return Err("Say the URL of the server.".into());
                 }
                 params["url"] = json!(url);
-                params["headers"] = table(entries);
+                params["headers"] = Value::Object(entries);
                 if editing {
-                    params["env"] = Value::Null;
+                    params["env"] = json!({});
                     params["sites"] = json!([]);
                 }
             }
         }
-        params["only"] = table(only);
+        params["only"] = Value::Object(only);
         if !editing {
             for key in ["env", "headers", "only"] {
                 if params[key].as_object().is_some_and(Map::is_empty) {
