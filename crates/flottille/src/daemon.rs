@@ -32,7 +32,7 @@ use crate::forge;
 use crate::inbox;
 use crate::items;
 use crate::judge;
-use crate::locks::Lock;
+use crate::locks::{Guard, Lock};
 use crate::mcp;
 use crate::projects::{self, Projects};
 use crate::providers;
@@ -218,6 +218,9 @@ struct Events {
     store: Store,
     /// Gone once the daemon stops: subscribers then end after the last event.
     bus: Option<broadcast::Sender<Event>>,
+    /// What the sessions said and did, not written yet (agent, name, data, activity): written
+    /// together when the daemon's loop turns, and before anything else reads or writes the store.
+    said: Vec<(String, String, Value, bool)>,
 }
 
 /// A subscriber's place in the stream: every event after `last`, from the store then live.
@@ -238,7 +241,14 @@ impl Daemon {
         Daemon {
             paths: paths.clone(),
             started: Instant::now(),
-            events: Lock::named("store", Events { store, bus }),
+            events: Lock::named(
+                "store",
+                Events {
+                    store,
+                    bus,
+                    said: Vec::new(),
+                },
+            ),
             projects: Lock::named("projects", projects),
             preparing: Lock::named("preparing", HashSet::new()),
             removing_workspaces: Lock::named("removing_workspaces", HashSet::new()),
@@ -272,7 +282,7 @@ impl Daemon {
     /// events in the order of their numbers.
     #[track_caller]
     pub fn emit(&self, name: &str, data: Value) -> Result<Event> {
-        let events = self.events.lock().unwrap();
+        let events = self.stored();
         let event = events.store.append_event(name, data)?;
         self.developer.event(&event);
         if let Some(bus) = &events.bus {
@@ -293,7 +303,7 @@ impl Daemon {
         &self,
         read: impl FnOnce(&Store) -> flottille_core::Result<T>,
     ) -> flottille_core::Result<T> {
-        read(&self.events.lock().unwrap().store)
+        read(&self.stored().store)
     }
 
     /// Writes the store, the change and its event (when it has one) in one transaction of
@@ -322,7 +332,7 @@ impl Daemon {
         logged: bool,
         write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
     ) -> flottille_core::Result<T> {
-        let mut events = self.events.lock().unwrap();
+        let mut events = self.stored();
         let (value, event) = write(&mut events.store)?;
         if let Some(event) = event.into() {
             if logged {
@@ -341,7 +351,7 @@ impl Daemon {
         &self,
         write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, Vec<Event>)>,
     ) -> flottille_core::Result<T> {
-        let mut events = self.events.lock().unwrap();
+        let mut events = self.stored();
         let (value, written) = write(&mut events.store)?;
         for event in &written {
             self.developer.event(event);
@@ -354,6 +364,54 @@ impl Daemon {
         Ok(value)
     }
 
+    /// An event of what a session says or does, written with those that come before the daemon's
+    /// loop turns again: a stream costs a commit, so an `fsync`, for each turn, not for each of
+    /// its pieces, and another client waits one commit, not a backlog of them. Measured on a busy
+    /// disk, one commit a piece put the pieces seconds behind, and `agent.list` with them (#903).
+    pub fn say(self: &Arc<Self>, agent: &str, name: &str, data: Value, activity: bool) {
+        let mut events = self.events.lock().unwrap();
+        events
+            .said
+            .push((agent.to_owned(), name.to_owned(), data, activity));
+        if events.said.len() > 1 {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                let daemon = Arc::clone(self);
+                runtime.spawn(async move { drop(daemon.stored()) });
+            }
+            Err(_) => self.write_said(&mut events),
+        }
+    }
+
+    /// The store, what the sessions said written first: nothing reads or writes it before what
+    /// was said before.
+    #[track_caller]
+    fn stored(&self) -> Guard<'_, Events> {
+        let mut events = self.events.lock().unwrap();
+        self.write_said(&mut events);
+        events
+    }
+
+    fn write_said(&self, events: &mut Events) {
+        if events.said.is_empty() {
+            return;
+        }
+        let said = std::mem::take(&mut events.said);
+        match events.store.append_agent_events(said) {
+            Ok(written) => {
+                for event in written {
+                    self.developer.event(&event);
+                    if let Some(bus) = &events.bus {
+                        let _ = bus.send(event);
+                    }
+                }
+            }
+            Err(error) => eprintln!("flottille daemon: what the sessions said: {error}"),
+        }
+    }
+
     /// Holds the store's lock for `held`, on the calling thread, which does nothing else
     /// meanwhile: a daemon stuck as a deadlock leaves it, for the tests of the watchdog and of
     /// `daemon stop` (`sweep::call`, `test.hold`).
@@ -363,7 +421,7 @@ impl Daemon {
     }
 
     fn subscribe(&self, after: Option<u64>) -> Result<Subscription> {
-        let events = self.events.lock().unwrap();
+        let events = self.stored();
         let bus = events.bus.as_ref().ok_or("Flottille is stopping")?;
         // Subscribed before the store is read: an event stored meanwhile comes both ways and the
         // number drops the second copy, none falls between the two.
@@ -376,12 +434,7 @@ impl Daemon {
     }
 
     fn events_after(&self, after: u64) -> Result<Vec<Event>> {
-        Ok(self
-            .events
-            .lock()
-            .unwrap()
-            .store
-            .events_after(after, PAGE)?)
+        Ok(self.stored().store.events_after(after, PAGE)?)
     }
 }
 

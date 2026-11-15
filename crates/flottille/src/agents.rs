@@ -2143,8 +2143,9 @@ impl Drop for Recorder {
 }
 
 impl Recorder {
-    fn record(&self, name: &str, data: Value, activity: bool) {
-        record(&self.daemon, &self.agent, name, data, activity);
+    fn record(&self, name: &str, mut data: Value, activity: bool) {
+        data["agent"] = self.agent.as_str().into();
+        self.daemon.say(&self.agent, name, data, activity);
     }
 
     /// The model the agent's process runs, as it reported it at its start.
