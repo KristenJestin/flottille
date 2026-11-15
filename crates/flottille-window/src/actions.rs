@@ -282,7 +282,7 @@ pub enum Command {
     /// was shown) and forgets it, never its folder.
     RemoveProject {
         project: String,
-        discard: Option<Vec<flottille_core::protocol::ShownWorkspace>>,
+        discard: Option<Vec<flottille_protocol::ShownWorkspace>>,
     },
     /// What registering a folder would register.
     DetectProject {
@@ -1788,7 +1788,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             result: answer(ask_alone(
                 connect,
                 "project.remove",
-                json!(flottille_core::protocol::ProjectRemove {
+                json!(flottille_protocol::ProjectRemove {
                     name: project.clone(),
                     discard,
                 }),

@@ -270,7 +270,7 @@ const EXCERPT: usize = 120;
 impl Forged {
     /// What an event says was done to a ticket or a pull request, when it says it: a read, a
     /// call refused, failed or held, and the re-run of a pull request's checks are none.
-    pub fn of(event: &flottille_core::protocol::Event) -> Option<Forged> {
+    pub fn of(event: &flottille_protocol::Event) -> Option<Forged> {
         let data = &event.data;
         if event.name != "agent.tool_served" || data["outcome"] != "ok" {
             return None;
@@ -357,7 +357,7 @@ impl News {
     /// An agent said something: the weakest news.
     pub const MESSAGE: &'static str = "a new message";
 
-    pub fn of(event: &flottille_core::protocol::Event) -> Option<News> {
+    pub fn of(event: &flottille_protocol::Event) -> Option<News> {
         let data = &event.data;
         let said = match event.name.as_str() {
             // The history a load replays was said before.
@@ -388,7 +388,7 @@ pub struct LinkShown {
 }
 
 impl LinkShown {
-    pub fn of(event: &flottille_core::protocol::Event) -> Option<LinkShown> {
+    pub fn of(event: &flottille_protocol::Event) -> Option<LinkShown> {
         if event.name != "agent.link_shown" {
             return None;
         }
@@ -1028,8 +1028,8 @@ mod tests {
         );
     }
 
-    fn served(tool: &str, arguments: Value, outcome: &str) -> flottille_core::protocol::Event {
-        flottille_core::protocol::Event {
+    fn served(tool: &str, arguments: Value, outcome: &str) -> flottille_protocol::Event {
+        flottille_protocol::Event {
             seq: 9,
             at: 90,
             name: "agent.tool_served".into(),

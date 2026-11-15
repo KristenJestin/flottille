@@ -361,6 +361,9 @@ fn a_recursive_read_of_a_folder_above_the_keys_is_refused_in_every_mode() {
         format!("find {s} -type f -exec cat {{}} +"),
         format!("tar cf - {s}"),
         format!("cp -r {s} copy"),
+        format!("env -C {up} grep -ra x"),
+        format!("env --chdir={up} grep -ra x"),
+        format!("env -C {up} git -C flottille grep --no-index -a x"),
     ];
     for mode in ["ask", "auto", "full"] {
         let output = user.run(&["agent", "mode", &id, mode]);
@@ -386,4 +389,13 @@ fn a_recursive_read_of_a_folder_above_the_keys_is_refused_in_every_mode() {
     let listed = mcp.call("run", json!({"line": format!("ls {s}")}));
     assert!(!listed.error, "{}", listed.text);
     assert!(listed.text.contains("remote"), "{}", listed.text);
+    // A search's pattern is not a folder: from an ordinary place, it runs.
+    for line in ["grep -rn / .", "grep -rn '~' ."] {
+        let searched = mcp.call("run", json!({ "line": line }));
+        assert!(
+            !searched.text.starts_with("refused: "),
+            "{line}: {}",
+            searched.text
+        );
+    }
 }

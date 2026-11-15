@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use flottille_core::protocol::Event;
+use flottille_protocol::Event;
 use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 

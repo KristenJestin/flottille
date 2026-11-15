@@ -5,7 +5,7 @@
 //! work. What the removal did is said in a toast.
 
 use crate::glyphs;
-use flottille_core::protocol::ShownWorkspace;
+use flottille_protocol::ShownWorkspace;
 use gpui_design_system::{
     Confirm, Icon, LabelledLine, Skeleton, Switch, Toast, awaiting, caption, changing, enter,
     presence, space, toast,
