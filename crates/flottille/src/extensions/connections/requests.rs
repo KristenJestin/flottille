@@ -270,9 +270,19 @@ fn nameable(entries: &[flottille_core::vault::Entry], entry: &str, to_make: bool
 /// user would otherwise be asked to save under it, in clear in the file and the vault's list.
 const NAME_WORD: usize = 19;
 
+/// The most hexadecimal digits a name to make holds, its separators taken out, when they are most
+/// of it: more is a token split where a name goes (`0123456789-abcdef0123-…`, a UUID).
+const NAME_HEX: usize = 15;
+
 fn random_like(name: &str) -> bool {
+    let joined: Vec<char> = name
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_' | '.'))
+        .collect();
+    let hex = joined.iter().filter(|c| c.is_ascii_hexdigit()).count();
     name.split(['-', '_', '.'])
         .any(|word| word.chars().count() > NAME_WORD)
+        || (hex > NAME_HEX && hex * 5 >= joined.len() * 4)
 }
 
 /// The vault entries a declaration names that the vault does not hold yet.
