@@ -806,7 +806,10 @@ fn an_open_issue_whose_only_pull_request_was_closed_unmerged_is_to_do(cx: &mut T
     assert_eq!(
         groups(&page, cx, "github-1"),
         [
-            ("To do".to_owned(), vec!["1".to_owned(), "3".to_owned()]),
+            (
+                "To do".to_owned(),
+                vec!["1".to_owned(), "2".to_owned(), "3".to_owned()]
+            ),
             ("Done".to_owned(), vec!["4".to_owned()]),
         ]
     );
