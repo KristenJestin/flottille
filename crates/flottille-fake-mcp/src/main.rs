@@ -84,6 +84,13 @@
 //! arguments, its folder and what the plugin answered, never a password. The lines `start`, `login`
 //! and `open` carry `config`, the JSON of the file `--config` names when the line was written.
 //!
+//! With `AGENT_BROWSER_SOCKET_DIR` set, a login and each tool call reach the browser agent-browser's
+//! daemon runs there, which outlives the command that started it: the file `browser.json` in that
+//! folder, written by the first one with the mode (`headed`, from the configuration) and the
+//! `XDG_RUNTIME_DIR` it started in, and found again by the next; the log line `browser` says which
+//! (`by`: `login` or `call`, `started` or not). With `close` among its arguments (and no `mcp`), it
+//! plays `agent-browser close`: the file is removed, and the log line `close` says its arguments.
+//!
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
 //! the child's pid with `--child`), `initialize` (the client's capabilities), `list` (the cursor
 //! asked), `call` (the tool, the arguments, when it started and ended, in milliseconds since the
@@ -125,6 +132,9 @@ fn main() {
     }
     if !args.iter().any(|arg| arg == "mcp") && args.iter().any(|arg| arg == "open") {
         return open(&args, &script, &log);
+    }
+    if !args.iter().any(|arg| arg == "mcp") && args.iter().any(|arg| arg == "close") {
+        return close(&args, &log);
     }
     let child = args.iter().any(|arg| arg == "--child").then(|| {
         std::process::Command::new("sleep")
@@ -245,6 +255,7 @@ fn main() {
                 let tool = params["name"].as_str().unwrap_or_default().to_owned();
                 let started = now_ms();
                 write_log(&log, json!({"event": "received", "tool": tool}));
+                browser(&args, &log, "call");
                 let answer = script["answers"][&tool].clone();
                 if let Some(message) = answer["rpc_error"].as_str() {
                     send(&json!({"jsonrpc": "2.0", "id": id,
@@ -319,6 +330,38 @@ fn display_environment() -> Value {
         names.sort();
         Some(names)
     })})
+}
+
+/// The browser on `AGENT_BROWSER_SOCKET_DIR`, started by this command when none runs there: what
+/// agent-browser's daemon does, which then serves every command of that folder until it is closed.
+fn browser(args: &[String], log: &Option<String>, by: &str) {
+    let Some(folder) = std::env::var_os("AGENT_BROWSER_SOCKET_DIR") else {
+        return;
+    };
+    let file = std::path::Path::new(&folder).join("browser.json");
+    let running = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let started = running.is_none();
+    let browser = running.unwrap_or_else(|| {
+        let browser = json!({"headed": loaded_config(args)["headed"],
+            "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok()});
+        std::fs::write(&file, browser.to_string()).unwrap();
+        browser
+    });
+    write_log(
+        log,
+        json!({"event": "browser", "by": by, "started": started, "browser": browser}),
+    );
+}
+
+/// `agent-browser close`: the browser on `AGENT_BROWSER_SOCKET_DIR` ends.
+fn close(args: &[String], log: &Option<String>) {
+    if let Some(folder) = std::env::var_os("AGENT_BROWSER_SOCKET_DIR") {
+        let _ = std::fs::remove_file(std::path::Path::new(&folder).join("browser.json"));
+    }
+    write_log(log, json!({"event": "close", "args": args}));
+    println!("✓ Browser closed");
 }
 
 fn write_log(log: &Option<String>, line: Value) {
@@ -949,6 +992,7 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         eprintln!("✗ no credential provider {provider}");
         std::process::exit(1);
     };
+    browser(args, log, "login");
     let answer = ask(&plugin);
     let success = answer["success"] == true && answer["protocol"] == "agent-browser.plugin.v1";
     let mut line = json!({"event": "login", "args": args, "config": loaded_config(args),

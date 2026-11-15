@@ -185,6 +185,41 @@ mod tests {
     }
 
     #[test]
+    fn a_link_or_a_folder_planted_at_the_owner_is_never_taken_over() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("display");
+        std::fs::create_dir(&base).unwrap();
+        // A link to a folder of someone's choosing: it is replaced, what it leads to untouched.
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("kept"), "").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, base.join("browser")).unwrap();
+        let shown = share_with(&base, "browser", None, None, Some(":0".into())).unwrap();
+        let folder = base.join("browser");
+        let kind = std::fs::symlink_metadata(&folder).unwrap();
+        assert!(kind.is_dir() && !kind.file_type().is_symlink());
+        assert_eq!(kind.permissions().mode() & 0o777, 0o700);
+        assert!(names(&folder).is_empty());
+        assert_eq!(names(&elsewhere), ["kept"]);
+        drop(shown);
+        assert_eq!(names(&elsewhere), ["kept"]);
+        // A folder left there, open to others and holding a socket: made again, private and empty.
+        std::fs::DirBuilder::new()
+            .mode(0o777)
+            .create(&folder)
+            .unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let _planted = UnixListener::bind(folder.join("wayland-0")).unwrap();
+        let shown = share_with(&base, "browser", None, None, Some(":0".into())).unwrap();
+        assert_eq!(
+            std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(names(&folder).is_empty());
+        drop(shown);
+    }
+
+    #[test]
     fn an_owner_is_a_plain_name() {
         let temp = tempfile::tempdir().unwrap();
         for owner in ["", "../x", "a/b"] {

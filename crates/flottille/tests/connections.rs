@@ -6181,6 +6181,8 @@ fn a_shown_browser_gets_the_display_variables() {
         .unwrap();
     let changed = review["adapter"]["changed"].to_string();
     assert!(changed.contains("is shown on the screen"), "{changed}");
+    // With X11, what it can do to the other windows is said: read and type.
+    assert!(changed.contains("type into"), "{changed}");
 }
 
 #[test]
@@ -6377,6 +6379,120 @@ fn the_server_and_its_login_share_one_browser_socket_folder() {
         shared.to_str().unwrap(),
         "{login}"
     );
-    // Their display folders are their own, and neither holds the browser's socket.
-    assert_ne!(server["XDG_RUNTIME_DIR"], login["XDG_RUNTIME_DIR"]);
+    // One display folder, the server's: the browser either of them starts is the other's too.
+    assert_eq!(server["XDG_RUNTIME_DIR"], login["XDG_RUNTIME_DIR"]);
+    assert_eq!(login["runtime_files"], json!(["wayland-test"]), "{login}");
+}
+
+/// The browser on the connection's socket folder, as the fake keeps it: none once it is closed.
+fn browser_running(user: &User) -> Option<Value> {
+    std::fs::read_to_string(user.path("state/flottille/connections/browser/browser.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+}
+
+#[test]
+fn a_browser_the_login_started_follows_the_switch_at_the_next_start() {
+    // The login starts the browser before the server does: it outlives the login, and must not
+    // outlive the switch.
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"headed": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let started = logged(&user, "browser", "browser");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["by"], "login");
+    let folder = user.path("runtime/flottille/display/browser");
+    assert_eq!(
+        browser_running(&user),
+        Some(json!({"headed": true, "XDG_RUNTIME_DIR": folder.to_str().unwrap()}))
+    );
+    let login = logged(&user, "browser", "login").last().unwrap()["display"].clone();
+    assert_eq!(login["runtime_files"], json!(["wayland-test"]), "{login}");
+
+    // The user hides it: the browser on the socket folder is closed, whoever started it.
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "headed": false}),
+    )
+    .unwrap();
+    eventually("the browser is closed", || browser_running(&user).is_none());
+    let closed = logged(&user, "browser", "close");
+    assert!(
+        closed[0]["args"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("close")),
+        "{closed:?}"
+    );
+
+    // The next start gets a browser in the mode the switch says.
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let last = logged(&user, "browser", "browser").last().unwrap().clone();
+    assert_eq!(last["by"], "call", "{last}");
+    assert_eq!(last["started"], true, "{last}");
+    assert_eq!(
+        last["browser"],
+        json!({"headed": null, "XDG_RUNTIME_DIR": null}),
+        "{last}"
+    );
+}
+
+#[test]
+fn the_reason_a_browser_is_not_shown_stays_said_during_a_call() {
+    // No Wayland socket to share: the browser runs headless, and says why while a call holds the
+    // server's turn too.
+    let user = user_with_display();
+    let mut script = agent_browser("0.43.0");
+    script["answers"]["agent_browser_click"] = json!({"sleep_ms": 1500});
+    browser_declared(&user, &script, json!({}), &[], json!({"headed": true}));
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "cart"}}),
+    ));
+    let said = connection(&user, "browser")["headless"].clone();
+    assert!(
+        said.as_str().is_some_and(|why| why.contains("hard link")),
+        "{said}"
+    );
+    std::thread::scope(|scope| {
+        let call = scope.spawn(|| {
+            mcp.call(
+                "conn_browser",
+                json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+            )
+        });
+        eventually("the server received the click", || {
+            logged(&user, "browser", "received")
+                .iter()
+                .any(|line| line["tool"] == "agent_browser_click")
+        });
+        assert_eq!(connection(&user, "browser")["headless"], said);
+        done(call.join().unwrap());
+    });
 }
