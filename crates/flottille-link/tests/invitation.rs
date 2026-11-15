@@ -4,8 +4,8 @@
 use std::path::Path;
 
 use flottille_link::{
-    Action, DeviceKey, Invitation, InvitationError, Keyring, KeyringError, MemberList, Role, Token,
-    verification_words,
+    Action, DeviceKey, Invitation, InvitationAsk, InvitationError, Keyring, KeyringError,
+    MemberList, Role, Token, verification_words,
 };
 use zeroize::Zeroizing;
 
@@ -229,4 +229,40 @@ fn an_entry_not_signed_by_the_invitation_s_fingerprint_is_refused_by_the_new_dev
     // The root the new device pins from now on.
     assert_eq!(members.root(), pc.public());
     assert_eq!(members.get(&laptop.public()).unwrap().role, Role::Runner);
+}
+
+#[test]
+fn an_invitation_ask_checks_only_as_its_member_signed_it() {
+    let (hub, pc, pixel) = (key(7), key(1), key(2));
+    let ask = InvitationAsk::sign(&hub.public(), 1_800_000_000, &pc).unwrap();
+    assert!(ask.signed());
+    assert_eq!(ask.member, pc.public());
+    assert!(ask.signed_bytes().starts_with(b"flottille-hub-invite-v1\0"));
+
+    // Two asks of the same second are two: a hub that took one can tell the other apart.
+    let again = InvitationAsk::sign(&hub.public(), 1_800_000_000, &pc).unwrap();
+    assert!(again.signed());
+    assert_ne!(again.nonce, ask.nonce);
+
+    let tampered = [
+        InvitationAsk {
+            at: ask.at + 1,
+            ..ask.clone()
+        },
+        InvitationAsk {
+            hub: pixel.public(),
+            ..ask.clone()
+        },
+        InvitationAsk {
+            member: pixel.public(),
+            ..ask.clone()
+        },
+        InvitationAsk {
+            nonce: [0; 16],
+            ..ask.clone()
+        },
+    ];
+    for ask in tampered {
+        assert!(!ask.signed(), "{ask:?}");
+    }
 }
