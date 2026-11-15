@@ -5,7 +5,9 @@
 //! read again once the `item.*` events of the project go quiet, as the items' lists are, and the
 //! sessions come from the shell's own read: the window never asks a forge or a tracker itself.
 //!
-//! What moves: the rows enter one after another, a row unfolds and folds (`Unfolding`), a ticket
+//! What moves: the rows enter one after another, a milestone that comes or goes unfolds or folds
+//! away with its line (`Block::present` of the kit's `Card`), a row unfolds and folds
+//! (`Unfolding`), a ticket
 //! that changes group folds away from one and unfolds in the other (`Grouped`), a group that gets
 //! its first ticket unfolds in and one that loses its last folds away (`Group`), the parts of a
 //! bar ease to their new share (`eased`), and the Closed fold opens and closes (`Disclosure`).
@@ -14,12 +16,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui_design_system::color::mix;
 use gpui_design_system::motion::{Motion, PANEL};
-use gpui_design_system::theme::radius;
 use gpui_design_system::{
-    Chip, Disclosure, EmptyLine, Group, Grouped, Icon, Item, Listing, PageHeader, Skeleton, Type,
-    Unfolding, awaiting, enter, palette, presence_of, space, tipped_when_cut,
+    Block, Card, Chip, Disclosure, EmptyLine, Group, Grouped, Icon, Item, Listing, PageHeader,
+    Skeleton, Type, Unfolding, awaiting, enter, hoverable, palette, presence_of, space,
+    tipped_when_cut,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels,
     Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Task,
@@ -99,8 +103,12 @@ pub struct Milestone {
     pub jira_project: Option<String>,
     pub open: bool,
     pub due: Option<String>,
+    /// The day the tracker says it was closed (GitHub).
+    pub closed_at: Option<String>,
     /// Whether its tickets were read: a released Jira version's are not.
     pub read: bool,
+    /// Why they could not be read, for a version not released.
+    pub problem: Option<String>,
     pub counts: Counts,
     pub groups: Vec<TicketGroup>,
 }
@@ -153,7 +161,9 @@ impl Milestone {
             jira_project: value["jira_project"].as_str().map(str::to_owned),
             open: value["state"] != "closed",
             due: value["due"].as_str().map(str::to_owned),
+            closed_at: value["closed_at"].as_str().map(str::to_owned),
             read: value["read"] != false,
+            problem: value["problem"].as_str().map(str::to_owned),
             counts: Counts {
                 done: count("done"),
                 review: count("review"),
@@ -189,6 +199,9 @@ impl Milestone {
     /// no review of its own (a pull request open is a chip there), and says its other tickets.
     fn counts_said(&self) -> String {
         let c = self.counts;
+        if self.problem.is_some() {
+            return "its tickets could not be read".to_owned();
+        }
         if !self.read {
             return "its tickets are read while it is not released".to_owned();
         }
@@ -227,10 +240,15 @@ impl Progress {
             .map(Milestone::of)
             .collect();
         // The open ones the soonest due first, those with no due date after them; the closed
-        // ones the last closed first.
+        // ones the last closed first: by the day the tracker says it closed them, else by their
+        // due date (a Jira version's is its release).
         milestones.sort_by(|a, b| match (a.open, b.open) {
             (true, true) => (a.due.is_none(), &a.due).cmp(&(b.due.is_none(), &b.due)),
-            (false, false) => b.due.cmp(&a.due),
+            (false, false) => b
+                .closed_at
+                .as_ref()
+                .or(b.due.as_ref())
+                .cmp(&a.closed_at.as_ref().or(a.due.as_ref())),
             (open, _) => open.cmp(&b.open).reverse(),
         });
         Self {
@@ -248,6 +266,28 @@ pub struct SessionChip {
     pub title: String,
     /// `running`, `waits for you`, `waiting`, `at rest` or `ended`.
     pub state: &'static str,
+    /// When it ended, for the one that ended last.
+    pub ended_at: u64,
+}
+
+/// The chips a workspace shows: the sessions that have not ended, and of the ended ones the last
+/// alone: a ticket worked on for weeks does not list every session it ever had.
+pub fn worth_showing(mut chips: Vec<SessionChip>) -> Vec<SessionChip> {
+    let last_ended = chips
+        .iter()
+        .filter(|c| c.state == "ended")
+        .map(|c| c.ended_at)
+        .max();
+    let mut kept_ended = false;
+    chips.retain(|chip| match chip.state {
+        "ended" if kept_ended || Some(chip.ended_at) != last_ended => false,
+        "ended" => {
+            kept_ended = true;
+            true
+        }
+        _ => true,
+    });
+    chips
 }
 
 /// The sessions of `project` by the workspace they work in.
@@ -271,9 +311,13 @@ pub fn sessions_of(snapshot: &Snapshot, project: &str) -> HashMap<String, Vec<Se
                 id: session.id.clone(),
                 title: session.title.clone(),
                 state,
+                ended_at: session.ended_at,
             });
     }
     by_place
+        .into_iter()
+        .map(|(place, chips)| (place, worth_showing(chips)))
+        .collect()
 }
 
 /// The workspaces of `project`, by name: one linked to a ticket, or unlinked, is read again.
@@ -296,6 +340,12 @@ pub struct ProgressPage {
     opened: HashSet<String>,
     folding: HashMap<String, Instant>,
     closed_open: bool,
+    /// The milestones the lists were synced with once, and those that arrived since: a card's
+    /// block that is first drawn present is simply there, so an arrival is drawn absent for one
+    /// frame first and unfolds.
+    drawn: bool,
+    known: HashSet<String>,
+    arriving: HashSet<String>,
     open_rows: Listing<()>,
     closed_rows: Listing<()>,
     /// The tickets of each milestone in their groups, by its id.
@@ -319,6 +369,9 @@ impl ProgressPage {
             opened: HashSet::new(),
             folding: HashMap::new(),
             closed_open: false,
+            drawn: false,
+            known: HashSet::new(),
+            arriving: HashSet::new(),
             open_rows: Listing::default(),
             closed_rows: Listing::default(),
             grouped: HashMap::new(),
@@ -465,6 +518,19 @@ impl ProgressPage {
     /// The groups of each milestone drawn are brought to what was read.
     fn sync(&mut self, now: Instant, reduce: bool) {
         let milestones: Vec<Milestone> = self.milestones().to_vec();
+        let ids: HashSet<String> = milestones.iter().map(|m| m.id.clone()).collect();
+        // What the tracker no longer lists leaves nothing of its own behind.
+        self.grouped.retain(|id, _| ids.contains(id));
+        self.scrolls.retain(|id, _| ids.contains(id));
+        self.opened.retain(|id| ids.contains(id));
+        self.folding.retain(|id, _| ids.contains(id));
+        if self.read.as_ref().is_some_and(Result::is_ok) {
+            if self.drawn {
+                self.arriving
+                    .extend(ids.iter().filter(|id| !self.known.contains(*id)).cloned());
+            }
+            self.known = ids;
+        }
         let open = milestones
             .iter()
             .filter(|m| m.open)
@@ -619,11 +685,12 @@ impl ProgressPage {
             }
             groups.push(group.children(lines).into_any_element());
         }
-        let empty = (milestone.counts.total == 0).then(|| {
-            SharedString::from(match milestone.read {
+        let empty = (milestone.counts.total == 0).then(|| match &milestone.problem {
+            Some(why) => SharedString::from(format!("Its tickets could not be read: {why}")),
+            None => SharedString::from(match milestone.read {
                 true => "No ticket in it yet.",
                 false => "Its tickets are not read once it is released.",
-            })
+            }),
         });
         let scroll = self.scrolls.get(&milestone.id).cloned().unwrap_or_default();
         div()
@@ -671,6 +738,26 @@ impl ProgressPage {
             Ok(_) => format!("#{}", ticket.key),
             Err(_) => ticket.key.clone(),
         };
+        // The key opens the ticket where the tracker keeps it, as the chips open theirs.
+        let (shell, url) = (self.shell.clone(), ticket.url.clone());
+        let opens = url.is_some();
+        let key_cell = div()
+            .id(part("key"))
+            .flex_none()
+            .w(space::XXL + space::LG)
+            .aria_label(SharedString::from(key.clone()))
+            .mono(11.5)
+            .when(opens, |d| d.cursor_pointer())
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                if let (Some(shell), Some(url)) = (shell.upgrade(), &url) {
+                    shell.read(cx).open_link(url);
+                }
+            })
+            .child(SharedString::from(key));
+        let key_cell = hoverable(key_cell, move |d, t| {
+            d.text_color(mix(p.faint, if opens { p.text } else { p.faint }, t))
+        });
         let title = div()
             .id(part("title"))
             .aria_label(SharedString::from(ticket.title.clone()))
@@ -761,17 +848,7 @@ impl ProgressPage {
             .py(space::XS)
             .border_t_1()
             .border_color(p.line)
-            .child(
-                div()
-                    .id(part("key"))
-                    .flex_none()
-                    .w(space::XXL + space::LG)
-                    .aria_label(SharedString::from(key.clone()))
-                    .mono(11.5)
-                    .text_color(p.faint)
-                    .child(SharedString::from(key))
-                    .test_support(),
-            )
+            .child(key_cell)
             .child(div().flex_1().min_w_0().child(tipped_when_cut(
                 title,
                 SharedString::from(ticket.title.clone()),
@@ -793,13 +870,16 @@ impl ProgressPage {
     }
 
     /// The parts of the bar and what they stand for.
-    fn legend(&self, jira: bool, cx: &App) -> AnyElement {
+    fn legend(&self, jira: bool, other: bool, cx: &App) -> AnyElement {
         let p = palette(cx);
         let mut parts = vec![("done", "done", p.ok)];
         if !jira {
             parts.push(("review", "in review", p.pend));
         }
         parts.push(("progress", "in progress", p.run));
+        if other {
+            parts.push(("other", "other", p.faint));
+        }
         parts.push(("todo", "to do", p.card2));
         div()
             .id("progress-legend")
@@ -823,7 +903,8 @@ impl ProgressPage {
             .into_any_element()
     }
 
-    /// The rows of `rows`, in one card, a line between two of them.
+    /// The rows of `rows`, in one card of the kit: a block each, which unfolds when its milestone
+    /// comes and folds away when it goes, with the line above it, drawn only between two blocks.
     fn card(
         &self,
         id: &str,
@@ -831,38 +912,26 @@ impl ProgressPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let p = palette(cx);
         let milestones: Vec<Milestone> = self.milestones().to_vec();
-        let mut children: Vec<AnyElement> = Vec::new();
-        for (index, (key, placement)) in rows.into_iter().enumerate() {
+        let mut card = Card::new().id(SharedString::from(id.to_owned()));
+        for (key, placement) in rows {
             let Some(milestone) = milestones.iter().find(|m| m.id == key) else {
                 continue;
             };
-            let line = (index > 0).then(|| div().flex_none().h(px(1.)).bg(p.line));
-            let content = div().flex().flex_col().children(line).child(
-                div()
-                    .px(space::XS)
-                    .child(self.milestone_row(milestone, window, cx)),
-            );
-            children.push(
-                Item::new(
-                    SharedString::from(format!("progress-item-{key}")),
-                    placement,
-                    content,
-                )
-                .into_any_element(),
-            );
+            let present = !placement.is_gone() && !self.arriving.contains(&key);
+            let block = Block::new()
+                .present(SharedString::from(format!("progress-item-{key}")), present)
+                .child(
+                    div()
+                        .px(space::XS)
+                        .child(self.milestone_row(milestone, window, cx)),
+                );
+            card = card.block(block);
         }
         div()
             .id(SharedString::from(id.to_owned()))
-            .bg(p.card)
-            .border_1()
-            .border_color(p.line)
-            .rounded(radius::CARD)
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .children(children)
+            .w_full()
+            .child(card)
             .test_support()
             .into_any_element()
     }
@@ -877,11 +946,16 @@ fn bar(id: &str, milestone: &Milestone, window: &mut Window, cx: &mut App) -> An
         0 => 0.,
         total => n as f32 / total as f32,
     };
-    let parts = [
+    let mut parts = vec![
         ("done", share(c.done), p.ok),
         ("review", share(c.review), p.pend),
         ("progress", share(c.progress), p.run),
     ];
+    // Jira's tickets whose status category Flottille cannot read: a colour of their own, not the
+    // track's (to do).
+    if milestone.jira() {
+        parts.push(("other", share(c.other), p.faint));
+    }
     let mut track = div()
         .id(SharedString::from(format!("{id}-bar")))
         .w_full()
@@ -933,9 +1007,17 @@ impl Render for ProgressPage {
         for milestone in self.milestones().to_vec() {
             self.scrolls.entry(milestone.id.clone()).or_default();
         }
+        // Rows that arrived are drawn absent this frame and unfold on the next.
+        if !self.arriving.is_empty() {
+            window.request_animation_frame();
+        }
         let pad = if self.narrow { space::LG } else { space::XXL };
         let key = |part: &str| ElementId::Name(format!("progress-{}-{part}", self.project).into());
         let jira = matches!(&self.read, Some(Ok(progress)) if progress.tracker == "jira");
+        let other = self
+            .milestones()
+            .iter()
+            .any(|m| m.open && m.counts.other > 0);
         let header = PageHeader::new("progress-header", "Progress").path(match jira {
             true => format!("{} · Jira versions", self.project),
             false => format!("{} · GitHub milestones", self.project),
@@ -994,7 +1076,7 @@ impl Render for ProgressPage {
             .flex()
             .flex_col()
             .gap(space::LG)
-            .child(enter(key("legend"), 1, self.legend(jira, cx)))
+            .child(enter(key("legend"), 1, self.legend(jira, other, cx)))
             .child(enter(key("list"), 2, list))
             .children(closed.map(|closed| enter(key("closed"), 3, closed)))
             .child(
@@ -1027,11 +1109,48 @@ impl Render for ProgressPage {
                 Skeleton::new("progress-skeleton").h(px(56.)),
                 content,
             ));
-        div()
+        let page = div()
             .id("progress-page")
             .size_full()
             .overflow_y_scroll()
             .child(column)
-            .test_support()
+            .test_support();
+        self.drawn |= self.read.as_ref().is_some_and(Result::is_ok);
+        self.arriving.clear();
+        page
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chip(id: &str, state: &'static str, ended_at: u64) -> SessionChip {
+        SessionChip {
+            id: id.to_owned(),
+            title: id.to_owned(),
+            state,
+            ended_at,
+        }
+    }
+
+    #[test]
+    fn a_workspace_shows_its_live_sessions_and_the_last_ended_one_alone() {
+        let shown = worth_showing(vec![
+            chip("old", "ended", 10),
+            chip("running", "running", 0),
+            chip("last", "ended", 30),
+            chip("waiting", "waiting", 0),
+            chip("older", "ended", 20),
+            chip("needs", "waits for you", 0),
+        ]);
+        let ids: Vec<&str> = shown.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["running", "last", "waiting", "needs"]);
+    }
+
+    #[test]
+    fn a_workspace_whose_sessions_all_ended_shows_the_last_of_them() {
+        let shown = worth_showing(vec![chip("a", "ended", 5), chip("b", "ended", 5)]);
+        assert_eq!(shown.len(), 1);
     }
 }
