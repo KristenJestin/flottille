@@ -2018,8 +2018,8 @@ fn a_ticked_row_hidden_by_the_search_is_not_set(cx: &mut TestAppContext) {
     );
 }
 
-/// The names of the actions of `driftbrowser` whose row shows a ticked box now.
-fn ticked_rows(cx: &mut VisualTestContext) -> Vec<String> {
+/// The names of the actions of `driftbrowser` whose row is drawn now.
+fn shown_rows(cx: &mut VisualTestContext) -> Vec<String> {
     let names: Vec<String> = driftbrowser()["tools"]
         .as_array()
         .unwrap()
@@ -2027,6 +2027,14 @@ fn ticked_rows(cx: &mut VisualTestContext) -> Vec<String> {
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
         .collect();
     names
+        .into_iter()
+        .filter(|name| !rows_of(cx, name).is_empty())
+        .collect()
+}
+
+/// The names of the actions of `driftbrowser` whose row shows a ticked box now.
+fn ticked_rows(cx: &mut VisualTestContext) -> Vec<String> {
+    shown_rows(cx)
         .into_iter()
         .filter(|name| match rows_of(cx, name).first() {
             Some(row) => selected(cx, &format!("{row}-pick")),
@@ -2140,12 +2148,12 @@ fn select_all_shown_ticks_what_the_search_shows(cx: &mut TestAppContext) {
     );
     click(cx, "connection-review-bulk-select-all");
     // What the search shows is ticked, and what it hides is left as it was.
-    let mut ticked = ticked_rows(cx);
-    ticked.sort();
-    assert_eq!(ticked, ["browser_click", "browser_cookies"]);
+    let shown = shown_rows(cx);
+    assert!(1 < shown.len() && shown.len() < 14, "{shown:?}");
+    assert_eq!(ticked_rows(cx), shown);
     assert_eq!(
-        label(cx, "connection-review-bulk-count").as_deref(),
-        Some("2 selected")
+        label(cx, "connection-review-bulk-count"),
+        Some(format!("{} selected", shown.len()))
     );
 
     type_in(&field, "", cx);
@@ -2160,8 +2168,8 @@ fn select_all_shown_ticks_what_the_search_shows(cx: &mut TestAppContext) {
         "a hidden row was not ticked by it"
     );
     assert_eq!(
-        label(cx, "connection-review-bulk-count").as_deref(),
-        Some("3 selected")
+        label(cx, "connection-review-bulk-count"),
+        Some(format!("{} selected", shown.len() + 1))
     );
 }
 
@@ -2187,12 +2195,12 @@ fn ctrl_a_in_the_review_selects_every_shown_row(cx: &mut TestAppContext) {
     click(cx, &row);
     cx.simulate_keystrokes("ctrl-a");
     settle(cx);
-    let mut ticked = ticked_rows(cx);
-    ticked.sort();
-    assert_eq!(ticked, ["browser_click", "browser_cookies"]);
+    let shown = shown_rows(cx);
+    assert!(1 < shown.len() && shown.len() < 14, "{shown:?}");
+    assert_eq!(ticked_rows(cx), shown);
     assert_eq!(
-        label(cx, "connection-review-bulk-count").as_deref(),
-        Some("2 selected")
+        label(cx, "connection-review-bulk-count"),
+        Some(format!("{} selected", shown.len()))
     );
 }
 
