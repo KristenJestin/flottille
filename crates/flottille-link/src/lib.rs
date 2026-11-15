@@ -6,6 +6,7 @@
 //! zeroized when dropped. This crate knows no daemon and no store: the caller names the key folder
 //! and hands its keyring in.
 
+mod hello;
 mod invitation;
 mod members;
 mod request;
@@ -23,6 +24,7 @@ use ed25519_dalek::{SECRET_KEY_LENGTH, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationError, Token};
 pub use members::{
     Action, Change, ChangeHash, ListError, Member, MemberList, Members, Role, Signature,

@@ -2448,8 +2448,10 @@ fn signing_in_opens_the_browser_and_says_when_it_is_signed_in(cx: &mut TestAppCo
     until(&shell, cx, "it says it is signed in", |cx| {
         toasts(&shell, cx).iter().any(|t| t == "Signed in to notes")
     });
-    until(&shell, cx, "the row no longer waits", |cx| {
-        label(cx, "connection-notes-line").as_deref() == Some("Waiting for its first review")
+    // Signed in, it is given at once (`docs/extensions.md`, "Connections"): its row ends on, and
+    // the moment it waits for its review between the two is one the window may never draw.
+    until(&shell, cx, "the row says it is on", |cx| {
+        label(cx, "connection-notes-line").as_deref() == Some("On · 3 actions")
     });
     let _ = server.kill();
     let _ = server.wait();

@@ -10,7 +10,6 @@ repository.workspace = true
 # The keys of the user's devices (`docs/remote.md`, "Identity and keys"): Ed25519, the transport
 # candidate's own. Its default features zeroize a private key when it is dropped.
 ed25519-dalek = "2.2.0"
-# The method catalogue, whose classes the role check reads.
 flottille-protocol = { version = "0.1.0", path = "../flottille-protocol" }
 # The operating system's random generator, which makes every private key.
 getrandom = "0.3.4"
