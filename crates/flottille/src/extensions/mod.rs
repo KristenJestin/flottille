@@ -1411,6 +1411,41 @@ fn set(daemon: &Daemon, asked: Set) -> Result<Value, Failure> {
 mod tests {
     use super::*;
 
+    /// The methods an extension's data names, never written whole in the sources: its actions
+    /// (`extension.act` asks `<prefix>.<action>`) and, with a guidance, `<name>.show`, `.set` and
+    /// `.reset` (the window builds them from `extension.list`). The daemon answers none the
+    /// catalogue leaves out.
+    #[test]
+    fn every_method_an_extension_names_is_catalogued() {
+        let mut missing = Vec::new();
+        for extension in ALL {
+            let prefix = extension.methods.prefix;
+            // Its family is known, so that the sources' test checks the arms of its `call`.
+            if !flottille_protocol::METHODS.iter().any(|(name, _)| {
+                name.split_once('.')
+                    .is_some_and(|(family, _)| family == prefix)
+            }) {
+                missing.push(format!("{prefix}.*"));
+            }
+            let mut named: Vec<String> = extension
+                .actions
+                .iter()
+                .map(|action| format!("{prefix}.{action}"))
+                .collect();
+            if extension.guidance.is_some() {
+                named.extend(
+                    ["show", "set", "reset"].map(|verb| format!("{}.{verb}", extension.name)),
+                );
+            }
+            missing.extend(
+                named
+                    .into_iter()
+                    .filter(|method| flottille_protocol::class(method).is_none()),
+            );
+        }
+        assert!(missing.is_empty(), "not catalogued: {missing:?}");
+    }
+
     #[test]
     fn an_unknown_extension_key_or_kind_in_extensions_toml_is_refused_naming_it() {
         assert_eq!(
