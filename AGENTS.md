@@ -25,7 +25,9 @@ is English only.
 ```
 cargo build
 cargo test
-cargo build -p flottille-fake-acli -p flottille-fake-agent -p flottille-fake-bkt -p flottille-fake-claude -p flottille-fake-codex -p flottille-fake-gh -p flottille-fake-mcp -p flottille-fake-pnpm -p flottille-fake-server   # the fakes the tests spawn: first, before one test binary (cargo test -p flottille --test <name>) builds only Flottille
+# before one test binary alone (cargo test -p flottille --test <name>), build the fakes it spawns:
+cargo build -p flottille-fake-acli -p flottille-fake-agent -p flottille-fake-bkt -p flottille-fake-claude \
+  -p flottille-fake-codex -p flottille-fake-gh -p flottille-fake-mcp -p flottille-fake-pnpm -p flottille-fake-server
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 tools/commit-message.sh --range origin/dev..HEAD
