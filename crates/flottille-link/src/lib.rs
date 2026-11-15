@@ -174,8 +174,13 @@ fn generate() -> Result<SigningKey, KeyError> {
 
 /// The key whose private half is `seed`, when it is one.
 fn from_seed(seed: &[u8]) -> Option<SigningKey> {
-    let seed: Zeroizing<[u8; SECRET_KEY_LENGTH]> = Zeroizing::new(seed.try_into().ok()?);
-    Some(SigningKey::from_bytes(&seed))
+    if seed.len() != SECRET_KEY_LENGTH {
+        return None;
+    }
+    // Copied into room made beforehand: a conversion would leave unwiped copies on the stack.
+    let mut bytes = Zeroizing::new([0u8; SECRET_KEY_LENGTH]);
+    bytes.copy_from_slice(seed);
+    Some(SigningKey::from_bytes(&bytes))
 }
 
 /// Makes `folder` (and its missing parents) the user's only, then checks that what is there is a
@@ -212,6 +217,7 @@ fn user() -> u32 {
 
 /// The key in `file`, made there when there is none.
 fn load_or_make_file(file: &Path) -> Result<SigningKey, KeyError> {
+    remove_left_behind(file);
     if let Some(key) = read_file(file)? {
         return Ok(key);
     }
@@ -220,13 +226,56 @@ fn load_or_make_file(file: &Path) -> Result<SigningKey, KeyError> {
     read_file(file)?.ok_or_else(|| KeyError(format!("{} was made, then was gone", file.display())))
 }
 
+/// Removes the temporary names of `file` (`write_new`) a process that is gone left: a crash
+/// between the link and the removal leaves one, a second name of the private key. This process's
+/// own may be a key another of its threads is making, and is left.
+fn remove_left_behind(file: &Path) {
+    let (Some(folder), Some(name)) = (file.parent(), file.file_name()) else {
+        return;
+    };
+    let prefix = format!(".{}.", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let entry_name = entry.file_name();
+        let Some(rest) = entry_name
+            .to_str()
+            .and_then(|entry_name| entry_name.strip_prefix(&prefix))
+            .and_then(|rest| rest.strip_suffix(".new"))
+        else {
+            continue;
+        };
+        let Some(pid) = rest
+            .split_once('.')
+            .filter(|(_, made)| !made.is_empty() && made.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|(pid, _)| pid.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        if pid > 0 && pid as u32 != std::process::id() && gone(pid) {
+            // Not there any more, or not removable: the next start tries again.
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Whether no process has this id.
+fn gone(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 sends nothing; it only asks whether the process exists.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    !alive && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
 /// The key in `file`, `None` when there is no file. A link, a file of another user, or one others
 /// may read or write is refused, as is a file that is not a key.
 fn read_file(file: &Path) -> Result<Option<SigningKey>, KeyError> {
     let shown = file.display();
+    // Without waiting: an open of a pipe named so would wait for a writer, and the daemon with it.
+    // On a file, `O_NONBLOCK` changes nothing.
     let opened = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(file);
     let opened = match opened {
         Ok(opened) => opened,

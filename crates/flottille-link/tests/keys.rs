@@ -3,8 +3,11 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use flottille_link::{DeviceKey, Keyring, KeyringError, MachineKey};
 use zeroize::Zeroizing;
@@ -201,6 +204,53 @@ fn a_machine_key_that_is_a_link_or_not_a_key_is_refused() {
     let refused = MachineKey::load_or_make(&folder).unwrap_err().to_string();
     assert!(refused.contains("not a key"), "{refused}");
     assert!(!refused.contains("short"), "{refused}");
+}
+
+#[test]
+fn a_machine_key_that_is_a_pipe_is_refused_without_waiting() {
+    let (_dir, folder) = state();
+    MachineKey::load_or_make(&folder).unwrap();
+    let file = folder.join("machine.key");
+    std::fs::remove_file(&file).unwrap();
+    let path = CString::new(file.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `path` is a valid C string that outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+
+    // An open that waits for a writer would never answer: the daemon would hang at its start.
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let loaded = MachineKey::load_or_make(&folder).map(|_| ());
+        sent.send(loaded.map_err(|error| error.to_string()))
+            .unwrap();
+    });
+    let refused = received
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the load waited on the pipe")
+        .unwrap_err();
+    assert!(refused.contains("not a file"), "{refused}");
+}
+
+#[test]
+fn a_temporary_name_a_crash_left_beside_a_key_is_removed() {
+    let (_dir, folder) = state();
+    MachineKey::load_or_make(&folder).unwrap();
+    let file = folder.join("machine.key");
+    // A crash between the link and the removal leaves the key a second name. No process has
+    // this id: it is above any `pid_max`.
+    let left = folder.join(".machine.key.2000000000.0.new");
+    std::fs::hard_link(&file, &left).unwrap();
+    // This process's own may be another thread's key being made: it is left.
+    let making = folder.join(format!(".machine.key.{}.7.new", std::process::id()));
+    std::fs::write(&making, b"being made").unwrap();
+    let other = folder.join(".machine.key.notes");
+    std::fs::write(&other, b"not a temporary name").unwrap();
+
+    MachineKey::load_or_make(&folder).unwrap();
+
+    assert!(!left.exists(), "the key's second name is still there");
+    assert_eq!(std::fs::metadata(&file).unwrap().nlink(), 1);
+    assert!(making.exists());
+    assert!(other.exists());
 }
 
 #[test]
