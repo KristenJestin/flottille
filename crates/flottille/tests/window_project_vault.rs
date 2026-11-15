@@ -226,9 +226,10 @@ fn an_empty_vault_says_so_and_an_entry_added_elsewhere_appears_in_the_tab(cx: &m
     until(&shell, cx, "the entry appears in the tab", |cx| {
         shown("project-vault-jira", cx)
     });
-    let partway = cx.update(|window, _| window.find("project-vault-jira").bounds().size.height);
+    let partway =
+        cx.update(|window, _| window.find("project-vault-item-jira").bounds().size.height);
     settle(cx);
-    let whole = cx.update(|window, _| window.find("project-vault-jira").bounds().size.height);
+    let whole = cx.update(|window, _| window.find("project-vault-item-jira").bounds().size.height);
     assert!(
         partway < whole,
         "the row unfolds: {partway:?} then {whole:?}"
