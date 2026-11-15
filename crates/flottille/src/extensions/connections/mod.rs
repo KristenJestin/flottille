@@ -1170,6 +1170,9 @@ fn decide<'a>(
             action.name, action.name
         )
     })?;
+    if let Some(why) = adapter.and_then(|adapter| adapter.refuses_url(&action.name, &arguments)) {
+        return Err(why);
+    }
     limits(declaration, action, &arguments)?;
     Ok(Some(setting))
 }
@@ -1979,7 +1982,7 @@ fn diff(
         "actions": actions,
         "refused": now.refused,
         "limits": limits,
-        "adapter": adapter_said(declaration, now, config, sites, in_clear),
+        "adapter": adapter_said(declaration, now, &proposed, config, sites, in_clear),
     })
 }
 
@@ -1989,6 +1992,7 @@ fn diff(
 fn adapter_said(
     declaration: &Declaration,
     now: &Listing,
+    proposed: &BTreeMap<String, String>,
     config: &std::path::Path,
     sites: &[String],
     in_clear: &[String],
@@ -1999,6 +2003,20 @@ fn adapter_said(
                 "Flottille's adapter for {} {} applies.",
                 adapter.server, adapter.range
             );
+            // login comes beside an action the user turned on before it, with no new review.
+            let scripts_on = adapter.scripts_on(
+                proposed
+                    .iter()
+                    .filter(|(_, setting)| *setting != "off")
+                    .map(|(action, _)| action.as_str()),
+            );
+            if !scripts_on.is_empty() {
+                let verb = if scripts_on.len() == 1 { "is" } else { "are" };
+                said.push_str(&format!(
+                    " {} {verb} on: a page script can read what login types.",
+                    scripts_on.join(", ")
+                ));
+            }
             if let Reach::Command(words) = &declaration.reach
                 && let Some(why) = adapter
                     .drops_allowlist(words, &declaration.env)

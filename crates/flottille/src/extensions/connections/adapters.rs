@@ -38,6 +38,11 @@ pub struct Adapter {
     /// The server's actions off at the first pin, which the user may turn on: those that run a
     /// script in the page, which no gate can judge.
     scripts: &'static [&'static str],
+    /// The same, for those that write the page's traffic to a file, which no masking reaches.
+    files: &'static [&'static str],
+    /// Its actions whose `url` is a pattern matched against an address, never opened: every
+    /// other `url` must be a web address (`web_address`).
+    patterns: &'static [&'static str],
     /// Actions off while it applies, which no setting turns on.
     locked: &'static [&'static str],
     /// Why they are.
@@ -69,8 +74,18 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_eval",
         "agent_browser_wait_for_function",
         "agent_browser_add_init_script",
-        "agent_browser_batch", // runs other actions, eval among them
+        "agent_browser_batch",         // runs other actions, eval among them
+        "agent_browser_flow_run",      // replays steps, as batch does
+        "agent_browser_network_route", // serves a body of its own for the page's requests
+        "agent_browser_chat",          // agent-browser's own model, through an external gateway
     ],
+    files: &[
+        "agent_browser_network_har_start",
+        "agent_browser_network_har_stop",
+        "agent_browser_trace_start",
+        "agent_browser_trace_stop",
+    ],
+    patterns: &["agent_browser_wait_for_url", "agent_browser_network_route"],
     locked: &[
         "agent_browser_auth_delete",
         "agent_browser_auth_list",
@@ -82,13 +97,18 @@ pub static AGENT_BROWSER: Adapter = Adapter {
         "agent_browser_plugin_run",
         "agent_browser_plugin_show",
         "agent_browser_set_credentials",
+        // A browser, or a session, that someone else controls: a login would type into it.
+        "agent_browser_connect",
+        "agent_browser_state_load",
         // Not served by 0.43.0: named should a 0.43 patch serve it, since off alone the user could
         // turn agent-browser's own login on beside Flottille's.
         "agent_browser_with_login",
     ],
     locked_why: "agent-browser's own logins keep passwords in its own store or take them as \
                  arguments, and its plugins run commands with its credential providers: \
-                 Flottille's vault is the only way to sign in, with the action login",
+                 Flottille's vault is the only way to sign in, with the action login; connect and \
+                 state_load bring a browser or a session someone else controls, which a login \
+                 would type into",
     actions: &[Own {
         name: LOGIN,
         description: "Signs in to a site in the browser with a vault entry of the user's: \
@@ -175,7 +195,7 @@ impl Adapter {
 
     /// The setting of a new action at the first pin, if the adapter sets one.
     pub fn first(&self, action: &str) -> Option<&'static str> {
-        if self.locks(action) || self.scripts.contains(&action) {
+        if self.locks(action) || self.scripts.contains(&action) || self.files.contains(&action) {
             return Some("off");
         }
         None
@@ -183,6 +203,30 @@ impl Adapter {
 
     pub fn own(&self, action: &str) -> Option<&'static Own> {
         self.actions.iter().find(|own| own.name == action)
+    }
+
+    /// Those of the actions `on` that run a script in the page, in its order.
+    pub fn scripts_on<'a>(&self, on: impl Iterator<Item = &'a str>) -> Vec<&'static str> {
+        let on: Vec<&str> = on.collect();
+        self.scripts
+            .iter()
+            .copied()
+            .filter(|script| on.contains(script))
+            .collect()
+    }
+
+    /// Why a call of `action` with `arguments` is refused: a `url` that is no web address, such
+    /// as a `javascript:` or a `data:` one, which runs in the page.
+    pub fn refuses_url(&self, action: &str, arguments: &Value) -> Option<String> {
+        let url = arguments["url"].as_str()?;
+        if self.patterns.contains(&action) || web_address(url).is_some() {
+            return None;
+        }
+        Some(format!(
+            "{action} takes a url that is http or https with a host while Flottille's adapter \
+             applies: another scheme (javascript:, data:, file:…) runs in the page or reads \
+             this machine"
+        ))
     }
 
     /// What it changes, a sentence each, as the review says it; `sites` are those the browser is
@@ -193,6 +237,16 @@ impl Adapter {
              review, and the user may turn them on",
             self.scripts.join(", ")
         )];
+        said.push(format!(
+            "{} write the page's traffic to a file, which is not masked: they are off at the \
+             first review, and the user may turn them on",
+            self.files.join(", ")
+        ));
+        said.push(
+            "a url its actions open must be http or https with a host: a javascript: or a data: \
+             one runs in the page"
+                .to_owned(),
+        );
         said.push(format!(
             "{} are off and stay off: {}",
             self.locked.join(", "),
