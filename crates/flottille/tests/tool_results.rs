@@ -373,6 +373,9 @@ fn a_page_of_fs_read_is_sized_so_that_its_result_is_not_cut() {
 fn a_page_of_fs_read_follows_the_limit_the_user_chose() {
     let user = User::with_fake_agent().with_cut_results();
     let (_, mcp, _) = session(&user);
+    // A page read again at another limit is a new page, not "unchanged".
+    user.call("tool_results.set", json!({"unchanged": false}))
+        .unwrap();
     let (_, at_default) = pages_of_big(&mcp);
     limit(&user, json!(4_000));
     let first = read(&mcp, "big.txt");

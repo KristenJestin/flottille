@@ -26,11 +26,18 @@ fn project(user: &User) -> PathBuf {
 
 /// A turn of `message`, waited for to its end.
 fn turn(user: &User, agent: Option<&str>, message: &str) -> String {
+    turn_on(user, agent, message, None)
+}
+
+/// The same, a new agent being of `provider` when it is given.
+fn turn_on(user: &User, agent: Option<&str>, message: &str, provider: Option<&str>) -> String {
     let (id, after) = match agent {
         None => {
-            let answer = user
-                .call("agent.run", json!({"project": "app", "message": message}))
-                .unwrap();
+            let mut params = json!({"project": "app", "message": message});
+            if let Some(provider) = provider {
+                params["provider"] = provider.into();
+            }
+            let answer = user.call("agent.run", params).unwrap();
             (
                 answer["agent"]["id"].as_str().unwrap().to_owned(),
                 answer["after"].as_u64().unwrap(),
@@ -53,9 +60,9 @@ fn claude_answers(user: &User) -> Vec<String> {
     answers(user.claude_received())
 }
 
-/// The same for the fake ACP agent.
-fn agent_answers(user: &User) -> Vec<String> {
-    answers(user.received())
+/// The same for the fake ACP agent standing for OpenCode, whose compactions Flottille cannot see.
+fn opencode_answers(user: &User) -> Vec<String> {
+    answers(user.provider_received("opencode"))
 }
 
 fn answers(received: Vec<Value>) -> Vec<String> {
@@ -176,13 +183,16 @@ fn again_reads_it_whole() {
 
 #[test]
 fn an_agent_whose_compactions_are_not_seen_always_reads_whole() {
-    let user = User::with_fake_agent();
-    user.fake_script(json!({"turns": [{"when": "read", "do": [read(), read()]}]}));
+    let user = User::with_fake_providers();
+    user.provider_script(
+        "opencode",
+        json!({"turns": [{"when": "read", "do": [read(), read()]}]}),
+    );
     project(&user);
 
-    turn(&user, None, "read it twice");
+    turn_on(&user, None, "read it twice", Some("opencode"));
 
-    let answers = agent_answers(&user);
+    let answers = opencode_answers(&user);
     assert_eq!(answers.len(), 2, "{answers:?}");
     assert_whole(&answers[0]);
     assert_whole(&answers[1]);
@@ -192,10 +202,11 @@ fn an_agent_whose_compactions_are_not_seen_always_reads_whole() {
 fn the_switch_off_reads_whole_and_is_kept_with_the_limit() {
     let user = claude_user(json!([{"when": "read", "do": [read(), read()]}]));
     project(&user);
+    // A test daemon has no cut of results until one is chosen.
     let shown = user
         .call("tool_results.set", json!({"unchanged": false}))
         .unwrap();
-    assert_eq!(shown, json!({"limit": 8000, "unchanged": false}));
+    assert_eq!(shown, json!({"limit": "off", "unchanged": false}));
     let shown = user
         .call("tool_results.set", json!({"limit": 16000}))
         .unwrap();

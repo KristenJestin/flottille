@@ -2383,7 +2383,7 @@ pub(crate) fn grouped(n: usize) -> String {
 mod tests {
     use super::{
         COMPACTION_HINT, COMPACTION_LINE, COMPACTION_USAGE, COMPACTOR_COST, TOOL_RESULTS_SENTENCE,
-        grouped,
+        UNCHANGED_HINT, grouped,
     };
 
     #[test]
