@@ -483,7 +483,8 @@ fn a_token_streamed_over_three_pieces_never_shows_in_clear_in_the_store() {
     turn_ended(&user, &id, after, 1);
 
     let store =
-        flottille_core::store::Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+        flottille_core::store::Store::open_read_only(&user.path("state/flottille/flottille.db"))
+            .unwrap();
     let events = store.agent_events(&id, 0, 200).unwrap();
 
     let reply: String = events
@@ -629,7 +630,8 @@ fn a_page_after_a_reply_split_by_a_tool_served_reads_neither_again() {
 /// The pieces of `name` stored for the agent, in order.
 fn stored(user: &User, agent: &str, name: &str) -> Vec<String> {
     let store =
-        flottille_core::store::Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+        flottille_core::store::Store::open_read_only(&user.path("state/flottille/flottille.db"))
+            .unwrap();
     store
         .agent_events(agent, 0, 200)
         .unwrap()

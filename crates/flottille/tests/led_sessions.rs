@@ -62,7 +62,7 @@ fn agent(user: &User, which: impl Fn(&Value) -> bool) -> Value {
 }
 
 fn store(user: &User) -> Store {
-    Store::open(&user.path("state/flottille/flottille.db")).unwrap()
+    Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
 fn eventually(what: &str, check: impl Fn() -> bool) {

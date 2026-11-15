@@ -98,7 +98,7 @@ fn allowed(user: &User, answer: Answer) -> Answer {
         .unwrap_or_else(|| panic!("not held: {}", answer.text));
     user.call("approval.approve", json!({"number": number}))
         .unwrap();
-    let store = || Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = || Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     let id = format!("approval-{number}");
     eventually("the answer", || store().delivery(&id).unwrap().is_some());
     let text = store().delivery(&id).unwrap().unwrap().body;
@@ -2561,7 +2561,7 @@ fn an_inline_command_stays_inline_when_it_is_edited() {
 
 /// What the store recorded as posted on the pull request `number` of `source`'s repository `.`.
 fn posted_on(user: &User, source: &str, number: &str) -> Vec<(String, Option<String>)> {
-    Store::open(&user.path("state/flottille/flottille.db"))
+    Store::open_read_only(&user.path("state/flottille/flottille.db"))
         .unwrap()
         .posts("app", source, ".", number)
         .unwrap()

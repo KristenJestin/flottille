@@ -138,7 +138,7 @@ fn answer(user: &User, answer: &str, number: u64) -> Delivery {
         String::from_utf8_lossy(&output.stderr)
     );
     let id = format!("approval-{number}");
-    let store = || Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = || Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     eventually("the answer", || store().delivery(&id).unwrap().is_some());
     store().delivery(&id).unwrap().unwrap()
 }
@@ -474,7 +474,7 @@ fn agent(user: &User, id: &str) -> Value {
 }
 
 fn store(user: &User) -> Store {
-    Store::open(&user.path("state/flottille/flottille.db")).unwrap()
+    Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
 #[test]

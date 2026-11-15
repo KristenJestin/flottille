@@ -138,7 +138,7 @@ fn release(user: &User) {
 
 /// The wakes of the starter `lead` at the ends of the turns of the session it follows.
 fn wakes(user: &User, lead: &str) -> Vec<String> {
-    Store::open(&user.path("state/flottille/flottille.db"))
+    Store::open_read_only(&user.path("state/flottille/flottille.db"))
         .unwrap()
         .last_deliveries(lead, 64)
         .unwrap()
@@ -335,7 +335,7 @@ fn open_of(user: &User, id: &str) -> Vec<String> {
 }
 
 fn events_of(user: &User, id: &str, name: &str) -> usize {
-    Store::open(&user.path("state/flottille/flottille.db"))
+    Store::open_read_only(&user.path("state/flottille/flottille.db"))
         .unwrap()
         .last_agent_events(id, name, 100)
         .unwrap()
@@ -388,6 +388,7 @@ fn a_question_answered_before_the_upgrade_is_not_open() {
     eventually("the answer taken", || open_of(&user, &id).is_empty());
     eventually("its turn's end", || state(&user, &id) == "idle");
     // An older version stored no `agent.answered`.
+    // Deleted with the daemon running: the test goes on with the same daemon and its session.
     let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
     db.execute(
@@ -424,7 +425,7 @@ fn a_message_written_before_a_question_does_not_answer_it() {
     send(&user, &id, "Also check the logs.");
     std::fs::write(user.path("fake/asked"), "").unwrap();
     let taken = || {
-        Store::open(&user.path("state/flottille/flottille.db"))
+        Store::open_read_only(&user.path("state/flottille/flottille.db"))
             .unwrap()
             .last_deliveries_of(&id, "user", 10)
             .unwrap()
@@ -579,7 +580,7 @@ fn the_answer_message_quotes_each_question_and_its_answer() {
     );
     eventually("no longer open", || open_seqs(&user, &id).is_empty());
     // The answers are kept with the ask they answer.
-    let answered = Store::open(&user.path("state/flottille/flottille.db"))
+    let answered = Store::open_read_only(&user.path("state/flottille/flottille.db"))
         .unwrap()
         .last_agent_events(&id, "agent.answered", 10)
         .unwrap()
@@ -723,7 +724,7 @@ fn a_child_s_several_questions_reach_its_parent_numbered() {
     );
     assert!(!answer.error, "{}", answer.text);
     let question = || {
-        Store::open(&user.path("state/flottille/flottille.db"))
+        Store::open_read_only(&user.path("state/flottille/flottille.db"))
             .unwrap()
             .last_deliveries(&lead, 64)
             .unwrap()
@@ -821,7 +822,7 @@ fn a_waiting_card_answer_is_not_listed_as_a_user_message() {
 
     // The answer waits for the turn's end, and the card says so: it is not a message of the
     // user to cancel, edit or send now.
-    let stored = Store::open(&user.path("state/flottille/flottille.db"))
+    let stored = Store::open_read_only(&user.path("state/flottille/flottille.db"))
         .unwrap()
         .deliveries(&id, "queued")
         .unwrap();

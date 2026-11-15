@@ -2074,6 +2074,8 @@ fn a_subscription_stored_with_a_deadline_keeps_it() {
 
     // What a subscription stored before it lasted until its target ended looks like: the hour it
     // was given by default.
+    // Written with the daemon running: the daemon's clock is the test's (`test.advance`), and a
+    // stop would lose it.
     let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
     let mut old = store.subscriptions().unwrap().remove(0);
     old.expires_at = old.created_at + 60 * 60_000;
@@ -2974,7 +2976,7 @@ fn rerun_through(user: &User, mcp: &Mcp, delivery: &str) -> Answer {
     let number = held(&mcp.call("forge", hinted(delivery)));
     user.call("approval.approve", json!({"number": number}))
         .unwrap();
-    let store = || Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = || Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     let id = format!("approval-{number}");
     eventually("the answer", || store().delivery(&id).unwrap().is_some());
     let text = store().delivery(&id).unwrap().unwrap().body;

@@ -1520,8 +1520,10 @@ fn a_folder_swapped_for_a_link_to_flottille_s_folder_after_the_approval_is_refus
     user.call("approval.approve", json!({"number": request["number"]}))
         .unwrap();
 
-    let store =
-        || flottille_core::store::Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = || {
+        flottille_core::store::Store::open_read_only(&user.path("state/flottille/flottille.db"))
+            .unwrap()
+    };
     let id = format!("approval-{}", request["number"]);
     eventually("the answer", || store().delivery(&id).unwrap().is_some());
     let text = store().delivery(&id).unwrap().unwrap().body;
