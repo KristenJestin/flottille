@@ -446,15 +446,20 @@ pub async fn run(
         crate::mcp::started_run(&going.run.id);
         return Outcome::Done(describe(daemon, &going.run.id, None, None, true, false));
     }
-    // The project's checks of a commit's message, before git makes it.
+    // The project's checks of a commit's message, then the commit checks of its repository,
+    // before git makes it.
     let at = crate::message_checks::Where {
         daemon,
         place,
         repository: &repository,
         folder: &folder.path,
     };
+    let checks = async {
+        crate::message_checks::commits(&at, &words).await?;
+        crate::commit_checks::commits(&at, &words).await
+    };
     tokio::select! {
-        checked = crate::message_checks::commits(&at, &words) => {
+        checked = checks => {
             if let Err(refusal) = checked {
                 return Outcome::Refused(refusal);
             }

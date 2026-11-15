@@ -60,6 +60,26 @@ pub enum ProjectAction {
         #[arg(long)]
         json: bool,
     },
+    /// Each repository's commit checks, and the lines its hooks propose, read and never run
+    CommitChecks {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replace one repository's commit checks: none given removes them
+    SetCommitChecks {
+        name: String,
+        /// The repository's path in the project, `.` for the project's folder
+        repository: String,
+        /// A line run before an agent's commit in the repository; one per option
+        #[arg(long = "pre-commit", value_name = "LINE")]
+        pre_commit: Vec<String>,
+        /// A line run on the commit's message, `{message_file}`; one per option
+        #[arg(long = "commit-msg", value_name = "LINE")]
+        commit_msg: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Fails (without a message of its own) when `list` found a file it cannot use, or `check` a
@@ -214,7 +234,74 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
             }
             Ok(outcome(same))
         }
+        ProjectAction::CommitChecks { name: wanted, json } => {
+            let checks = ask("project.commit_checks", name(wanted)?)?;
+            match json {
+                true => println!("{checks}"),
+                false => print!("{}", commit_checks_text(&checks)),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProjectAction::SetCommitChecks {
+            name,
+            repository,
+            pre_commit,
+            commit_msg,
+            json,
+        } => {
+            let asked = flottille_core::protocol::CommitChecks {
+                name,
+                repository,
+                pre_commit,
+                commit_msg,
+            };
+            let checks = ask("project.set_commit_checks", serde_json::to_value(asked)?)?;
+            match json {
+                true => println!("{checks}"),
+                false => print!("{}", commit_checks_text(&checks)),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
+}
+
+/// Each repository's commit checks by hook, then what its hooks propose and what they hold that
+/// cannot be a check.
+fn commit_checks_text(checks: &Value) -> String {
+    let mut out = String::new();
+    for repository in checks["repositories"].as_array().into_iter().flatten() {
+        out.push_str(&format!("{}\n", text(repository, "path")));
+        for (hook, key) in [("pre-commit", "pre_commit"), ("commit-msg", "commit_msg")] {
+            let lines = list_of(&repository[key]);
+            match lines.is_empty() {
+                true => out.push_str(&format!("  {hook}: none\n")),
+                false => {
+                    out.push_str(&format!("  {hook}:\n"));
+                    for line in lines {
+                        out.push_str(&format!("    {line}\n"));
+                    }
+                }
+            }
+        }
+        for proposal in repository["proposed"].as_array().into_iter().flatten() {
+            out.push_str(&format!(
+                "  proposed for {} (from {}): {}\n",
+                text(proposal, "hook"),
+                text(proposal, "from"),
+                text(proposal, "line")
+            ));
+        }
+        for left in repository["left_out"].as_array().into_iter().flatten() {
+            out.push_str(&format!(
+                "  left out of {} ({}): {}: {}\n",
+                text(left, "from"),
+                text(left, "hook"),
+                text(left, "line"),
+                text(left, "why")
+            ));
+        }
+    }
+    out
 }
 
 /// The daemon names a configuration file `projects/<name>.toml`; the user needs to know which

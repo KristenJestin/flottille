@@ -35,6 +35,7 @@ use crate::actions::Command;
 use crate::commands::{
     CommandsSection, boxed, menu_of, problem_line, section_blocks, spaced, stack,
 };
+use crate::commit_checks::CommitChecks;
 use crate::conventions::{Convention, Kind};
 use crate::message_checks::MessageChecks;
 use crate::programs::{ProgramChecks, ProgramState, ProgramValue, program_block};
@@ -441,6 +442,9 @@ pub struct ProjectSettingsPage {
     rules: Entity<RulesEditor>,
     /// The checks of its agents' messages, under its rules (`docs/projects.md`, "Message checks").
     message_checks: Entity<MessageChecks>,
+    /// Each repository's commit checks, under the message checks (`docs/projects.md`, "Commit
+    /// checks").
+    commit_checks: Entity<CommitChecks>,
     /// The regular expression its branches match, under the setup.
     branch_format: Entity<Convention>,
     /// The description of a pull request opened without one, beside the message checks.
@@ -470,6 +474,7 @@ impl ProjectSettingsPage {
             cx.new(|_| RulesEditor::new(shell, Some(project)))
         };
         let message_checks = cx.new(|_| MessageChecks::new(shell.clone(), name.clone()));
+        let commit_checks = cx.new(|_| CommitChecks::new(shell.clone(), name.clone()));
         let convention = |kind, cx: &mut Context<Self>| {
             cx.new(|_| Convention::new(shell.clone(), name.clone(), kind))
         };
@@ -491,7 +496,9 @@ impl ProjectSettingsPage {
             repositories.clone(),
         );
         let checking = programs.clone();
+        let committing = commit_checks.clone();
         cx.defer(move |cx| {
+            committing.update(cx, |section, cx| section.read(cx));
             checking.update(cx, |checks, cx| checks.refresh(cx));
             listing.update(cx, |section, cx| section.read(cx));
             skilling.update(cx, |section, cx| section.read(cx));
@@ -567,6 +574,7 @@ impl ProjectSettingsPage {
             narrow: false,
             rules,
             message_checks,
+            commit_checks,
             branch_format,
             pull_request_template,
             skills,
@@ -589,6 +597,10 @@ impl ProjectSettingsPage {
 
     pub fn message_checks(&self) -> &Entity<MessageChecks> {
         &self.message_checks
+    }
+
+    pub fn commit_checks(&self) -> &Entity<CommitChecks> {
+        &self.commit_checks
     }
 
     /// The section of the convention whose key is `key`: the branch format, or the pull request
@@ -2722,6 +2734,10 @@ impl Render for ProjectSettingsPage {
                 ("commands", self.commands.clone().into_any_element()),
                 ("skills", self.skills.clone().into_any_element()),
                 ("checks", self.message_checks.clone().into_any_element()),
+                (
+                    "commit-checks",
+                    self.commit_checks.clone().into_any_element(),
+                ),
                 (
                     "template",
                     self.pull_request_template.clone().into_any_element(),

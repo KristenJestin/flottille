@@ -32,15 +32,17 @@ const ARGUMENTS: [(&str, &[&str]); 4] = [
 ];
 
 /// A milestone of the tracker's repository, as GitHub's API says it.
-struct Milestone {
-    number: u64,
-    title: String,
-    state: String,
+pub(super) struct Milestone {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
     /// The day it is due, when it has one.
-    due: Option<String>,
+    pub due: Option<String>,
+    /// The day it was closed, when it was.
+    pub closed_on: Option<String>,
     open: u64,
     closed: u64,
-    url: Option<String>,
+    pub url: Option<String>,
 }
 
 impl Milestone {
@@ -50,6 +52,10 @@ impl Milestone {
             title: value["title"].as_str()?.to_owned(),
             state: value["state"].as_str().unwrap_or("open").to_owned(),
             due: value["due_on"]
+                .as_str()
+                .and_then(|at| at.get(..10))
+                .map(str::to_owned),
+            closed_on: value["closed_at"]
                 .as_str()
                 .and_then(|at| at.get(..10))
                 .map(str::to_owned),
@@ -228,7 +234,7 @@ async fn forge_of(project: &Project) -> Result<Forge, String> {
 
 /// Every milestone of the repository of `state` (`open`, `closed` or `all`), page after page: `gh
 /// api` prints each page's list one after another.
-async fn read(forge: &Forge, state: &str) -> Result<Vec<Milestone>, String> {
+pub(super) async fn read(forge: &Forge, state: &str) -> Result<Vec<Milestone>, String> {
     forge::signed_in().await?;
     let path = format!(
         "repos/{}/milestones?state={state}&per_page=100",

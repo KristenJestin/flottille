@@ -310,7 +310,7 @@ leaves it out.
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
 (by label, assignee and `updated_within`), `search` with words, `in_comments` or `jql`, `show` the workspace's ticket or another of the
-project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards, `milestones` the milestones of a GitHub repository or the versions of Jira's projects; `create` (on Jira also under a parent, in a sprint and in a version; on GitHub in a milestone), `milestone_create` and `milestone_edit` (GitHub, "Milestones" below; refused on Jira, "Versions"), `comment`, `log_time` (Jira, "Logging time" below) and `time_spent`, `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
+project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards, `milestones` the milestones of a GitHub repository or the versions of Jira's projects, `progress` their tickets grouped with the work on each ("Progress" below); `create` (on Jira also under a parent, in a sprint and in a version; on GitHub in a milestone), `milestone_create` and `milestone_edit` (GitHub, "Milestones" below; refused on Jira, "Versions"), `comment`, `log_time` (Jira, "Logging time" below) and `time_spent`, `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
 GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
 Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
 tracker does not take, or a creation in a Jira project that is not one of the tracker's, is
@@ -761,6 +761,59 @@ What Flottille does with it:
   shape of `fixVersions` in a view. The maintainer checks them on their site: `tickets
   milestones`, then a `create` with `milestone` and `type`, then `list` with `milestone`. If `acli`
   refuses `fixVersions` in the JSON, the creation answers with its words and nothing else is done.
+
+### Progress
+
+Seen in use: the maintainer followed how the work advanced by refreshing the forge's milestones
+page all day, while agents worked on their own (#801). Flottille already knows, for each ticket,
+the workspace and the session on it, its pull request and its checks: a project's **Progress**
+page shows each milestone with them. It is an entry of the project in the window's sidebar, under
+the project's row, for a project that declares a tracker.
+
+- **`project.progress {project}`** (`docs/protocol.md`), and the same as lines for an agent
+  through `tickets` `progress` (a read, allowed as `milestones` is), gives, in one call, every
+  milestone of the tracker (a GitHub repository's milestones of every state, a Jira project's
+  versions), each with its tickets in their groups and, for each ticket, the workspaces linked to
+  it and its pull requests with their checks. **The tickets, their states, the pull requests and
+  their checks are what the items' rounds keep** ([`items.md`](items.md)): nothing of them is
+  asked. The milestones are not in what the rounds read, so they are read by `project.progress`
+  itself, **at most once per round of the tracker** (kept in the daemon's memory until the
+  tracker's next round, or a minute before its first), and only while something asks. Two callers
+  at once make one read: a project has one read in flight, and the second waits for it:
+  - GitHub: `gh api repos/<owner>/<name>/milestones?state=all&per_page=100 --paginate`, the call
+    of `tickets milestones`; a ticket is in a milestone when its item's `milestone` says its title
+    (the rounds read it with `gh issue list --json …,milestone`).
+  - Jira: `acli jira project view --key <P> --json` for each project of the tracker, the call of
+    `tickets milestones`, then, for each version **not released** (and not archived), `acli jira
+    workitem search --jql 'project = "<P>" AND fixVersion = "<name>" ORDER BY updated DESC'
+    --fields key,summary --json --paginate --limit 10000`, its keys alone, **kept five minutes**
+    across the rounds (a round of the tracker does not search each version again). A version whose
+    search fails is listed with `read` false and the reason in `problem`: the other versions show.
+    The rounds' own search
+    is left as it was: whether `search` allows `fixVersions` among its `--fields` is not known
+    (above), and a refusal would stop every round of the tracker. A released version is listed
+    without its tickets, said on its row.
+- **The groups**, whatever the tracker:
+  - **GitHub** issues are open or closed, so the groups are derived: *To do* (open, nothing on it),
+    *In progress* (a workspace linked to it, or a pull request on it merged; one closed unmerged
+    is work dropped, it does not count), *In
+    review* (a pull request on it open or draft), *Done* (closed). A repository that tracks its
+    issues in a GitHub Project with a status field is not read for it yet.
+  - **Jira**: the project's own statuses, the custom ones too, ordered by their status category as
+    Jira gives it (`new`, `indeterminate`, `done`), then by name; a status whose category Flottille
+    cannot read puts the work item under *Other*, last, which says so. A pull request open on a
+    work item is a chip in its status's group.
+  - The bar counts by category: done, in review (GitHub), in progress, to do, and *other* when
+    there is one.
+- **What ties a ticket to the work on it**: a workspace linked to it (`workspace.ticket`); the
+  sessions working in such a workspace, which the window reads from its own list; a pull request
+  on the branch of such a workspace, in one of its repositories; on GitHub, a pull request of the
+  tracker's repository whose description closes it with one of GitHub's keywords (`Closes #12`,
+  `fixes #12`, `resolves: #12`), read once the rounds read its description; on Jira, a pull
+  request whose title or branch names the key as a word of its own (`ABC-12`, `feat/abc-12-…`).
+- A milestone that changes on a GitHub issue is an `item.changed` whose `fields` hold
+  `milestone`, so that the page reads again; so is any other `item.*` event of the project, and a
+  workspace made or removed.
 
 ### What `acli jira workitem search` prints is assumed too
 

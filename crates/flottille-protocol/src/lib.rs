@@ -151,6 +151,20 @@ pub struct MessageChecks {
     pub checks: Vec<String>,
 }
 
+/// The parameters of `project.set_commit_checks`: every commit check of one repository of the
+/// project, by its hook, in order; none removes them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitChecks {
+    pub name: String,
+    /// Its path in the project, `.` for the project's folder.
+    pub repository: String,
+    #[serde(default)]
+    pub pre_commit: Vec<String>,
+    #[serde(default)]
+    pub commit_msg: Vec<String>,
+}
+
 /// The parameters of `project.set_conventions`: the project's branch format and pull request
 /// template, each kept when left out and removed when empty.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -351,6 +351,28 @@ line cannot be split without a shell or does not name `{message}` (`the check `l
 used: must name {message}, the file that holds the message it checks; nothing was saved`). It is the
 user's alone: no tool of an agent writes the checks, which Flottille runs outside the gate.
 
+#### `project.commit_checks`
+
+`{"name"}`. Each repository's commit checks (`docs/projects.md`, "Commit checks") and what its
+hooks in the project's folder propose: `{"name", "repositories": [{"path", "pre_commit",
+"commit_msg", "proposed": [{"hook", "line", "from"}], "left_out": [{"hook", "line", "from",
+"why"}]}]}`, in the file's order. `hook` is `pre-commit` or `commit-msg`, `from` the file it was
+read from, relative to the repository; a line already saved for its hook is not proposed again, and
+`left_out` holds the commands of a hook file that cannot be a check, with why (shell syntax). The
+hooks are read, never run, and every line is masked.
+
+#### `project.set_commit_checks`
+
+`{"name", "repository", "pre_commit"?, "commit_msg"?}`. Replaces one repository's commit checks,
+every one in order, in its file where it stands: `commit_checks = { pre_commit = […], commit_msg =
+[…] }` of its `[[repositories]]`, removed when both are empty (a blank line is left out). Answers
+what `project.commit_checks` does. `refused`, nothing written, when the project has no such
+repository, or a line cannot be split without a shell (with the sentence a `run` line gets for its
+shell syntax), a `commit-msg` one does not name `{message_file}` or a `pre-commit` one does (`the
+commit-msg check `lint x` cannot be used: must name {message_file}, the file that holds the
+commit's message; nothing was saved`, its hook named). It is the user's alone: no tool of an
+agent writes them.
+
 #### `project.ticket`
 
 `{"project", "ticket"}`. Reads a ticket of the project's tracker before any workspace has it, for
@@ -358,6 +380,21 @@ the new-workspace form's preview (`docs/tickets.md`): `{"project", "ticket", "tr
 "tracker_said", "problem"}` and, once read, the fields of `workspace.ticket`. `problem` says why it
 is not taken or not read; it is not a refusal.
 
+
+#### `project.progress`
+
+`{"project"}`. The milestones of the project's tracker and their tickets, for the window's
+Progress page (`docs/tickets.md`, "Progress"): `{"project", "tracker" (github or jira),
+"milestones", "problem"}`. Each milestone is `{"id", "name", "source", "jira_project", "state"
+(open or closed), "due", "closed_at" (the day GitHub closed it, when it says so), "url", "read",
+"problem" (why a Jira version's tickets could not be read), "counts": {"done", "review", "progress", "todo", "other",
+"total"}, "groups"}`, each group `{"name", "category" (new, indeterminate, review, done or
+other), "tickets"}`, each ticket `{"key", "title", "state", "status", "url", "workspaces",
+"pulls"}`, each pull request `{"repository", "key", "title", "state", "ci", "url"}`. `read` is
+false for a released Jira version, whose tickets are not read, or whose search failed (its own
+`problem` says why). The top-level `problem` says why the milestones
+could not be read (`milestones` is then empty); it is not a refusal. `refused` for a project that
+declares no tracker.
 ### The rules methods
 
 `rules.show`, `rules.set` and `rules.reset` read, write and reset how agents are told to work

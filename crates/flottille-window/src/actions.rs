@@ -265,6 +265,15 @@ pub enum Command {
         key: &'static str,
         value: String,
     },
+    /// Reads each repository's commit checks and what its hooks propose (`project.commit_checks`).
+    ReadCommitChecks(String),
+    /// Writes one repository's commit checks (`project.set_commit_checks`).
+    SaveCommitChecks {
+        project: String,
+        repository: String,
+        pre_commit: Vec<String>,
+        commit_msg: Vec<String>,
+    },
     /// Writes the project's message checks (`project.set_message_checks`).
     SaveMessageChecks {
         project: String,
@@ -351,6 +360,12 @@ pub enum Command {
     /// (`project.settings`).
     /// `asked` numbers the reads, so that an answer older than one applied is dropped.
     Items {
+        project: String,
+        asked: u64,
+    },
+    /// The project's milestones and their tickets (`project.progress`); `asked` numbers the
+    /// reads.
+    Progress {
         project: String,
         asked: u64,
     },
@@ -851,6 +866,13 @@ pub enum Outcome {
         key: &'static str,
         saved: Result<String, String>,
     },
+    /// Each repository's commit checks and proposals, read or after the save of `saved`'s
+    /// repository, or why nothing was read or written.
+    CommitChecks {
+        project: String,
+        read: Result<Value, String>,
+        saved: Option<String>,
+    },
     /// The project's message checks as saved, or why nothing was.
     MessageChecks {
         project: String,
@@ -1051,6 +1073,11 @@ pub enum Outcome {
         project: String,
         asked: u64,
         read: Result<crate::items::Read, String>,
+    },
+    Progress {
+        project: String,
+        asked: u64,
+        read: Result<crate::progress::Progress, String>,
     },
     Item {
         project: String,
@@ -1726,6 +1753,36 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             project,
             key,
         },
+        Command::ReadCommitChecks(project) => Outcome::CommitChecks {
+            read: answer(ask_alone(
+                connect,
+                "project.commit_checks",
+                json!({"name": project}),
+                bounds.quick,
+            )),
+            project,
+            saved: None,
+        },
+        Command::SaveCommitChecks {
+            project,
+            repository,
+            pre_commit,
+            commit_msg,
+        } => Outcome::CommitChecks {
+            read: answer(ask_alone(
+                connect,
+                "project.set_commit_checks",
+                json!({
+                    "name": project,
+                    "repository": repository,
+                    "pre_commit": pre_commit,
+                    "commit_msg": commit_msg,
+                }),
+                bounds.quick,
+            )),
+            project,
+            saved: Some(repository),
+        },
         Command::SaveMessageChecks { project, checks } => Outcome::MessageChecks {
             saved: answer(ask_alone(
                 connect,
@@ -2153,6 +2210,17 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                         .map(|settings| crate::items::Read::of(&listed, &settings))
                 });
             Outcome::Items {
+                project,
+                asked,
+                read,
+            }
+        }
+        Command::Progress { project, asked } => {
+            let params = json!({"project": project});
+            let read = ask_alone(connect, "project.progress", params, bounds.quick)
+                .and_then(|read| read)
+                .map(|read| crate::progress::Progress::of(&read));
+            Outcome::Progress {
                 project,
                 asked,
                 read,

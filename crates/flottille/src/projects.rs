@@ -12,8 +12,8 @@ use flottille_core::detect;
 use flottille_core::paths::Paths;
 use flottille_core::project::{Project, slug, valid_name};
 use flottille_core::protocol::{
-    Conventions, MessageChecks, ProjectFolder, ProjectName, ProjectRemove, ProjectRepository,
-    ProjectSettings, ShownWorkspace,
+    CommitChecks, Conventions, MessageChecks, ProjectFolder, ProjectName, ProjectRemove,
+    ProjectRepository, ProjectSettings, ShownWorkspace,
 };
 use flottille_core::registry::Registry;
 use flottille_core::run::Run;
@@ -836,6 +836,111 @@ pub fn set_message_checks(daemon: &Daemon, params: Value) -> std::result::Result
         Ok(())
     })?;
     Ok(json!({"name": saved.name, "message_checks": saved.message_checks}))
+}
+
+/// `project.commit_checks`: each repository's commit checks, as the file says them, and what its
+/// hooks in the project's folder propose besides, read and never run (`commit_checks::proposals`).
+pub fn commit_checks(daemon: &Daemon, params: Value) -> std::result::Result<Value, Failure> {
+    let asked: ProjectName = serde_json::from_value(params)?;
+    let project = load_project(daemon, &asked.name)?;
+    Ok(commit_checks_of(&project))
+}
+
+fn commit_checks_of(project: &Project) -> Value {
+    let repositories: Vec<Value> = project
+        .repositories
+        .iter()
+        .map(|repository| {
+            let saved = &repository.commit_checks;
+            let (mut proposed, left_out) =
+                crate::commit_checks::proposals(&project.folder.join(&repository.path));
+            proposed.retain(|proposal| {
+                let lines = match proposal.hook {
+                    "pre-commit" => &saved.pre_commit,
+                    _ => &saved.commit_msg,
+                };
+                !lines.contains(&proposal.line)
+            });
+            json!({
+                "path": repository.path,
+                "pre_commit": saved.pre_commit,
+                "commit_msg": saved.commit_msg,
+                "proposed": proposed,
+                "left_out": left_out,
+            })
+        })
+        .collect();
+    json!({"name": project.name, "repositories": repositories})
+}
+
+/// `project.set_commit_checks`: one repository's commit checks, the user's alone (an agent's
+/// `project` tool never writes them), each line refused with its reason when it cannot be run;
+/// then what `project.commit_checks` says.
+pub fn set_commit_checks(daemon: &Daemon, params: Value) -> std::result::Result<Value, Failure> {
+    let asked: CommitChecks = serde_json::from_value(params)?;
+    let kept = |lines: &[String]| -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| line.trim().to_owned())
+            .filter(|line| !line.is_empty())
+            .collect()
+    };
+    let (pre_commit, commit_msg) = (kept(&asked.pre_commit), kept(&asked.commit_msg));
+    for (lines, hook) in [(&pre_commit, "pre-commit"), (&commit_msg, "commit-msg")] {
+        for line in lines {
+            let message = hook == "commit-msg";
+            flottille_core::project::check_commit_check(line, message).map_err(|why| {
+                Failure::refused(format!(
+                    "the {hook} check `{line}` cannot be used: {why}; nothing was saved"
+                ))
+            })?;
+        }
+    }
+    let saved = rewrite(daemon, &asked.name, |project, document| {
+        if !project
+            .repositories
+            .iter()
+            .any(|repository| repository.path == asked.repository)
+        {
+            return Err(Failure::refused(format!(
+                "the project {} has no repository {}; nothing was saved",
+                asked.name, asked.repository
+            )));
+        }
+        let entries = document
+            .get_mut("repositories")
+            .and_then(toml_edit::Item::as_array_of_tables_mut)
+            .ok_or_else(|| {
+                Failure::new(
+                    "invalid-config",
+                    format!(
+                        "projects/{}.toml: repositories: must be an array of tables",
+                        asked.name
+                    ),
+                )
+            })?;
+        for entry in entries.iter_mut() {
+            if entry.get("path").and_then(|p| p.as_str()) != Some(asked.repository.as_str()) {
+                continue;
+            }
+            let mut checks = toml_edit::InlineTable::new();
+            for (key, lines) in [("pre_commit", &pre_commit), ("commit_msg", &commit_msg)] {
+                if !lines.is_empty() {
+                    checks.insert(key, lines.iter().collect::<toml_edit::Array>().into());
+                }
+            }
+            match checks.is_empty() {
+                true => {
+                    entry.remove("commit_checks");
+                }
+                false => {
+                    entry.insert("commit_checks", toml_edit::value(checks));
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(commit_checks_of(&saved))
 }
 
 /// `project.set_conventions`: the project's branch format and pull request template, the user's

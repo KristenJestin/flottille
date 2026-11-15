@@ -20,6 +20,7 @@ mod codex;
 mod codex_bridge;
 mod command_command;
 mod commands;
+mod commit_checks;
 mod compaction;
 mod daemon;
 mod deliveries;

@@ -408,6 +408,28 @@ pub async fn prepared(
         {
             return Err(Outcome::Refused(why));
         }
+        // A Bitbucket thread is the number of its first comment: another id is refused as it is,
+        // before the user is asked.
+        if matches!(args["action"].as_str(), Some("reply" | "resolve"))
+            && let Some((_, path)) = write_target(
+                daemon,
+                &grant.place,
+                args["workspace"].as_str(),
+                args["repository"].as_str(),
+            )
+            && let Ok(project) = projects::load_project(daemon, &grant.place.project)
+            && let Some(repository) = project.repositories.iter().find(|r| r.path == path)
+            && matches!(
+                repository.forge,
+                Some(
+                    RepositoryForge::BitbucketCloud { .. }
+                        | RepositoryForge::BitbucketDataCenter { .. }
+                )
+            )
+            && let Some(why) = crate::forge::bitbucket_thread(&args["thread"])
+        {
+            return Err(Outcome::Refused(why));
+        }
         let mut says = posted_says(args);
         // Without a body, the forge shows the project's template: the card says it whole.
         if args["action"] == "create"
@@ -648,6 +670,7 @@ fn posted_says(args: &Value) -> Vec<String> {
                 | "link_types"
                 | "sprints"
                 | "milestones"
+                | "progress"
                 | "time_spent"
         ) | None
     ) {
@@ -735,6 +758,24 @@ fn forge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<String> {
                 .map(|base| format!("It moves it onto the base {base}")));
         }
         Some("merge") => say(merge_says(daemon, grant, args)),
+        Some(action @ ("reply" | "resolve")) => {
+            let thread = match &args["thread"] {
+                Value::String(id) => id.trim().to_owned(),
+                other => other.to_string(),
+            };
+            let number = &args["number"];
+            say(Some(match (action, args["resolved"].as_bool()) {
+                ("reply", _) => {
+                    format!("It replies in the review thread {thread} of pull request #{number}")
+                }
+                (_, Some(false)) => format!(
+                    "It marks the review thread {thread} of pull request #{number} unresolved"
+                ),
+                _ => format!(
+                    "It marks the review thread {thread} of pull request #{number} resolved"
+                ),
+            }));
+        }
         Some("review") => {
             say(args["verdict"]
                 .as_str()

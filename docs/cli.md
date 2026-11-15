@@ -521,6 +521,39 @@ $ flottille project check shop
 Project shop: the repositories match the configuration.
 ```
 
+### `flottille project commit-checks <name>`
+
+Each repository's commit checks by hook (`docs/projects.md`, "Commit checks"), then the lines its
+hooks propose, with the file each was read from, and the commands of a hook file that cannot be a
+check, with why. Nothing is run. `--json` prints `project.commit_checks`.
+
+```
+$ flottille project commit-checks shop
+api
+  pre-commit: none
+  commit-msg: none
+  proposed for pre-commit (from .husky/pre-commit): lint-staged
+  proposed for commit-msg (from .husky/commit-msg): npx --no -- commitlint --edit {message_file}
+  left out of .husky/pre-commit (pre-commit): pnpm test && pnpm lint: Flottille runs a command without a shell, and “&&” is shell syntax: …
+```
+
+### `flottille project set-commit-checks <name> <repository> [--pre-commit <line>]… [--commit-msg <line>]…`
+
+Replaces the commit checks of one repository (its path in the project, `.` for the project's
+folder), each option one line, in order; none given removes them. A line that cannot be used is
+refused with why, and nothing is saved. Prints what `project commit-checks` prints; `--json`,
+`project.set_commit_checks`.
+
+```
+$ flottille project set-commit-checks shop api --pre-commit lint-staged \
+    --commit-msg "npx --no -- commitlint --edit {message_file}"
+api
+  pre-commit:
+    lint-staged
+  commit-msg:
+    npx --no -- commitlint --edit {message_file}
+```
+
 ### `flottille project remove <name> [--discard [--yes]]`
 
 Stops the project's agents and command runs, removes its workspaces and forgets its configuration,
