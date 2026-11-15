@@ -5,6 +5,10 @@
 //!
 //! The owner is a view, and a picture scaled in the background comes back to it: every method
 //! that may wait for one takes `of`, the way to reach this value from its owner.
+//!
+//! Each picture is also a chip in the owner's field, where it was put (#773): `Image 1`, its name
+//! and its size, numbered from 1 in the order of the chips, its thumbnail under the same number.
+//! Removing the chip removes the picture, and the thumbnail's remove button removes the chip.
 
 use std::sync::Arc;
 
@@ -12,8 +16,8 @@ use flottille_core::images::{MAX_IMAGE_BYTES, MAX_IMAGES};
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
-    Button, Icon, Listing, Skeleton, Toast, enter, fade, hoverable, icon, palette, presence, space,
-    toast,
+    Badge, Button, Icon, Listing, Piece, Skeleton, Toast, Token, TokenEvent, TokenField, enter,
+    fade, hoverable, icon, palette, presence, space, toast,
 };
 use gpui_kit::base::input::Paste;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -25,6 +29,7 @@ use gpui_kit::{
 
 use crate::actions::Picture;
 use crate::picture_viewer::PictureViewer;
+use crate::tokens;
 
 /// What a toast says of a picture the composer does not attach: its title, and why.
 pub const NOT_ATTACHED: &str = "The picture was not attached";
@@ -43,13 +48,58 @@ fn thumb_key(image: &Arc<gpui_kit::Image>) -> String {
     format!("{:x}", Arc::as_ptr(image) as usize)
 }
 
+/// The extension a picture of that format is named with when it came without a name (pasted).
+fn extension(format: gpui_kit::ImageFormat) -> &'static str {
+    use gpui_kit::ImageFormat::{Gif, Jpeg, Webp};
+    match format {
+        Jpeg => "jpg",
+        Gif => "gif",
+        Webp => "webp",
+        _ => "png",
+    }
+}
+
+/// The number of a thumbnail, its chip's in the text, as the kit's badge: a new number fades in
+/// as the chips before it change. `id` names it; one that leaves keeps the number it had.
+fn number(id: ElementId, key: &str, number: usize) -> AnyElement {
+    let badge = div()
+        .id(id)
+        .aria_label(SharedString::from(format!("Image {number}")))
+        .child(Badge::count(number))
+        .test_support();
+    div()
+        .absolute()
+        .left(px(3.))
+        .bottom(px(3.))
+        .child(enter(
+            ElementId::Name(format!("attachment-number-enter-{key}-{number}").into()),
+            0,
+            badge,
+        ))
+        .into_any_element()
+}
+
 /// How a composer reaches its [`Attachments`].
 pub type Of<T> = fn(&mut T) -> &mut Attachments;
 
+/// A picture attached: its chip's id, its name, and whether its chip is in the field yet.
+#[derive(Clone)]
+struct Attached {
+    id: u64,
+    image: Arc<gpui_kit::Image>,
+    name: String,
+    /// Its chip was put in the field (or it came back without one, and goes after the text).
+    placed: bool,
+}
+
 #[derive(Default)]
 pub struct Attachments {
-    /// Pictures pasted or dropped, sent with the next message.
-    images: Vec<Arc<gpui_kit::Image>>,
+    /// Pictures pasted or dropped, sent with the next message, in the order of their chips.
+    images: Vec<Attached>,
+    /// The ones whose chip the user removed: an undo or a paste of the chip brings them back.
+    gone: Vec<Attached>,
+    /// The field the chips are in, set by the owner.
+    field: Option<Entity<TokenField>>,
     /// The ones the message being sent holds: they leave when it is taken, whatever was removed
     /// or added meanwhile.
     sent: Vec<Arc<gpui_kit::Image>>,
@@ -62,14 +112,37 @@ pub struct Attachments {
     scaling: Vec<u64>,
     places: Listing<()>,
     scaled: u64,
+    /// The number each thumbnail last showed, by its key: one that folds away keeps it.
+    numbers: std::collections::HashMap<String, usize>,
     /// A thumbnail opened large; made when the strip is first drawn.
     viewer: Option<Entity<PictureViewer>>,
 }
 
 impl Attachments {
-    /// The pictures that go with the next message.
-    pub fn pictures(&self) -> &[Arc<gpui_kit::Image>] {
-        &self.images
+    /// The pictures of the chips of `field`.
+    pub fn new(field: Entity<TokenField>) -> Self {
+        Self {
+            field: Some(field),
+            ..Self::default()
+        }
+    }
+
+    /// The pictures that go with the next message, in the order of their chips.
+    pub fn pictures(&self) -> Vec<Arc<gpui_kit::Image>> {
+        self.images.iter().map(|a| a.image.clone()).collect()
+    }
+
+    /// The chip of the picture `at` (in the order of [`Attachments::pictures`]) is in the field.
+    pub fn has_chip(&self, at: usize, cx: &gpui_kit::App) -> bool {
+        let (Some(field), Some(attached)) = (&self.field, self.images.get(at)) else {
+            return false;
+        };
+        let id = tokens::picture_id(attached.id);
+        field
+            .read(cx)
+            .value(cx)
+            .iter()
+            .any(|piece| matches!(piece, Piece::Token(token) if token.id == id))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -95,6 +168,18 @@ impl Attachments {
     /// resizing a 4K screenshot takes long enough to freeze the window, so it happens on the
     /// background executor and the picture is attached once it is done.
     pub fn attach<T: 'static>(&mut self, image: gpui_kit::Image, cx: &mut Context<T>, of: Of<T>) {
+        let name = format!("image.{}", extension(image.format));
+        self.attach_named(image, name, cx, of);
+    }
+
+    /// [`Attachments::attach`], the picture named as its chip says it.
+    fn attach_named<T: 'static>(
+        &mut self,
+        image: gpui_kit::Image,
+        name: String,
+        cx: &mut Context<T>,
+        of: Of<T>,
+    ) {
         use gpui_kit::ImageFormat::{Gif, Jpeg, Png, Webp};
         if self.takes == Some(false) {
             return Self::not_attached(NO_IMAGES, cx);
@@ -110,7 +195,7 @@ impl Attachments {
         }
         let mime = image.format.mime_type();
         if !flottille_core::images::needs_scaling(mime, &image.bytes) {
-            return self.keep(image, cx);
+            return self.keep(image, name, cx);
         }
         let (id, format) = (self.scaled, image.format);
         self.scaled += 1;
@@ -124,7 +209,7 @@ impl Attachments {
             this.update(cx, |this, cx| {
                 let attachments = of(this);
                 attachments.scaling.retain(|scaling| *scaling != id);
-                attachments.keep(gpui_kit::Image::from_bytes(format, bytes), cx);
+                attachments.keep(gpui_kit::Image::from_bytes(format, bytes), name, cx);
             })
             .ok();
         })
@@ -132,13 +217,28 @@ impl Attachments {
         cx.notify();
     }
 
-    /// Keeps a picture that is ready to be sent, if it weighs what a message may carry.
-    fn keep<T: 'static>(&mut self, image: gpui_kit::Image, cx: &mut Context<T>) {
+    /// Keeps a picture that is ready to be sent, if it weighs what a message may carry. Its chip
+    /// goes in at the caret when the owner is next drawn ([`Attachments::place`]).
+    fn keep<T: 'static>(&mut self, image: gpui_kit::Image, name: String, cx: &mut Context<T>) {
         if image.bytes.len() > MAX_IMAGE_BYTES {
             return Self::not_attached(IMAGE_TOO_BIG, cx);
         }
-        self.images.push(Arc::new(image));
+        self.push(Arc::new(image), name, self.field.is_none());
         cx.notify();
+    }
+
+    fn push(&mut self, image: Arc<gpui_kit::Image>, name: String, placed: bool) -> u64 {
+        // Unique across composers: a chip copied from one into another is not taken there for
+        // a picture of its own.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.images.push(Attached {
+            id,
+            image,
+            name,
+            placed,
+        });
+        id
     }
 
     /// Attaches the picture a file holds (a file dropped on the composer, or picked).
@@ -164,17 +264,261 @@ impl Attachments {
         if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
             return Self::not_attached(IMAGE_TOO_BIG, cx);
         }
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("image.{}", extension(format)));
         match std::fs::read(path) {
-            Ok(bytes) => self.attach(gpui_kit::Image::from_bytes(format, bytes), cx, of),
+            Ok(bytes) => {
+                self.attach_named(gpui_kit::Image::from_bytes(format, bytes), name, cx, of)
+            }
             Err(_) => Self::not_attached(NOT_READ, cx),
         }
     }
 
-    pub fn detach<T: 'static>(&mut self, at: usize, cx: &mut Context<T>) {
+    /// The remove button of the picture `at`: the picture leaves, and its chip folds away.
+    pub fn detach<T: 'static>(&mut self, at: usize, window: &mut Window, cx: &mut Context<T>) {
         if at < self.images.len() {
-            self.images.remove(at);
+            let gone = self.images.remove(at);
+            if let Some(field) = &self.field {
+                let id = tokens::picture_id(gone.id);
+                field.update(cx, |field, cx| field.remove(&id, window, cx));
+            }
+            // An undo brings its chip back, and the chip its picture.
+            self.gone.push(gone);
             cx.notify();
         }
+    }
+
+    /// What the user did to the chips: a picture's chip removed takes its picture away, one that
+    /// came back (an undo, a paste) brings it back.
+    pub fn chip_changed<T: 'static>(&mut self, event: &TokenEvent, cx: &mut Context<T>) {
+        match event {
+            TokenEvent::Removed(id) => {
+                let Some(id) = tokens::picture_of(id) else {
+                    return;
+                };
+                if let Some(at) = self.images.iter().position(|a| a.id == id) {
+                    self.gone.push(self.images.remove(at));
+                    cx.notify();
+                }
+            }
+            TokenEvent::Added(id) => {
+                let Some(id) = tokens::picture_of(id) else {
+                    return;
+                };
+                if let Some(at) = self.gone.iter().position(|a| a.id == id) {
+                    let back = self.gone.remove(at);
+                    self.images.push(back);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Puts in the chips of the pictures attached since the owner was drawn, at the caret. Called
+    /// as the owner is drawn: it reads the field only when a picture waits, so that the owner is
+    /// not drawn again for each key typed.
+    pub fn place<T: 'static>(&mut self, window: &mut Window, cx: &mut Context<T>) {
+        if self.images.iter().all(|a| a.placed) {
+            return;
+        }
+        let Some(field) = self.field.clone() else {
+            return;
+        };
+        let waiting: Vec<u64> = self
+            .images
+            .iter()
+            .filter(|a| !a.placed)
+            .map(|a| a.id)
+            .collect();
+        for id in waiting {
+            let Some(attached) = self.images.iter_mut().find(|a| a.id == id) else {
+                continue;
+            };
+            attached.placed = true;
+            // Its number is its place among the chips before the caret: one put at the end needs
+            // no other renumbered, and unfolds as it is.
+            let before = {
+                let input = field.read(cx).input().read(cx);
+                let caret = input.cursor();
+                input
+                    .tokens()
+                    .iter()
+                    .filter(|span| span.range().end <= caret)
+                    .filter(|span| tokens::picture_of(span.token().id()).is_some())
+                    .count()
+            };
+            let token = Token::new(
+                tokens::picture_id(id),
+                tokens::picture_look(before + 1, &attached.name, Some(attached.image.bytes.len())),
+            );
+            field.update(cx, |field, cx| field.insert(token, window, cx).ok());
+        }
+    }
+
+    /// The text changed: the numbers and the thumbnails follow the order of the chips.
+    pub fn follow<T: 'static>(&mut self, window: &mut Window, cx: &mut Context<T>) {
+        if let Some(field) = self.field.clone() {
+            self.follow_chips(&field, window, cx);
+        }
+    }
+
+    /// The thumbnails in the order of the chips (those without one after them), and each chip
+    /// numbered by its place. A chip still folding away waits: the text is not set under it.
+    fn follow_chips<T: 'static>(
+        &mut self,
+        field: &Entity<TokenField>,
+        window: &mut Window,
+        cx: &mut Context<T>,
+    ) {
+        let value = field.read(cx).value(cx);
+        let chips = value
+            .iter()
+            .filter(|piece| matches!(piece, Piece::Token(_)))
+            .count();
+        if field.read(cx).input().read(cx).tokens().len() != chips {
+            return;
+        }
+        let order: Vec<u64> = value
+            .iter()
+            .filter_map(|piece| match piece {
+                Piece::Token(token) => tokens::picture_of(&token.id),
+                Piece::Text(_) => None,
+            })
+            .collect();
+        let rank = |a: &Attached| {
+            order
+                .iter()
+                .position(|id| *id == a.id)
+                .unwrap_or(usize::MAX)
+        };
+        if self.images.windows(2).any(|w| rank(&w[0]) > rank(&w[1])) {
+            self.images.sort_by_key(rank);
+            cx.notify();
+        }
+        let mut renumbered = false;
+        let pieces: Vec<Piece> = value
+            .into_iter()
+            .map(|piece| match piece {
+                Piece::Token(token) => match tokens::picture_of(&token.id)
+                    .and_then(|id| self.images.iter().position(|a| a.id == id))
+                {
+                    Some(at) => {
+                        let attached = &self.images[at];
+                        let look = tokens::picture_look(
+                            at + 1,
+                            &attached.name,
+                            Some(attached.image.bytes.len()),
+                        );
+                        renumbered |= look != token.look;
+                        Piece::Token(Token::new(token.id, look))
+                    }
+                    None => Piece::Token(token),
+                },
+                text => text,
+            })
+            .collect();
+        if !renumbered {
+            return;
+        }
+        // A number is in the chip's text: the text is set again, the caret moved by what the
+        // numbers before it gained or lost.
+        let input = field.read(cx).input().clone();
+        let (caret, before) = {
+            let input = input.read(cx);
+            let caret = input.cursor();
+            let gained: isize = input
+                .tokens()
+                .iter()
+                .zip(pieces.iter().filter_map(|piece| match piece {
+                    Piece::Token(token) => Some(token),
+                    Piece::Text(_) => None,
+                }))
+                .filter(|(span, _)| span.range().end <= caret)
+                .map(|(span, token)| token.look.label.len() as isize - span.range().len() as isize)
+                .sum();
+            (caret, gained)
+        };
+        let caret = (caret as isize + before).max(0) as usize;
+        field.update(cx, |field, cx| field.set_value(pieces, window, cx).ok());
+        input.update(cx, |input, cx| input.set_selected_range(caret..caret, cx));
+    }
+
+    /// The message as it is sent: its text, each picture's chip as its marker
+    /// (`[Image 1: photo.png]`), and the pictures in that order. A picture without a chip goes
+    /// after the text, where the daemon marks it. A chip copied again in the text is its label:
+    /// the picture goes once, at its first chip.
+    pub fn message(&self, cx: &gpui_kit::App) -> String {
+        let Some(field) = &self.field else {
+            return String::new();
+        };
+        let pieces = field.read(cx).value(cx);
+        let mut marked = Vec::new();
+        tokens::sent_text(&pieces, |id| {
+            let id = tokens::picture_of(id)?;
+            if marked.contains(&id) {
+                return None;
+            }
+            marked.push(id);
+            let at = self.images.iter().position(|a| a.id == id)?;
+            Some(flottille_core::images::marker(
+                at + 1,
+                &self.images[at].name,
+            ))
+        })
+    }
+
+    /// The pictures a message taken back carries, with its text: each marker of the text is the
+    /// chip of the picture of its number, the others go after the text. The pieces for the field.
+    /// The limits of an attachment hold: an agent that takes no images gets none back, and a
+    /// message carries [`MAX_IMAGES`] at most, each refusal said in a toast; a marker left without
+    /// its picture stays text.
+    pub fn restore_with<T: 'static>(
+        &mut self,
+        text: &str,
+        pictures: Vec<Picture>,
+        cx: &mut Context<T>,
+    ) -> Vec<Piece> {
+        let mut ids = Vec::new();
+        if !pictures.is_empty() && self.takes == Some(false) {
+            Self::not_attached(NO_IMAGES, cx);
+        }
+        let room = match self.takes {
+            Some(false) => 0,
+            _ => MAX_IMAGES.saturating_sub(self.images.len() + self.scaling.len()),
+        };
+        if self.takes != Some(false) && pictures.len() > room {
+            Self::not_attached(
+                format!("A message carries {MAX_IMAGES} images at most."),
+                cx,
+            );
+        }
+        for picture in pictures.into_iter().take(room) {
+            let Some(format) = gpui_kit::ImageFormat::from_mime_type(&picture.mime) else {
+                continue;
+            };
+            let image = Arc::new(gpui_kit::Image::from_bytes(format, picture.bytes));
+            ids.push(self.push(image, format!("image.{}", extension(format)), true));
+        }
+        let images = &mut self.images;
+        tokens::pieces_of(
+            text,
+            |_| false,
+            |picture, found| {
+                let id = *ids.get(picture)?;
+                let attached = images.iter_mut().find(|a| a.id == id)?;
+                attached.name = found.name.clone();
+                Some(Token::new(
+                    tokens::picture_id(id),
+                    tokens::picture_look(
+                        found.number,
+                        &found.name,
+                        Some(attached.image.bytes.len()),
+                    ),
+                ))
+            },
+        )
     }
 
     /// Paste: a clipboard that holds a picture attaches it, whatever text comes with it (a copy in
@@ -234,12 +578,12 @@ impl Attachments {
 
     /// The pictures of the message being sent, which stay attached until it is taken.
     pub fn sending(&mut self) -> Vec<Picture> {
-        self.sent = self.images.clone();
+        self.sent = self.pictures();
         self.images
             .iter()
-            .map(|image| Picture {
-                mime: image.format.mime_type().to_owned(),
-                bytes: image.bytes.clone(),
+            .map(|a| Picture {
+                mime: a.image.format.mime_type().to_owned(),
+                bytes: a.image.bytes.clone(),
             })
             .collect()
     }
@@ -248,29 +592,25 @@ impl Attachments {
     /// away from the strip.
     pub fn take<T: 'static>(&mut self, cx: &mut Context<T>) -> Vec<Arc<gpui_kit::Image>> {
         cx.notify();
+        self.gone.clear();
         std::mem::take(&mut self.images)
+            .into_iter()
+            .map(|a| a.image)
+            .collect()
     }
 
     /// The message was taken: the pictures it held leave, and those changed meanwhile stay.
     pub fn sent(&mut self) {
         let sent = std::mem::take(&mut self.sent);
         self.images
-            .retain(|image| !sent.iter().any(|sent| Arc::ptr_eq(sent, image)));
+            .retain(|a| !sent.iter().any(|sent| Arc::ptr_eq(sent, &a.image)));
     }
 
     /// A session started: nothing stays attached for the next one.
     pub fn clear(&mut self) {
         self.sent.clear();
         self.images.clear();
-    }
-
-    /// The pictures of a message taken back join the ones already attached.
-    pub fn restore<T: 'static>(&mut self, pictures: Vec<Picture>, cx: &mut Context<T>, of: Of<T>) {
-        for picture in pictures {
-            if let Some(format) = gpui_kit::ImageFormat::from_mime_type(&picture.mime) {
-                self.attach(gpui_kit::Image::from_bytes(format, picture.bytes), cx, of);
-            }
-        }
+        self.gone.clear();
     }
 
     /// The Attach button, which opens the system's file chooser.
@@ -312,17 +652,17 @@ impl Attachments {
         &mut self,
         window: &mut Window,
         cx: &mut Context<T>,
-        detach: fn(&mut T, usize, &mut Context<T>),
+        detach: fn(&mut T, usize, &mut Window, &mut Context<T>),
     ) -> AnyElement {
         let p = palette(cx);
         let viewer = self
             .viewer
             .get_or_insert_with(|| cx.new(|_| PictureViewer::new()))
             .clone();
-        let attached = self.images.clone();
+        let attached = self.pictures();
         let now = cx.background_executor().now();
         self.thumbs.sync(
-            self.images.iter().map(|i| (thumb_key(i), i.clone())),
+            attached.iter().map(|i| (thumb_key(i), i.clone())),
             now,
             cx.reduce_motion(),
         );
@@ -337,6 +677,8 @@ impl Attachments {
                 )
             })
             .collect();
+        self.numbers
+            .retain(|key, _| listed.iter().any(|(listed, ..)| listed == key));
         self.places.sync(
             self.scaling.iter().map(|id| (format!("scaling-{id}"), ())),
             now,
@@ -364,6 +706,17 @@ impl Attachments {
                     window,
                     cx,
                 );
+                if !gone {
+                    self.numbers.insert(key.clone(), at + 1);
+                }
+                // The badge folds away with its thumbnail, its number as it was.
+                let badge = self.numbers.get(&key).map(|&shown| {
+                    let id = match gone {
+                        true => format!("attachment-leaving-number-{key}"),
+                        false => format!("attachment-number-{at}"),
+                    };
+                    number(ElementId::Name(id.into()), &key, shown)
+                });
                 let thumb = div()
                     .id(id)
                     .relative()
@@ -378,6 +731,7 @@ impl Attachments {
                             .rounded(px(7.))
                             .object_fit(gpui_kit::ObjectFit::Cover),
                     )
+                    .children(badge)
                     .when(!gone, |d| {
                         d.child(hoverable(
                             div()
@@ -396,9 +750,9 @@ impl Attachments {
                                 .cursor_pointer()
                                 .aria_label("Remove the picture")
                                 // Removing is not opening: the click stays with the button.
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    detach(this, at, cx)
+                                    detach(this, at, window, cx)
                                 })),
                             // An icon does not inherit the ink: it is drawn here, in the ink this frame.
                             move |d, t| {
