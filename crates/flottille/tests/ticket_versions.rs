@@ -947,3 +947,115 @@ fn a_creation_allowed_after_a_restart_is_checked_against_its_card() {
     );
     assert!(acli_writes(&user).is_empty(), "{:?}", acli_writes(&user));
 }
+
+/// What the fake `acli` answers of a work item of `ABC` in the version `version`.
+fn version_item(key: &str, version: &str) -> Value {
+    json!({"key": key, "self": format!("https://{SITE}/rest/api/3/issue/1"),
+        "fields": {"summary": format!("Work {key}"),
+            "status": {"name": "Building", "statusCategory": {"key": "indeterminate"}},
+            "fixVersions": [{"name": version}], "labels": [],
+            "updated": "2020-01-01T00:00:00Z"}})
+}
+
+fn two_unreleased_versions() -> Value {
+    json!({
+        "site": SITE,
+        "versions": {"ABC": [
+            {"id": "10001", "name": "2.4", "released": false, "releaseDate": "2026-11-28"},
+            {"id": "10002", "name": "2.5", "released": false, "releaseDate": "2026-12-20"}
+        ]},
+        "items": {
+            "ABC-1": version_item("ABC-1", "2.4"),
+            "ABC-2": version_item("ABC-2", "2.5"),
+        }
+    })
+}
+
+/// How many searches of a version's work items the fake `acli` was asked.
+fn version_searches(user: &User) -> usize {
+    user.acli_received()
+        .iter()
+        .filter(|call| {
+            let args = call["args"].as_array().cloned().unwrap_or_default();
+            args.iter().any(|a| a == "search")
+                && args
+                    .iter()
+                    .any(|a| a.as_str().is_some_and(|a| a.contains("fixVersion")))
+        })
+        .count()
+}
+
+fn progress_of(user: &User) -> Value {
+    user.call("project.progress", json!({"project": "app"}))
+        .unwrap()
+}
+
+fn version<'a>(progress: &'a Value, name: &str) -> &'a Value {
+    progress["milestones"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"].as_str().is_some_and(|n| n.starts_with(name)))
+        .unwrap_or_else(|| panic!("no version {name}: {progress}"))
+}
+
+#[test]
+fn a_version_whose_search_fails_says_so_and_the_others_show() {
+    let user = user();
+    on_jira(&user);
+    let mut script = two_unreleased_versions();
+    script["fail"] = json!({"search_jql": {"fixVersion = \"2.5\"": "✗ Error: the search broke"}});
+    user.acli_script(script);
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+
+    let progress = progress_of(&user);
+
+    assert_eq!(progress["problem"], Value::Null, "{progress}");
+    let good = version(&progress, "2.4");
+    assert_eq!(good["read"], true, "{good}");
+    assert_eq!(good["counts"]["total"], 1, "{good}");
+    let broken = version(&progress, "2.5");
+    assert_eq!(broken["read"], false, "{broken}");
+    assert!(
+        broken["problem"]
+            .as_str()
+            .is_some_and(|why| why.contains("the search broke")),
+        "{broken}"
+    );
+}
+
+#[test]
+fn the_versions_are_not_searched_again_within_a_round() {
+    let user = user().with_env("FLOTTILLE_TEST_CLOCK", "1");
+    on_jira(&user);
+    user.acli_script(two_unreleased_versions());
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+
+    progress_of(&user);
+    assert_eq!(
+        version_searches(&user),
+        2,
+        "one search per unreleased version"
+    );
+
+    // Another round of the tracker: the keys of the versions are kept for five minutes, so no
+    // version is searched again before then.
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let progress = progress_of(&user);
+    assert_eq!(version(&progress, "2.4")["counts"]["total"], 1);
+    assert_eq!(version_searches(&user), 2, "kept, not searched again");
+
+    user.call("test.advance", json!({"ms": 6 * 60 * 1000}))
+        .unwrap();
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    progress_of(&user);
+    assert_eq!(
+        version_searches(&user),
+        4,
+        "searched again after five minutes"
+    );
+}

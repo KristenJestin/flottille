@@ -396,26 +396,26 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "tickets",
         title: "Tickets",
-        description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh or acli \
-            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker: {\"action\": \"search\", \"query\": \"x\"}, \
+        description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh/acli \
+            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker: {\"action\":\"search\",\"query\":\"x\"}, \
             on Jira also in_comments, jql; show: a workspace's ticket (in \
-            main, name workspace) or ticket, with its links; detail full adds the comments, \
-            with the id of yours; Jira images and files are named, not shown; \
+            main, name workspace) or ticket, with links; detail full adds comments, \
+            yours with ids; Jira images and files are named, not shown; \
             types: a Jira project's work item types (never guess); link_types. \
             Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
             reopen, status, link and unlink, comment_edit and \
             comment_delete (yours only); log_time (Jira), \
-            time_spent: this session's work time, to propose). \
-            Assign only when asked (assignee \"me\": the user; \
-            GitHub: assignees). Jira create: parent, sprint (sprints lists them). \
-            Milestones (Jira: versions): milestones; GitHub: milestone_create/_edit. \
-            subscribe: a ticket's events wake you until it is closed; unsubscribe.",
+            time_spent (this session's work time, to propose). \
+            Assign only if asked (assignee \"me\": the user; \
+            GitHub: assignees). Jira create: parent, sprint (see sprints). \
+            Milestones (Jira: versions): milestones, progress (tickets, their work); GitHub: milestone_create/_edit. \
+            subscribe: a ticket's events wake you until it closes; unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "link_types", "sprints", "milestones", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes)."},
                 "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out."},

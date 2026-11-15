@@ -693,3 +693,88 @@ fn milestone_create_refuses_a_state() {
     );
     assert_eq!(gh_writes(&user), Vec::<String>::new());
 }
+
+#[test]
+fn the_lead_agent_reads_the_progress_of_the_milestones_through_tickets() {
+    let user = user();
+    on_github(&user);
+    let mut done = issue(3, "Write the guide", Some((1, "v0.1")));
+    done["state"] = json!("CLOSED");
+    user.gh_script(json!({
+        "milestones": {"acme/app": milestones()},
+        "issues": {"acme/app": {
+            "1": issue(1, "Sign in", Some((1, "v0.1"))),
+            "3": done,
+            "4": issue(4, "In no milestone", None),
+        }},
+    }));
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let mcp = root_in(&user);
+
+    let said = read(&user, &mcp, json!({"action": "progress"}));
+
+    assert!(
+        said.contains("- v0.1 (due 2026-12-01): 1 done, 0 in review, 0 in progress, 1 to do"),
+        "{said}"
+    );
+    assert!(said.contains("  To do: #1 Sign in"), "{said}");
+    assert!(said.contains("  Done: #3 Write the guide"), "{said}");
+    assert!(said.contains("- v0.2 (no due date): 0 done"), "{said}");
+    assert!(said.contains("Closed: v0.0"), "{said}");
+    assert!(!said.contains("In no milestone"), "{said}");
+    // The page's own read: the same milestones, the same groups.
+    let progress = user
+        .call("project.progress", json!({"project": "app"}))
+        .unwrap();
+    let first = &progress["milestones"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "v0.1")
+        .unwrap()
+        .clone();
+    assert_eq!(first["counts"]["done"], 1, "{first}");
+    assert_eq!(first["groups"][0]["tickets"][0]["key"], "1", "{first}");
+}
+
+#[test]
+fn two_reads_at_once_reach_the_tracker_once() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(json!({
+        "milestones": {"acme/app": milestones()},
+        "issues": {"acme/app": {"1": issue(1, "Sign in", Some((1, "v0.1")))}},
+        // Slow enough that the second caller comes while the first is still reading.
+        "milestones_delay_ms": 1500,
+    }));
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+
+    let listed = |user: &User| {
+        gh_calls(user)
+            .iter()
+            .filter(|call| call.contains("/milestones"))
+            .count()
+    };
+    let before = listed(&user);
+    let answers: Vec<Value> = std::thread::scope(|scope| {
+        let reads: Vec<_> = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    user.call("project.progress", json!({"project": "app"}))
+                        .unwrap()
+                })
+            })
+            .collect();
+        reads.into_iter().map(|read| read.join().unwrap()).collect()
+    });
+
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(answers[0]["milestones"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        listed(&user) - before,
+        1,
+        "the tracker's milestones were read once"
+    );
+}

@@ -39,6 +39,8 @@ pub struct Project {
     pub model: Option<String>,
     /// How many commands its agents run now: the tree shows an icon while there is one.
     pub commands: usize,
+    /// It declares a tracker: the tree shows its Progress page under it.
+    pub tracked: bool,
 }
 
 /// A workspace as its place on the project page shows it.
@@ -854,6 +856,7 @@ impl Snapshot {
                     provider: project["provider"].as_str().map(str::to_owned),
                     model: project["model"].as_str().map(str::to_owned),
                     commands,
+                    tracked: !project["tracker"].is_null(),
                 }
             })
             .collect();
