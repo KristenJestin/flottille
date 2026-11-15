@@ -681,7 +681,7 @@ fn a_url_flagged_as_holding_a_secret_is_served_without_it() {
     for (name, url) in [
         ("design", "https://design.example.com/mcp"),
         ("sketch", "https://sketch.example.com/mcp"),
-        ("notes", "ada:"),
+        ("notes", ""),
         ("plain", "https://plain.example.com/mcp?page=2"),
     ] {
         assert_eq!(connection_named(&user, name)["url"], url, "{listed}");
@@ -778,7 +778,8 @@ fn a_url_pasted_without_its_scheme_names_only_the_scheme() {
                 "url": format!("ada:{IN_A_URL}@notes.example.com/mcp")}),
         )
         .unwrap_err();
-    assert!(refused.1.contains("\"ada\""), "{refused:?}");
+    assert!(refused.1.contains("is no http(s) URL"), "{refused:?}");
+    assert!(!refused.1.contains("ada"), "{refused:?}");
     assert!(!refused.1.contains(IN_A_URL), "{refused:?}");
     assert!(!refused.1.contains("notes.example.com"), "{refused:?}");
 }
@@ -874,4 +875,177 @@ fn a_cookie_header_beside_cookie_lines_is_refused() {
         )
         .unwrap_err();
     assert!(refused.1.contains("given twice"), "{refused:?}");
+}
+
+/// A token pasted as the login of a URL without its scheme: the URL parser reads it as the scheme.
+const SLACK_LIKE: &str = "xoxb-1-2-abc";
+const HEX_TOKEN: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+
+/// What an agent's request was held as: its number.
+fn held_number(text: &str) -> u64 {
+    text.strip_prefix("Waiting for the user's approval, request #")
+        .unwrap_or_else(|| panic!("not held: {text}"))
+        .split('.')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn an_unknown_scheme_is_never_printed() {
+    let user = user();
+    for token in [SLACK_LIKE, HEX_TOKEN] {
+        let refused = user
+            .call(
+                "connection.add",
+                json!({"name": "notes", "about": "Notes.",
+                    "url": format!("{token}:x@notes.example.com/mcp")}),
+            )
+            .unwrap_err();
+        assert!(refused.1.contains("is no http(s) URL"), "{refused:?}");
+        assert!(!refused.1.contains(token), "{refused:?}");
+    }
+    written_by_hand(
+        &user,
+        &format!(
+            "\n[[connections.server]]\nname = \"slack\"\nabout = \"Chat.\"\n\
+             url = \"{SLACK_LIKE}:x@slack.example.com/mcp\"\n\
+             \n[[connections.server]]\nname = \"hex\"\nabout = \"Hex.\"\n\
+             url = \"{HEX_TOKEN}:x@hex.example.com/mcp\"\n"
+        ),
+    );
+    let listed = user.call("connection.list", json!({})).unwrap();
+    for token in [SLACK_LIKE, HEX_TOKEN] {
+        assert!(!listed.to_string().contains(token), "{listed}");
+    }
+    for name in ["slack", "hex"] {
+        let connection = connection_named(&user, name);
+        assert_eq!(connection["url"], "", "{connection}");
+        let failing = connection["failing"].as_str().unwrap_or_default();
+        assert!(failing.contains("is no http(s) URL"), "{connection}");
+    }
+    // Nor an agent, shown it or proposing to mend it.
+    let mcp = session(&user);
+    let mut said = Vec::new();
+    for name in ["slack", "hex"] {
+        said.push(
+            mcp.call("connections", json!({"action": "show", "name": name}))
+                .text,
+        );
+        let held = mcp.call(
+            "connections",
+            json!({"action": "edit", "name": name,
+                "url": format!("https://{name}.example.com/mcp")}),
+        );
+        assert!(!held.error, "{}", held.text);
+        let number = held_number(&held.text);
+        let request = user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["number"] == number)
+            .cloned()
+            .unwrap();
+        said.push(request.to_string());
+        said.push(
+            user.call("connection.proposed", json!({"number": number}))
+                .unwrap()
+                .to_string(),
+        );
+        said.push(held.text);
+    }
+    for text in &said {
+        for token in [SLACK_LIKE, HEX_TOKEN] {
+            assert!(!text.contains(token), "{text}");
+        }
+    }
+}
+
+#[test]
+fn harmless_words_excuse_only_a_token_or_a_key() {
+    let user = user();
+    for parameter in [
+        "project_secret",
+        "projectSecret",
+        "sync_password",
+        "page_passphrase",
+        "cursor_signature",
+    ] {
+        let url = format!("https://design.example.com/mcp?page=2&{parameter}=abc123");
+        let refused = user
+            .call(
+                "connection.add",
+                json!({"name": "design", "about": "Designs.", "url": url}),
+            )
+            .unwrap_err();
+        assert!(refused.1.contains(parameter), "{parameter}: {refused:?}");
+        assert!(!refused.1.contains("abc123"), "{refused:?}");
+    }
+}
+
+#[test]
+fn plural_secret_names_and_a_plain_key_are_refused() {
+    let user = user();
+    for parameter in ["access_tokens", "apiKeys", "secrets", "passwords", "key"] {
+        let url = format!("https://design.example.com/mcp?page=2&{parameter}=abc123");
+        let refused = user
+            .call(
+                "connection.add",
+                json!({"name": "design", "about": "Designs.", "url": url}),
+            )
+            .unwrap_err();
+        assert!(refused.1.contains(parameter), "{parameter}: {refused:?}");
+        assert!(!refused.1.contains("abc123"), "{refused:?}");
+    }
+}
+
+#[test]
+fn common_names_ending_in_key_or_token_are_allowed() {
+    let user = user();
+    let url = "https://design.example.com/mcp?issueKey=a&spaceKey=b&partition_key=c&cache_key=d\
+               &object_key=e&public_key=f&publishable_key=g&site_key=h&sort_key=i\
+               &pagination_token=j&resume_token=k&last_evaluated_key=l";
+    user.call(
+        "connection.add",
+        json!({"name": "design", "about": "Designs.", "url": url}),
+    )
+    .unwrap();
+    assert_eq!(connection_named(&user, "design")["url"], url);
+}
+
+#[test]
+fn an_edit_card_marks_a_url_served_cleaned() {
+    let user = user();
+    written_by_hand(
+        &user,
+        &format!(
+            "\n[[connections.server]]\nname = \"design\"\nabout = \"Designs.\"\n\
+             url = \"https://design.example.com/mcp?project=p&access_token={IN_A_URL}\"\n"
+        ),
+    );
+    let mcp = session(&user);
+    let held = mcp.call(
+        "connections",
+        json!({"action": "edit", "name": "design",
+            "url": "https://design.example.com/mcp?project=p"}),
+    );
+    assert!(!held.error, "{}", held.text);
+    let number = held_number(&held.text);
+    let says = user.call("approval.list", json!({})).unwrap()["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["number"] == number)
+        .cloned()
+        .unwrap()["says"]
+        .to_string();
+    assert!(!says.contains(IN_A_URL), "{says}");
+    assert!(
+        says.contains(
+            "https://design.example.com/mcp (cleaned: its query is dropped) → \
+             https://design.example.com/mcp?project=p"
+        ),
+        "{says}"
+    );
 }

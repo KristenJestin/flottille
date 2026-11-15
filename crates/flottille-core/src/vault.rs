@@ -105,3 +105,25 @@ impl Entry {
             "username": self.username, "project": self.project, "for": self.bound})
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_entry_is_recognised_by_its_prefix_only() {
+        let refused = format!(
+            "the connection could not start: {REFUSED_ENTRY} the header Authorization from the \
+             vault entry notes-token: check the entry's value"
+        );
+        assert!(refused_entry(&refused));
+        assert!(refused_entry(&format!(
+            "{REFUSED_ENTRY} the query parameter userToken from the vault entry notes-token"
+        )));
+        // A failure that only quotes it is no refusal of the entries.
+        assert!(!refused_entry(&format!(
+            "the connection could not start: the server said \"{REFUSED_ENTRY} nothing\""
+        )));
+        assert!(!refused_entry(&format!("it failed: {REFUSED_ENTRY} x")));
+    }
+}
