@@ -544,7 +544,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, query?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, verdict?, comments?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, follow?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, query?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, subscribe?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, verdict?, comments?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, follow?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -650,7 +650,10 @@ pending requests.
   action), or re-runs the failed jobs of its last
   commit's pipelines (`docs/commands.md`, "`forge`"). **`create`** also takes `reviewers`
   (each a person as the agent knows them, "People" below; added to the project's, none twice), `labels` (GitHub only: Bitbucket has no labels on pull
-  requests, and the call is refused saying so, before anything is opened) and
+  requests, and the call is refused saying so, before anything is opened),
+  `subscribe: false` (opened without the automatic subscription a session gets, which its answer
+  says otherwise: `You are subscribed to it until it is merged or closed: …`, `docs/extensions.md`,
+  "Automatic subscriptions"; refused on any other action) and
   `delete_branch_on_merge`. On Bitbucket that one is the pull request's own "close source branch"
   (`bkt pr create --close-source`); GitHub has no such flag per pull request, so Flottille keeps
   the wish for that pull request (the store's `posts`, kind `delete_branch`) and applies it at

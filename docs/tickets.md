@@ -331,6 +331,9 @@ when it could leave them (`docs/tools.md`, "The tickets").
 
 ### Subscribing to a ticket
 
+A session may be subscribed to its workspace's ticket without asking, when the user set its events
+(`docs/extensions.md`, "Automatic subscriptions"; none by default).
+
 **`subscribe {ticket?, workspace?, events, from?, minutes?}`**: each of `events` of the ticket
 (the one named, or the workspace's) wakes the agent, as a `subscription` delivery
 (`docs/design.md` §5.6), until the ticket is closed, with the same shape as `forge` `subscribe`:

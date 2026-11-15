@@ -442,6 +442,7 @@ There is no "Extensions" tab, and the word never shows.
   | Specs | A spec of each task, written with you before an agent builds it. |
   | Review | Fresh eyes on a session's change before you merge it. |
   | Compaction | Long conversations summarised so agents keep going. |
+  | Automatic subscriptions | What wakes a session, without it asking. |
   | Connections | Your MCP servers, given to every agent behind the gate. |
   | Handbook (later) | One row more. |
 
@@ -477,7 +478,7 @@ There is no "Extensions" tab, and the word never shows.
 - **Long tool results** (#308, core): a section of Settings' Agents tab, since it is about what
   every agent is given, whatever runs it; it moves to the savings of Usage when Usage comes (#547).
 
-Features, in order: Specs, Review, Compaction, then Connections. The order is a number each
+Features, in order: Specs, Review, Compaction, Automatic subscriptions, then Connections. The order is a number each
 declaration gives; the core's tabs and sections have their own places, and none is moved by a
 declaration.
 
@@ -806,6 +807,46 @@ guidance, each pass may have instructions of its own, **empty by default**:
 - **Global only**: a project does not override a check's instructions (its rules already reach
   the Project rules check). Asked for later, it would be a value of the project's page like the
   models.
+
+### Automatic subscriptions
+
+What wakes a session without it asking (#793): an agent hears of what happens outside only when it
+is subscribed (`design.md` §5.6), and one that subscribed on its own once did not on the next pull
+request. Project-scoped, **on by default**, its switch "Subscribe sessions automatically". It
+launches no agent and reads nothing of its own: it opens subscriptions as `forge` `subscribe` and
+`tickets` `subscribe` do, which the rounds of the items feed (`forges.md`, "Subscriptions").
+
+- **Named `autosubscriptions`** (`[autosubscriptions]` of `extensions.toml`,
+  `[extensions.autosubscriptions]` of a project's file); `autosubscriptions.events {project}`
+  answers the events each subject subscribes a session of the project to now.
+- **Three subjects**, each a setting of the kind `subset` (`created_pull`, `branch_pull`,
+  `ticket`), global and overridable per project, a project's value winning: the events it
+  subscribes to, or none.
+
+  | Subject | Events offered | On by default |
+  |---|---|---|
+  | A pull request the session opens (`forge create`) | checks, review, approved, comment, merged, closed | all |
+  | The session's own pull request opened another way (on its workspace's branch, seen opening by the rounds of the items, `item.opened`) | the same | all |
+  | The ticket the session works on (its workspace's: linked before it starts, or while it runs) | commented, status, assigned, closed | none |
+
+- **From people only** (`from: people`): what a bot or an agent wrote never wakes the session.
+- **Until the target ends** (merged, closed, done), the agent ends, or `unsubscribe`: the rules
+  of every subscription. A `subscribe` of the agent's own to the same target replaces it.
+- **Said where it starts**: `forge create`'s answer (`You are subscribed to it until it is merged
+  or closed: checks, approvals, reviews, people's comments. unsubscribe to stop.`), and a delivery
+  `[flottille:autosubscriptions]` when one starts on its own (a pull request opened another way, the
+  ticket; the ticket of a session that starts goes with its first prompt). The tools'
+  descriptions say a subscription may be there already (`maybe already`), so that an agent does
+  not subscribe again. `forge create {…, subscribe: false}` opens one without it.
+- **Only a session**: a root, led or handed; never a child, nor an extension's agents (a
+  review's pilot, its passes), which all have a parent.
+- **A pull request the agent opens is its own**: the round that then sees it open does not take
+  it for one opened another way, whether `create` subscribed or not (`forge::Own`, kept in memory
+  until a round or a live read sees it open).
+
+In the window, its page is the generic one, drawn from the declaration: its switch, its usage
+line, then one field per subject with a switch per event (the control of a `subset`); in a
+project, each field carries the dot "set here" and **Use Settings' value**.
 
 ### Connections
 
