@@ -1158,7 +1158,7 @@ fn run(call: &Call) -> Verdict {
                 }
             ));
         }
-        if let Some(why) = credential(home, path) {
+        if let Some(why) = credential(call.own, home, path) {
             return Verdict::Deny(why);
         }
         if in_git(path) {
@@ -1261,7 +1261,7 @@ fn run(call: &Call) -> Verdict {
             // An option's value or a text's word (`awk -F/`, `tr / _`) is seldom a path the line
             // writes: naming a folder above Flottille's there is held, as any base call.
             if *soft
-                && credential(home, path).is_none()
+                && credential(call.own, home, path).is_none()
                 && let Some(why) = above_own(call.own, path)
             {
                 found.base(why);
@@ -3878,7 +3878,7 @@ pub fn forbidden(
     path: &Resolved,
     write: bool,
 ) -> Option<String> {
-    if let Some(why) = credential(home, path) {
+    if let Some(why) = credential(own, home, path) {
         return Some(why);
     }
     if !write {
@@ -3967,8 +3967,9 @@ fn seen(path: &Resolved) -> Vec<PathBuf> {
     seen
 }
 
-/// The refusal of a path in a login's place: an agent's, the user's, the system's secrets.
-fn credential(home: Option<&Path>, path: &Resolved) -> Option<String> {
+/// The refusal of a path in a login's place: an agent's, the user's, the system's secrets, and
+/// Flottille's own keys.
+fn credential(own: &[PathBuf], home: Option<&Path>, path: &Resolved) -> Option<String> {
     if let Some(process) = open_files(path) {
         return Some(format!(
             "refused: {} goes through {}, a process's open files: the agent's own command line \
@@ -3987,6 +3988,7 @@ fn credential(home: Option<&Path>, path: &Resolved) -> Option<String> {
             .map(|system| (*system).to_owned())
             .or_else(|| seen.iter().find_map(|path| credential_names(path)))
     }
+    .or_else(|| keys(own, path))
     .or_else(|| match agent_folder(home, path)? {
         AgentFolder::Login(place) => Some(place),
         AgentFolder::Repository(_) => None,
@@ -3996,6 +3998,21 @@ fn credential(home: Option<&Path>, path: &Resolved) -> Option<String> {
          in any mode; nothing was done",
         path.shown
     ))
+}
+
+/// Flottille's keys folder, `remote/` (`docs/remote.md`, "Identity and keys"), when a path is in
+/// it: the machine key, and the clients' device key on a machine with no keyring. It is in the
+/// state folder; it is looked for in each of Flottille's own folders, which hold no other
+/// `remote`, so that no order of `own` can leave it out.
+fn keys(own: &[PathBuf], path: &Resolved) -> Option<String> {
+    let folders: Vec<PathBuf> = own_folders(own)
+        .iter()
+        .map(|own| own.join(crate::remote::FOLDER))
+        .collect();
+    seen(path)
+        .iter()
+        .any(|path| folders.iter().any(|keys| path.starts_with(keys)))
+        .then(|| format!("Flottille's keys, its {}/ folder", crate::remote::FOLDER))
 }
 
 /// The process's folder in `/proc` a path goes through when it reaches the files that process
