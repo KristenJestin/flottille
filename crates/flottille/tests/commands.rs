@@ -513,6 +513,56 @@ fn forge_write_creates_a_pull_request_with_the_fake_gh_once_allowed() {
 }
 
 #[test]
+fn the_pull_request_targets_the_chosen_base() {
+    let user = User::with_fake_agent().with_fake_gh();
+    prepared(
+        &user,
+        |folder| {
+            user.git(
+                folder,
+                &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
+            );
+            user.git(folder, &["branch", "release"]);
+        },
+        true,
+    );
+    declare_proposed(&user);
+    // The base an agent chose, as the protocol's `bases` carries it; offline, nothing of the
+    // forge's address is fetched.
+    user.call(
+        "workspace.create",
+        json!({"project": "app", "name": "hotfix", "bases": {".": "release"}, "offline": true}),
+    )
+    .unwrap();
+    user.git(
+        &user.path("data/flottille/workspaces/app/hotfix"),
+        &["update-ref", "refs/remotes/origin/app/hotfix", "HEAD"],
+    );
+    user.gh_script(json!({"created": 14}));
+    let opened = user.received_requests("session/new").len();
+    user.call(
+        "agent.run",
+        json!({"project": "app", "workspace": "hotfix", "message": "hello"}),
+    )
+    .unwrap();
+    let (url, authorization) = server_of(&user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "create", "repository": ".", "title": "Fix it"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let calls = gh_calls(&user);
+    let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+    assert!(
+        created.contains("--head app/hotfix --base release "),
+        "{created}"
+    );
+}
+
+#[test]
 fn forge_create_refuses_an_unpushed_branch_with_the_push_to_do() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github_unpushed(&user);

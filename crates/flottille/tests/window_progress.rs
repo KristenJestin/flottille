@@ -787,6 +787,33 @@ fn a_version_whose_search_fails_says_so_on_its_row(cx: &mut TestAppContext) {
     assert!(!present(cx, "progress-problem"), "the page still shows");
 }
 
+/// Where the page says it could not read the milestones: the line is a block of its own, which
+/// holds the space above it (#884), and sits where it sat under the gap of the page's column.
+#[gpui_kit::test]
+fn the_line_that_says_the_milestones_were_not_read_sits_where_the_gap_put_it(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    on_github(&user);
+    let mut script = github_script(json!({}));
+    script["fail"] = json!({"acme/app": "HTTP 502: Bad Gateway"});
+    user.gh_script(script);
+    user.call("items.refresh", json!({"project": "app"})).ok();
+
+    let (_shell, _page, cx) = open_progress(&user, cx);
+
+    assert!(present(cx, "progress-problem"), "the page says why");
+    let (header, line) = cx.update(|window, _| {
+        (
+            window.find("progress-header").bounds(),
+            window.find("progress-problem").bounds(),
+        )
+    });
+    let under = f32::from(line.top() - header.bottom());
+    // Measured on `origin/dev`, where the column's gap put it: legend, an empty list, then the line.
+    assert_eq!(under, 84.0);
+}
+
 #[gpui_kit::test]
 fn an_open_issue_whose_only_pull_request_was_closed_unmerged_is_to_do(cx: &mut TestAppContext) {
     let user = user();

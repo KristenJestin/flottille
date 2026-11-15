@@ -19,7 +19,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::{Command, VaultWrite};
-use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
+use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line, spaced};
 use crate::project_settings::Reveal as ProjectReveal;
 use crate::shell::Shell;
 
@@ -631,30 +631,28 @@ impl VaultSection {
                 .id("vault-binding")
                 .flex()
                 .flex_col()
-                .gap(space::XS)
                 .child(line("vault-binding-for", "For", used))
                 .child(
                     presence_of("vault-binding-host-block", host, move |host| {
                         line("vault-binding-host", "Goes to", host)
                     })
-                    .gap(space::XS),
+                    .space(space::XS),
                 )
-                .child(
-                    div().pt(space::XS).child(
-                        Button::quiet("vault-binding-remove", "Remove the binding")
-                            .disabled(saving)
-                            .on_click(move |_, _, cx| {
-                                this.update(cx, |this, cx| {
-                                    this.bound = None;
-                                    cx.notify();
-                                })
-                                .ok();
-                            }),
-                    ),
-                )
+                .child(spaced(
+                    space::SM,
+                    Button::quiet("vault-binding-remove", "Remove the binding")
+                        .disabled(saving)
+                        .on_click(move |_, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.bound = None;
+                                cx.notify();
+                            })
+                            .ok();
+                        }),
+                ))
                 .into_any_element()
         })
-        .gap(space::LG)
+        .space(space::LG)
     }
 
     fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
@@ -705,46 +703,46 @@ impl VaultSection {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(space::LG)
             .child(Field::new("vault-name-field", "Name", name).hint("How agents ask for it."))
-            .child(
+            .child(spaced(
+                space::LG,
                 Field::new(
                     "vault-secret-field",
                     "Secret",
                     boxed("vault-secret", Input::new(&fields.secret), cx),
                 )
                 .hint(SECRET_HINT),
-            )
-            .child(description)
-            .child(
+            ))
+            .child(spaced(space::LG, description))
+            .child(spaced(
+                space::LG,
                 Field::new(
                     "vault-url-field",
                     "URL",
                     boxed("vault-url", Input::new(&fields.url), cx),
                 )
                 .optional(),
-            )
-            .child(
+            ))
+            .child(spaced(
+                space::LG,
                 Field::new(
                     "vault-username-field",
                     "Username",
                     boxed("vault-username", Input::new(&fields.username), cx),
                 )
                 .optional(),
-            )
+            ))
             .child(binding)
-            .child(Field::new(
-                "vault-project-field",
-                "Seen by agents of",
-                select,
+            .child(spaced(
+                space::LG,
+                Field::new("vault-project-field", "Seen by agents of", select),
             ))
             .test_support();
         modal
             .sentence(
                 "Agents see its name, what it is for, its URL and its username; never its secret.",
             )
-            .child(body)
-            .child(error)
+            .child(div().flex().flex_col().child(body).child(error))
             .action(
                 Button::primary(
                     "save-vault-entry",
@@ -785,32 +783,37 @@ impl Render for VaultSection {
         let section = Section::new("vault", "Vault")
             .count(count.to_string())
             .sentence(SENTENCE)
-            .child(crate::extensions::usage_line("vault-usage", USAGE, cx))
             .action(
                 Button::secondary("add-vault-entry", "New entry")
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
             )
-            .child(presence("vault-list-block", count > 0, list).gap(space::MD))
             .child(
-                presence(
-                    "no-vault-block",
-                    empty,
-                    EmptyLine::new(
-                        "no-vault",
-                        Icon::Key,
-                        "No entry yet. Add a secret an agent needs, such as a tracker's token: \
-                         agents use it through Flottille's tools and never see it.",
-                    ),
-                )
-                .gap(space::MD),
-            )
-            .child(problem_line(
-                "vault-problem",
-                self.problem.clone(),
-                space::MD,
-                cx,
-            ));
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(crate::extensions::usage_line("vault-usage", USAGE, cx))
+                    .child(presence("vault-list-block", count > 0, list).space(space::MD))
+                    .child(
+                        presence(
+                            "no-vault-block",
+                            empty,
+                            EmptyLine::new(
+                                "no-vault",
+                                Icon::Key,
+                                "No entry yet. Add a secret an agent needs, such as a tracker's \
+                                 token: agents use it through Flottille's tools and never see it.",
+                            ),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(problem_line(
+                        "vault-problem",
+                        self.problem.clone(),
+                        space::MD,
+                        cx,
+                    )),
+            );
         div()
             .text_color(p.text)
             .child(section)

@@ -442,6 +442,7 @@ There is no "Extensions" tab, and the word never shows.
   | Specs | A spec of each task, written with you before an agent builds it. |
   | Review | Fresh eyes on a session's change before you merge it. |
   | Compaction | Long conversations summarised so agents keep going. |
+  | Automatic subscriptions | What wakes a session, without it asking. |
   | Connections | Your MCP servers, given to every agent behind the gate. |
   | Handbook (later) | One row more. |
 
@@ -477,7 +478,7 @@ There is no "Extensions" tab, and the word never shows.
 - **Long tool results** (#308, core): a section of Settings' Agents tab, since it is about what
   every agent is given, whatever runs it; it moves to the savings of Usage when Usage comes (#547).
 
-Features, in order: Specs, Review, Compaction, then Connections. The order is a number each
+Features, in order: Specs, Review, Compaction, Automatic subscriptions, then Connections. The order is a number each
 declaration gives; the core's tabs and sections have their own places, and none is moved by a
 declaration.
 
@@ -806,6 +807,61 @@ guidance, each pass may have instructions of its own, **empty by default**:
 - **Global only**: a project does not override a check's instructions (its rules already reach
   the Project rules check). Asked for later, it would be a value of the project's page like the
   models.
+
+### Automatic subscriptions
+
+What wakes a session without it asking (#793): an agent hears of what happens outside only when it
+is subscribed (`design.md` §5.6), and one that subscribed on its own once did not on the next pull
+request. Project-scoped, **on by default**, its switch "Subscribe sessions automatically". It
+launches no agent and reads nothing of its own: it opens subscriptions as `forge` `subscribe` and
+`tickets` `subscribe` do, which the rounds of the items feed (`forges.md`, "Subscriptions").
+
+- **Named `autosubscriptions`** (`[autosubscriptions]` of `extensions.toml`,
+  `[extensions.autosubscriptions]` of a project's file); `autosubscriptions.events {project}`
+  answers the events each subject subscribes a session of the project to now.
+- **Three subjects**, each a setting of the kind `subset` (`created_pull`, `branch_pull`,
+  `ticket`), global and overridable per project, a project's value winning: the events it
+  subscribes to, or none.
+
+  | Subject | Events offered | On by default |
+  |---|---|---|
+  | A pull request the session opens (`forge create`) | checks, review, approved, comment, merged, closed | all |
+  | The session's own pull request opened another way (on its workspace's branch, seen opening by the rounds of the items, `item.opened`) | the same | all |
+  | The ticket the session works on (its workspace's: linked before it starts, or while it runs) | commented, status, assigned, closed | none |
+
+- **From people only** (`from: people`): what a bot or an agent wrote never wakes the session.
+- **Until the target ends** (merged, closed, done), the agent ends, or `unsubscribe`: the rules
+  of every subscription. A `subscribe` of the agent's own to the same target replaces it.
+- **Said where it starts**: `forge create`'s answer (`You are subscribed to it until it is merged
+  or closed: checks, approvals, reviews, people's comments. unsubscribe to stop.`), and a delivery
+  `[flottille:autosubscriptions]` when one starts on its own (a pull request opened another way, the
+  ticket; the ticket of a session that starts goes with its first prompt). The tools'
+  descriptions say a subscription may be there already (`maybe already`), so that an agent does
+  not subscribe again. `forge create {…, subscribe: false}` opens one without it.
+- **Only a session**: a root, led or handed; never a child, nor an extension's agents (a
+  review's pilot, its passes), which all have a parent. The sessions Specs starts are root
+  sessions: they are subscribed.
+- **Its own pull request, in its own repository**: one opened on a workspace's branch subscribes
+  that workspace's sessions only when it is in a repository the workspace holds and is not from a
+  fork (GitHub's `isCrossRepository`, a Bitbucket source repository other than the destination):
+  another repository's branch of the same name, or a fork's, subscribes nobody. The review's
+  `auto_on_pull_request` reads it the same way.
+- **A pull request the agent opens is its own**: the round that then sees it open does not take
+  it for one opened another way, whether `create` subscribed or not. `forge create` records it in
+  the store (`opened_pulls`, with the posts' records, `forges.md`), so that it survives a restart;
+  a round that sees the pull request open takes the record, once, and a record no round took in
+  half an hour is dropped (a live read stored the pull request first, so no round will see it open),
+  so that it never hides one opened by hand later. A `create` that fails leaves none. While a call
+  reads or opens a pull request, the rounds also leave it to that call.
+- **A ticket the agent subscribed to itself is left as it made it**: linking the workspace to a
+  ticket it is subscribed to changes nothing and says nothing, nor does linking the same ticket
+  again. Linking another ticket, or none, ends the automatic subscription to the previous one
+  (marked as automatic: `seen` of the subscription holds `{"automatic": true}`), never the
+  agent's own.
+
+In the window, its page is the generic one, drawn from the declaration: its switch, its usage
+line, then one field per subject with a switch per event (the control of a `subset`); in a
+project, each field carries the dot "set here" and **Use Settings' value**.
 
 ### Connections
 

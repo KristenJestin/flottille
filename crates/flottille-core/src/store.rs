@@ -729,6 +729,19 @@ const MIGRATIONS: &[&str] = &[
     -- the CI failed (`docs/forges.md`, \"What kind of failure it was\").
     ALTER TABLE item_checks ADD COLUMN outcome TEXT;
 ",
+    "
+    -- A pull request an agent opened with `forge create`, until the rounds see it open or it is
+    -- too old (Automatic subscriptions, #793): what tells it from one opened
+    -- another way, across a restart of the daemon.
+    CREATE TABLE opened_pulls (
+        id         INTEGER PRIMARY KEY,
+        project    TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        branch     TEXT NOT NULL,
+        opened_at  INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX opened_pulls_branch ON opened_pulls (project, repository, branch);
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -1536,6 +1549,29 @@ impl Store {
         }
         transaction.commit()?;
         Ok(event)
+    }
+
+    /// `append_agent_event` for each of `events` (agent, name, data, activity), in order and in
+    /// one transaction: what a stream said meanwhile costs one commit, so one `fsync`, not one a
+    /// piece (#903).
+    pub fn append_agent_events(
+        &mut self,
+        events: &[(String, String, Value, bool)],
+    ) -> Result<Vec<Event>> {
+        let transaction = self.connection.transaction()?;
+        let mut appended = Vec::with_capacity(events.len());
+        for (agent, name, data, activity) in events {
+            let event = append_agent_event(&transaction, agent, name, data.clone())?;
+            if *activity {
+                transaction.execute(
+                    "UPDATE agents SET active_at = ?2 WHERE id = ?1",
+                    params![agent, event.at],
+                )?;
+            }
+            appended.push(event);
+        }
+        transaction.commit()?;
+        Ok(appended)
     }
 
     /// At most `limit` events of the agent numbered after `after`, oldest first.
@@ -2952,6 +2988,48 @@ impl Store {
         Ok(())
     }
 
+    /// Records that an agent opened a pull request on `branch` of `repository`, at `at`.
+    pub fn add_opened_pull(
+        &self,
+        (project, repository, branch): (&str, &str, &str),
+        at: u64,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO opened_pulls (project, repository, branch, opened_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![project, repository, branch, at],
+        )?;
+        Ok(())
+    }
+
+    /// Takes the oldest record of a pull request an agent opened on `branch`: whether there was
+    /// one, so that the next pull request opened on the branch is not taken for it. Records made
+    /// before `since` are too old to count, and are dropped.
+    pub fn take_opened_pull(
+        &self,
+        (project, repository, branch): (&str, &str, &str),
+        since: u64,
+    ) -> Result<bool> {
+        self.connection.execute(
+            "DELETE FROM opened_pulls WHERE opened_at < ?1",
+            params![since],
+        )?;
+        let found: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT id FROM opened_pulls WHERE project = ?1 AND repository = ?2 \
+                 AND branch = ?3 ORDER BY id LIMIT 1",
+                params![project, repository, branch],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = found {
+            self.connection
+                .execute("DELETE FROM opened_pulls WHERE id = ?1", params![id])?;
+        }
+        Ok(found.is_some())
+    }
+
     /// What was posted on one item, oldest first.
     pub fn posts(
         &self,
@@ -4120,6 +4198,31 @@ mod tests {
     }
 
     #[test]
+    fn an_opened_pull_is_taken_once_and_an_old_one_not_at_all() {
+        let store = Store::open_in_memory().unwrap();
+        let on = ("app", "api", "app/login");
+        store.add_opened_pull(on, 1_000).unwrap();
+        store.add_opened_pull(on, 5_000).unwrap();
+        store
+            .add_opened_pull(("app", "web", "app/login"), 5_000)
+            .unwrap();
+
+        // Taken one by one, in order; another repository's is its own.
+        assert!(store.take_opened_pull(on, 0).unwrap());
+        assert!(store.take_opened_pull(on, 0).unwrap());
+        assert!(!store.take_opened_pull(on, 0).unwrap());
+        assert!(
+            store
+                .take_opened_pull(("app", "web", "app/login"), 0)
+                .unwrap()
+        );
+
+        // One that is too old no longer hides a pull request opened another way.
+        store.add_opened_pull(on, 1_000).unwrap();
+        assert!(!store.take_opened_pull(on, 2_000).unwrap());
+    }
+
+    #[test]
     fn a_store_before_the_posts_gains_their_table_and_keeps_its_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("flottille.db");
@@ -4934,6 +5037,40 @@ mod tests {
             .map(|e| e.seq)
             .collect();
         assert_eq!(names, [replayed.seq, live.seq]);
+    }
+
+    #[test]
+    fn the_pieces_written_together_keep_their_order_and_their_activity() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let piece = |text: &str, activity| {
+            (
+                agent.id.clone(),
+                "agent.message".to_owned(),
+                json!({"text": text}),
+                activity,
+            )
+        };
+
+        let written = store
+            .append_agent_events(&[piece("one ", false), piece("two", true)])
+            .unwrap();
+
+        assert_eq!(written.len(), 2);
+        let texts: Vec<Value> = store
+            .agent_events(&agent.id, written[0].seq - 1, 10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.data["text"].clone())
+            .collect();
+        assert_eq!(texts, [json!("one "), json!("two")]);
+        assert_eq!(
+            store.agent(&agent.id).unwrap().unwrap().active_at,
+            Some(written[1].at)
+        );
     }
 
     #[test]

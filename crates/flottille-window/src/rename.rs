@@ -102,7 +102,6 @@ impl Render for RenameSession {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(space::SM)
                     .child(Field::new(
                         "rename-title-field",
                         "Title",

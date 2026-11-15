@@ -3,6 +3,7 @@
 //! daemon that names them, and the frame that keeps their switches, their settings and their
 //! tables.
 
+mod automatic;
 mod command;
 mod connections;
 mod guidance;
@@ -28,7 +29,14 @@ use crate::mcp::{Definition, Grant, Outcome};
 use crate::projects::{self, Failure};
 use crate::providers::{self, Provider};
 
+pub use automatic::pull_sentence;
 pub use command::run;
+
+/// The events a pull request a session opens (`forge create`) subscribes it to, as Settings and
+/// the project set them (`docs/extensions.md`, "Automatic subscriptions"): none while that is off.
+pub fn subscribed_on_create(daemon: &Daemon, project: &str) -> Vec<String> {
+    automatic::events(daemon, project, automatic::CREATED_PULL)
+}
 
 /// The agents' `connections` family (`docs/tools.md`, "Connections"): whether a call writes a
 /// connection, held for the user in every mode.
@@ -61,6 +69,7 @@ pub async fn family_call(
 pub const ALL: &[&Extension] = &[
     &specs::EXTENSION,
     &review::EXTENSION,
+    &automatic::EXTENSION,
     &connections::EXTENSION,
 ];
 
@@ -1474,7 +1483,7 @@ mod tests {
         assert_eq!(
             parse("[spexs]\nenabled = true\n").unwrap_err(),
             "extensions.toml: spexs: unknown extension: the extensions are specs, review, \
-             connections"
+             autosubscriptions, connections"
         );
         assert_eq!(
             parse("[specs]\nenable = true\n").unwrap_err(),

@@ -346,6 +346,7 @@ pub(crate) fn offer(
             head: String::new(),
             head_commit: None,
             base: String::new(),
+            cross: false,
             url: String::new(),
             description: String::new(),
             mergeable: None,
@@ -420,7 +421,7 @@ pub(super) fn target(
 }
 
 /// Whether two targets are the same pull request, whichever way each was found.
-pub(super) fn same_pull(one: &Value, other: &Value) -> bool {
+pub(crate) fn same_pull(one: &Value, other: &Value) -> bool {
     ["project", "repository", "number"]
         .iter()
         .all(|key| one[key] == other[key])

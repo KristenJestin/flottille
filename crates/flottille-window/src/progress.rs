@@ -1075,10 +1075,15 @@ impl Render for ProgressPage {
         let content = div()
             .flex()
             .flex_col()
-            .gap(space::LG)
-            .child(enter(key("legend"), 1, self.legend(jira, other, cx)))
-            .child(enter(key("list"), 2, list))
-            .children(closed.map(|closed| enter(key("closed"), 3, closed)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::LG)
+                    .child(enter(key("legend"), 1, self.legend(jira, other, cx)))
+                    .child(enter(key("list"), 2, list))
+                    .children(closed.map(|closed| enter(key("closed"), 3, closed))),
+            )
             .child(
                 presence_of(key("problem"), problem, move |why| {
                     div()
@@ -1090,7 +1095,7 @@ impl Render for ProgressPage {
                         .test_support()
                         .into_any_element()
                 })
-                .gap(space::LG),
+                .space(space::LG),
             );
         let column = div()
             .max_w(space::COLUMN + pad * 2.)

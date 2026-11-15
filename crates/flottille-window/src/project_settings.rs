@@ -32,7 +32,9 @@ use gpui_kit::{
 use serde_json::{Value, json};
 
 use crate::actions::Command;
-use crate::commands::{CommandsSection, boxed, menu_of, problem_line};
+use crate::commands::{
+    CommandsSection, boxed, menu_of, problem_line, section_blocks, spaced, stack,
+};
 use crate::commit_checks::CommitChecks;
 use crate::conventions::{Convention, Kind};
 use crate::message_checks::MessageChecks;
@@ -1703,6 +1705,9 @@ impl ProjectSettingsPage {
             let paths: Vec<_> = read.listed.iter().map(|info| info.path.clone()).collect();
             only_at_root(&paths)
         });
+        let none = read
+            .as_ref()
+            .is_some_and(|read| read.listed.is_empty() && read.new.is_empty());
         let section = Section::new("repositories", "Repositories")
             .when(!alone, |section| section.count(count.to_string()))
             .sentence(if alone {
@@ -1710,29 +1715,34 @@ impl ProjectSettingsPage {
             } else {
                 "The git repositories of the project. Each workspace gets its own copy of each."
             })
-            .child(
-                presence(
-                    "repository-list-block",
-                    !self.repository_rows.is_empty(),
-                    list,
-                )
-                .gap(space::MD),
-            )
-            .child(
-                presence(
-                    "no-repositories-block",
-                    read.as_ref()
-                        .is_some_and(|read| read.listed.is_empty() && read.new.is_empty()),
-                    EmptyLine::new(
-                        "no-repositories",
-                        Icon::Repository,
-                        "No git repository in this folder yet. Flottille looks again when you \
-                         come back.",
-                    ),
-                )
-                .gap(space::MD),
-            )
-            .child(problem_line("repositories-problem", problem, space::MD, cx));
+            .child(section_blocks(
+                "repositories-blocks",
+                !self.repository_rows.is_empty() || none || problem.is_some(),
+                space::MD,
+                stack(space::MD)
+                    .child(
+                        presence(
+                            "repository-list-block",
+                            !self.repository_rows.is_empty(),
+                            list,
+                        )
+                        .space(space::MD),
+                    )
+                    .child(
+                        presence(
+                            "no-repositories-block",
+                            none,
+                            EmptyLine::new(
+                                "no-repositories",
+                                Icon::Repository,
+                                "No git repository in this folder yet. Flottille looks again \
+                                 when you come back.",
+                            ),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(problem_line("repositories-problem", problem, space::MD, cx)),
+            ));
         // Adding a second repository (or removing the last other) changes the section's words:
         // it fades back in rather than swapping them at once.
         changing(
@@ -1981,12 +1991,8 @@ impl ProjectSettingsPage {
             .on_click(move |_, window, cx| {
                 this.update(cx, |this, cx| this.add_base(window, cx)).ok();
             });
-        // The gap is the parent's: the blocks that come and go take theirs with them.
-        let control = div()
-            .flex()
-            .flex_col()
-            .gap(space::SM)
-            .child(presence("base-list-block", !self.bases.is_empty(), list).gap(space::SM))
+        let control = stack(space::SM)
+            .child(presence("base-list-block", !self.bases.is_empty(), list).space(space::SM))
             .child(
                 presence(
                     "base-empty-block",
@@ -1997,9 +2003,10 @@ impl ProjectSettingsPage {
                         "No base branch: add one, a workspace starts from it.",
                     ),
                 )
-                .gap(space::SM),
+                .space(space::SM),
             )
-            .child(
+            .child(spaced(
+                space::SM,
                 div()
                     .flex()
                     .items_center()
@@ -2010,7 +2017,7 @@ impl ProjectSettingsPage {
                             .child(boxed("base-branch", Input::new(branch), cx)),
                     )
                     .child(add),
-            );
+            ));
         Field::new("base-field", "Base branches", control)
             .hint("A new workspace starts from the first of these branches the remote has.")
             .error(self.base_error.clone())
@@ -2160,54 +2167,69 @@ impl ProjectSettingsPage {
                 let (bases, depends, delete_branch) =
                     lists.expect("made for a repository's dialog");
                 modal
-                    .child(bases)
-                    .child(depends)
-                    .child(delete_branch)
-                    .child(Field::new("forge-kind-field", "Forge", select))
                     .child(
-                        presence(
-                            "forge-host-block",
-                            self.forge_kind == ForgeKind::BitbucketDataCenter,
-                            Field::new(
-                                "forge-host-field",
-                                "Host",
-                                boxed("forge-host", Input::new(&fields.host), cx),
-                            ),
-                        )
-                        .gap(space::LG),
-                    )
-                    .child(
-                        presence(
-                            "forge-repository-block",
-                            self.forge_kind != ForgeKind::None,
-                            Field::new(
-                                "forge-repository-field",
-                                "Repository on the forge",
-                                boxed("forge-repository", Input::new(&fields.repository), cx),
-                            )
-                            .hint(hint),
-                        )
-                        .gap(space::LG),
-                    )
-                    .child(
-                        presence_of(
-                            "forge-disagrees-block",
-                            disagrees.map(|why| {
-                                SharedString::from(format!(
-                                    "The forge declared is refused until it agrees: {why}."
-                                ))
-                            }),
-                            move |said| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
                                 div()
-                                    .id("forge-disagrees")
-                                    .text_size(px(12.5))
-                                    .text_color(p.wait)
-                                    .child(said)
-                                    .test_support()
-                                    .into_any_element()
-                            },
-                        )
-                        .gap(space::LG),
+                                    .flex()
+                                    .flex_col()
+                                    .gap(space::LG)
+                                    .child(bases)
+                                    .child(depends)
+                                    .child(delete_branch)
+                                    .child(Field::new("forge-kind-field", "Forge", select)),
+                            )
+                            .child(
+                                presence(
+                                    "forge-host-block",
+                                    self.forge_kind == ForgeKind::BitbucketDataCenter,
+                                    Field::new(
+                                        "forge-host-field",
+                                        "Host",
+                                        boxed("forge-host", Input::new(&fields.host), cx),
+                                    ),
+                                )
+                                .space(space::LG),
+                            )
+                            .child(
+                                presence(
+                                    "forge-repository-block",
+                                    self.forge_kind != ForgeKind::None,
+                                    Field::new(
+                                        "forge-repository-field",
+                                        "Repository on the forge",
+                                        boxed(
+                                            "forge-repository",
+                                            Input::new(&fields.repository),
+                                            cx,
+                                        ),
+                                    )
+                                    .hint(hint),
+                                )
+                                .space(space::LG),
+                            )
+                            .child(
+                                presence_of(
+                                    "forge-disagrees-block",
+                                    disagrees.map(|why| {
+                                        SharedString::from(format!(
+                                            "The forge declared is refused until it agrees: {why}."
+                                        ))
+                                    }),
+                                    move |said| {
+                                        div()
+                                            .id("forge-disagrees")
+                                            .text_size(px(12.5))
+                                            .text_color(p.wait)
+                                            .child(said)
+                                            .test_support()
+                                            .into_any_element()
+                                    },
+                                )
+                                .space(space::LG),
+                            ),
                     )
                     .kept(error)
                     .action(save)
@@ -2279,42 +2301,47 @@ impl ProjectSettingsPage {
                         .into_any_element()
                 };
                 modal
-                    .child(Field::new("tracker-kind-field", "Tickets", select))
                     .child(
-                        presence(
-                            "tracker-github-block",
-                            self.tracker_kind == TrackerKind::Github,
-                            github,
-                        )
-                        .gap(space::LG),
-                    )
-                    .child(
-                        presence(
-                            "tracker-jira-block",
-                            self.tracker_kind == TrackerKind::Jira,
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(space::LG)
-                                .child(Field::new(
-                                    "tracker-site-field",
-                                    "Site",
-                                    boxed("tracker-site", Input::new(&fields.site), cx),
-                                ))
-                                .child(
-                                    Field::new(
-                                        "tracker-keys-field",
-                                        "Project keys",
-                                        boxed("tracker-keys", Input::new(&fields.keys), cx),
-                                    )
-                                    .hint(
-                                        "A ticket is a key of one of these projects (ABC-123), \
-                                         read with acli when it is signed in to this site.",
-                                    ),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(Field::new("tracker-kind-field", "Tickets", select))
+                            .child(
+                                presence(
+                                    "tracker-github-block",
+                                    self.tracker_kind == TrackerKind::Github,
+                                    github,
                                 )
-                                .child(worklog),
-                        )
-                        .gap(space::LG),
+                                .space(space::LG),
+                            )
+                            .child(
+                                presence(
+                                    "tracker-jira-block",
+                                    self.tracker_kind == TrackerKind::Jira,
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(space::LG)
+                                        .child(Field::new(
+                                            "tracker-site-field",
+                                            "Site",
+                                            boxed("tracker-site", Input::new(&fields.site), cx),
+                                        ))
+                                        .child(
+                                            Field::new(
+                                                "tracker-keys-field",
+                                                "Project keys",
+                                                boxed("tracker-keys", Input::new(&fields.keys), cx),
+                                            )
+                                            .hint(
+                                                "A ticket is a key of one of these projects (ABC-123), read \
+                                                 with acli when it is signed in to this site.",
+                                            ),
+                                        )
+                                        .child(worklog),
+                                )
+                                .space(space::LG),
+                            )
                     )
                     .kept(error)
                     .action(save)
@@ -2629,7 +2656,6 @@ impl Render for ProjectSettingsPage {
         let header = div()
             .flex()
             .flex_col()
-            .gap(space::MD)
             .child(
                 PageHeader::new("project-settings-header", "Settings")
                     .crumb(crumb)
@@ -2656,7 +2682,7 @@ impl Render for ProjectSettingsPage {
                             .into_any_element()
                     },
                 )
-                .gap(space::MD),
+                .space(space::MD),
             )
             .child(
                 presence_of(
@@ -2672,7 +2698,7 @@ impl Render for ProjectSettingsPage {
                             .into_any_element()
                     },
                 )
-                .gap(space::MD),
+                .space(space::MD),
             );
         if let Some((at, until)) = self.scroll_to {
             self.scroll.scroll_to_top_of_item(at);
