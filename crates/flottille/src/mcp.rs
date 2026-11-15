@@ -398,7 +398,7 @@ const SERVED: [Definition; 33] = [
             main, name workspace) or ticket, with links; detail full adds comments, \
             yours with ids; Jira images and files are named, not shown; \
             types: a Jira project's work item types (never guess); link_types. \
-            Writes (judged, answered at once, result maybe later): create, comment, edit, close, \
+            Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
             reopen, status, link and unlink, comment_edit and \
             comment_delete (yours only); log_time (Jira), \
             time_spent (this session's work time, to propose). \
