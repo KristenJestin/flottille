@@ -2142,6 +2142,10 @@ fn select_all_shown_ticks_what_the_search_shows(cx: &mut TestAppContext) {
     let field = search_field(&shell, cx);
     type_in(&field, "cookies", cx);
     settle(cx);
+    // The bar shows with a ticked row that shows: tick one of the found rows to bring it.
+    let first = shown_rows(cx).remove(0);
+    let first = row_of(cx, &first);
+    click(cx, &format!("{first}-pick"));
     assert_eq!(
         label(cx, "connection-review-bulk-select-all").as_deref(),
         Some("Select all shown")
