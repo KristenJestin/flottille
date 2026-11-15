@@ -1,7 +1,7 @@
 # Every commit of dev is merged forward into the version after it, next/X.Y (docs/releases.md,
 # "The next version"): a merge commit, never a squash. When it does not merge, a branch
 # forward/<dev's commit>-X.Y at dev's commit and a pull request into next/X.Y leave the conflict
-# to resolve, and say so.
+# to resolve, and say so; while it is open, the later pushes wait for its merge.
 name: forward
 
 on:
@@ -46,16 +46,29 @@ jobs:
                 continue
                 ;;
             esac
+            # A conflict left to resolve: dev's later commits hold it too, so nothing more is opened
+            # until that pull request is merged; the push to dev after it brings them.
+            if ! heads=$(gh pr list --base "$branch" --state open --json headRefName --jq '.[].headRefName'); then
+              status=1
+              continue
+            fi
+            open=$(grep -m 1 '^forward/' <<< "$heads" || true)
+            if [ -n "$open" ]; then
+              echo "::notice::A pull request from $open into $branch is open: $GITHUB_SHA waits for its merge."
+              continue
+            fi
             if gh api "repos/$GH_REPO/merges" -f base="$branch" -f head="$GITHUB_SHA" -f commit_message="chore(repo): merge dev into $branch" > /dev/null 2> "$RUNNER_TEMP/merge.err"; then
               echo "::notice::$GITHUB_SHA merged into $branch."
               gh workflow run ci.yml --ref "$branch"
             elif grep -q 'HTTP 409' "$RUNNER_TEMP/merge.err"; then
               forward=forward/${GITHUB_SHA:0:12}-$line
-              # Run again, the branch and its pull request are there already.
-              if gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$forward" -f sha="$GITHUB_SHA" > /dev/null; then
-                gh pr create --base "$branch" --head "$forward" --title "chore(repo): merge dev into $branch" \
-                  --body "dev's $GITHUB_SHA does not merge into \`$branch\`: the conflict is left to resolve on \`$forward\`, by a merge whose first parent is \`$branch\` (docs/releases.md, \"The next version\"). Merged with a merge commit, never a squash."
+              # Run again after a failure, the branch may be there already: its pull request is not
+              # (none is open, above).
+              if ! gh api "repos/$GH_REPO/git/ref/heads/$forward" > /dev/null 2>&1; then
+                gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$forward" -f sha="$GITHUB_SHA" > /dev/null
               fi
+              gh pr create --base "$branch" --head "$forward" --title "chore(repo): merge dev into $branch" \
+                --body "dev's $GITHUB_SHA does not merge into \`$branch\`: the conflict is left to resolve on \`$forward\`, by a merge whose first parent is \`$branch\` (docs/releases.md, \"The next version\"). Merged with a merge commit, never a squash."
               echo "::warning::$GITHUB_SHA does not merge into $branch: a pull request from $forward leaves the conflict to resolve."
             else
               cat "$RUNNER_TEMP/merge.err" >&2

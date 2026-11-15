@@ -4,7 +4,8 @@ on:
   pull_request:
   push:
     # A feature branch's pushes are verified, then published as its alpha (`publish`).
-    # A stable line's (stable/X.Y) and the next version's (next/X.Y) are published as betas.
+    # A stable line's (stable/X.Y) and the next version's (next/X.Y) are published as their
+    # pre-releases, -rc.N and -next.N.
     branches: [main, dev, "stable/*", "next/*", "feat/**", "fix/**"]
   workflow_dispatch:
 
@@ -256,8 +257,8 @@ jobs:
           skip() { echo "::notice::$1: nothing is published."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; }
           at=$GITHUB_SHA
           # A line's release (release.yml): the tag vX.Y.Z it put on a commit of stable/X.Y, with
-          # the version of that commit's beta. Its changelog is the line's commits since the line's
-          # previous tag.
+          # the version of that commit's release candidate (-rc). Its changelog is the line's
+          # commits since the line's previous tag.
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             if ! [[ $GITHUB_REF_NAME =~ ^v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*))\.(0|[1-9][0-9]*)$ ]]; then
               echo "::error::$GITHUB_REF_NAME is not a stable version: nothing was published."
@@ -269,8 +270,8 @@ jobs:
               echo "::error::$at is not a commit of $line: a line's release is made by the Release workflow only (docs/releases.md), nothing was published."
               exit 1
             fi
-            if ! git tag --points-at "$at" | grep -qE "^v${version//./\\.}-beta\.[0-9]+$"; then
-              echo "::error::$at has no beta of $version: nothing was published."
+            if ! git tag --points-at "$at" | grep -qE "^v${version//./\\.}-rc\.[0-9]+$"; then
+              echo "::error::$at has no release candidate of $version: nothing was published."
               exit 1
             fi
             read -r _ since <<< "$(tools/version.sh base --branch "$line" --at "$at^")"
@@ -407,8 +408,18 @@ jobs:
             # On the commit released, the same on main and on dev: the next betas count from it.
             gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --latest
           elif [ "$CHANNEL" = stable ]; then
-            # A line's, on its tag: never latest, which the stable channel takes, main's release.
-            gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --latest=false
+            # A line's, on its tag: the stable channel takes the latest release, so it is marked
+            # latest when above the one marked (the newest line's fix reaches its users), never
+            # when below (an older line's would take the channel back). Not knowing, nothing.
+            latest=--latest
+            if current=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2> "$RUNNER_TEMP/latest.err"); then
+              if [ "$(printf '%s\n%s\n' "${current#v}" "$VERSION" | sort -V | tail -n 1)" != "$VERSION" ] || [ "${current#v}" = "$VERSION" ]; then
+                latest=--latest=false
+              fi
+            elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/latest.err"; then
+              cat "$RUNNER_TEMP/latest.err" >&2; exit 1
+            fi
+            gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md "$latest"
           else
             gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --prerelease --latest=false
           fi

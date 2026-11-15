@@ -79,20 +79,20 @@ jobs:
               ;;
           esac
           if [ -n "$line" ]; then
-            # The version is the one of its beta, which CI published on this very commit once its
-            # verify passed: a lightweight tag vX.Y.Z-beta.N, of this line.
+            # The version is the one of its release candidate, which CI published on this very
+            # commit once its verify passed: a lightweight tag vX.Y.Z-rc.N, of this line.
             versions=$(gh api "repos/$GH_REPO/git/matching-refs/tags/v$major.$minor." --paginate --jq '.[] | "\(.object.sha) \(.ref)"' |
               while read -r sha ref; do
-                if [ "$sha" = "$commit" ] && [[ $ref =~ ^refs/tags/(v$major\.$minor\.(0|[1-9][0-9]*))-beta\.[0-9]+$ ]]; then
+                if [ "$sha" = "$commit" ] && [[ $ref =~ ^refs/tags/(v$major\.$minor\.(0|[1-9][0-9]*))-rc\.[0-9]+$ ]]; then
                   echo "${BASH_REMATCH[1]}"
                 fi
               done | sort -u)
             if [ -z "$versions" ]; then
-              echo "::error::No beta of $commit was published on $line (its push run did not publish one): nothing was released."
+              echo "::error::No release candidate (-rc) of $commit was published on $line (its push run did not publish one): nothing was released."
               exit 1
             fi
             if [ "$(wc -l <<< "$versions")" -ne 1 ]; then
-              echo "::error::$commit is the beta of several versions ($(tr '\n' ' ' <<< "$versions")): nothing was released."
+              echo "::error::$commit is the release candidate of several versions ($(tr '\n' ' ' <<< "$versions")): nothing was released."
               exit 1
             fi
             tag=$versions

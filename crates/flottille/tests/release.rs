@@ -638,13 +638,10 @@ fn a_line_counts_from_its_own_latest_tag() {
     repo.release_by_fast_forward("0.4.0");
     repo.git(&["checkout", "--quiet", "stable/0.3"]);
 
-    assert_eq!(
-        repo.next(&["beta", "--branch", "stable/0.3"]),
-        "0.3.2-beta.2"
-    );
+    assert_eq!(repo.next(&["beta", "--branch", "stable/0.3"]), "0.3.2-rc.2");
     assert_eq!(repo.next(&["stable", "--branch", "stable/0.3"]), "0.3.2");
     // Its name as git has it when none is given.
-    assert_eq!(repo.next(&["beta"]), "0.3.2-beta.2");
+    assert_eq!(repo.next(&["beta"]), "0.3.2-rc.2");
     assert!(
         repo.next(&["base", "--branch", "stable/0.3"])
             .starts_with("v0.3.1 "),
@@ -660,10 +657,7 @@ fn a_line_bumps_the_patch_only() {
     repo.commit("fix(store): a new schema (#16)\n\nBREAKING CHANGE: the old store is not read");
 
     assert_eq!(repo.next(&["stable", "--branch", "stable/0.3"]), "0.3.1");
-    assert_eq!(
-        repo.next(&["beta", "--branch", "stable/0.3"]),
-        "0.3.1-beta.4"
-    );
+    assert_eq!(repo.next(&["beta", "--branch", "stable/0.3"]), "0.3.1-rc.4");
 
     // From 1.0 on too: a feature is the minor on dev, the patch on a line.
     let repo = Repo::new();
@@ -758,10 +752,10 @@ fn each_line_counts_its_own_with_stable_0_3_and_next_0_5_while_dev_is_0_4() {
         repo.git(&["checkout", "--quiet", branch]);
         repo.next(&["beta", "--branch", branch])
     };
-    assert_eq!(on("stable/0.3"), "0.3.2-beta.1");
+    assert_eq!(on("stable/0.3"), "0.3.2-rc.1");
     // dev above every stable line, below next.
     assert_eq!(on("dev"), "0.4.0-beta.2");
-    assert_eq!(on("next/0.5"), "0.5.0-beta.3");
+    assert_eq!(on("next/0.5"), "0.5.0-next.3");
     repo.git(&["checkout", "--quiet", "next/0.5"]);
     assert_eq!(repo.next(&["stable", "--branch", "next/0.5"]), "0.5.0");
 }
@@ -808,15 +802,125 @@ fn two_lines_at_once_each_count_their_own() {
         repo.git(&["checkout", "--quiet", line]);
         repo.next(&[channel, "--branch", line])
     };
-    assert_eq!(on("stable/0.3", "beta"), "0.3.2-beta.1");
-    assert_eq!(on("stable/0.4", "beta"), "0.4.1-beta.1");
+    assert_eq!(on("stable/0.3", "beta"), "0.3.2-rc.1");
+    assert_eq!(on("stable/0.4", "beta"), "0.4.1-rc.1");
     assert_eq!(on("stable/0.4", "stable"), "0.4.1");
 
     repo.line_release("0.4.1");
     repo.commit("fix(cli): a typo (#17)");
-    assert_eq!(on("stable/0.4", "beta"), "0.4.2-beta.1");
-    assert_eq!(on("stable/0.3", "beta"), "0.3.2-beta.1");
+    assert_eq!(on("stable/0.4", "beta"), "0.4.2-rc.1");
+    assert_eq!(on("stable/0.3", "beta"), "0.3.2-rc.1");
     assert_eq!(on("dev", "beta"), "0.5.0-beta.2");
+}
+
+#[test]
+fn dev_and_a_stable_line_never_compute_the_same_version() {
+    // dev took only fixes since 0.3.0, and the line stable/0.3 one of them: both are 0.3.1
+    // before either is released.
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(gui): add a page (#10)");
+    repo.release_by_fast_forward("0.3.0");
+    repo.commit("fix(store): a lock (#12)");
+    repo.git(&["checkout", "--quiet", "-b", "stable/0.3", "v0.3.0"]);
+    repo.commit("fix(store): a lock (#13)");
+
+    let on = |branch: &str, channel: &str| {
+        repo.git(&["checkout", "--quiet", branch]);
+        repo.next(&[channel, "--branch", branch])
+    };
+    // Their pre-releases have names of their own.
+    assert_eq!(on("dev", "beta"), "0.3.1-beta.1");
+    assert_eq!(on("stable/0.3", "beta"), "0.3.1-rc.1");
+
+    // dev released 0.3.1 first: the line goes above it, never to a tag dev holds.
+    repo.git(&["checkout", "--quiet", "dev"]);
+    repo.release_by_fast_forward("0.3.1");
+    assert_eq!(on("stable/0.3", "beta"), "0.3.2-rc.1");
+    assert_eq!(on("stable/0.3", "stable"), "0.3.2");
+}
+
+#[test]
+fn a_next_line_publishes_next_pre_releases() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(specs): the specs (#20)\n\nRelease-As: 0.4.0");
+    repo.git(&["checkout", "--quiet", "-b", "next/0.5"]);
+    repo.commit("feat(remote): a phone (#30)");
+    let sha = repo.head();
+
+    assert_eq!(repo.next(&["beta", "--branch", "next/0.5"]), "0.5.0-next.3");
+    repo.git(&["checkout", "--quiet", "dev"]);
+    assert_eq!(repo.next(&["beta", "--branch", "dev"]), "0.4.0-beta.2");
+
+    // CI publishes it under that name.
+    let (output, outputs, _) = version_step(&repo, "next/0.5", "branch", &sha);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        outputs,
+        "channel=beta\nversion=0.5.0-next.3\ntag=v0.5.0-next.3\n"
+    );
+}
+
+#[test]
+fn a_stable_line_publishes_rc_pre_releases() {
+    let repo = a_line_of_0_3();
+    let sha = repo.head();
+    assert_eq!(repo.next(&["beta", "--branch", "stable/0.3"]), "0.3.1-rc.1");
+    repo.commit("fix(cli): a typo (#14)");
+    assert_eq!(repo.next(&["beta", "--branch", "stable/0.3"]), "0.3.1-rc.2");
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    let (output, outputs, _) = version_step(&repo, "stable/0.3", "branch", &sha);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        outputs,
+        "channel=beta\nversion=0.3.1-rc.1\ntag=v0.3.1-rc.1\n"
+    );
+
+    // A line's release takes its rc, nothing else of that version.
+    repo.git(&["tag", "v0.3.1-beta.1", &sha]);
+    let released = run_release_of(&repo, "stable/0.3", &sha, "refs/heads/dev");
+    assert!(!released.output.status.success(), "{:?}", released.output);
+    assert!(repo.git(&["tag", "--list", "v0.3.1"]).is_empty());
+    repo.git(&["tag", "v0.3.1-rc.1", &sha]);
+    let released = run_release_of(&repo, "stable/0.3", &sha, "refs/heads/dev");
+    assert!(released.output.status.success(), "{:?}", released.output);
+    assert_eq!(repo.git(&["rev-parse", "v0.3.1^{commit}"]), sha);
+}
+
+#[test]
+fn a_line_with_nothing_since_its_tag_publishes_nothing() {
+    // Just cut from its tag: no commit of its own.
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(gui): add a page (#10)");
+    repo.release_by_fast_forward("0.3.0");
+    repo.commit("fix(store): a lock (#12)");
+    repo.git(&["checkout", "--quiet", "-b", "stable/0.3", "v0.3.0"]);
+    let cut = repo.head();
+    let nothing = |repo: &Repo| {
+        for channel in ["stable", "beta", "alpha"] {
+            let output = repo.version(&[channel, "--branch", "stable/0.3"]);
+            assert_eq!(output.status.code(), Some(3), "{channel}: {output:?}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "", "{channel}");
+        }
+    };
+    nothing(&repo);
+
+    // Nor right after its release.
+    repo.commit("fix(store): a lock (#13)");
+    repo.line_release("0.3.1");
+    nothing(&repo);
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    // CI's push run of the line skips.
+    let (output, outputs, _) = version_step(&repo, "stable/0.3", "branch", &cut);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(outputs, "skip=true\n");
 }
 
 // The changelog.
@@ -1425,6 +1529,53 @@ fn install_sh_takes_the_most_recent_build_and_an_exact_version() {
 }
 
 #[test]
+fn the_beta_channel_never_takes_a_next_or_rc_release() {
+    // A stable line's rc and the next version's pre-release, published after dev's beta.
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    betas(
+        &releases,
+        programs.path(),
+        &[
+            ("0.5.0-next.2", "2026-11-04T11:00:00Z"),
+            ("0.3.2-rc.1", "2026-11-04T10:00:00Z"),
+            ("0.4.0-beta.3", "2026-11-04T09:00:00Z"),
+        ],
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    let output = install(home.path(), &releases, &["--channel", "beta"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        installed_version(home.path()),
+        "flottille 0.4.0-beta.3 (test, 000000000000)"
+    );
+    // Each is installed by its version.
+    for version in ["0.5.0-next.2", "0.3.2-rc.1"] {
+        let home = tempfile::tempdir().unwrap();
+        let output = install(home.path(), &releases, &["--version", version]);
+        assert!(output.status.success(), "{version}: {output:?}");
+        assert_eq!(
+            installed_version(home.path()),
+            format!("flottille {version} (test, 000000000000)")
+        );
+    }
+
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let binary = installed();
+    let output = user
+        .command_through(&binary, &["update", "--channel", "beta"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let said = Command::new(&binary).arg("--version").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&said.stdout).trim(),
+        "flottille 0.4.0-beta.3 (test, 000000000000)"
+    );
+}
+
+#[test]
 fn install_sh_does_not_offer_a_draft() {
     let releases = Releases::serve();
     let programs = tempfile::tempdir().unwrap();
@@ -1724,15 +1875,22 @@ fn step_script(workflow: &str, id: &str) -> String {
 const FAKE_GH: &str = r#"#!/usr/bin/env bash
 set -euo pipefail
 echo "$*" >> "$FAKE_GH_LOG"
+# A call that fails as GitHub may fail, to run a workflow again after it.
+if [ -n "${FAKE_GH_FAIL:-}" ] && [[ "$*" == $FAKE_GH_FAIL ]]; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
 cd "$FAKE_GH_REPO"
+# The pull requests opened, one `<base> <head>` per line.
+prs=$(git rev-parse --git-dir)/fake-prs
+touch "$prs"
 exists() { git cat-file -e "$1^{commit}" 2> /dev/null; }
 # The fields given with -f, as `field[name]`.
 declare -A field=()
 args=("$@")
-jq=
+jq= base_arg= head_arg=
 for ((i = 0; i < ${#args[@]}; i++)); do
   if [ "${args[i]}" = -f ]; then kv=${args[i + 1]}; field["${kv%%=*}"]=${kv#*=}; fi
   if [ "${args[i]}" = --jq ]; then jq=${args[i + 1]}; fi
+  if [ "${args[i]}" = --base ]; then base_arg=${args[i + 1]}; fi
+  if [ "${args[i]}" = --head ]; then head_arg=${args[i + 1]}; fi
 done
 case "$1 ${2:-}" in
   "api repos/o/r/git/ref/heads/"*)
@@ -1782,13 +1940,26 @@ case "$1 ${2:-}" in
     elif git merge-base --is-ancestor "$head" "$base"; then echo behind
     else echo diverged; fi ;;
   "api -X")
-    if [ "$3" = DELETE ]; then git update-ref -d "refs/${4#repos/o/r/git/refs/}"; exit 0; fi
+    if [ "$3" = DELETE ]; then
+      ref=refs/${4#repos/o/r/git/refs/}
+      git rev-parse -q --verify "$ref" > /dev/null || { echo "gh: Reference does not exist (HTTP 422)" >&2; exit 1; }
+      git update-ref -d "$ref"
+      exit 0
+    fi
     [ "$3 $4" = "PATCH repos/o/r/git/refs/heads/main" ] && [ "$7 $8" = "-F force=false" ] || { echo "gh: unexpected $*" >&2; exit 2; }
     sha=${6#sha=}
     exists "$sha" && git merge-base --is-ancestor main "$sha" || { echo "gh: Update is not a fast forward (HTTP 422)" >&2; exit 1; }
     git update-ref refs/heads/main "$sha"
     echo '{}' ;;
-  "workflow run" | "pr create" | "pr comment") ;;
+  "pr create") echo "$base_arg $head_arg" >> "$prs" ;;
+  # The heads of those opened, into `--base` or from `--head` when given.
+  "pr list")
+    while read -r base head; do
+      if [ -n "$base_arg" ] && [ "$base" != "$base_arg" ]; then continue; fi
+      if [ -n "$head_arg" ] && [ "$head" != "$head_arg" ]; then continue; fi
+      echo "$head"
+    done < "$prs" ;;
+  "workflow run" | "pr comment") ;;
   *) echo "gh: unexpected $*" >&2; exit 2 ;;
 esac
 "#;
@@ -2019,11 +2190,11 @@ fn the_release_workflow_runs_no_code_of_the_branch_and_interpolates_no_input() {
     }
 }
 
-/// The line `stable/0.3` with its head's beta published, as CI publishes it on
+/// The line `stable/0.3` with its head's rc published, as CI publishes it on
 /// the push (a lightweight tag, made by `gh release create`). On dev.
 fn a_line_ready_for_a_release() -> Repo {
     let repo = a_line_of_0_3();
-    repo.tag("v0.3.1-beta.1");
+    repo.tag("v0.3.1-rc.1");
     repo.git(&["checkout", "--quiet", "dev"]);
     repo
 }
@@ -2039,7 +2210,7 @@ fn a_line_s_commit_released_tags_it_and_leaves_main() {
     assert!(released.output.status.success(), "{:?}", released.output);
     assert_eq!(released.main, main, "main does not move for a line");
     assert!(!released.calls.contains("PATCH"), "{}", released.calls);
-    // The version its beta had, on that very commit, the tag naming its line.
+    // The version its rc had, on that very commit, the tag naming its line.
     assert_eq!(repo.git(&["rev-parse", "v0.3.1^{commit}"]), line);
     assert_eq!(repo.git(&["cat-file", "-t", "v0.3.1"]), "tag");
     assert_eq!(
@@ -2056,10 +2227,7 @@ fn a_line_s_commit_released_tags_it_and_leaves_main() {
     // The line then counts from it.
     repo.git(&["checkout", "--quiet", "stable/0.3"]);
     repo.commit("fix(cli): a typo (#14)");
-    assert_eq!(
-        repo.next(&["beta", "--branch", "stable/0.3"]),
-        "0.3.2-beta.1"
-    );
+    assert_eq!(repo.next(&["beta", "--branch", "stable/0.3"]), "0.3.2-rc.1");
 }
 
 #[test]
@@ -2068,7 +2236,7 @@ fn a_line_s_older_commit_is_released_by_its_full_sha() {
     let older = repo.git(&["rev-parse", "stable/0.3"]);
     repo.git(&["checkout", "--quiet", "stable/0.3"]);
     repo.commit("fix(cli): a typo (#14)");
-    repo.tag("v0.3.1-beta.2");
+    repo.tag("v0.3.1-rc.2");
     repo.git(&["checkout", "--quiet", "dev"]);
 
     let released = run_release_of(&repo, "stable/0.3", &older, "refs/heads/dev");
@@ -2132,7 +2300,7 @@ fn a_commit_on_no_line_nor_dev_is_refused() {
 }
 
 #[test]
-fn a_line_s_commit_without_a_beta_is_refused() {
+fn a_line_s_commit_without_an_rc_is_refused() {
     // Its push run published nothing (it failed, or the line moved on before): nothing says it
     // passed `verify`, nor which version it is.
     let repo = a_line_ready_for_a_release();
@@ -2144,7 +2312,7 @@ fn a_line_s_commit_without_a_beta_is_refused() {
 
     assert!(!released.output.status.success(), "{:?}", released.output);
     assert!(
-        String::from_utf8_lossy(&released.output.stdout).contains("No beta of"),
+        String::from_utf8_lossy(&released.output.stdout).contains("No release candidate"),
         "{:?}",
         released.output
     );
@@ -2423,7 +2591,7 @@ fn every_commit_of_dev_is_merged_forward_into_next() {
     );
     // next stays above dev.
     repo.git(&["checkout", "--quiet", "next/0.5"]);
-    assert_eq!(repo.next(&["beta", "--branch", "next/0.5"]), "0.5.0-beta.4");
+    assert_eq!(repo.next(&["beta", "--branch", "next/0.5"]), "0.5.0-next.4");
     repo.git(&["checkout", "--quiet", "dev"]);
 
     // Run again: nothing more to merge.
@@ -2479,6 +2647,141 @@ fn a_commit_of_dev_that_does_not_merge_forward_opens_a_pull_request_with_the_con
     let (output, calls) = forward(&repo);
     assert!(output.status.success(), "{output:?}");
     assert!(!calls.contains("pr create"), "{calls}");
+}
+
+/// dev and next/0.5 changing the same file: dev's commit does not merge forward. On dev.
+fn dev_that_does_not_merge_forward() -> Repo {
+    let repo = dev_with_a_next_line();
+    repo.git(&["checkout", "--quiet", "next/0.5"]);
+    std::fs::write(repo.dir.path().join("notes"), "next's").unwrap();
+    repo.git(&["add", "--all"]);
+    repo.git(&[
+        "commit",
+        "--quiet",
+        "-m",
+        "feat(remote): next's notes (#31)",
+    ]);
+    repo.git(&["checkout", "--quiet", "dev"]);
+    std::fs::write(repo.dir.path().join("notes"), "dev's").unwrap();
+    repo.git(&["add", "--all"]);
+    repo.git(&["commit", "--quiet", "-m", "fix(cli): dev's notes (#21)"]);
+    repo
+}
+
+#[test]
+fn a_push_to_dev_while_a_forward_pull_request_is_open_opens_no_other() {
+    let repo = dev_that_does_not_merge_forward();
+    let (output, calls) = forward(&repo);
+    assert!(output.status.success(), "{output:?}");
+    assert!(calls.contains("pr create"), "{calls}");
+    let next = repo.git(&["rev-parse", "next/0.5"]);
+
+    // dev moves on while that pull request is open.
+    repo.commit("fix(gui): a colour (#22)");
+    let later = repo.head();
+    let (output, calls) = forward(&repo);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(!calls.contains("pr create"), "{calls}");
+    assert!(!calls.contains("merges"), "{calls}");
+    assert!(!calls.contains("git/refs "), "{calls}");
+    assert_eq!(repo.git(&["rev-parse", "next/0.5"]), next);
+    assert_eq!(
+        repo.git(&["branch", "--list", &format!("forward/{}-0.5", &later[..12])]),
+        ""
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("is open"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn a_forward_run_again_after_its_pull_request_failed_opens_it() {
+    let repo = dev_that_does_not_merge_forward();
+    let dev = repo.head();
+    let failing = |repo: &Repo| {
+        run_step(
+            repo,
+            ".github/workflows/forward.yml",
+            "forward",
+            &[("GITHUB_SHA", &dev), ("FAKE_GH_FAIL", "pr create*")],
+        )
+    };
+    let (output, _) = failing(&repo);
+    assert!(!output.status.success(), "{output:?}");
+    let branch = format!("forward/{}-0.5", &dev[..12]);
+    assert_eq!(
+        repo.git(&["rev-parse", &branch]),
+        dev,
+        "the branch was made"
+    );
+
+    let (output, calls) = forward(&repo);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        calls.contains(&format!("pr create --base next/0.5 --head {branch}")),
+        "{calls}"
+    );
+}
+
+#[test]
+fn a_backport_run_again_after_a_failure_finishes_it() {
+    let setup = || {
+        let repo = a_line_of_0_3();
+        repo.git(&["checkout", "--quiet", "dev"]);
+        repo.commit("fix(cli): a typo (#20)");
+        let squash = repo.head();
+        (repo, squash)
+    };
+    let failing = |repo: &Repo, squash: &str, fail: &str| {
+        run_step(
+            repo,
+            ".github/workflows/backport.yml",
+            "backport",
+            &[
+                ("PR", "20"),
+                ("SQUASH", squash),
+                ("TITLE", "fix(cli): a typo"),
+                ("LABELS", r#"["backport 0.3"]"#),
+                ("FAKE_GH_FAIL", fail),
+            ],
+        )
+    };
+
+    // The branch made, its pull request not: the run again opens it, and builds it.
+    let (repo, squash) = setup();
+    let (output, _) = failing(&repo, &squash, "pr create*");
+    assert!(!output.status.success(), "{output:?}");
+    let made = repo.git(&["rev-parse", "backport/20-0.3"]);
+    let (output, calls) = backport(&repo, &squash, r#"["backport 0.3"]"#);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(repo.git(&["rev-parse", "backport/20-0.3"]), made);
+    assert!(
+        calls.contains("pr create --base stable/0.3 --head backport/20-0.3"),
+        "{calls}"
+    );
+    assert!(
+        calls.ends_with("workflow run ci.yml --ref backport/20-0.3\n"),
+        "{calls}"
+    );
+    // Opened: a third run opens nothing.
+    let (output, calls) = backport(&repo, &squash, r#"["backport 0.3"]"#);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!calls.contains("pr create"), "{calls}");
+
+    // A failure mid-pick removes its work branch, and the run again brings it.
+    let (repo, squash) = setup();
+    let (output, _) = failing(&repo, &squash, "api repos/o/r/merges*");
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(repo.git(&["branch", "--list", "backport*"]), "");
+    // One left by a run cut short is not in the way.
+    repo.git(&["branch", "backport-work/20-0.3", "stable/0.3"]);
+    let (output, calls) = backport(&repo, &squash, r#"["backport 0.3"]"#);
+    assert!(output.status.success(), "{output:?}");
+    assert!(calls.contains("pr create"), "{calls}");
+    assert_eq!(repo.git(&["branch", "--list", "backport-work/*"]), "");
 }
 
 #[test]
@@ -2598,7 +2901,7 @@ fn a_push_to_main_that_is_not_a_commit_of_dev_publishes_nothing_and_fails() {
 }
 
 #[test]
-fn the_pushes_of_a_line_are_published_as_its_betas() {
+fn the_pushes_of_a_line_are_published_as_its_rcs() {
     let repo = a_line_of_0_3();
     let sha = repo.head();
     repo.git(&["checkout", "--quiet", "dev"]);
@@ -2608,18 +2911,18 @@ fn the_pushes_of_a_line_are_published_as_its_betas() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         outputs,
-        "channel=beta\nversion=0.3.1-beta.1\ntag=v0.3.1-beta.1\n"
+        "channel=beta\nversion=0.3.1-rc.1\ntag=v0.3.1-rc.1\n"
     );
     assert_eq!(changelog, "### Fixes\n\n- **store**: a lock (#13)\n");
 }
 
-/// The line `stable/0.3` at 0.3.1, then a fix whose beta was published and that
+/// The line `stable/0.3` at 0.3.1, then a fix whose rc was published and that
 /// the `Release` workflow tagged `v0.3.2`. On dev; the commit tagged.
 fn a_line_tagged_for_its_release() -> (Repo, String) {
     let repo = a_line_of_0_3();
     repo.line_release("0.3.1");
     repo.commit("fix(cli): a typo (#14)");
-    repo.tag("v0.3.2-beta.1");
+    repo.tag("v0.3.2-rc.1");
     repo.line_release("0.3.2");
     let sha = repo.head();
     repo.git(&["checkout", "--quiet", "dev"]);
@@ -2642,7 +2945,7 @@ fn a_tag_not_on_its_line_publishes_nothing_and_fails() {
     let (repo, _) = a_line_tagged_for_its_release();
     // A tag of the line's form on a commit of dev, with a candidate of that version beside it.
     let dev = repo.head();
-    repo.tag("v0.3.3-beta.1");
+    repo.tag("v0.3.3-rc.1");
     repo.line_release("0.3.3");
 
     let (output, outputs, _) = version_step(&repo, "v0.3.3", "tag", &dev);
@@ -2656,7 +2959,7 @@ fn a_tag_not_on_its_line_publishes_nothing_and_fails() {
 }
 
 #[test]
-fn a_tag_without_its_beta_publishes_nothing_and_fails() {
+fn a_tag_without_its_rc_publishes_nothing_and_fails() {
     let (repo, _) = a_line_tagged_for_its_release();
     repo.git(&["checkout", "--quiet", "stable/0.3"]);
     repo.commit("fix(gui): a colour (#15)");
@@ -2668,7 +2971,7 @@ fn a_tag_without_its_beta_publishes_nothing_and_fails() {
 
     assert!(!output.status.success(), "{output:?}");
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("has no beta of"),
+        String::from_utf8_lossy(&output.stdout).contains("has no release candidate of"),
         "{output:?}"
     );
     assert_eq!(outputs, "");
@@ -3761,6 +4064,13 @@ echo "$*" >> "$FAKE_GH_LOG"
 touch "$FAKE_GH_STATE"
 case "$1 $2" in
   "api repos/o/r/git/ref/heads/"* | "api repos/o/r/commits/"*) echo "$FAKE_TIP" ;;
+  # The tag of the release marked latest, none, or the API failing.
+  "api repos/o/r/releases/latest")
+    case "${FAKE_LATEST:-}" in
+      "") echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+      error) echo "gh: Server Error (HTTP 502)" >&2; exit 1 ;;
+      *) echo "$FAKE_LATEST" ;;
+    esac ;;
   "release view")
     tag=$3
     if grep -qx "$tag" "$FAKE_GH_STATE"; then echo false
@@ -4037,54 +4347,82 @@ fn a_line_s_release_skips_verify_for_a_commit_whose_push_run_on_its_line_succeed
     assert_eq!(log, "");
 }
 
-#[test]
-fn a_line_s_release_is_published_on_its_tag_and_never_marked_latest() {
-    // The stable channel takes the latest release: main's, the newest line.
-    let fake = Fake::new();
-    let script = step_script(".github/workflows/ci.yml", "publish");
-    let publish = |tip: &str| {
-        fake.run(
-            &script,
-            &[
-                ("GH_TOKEN", "unused"),
-                ("CHANNEL", "stable"),
-                ("VERSION", "0.3.2"),
-                ("TAG", "v0.3.2"),
-                ("GITHUB_REF_NAME", "v0.3.2"),
-                ("GITHUB_REF_TYPE", "tag"),
-                ("GITHUB_SHA", "abc123"),
-                ("FAKE_TIP", tip),
-            ],
-        )
-    };
+/// `publish` of a line's release `v0.3.2` on its tag, the tag naming `tip`, the release marked
+/// latest being `latest` (none when empty, `error` for an API that fails).
+fn publish_line_release(fake: &Fake, tip: &str, latest: &str) -> Output {
+    fake.run(
+        &step_script(".github/workflows/ci.yml", "publish"),
+        &[
+            ("GH_TOKEN", "unused"),
+            ("CHANNEL", "stable"),
+            ("VERSION", "0.3.2"),
+            ("TAG", "v0.3.2"),
+            ("GITHUB_REF_NAME", "v0.3.2"),
+            ("GITHUB_REF_TYPE", "tag"),
+            ("GITHUB_SHA", "abc123"),
+            ("FAKE_TIP", tip),
+            ("FAKE_LATEST", latest),
+        ],
+    )
+}
 
+fn created(fake: &Fake) -> String {
+    let log = fake.log();
+    log.lines()
+        .find(|l| l.starts_with("release create"))
+        .unwrap_or_else(|| panic!("{log}"))
+        .to_owned()
+}
+
+#[test]
+fn a_line_s_release_is_published_on_its_tag() {
     // A tag that names another commit now publishes nothing.
-    let output = publish("def456");
+    let fake = Fake::new();
+    let output = publish_line_release(&fake, "def456", "v0.3.1");
     assert!(output.status.success(), "{output:?}");
     assert!(!fake.log().contains("release create"), "{}", fake.log());
 
-    let output = publish("abc123");
+    let output = publish_line_release(&fake, "abc123", "v0.3.1");
     assert!(output.status.success(), "{output:?}");
     assert_eq!(fake.tags(), ["v0.3.2"]);
-    let log = fake.log();
-    assert!(log.contains("api repos/o/r/commits/v0.3.2"), "{log}");
-    let created = log
-        .lines()
-        .find(|l| l.starts_with("release create"))
-        .unwrap();
-    assert!(created.contains("--latest=false"), "{created}");
-    assert!(!created.contains("--prerelease"), "{created}");
+    assert!(fake.log().contains("api repos/o/r/commits/v0.3.2"));
+    assert!(!created(&fake).contains("--prerelease"));
 
-    // main's stable release alone is marked latest.
+    // main's stable release is always marked latest.
     let fake = Fake::new();
     let output = fake.publish("stable", "main", "0.4.0");
     assert!(output.status.success(), "{output:?}");
-    let log = fake.log();
-    let created = log
-        .lines()
-        .find(|l| l.starts_with("release create"))
-        .unwrap();
-    assert!(created.ends_with(" --latest"), "{created}");
+    assert!(created(&fake).ends_with(" --latest"), "{}", created(&fake));
+}
+
+#[test]
+fn a_line_s_release_above_the_latest_is_marked_latest() {
+    // The stable channel reads the latest release: the newest line's fix reaches its users.
+    for latest in ["v0.3.1", "v0.3.0", ""] {
+        let fake = Fake::new();
+        let output = publish_line_release(&fake, "abc123", latest);
+        assert!(output.status.success(), "{latest}: {output:?}");
+        let created = created(&fake);
+        assert!(created.ends_with(" --latest"), "{latest}: {created}");
+        assert!(!created.contains("--prerelease"), "{created}");
+    }
+}
+
+#[test]
+fn a_line_s_release_below_the_latest_is_not() {
+    // An older line's: the stable channel keeps the newer release.
+    for latest in ["v0.4.0", "v0.3.10", "v0.3.2"] {
+        let fake = Fake::new();
+        let output = publish_line_release(&fake, "abc123", latest);
+        assert!(output.status.success(), "{latest}: {output:?}");
+        let created = created(&fake);
+        assert!(created.ends_with(" --latest=false"), "{latest}: {created}");
+    }
+    // Not knowing which is latest, nothing is published: run again, it is.
+    let fake = Fake::new();
+    let output = publish_line_release(&fake, "abc123", "error");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(!fake.log().contains("release create"), "{}", fake.log());
 }
 
 #[test]

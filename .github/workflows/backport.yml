@@ -50,9 +50,17 @@ jobs:
             [[ $label =~ ^backport\ ((0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]] || continue
             line=${BASH_REMATCH[1]}
             branch=backport/$PR-$line work=backport-work/$PR-$line
-            # Brought already, by an earlier run of another label.
+            # Brought already, by an earlier run of another label. A run that failed before its
+            # pull request: opened now.
             if gh api "repos/$GH_REPO/git/ref/heads/$branch" > /dev/null 2>&1; then
-              echo "::notice::$branch is there already."
+              opened=$(gh pr list --head "$branch" --state all --json headRefName --jq '.[].headRefName')
+              if [ -n "$opened" ]; then
+                echo "::notice::$branch is there already."
+              else
+                gh pr create --base "stable/$line" --head "$branch" --title "$TITLE" \
+                  --body "Brings #$PR to \`stable/$line\`: the \`cherry-pick -x\` of its squash, $SQUASH."
+                gh workflow run ci.yml --ref "$branch"
+              fi
               continue
             fi
             if ! tip=$(gh api "repos/$GH_REPO/git/ref/heads/stable/$line" --jq .object.sha); then
@@ -66,6 +74,8 @@ jobs:
             parent=$(gh api "repos/$GH_REPO/git/commits/$SQUASH" --jq '.parents[0].sha')
             files=$(gh api "repos/$GH_REPO/git/commits/$tip" --jq .tree.sha)
             sibling=$(gh api "repos/$GH_REPO/git/commits" -f message="backport of #$PR to stable/$line" -f tree="$files" -f "parents[]=$parent" --jq .sha)
+            # One left by a run cut short is not in the way.
+            gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$work" > /dev/null 2>&1 || true
             gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$work" -f sha="$sibling" > /dev/null
             if merged=$(gh api "repos/$GH_REPO/merges" -f base="$work" -f head="$SQUASH" -f commit_message="backport of #$PR to stable/$line" --jq .sha 2> "$RUNNER_TEMP/merge.err"); then
               gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$work"
