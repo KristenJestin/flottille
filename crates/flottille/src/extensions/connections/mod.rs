@@ -795,6 +795,15 @@ fn action_ok(name: &str) -> bool {
 /// says the URL without its login, query and fragment, where a secret may be.
 fn checked_url(text: &str) -> std::result::Result<String, String> {
     let url = url::Url::parse(text).map_err(|error| format!("is no URL: {error}"))?;
+    // Another scheme says its name alone: what follows it may be a login pasted without
+    // `https://` (`ada:secret@host`), which no other part of it would hide.
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "its scheme {:?} is none Flottille reaches: must be an https:// URL, or http:// on \
+             this machine",
+            url.scheme()
+        ));
+    }
     let said = said_url(&url);
     if !url.username().is_empty() || url.password().is_some() {
         return Err(format!(
@@ -803,7 +812,10 @@ fn checked_url(text: &str) -> std::result::Result<String, String> {
     }
     match url.scheme() {
         "https" if url.host().is_some() => Ok(text.to_owned()),
-        "http" => {
+        "https" => Err(format!(
+            "{said:?}: must be an https:// URL, or http:// on this machine"
+        )),
+        _ => {
             let local = match url.host() {
                 Some(url::Host::Domain(domain)) => domain == "localhost",
                 Some(url::Host::Ipv4(address)) => address.is_loopback(),
@@ -819,9 +831,6 @@ fn checked_url(text: &str) -> std::result::Result<String, String> {
                 ))
             }
         }
-        _ => Err(format!(
-            "{said:?}: must be an https:// URL, or http:// on this machine"
-        )),
     }
 }
 
