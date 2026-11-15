@@ -767,7 +767,13 @@ line names, every program a wrapper or a runner runs included:
   `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.netrc`, `~/.npmrc`,
   `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`,
   `~/.local/share/opencode`, wherever they are along a path, and `/etc/shadow`, `/etc/sudoers`,
-  `/etc/sudoers.d`; the agents' own folders of the home (`~/.claude`, `~/.claude.json` and its
+  `/etc/sudoers.d`; Flottille's keys, the folder `remote/` of its state folder, in any case
+  (`docs/remote.md`, "Identity and keys"), and a program that reads every file below a folder
+  that holds it, in any case (`grep -r`, `rg`, `diff -r`, `git grep --no-index`, `git diff
+  --no-index`, `find` or `fd` that runs a program, `tar`, `cp -r`, `rsync`, `zip -r`), named or
+  the one it runs in (where `env -C`, `sudo -D` or git's `-C` move it), a search's pattern never
+  taken for a folder, where a listing of it (`ls`, `find`, `tree`, `fs_list`) is not refused and `search` leaves the
+  keys out; the agents' own folders of the home (`~/.claude`, `~/.claude.json` and its
   copies beside it, `~/.claude.json.backup`…, `~/.codex`), whole, where the path leads included (a
   link to them, a project that is the home folder), and a file of a revision named `rev:path`
   (`git show HEAD:.claude/.credentials.json`, `git cat-file`, `git diff`) as the path it names;

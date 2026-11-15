@@ -57,6 +57,7 @@ mod quota;
 mod read_commands;
 mod reads;
 mod ready;
+mod remote;
 mod results;
 mod roles;
 mod rules;

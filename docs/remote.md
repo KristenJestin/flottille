@@ -8,7 +8,7 @@ app) reads and answers the sessions of every machine of the user. It is the mile
 `v0.4 - Remote` (`docs/design.md` §12, §13).
 
 **Status: the design of v0.4, decided with the maintainer on 2026-11-12, 2026-11-13 and 2026-11-14.** Nothing
-here is built. What is decided is said as such; the defaults taken are in "Defaults taken, to
+here is built but the keys (`crates/flottille-link`). What is decided is said as such; the defaults taken are in "Defaults taken, to
 confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
@@ -181,11 +181,29 @@ hub. No discovery service of a third party is used.
 
 ## Identity and keys
 
+- **Remote is off** until the user turns it on in the daemon's configuration,
+  `$XDG_CONFIG_HOME/flottille/daemon.toml`:
+
+  ```toml
+  [remote]
+  on = true
+  ```
+
+  Off, nothing of it is made or read.
+- **Keys are Ed25519** (`crates/flottille-link`): a device's identity is its public key, shown as
+  its fingerprint, the first 8 bytes of the key's SHA-256 in hexadecimal by groups of four
+  (`3f2a-91bc-0d4e-77a1`). A private key is made from the operating system's random generator,
+  zeroized when dropped, and its `Debug` prints the fingerprint only.
 - **The machine key** is made by the daemon at its first start with remote on:
   `$XDG_STATE_HOME/flottille/remote/machine.key`, mode 600, the folder 700. The daemon alone reads
-  it. It signs what a machine may send ("What a machine may send"), never a user's action.
+  it. It signs what a machine may send ("What a machine may send"), never a user's action. It is
+  read back at every start; a link, a file of another user, or one others may read or write is
+  refused, left as it is, and so is the daemon's start
+  (`… machine.key is readable by others (mode 644): a private key is yours only; make it so with chmod 600 …`).
 - **The device key of a machine's clients** (the window and the command line of that user session)
-  is in the session's keyring (`vault.md`, "Where the secrets are"), an item `Flottille: device`; on
+  is in the session's keyring (`vault.md`, "Where the secrets are"), an item `Flottille: device`
+  with the attributes `application = flottille` and `flottille-key = device` (never
+  `flottille-entry`, a vault entry's: one may be named `device`); on
   a machine with no Secret Service (a headless server), `$XDG_STATE_HOME/flottille/remote/device.key`,
   mode 600, read by the clients only. The daemon never reads it. It signs the user's actions, the
   member list's changes included.
@@ -640,6 +658,14 @@ on a real phone, by hand, and reported.
 - A launch an agent aims at a runner that cannot take it is refused, naming the runners that could;
   the agent's tool description lists no machine.
 - A notification waits 30 seconds and is dropped when a client had an input in the last 2 minutes.
+
+- A key file holds the 32 bytes of the private key, nothing else; it is made under a temporary
+  name with `O_EXCL`, synced, then linked into place, so that two clients making the device key at
+  once keep the same one.
+- A keyring that is there but fails (locked) is said, never replaced by `device.key`: the same
+  device would get a second identity.
+- A machine key that is refused stops the daemon's start with its sentence, rather than starting
+  with remote off.
 
 ## Open questions
 

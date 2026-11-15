@@ -1081,6 +1081,9 @@ fn run(call: &Call) -> Verdict {
             return Verdict::Deny(why);
         }
     }
+    if let Some(why) = reads_the_keys(call, &layers) {
+        return Verdict::Deny(why);
+    }
     let home = call.grant.place.home.as_deref();
     let main = call.grant.place.workspace.is_none();
     let mut found = Found::default();
@@ -1158,7 +1161,7 @@ fn run(call: &Call) -> Verdict {
                 }
             ));
         }
-        if let Some(why) = credential(home, path) {
+        if let Some(why) = credential(call.own, home, path) {
             return Verdict::Deny(why);
         }
         if in_git(path) {
@@ -1261,7 +1264,7 @@ fn run(call: &Call) -> Verdict {
             // An option's value or a text's word (`awk -F/`, `tr / _`) is seldom a path the line
             // writes: naming a folder above Flottille's there is held, as any base call.
             if *soft
-                && credential(home, path).is_none()
+                && credential(call.own, home, path).is_none()
                 && let Some(why) = above_own(call.own, path)
             {
                 found.base(why);
@@ -2149,14 +2152,7 @@ fn walks_secrets(call: &Call, layer: &[String]) -> Option<String> {
             .any(|word| names.iter().any(|name| abbreviates(word, name, 4)))
     };
     let walks = match program {
-        "grep" | "egrep" | "fgrep" => {
-            short(&['r', 'R'])
-                || long(&["recursive", "dereference-recursive"])
-                || args.windows(2).any(|w| w[0] == "-d" && w[1] == "recurse")
-                || args
-                    .iter()
-                    .any(|w| w == "-drecurse" || w == "--directories=recurse")
-        }
+        "grep" | "egrep" | "fgrep" => greps_recursively(args),
         "rg" => {
             short(&['u', '.', 'L'])
                 || long(&["unrestricted", "hidden", "follow"])
@@ -2199,6 +2195,175 @@ fn walks_secrets(call: &Call, layer: &[String]) -> Option<String> {
                 } else {
                     &folder.shown
                 }
+            ));
+        }
+    }
+    None
+}
+
+/// Whether a `grep`'s options make it read every file below the folders it names: `-r`, `-R`, or
+/// `-d recurse` spelled any way getopt takes it (in a cluster, its value attached, any
+/// unambiguous start of `--directories` and of `recurse`).
+fn greps_recursively(args: &[String]) -> bool {
+    // GNU grep's short options that take a value, attached or the next word.
+    const VALUED: &str = "ABCDdefmX";
+    let recurse =
+        |value: Option<&str>| value.is_some_and(|v| v.len() >= 3 && "recurse".starts_with(v));
+    let mut words = args
+        .iter()
+        .map(String::as_str)
+        .take_while(|word| *word != "--");
+    while let Some(word) = words.next() {
+        if word.starts_with("--") {
+            if abbreviates(word, "recursive", 4) || abbreviates(word, "dereference-recursive", 4) {
+                return true;
+            }
+            if abbreviates(word, "directories", 2) {
+                let value = match word.split_once('=') {
+                    Some((_, value)) => Some(value),
+                    None => words.next(),
+                };
+                if recurse(value) {
+                    return true;
+                }
+            }
+            continue;
+        }
+        let Some(cluster) = word.strip_prefix('-').filter(|cluster| !cluster.is_empty()) else {
+            continue;
+        };
+        for (at, letter) in cluster.char_indices() {
+            if letter == 'r' || letter == 'R' {
+                return true;
+            }
+            if VALUED.contains(letter) {
+                let rest = &cluster[at + 1..];
+                let value = if rest.is_empty() {
+                    words.next()
+                } else {
+                    Some(rest)
+                };
+                if letter == 'd' && recurse(value) {
+                    return true;
+                }
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Whether a layer's program reads every file below the folders it names, or below the folder it
+/// runs in when it names none: where its own words start (after git's command), and whether the
+/// first of them that is not an option is a pattern rather than a folder. A listing (`ls -R`,
+/// `find` and `fd` without a program to run, `tree`, `du`) shows names, never a byte, and is not
+/// one.
+fn reads_every_file(layer: &[String]) -> Option<(usize, bool)> {
+    let program = base(&layer[0]);
+    let args = &layer[1..];
+    let short = |letters: &[char]| shorts(args).any(|word| word[1..].contains(letters));
+    let long = |names: &[&str]| {
+        args.iter()
+            .any(|word| names.iter().any(|name| abbreviates(word, name, 3)))
+    };
+    match program {
+        "grep" | "egrep" | "fgrep" if greps_recursively(args) => Some((1, true)),
+        "rg" | "ag" | "ack" => Some((1, true)),
+        "fd" if executed(layer).is_some() => Some((1, true)),
+        "find" if executed(layer).is_some() => Some((1, false)),
+        "diff" if short(&['r']) || long(&["recursive"]) => Some((1, false)),
+        "cp" if short(&['r', 'R', 'a']) || long(&["recursive", "archive"]) => Some((1, false)),
+        "zip" if short(&['r']) || long(&["recurse-paths"]) => Some((1, false)),
+        "tar" | "rsync" => Some((1, false)),
+        "git" => {
+            let (at, _) = git_globals(args);
+            let rest = args.get(at + 1..).unwrap_or_default();
+            let any = |names: &[&str]| rest.iter().any(|w| names.contains(&w.as_str()));
+            match args.get(at).map(String::as_str) {
+                Some("grep") if any(&["--no-index", "--untracked"]) => Some((at + 2, true)),
+                Some("diff") if any(&["--no-index"]) => Some((at + 2, false)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The refusal of a line that reads every file below a folder holding Flottille's keys folder
+/// (`keys`), in every mode: what it prints or copies holds the keys' bytes. The folder may be one
+/// it names (through a link, `..` or `/proc/self/root` too), or the one it runs in, which a
+/// wrapper (`env -C`) or git's `-C` moves.
+///
+/// The other logins' places (`SENSITIVE`, the agents' folders of the home) are still refused only
+/// for a path in them (`credential`): a recursive read of a folder that holds one is held, not
+/// refused, and passes in Full (#899).
+fn reads_the_keys(call: &Call, layers: &[Vec<String>]) -> Option<String> {
+    let from = call.paths.first()?;
+    let place = &call.grant.place;
+    let keys: Vec<PathBuf> = own_folders(call.own)
+        .iter()
+        .map(|own| own.join(crate::remote::FOLDER))
+        .collect();
+    // A file system may not tell cases apart: `~/.local/STATE` holds the keys there.
+    let above = |path: &Path, keys: &Path| {
+        let mut keys = keys.components();
+        path.components().all(|part| {
+            keys.next()
+                .is_some_and(|key| key.as_os_str().eq_ignore_ascii_case(part.as_os_str()))
+        })
+    };
+    let holds = |folder: &Resolved| {
+        seen(folder)
+            .iter()
+            .any(|path| keys.iter().any(|keys| above(path, keys)))
+    };
+    for (layer, starts) in layers.iter().zip(folders(place, from, layers)) {
+        let Some((start, pattern)) = reads_every_file(layer) else {
+            continue;
+        };
+        let moved = moved(place, &starts, layer);
+        // A pattern given by an option (`-e`, `-f`, in a cluster too) leaves every word a folder;
+        // a letter taken for one of them only makes the gate look at one word more.
+        let mut pattern = pattern
+            && !shorts(&layer[start..]).any(|word| word[1..].contains(['e', 'f']))
+            && !layer[start..]
+                .iter()
+                .take_while(|word| *word != "--")
+                .any(|word| abbreviates(word, "regexp", 3) || abbreviates(word, "file", 3));
+        let mut named = false;
+        let mut found = None;
+        for (at, whole) in layer.iter().enumerate().skip(1) {
+            if pattern && at >= start && !whole.starts_with('-') {
+                // A search's pattern, never read as a path: `rg /home/ src` reads `src`.
+                pattern = false;
+                continue;
+            }
+            // git's global options name paths from where it starts, and say nothing of the
+            // folders its command reads (`-C` is `moved`).
+            let own = at >= start;
+            for word in named_paths(whole) {
+                let folder = place.resolve(if own { &moved.path } else { &starts.path }, word);
+                named |= own && std::fs::symlink_metadata(&folder.path).is_ok();
+                if found.is_none() && holds(&folder) {
+                    found = Some(folder);
+                }
+            }
+        }
+        if found.is_none() && !named && holds(&moved) {
+            found = Some(moved);
+        }
+        if let Some(folder) = found {
+            return Some(format!(
+                "refused: {} reads every file below {}, which holds Flottille's keys, its {}/ \
+                 folder, a login's place: an agent never reads nor writes a login, in any mode; \
+                 name the folders to read, without it; nothing was done",
+                shown_words(layer),
+                if folder.shown.is_empty() {
+                    "the place's folder"
+                } else {
+                    &folder.shown
+                },
+                crate::remote::FOLDER
             ));
         }
     }
@@ -3066,33 +3231,7 @@ fn inner(words: &[String]) -> Result<Option<Vec<String>>, String> {
     let from = |at: usize| Some(args.get(at..)?.to_vec()).filter(|rest| !rest.is_empty());
     Ok(match program {
         "env" => return env(args),
-        "sudo" => from(skip(
-            args,
-            &[
-                "-u",
-                "-g",
-                "-C",
-                "-D",
-                "-p",
-                "-r",
-                "-t",
-                "-U",
-                "-T",
-                "-R",
-                "--user",
-                "--group",
-                "--chdir",
-                "--prompt",
-                "--role",
-                "--type",
-                "--other-user",
-                "--close-from",
-                "--command-timeout",
-                "--chroot",
-                "--host",
-            ],
-            true,
-        )),
+        "sudo" => from(skip(args, &SUDO_VALUED, true)),
         "doas" => from(skip(args, &["-u", "-C"], false)),
         "nice" => from(skip(args, &["-n", "--adjustment"], false)),
         "ionice" => from(skip(args, &["-c", "--class", "-n", "--classdata"], false)),
@@ -3202,6 +3341,98 @@ fn inner(words: &[String]) -> Result<Option<Vec<String>>, String> {
     })
 }
 
+/// The options of `sudo` that take the next word.
+const SUDO_VALUED: [&str; 21] = [
+    "-u",
+    "-g",
+    "-C",
+    "-D",
+    "-p",
+    "-r",
+    "-t",
+    "-U",
+    "-T",
+    "-R",
+    "--user",
+    "--group",
+    "--chdir",
+    "--prompt",
+    "--role",
+    "--type",
+    "--other-user",
+    "--close-from",
+    "--command-timeout",
+    "--chroot",
+    "--host",
+];
+
+/// The options of `env` that take the next word.
+const ENV_VALUED: [&str; 4] = ["-u", "--unset", "-C", "--chdir"];
+
+/// The folders a layer's options change to, in turn: a wrapper's (`env -C`, `sudo -D`), where
+/// the program it runs starts, and git's `-C`, where its own words name paths from.
+fn changes_to(layer: &[String]) -> Vec<&str> {
+    let args = &layer[1..];
+    let (short, valued): (&str, &[&str]) = match base(&layer[0]) {
+        "git" => {
+            return git_globals(args)
+                .1
+                .into_iter()
+                .filter(|(option, _)| *option == "-C")
+                .filter_map(|(_, folder)| folder)
+                .collect();
+        }
+        "env" => ("-C", &ENV_VALUED),
+        "sudo" => ("-D", &SUDO_VALUED),
+        _ => return Vec::new(),
+    };
+    let options = &args[..skip(args, valued, true)];
+    let mut folders = Vec::new();
+    for (at, word) in options.iter().enumerate() {
+        if word == short || word == "--chdir" {
+            folders.extend(options.get(at + 1).map(String::as_str));
+        } else if let Some(folder) = word.strip_prefix("--chdir=").or_else(|| {
+            word.strip_prefix(short)
+                .filter(|folder| !folder.is_empty() && !word.starts_with("--"))
+        }) {
+            folders.push(folder);
+        }
+    }
+    folders
+}
+
+/// The folder a layer's program works in, from the one it starts in: after its options that
+/// change it (`changes_to`).
+fn moved(place: &place::Place, folder: &Resolved, layer: &[String]) -> Resolved {
+    changes_to(layer)
+        .into_iter()
+        .fold(folder.clone(), |folder, to| place.resolve(&folder.path, to))
+}
+
+/// The folder each layer of `lines` starts in, in the same order: the run's, the one the wrapper
+/// around it moved to, and, for a line an option runs (`find -exec`), the folder of the layer
+/// that runs it.
+fn folders(place: &place::Place, from: &Resolved, layers: &[Vec<String>]) -> Vec<Resolved> {
+    let mut folders = vec![from.clone()];
+    let mut runners = std::collections::VecDeque::new();
+    for (at, layer) in layers
+        .iter()
+        .enumerate()
+        .take(layers.len().saturating_sub(1))
+    {
+        let here = moved(place, &folders[at], layer);
+        let lines = executed(layer).map_or(0, |(_, lines)| lines.len());
+        runners.extend(std::iter::repeat_n(here.clone(), lines));
+        // A layer's wrapper is the one before it, as `layers` unwraps; any other starts a line run.
+        folders.push(if matches!(inner(layer), Ok(Some(_))) {
+            here
+        } else {
+            runners.pop_front().unwrap_or_else(|| from.clone())
+        });
+    }
+    folders
+}
+
 /// Where the program a wrapper runs starts: after its options (those in `valued` take the next
 /// word) and, when `assignments`, its `NAME=value` words.
 fn skip(args: &[String], valued: &[&str], assignments: bool) -> usize {
@@ -3243,7 +3474,7 @@ fn env(args: &[String]) -> Result<Option<Vec<String>>, String> {
         {
             return split("env", Some(line), &args[at + 1..]);
         }
-        if ["-u", "--unset", "-C", "--chdir"].contains(&word) {
+        if ENV_VALUED.contains(&word) {
             at += 2;
         } else if word.starts_with('-') || assignment(word) {
             at += 1;
@@ -3878,7 +4109,7 @@ pub fn forbidden(
     path: &Resolved,
     write: bool,
 ) -> Option<String> {
-    if let Some(why) = credential(home, path) {
+    if let Some(why) = credential(own, home, path) {
         return Some(why);
     }
     if !write {
@@ -3967,8 +4198,9 @@ fn seen(path: &Resolved) -> Vec<PathBuf> {
     seen
 }
 
-/// The refusal of a path in a login's place: an agent's, the user's, the system's secrets.
-fn credential(home: Option<&Path>, path: &Resolved) -> Option<String> {
+/// The refusal of a path in a login's place: an agent's, the user's, the system's secrets, and
+/// Flottille's own keys.
+fn credential(own: &[PathBuf], home: Option<&Path>, path: &Resolved) -> Option<String> {
     if let Some(process) = open_files(path) {
         return Some(format!(
             "refused: {} goes through {}, a process's open files: the agent's own command line \
@@ -3987,6 +4219,7 @@ fn credential(home: Option<&Path>, path: &Resolved) -> Option<String> {
             .map(|system| (*system).to_owned())
             .or_else(|| seen.iter().find_map(|path| credential_names(path)))
     }
+    .or_else(|| keys(own, path))
     .or_else(|| match agent_folder(home, path)? {
         AgentFolder::Login(place) => Some(place),
         AgentFolder::Repository(_) => None,
@@ -3996,6 +4229,31 @@ fn credential(home: Option<&Path>, path: &Resolved) -> Option<String> {
          in any mode; nothing was done",
         path.shown
     ))
+}
+
+/// Flottille's keys folder, `remote/` (`docs/remote.md`, "Identity and keys"), when a path is in
+/// it: the machine key, and the clients' device key on a machine with no keyring. It is in the
+/// state folder; it is looked for in each of Flottille's own folders, which hold no other
+/// `remote`, so that no order of `own` can leave it out. A file system may not tell cases apart:
+/// `REMOTE` is `remote` there, as for an agent's folder.
+///
+/// Only what is in it: a folder above it is refused to a program that reads every file below
+/// (`reads_the_keys`), and to a write (`forbidden`), but a listing of it shows names only.
+fn keys(own: &[PathBuf], path: &Resolved) -> Option<String> {
+    let own = own_folders(own);
+    let in_keys = |path: &Path| {
+        own.iter().any(|own| {
+            path.strip_prefix(own)
+                .ok()
+                .and_then(|rest| rest.components().next())
+                .and_then(|name| name.as_os_str().to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(crate::remote::FOLDER))
+        })
+    };
+    seen(path)
+        .iter()
+        .any(|path| in_keys(path))
+        .then(|| format!("Flottille's keys, its {}/ folder", crate::remote::FOLDER))
 }
 
 /// The process's folder in `/proc` a path goes through when it reaches the files that process
@@ -7557,6 +7815,267 @@ mod tests {
             "git log -1 :/release",
         ] {
             assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+    }
+
+    /// Flottille's state folder at `state`, one of its own, holding its keys folder `remote/`.
+    fn with_keys(fixture: &mut Fixture, state: PathBuf) -> PathBuf {
+        std::fs::create_dir_all(state.join("remote")).unwrap();
+        std::fs::create_dir_all(state.join("logs")).unwrap();
+        std::fs::write(state.join("remote/machine.key"), [7u8; 32]).unwrap();
+        fixture.own.push(state.clone());
+        state
+    }
+
+    fn refused_for_the_keys(fixture: &Fixture, line: &str) {
+        let verdict = fixture.run(line);
+        assert!(denied(&verdict), "{line}: {verdict:?}");
+        let Verdict::Deny(why) = verdict else {
+            unreachable!()
+        };
+        assert!(why.contains("Flottille's keys"), "{line}: {why}");
+        assert!(why.contains("in any mode"), "{line}: {why}");
+    }
+
+    #[test]
+    fn a_recursive_read_of_a_folder_above_the_keys_is_refused() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let state = with_keys(&mut fixture, base.join("xdg/state/flottille"));
+        std::os::unix::fs::symlink(&state, fixture.root.join("st")).unwrap();
+        let s = state.display();
+        let up = base.join("xdg/state");
+        let up = up.display();
+        for line in [
+            format!("grep -ra needle {s}"),
+            format!("grep -r -a needle {up}"),
+            format!("grep -R needle {s}/remote/.."),
+            format!("grep -R needle {s}/logs/.."),
+            format!("grep --recursive needle {s}"),
+            format!("grep -d recurse needle {s}"),
+            format!("egrep -r needle {s}"),
+            format!("rg needle {s}"),
+            format!("rg -uu -a needle {s}"),
+            format!("rg needle /proc/self/root{s}"),
+            format!("grep -r needle /proc/self/root{up}"),
+            "grep -r needle st".into(),
+            "rg -a needle st/".into(),
+            format!("diff -r {s} src"),
+            format!("diff --recursive -a src {s}"),
+            format!("git grep --no-index needle {s}"),
+            format!("git -C {s} grep --no-index needle"),
+            format!("git diff --no-index {s} src"),
+            format!("find {s} -type f -exec cat {{}} +"),
+            format!("fd . {s} -x cat"),
+            format!("tar cf - {s}"),
+            format!("tar -C {up} -c flottille"),
+            format!("cp -r {s} copy"),
+            format!("cp -a {s} copy"),
+            format!("rsync -a {s} copy"),
+            format!("zip -r keys.zip {s}"),
+            format!("nice grep -r needle {s}"),
+        ] {
+            refused_for_the_keys(&fixture, &line);
+        }
+        // Names, never a byte: a listing of the folder, and a read of a folder beside the keys.
+        for line in [
+            format!("ls {s}"),
+            format!("ls -laR {s}"),
+            format!("find {s}"),
+            format!("du -a {s}"),
+            format!("tree {s}"),
+            format!("grep -r needle {s}/logs"),
+            format!("rg needle {s}/logs"),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(!denied(&verdict), "{line}: {verdict:?}");
+        }
+        for tool in ["fs_list", "search"] {
+            let verdict = fixture.file(tool, &state.display().to_string());
+            assert!(!denied(&verdict), "{tool}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_recursive_read_of_the_run_s_folder_above_the_keys_is_refused() {
+        // A project in the home folder: its place holds Flottille's state folder.
+        let mut fixture = Fixture::workspace();
+        let state = fixture.root.join(".local/state/flottille");
+        with_keys(&mut fixture, state);
+        for line in [
+            "grep -r needle",
+            "grep -rn needle .",
+            "rg needle",
+            "rg -uu -a needle .",
+            "grep -r needle .local",
+            "find -type f -exec cat {} +",
+            "tar cf - .",
+        ] {
+            refused_for_the_keys(&fixture, line);
+        }
+        for line in [
+            "grep -r needle src",
+            "rg needle src",
+            "ls -R",
+            "ls .local/state/flottille",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(!denied(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn the_keys_folder_is_found_in_any_case() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let state = with_keys(&mut fixture, base.join("xdg/state/flottille"));
+        for name in ["REMOTE", "Remote", "rEmOtE"] {
+            let key = state.join(name).join("machine.key");
+            let key = key.display();
+            for verdict in [
+                fixture.file("fs_read", &key.to_string()),
+                fixture.file("fs_write", &key.to_string()),
+                fixture.run(&format!("cat {key}")),
+            ] {
+                let Verdict::Deny(why) = &verdict else {
+                    panic!("{name}: not refused: {verdict:?}");
+                };
+                assert!(why.contains("Flottille's keys"), "{name}: {why}");
+            }
+        }
+        // Only `remote`, in any case: a folder whose name only starts so is Flottille's state.
+        let verdict = fixture.file(
+            "fs_read",
+            &state.join("remotes/a.txt").display().to_string(),
+        );
+        assert!(!denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_search_pattern_is_not_taken_for_a_folder() {
+        // An ordinary workspace; Flottille's state folder in the home.
+        let mut fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        let state = with_keys(&mut fixture, home.join(".local/state/flottille"));
+        let h = home.display();
+        let s = state.display();
+        for line in [
+            format!("rg {h}/ src"),
+            "grep -rn / src".into(),
+            "rg '~' src".into(),
+            "rg -n -i '~'".into(),
+            "git grep --no-index / src".into(),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(!denied(&verdict), "{line}: {verdict:?}");
+        }
+        // The pattern given by an option: the first word is a folder.
+        for line in [
+            format!("grep -r x {s}"),
+            format!("rg '~' {s}"),
+            "rg -e x '~'".into(),
+            "rg --regexp x '~'".into(),
+            "grep -r --regexp=x '~'".into(),
+            "grep -r --reg=x '~'".into(),
+            "grep -rex '~'".into(),
+            "grep -r -f patterns '~'".into(),
+            "grep -r --file=patterns '~'".into(),
+            "git grep --no-index -e x '~'".into(),
+        ] {
+            refused_for_the_keys(&fixture, &line);
+        }
+    }
+
+    #[test]
+    fn a_wrapper_s_folder_is_where_its_program_reads() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let state = with_keys(&mut fixture, base.join("xdg/state/flottille"));
+        let up = base.join("xdg/state");
+        let up = up.display();
+        let logs = state.join("logs");
+        let logs = logs.display();
+        let b = base.display();
+        for line in [
+            format!("env -C {up} grep -ra x"),
+            format!("env -C {up} grep -ra ''"),
+            format!("env --chdir={up} grep -ra x"),
+            format!("env --chdir {logs} grep -r x .."),
+            format!("env -C {logs} rg x .."),
+            format!("env -C {logs} nice grep -r x .."),
+            format!("env -C {logs} env -C .. grep -r x"),
+            format!("env -C {b} git -C xdg grep --no-index x"),
+            format!("git -C {logs} grep --no-index x .."),
+            format!("git -C {b}/xdg -C state grep --no-index x"),
+            format!("sudo -D {up} grep -r x"),
+            format!("sudo --chdir={up} grep -r x"),
+        ] {
+            refused_for_the_keys(&fixture, &line);
+        }
+        // A wrapper's folder beside the keys: what is read there holds none of them. (`env`'s
+        // folder in Flottille's own is refused all the same, as a word of a program that may
+        // write.)
+        for line in [
+            format!("env -C {logs} grep -r x"),
+            format!("env -C {logs} grep -r x ."),
+            format!("git -C {logs} grep --no-index x"),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(
+                !matches!(&verdict, Verdict::Deny(why) if why.contains("Flottille's keys")),
+                "{line}: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn grep_s_every_spelling_of_recurse_is_recursive() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let state = with_keys(&mut fixture, base.join("xdg/state/flottille"));
+        let s = state.display();
+        for spelling in [
+            "--directories recurse",
+            "--directories=recurse",
+            "--dir=recurse",
+            "--direc recurse",
+            "--di=rec",
+            "-ad recurse",
+            "-adrecurse",
+            "-d rec",
+            "-drecu",
+            "-a -d recurse",
+            "-in -d recurse",
+        ] {
+            refused_for_the_keys(&fixture, &format!("grep {spelling} x {s}"));
+        }
+        // Another value of `-d`, or an `r` that is an option's value, reads one file.
+        for args in [
+            &["-d", "read"][..],
+            &["-d", "re"],
+            &["-dskip"],
+            &["--directories=skip"],
+            &["--de=recurse"],
+            &["-er"],
+            &["-e", "-r"],
+            &["-m", "-r"],
+        ] {
+            let args: Vec<String> = args.iter().map(|word| word.to_string()).collect();
+            assert!(!greps_recursively(&args), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_folder_above_the_keys_is_found_in_any_case() {
+        let mut fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        with_keys(&mut fixture, home.join(".local/state/flottille"));
+        for line in [
+            "grep -r x '~/.local/STATE/flottille'",
+            "rg x '~/.LOCAL/state'",
+            "grep -ra x '~/.Local'",
+        ] {
+            refused_for_the_keys(&fixture, line);
         }
     }
 }

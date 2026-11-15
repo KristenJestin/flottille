@@ -11,7 +11,9 @@ In the keyring of the user's session: the Secret Service on Linux (GNOME Keyring
 KeePassXC…), reached through the `oo7` crate (already part of the window, which keeps nothing in
 it itself). Each secret is an item labelled `Flottille: <name>`, with the attributes
 `application = flottille` and `flottille-entry = <name>`. A keyring that is locked asks the user
-to unlock it, as it does for any program.
+to unlock it, as it does for any program. The device key of remote's clients is one more item,
+`Flottille: device`, told apart from an entry named `device` by its attribute
+`flottille-key = device` instead of `flottille-entry` (`docs/remote.md`, "Identity and keys").
 
 Never a file of Flottille's and never its store: the store keeps only the entries' metadata
 (`vault_entries`), and nothing of Flottille's (store, events, logs, files) holds a secret.
