@@ -38,6 +38,8 @@ pub(super) struct Milestone {
     pub state: String,
     /// The day it is due, when it has one.
     pub due: Option<String>,
+    /// The day it was closed, when it was.
+    pub closed_on: Option<String>,
     open: u64,
     closed: u64,
     pub url: Option<String>,
@@ -50,6 +52,10 @@ impl Milestone {
             title: value["title"].as_str()?.to_owned(),
             state: value["state"].as_str().unwrap_or("open").to_owned(),
             due: value["due_on"]
+                .as_str()
+                .and_then(|at| at.get(..10))
+                .map(str::to_owned),
+            closed_on: value["closed_at"]
                 .as_str()
                 .and_then(|at| at.get(..10))
                 .map(str::to_owned),

@@ -778,20 +778,25 @@ the project's row, for a project that declares a tracker.
   their checks are what the items' rounds keep** ([`items.md`](items.md)): nothing of them is
   asked. The milestones are not in what the rounds read, so they are read by `project.progress`
   itself, **at most once per round of the tracker** (kept in the daemon's memory until the
-  tracker's next round, or a minute before its first), and only while something asks:
+  tracker's next round, or a minute before its first), and only while something asks. Two callers
+  at once make one read: a project has one read in flight, and the second waits for it:
   - GitHub: `gh api repos/<owner>/<name>/milestones?state=all&per_page=100 --paginate`, the call
     of `tickets milestones`; a ticket is in a milestone when its item's `milestone` says its title
     (the rounds read it with `gh issue list --json …,milestone`).
   - Jira: `acli jira project view --key <P> --json` for each project of the tracker, the call of
     `tickets milestones`, then, for each version **not released** (and not archived), `acli jira
     workitem search --jql 'project = "<P>" AND fixVersion = "<name>" ORDER BY updated DESC'
-    --fields key,summary --json --paginate --limit 10000`, its keys alone. The rounds' own search
+    --fields key,summary --json --paginate --limit 10000`, its keys alone, **kept five minutes**
+    across the rounds (a round of the tracker does not search each version again). A version whose
+    search fails is listed with `read` false and the reason in `problem`: the other versions show.
+    The rounds' own search
     is left as it was: whether `search` allows `fixVersions` among its `--fields` is not known
     (above), and a refusal would stop every round of the tracker. A released version is listed
     without its tickets, said on its row.
 - **The groups**, whatever the tracker:
   - **GitHub** issues are open or closed, so the groups are derived: *To do* (open, nothing on it),
-    *In progress* (a workspace linked to it, or a pull request on it merged or closed), *In
+    *In progress* (a workspace linked to it, or a pull request on it merged; one closed unmerged
+    is work dropped, it does not count), *In
     review* (a pull request on it open or draft), *Done* (closed). A repository that tracks its
     issues in a GitHub Project with a status field is not read for it yet.
   - **Jira**: the project's own statuses, the custom ones too, ordered by their status category as

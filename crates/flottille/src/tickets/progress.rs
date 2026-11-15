@@ -8,10 +8,12 @@
 //! (`docs/items.md`): nothing of them is asked here. The milestones themselves are not in what the
 //! rounds read, so they are read here, once per round of the tracker at most (`Kept`): GitHub's in
 //! one `gh api` call, Jira's in one `project view` per project and, since the rounds keep no fix
-//! version, one search of the keys of each version not released yet.
+//! version, one search of the keys of each version not released yet, whose answer is kept for
+//! `SEARCHED_MS` (five minutes) across the rounds. One read of a project is in flight at a time:
+//! a second caller waits for it and finds what it read.
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use flottille_core::declared::ProjectTracker;
 use flottille_core::item::{Check, Filter, Item};
@@ -34,6 +36,10 @@ use crate::projects::{self, Failure};
 /// when the tracker was read, a page that asks again often does not read them each time.
 const UNROUNDED_MS: u64 = 60_000;
 
+/// How long the keys of a Jira version's work items are kept, whatever the rounds say: a search
+/// of each version every round is more than the tracker's quota should bear.
+const SEARCHED_MS: u64 = 300_000;
+
 /// A milestone of the tracker as the page shows it, its tickets not yet placed.
 #[derive(Clone, Debug)]
 pub(super) struct Milestone {
@@ -46,9 +52,20 @@ pub(super) struct Milestone {
     /// The day it is due (GitHub) or is or was released (Jira).
     pub due: Option<String>,
     pub url: Option<String>,
+    /// The day it was closed, when the tracker says it (GitHub).
+    pub closed: Option<String>,
     /// The keys of a Jira version's work items, when they were read; a GitHub milestone's tickets
     /// are those whose item names it.
     pub keys: Option<Vec<String>>,
+    /// Why the keys of a version not released could not be read.
+    pub problem: Option<String>,
+}
+
+/// The keys of one Jira version, as its last search found them.
+struct Searched {
+    name: String,
+    at: u64,
+    keys: Vec<String>,
 }
 
 /// What was read of a project's milestones, and the round of the tracker it was read after.
@@ -61,6 +78,14 @@ struct Read {
 }
 
 static KEPT: LazyLock<Mutex<HashMap<String, Read>>> = LazyLock::new(Default::default);
+
+/// The searches of the versions, by project of Flottille and version id.
+static SEARCHED: LazyLock<Mutex<HashMap<(String, String), Searched>>> =
+    LazyLock::new(Default::default);
+
+/// A project's read in flight: whoever holds it reads, the others wait and find the result.
+static READING: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Default::default);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -115,6 +140,9 @@ pub(super) async fn said(daemon: &Daemon, project: &Project) -> Outcome {
                 Some(n) => format!(", {n} other"),
             }
         ));
+        if let Some(problem) = milestone["problem"].as_str() {
+            lines.push(format!("  its tickets could not be read: {problem}"));
+        }
         for group in milestone["groups"].as_array().into_iter().flatten() {
             for ticket in group["tickets"].as_array().into_iter().flatten() {
                 let mut on: Vec<String> = ticket["workspaces"]
@@ -218,6 +246,13 @@ async fn kept_or_read(
     tracker: &ProjectTracker,
     round_at: Option<u64>,
 ) -> Result<Vec<Milestone>, String> {
+    let reading = READING
+        .lock()
+        .unwrap()
+        .entry(project.name.clone())
+        .or_default()
+        .clone();
+    let _reading = reading.lock().await;
     let said = serde_json::to_string(tracker).unwrap_or_default();
     let now = now_ms();
     if let Some(kept) = KEPT.lock().unwrap().get(&project.name)
@@ -256,7 +291,9 @@ async fn read(project: &Project, tracker: &ProjectTracker) -> Result<Vec<Milesto
                     open: m.state != "closed",
                     due: m.due,
                     url: m.url,
+                    closed: m.closed_on,
                     keys: None,
+                    problem: None,
                 })
                 .collect())
         }
@@ -266,24 +303,59 @@ async fn read(project: &Project, tracker: &ProjectTracker) -> Result<Vec<Milesto
             for key in projects {
                 for version in versions::read(key).await? {
                     let open = !version.released && !version.archived;
-                    let keys = match open {
-                        true => Some(keys_in(site, key, &version.name).await?),
-                        false => None,
+                    let id = format!("jira-{key}-{}", version.id);
+                    // A search that fails leaves this version's row saying so, the others show.
+                    let (keys, problem) = match open {
+                        true => match keys_of(project, &id, site, key, &version.name).await {
+                            Ok(keys) => (Some(keys), None),
+                            Err(why) => (None, Some(masked(&why))),
+                        },
+                        false => (None, None),
                     };
                     all.push(Milestone {
-                        id: format!("jira-{key}-{}", version.id),
+                        id,
                         name: version.shown(),
                         project: Some(key.clone()),
                         open,
                         due: version.date.clone(),
                         url: None,
+                        closed: None,
                         keys,
+                        problem,
                     });
                 }
             }
             Ok(all)
         }
     }
+}
+
+/// The keys of the version `id`: those a search found less than `SEARCHED_MS` ago, else a search.
+async fn keys_of(
+    project: &Project,
+    id: &str,
+    site: &str,
+    jira_project: &str,
+    version: &str,
+) -> Result<Vec<String>, String> {
+    let now = now_ms();
+    let at = (project.name.clone(), id.to_owned());
+    if let Some(kept) = SEARCHED.lock().unwrap().get(&at)
+        && kept.name == version
+        && now.saturating_sub(kept.at) < SEARCHED_MS
+    {
+        return Ok(kept.keys.clone());
+    }
+    let keys = keys_in(site, jira_project, version).await?;
+    SEARCHED.lock().unwrap().insert(
+        at,
+        Searched {
+            name: version.to_owned(),
+            at: now,
+            keys: keys.clone(),
+        },
+    );
+    Ok(keys)
 }
 
 /// The keys of the work items of the Jira project `project` in its version `version`.
@@ -441,10 +513,12 @@ fn placed(milestone: &Milestone, tickets: &[Item], links: &Links<'_>) -> Value {
                 (group, category.to_owned())
             }
             false => {
+                // A pull request closed without being merged is work that was dropped.
+                let worked_on = pulls.iter().any(|p| p.state != "closed");
                 let at = match () {
                     _ if ticket.state == "closed" => 3,
                     _ if open_pull => 2,
-                    _ if !workspaces.is_empty() || !pulls.is_empty() => 1,
+                    _ if !workspaces.is_empty() || worked_on => 1,
                     _ => 0,
                 };
                 let (group, category) = GITHUB_GROUPS[at];
@@ -512,6 +586,8 @@ fn placed(milestone: &Milestone, tickets: &[Item], links: &Links<'_>) -> Value {
         "due": milestone.due,
         "url": milestone.url,
         "read": !jira || milestone.keys.is_some(),
+        "problem": milestone.problem,
+        "closed_at": milestone.closed,
         "counts": {
             "done": count("done"),
             "review": count("review"),
