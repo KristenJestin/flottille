@@ -407,6 +407,9 @@ async fn carried(
         headers.insert(name, value);
         Ok(())
     };
+    // Each entry is looked up again at each start: one removed since the declaration was written
+    // fails it. Its host is not compared with the URL's here: the user's own form binds an entry
+    // of any host; an agent's request had it compared before its write, under the file's lock.
     for line in &declaration.secrets {
         let secret = crate::vault::every_project_s(daemon, &declaration.name, &line.entry).await?;
         match line.place {

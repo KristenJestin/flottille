@@ -330,6 +330,13 @@ struct Values {
 /// Held while `extensions.toml` is read and written again.
 static WRITING: Mutex<()> = Mutex::new(());
 
+/// `change`, never between a write's checks of what the file is to name and the write
+/// (`rewrite`): a vault entry removed while an accepted connection is written.
+pub fn between_writes<T>(change: impl FnOnce() -> T) -> T {
+    let _writing = WRITING.lock().unwrap();
+    change()
+}
+
 /// Refuses extensions whose tools could not be told apart from another tool: one named as a tool
 /// of the core, which it would shadow, or as another extension's. Checked at the daemon's start.
 pub fn check_tools(extensions: &[&Extension]) -> Result<(), String> {
