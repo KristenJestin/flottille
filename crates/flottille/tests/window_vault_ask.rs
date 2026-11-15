@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,8 @@ use serde_json::json;
 const SECRET: &str = "w0rklog-t0ken-from-the-form";
 const WHY: &str = "to log the two hours spent on ABC-1";
 const STAGING: &str = "to sign in to staging";
+const BANK: &str = "to sign in to the bank";
+const SHOP: &str = "to sign in to the shop";
 
 fn user() -> User {
     let user = User::with_fake_agent().with_fake_acli();
@@ -40,6 +43,18 @@ fn user() -> User {
                  "url": "https://staging.example.com:8443/login?next=/",
                  "username": "tester@example.com"}}},
             {"say": "Asked for the login."},
+            {"hold": "release"}]},
+        {"when": "sign in to the bank", "do": [
+            {"mcp": {"tool": "vault", "arguments":
+                {"action": "ask", "name": "bank-login", "why": BANK,
+                 "url": "https://evil.example\\@bank.example/"}}},
+            {"say": "Asked for the bank."},
+            {"hold": "release"}]},
+        {"when": "sign in to the shop", "do": [
+            {"mcp": {"tool": "vault", "arguments":
+                {"action": "ask", "name": "shop-test", "why": SHOP,
+                 "url": "https://shop.example.com/login", "for": "connection:browser"}}},
+            {"say": "Asked for the shop."},
             {"hold": "release"}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
@@ -57,6 +72,9 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 /// A session of `app`, whose Jira tracker names the missing entry `jira-time`, told `message`:
 /// its turn holds until the test releases it, so the card stays in sight while it is answered.
 fn session(user: &User, message: &str) -> String {
+    if message.contains("shop") {
+        connection(user, "browser");
+    }
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -385,4 +403,130 @@ fn the_card_shows_the_host_the_secret_goes_to(cx: &mut TestAppContext) {
     assert_eq!(set["name"], "staging-login");
     assert_eq!(set["url"], "https://staging.example.com/login");
     assert_eq!(set["project"], "app");
+}
+
+/// The connection `name` declared on the fake MCP server, never reviewed: it exists, and gives
+/// no tool.
+fn connection(user: &User, name: &str) {
+    let fake = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-mcp");
+    assert!(fake.exists(), "`cargo build -p flottille-fake-mcp` first");
+    let script = user.path(&format!("{name}-script.json"));
+    std::fs::write(
+        &script,
+        json!({"server": {"name": name, "version": "1.0.0"}, "tools": []}).to_string(),
+    )
+    .unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    user.call(
+        "connection.add",
+        json!({"name": name, "about": format!("The {name} of the tests."),
+            "command": [fake, "--script", script]}),
+    )
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn an_ask_with_a_backslash_url_shows_the_host_login_would_use(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "sign in to the bank");
+    // A web address reads a backslash as "/": the host is evil.example, whatever the text after it says.
+    let asked = user.call("vault.asks", json!({})).unwrap()["asks"][0].clone();
+    assert_eq!(asked["host"], "evil.example", "{asked}");
+    let (shell, cx) = window(&user, cx);
+    let (_, at) = card(&shell, &id, cx);
+
+    assert_eq!(
+        label(format!("row-{at}-vault-ask-host"), cx).as_deref(),
+        Some("Goes to: evil.example")
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn the_vault_form_shows_the_binding_and_its_host(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "sign in to the shop");
+    let (shell, cx) = window(&user, cx);
+    let (_, at) = card(&shell, &id, cx);
+
+    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    settle(cx);
+    let vault = vault_form(&shell, cx);
+    assert!(vault.read_with(cx, |v, _| v.is_open()), "the form is open");
+    // What the entry will be bound to, and where its secret goes, said in the form itself.
+    assert_eq!(
+        label("vault-binding-for", cx).as_deref(),
+        Some("For: the connection browser")
+    );
+    assert_eq!(
+        label("vault-binding-host", cx).as_deref(),
+        Some("Goes to: shop.example.com")
+    );
+    assert_eq!(
+        label("vault-binding-remove", cx).as_deref(),
+        Some("Remove the binding")
+    );
+
+    // The user may remove the binding: it folds away, moving, and the entry is saved bound to
+    // no use.
+    cx.update(|window, cx| window.click("vault-binding-remove", cx));
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the binding leaves without moving"
+    );
+    settle(cx);
+    assert!(!has("vault-binding-for", cx), "still shown");
+    save(&user, &shell, &vault, (&id, at), cx);
+
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    let set = user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
+    assert_eq!(set["name"], "shop-test");
+    assert_eq!(set["for"], serde_json::Value::Null, "{set}");
+}
+
+#[gpui_kit::test]
+fn dismiss_is_disabled_while_its_call_runs(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "sign in to staging");
+    let (shell, cx) = window(&user, cx);
+    let (_, at) = card(&shell, &id, cx);
+    let number = user.call("vault.asks", json!({})).unwrap()["asks"][0]["ask"]
+        .as_u64()
+        .unwrap();
+
+    // A second click before the daemon answered sends nothing more.
+    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-dismiss"), cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    assert!(
+        shell.read_with(cx, |s, _| s.is_dismissing(number)),
+        "Dismiss is not disabled"
+    );
+    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-dismiss"), cx));
+    until(&shell, cx, "the request is dismissed", |_| {
+        user.call("vault.asks", json!({})).unwrap()["asks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    for _ in 0..20 {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        settle(cx);
+    }
+    let toasts: Vec<String> = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| toast.title().to_owned())
+            .collect()
+    });
+    assert!(
+        !toasts.iter().any(|t| t.contains("not dismissed")),
+        "a second dismissal was sent: {toasts:?}"
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
 }

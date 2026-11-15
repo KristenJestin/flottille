@@ -4641,6 +4641,17 @@ fn a_browser_login_without_an_entry_offers_the_ask() {
 }
 
 #[test]
+fn a_connection_without_login_does_not_list_the_vault() {
+    let user = user();
+    project(&user, "app");
+    connect(&user, "almanac", &almanac(), json!({}));
+    let (_, mcp) = session(&user, "app");
+    // No login of its own takes an entry: nothing it does may ask for one.
+    assert!(has(&mcp, "conn_almanac"));
+    assert!(!has(&mcp, "vault"), "{:?}", mcp.names());
+}
+
+#[test]
 fn a_plugin_request_without_its_runs_token_is_refused() {
     // The fake command line asks the plugin without the token Flottille gave the run, or with
     // another one.
@@ -5611,9 +5622,22 @@ fn an_entry_bound_to_plain_http_on_another_host_is_refused_for_a_sign_in() {
     user.call(
         "vault.set",
         json!({"name": "intranet-test", "secret": "s3cret-of-the-intranet", "username": "tester",
-            "url": "http://intranet.example.test/login", "for": "connection:browser"}),
+            "url": "https://intranet.example.test/login", "for": "connection:browser"}),
     )
     .unwrap();
+    // The vault refuses plain http to another machine for a connection's entry at save: one kept
+    // before it did is still refused when it is used.
+    let mut store =
+        flottille_core::store::Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let mut kept = store
+        .vault_entries()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.name == "intranet-test")
+        .unwrap();
+    kept.url = Some("http://intranet.example.test/login".into());
+    store.put_vault_entry(&kept).unwrap();
+    drop(store);
     let said = refused(mcp.call(
         "conn_browser",
         json!({"action": "login", "arguments": {"entry": "intranet-test"}}),
