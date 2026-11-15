@@ -695,6 +695,22 @@ on a real phone, by hand, and reported.
 - The four words are BIP-39's English list (MIT licence), drawn from the first 44 bits of a
   SHA-256 of the two keys and the token.
 
+- The git work of "What travels" is `crates/flottille/src/git/bundle.rs`. The snapshot is made
+  from a copy of the repository's index (a linked worktree's own), under Flottille's name
+  (`Flottille <flottille@localhost>`), never signed: it is never kept as a commit. The bundle
+  holds one ref, `refs/flottille/outgoing/<launch>`: its parent is the branch as it was when the
+  snapshot was made, so the branch travels below it and the branch's name goes beside the bundle.
+  When the other side has every commit already, no bundle is written (git makes no empty one)
+  and the answer says "nothing new".
+- A bundle received is verified, then fetched into `refs/flottille/incoming/<launch>`; a
+  repository never received is made by `git init` and that fetch, with no remote. The fetch sets
+  `protocol.file.allow=always` for itself: a configuration that refuses git's file transport is
+  about submodules and remotes, not a file of Flottille's.
+- The snapshot is laid with `read-tree -m -u HEAD <snapshot>`, then `reset`: every change is
+  unstaged, and a file `HEAD` does not have is untracked there, even one the sender had staged.
+- A returning bundle holds the one branch of the workspace; a `machine` is one ref component and
+  the `branch` a branch name git accepts, or nothing is fetched.
+
 ## Open questions
 
 1. **The transport**: the hub and its relay are decided; iroh is the candidate, to be proved by the
