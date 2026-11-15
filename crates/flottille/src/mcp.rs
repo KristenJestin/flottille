@@ -117,7 +117,9 @@ const SERVED: [Definition; 33] = [
             numbered. The end of the page names the offset of the next one: pass it as \
             range.offset to read on. Reading a file is what lets fs_write and fs_edit change it \
             later. A page already read and unchanged since is answered in one line, unless again \
-            is true. Refused outside the place and for a folder (use fs_list).",
+            is true. outline: true lists the declarations of a Rust, TypeScript, JavaScript, \
+            Python or Go file with their lines and byte offsets, for range.offset: it is not a \
+            read. Refused outside the place and for a folder (use fs_list).",
         read_only: true,
         idempotent: true,
         destructive: false,
@@ -129,7 +131,8 @@ const SERVED: [Definition; 33] = [
                     "offset": {"type": "integer", "minimum": 0, "description": "The byte to start at; a page names the next one."},
                     "length": {"type": "integer", "minimum": 1, "maximum": files::READ_PAGE_BYTES}
                 }, "additionalProperties": false},
-                "again": {"type": "boolean", "description": "Send the page even when it is unchanged since you read it."}
+                "again": {"type": "boolean", "description": "Send the page even when it is unchanged since you read it."},
+                "outline": {"type": "boolean", "description": "The declarations of a source file with their lines and byte offsets, instead of a page. Not a read: fs_write and fs_edit still need a page read."}
             }, "required": ["path"], "additionalProperties": false})
         },
     },

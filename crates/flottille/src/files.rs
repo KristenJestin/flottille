@@ -497,6 +497,9 @@ struct ReadArguments {
     /// Reads the page whole even when it is unchanged since the session read it.
     #[serde(default)]
     again: bool,
+    /// The declarations of a source file instead of a page of it.
+    #[serde(default)]
+    outline: bool,
 }
 
 #[derive(Deserialize)]
@@ -529,6 +532,13 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
         Ok(args) => args,
         Err(refusal) => return refusal,
     };
+    if args.outline && args.range.is_some() {
+        return Outcome::Refused(
+            "refused: an outline lists the whole file: give no range, and read the part you \
+             want from its offset with fs_read"
+                .into(),
+        );
+    }
     let (offset, length) = match page_of(args.range.as_ref()) {
         Ok(page) => page,
         Err(refusal) => return refusal,
@@ -537,6 +547,13 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
         Ok(path) => path,
         Err(refusal) => return refusal,
     };
+    if args.outline {
+        // The same path checks as a read, then none of what makes a read one: no fingerprint.
+        return match outline_of(cx, &path) {
+            Ok(outcome) => outcome,
+            Err(error) => failed(&path, error),
+        };
+    }
     // A page is sized so that its result is not cut (`docs/tools.md`, "Long results"): the
     // session knows the file's fingerprint once it read a page, and a page it was shown only in
     // part would let it write over text it never saw.
@@ -545,6 +562,57 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
         Ok(outcome) => outcome,
         Err(error) => failed(&path, error),
     }
+}
+
+/// The most bytes of a file an outline is made of.
+const OUTLINE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// The outline of a source file (`docs/tools.md`, "Files"). It is not a read: the session is not
+/// given the file's fingerprint, so what it needs to write the file is still to read a page.
+fn outline_of(cx: &Context, path: &Resolved) -> std::io::Result<Outcome> {
+    let mut file = match open_regular(&path.path) {
+        Err(error) if error.kind() == ErrorKind::IsADirectory => {
+            return Ok(Outcome::Refused(format!(
+                "refused: {} is a folder: list it with fs_list",
+                path.shown
+            )));
+        }
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(not_regular(path)),
+        opened => opened?,
+    };
+    if !crate::results::offers_outline(&cx.daemon.paths) {
+        return Ok(Outcome::Refused(
+            "refused: outlines are turned off by the user; read it with fs_read".into(),
+        ));
+    }
+    let extension = path.path.extension().and_then(|e| e.to_str());
+    let Some(language) = extension.and_then(crate::outline::Language::of) else {
+        return Ok(Outcome::Refused(match extension {
+            Some(extension) => {
+                format!("refused: no outline for {extension} files; read it with fs_read")
+            }
+            None => {
+                "refused: no outline for files without an extension; read it with fs_read".into()
+            }
+        }));
+    };
+    let size = file.metadata()?.len();
+    if size > OUTLINE_BYTES {
+        return Ok(Outcome::Refused(format!(
+            "refused: {} is {size} bytes: too large for an outline ({} MiB at most); read it a \
+             page at a time with fs_read",
+            path.shown,
+            OUTLINE_BYTES / (1024 * 1024)
+        )));
+    }
+    let mut source = Vec::new();
+    file.read_to_end(&mut source)?;
+    Ok(
+        match crate::outline::describe(&path.shown, language, &source) {
+            Ok(text) => Outcome::Done(text),
+            Err(why) => Outcome::Failed(why),
+        },
+    )
 }
 
 /// The lines of a file a command that only prints some of it asks for.
