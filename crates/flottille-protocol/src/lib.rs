@@ -283,6 +283,9 @@ pub struct AgentRun {
     /// Pasted or dropped images, sent with the first message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageUpload>,
+    /// Large pasted texts, sent as files with the first message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texts: Vec<TextUpload>,
 }
 
 /// The parameters of `agent.send`.
@@ -294,6 +297,9 @@ pub struct AgentSend {
     /// Pasted or dropped images, sent with the message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageUpload>,
+    /// Large pasted texts, written as files the message names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texts: Vec<TextUpload>,
     /// When the agent's cache expired: compact it first (true) or send to its session as it is
     /// (false), whatever the setting; the setting decides when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -306,6 +312,15 @@ pub struct AgentSend {
 pub struct ImageUpload {
     pub mime: String,
     pub data: String,
+}
+
+/// A large pasted text sent with a message: its name and its text. The daemon masks it and writes
+/// it in the agent's folder, and the message says where.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextUpload {
+    pub name: String,
+    pub text: String,
 }
 
 /// The parameters of `agent.image`: an image of the agent's folder, by the name an event gave.

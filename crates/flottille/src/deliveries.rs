@@ -607,11 +607,15 @@ pub const IMAGE_TYPES: [(&str, &str); 4] = [
 ];
 
 /// An image of the agent's folder, as its MIME type and its bytes in base64; `None` when the name
-/// is not one Flottille made or the file is gone.
+/// is not one Flottille made or the file is gone. A pasted text of the agent's folder (`.txt`,
+/// #848) is given the same way, as `text/plain`.
 pub fn read_image(daemon: &Daemon, agent: &str, name: &str) -> Option<(&'static str, String)> {
     use base64::Engine as _;
     let (_, extension) = name.rsplit_once('.')?;
-    let (mime, _) = IMAGE_TYPES.iter().find(|(_, e)| *e == extension)?;
+    let mime = match extension {
+        "txt" => "text/plain",
+        _ => IMAGE_TYPES.iter().find(|(_, e)| *e == extension)?.0,
+    };
     if name.contains('/') || name.starts_with('.') {
         return None;
     }
