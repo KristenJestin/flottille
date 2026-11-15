@@ -237,44 +237,45 @@ impl Secret {
 }
 
 /// The names of a query parameter whose value is a secret, in words (`userToken`, `user_token`
-/// and `UserToken` are `["user", "token"]`): a name that is one of them, whole.
-const SECRET_PARAMETERS: [&[&str]; 18] = [
+/// and `UserToken` are `["user", "token"]`), or run together (`usertoken`): a name that is one of
+/// them, whole, or ends with one of `SECRET_SUFFIXES`.
+const SECRET_PARAMETERS: [&[&str]; 12] = [
     &["token"],
-    &["access", "token"],
-    &["auth", "token"],
     &["user", "token"],
-    &["api", "token"],
     &["id", "token"],
     &["refresh", "token"],
-    &["session", "token"],
-    &["private", "token"],
+    &["session", "id"],
     &["key"],
-    &["apikey"],
     &["auth"],
     &["authorization"],
-    &["secret"],
-    &["password"],
-    &["passwd"],
-    &["access", "key"],
-    &["private", "key"],
+    &["sig"],
+    &["jwt"],
+    &["bearer"],
+    &["sid"],
 ];
 
 /// The ends of a name that say its value is a secret, whatever comes before (`x_api_key`,
-/// `client_secret`). Not `token` or `key` alone: `pageToken` and `project_key` are no secrets.
-const SECRET_SUFFIXES: [&[&str]; 9] = [
+/// `client_secret`, `clientsecret`, `X-Amz-Security-Token`). Not `token` or `key` alone:
+/// `pageToken` and `project_key` are no secrets.
+const SECRET_SUFFIXES: [&[&str]; 14] = [
     &["access", "token"],
     &["auth", "token"],
     &["api", "token"],
+    &["session", "token"],
+    &["security", "token"],
+    &["private", "token"],
     &["api", "key"],
-    &["apikey"],
     &["secret", "key"],
     &["private", "key"],
+    &["access", "key"],
     &["secret"],
     &["password"],
+    &["passwd"],
+    &["signature"],
 ];
 
 /// A parameter's name in lowercase words: split at `_`, `-`, `.` and where a capital follows a
-/// small letter or a digit.
+/// small letter or a digit; a number at a word's end is left out (`token2` is `token`).
 fn words_of(name: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
@@ -293,22 +294,41 @@ fn words_of(name: &str) -> Vec<String> {
     }
     words.extend((!word.is_empty()).then_some(word));
     words
+        .into_iter()
+        .map(|word| word.trim_end_matches(|c: char| c.is_numeric()).to_owned())
+        .filter(|word| !word.is_empty())
+        .collect()
 }
 
-/// Why a URL may not be reached as it is: a query parameter named like a secret, whose value may
-/// be one. Its name only is said. Checked when a connection is added or edited; one already
-/// declared that has one fails, alone, with this reason.
+/// Whether a parameter named `name` would carry a secret.
+fn secret_parameter(name: &str) -> bool {
+    let words = words_of(name);
+    let Some(last) = words.last() else {
+        return false;
+    };
+    SECRET_PARAMETERS
+        .iter()
+        .any(|whole| words == *whole || (words.len() == 1 && *last == whole.concat()))
+        || SECRET_SUFFIXES.iter().any(|end| {
+            (words.len() >= end.len() && words[words.len() - end.len()..] == **end)
+                || last.ends_with(&end.concat())
+        })
+}
+
+/// Why a URL may not be reached as it is: a parameter of its query, or of its fragment
+/// (`#access_token=…`, as some sign-ins hand it), named like a secret, whose value may be one.
+/// Its name only is said. Checked when a connection is added or edited; one already declared that
+/// has one fails, alone, with this reason. Its path is not looked at.
 fn query_secret(text: &str) -> Option<String> {
     let url = url::Url::parse(text).ok()?;
-    let (name, _) = url.query_pairs().find(|(name, _)| {
-        let words = words_of(name);
-        SECRET_PARAMETERS.iter().any(|whole| words == *whole)
-            || SECRET_SUFFIXES
-                .iter()
-                .any(|end| words.len() >= end.len() && words[words.len() - end.len()..] == **end)
-    })?;
+    let fragment = url::form_urlencoded::parse(url.fragment().unwrap_or_default().as_bytes());
+    let (name, place) = url
+        .query_pairs()
+        .map(|(name, _)| (name, "query"))
+        .chain(fragment.map(|(name, _)| (name, "fragment")))
+        .find(|(name, _)| secret_parameter(name))?;
     Some(format!(
-        "url: its query holds {name}, which looks like a secret: move it to \"Secrets of its \
+        "url: its {place} holds {name}, which looks like a secret: move it to \"Secrets of its \
          requests\", a query parameter from a vault entry (secrets, in = \"query\")"
     ))
 }
