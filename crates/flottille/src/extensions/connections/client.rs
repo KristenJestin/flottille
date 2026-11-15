@@ -492,8 +492,10 @@ async fn start_with(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let mut child = crate::children::spawn(crate::children::in_own_session(&mut command))
-                .map_err(|error| format!("{}: {error}", words[0]))?;
+            let mut child = crate::children::spawn(crate::landlock::confined(
+                crate::children::in_own_session(&mut command),
+            ))
+            .map_err(|error| format!("{}: {error}", words[0]))?;
             let leader = child.id();
             let (Some(stdout), Some(stdin), Some(stderr)) =
                 (child.stdout.take(), child.stdin.take(), child.stderr.take())
@@ -597,9 +599,14 @@ async fn start_with(
                     if bearing && let Some(said) = token_refused(daemon, declaration).await {
                         return Err(said);
                     }
+                    // A header the user gave from the vault is what the server refused: a
+                    // sign-in does not change it, the entry does.
+                    if !declaration.headers.is_empty() {
+                        return Err(refused_headers(&declaration.headers));
+                    }
                     return Err(format!(
-                        "the server asks to be signed in: the user signs it in with `flottille \
-                         connection login {name}`"
+                        "{}: the user signs it in with `flottille connection login {name}`",
+                        flottille_core::vault::SIGN_IN_ASKED
                     ));
                 }
                 Err(error) => return Err(error.to_string()),
@@ -694,11 +701,27 @@ async fn token_refused(daemon: &Arc<Daemon>, declaration: &Declaration) -> Optio
     }
 }
 
+/// What a start says of a server that answered `401` to the headers of vault entries: which
+/// header and which entry, never the value.
+fn refused_headers(headers: &std::collections::BTreeMap<String, String>) -> String {
+    let given: Vec<String> = headers
+        .iter()
+        .map(|(header, entry)| format!("{header} from the vault entry {entry}"))
+        .collect();
+    let given = given.join(", the header ");
+    format!(
+        "{} {given}: check the entry's value (its prefix, e.g. \"Bearer \") and that its URL \
+         is of this host",
+        flottille_core::vault::REFUSED_ENTRY
+    )
+}
+
 /// What a start says of a connection whose authorization server refused to refresh its tokens.
 fn signed_out_said(name: &str, why: &str) -> String {
     format!(
-        "the connection {name} is signed out ({why}): the user is asked to sign in again \
-         (`flottille connection login {name}`)"
+        "the connection {name}{}{why}): the user is asked to sign in again \
+         (`flottille connection login {name}`)",
+        flottille_core::vault::SIGNED_OUT
     )
 }
 
@@ -1082,15 +1105,6 @@ impl Pictures<'_> {
         if self.taken >= MAX_PICTURES {
             return left_out(&format!("a result carries {MAX_PICTURES} images at most"));
         }
-        if about > MAX_PICTURE_BYTES {
-            return left_out(&format!("over {} MiB", MAX_PICTURE_BYTES >> 20));
-        }
-        if self.bytes + about > MAX_PICTURES_BYTES {
-            return left_out(&format!(
-                "over {} MiB for the images of one result",
-                MAX_PICTURES_BYTES >> 20
-            ));
-        }
         let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
             return left_out("its data is not base64");
         };
@@ -1103,15 +1117,46 @@ impl Pictures<'_> {
             let kind = mime.strip_prefix("image/").unwrap_or(mime);
             return left_out(&format!("its bytes are not those of a {kind}"));
         }
-        // As the pictures of a message are, before they are stored.
-        let bytes = flottille_core::images::scaled_down(mime, bytes);
+        // Scaled before the caps are looked at, as the pictures of a message are before they are
+        // stored: the answer's own size limit (`ANSWER_LIMIT`) is what bounds what is decoded.
+        let fitted = flottille_core::images::fit_under(mime, &bytes, MAX_PICTURE_BYTES);
+        let (bytes, extension, line) = match fitted {
+            Some(fitted) => {
+                let line = format!(
+                    "[an image scaled from {} {} to {} {}, {}×{}, is attached]",
+                    size_said(bytes.len()),
+                    kind_said(mime),
+                    size_said(fitted.bytes.len()),
+                    kind_said(fitted.mime),
+                    fitted.width,
+                    fitted.height
+                );
+                // A PNG that became a JPEG is stored as one: its name says what it is.
+                let extension = if fitted.mime == "image/jpeg" {
+                    "jpg"
+                } else {
+                    "png"
+                };
+                (fitted.bytes, extension, Some(line))
+            }
+            None => (bytes, *extension, None),
+        };
+        if bytes.len() > MAX_PICTURE_BYTES {
+            return left_out(&format!("over {} MiB", MAX_PICTURE_BYTES >> 20));
+        }
+        if self.bytes + bytes.len() > MAX_PICTURES_BYTES {
+            return left_out(&format!(
+                "over {} MiB for the images of one result",
+                MAX_PICTURES_BYTES >> 20
+            ));
+        }
         let Some(name) = self.store(extension, &bytes) else {
             return left_out("it could not be stored");
         };
         crate::mcp::picture_served(&name);
         self.taken += 1;
         self.bytes += bytes.len();
-        format!("[an image ({mime}, {} bytes) is attached]", bytes.len())
+        line.unwrap_or_else(|| format!("[an image ({mime}, {} bytes) is attached]", bytes.len()))
     }
 
     fn store(&self, extension: &str, bytes: &[u8]) -> Option<String> {
@@ -1121,6 +1166,19 @@ impl Pictures<'_> {
         std::fs::write(folder.join(&name), bytes).ok()?;
         Some(name)
     }
+}
+
+/// A size as the line of a scaled image says it.
+fn size_said(bytes: usize) -> String {
+    match bytes {
+        1_000_000.. => format!("{:.1} MB", bytes as f64 / 1_000_000.0),
+        _ => format!("{} KB", bytes / 1000),
+    }
+}
+
+/// The name of a type as a line says it: `image/png` is PNG.
+fn kind_said(mime: &str) -> String {
+    mime.strip_prefix("image/").unwrap_or(mime).to_uppercase()
 }
 
 /// A server's result as the agent reads it: its text blocks, masked, framed as a third party's

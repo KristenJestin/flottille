@@ -333,15 +333,16 @@ secret.
 
 ### `vault.asked`, `vault.ask_joined`, `vault.ask_answered`
 
-An agent asked the user for a vault entry a feature of Flottille names and that is missing
-(`vault {action: "ask"}`, `docs/vault.md`, "Asking the user for an entry"), an event of that
-agent. `vault.asked` opens the request, numbered by its `seq`: `agent`, `project`, `name`, `why`
-(the agent's reason), and what Flottille prefilled, `description` and `takes_username`, and
-`taken` when another project already uses the name (the sentence the request is refused with).
-`vault.ask_joined` is another agent's ask while it is open: `agent`, `ask` (the request's
-number), `project`, `name`, `why`. `vault.ask_answered`, an event of the agent that opened it,
-closes it: `ask`, `project`, `name`, `entry` (the entry set, which is not `name` when the user
-chose another), `outcome` (`set` or `dismissed`). Never a secret.
+An agent asked the user to add a vault entry (`vault {action: "ask"}`, `docs/vault.md`, "Asking
+the user for an entry"), an event of that agent. `vault.asked` opens the request, numbered by its
+`seq`: `agent`, `project` (the agent's), `name`, `why` (the agent's reason), and what prefills the
+form of a new entry: `description` (a feature's, else `null`), `url`, `host` (where the secret
+goes, the daemon's reading of `url` as a connection's login reads it, in ASCII; `null` without a
+`url`), `username`, `for` (the use, or `null`), `every` (every project's entry) and
+`takes_username`. `vault.ask_joined` is another
+agent's ask while it is open: `agent`, `ask` (the request's number), `project`, `name`, `why`.
+`vault.ask_answered`, an event of the agent that opened it, closes it: `ask`, `project`, `name`,
+`outcome` (`set` or `dismissed`). Never a secret.
 
 ### `workspace.created`
 

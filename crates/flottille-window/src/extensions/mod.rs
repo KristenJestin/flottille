@@ -1301,6 +1301,7 @@ pub fn icon_named(name: &str) -> Icon {
         "scan-search" => Icon::Lucide("scan-search"),
         "shrink" => Icon::Lucide("shrink"),
         "plug" => Icon::Lucide("plug"),
+        "bell" => Icon::Bell,
         _ => Icon::Lucide("blocks"),
     }
 }

@@ -9692,6 +9692,7 @@ fn every_setting_of_a_project_is_edited_in_its_settings_and_the_project_page_has
                 "tasks" => &["add-task"],
                 "instructions" => &["add-skill", "add-command", "message-checks-text-atlas"],
                 "features" => &["project-features-list"],
+                "vault" => &["project-vault-add"],
                 other => panic!("no editor known for {other}"),
             };
             for editor in editors {
@@ -9709,6 +9710,7 @@ fn tab_title(tab: &str) -> &'static str {
         "tasks" => "tasks-title",
         "instructions" => "rules-title",
         "features" => "project-features-list",
+        "vault" => "project-vault-title",
         other => panic!("no tab {other}"),
     }
 }
@@ -12572,6 +12574,38 @@ fn the_developer_mode_is_switched_in_settings_with_its_log_s_path_beside_the_swi
     assert!(output.status.success());
     until(&shell, cx, "the page shows it off", |cx| {
         page.read_with(cx, |page, _| !page.developer_on())
+    });
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn the_switch_that_says_a_file_is_unchanged_is_off_until_it_is_turned_on(cx: &mut TestAppContext) {
+    let user = User::new().with_cut_results();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    choose_settings_tab("agents", cx);
+    until(&shell, cx, "the page knows the switch", |cx| {
+        page.read_with(cx, |page, _| page.unchanged_said().is_some())
+    });
+    settle(cx);
+    assert_eq!(
+        page.read_with(cx, |page, _| page.unchanged_said()),
+        Some(false)
+    );
+
+    cx.update(|window, cx| window.click("tool-results-unchanged-switch", cx));
+    until(&shell, cx, "the daemon says it is on", |cx| {
+        page.read_with(cx, |page, _| page.unchanged_said() == Some(true))
+    });
+    let text = std::fs::read_to_string(user.path("config/flottille/tool-results.toml")).unwrap();
+    assert!(text.contains("unchanged = true"), "{text}");
+    settle(cx);
+
+    // Chosen from elsewhere, the page follows.
+    user.call("tool_results.set", json!({"unchanged": false}))
+        .unwrap();
+    until(&shell, cx, "the page shows it off", |cx| {
+        page.read_with(cx, |page, _| page.unchanged_said() == Some(false))
     });
     settle(cx);
 }

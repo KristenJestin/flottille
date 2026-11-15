@@ -442,6 +442,7 @@ There is no "Extensions" tab, and the word never shows.
   | Specs | A spec of each task, written with you before an agent builds it. |
   | Review | Fresh eyes on a session's change before you merge it. |
   | Compaction | Long conversations summarised so agents keep going. |
+  | Automatic subscriptions | What wakes a session, without it asking. |
   | Connections | Your MCP servers, given to every agent behind the gate. |
   | Handbook (later) | One row more. |
 
@@ -477,7 +478,7 @@ There is no "Extensions" tab, and the word never shows.
 - **Long tool results** (#308, core): a section of Settings' Agents tab, since it is about what
   every agent is given, whatever runs it; it moves to the savings of Usage when Usage comes (#547).
 
-Features, in order: Specs, Review, Compaction, then Connections. The order is a number each
+Features, in order: Specs, Review, Compaction, Automatic subscriptions, then Connections. The order is a number each
 declaration gives; the core's tabs and sections have their own places, and none is moved by a
 declaration.
 
@@ -807,6 +808,61 @@ guidance, each pass may have instructions of its own, **empty by default**:
   the Project rules check). Asked for later, it would be a value of the project's page like the
   models.
 
+### Automatic subscriptions
+
+What wakes a session without it asking (#793): an agent hears of what happens outside only when it
+is subscribed (`design.md` §5.6), and one that subscribed on its own once did not on the next pull
+request. Project-scoped, **on by default**, its switch "Subscribe sessions automatically". It
+launches no agent and reads nothing of its own: it opens subscriptions as `forge` `subscribe` and
+`tickets` `subscribe` do, which the rounds of the items feed (`forges.md`, "Subscriptions").
+
+- **Named `autosubscriptions`** (`[autosubscriptions]` of `extensions.toml`,
+  `[extensions.autosubscriptions]` of a project's file); `autosubscriptions.events {project}`
+  answers the events each subject subscribes a session of the project to now.
+- **Three subjects**, each a setting of the kind `subset` (`created_pull`, `branch_pull`,
+  `ticket`), global and overridable per project, a project's value winning: the events it
+  subscribes to, or none.
+
+  | Subject | Events offered | On by default |
+  |---|---|---|
+  | A pull request the session opens (`forge create`) | checks, review, approved, comment, merged, closed | all |
+  | The session's own pull request opened another way (on its workspace's branch, seen opening by the rounds of the items, `item.opened`) | the same | all |
+  | The ticket the session works on (its workspace's: linked before it starts, or while it runs) | commented, status, assigned, closed | none |
+
+- **From people only** (`from: people`): what a bot or an agent wrote never wakes the session.
+- **Until the target ends** (merged, closed, done), the agent ends, or `unsubscribe`: the rules
+  of every subscription. A `subscribe` of the agent's own to the same target replaces it.
+- **Said where it starts**: `forge create`'s answer (`You are subscribed to it until it is merged
+  or closed: checks, approvals, reviews, people's comments. unsubscribe to stop.`), and a delivery
+  `[flottille:autosubscriptions]` when one starts on its own (a pull request opened another way, the
+  ticket; the ticket of a session that starts goes with its first prompt). The tools'
+  descriptions say a subscription may be there already (`maybe already`), so that an agent does
+  not subscribe again. `forge create {…, subscribe: false}` opens one without it.
+- **Only a session**: a root, led or handed; never a child, nor an extension's agents (a
+  review's pilot, its passes), which all have a parent. The sessions Specs starts are root
+  sessions: they are subscribed.
+- **Its own pull request, in its own repository**: one opened on a workspace's branch subscribes
+  that workspace's sessions only when it is in a repository the workspace holds and is not from a
+  fork (GitHub's `isCrossRepository`, a Bitbucket source repository other than the destination):
+  another repository's branch of the same name, or a fork's, subscribes nobody. The review's
+  `auto_on_pull_request` reads it the same way.
+- **A pull request the agent opens is its own**: the round that then sees it open does not take
+  it for one opened another way, whether `create` subscribed or not. `forge create` records it in
+  the store (`opened_pulls`, with the posts' records, `forges.md`), so that it survives a restart;
+  a round that sees the pull request open takes the record, once, and a record no round took in
+  half an hour is dropped (a live read stored the pull request first, so no round will see it open),
+  so that it never hides one opened by hand later. A `create` that fails leaves none. While a call
+  reads or opens a pull request, the rounds also leave it to that call.
+- **A ticket the agent subscribed to itself is left as it made it**: linking the workspace to a
+  ticket it is subscribed to changes nothing and says nothing, nor does linking the same ticket
+  again. Linking another ticket, or none, ends the automatic subscription to the previous one
+  (marked as automatic: `seen` of the subscription holds `{"automatic": true}`), never the
+  agent's own.
+
+In the window, its page is the generic one, drawn from the declaration: its switch, its usage
+line, then one field per subject with a switch per event (the control of a `subset`); in a
+project, each field carries the dot "set here" and **Use Settings' value**.
+
 ### Connections
 
 Lets the user give their agents a tool that exists as an MCP server, whichever it is (a memory,
@@ -928,7 +984,11 @@ Its cost in the agent's context is about one tool line:
   is not base64 or whose bytes are not the type it says (a page labelled png: a provider
   refuses such an image, and it stays in the history), is left out with one line saying what it
   was, how big and why. One larger than 2000 px on its long side is scaled down, as a message's
-  picture is. The image is kept as a message's picture is: a file in the agent's folder of images in
+  picture is, before the 2 MiB is looked at; one still over it is scaled again, its long side
+  halved down to 500 px, a PNG being tried as a JPEG at each size before the next (a GIF and a
+  WebP are never scaled: past the cap, they are left out). The line says when an image was
+  scaled, from what to what (`[an image scaled from 6.8 MB PNG to 1.4 MB JPEG, 2000×1400, is
+  attached]`), so the agent knows it does not see the full resolution. The image is kept as a message's picture is: a file in the agent's folder of images in
   the data folder (`images/<agent>/`, gone with the agent's session as the pictures of its
   messages are), and its name in `pictures` of the call's `agent.tool_served` (`events.md`); never
   base64 in the store or in an event (what the agent's own provider reports of the call, which
@@ -1163,7 +1223,8 @@ list of tables, `[[connections.server]]`, checked by it, written through the fra
 launched, gated, performed and described to the judge by the extension), and `needs_you` (its
 events the inbox lists, kind `connections`). The pin and the settings are in
 `ext_connections_connections`. A `help` action of a server's is not offered, as `help` is
-Flottille's. The server's environment is a run's (forge tokens emptied, no `XDG_RUNTIME_DIR`),
+Flottille's. The server's environment is a run's (forge tokens emptied, no `XDG_RUNTIME_DIR`, no session bus
+and no runtime folder: `docs/vault.md`, "The runtime folder"),
 its folder `$XDG_STATE_HOME/flottille/connections/<name>`. A URL is reached with no proxy,
 whatever the daemon's environment says. Accepting stops the server the review started, and no
 server of the connection starts until the pin is written: a change it announces before the accept
@@ -1224,8 +1285,8 @@ A line of Flottille's own (not the server's) is added to what `help` with `for: 
 gives. The review (`connection.review`, its `adapter`) says that the adapter applies, what it
 changed, what Accept would pin, and, for each action it keeps off, why (`locked`); the window
 shows that sentence under the server's version, above the bar of what is left to the judge, so
-that the user reads why `login` is refused before Accept, and what the adapter changed unfolds
-under it. A kept-off action has its pill disabled (`Off`), no box to tick it with, so that the
+that the user reads why `login` would be refused (a command that sets the browser's sites, an
+entry on plain `http`) before Accept, and what the adapter changed unfolds under it. A kept-off action has its pill disabled (`Off`), no box to tick it with, so that the
 bar never sets it, and the line saying why in its unfolded row instead of the four choices. The
 user can still change every other setting.
 
@@ -1242,37 +1303,42 @@ way in:
   `_auth_show`, `_auth_delete`, `agent_browser_set_credentials` (a password as an argument), its
   plugins `agent_browser_plugin_add`, `_plugin_list`, `_plugin_run`, `_plugin_show` (they run
   commands with its credential providers) and `agent_browser_with_login`, whatever the user set.
-- **Only the actions it knows do not read a typed secret directly stay on beside `login`**: an
-  allowlist, not a list of what may leak, which would miss the next one. Every other action, one it does not
-  know included (a 0.43 patch may add one), is **off at the first pin**, and **`login` is refused
-  while one of them is on**; the review says which. A page script can copy a field into what any
-  other action reads (the title, the text), and a component's state, a field's attributes or its
-  HTML follow what is typed, so masking the exact secret is not enough. The 48 actions of the
-  list, read from 0.43.0's own list and descriptions (a why each in the code), all prefixed
-  `agent_browser_`: `back`, `forward`, `reload`; the inputs (`click`, `dblclick`, `fill`, `type`,
-  `press`, `hover`, `focus`, `check`, `uncheck`, `select`, `scroll`, `scroll_into_view`, `drag`,
-  `keydown`, `keyup`, `keyboard_type`, `keyboard_insert_text`, `mouse_move`/`_down`/`_up`/`_wheel`,
-  `find`); the waits (`wait_ms`, `wait_for_selector`, `wait_for_text`, `wait_for_url`,
-  `wait_for_load`); `screenshot`, `get_text`, `get_url`, `get_title`, `get_count`, `get_box`,
-  `is_visible`, `is_enabled`, `is_checked`; `tab_list`, `tab_switch`, `tab_close`,
-  `frame_switch`, `frame_main`, `dialog_status`, `dialog_accept`, `dialog_dismiss`, `close`. Left
-  out among others: whatever runs a script (`eval`, `wait_for_function`, `batch`, `chat`, …),
-  takes a URL (`open`, `tab_new`, `pushstate`: a `javascript:` URL runs in the page) or extra
-  options, reaches another browser (`connect`, `get_cdp_url`), or gives a field's value, its HTML,
-  its attributes, a component's state or a snapshot (`get_value`, `get_attr`, `get_html`,
-  `react_*`, `snapshot`).
-- **What stays possible.** The list narrows the ways to the secret; it does not close them all,
-  and each call of these actions is still judged by the gate, which is what stands against them:
-  - **a selector oracle**: on a site whose framework copies what is typed into the field's `value`
-    attribute (React does), the allowed actions that take a selector (`get_count`, `is_visible`,
-    `wait_for_selector`, `click`…) can test `input[value^=…]`, one guess at a time;
-  - **a show-password toggle**: clicked, the field shows the secret, which `screenshot` or
-    `get_text` then read;
-  - **a login form sent with GET** puts the secret in the address, where `get_url`, `tab_list` and
-    `wait_for_url` read it;
-  - **another tab of the session** that holds a window handle to the login tab could navigate it
-    between its load and its fill, to another page of the entry's own sites (to another domain,
-    the allowlist below closes it).
+  So are `agent_browser_connect` and `agent_browser_state_load`: they bring a browser, or a
+  session, that someone else controls, and a login would type into it (the start options `--cdp`
+  and `--state` already make `login` refused, below).
+- **`login` is offered beside every other action**, as agent-browser's own login restricts
+  nothing after it: what keeps the secret is that it never reaches the model's context (Flottille's
+  own `auth login` run fills it), the masking of the outputs, and the session kept to the entries'
+  sites (below). The actions that run a script in the page, which no gate can judge, are **off at
+  the first pin**: `eval`, `wait_for_function`, `add_init_script`, `batch` and `flow_run` (which
+  run or replay the others), `network_route` (which serves a body of its own for the page's
+  requests) and `chat` (agent-browser's own model, through an external gateway). So are those that
+  write the page's traffic to a file, which no masking reaches: `network_har_start`,
+  `network_har_stop`, `trace_start`, `trace_stop`. Both are the user's to turn on; every other
+  action is judged at the first pin, as any server's. A connection accepted with one of the first
+  on (`eval`) gets `login` beside it with no new review: the review says so (`agent_browser_eval
+  is on: a page script can read what login types`).
+- **A `url` is a web address.** While the adapter applies, a call whose `url` argument is not
+  `http` or `https` with a host is refused before the server sees it (`open`, `tab_new`,
+  `pushstate`, any action taking one): a `javascript:` or a `data:` URL runs in the page that is
+  open, the login form among them, and a `file:` one reads this machine. `wait_for_url` and
+  `network_route` are left out: their `url` is a pattern matched against an address, never opened.
+- **Every output of the connection's tools is masked** for the vault's secrets, those of the
+  entries bound to it among them, before the agent, the store or a log sees it (`docs/vault.md`),
+  raw and in the forms a page shows a typed secret in: an address (a form sent with GET, encoded),
+  HTML (escaped as a text, as an attribute, or with all five of `&<>"'`), JSON (escaped), and, for
+  an entry with a username, `<username>:<secret>` in base64 (an `Authorization: Basic` header).
+- **What stays possible**, as agent-browser's own docs leave it to its policies. Handled: a
+  `javascript:` or `data:` URL (refused, above), a script-running action (off at the first pin),
+  another browser or a saved session (`connect`, `state_load`, `--cdp`, `--state`: off, or
+  `login` refused), a HAR or a trace (off at the first pin). Left: a page script can copy a field
+  into what another action reads, a show-password toggle shows the secret on a screenshot (pixels
+  are not masked), a selector can test a field's `value` attribute one guess at a time, an action
+  that reads the page (`snapshot`, `get_value`, `eval`…) right after a login may see the secret in
+  a form other than those masked, and **a page saved to a file** (`pdf`, `download`, a HAR or a
+  trace the user turned on) is not masked: Flottille masks what the tools answer, not the files
+  the browser writes. Each call of these actions is judged by the gate, which is what stands
+  against them; the user turns off what they do not want.
 - **The session is kept to the entries' sites.** While the adapter applies and the connection has
   an entry bound with a usable web address, the configuration Flottille writes holds
   `"allowedDomains": [<hosts>]`: the exact hosts of the entries bound to this connection, sorted,
@@ -1347,6 +1413,9 @@ way in:
 - **`login {entry}`**, Flottille's own action: the agent names a vault entry **bound to this
   connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
   lists, never their values. An entry bound to another use, or to none, is refused, naming its use.
+  A name the vault does not hold is refused with the call that asks the user to add it, `vault
+  {action: "ask", name, why, url, username, for: "connection:<name>"}` (`vault.md`, "Asking the
+  user for an entry").
   **The login always opens the entry's own URL**, and takes no URL of the agent's: a page of its
   choosing, even on the entry's site, could redirect the fill elsewhere (`/go?to=…`). An entry
   without a URL, or whose URL is no web address (`http` or `https` with a host), is refused (said
@@ -1389,8 +1458,7 @@ way in:
 - **`agent-browser mcp`** (vercel-labs/agent-browser, a browser for agents): its `eval` runs
   arbitrary script in the page, which no gate can judge, so it is **off** (its adapter sets it so,
   "Adapters"); a limit on `url` names
-  the addresses its `open` may reach (the exact values listed), when the user turns `open` on and
-  does without `login`; the other actions stay **judged**.
+  the addresses its `open` may reach (the exact values listed); the other actions stay **judged**.
 - **`agent-desktop mcp`** (vercel-labs/agent-desktop, driving the desktop through AT-SPI on Linux,
   its tools named `desktop_click`, `desktop_snapshot`…): the most powerful kind, since it acts in
   every application the user has open. It is declared without `--headed` (that flag, a global one

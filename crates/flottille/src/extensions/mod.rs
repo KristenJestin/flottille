@@ -3,6 +3,7 @@
 //! daemon that names them, and the frame that keeps their switches, their settings and their
 //! tables.
 
+mod automatic;
 mod command;
 mod connections;
 mod guidance;
@@ -28,7 +29,14 @@ use crate::mcp::{Definition, Grant, Outcome};
 use crate::projects::{self, Failure};
 use crate::providers::{self, Provider};
 
+pub use automatic::pull_sentence;
 pub use command::run;
+
+/// The events a pull request a session opens (`forge create`) subscribes it to, as Settings and
+/// the project set them (`docs/extensions.md`, "Automatic subscriptions"): none while that is off.
+pub fn subscribed_on_create(daemon: &Daemon, project: &str) -> Vec<String> {
+    automatic::events(daemon, project, automatic::CREATED_PULL)
+}
 
 /// The agents' `connections` family (`docs/tools.md`, "Connections"): whether a call writes a
 /// connection, held for the user in every mode.
@@ -61,6 +69,7 @@ pub async fn family_call(
 pub const ALL: &[&Extension] = &[
     &specs::EXTENSION,
     &review::EXTENSION,
+    &automatic::EXTENSION,
     &connections::EXTENSION,
 ];
 
@@ -748,6 +757,34 @@ pub fn rewrite(
     // Before the answer: the next call of a session is served the tools it has now.
     projects::tools_changed(daemon);
     Ok(())
+}
+
+/// Whether `tool` is a connection's (`conn_<name>`) whose login takes a vault entry.
+pub fn logs_in(daemon: &Daemon, tool: &str) -> bool {
+    tool.strip_prefix(connections::PREFIX)
+        .is_some_and(|name| connections::logs_in(daemon, name))
+}
+
+/// Whether the feature of an extension a vault entry would be bound to (`bound`,
+/// `connection:<name>`) is declared: a connection by its name; why it cannot be told when its
+/// files cannot be read.
+pub fn bound_exists(daemon: &Daemon, bound: &str) -> Result<bool, String> {
+    match bound.split_once(':') {
+        Some(("connection", name)) => connections::exists(daemon, name),
+        _ => Ok(true),
+    }
+}
+
+/// The host a secret given for `url` goes to as a connection's login reads it (in ASCII, a
+/// backslash read as `/`), if it is a web address a secret may go to.
+pub fn site_of(url: &str) -> Option<String> {
+    connections::site(url)
+}
+
+/// The host of `url` when it is plain `http` to another machine, where a secret would travel in
+/// clear.
+pub fn in_clear(url: &str) -> Option<String> {
+    connections::in_clear(url)
 }
 
 /// The names of the tools the active extensions give an agent of the project: a root, another
@@ -1451,7 +1488,7 @@ mod tests {
         assert_eq!(
             parse("[spexs]\nenabled = true\n").unwrap_err(),
             "extensions.toml: spexs: unknown extension: the extensions are specs, review, \
-             connections"
+             autosubscriptions, connections"
         );
         assert_eq!(
             parse("[specs]\nenable = true\n").unwrap_err(),

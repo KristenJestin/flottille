@@ -42,6 +42,69 @@ pub fn scaled_down(mime: &str, bytes: Vec<u8>) -> Vec<u8> {
     }
 }
 
+/// The shortest long side `fit_under` goes down to.
+pub const MIN_SIDE: u32 = 500;
+
+/// A picture made to fit a byte cap.
+pub struct Fitted {
+    pub mime: &'static str,
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The picture made to weigh `cap` bytes at most, for one that is neither a message's nor stored
+/// at its own size (a connection's result). It is scaled down to `MAX_SIDE` as `scaled_down` does;
+/// still over the cap, its long side is halved down to `MIN_SIDE`, and a PNG that does not fit at
+/// one size is tried as a JPEG (a PNG with transparency loses it) before the next, smaller one.
+/// `None` when nothing is to be done: a GIF or a WebP, a picture that cannot be read, one that
+/// already fits as it is, and one that fits at no size (the caller leaves it out).
+pub fn fit_under(mime: &str, bytes: &[u8], cap: usize) -> Option<Fitted> {
+    let format = scaled_format(mime)?;
+    let reader = || ImageReader::with_format(Cursor::new(bytes), format);
+    let (width, height) = reader().into_dimensions().ok()?;
+    let long = width.max(height);
+    if long <= MAX_SIDE && bytes.len() <= cap {
+        return None;
+    }
+    let picture = reader().decode().ok()?;
+    let mut side = long.min(MAX_SIDE);
+    loop {
+        let resized;
+        let shown = if long > side {
+            resized = picture.resize(side, side, imageops::FilterType::Lanczos3);
+            &resized
+        } else {
+            &picture
+        };
+        let formats: &[ImageFormat] = match format {
+            ImageFormat::Png => &[ImageFormat::Png, ImageFormat::Jpeg],
+            _ => &[ImageFormat::Jpeg],
+        };
+        for &candidate in formats {
+            let Some(encoded) = encode(shown, candidate) else {
+                continue;
+            };
+            if encoded.len() <= cap {
+                return Some(Fitted {
+                    mime: if candidate == ImageFormat::Png {
+                        "image/png"
+                    } else {
+                        "image/jpeg"
+                    },
+                    bytes: encoded,
+                    width: shown.width(),
+                    height: shown.height(),
+                });
+            }
+        }
+        if side <= MIN_SIDE {
+            return None;
+        }
+        side = (side / 2).max(MIN_SIDE);
+    }
+}
+
 /// Whether `scaled_down` would decode and resize this picture. Only its header is read, so the
 /// answer is cheap: a caller that must not wait for the scaling asks first.
 pub fn needs_scaling(mime: &str, bytes: &[u8]) -> bool {
@@ -144,7 +207,7 @@ fn scaled_format(mime: &str) -> Option<ImageFormat> {
 fn encode(picture: &DynamicImage, format: ImageFormat) -> Option<Vec<u8>> {
     let mut out = Cursor::new(Vec::new());
     match format {
-        ImageFormat::Jpeg => picture
+        ImageFormat::Jpeg => DynamicImage::ImageRgb8(picture.to_rgb8())
             .write_with_encoder(JpegEncoder::new_with_quality(&mut out, 90))
             .ok()?,
         _ => picture.write_to(&mut out, format).ok()?,
@@ -377,5 +440,49 @@ mod tests {
         let junk = b"\x89PNG\r\n\x1a\nnot a real picture".to_vec();
         assert_eq!(scaled_down("image/png", junk.clone()), junk);
         assert_eq!(scaled_down("image/gif", junk.clone()), junk);
+    }
+
+    /// A picture of a gradient and some noise: heavy as a PNG, much lighter as a JPEG.
+    fn noisy(width: u32, height: u32) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |x, y| {
+            let noise = ((x * 7919 + y * 104_729) % 13) as u8;
+            image::Rgb([
+                ((x / 4) as u8).wrapping_add(noise),
+                ((y / 4) as u8).wrapping_add(noise),
+                ((x + y) / 8) as u8,
+            ])
+        }))
+        .write_to(&mut out, ImageFormat::Png)
+        .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn a_picture_that_fits_is_left_to_the_caller() {
+        let png = picture(300, 200, ImageFormat::Png);
+        assert!(fit_under("image/png", &png, png.len()).is_none());
+        assert!(fit_under("image/gif", b"GIF89a", 1).is_none());
+        assert!(fit_under("image/png", b"junk", 1).is_none());
+    }
+
+    #[test]
+    fn a_picture_over_the_cap_is_halved_until_it_fits_or_reaches_the_least() {
+        let png = noisy(1600, 800);
+        // Over any size: nothing fits, down to the least side.
+        assert!(fit_under("image/png", &png, 10).is_none());
+        let fitted = fit_under("image/png", &png, png.len() / 3).unwrap();
+        assert!(fitted.bytes.len() <= png.len() / 3);
+        assert!(fitted.width.max(fitted.height) >= MIN_SIDE);
+    }
+
+    #[test]
+    fn a_png_that_does_not_fit_is_tried_as_a_jpeg() {
+        let png = noisy(1200, 600);
+        let jpeg = encode(&image::load_from_memory(&png).unwrap(), ImageFormat::Jpeg).unwrap();
+        assert!(jpeg.len() < png.len());
+        let fitted = fit_under("image/png", &png, jpeg.len()).unwrap();
+        assert_eq!(fitted.mime, "image/jpeg");
+        assert_eq!((fitted.width, fitted.height), (1200, 600));
     }
 }

@@ -1146,6 +1146,62 @@ fn a_run_step_leaving_a_child_in_the_background_ends_with_its_own_process() {
 }
 
 #[test]
+fn a_setup_line_gets_no_session_bus_address() {
+    let fixture = Fixture::new(false);
+    let out = fixture.user.path("bus");
+    let script = fixture.script(
+        "bus.sh",
+        "echo \"${DBUS_SESSION_BUS_ADDRESS-unset}\" > \"$1\"\n",
+    );
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {} {}\"\nrepository = \"lib\"\n",
+        script.display(),
+        out.display()
+    ));
+
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "unset\n");
+}
+
+#[test]
+fn a_setup_line_cannot_read_the_user_s_runtime_folder() {
+    if common::landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) is not used",
+            common::landlock_abi()
+        );
+        return;
+    }
+    let fixture = Fixture::new(false);
+    let note = fixture.user.path("runtime/note");
+    std::fs::write(&note, "kept from setups\n").unwrap();
+    let elsewhere = fixture.user.path("home/note");
+    std::fs::write(&elsewhere, "open to setups\n").unwrap();
+    let out = fixture.user.path("read");
+    let script = fixture.script(
+        "read.sh",
+        "cat \"$1\" > \"$3\" 2>&1\ncat \"$2\" >> \"$3\" 2>&1\n",
+    );
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {} {} {} {}\"\nrepository = \"lib\"\n",
+        script.display(),
+        note.display(),
+        elsewhere.display(),
+        out.display()
+    ));
+
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let read = std::fs::read_to_string(&out).unwrap();
+    assert!(read.contains("Permission denied"), "{read}");
+    assert!(!read.contains("kept from setups"), "{read}");
+    assert!(read.contains("open to setups"), "{read}");
+}
+
+#[test]
 fn a_run_step_past_its_time_limit_is_stopped_and_fails() {
     let fixture = Fixture::new(false);
     let script = fixture.script("slow.sh", "echo started\nsleep 60\n");

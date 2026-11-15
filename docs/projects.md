@@ -522,14 +522,34 @@ regular file, not a link nor a FIFO, of 256 KiB at most.
 - **When**: before an agent's `git commit` (a line of `run`, or a task, at any of its layers, and
   the user's git alias of it, read as the message checks read them, above), in the repository the
   commit is in: the folder git works in, as the gate reads it, moved by the wrappers around it
-  (`env -C web git commit`) and its own `-C` (`git -C ../web commit`), every link and `..`
-  followed; the `-F` file of the message is read there too. While a repository of the project has
-  checks, a commit that points git at another repository than its folder's (`--git-dir`,
-  `--work-tree`, or `GIT_DIR`, `GIT_WORK_TREE` set by a wrapper) is refused: `refused: --git-dir
-  points the commit at a repository other than its folder's, whose commit checks would not run,
-  and the project's repositories have commit checks: commit in the repository's folder, with git
-  -C <folder> if it is another one; nothing was committed`. A `git merge`, `git commit-tree`, `cherry-pick`
-  or `rebase` runs none of them, as git runs no `pre-commit` for them. A repository without checks
+  (`env -C web git commit`, `env`'s options read as `env` reads them: `-vC web`, `--ch=web`, those
+  of `-S`) and its own `-C` (`git -C ../web commit`), every link and `..` followed; the `-F` file of
+  the message is read there too. The repository is the one git reads in that folder (its
+  `git rev-parse --git-common-dir`), whatever folder holds it: a worktree of `web` made inside
+  `api`, a `.git` file, a folder outside the workspace commit with `web`'s checks, which run at the
+  top of that worktree. While a repository of the project has checks, a commit (or an alias) is
+  refused when the gate cannot tell its repository:
+  - it points git at another repository than its folder's (`--git-dir`, `--work-tree`, or
+    `GIT_DIR`, `GIT_WORK_TREE` set before a program at any layer of the line): `refused: --git-dir
+    points the commit at a repository other than its folder's, whose commit checks would not run,
+    and the project's repositories have commit checks: commit in the repository's folder, with git
+    -C <folder> if it is another one; nothing was committed`;
+  - the line sets any other `GIT_*` variable before a program (`GIT_COMMON_DIR`,
+    `GIT_INDEX_FILE`), but those of who wrote and made the commit (`GIT_AUTHOR_*`,
+    `GIT_COMMITTER_*`): `refused: GIT_INDEX_FILE changes where or how git commits, past the commit
+    checks of its repository, …`;
+  - a program the gate does not know runs git (`pnpm -C ../web exec git commit`, `uv run
+    --directory ../web git commit`), or `pnpm exec` (`yarn exec`, `dlx`) with an option other
+    than `--package` (`--dir=../web`, `-c '<line>'`), one that moves to a folder of its own first
+    (`find -execdir`, `-okdir`, `fd --base-directory`), or one that fills words in (`find -exec`,
+    `-ok`, `fd -x`, `-X`, `xargs`): ``refused: `pnpm` runs git in a folder it chooses itself,
+    where Flottille cannot tell which repository's commit checks to run, …``. Under these, a git
+    whose command is not on the line (`xargs git`, `fd -x git {}`) is refused too;
+  - a repository with checks that git cannot read: `refused: the repositories' commit checks read
+    each commit before it is made, and git cannot say which repository … is in (…)`.
+
+  A `git merge`, `git commit-tree`, `cherry-pick`, `rebase`, `am`, `revert`, `stash` or `notes`
+  runs none of them, as git runs no `pre-commit` for them. A repository without checks
   commits as before.
 - **`--no-verify`** (`-n`) on an agent's commit in a repository with checks is refused: `refused:
   --no-verify skips the commit checks of the repository api, which are the user's, not the agent's

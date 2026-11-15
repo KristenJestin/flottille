@@ -926,7 +926,9 @@ Nothing is sized by those runs: `forge` `subscribe` without `minutes` has no dea
 ## Subscriptions
 
 The pull requests the daemon keeps up to date are a source of events of the subscriptions
-(`docs/design.md` §5.6). Each round of the items compares what it read of a pull request with
+(`docs/design.md` §5.6). A session may be subscribed without asking, to the pull request it opens
+(`create`, unless `subscribe: false`) and to its own opened another way, with the events the user
+set (`docs/extensions.md`, "Automatic subscriptions"). Each round of the items compares what it read of a pull request with
 what the store holds of it and says what changed as `item.*` events ([`items.md`](items.md),
 "Events"); a subscription to that pull request is offered them once they are stored, as the
 events it names, and wakes the agent at each read that holds some, until the pull request is
