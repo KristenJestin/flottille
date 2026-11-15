@@ -741,6 +741,28 @@ impl Review {
             .collect()
     }
 
+    /// The list an action is drawn in: "changes" for a changed one of a re-review, else the group
+    /// of its setting.
+    fn home_of(&self, diff: &Diff, action: &ActionDiff) -> &'static str {
+        match !diff.first && action.change != "unchanged" {
+            true => "changes",
+            false => GROUPS
+                .iter()
+                .find(|(key, ..)| *key == self.setting_of(&action.name))
+                .map_or("judged", |(key, ..)| *key),
+        }
+    }
+
+    /// Whether any action of the list `home` has a box, whatever the search shows: a header keeps
+    /// its tick while a search leaves the group only rows without one, so that its title stays.
+    fn has_boxes(&self, diff: &Diff, home: &str) -> bool {
+        diff.actions.iter().any(|action| {
+            action.locked.is_none()
+                && action.change != "removed"
+                && self.home_of(diff, action) == home
+        })
+    }
+
     /// What the tick of a group says of its `names`: none, some or all of them ticked.
     fn tick_of(&self, names: &[String]) -> CheckState {
         let ticked = names.iter().filter(|n| self.picked.contains(*n)).count();
@@ -2155,15 +2177,9 @@ impl ConnectionsSection {
             if !review.shows(at, action) {
                 continue;
             }
-            match !diff.first && action.change != "unchanged" {
-                true => changes.push((action.name.clone(), at)),
-                false => {
-                    let group = GROUPS
-                        .iter()
-                        .find(|(key, ..)| *key == review.setting_of(&action.name))
-                        .map_or("judged", |(key, ..)| *key);
-                    grouped.push((action.name.clone(), group, at));
-                }
+            match review.home_of(diff, action) {
+                "changes" => changes.push((action.name.clone(), at)),
+                group => grouped.push((action.name.clone(), group, at)),
             }
         }
         review
@@ -2537,7 +2553,7 @@ impl ConnectionsSection {
             if let Some(since) = since {
                 group = group.sentence(since);
             }
-            if !names.is_empty() {
+            if review.has_boxes(diff, "changes") {
                 group = group.select(review.tick_of(&names), self.tick_group(names, cx));
             }
             group.gap(space::SM)
@@ -2566,7 +2582,7 @@ impl ConnectionsSection {
                 })
                 .children(items)
                 .gap(space::SM);
-            if !names.is_empty() {
+            if review.has_boxes(diff, key) {
                 group = group.select(review.tick_of(&names), self.tick_group(names, cx));
             }
             groups.push(group);
