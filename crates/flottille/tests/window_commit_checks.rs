@@ -290,7 +290,18 @@ fn the_project_s_commit_checks_are_listed_proposed_and_saved(cx: &mut TestAppCon
         assert!(window.find(ElementId::from(left_said.clone())).visible());
     });
 
-    // A line with shell syntax is refused under the fields, and nothing is written.
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+}
+
+#[gpui_kit::test]
+fn a_refused_pre_commit_line_is_said_under_the_pre_commit_field(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    desk(&user);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (_, checks) = open(&shell, cx);
+
+    // A line with shell syntax is refused under its own field, and nothing is written.
     let field = checks
         .read_with(cx, |c, _| c.field("web", "pre-commit"))
         .unwrap();
@@ -306,10 +317,16 @@ fn the_project_s_commit_checks_are_listed_proposed_and_saved(cx: &mut TestAppCon
     });
     settle(cx);
     cx.update(|window, _| {
-        let error = window.find("commit-checks-commit-msg-field-desk-web-error");
+        let error = window.find("commit-checks-pre-commit-field-desk-web-error");
         assert!(error.visible());
         let said = error.label().unwrap();
+        assert!(said.contains("the pre-commit check"), "{said}");
         assert!(said.contains("nothing was saved"), "{said}");
+        assert!(
+            window
+                .try_find("commit-checks-commit-msg-field-desk-web-error")
+                .is_none_or(|error| !error.visible())
+        );
     });
     assert!(!file(&user).contains("lint | tee"), "{}", file(&user));
     assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);

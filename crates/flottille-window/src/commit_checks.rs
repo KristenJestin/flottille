@@ -420,7 +420,17 @@ impl CommitChecks {
             return div().into_any_element();
         };
         let savable = repository.savable(cx);
+        // A refusal is said under the field of the hook it names, the commit-msg one otherwise.
         let problem = repository.problem.clone();
+        let pre_commit = problem.as_ref().is_some_and(|why| {
+            why.split('`')
+                .next()
+                .is_some_and(|start| start.contains("pre-commit check"))
+        });
+        let (pre_problem, msg_problem) = match pre_commit {
+            true => (problem, None),
+            false => (None, problem),
+        };
         let now = cx.background_executor().now();
         let reduce = cx.reduce_motion();
         let shown = repository.shown(cx);
@@ -514,13 +524,14 @@ impl CommitChecks {
             .child(
                 Field::new(id("pre-commit-field"), "Before the commit (pre-commit)", pre_text)
                     .optional()
-                    .hint("One command line per line, run in the repository's folder."),
+                    .hint("One command line per line, run in the repository's folder.")
+                    .error(pre_problem),
             )
             .child(
                 Field::new(id("commit-msg-field"), "On its message (commit-msg)", msg_text)
                     .optional()
                     .hint("One command line per line; {message_file} stands for the file that holds the message.")
-                    .error(problem),
+                    .error(msg_problem),
             )
             .child(div().flex().justify_end().child(presence(
                 id("save-block"),
