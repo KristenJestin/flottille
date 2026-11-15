@@ -216,12 +216,16 @@ the wrong code first).
    or by `spaced(g, child)`; `stack(g)` is the column whose children all hold their space above
    them, pulled up by `g` so that the first lands where its parent (a `Section`'s gap under its
    header, a modal's body) put it. A kit `Section` gaps `MD` between its children and a modal's
-   body `LG`, so what a block of theirs needs goes in one column that is their only child. The old
+   body `LG`, so what a block of theirs needs goes in one column that is their only child. A
+   column of blocks that are all folded still takes its slot (the gap above it, and its pull is
+   not counted in its parent's height): a `Section`'s column goes through `section_blocks(id,
+   open, g, stack(g)..)`, drawn while one of its blocks is shown. The old
    `presence(..).gap(g)` is the parent's gap, only folded with the block, and the window does not
    use it: a block that keeps it (its column holds the rows of a `Listing`, whose `Item::gap` is
-   the column's) is on `KEPT` in **[test]** `a_block_has_its_own_space`
-   (`crates/flottille-window/tests/`), which reads the window's sources as syntax trees and refuses
-   any other.
+   the column's; `section_blocks`, whose parent is the kit's `Section`) is on `KEPT` in
+   **[test]** `a_block_has_its_own_space` (`crates/flottille-window/tests/`), which reads the window's sources as syntax trees and refuses
+   any other, a `KEPT` entry that matches nothing, and a block with `.space(..)` in a column that
+   has `.gap(..)`.
 10. **Motion**, as above: everything that appears, leaves, opens, folds or changes state moves
     with the shared durations; a drawer slides from the right; a select's list fades in; a
     radio's dot scales in. **[test]** each component's scenario.
