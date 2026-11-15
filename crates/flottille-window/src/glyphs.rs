@@ -12,6 +12,8 @@ pub const AGENTS: Icon = Icon::Lucide("network");
 pub const PULL_REQUEST: Icon = Icon::Lucide("git-pull-request");
 /// A ticket of the tracker.
 pub const TICKET: Icon = Icon::Lucide("ticket");
+/// A picture of a message: its chip in the text.
+pub const PICTURE: Icon = Icon::Lucide("image");
 /// The stop action: a small filled square, not Lucide's square in a circle, which blurs into a
 /// muddy ring when it is drawn at 14 px.
 pub const STOP: Icon = Icon::Filled(STOP_PATH);
@@ -31,7 +33,8 @@ gpui_kit::assets::icon_assets!(
         Plug,
         Power,
         LogIn,
-        Blocks
+        Blocks,
+        Image
     ]
 );
 

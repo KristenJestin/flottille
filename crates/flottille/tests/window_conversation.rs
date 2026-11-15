@@ -2328,22 +2328,6 @@ fn commanded(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<(
     })
 }
 
-/// The heights of `id` on each frame, until every animation ended.
-fn heights_while_it_moves(id: &str, cx: &mut VisualTestContext) -> Vec<f32> {
-    let mut seen = Vec::new();
-    for _ in 0..40 {
-        cx.executor().advance_clock(Duration::from_millis(16));
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        cx.run_until_parked();
-        seen.extend(cx.update(|window, _| {
-            window
-                .try_find(id.to_owned())
-                .map(|found| f32::from(found.bounds().size.height))
-        }));
-    }
-    seen
-}
-
 #[gpui_kit::test]
 fn a_command_message_shows_what_the_user_typed(cx: &mut TestAppContext) {
     let user = user();
@@ -2385,14 +2369,8 @@ fn a_command_message_shows_what_the_user_typed(cx: &mut TestAppContext) {
         "the chip is the /ship"
     );
     assert!(has(format!("row-{at}-message-text"), cx));
-    assert_eq!(
-        label(format!("row-{at}-received-toggle"), cx).as_deref(),
-        Some(flottille_window::session::RECEIVED)
-    );
-    assert!(
-        !has(format!("row-{at}-received-text"), cx),
-        "what the agent received is folded at first"
-    );
+    // What the agent received is not drawn (#846): `what_the_agent_received_is_not_shown`.
+    assert!(!has(format!("row-{at}-received-toggle"), cx));
     // The agent received the commands' text, never the bare `/ship`.
     assert!(
         prompts(&user)
@@ -2401,43 +2379,6 @@ fn a_command_message_shows_what_the_user_typed(cx: &mut TestAppContext) {
         "{:?}",
         prompts(&user)
     );
-}
-
-#[gpui_kit::test]
-fn what_the_agent_received_unfolds_under_the_message(cx: &mut TestAppContext) {
-    let user = user();
-    let lead = lead(&user);
-    with_ship(&user);
-    let (shell, page, cx) = open_session(&user, &lead, cx);
-    user.call("agent.send", json!({"agent": lead, "message": "/ship now"}))
-        .unwrap();
-    until(&shell, cx, "the message shows", |cx| {
-        commanded(&page, cx).is_some()
-    });
-    at_rest(cx);
-    let at = commanded(&page, cx).unwrap().0;
-    let received = format!("row-{at}-received");
-
-    cx.update(|window, cx| window.click(format!("row-{at}-received-toggle"), cx));
-    let unfolding = heights_while_it_moves(&received, cx);
-    assert!(
-        unfolding.len() > 2 && unfolding.windows(2).any(|w| w[0] < w[1]),
-        "it unfolds over frames, never at once: {unfolding:?}"
-    );
-    at_rest(cx);
-    assert!(has(format!("row-{at}-received-text"), cx));
-    let shown = label(format!("row-{at}-received-text"), cx).unwrap_or_default();
-    assert!(shown.contains("Push the branch"), "{shown}");
-    assert!(shown.contains("[command ship] now"), "{shown}");
-
-    cx.update(|window, cx| window.click(format!("row-{at}-received-toggle"), cx));
-    let folding = heights_while_it_moves(&received, cx);
-    assert!(
-        folding.len() > 2 && folding.windows(2).any(|w| w[0] > w[1]),
-        "and folds away over frames: {folding:?}"
-    );
-    at_rest(cx);
-    assert!(!has(format!("row-{at}-received-text"), cx), "folded again");
 }
 
 #[gpui_kit::test]
@@ -2714,6 +2655,23 @@ fn send(reply: &Entity<Reply>, text: &str, cx: &mut VisualTestContext) -> u64 {
     })
 }
 
+/// Sends `text` typed before the chip of the picture attached (#773): the message holds the
+/// picture's marker after the text, what this gives back.
+fn send_before_picture(reply: &Entity<Reply>, text: &str, cx: &mut VisualTestContext) -> u64 {
+    let field = reply.read_with(cx, |r, _| r.field().clone());
+    field.update_in(cx, |field, window, cx| {
+        field.set_selected_range(0..0, cx);
+        field.insert(format!("{text} "), window, cx);
+    });
+    reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    reply.read_with(cx, |r, _| {
+        r.pending().last().expect("a message is sent").key
+    })
+}
+
+/// The message of `send_before_picture("think it over")`.
+const OVER_PICTURE: &str = "think it over [Image 1: image.png]";
+
 /// Draws the window without taking anything from the daemon: what shows before it answers.
 fn draw_alone(cx: &mut VisualTestContext) {
     for _ in 0..3 {
@@ -2756,7 +2714,7 @@ fn a_sent_message_shows_before_the_daemon_answers(cx: &mut TestAppContext) {
     });
     settle(cx);
 
-    let key = send(&reply, "think it over", cx);
+    let key = send_before_picture(&reply, "think it over", cx);
     draw_alone(cx);
 
     // The daemon's answer is held: the message is in the conversation, with its picture,
@@ -2764,14 +2722,14 @@ fn a_sent_message_shows_before_the_daemon_answers(cx: &mut TestAppContext) {
     assert!(reply.read_with(cx, |r, _| r.pending()[0].accepted.is_none()));
     assert_eq!(
         label(pending_part(key, "bubble"), cx).as_deref(),
-        Some("think it over")
+        Some(OVER_PICTURE)
     );
     assert!(has(pending_part(key, "image-0"), cx), "its picture");
     assert_eq!(
         label(pending_part(key, "sending"), cx).as_deref(),
         Some(SENDING)
     );
-    assert_eq!(user_messages(&page, "think it over", cx), 0);
+    assert_eq!(user_messages(&page, OVER_PICTURE, cx), 0);
     assert_eq!(field_text(&reply, cx), "");
     assert!(reply.read_with(cx, |r, _| r.attachments().is_empty()));
     let bubble = cx.update(|window, _| window.find(pending_part(key, "bubble")).bounds());
@@ -2780,8 +2738,7 @@ fn a_sent_message_shows_before_the_daemon_answers(cx: &mut TestAppContext) {
 
     gate.open();
     until(&shell, cx, "the turn ends", |cx| {
-        user_messages(&page, "think it over", cx) == 1
-            && !reply.read_with(cx, |r, _| r.is_running())
+        user_messages(&page, OVER_PICTURE, cx) == 1 && !reply.read_with(cx, |r, _| r.is_running())
     });
     at_rest(cx);
 }
@@ -3177,10 +3134,11 @@ fn a_message_whose_picture_was_not_sent_is_recorded_in_place(cx: &mut TestAppCon
     // Its next process takes no pictures: the daemon says so in the text it records.
     user.fake_script(script());
 
-    let key = send(&reply, "think it over", cx);
+    let key = send_before_picture(&reply, "think it over", cx);
     settle(cx);
     let pending = cx.update(|window, _| window.find(pending_part(key, "bubble")).bounds());
-    let recorded = "think it over\n\n[1 image not sent: this agent takes no images]";
+    let recorded =
+        "think it over [Image 1: image.png]\n\n[1 image not sent: this agent takes no images]";
     until(&shell, cx, "the daemon records it", |cx| {
         row_of(&page, cx, |b| is_message(b, recorded)).is_some()
     });

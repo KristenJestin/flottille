@@ -1,16 +1,14 @@
-//! The rows of a setup's steps and the text of a message with its commands, which draw what an
-//! agent does with the parts of the kit (`gpui-design-system`).
+//! The rows of a setup's steps, which draw what an agent does with the parts of the kit
+//! (`gpui-design-system`).
 
-use std::ops::Range;
 use std::rc::Rc;
 
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::{Type, hoverable, palette, tint, tipped_when_cut};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, ElementId, FontWeight, HighlightStyle, InteractiveElement,
-    IntoElement, ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
-    StyledText, TestSupportExt, Window, div, px,
+    AnyElement, App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement,
+    RenderOnce, SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window, div, px,
 };
 
 type OnClick = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -159,19 +157,4 @@ impl RenderOnce for StepRow {
             d.bg(p.hover.opacity(t))
         })
     }
-}
-
-/// A message as it was typed, each command it used (`commands`, byte ranges of `/name`) drawn as
-/// an accent chip in its line: the accent's ink, medium, on the accent's faint fill. A chip is a
-/// run of the text, so that the line wraps as the words do.
-pub fn commanded_text(text: &str, commands: &[Range<usize>], cx: &App) -> StyledText {
-    let p = palette(cx);
-    let chip = HighlightStyle {
-        color: Some(p.acc),
-        background_color: Some(p.acc.opacity(0.14)),
-        font_weight: Some(FontWeight::MEDIUM),
-        ..Default::default()
-    };
-    StyledText::new(text.to_owned())
-        .with_highlights(commands.iter().map(|range| (range.clone(), chip)))
 }
