@@ -2320,17 +2320,18 @@ fn remind_integrated(daemon: &Arc<Daemon>, agent: &Agent) {
     });
 }
 
-/// The led sessions whose check found the forge asked too recently, and when it may be asked
-/// again: checked then by the sweep, since neither of the two may end a turn before.
-static CAPPED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+/// The led sessions whose check found the forge asked too recently, or found their work not
+/// integrated yet, and when it may be asked again: checked then by the sweep, since neither of
+/// the two may end a turn before (a pull request merged later, both idle).
+static CHECK_AGAIN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// From the sweep: the led sessions whose capped check may run again are checked, a turn ending
-/// or not.
+/// From the sweep: the led sessions whose check may run again are checked, a turn ending or
+/// not, while their pilot is idle too (a pilot's turn checks them again when it ends).
 pub fn remind_integrated_due(daemon: &Arc<Daemon>) {
     let now = now_ms();
     let mut due = Vec::new();
-    CAPPED
+    CHECK_AGAIN
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|id, until| {
@@ -2346,7 +2347,16 @@ pub fn remind_integrated_due(daemon: &Arc<Daemon>) {
     let daemon = daemon.clone();
     tokio::spawn(async move {
         for id in due {
-            if let Ok(Some(session)) = daemon.read(|store| store.agent(&id)) {
+            let Ok(Some(session)) = daemon.read(|store| store.agent(&id)) else {
+                continue;
+            };
+            let pilot_idle = session.launched_by.as_deref().is_some_and(|pilot| {
+                matches!(
+                    daemon.read(|store| store.agent(pilot)),
+                    Ok(Some(pilot)) if pilot.state == AgentState::Idle
+                )
+            });
+            if pilot_idle {
                 remind_once(&daemon, &session).await;
             }
         }
@@ -2375,7 +2385,7 @@ async fn remind_once(daemon: &Arc<Daemon>, session: &Agent) {
         Ok(Some(branch)) => branch,
         Ok(None) => return,
         Err(until) => {
-            CAPPED
+            CHECK_AGAIN
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(session.id.clone(), until);

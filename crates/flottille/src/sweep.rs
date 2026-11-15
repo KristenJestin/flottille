@@ -1,7 +1,8 @@
 //! The sweep (`docs/reference/hemera.md` §5 "Sweep"): every few seconds, what time alone decides.
 //! A note not taken in time goes as a prompt; a child stuck in a turn is replaced; a lead whose
 //! children run while nothing happens is told how they are; a child that reported and stays in
-//! its turn is stopped; a led session's integration check that had to wait runs again; an ended
+//! its turn is stopped; a led session's integration check that had to wait, or found its work
+//! not integrated yet, runs again; an ended
 //! root's session kept 7 days is forgotten. It never wakes an agent by itself: what it finds is delivered.
 //!
 //! Every time is read from the store's clock, which a test moves ahead (`test.advance`).
