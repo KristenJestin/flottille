@@ -910,15 +910,18 @@ sentence on what it is for, and how to reach the server, either
   or `privatekey` (`usertoken`, `clientsecret`). A token or a key alone is excused by the words
   before it, run together, a position, a state or an identifier the server hands out and no
   credential:
-  - before `token`: `page`, `next`, `next_page`, `continuation`, `cursor`, `sync`, `pagination`,
-    `resume` (`pageToken`, `next_page_token`, `pagetoken`, `pagination_token`, `resume_token`);
+  - before `token`: `max`, `page`, `next`, `next_page`, `continuation`, `cursor`, `sync`,
+    `pagination`, `resume` (`max_tokens`, `maxTokens`, `pageToken`, `next_page_token`,
+    `pagetoken`, `pagination_token`, `resume_token`);
   - before `key`: `cursor`, `project`, `idempotency`, `issue`, `space`, `partition`, `cache`,
     `object`, `public`, `publishable`, `site`, `sort`, `last_evaluated`, `page`, `next`
     (`cursor_key`, `project_key`, `issueKey`, `spaceKey`, `partition_key`, `sort_key`,
     `object_key`, `public_key`, `publishable_key`, `site_key`, `last_evaluated_key`).
 
   No word excuses the others: `project_secret`, `sync_password`, `page_passphrase` and
-  `cursor_signature` are refused. It is refused too when it is `session_id`, `auth`,
+  `cursor_signature` are refused. Any other plural of a secret word is refused on purpose
+  (`input_tokens`, `keys`): it goes through a vault entry, as every refused name does. It is
+  refused too when it is `session_id`, `auth`,
   `authorization`, `bearer` or `sid`, whole or run together (`sessionid`). A word that only holds
   one of them is allowed: `author`, `oauth_state`, `keyword`, `monkey`. Another name ending in
   `key` or `token` for no credential is refused too: the user writes such a parameter from a
@@ -933,8 +936,9 @@ sentence on what it is for, and how to reach the server, either
   it is listed with `failing` and `url_fault` saying why, and its URL is served
   (`connection.list`, the window, an agent's `connections list` and `show`, a request's before and
   after) as an error says it: without its login, query and fragment, its scheme alone for a known
-  other scheme, empty for an unknown one. A card and an agent's `show` mark it ("cleaned: its
-  query is dropped"), so that an edit to the URL served is not taken for one that keeps the rest.
+  other scheme, empty for an unknown one. A card, an agent's `show` and the window's request dialog
+  (`connection.proposed`, the old value) mark it ("cleaned: its query is dropped", "cleaned: it
+  is not shown" for an unknown scheme), so that an edit to the URL served is not taken for one that keeps the rest.
   The window's form leaves such a URL's field empty, its fault under it, for the user to type it
   again: Save never writes the cleaned URL back by itself. Its server never starts, `login` is
   refused with the same reason, and it is edited (its URL mended) or removed as any other; an edit

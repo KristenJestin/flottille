@@ -280,8 +280,10 @@ const RUN_TOGETHER_ENDS: [&str; 10] = [
 ];
 
 /// The words before `token`, run together, that make it none: a page's or a cursor's position
-/// (`pageToken`, `next_page_token`, `pagination_token`, `resume_token`), a sync's state.
-const HARMLESS_TOKENS: [&str; 8] = [
+/// (`pageToken`, `next_page_token`, `pagination_token`, `resume_token`), a sync's state, a
+/// limit of an LLM's reply (`max_tokens`).
+const HARMLESS_TOKENS: [&str; 9] = [
+    "max",
     "page",
     "next",
     "nextpage",
@@ -835,6 +837,16 @@ impl Declaration {
             Some(note) => format!("{served} ({note})"),
             None => served,
         })
+    }
+
+    /// `json`, its URL as a card says it (`marked_url`): for a proposal's dialog, which shows the
+    /// old value beside the new one.
+    pub(super) fn served_marked(&self) -> Value {
+        let mut json = self.json();
+        if let Some(url) = self.marked_url() {
+            json["url"] = json!(url);
+        }
+        json
     }
 
     /// `json`, its URL as it is served.

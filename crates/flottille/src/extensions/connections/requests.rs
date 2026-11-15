@@ -1014,7 +1014,7 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
             return Ok(
                 json!({"number": number, "action": args["action"], "name": args["name"],
                 "before": declaration(&daemon.paths, args["name"].as_str().unwrap_or_default())
-                    .ok().map(|d| d.served()),
+                    .ok().map(|d| d.served_marked()),
                 "after": null, "changed": [], "settings": {}, "secrets": [], "current": false,
                 "why": why}),
             );
@@ -1041,8 +1041,8 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
         "number": number,
         "action": proposal.action,
         "name": proposal.name,
-        "before": proposal.before.as_ref().map(Declaration::served),
-        "after": proposal.after.as_ref().map(Declaration::served),
+        "before": proposal.before.as_ref().map(Declaration::served_marked),
+        "after": proposal.after.as_ref().map(Declaration::served_marked),
         "changed": changed,
         "settings": proposal.settings,
         "secrets": proposal.after.as_ref().or(proposal.before.as_ref())
