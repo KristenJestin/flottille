@@ -224,21 +224,30 @@ $ flottille update --channel alpha --branch feat/specs
 ~/.local/bin/flottille is now 0.3.1-alpha.feat-specs.4.
 ```
 
-### `flottille remote address list|add <address>|remove <address> [--json]`
+### `flottille remote address list [--json]`
 
 With remote on (`docs/remote.md`, "Identity and keys"), the addresses another machine reaches this
 one at: the one its link listens on, `found` (its interfaces' when it listens on all of them), and
-those declared by hand, `declared`: a VPN address, a DNS name, a forwarded port, with its port when
-it is not the link's own. Flottille finds no path by itself, and relays nothing: how two machines
-reach each other is the user's to arrange. A change is told at once to the machines linked to this
-one. `remote.machines`, `remote.address.add`, `remote.address.remove` (`docs/protocol.md`).
+those declared by hand, `declared`. Flottille finds no path by itself, and relays nothing: how two
+machines reach each other (a LAN, a VPN, a public address, a tunnel) is the user's to arrange.
+`remote.machines` (`docs/protocol.md`).
 
 ```
-$ flottille remote address add 100.64.0.7
 $ flottille remote address list
 192.168.1.20:7447  found
 100.64.0.7:7447  declared
 ```
+
+### `flottille remote address add <address> [--json]`
+
+Declares an address of this machine: a VPN address, a DNS name, a forwarded port, with its port
+when it is not the link's own (`100.64.0.7`, `server.example.net:7447`). It is told at once to the
+machines linked to this one. `remote.address.add`.
+
+### `flottille remote address remove <address> [--json]`
+
+Removes an address declared by hand, and tells the machines linked to this one.
+`remote.address.remove`.
 
 ## Extensions and specs
 
