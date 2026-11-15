@@ -19,7 +19,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::{Command, VaultWrite};
-use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
+use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line, spaced};
 use crate::project_settings::Reveal as ProjectReveal;
 use crate::shell::Shell;
 
@@ -109,6 +109,9 @@ pub struct VaultSection {
     bound: Option<String>,
     /// Why an agent asked for the new entry, when the dialog was opened from its request.
     why: Option<String>,
+    /// The host the request's URL sends the secret to, as the daemon read it, and that URL: the
+    /// host is said while the URL is the one asked.
+    host: Option<(String, String)>,
     saving: bool,
     writing: Option<Writing>,
     form_error: Option<SharedString>,
@@ -169,6 +172,7 @@ impl VaultSection {
             project: None,
             bound: None,
             why: None,
+            host: None,
             saving: false,
             writing: None,
             form_error: None,
@@ -214,6 +218,14 @@ impl VaultSection {
         self.fields.as_ref().map(|f| &f.description)
     }
 
+    pub fn url_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.url)
+    }
+
+    pub fn username_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.username)
+    }
+
     /// Asks the daemon for the list.
     pub fn read(&self, cx: &mut Context<Self>) {
         perform_later(&self.shell, Command::Vault, cx);
@@ -253,6 +265,13 @@ impl VaultSection {
                         }
                     }));
             }
+            // The host asked is said while the URL is the one asked.
+            self._subscriptions
+                .push(cx.subscribe(&url, |this, _, event, cx| {
+                    if matches!(event, InputEvent::Change) && this.host.is_some() {
+                        cx.notify();
+                    }
+                }));
             self.fields = Some(Fields {
                 name,
                 secret,
@@ -307,6 +326,21 @@ impl VaultSection {
         opened
     }
 
+    /// "New entry" from an agent's request (`vault_ask.rs`): `entry` prefilled, `why` under what it
+    /// is for, and `host`, where the daemon reads its URL sends the secret; the user may change
+    /// every field before Add, remove the binding, or close it.
+    pub fn add_asked(
+        &mut self,
+        entry: &VaultEntry,
+        why: String,
+        host: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_prefilled(entry, Some(why), None, window, cx);
+        self.host = host.zip(entry.url.clone());
+    }
+
     /// The project page to go back to, once the dialog it was opened for is closed (an entry set).
     pub fn take_return(&mut self) -> Option<(String, ProjectReveal)> {
         match self.form {
@@ -333,6 +367,7 @@ impl VaultSection {
         self.every_project = false;
         self.bound = None;
         self.why = None;
+        self.host = None;
         let fields = self.fields(window, cx);
         let (name, secret, description, url, username) = (
             fields.name.clone(),
@@ -608,6 +643,66 @@ impl VaultSection {
             })
     }
 
+    /// What a new entry is bound to, and where its secret goes, said in the dialog, with the way
+    /// to bind it to no use; it folds away once the binding is removed.
+    fn binding(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mute = palette(cx).mute;
+        let used = self
+            .bound
+            .as_deref()
+            .map(|bound| flottille_core::vault::use_said(bound).unwrap_or_else(|| bound.to_owned()))
+            .map(SharedString::from);
+        let url = self
+            .fields
+            .as_ref()
+            .map(|fields| fields.url.read(cx).value().trim().to_owned());
+        let host = self
+            .host
+            .clone()
+            .filter(|(_, asked)| url.as_deref() == Some(asked.trim()))
+            .map(|(host, _)| SharedString::from(host));
+        let this = cx.entity().downgrade();
+        let saving = self.saving;
+        let line = move |id: &'static str, label: &'static str, value: SharedString| {
+            div()
+                .id(id)
+                .flex()
+                .gap(space::SM)
+                .aria_label(SharedString::from(format!("{label}: {value}")))
+                .child(div().text_color(mute).child(label))
+                .child(div().min_w_0().child(value))
+                .test_support()
+                .into_any_element()
+        };
+        presence_of("vault-binding-block", used, move |used| {
+            div()
+                .id("vault-binding")
+                .flex()
+                .flex_col()
+                .child(line("vault-binding-for", "For", used))
+                .child(
+                    presence_of("vault-binding-host-block", host, move |host| {
+                        line("vault-binding-host", "Goes to", host)
+                    })
+                    .space(space::XS),
+                )
+                .child(spaced(
+                    space::SM,
+                    Button::quiet("vault-binding-remove", "Remove the binding")
+                        .disabled(saving)
+                        .on_click(move |_, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.bound = None;
+                                cx.notify();
+                            })
+                            .ok();
+                        }),
+                ))
+                .into_any_element()
+        })
+        .space(space::LG)
+    }
+
     fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
         let this = cx.entity().downgrade();
@@ -625,6 +720,7 @@ impl VaultSection {
             return modal;
         };
         let select = self.project_select(cx);
+        let binding = self.binding(cx);
         let error = problem_line("vault-error", self.form_error.clone(), space::LG, cx);
         let fields = self.fields.as_ref().expect("made when the form opens");
         let description = Field::new(
@@ -655,34 +751,38 @@ impl VaultSection {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(space::LG)
             .child(Field::new("vault-name-field", "Name", name).hint("How agents ask for it."))
-            .child(
+            .child(spaced(
+                space::LG,
                 Field::new(
                     "vault-secret-field",
                     "Secret",
                     boxed("vault-secret", Input::new(&fields.secret), cx),
                 )
                 .hint(SECRET_HINT),
-            )
-            .child(description)
-            .child(
+            ))
+            .child(spaced(space::LG, description))
+            .child(spaced(
+                space::LG,
                 Field::new(
                     "vault-url-field",
                     "URL",
                     boxed("vault-url", Input::new(&fields.url), cx),
                 )
                 .optional(),
-            )
-            .child(
+            ))
+            .child(spaced(
+                space::LG,
                 Field::new(
                     "vault-username-field",
                     "Username",
                     boxed("vault-username", Input::new(&fields.username), cx),
                 )
                 .optional(),
-            )
-            .child(
+            ))
+            .child(binding)
+            .child(spaced(
+                space::LG,
                 // The note goes once a project is chosen: it said what the entry was when the form
                 // opened, not what it is about to become.
                 div()
@@ -711,7 +811,7 @@ impl VaultSection {
                         )
                         .space(space::XS),
                     ),
-            )
+            ))
             .test_support();
         modal
             .sentence(

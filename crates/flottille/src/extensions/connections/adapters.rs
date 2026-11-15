@@ -124,7 +124,7 @@ pub static AGENT_BROWSER: Adapter = Adapter {
 
 const ALL: &[&Adapter] = &[&AGENT_BROWSER];
 
-const LOGIN: &str = "login";
+pub(super) const LOGIN: &str = "login";
 /// What Flottille is called in the configuration it writes for agent-browser.
 const PLUGIN: &str = "flottille";
 const PROTOCOL: &str = "agent-browser.plugin.v1";
@@ -471,8 +471,8 @@ pub fn config_of(daemon: &Daemon, name: &str) -> PathBuf {
 /// be typed into (`https`, or `http` on this machine, as a connection's secrets go), nor for a
 /// host that would not be one entry of the list agent-browser reads (it separates them with
 /// commas, reads `*` as a wildcard, and a leading `-` or a space would make it an option or two
-/// words).
-fn site(text: &str) -> Option<String> {
+/// words). Its domain is said as the network reads it, in ASCII (punycode).
+pub fn site(text: &str) -> Option<String> {
     let url = url::Url::parse(text).ok()?;
     let host = url.host_str()?;
     let usable = super::requests::carries_secrets(&url)
@@ -483,7 +483,7 @@ fn site(text: &str) -> Option<String> {
 
 /// The host of `text` when it is plain `http` to another machine, where a sign-in's password
 /// would travel in clear.
-fn in_clear(text: &str) -> Option<String> {
+pub fn in_clear(text: &str) -> Option<String> {
     let url = url::Url::parse(text).ok()?;
     if url.scheme() != "http" || super::requests::carries_secrets(&url) {
         return None;
@@ -648,7 +648,11 @@ pub async fn perform(
         None => {
             return Outcome::Refused(format!(
                 "refused: the vault has no entry {entry}: login takes an entry bound to the \
-                 connection {name}"
+                 connection {name}; or ask the user to add it, who types only the secret: vault \
+                 {{action: \"ask\", name: \"{entry}\", why: \"<what you sign in for>\", url: \
+                 \"<the site's login page>\", username: \"<the account, if you know it>\", for: \
+                 \"connection:{name}\"}}, answered at once, the user's answer coming later as a \
+                 delivery"
             ));
         }
     };

@@ -118,41 +118,54 @@ entry it makes bound to the project's worklog.
 
 ## What agents see
 
-The `vault` tool, listed to an agent whose project sees at least one entry (`docs/tools.md`, "The
-vault"): `vault {action: "list"}` gives the name, the description, the URL and the username of each
+The `vault` tool, listed to an agent whose project sees at least one entry, misses one a feature
+names, or has a connection whose `login` takes one (`docs/tools.md`, "The vault"): `vault {action: "list"}` gives the name, the description, the URL and the username of each
 entry the agent's project sees, so that it knows what exists and what it is for. No action returns
 a secret. An entry of another project is not listed, and is no entry for a tool of the agent's.
 
 ## Asking the user for an entry
 
-An agent often finds out it needs a secret when it reaches for it: a tool refuses because the entry
-a feature names is missing. It may then ask the user for that entry, and only that one: **there is
-no free-form ask**.
+An agent often finds out it needs a secret when it reaches for it: a tool refuses because an entry
+is missing (the tracker's `worklog_token`, a browser `login`'s entry), or the task needs a sign-in
+the vault does not hold. It may ask the user to add **any new entry**: the ask is a helper to add
+an entry to the vault, not a request with rules of its own.
 
-- **Only a known need.** An entry may be asked for only when a feature of Flottille names it for
-  the agent's project and the project does not see it: today the tracker's `worklog_token`
-  (`docs/tickets.md`, "Logging time"). The daemon knows the entry's name and what it is for; the
-  agent gives only its reason. `vault {action: "ask", name, why}` for any other name is refused.
-  The `vault` tool is listed to an agent whose project misses such an entry, even when it sees
-  none.
-- **Offered with the refusal.** The call that needed it is refused as before, and the refusal
-  says the entry may be asked for, with the call to make. The ask answers at once: nothing waits
-  for the user.
-- **One request, never twice.** The user sees one card in the session of the agent that asked
-  (and an inbox entry): the entry's name, its description and its project, prefilled by Flottille,
-  the agent's reason, a username field when the entry needs one (Jira's API takes the account's
-  e-mail), and one empty masked field for the secret, with Set and Dismiss. While a request for an
-  entry is open, another ask for it joins it. A dismissed entry is not offered again, nor asked
-  for, until the project's settings change or the entry is set from Settings, Vault.
-- **Set** stores the entry as Settings, Vault does, with the same checks, for the project that
-  asked, bound to its worklog ("Bound to one use"). It never changes an existing entry's project: when another project uses the name (or it
-  is global), the card says so on its name line, `<name> is used by the project <other>: choose
-  another name`, and Set waits for another name. The card does not change the setting that names
-  the entry: it says that setting must name the new one, and so does the delivery. Each agent
-  that asked is handed a delivery, `the user set the vault entry <name>`, never the secret; or
-  `the user dismissed …`. An entry set from Settings answers its open requests the same way.
+- **`vault {action: "ask", name, why, url?, username?, for?, project?}`.** `name` is the new
+  entry's name; `url` the address the secret is for, which the daemon reads as a connection's
+  `login` does (a backslash is a `/`, a domain is said in ASCII) and refuses when it is no `https`
+  address, or `http` on this machine; `username` the account; `for` the use it is bound to,
+  `worklog` (the agent's project's) or `connection:<name>` (a connection the user declared), or
+  none; `project` `this`
+  (the agent's project's alone) or `every`, a connection's entry being every project's. A name
+  the vault already holds is refused, naming it: the agent uses it (when its project sees it) or
+  asks under another name. An entry a feature of Flottille names and the project misses (today
+  the tracker's `worklog_token`, `docs/tickets.md`, "Logging time") keeps the feature's prefill:
+  its description and its use, the worklog.
+- **Offered with the refusal.** The call that needed the entry is refused as before, and the
+  refusal says the entry may be asked for, with the call to make: `tickets log_time` with its
+  name, a browser connection's `login` with its name and `for: "connection:<name>"`
+  (`docs/extensions.md`, "Connections"). The ask answers at once: nothing waits for the user.
+- **A way in to the vault's own form.** The user sees one card in the session of the agent that
+  asked (and an inbox entry, which names the host and whose entry it is, the project's or every
+  project's): the entry's name, the host of its URL **on a line of its own** (where the secret
+  will go: the agent chose it; the daemon's reading, never the window's), what it is for, its use,
+  its project and the agent's reason, with **New entry** and **Dismiss** (disabled while
+  its call runs). New entry opens Settings, Vault's form of a new entry, prefilled with all
+  of it, the agent's reason under what it is for, and what it will be bound to ("For …") with the
+  host its secret goes to ("Goes to …", while the URL is the one asked) and **Remove the
+  binding**: the user changes any field, types the secret and saves, with the checks of that form
+  (plain `http` to another machine refused for a connection's entry; the username required when
+  the feature that asked reads it, the worklog's), or closes it and nothing is stored. There is
+  no second form.
+- **One request a name.** While a request for a name is open, another ask for it joins it when it
+  is the same project's or the request is every project's; another project's agent is refused
+  (`ask under another name`), and told nothing of it. Dismiss closes the request; the name may be
+  asked for again.
+- **Answered when the entry is saved**, from that form or any other way: each agent that asked
+  and whose project sees the entry is handed a delivery, `the user set the vault entry <name>`,
+  never the secret; on Dismiss each is handed `the user dismissed …`.
 
-The secret goes from the card's field to the keyring as any secret set from the window: it never
+The secret goes from the form's field to the keyring as any secret set from the window: it never
 reaches the agent, an event, a log or an error.
 
 ## How a secret is used

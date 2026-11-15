@@ -1412,6 +1412,9 @@ way in:
 - **`login {entry}`**, Flottille's own action: the agent names a vault entry **bound to this
   connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
   lists, never their values. An entry bound to another use, or to none, is refused, naming its use.
+  A name the vault does not hold is refused with the call that asks the user to add it, `vault
+  {action: "ask", name, why, url, username, for: "connection:<name>"}` (`vault.md`, "Asking the
+  user for an entry").
   **The login always opens the entry's own URL**, and takes no URL of the agent's: a page of its
   choosing, even on the entry's site, could redirect the fill elsewhere (`/go?to=…`). An entry
   without a URL, or whose URL is no web address (`http` or `https` with a host), is refused (said

@@ -1,12 +1,13 @@
-//! An agent asks the user for a vault entry a feature of Flottille names and that is missing
-//! (#566, `docs/vault.md`, "Asking the user for an entry"): the refusal that met the missing entry
-//! says it can be asked for, `vault {action: "ask"}` answers at once, the user sees one request
-//! prefilled by Flottille and types only the secret, and the agent is told what the user did,
-//! never the secret. Against the real daemon with the fake ACP agent and the in-memory keyring the
+//! An agent asks the user for a vault entry (#566, #947, `docs/vault.md`, "Asking the user for an
+//! entry"): any new entry, prefilled by the agent, or by the feature that names it; the refusal
+//! that met a missing entry says it can be asked for, `vault {action: "ask"}` answers at once, the
+//! user's own form of Settings, Vault stores it, and the agent is told what the user did, never
+//! the secret. Against the real daemon with the fake ACP agent and the in-memory keyring the
 //! tests' configuration chooses; no real agent, keyring or site is reached.
 
 mod common;
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -50,9 +51,14 @@ fn tracker(user: &User, entry: &str) {
 
 /// A root agent of `app` and the client of its tools.
 fn root_in(user: &User) -> (Mcp, String) {
+    root_of(user, "app")
+}
+
+/// A root agent of `project` and the client of its tools.
+fn root_of(user: &User, project: &str) -> (Mcp, String) {
     let opened = user.received_requests("session/new").len();
     let run = user
-        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .call("agent.run", json!({"project": project, "message": "hello"}))
         .unwrap();
     let (url, authorization) = server_of(user, opened);
     (
@@ -132,12 +138,14 @@ fn a_missing_worklog_entry_can_be_asked_for_and_the_user_sets_it() {
     assert_eq!(request["project"], "app");
     assert_eq!(request["agent"], agent.as_str());
     assert_eq!(request["why"], "to log the two hours spent on ABC-1");
+    // The feature that names it prefills what it is for and its use.
     assert!(
         request["description"]
             .as_str()
             .is_some_and(|d| d.contains("Jira")),
         "prefilled by Flottille: {request}"
     );
+    assert_eq!(request["for"], "worklog:app", "{request}");
     assert_eq!(request["takes_username"], true, "{request}");
     let inbox = user.call("inbox.list", json!({})).unwrap();
     let entry = inbox["entries"]
@@ -149,18 +157,19 @@ fn a_missing_worklog_entry_can_be_asked_for_and_the_user_sets_it() {
         .clone();
     assert!(entry["text"].as_str().unwrap().contains("jira-time"));
 
+    // The user saves Settings, Vault's form the card opened, prefilled.
     let number = request["ask"].as_u64().unwrap();
     user.call(
-        "vault.ask_set",
-        json!({"ask": number, "secret": SECRET, "username": ACCOUNT}),
+        "vault.set",
+        json!({"name": "jira-time", "secret": SECRET, "username": ACCOUNT, "project": "app",
+            "description": request["description"], "for": request["for"]}),
     )
     .unwrap();
 
-    let entries = user.call("vault.list", json!({})).unwrap();
-    let set = &entries["entries"][0];
-    assert_eq!(set["name"], "jira-time");
+    let set = entry_of(&user, "jira-time");
     assert_eq!(set["project"], "app");
     assert_eq!(set["username"], ACCOUNT);
+    assert_eq!(set["for"], "worklog:app");
     assert!(asks(&user).is_empty(), "answered, not open");
 
     let body = told(&user, number, &agent);
@@ -170,6 +179,11 @@ fn a_missing_worklog_entry_can_be_asked_for_and_the_user_sets_it() {
     );
     // Nothing the agent receives, or the daemon keeps (its store, its logs), holds the secret.
     assert!(!body.contains(SECRET), "{body}");
+    nothing_holds(&user, SECRET);
+}
+
+/// No file of the daemon's (its store, its logs) holds `secret`.
+fn nothing_holds(user: &User, secret: &str) {
     let mut folders = vec![user.path("state"), user.path("runtime")];
     while let Some(folder) = folders.pop() {
         for item in std::fs::read_dir(folder).into_iter().flatten().flatten() {
@@ -177,7 +191,7 @@ fn a_missing_worklog_entry_can_be_asked_for_and_the_user_sets_it() {
             if path.is_dir() {
                 folders.push(path);
             } else if let Ok(bytes) = std::fs::read(&path) {
-                let found = bytes.windows(SECRET.len()).any(|w| w == SECRET.as_bytes());
+                let found = bytes.windows(secret.len()).any(|w| w == secret.as_bytes());
                 assert!(!found, "{} holds the secret", path.display());
             }
         }
@@ -185,25 +199,106 @@ fn a_missing_worklog_entry_can_be_asked_for_and_the_user_sets_it() {
 }
 
 #[test]
-fn an_ask_for_an_entry_nothing_needs_is_refused() {
+fn an_agent_asks_for_an_entry_no_feature_names() {
     let user = User::with_fake_agent().with_fake_acli();
     project(&user, "jira-time");
-    let (mcp, _) = root_in(&user);
+    connection(&user, "browser");
+    let (mcp, agent) = root_in(&user);
 
-    let refused = ask(&mcp, "aws-root", "to deploy");
+    let answer = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "staging-login", "why": "to sign in to staging",
+            "url": "https://staging.example.com/login", "username": "tester@example.com"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let open = asks(&user);
+    assert_eq!(open.len(), 1, "{open:?}");
+    let request = &open[0];
+    assert_eq!(request["name"], "staging-login");
+    assert_eq!(request["url"], "https://staging.example.com/login");
+    assert_eq!(request["username"], "tester@example.com");
+    assert_eq!(request["why"], "to sign in to staging");
+    // This project's, bound to no use, as asked.
+    assert_eq!(request["project"], "app");
+    assert_eq!(request["every"], false, "{request}");
+    assert_eq!(request["for"], Value::Null, "{request}");
+    let number = request["ask"].as_u64().unwrap();
+
+    // A use asked for: a connection's entry is every project's.
+    let bound = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "shop-test", "why": "to sign in to the shop",
+            "url": "https://shop.example.com/login", "for": "connection:browser"}),
+    );
+    assert!(!bound.error, "{}", bound.text);
+    let shop = asks(&user)
+        .into_iter()
+        .find(|ask| ask["name"] == "shop-test")
+        .unwrap();
+    assert_eq!(shop["for"], "connection:browser", "{shop}");
+    assert_eq!(shop["every"], true, "{shop}");
+
+    // A use the agent's project cannot have is refused.
+    let refused = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "elsewhere", "why": "x", "for": "worklog:other"}),
+    );
     assert!(refused.error, "{}", refused.text);
-    assert!(refused.text.starts_with("refused:"), "{}", refused.text);
-    assert!(refused.text.contains("aws-root"), "{}", refused.text);
-    assert!(asks(&user).is_empty());
 
-    // An entry the project names but the vault holds is no need either.
+    // The user saves the form as prefilled: it is stored bound as asked, and the agent is told,
+    // never the secret.
     user.call(
         "vault.set",
-        json!({"name": "jira-time", "secret": SECRET, "username": ACCOUNT, "project": "app"}),
+        json!({"name": "staging-login", "secret": SECRET, "username": "tester@example.com",
+            "url": "https://staging.example.com/login", "project": "app"}),
     )
     .unwrap();
-    let refused = ask(&mcp, "jira-time", "to log time");
-    assert!(refused.error, "{}", refused.text);
+    let set = entry_of(&user, "staging-login");
+    assert_eq!(set["project"], "app");
+    assert_eq!(set["url"], "https://staging.example.com/login");
+    let body = told(&user, number, &agent);
+    assert!(
+        body.contains("the user set the vault entry `staging-login`"),
+        "{body}"
+    );
+    assert!(!body.contains(SECRET), "{body}");
+    user.call(
+        "vault.set",
+        json!({"name": "shop-test", "secret": "sh0p-s3cret-typed", "for": "connection:browser",
+            "url": "https://shop.example.com/login"}),
+    )
+    .unwrap();
+    assert_eq!(entry_of(&user, "shop-test")["for"], "connection:browser");
+    assert!(asks(&user).is_empty(), "both answered");
+    nothing_holds(&user, SECRET);
+}
+
+#[test]
+fn an_ask_for_an_existing_entry_is_refused_naming_it() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    other_project(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "deploy-key", "secret": "d3ploy-s3cret-key", "project": "app"}),
+    )
+    .unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "theirs", "secret": "th3irs-s3cret-key", "project": "other"}),
+    )
+    .unwrap();
+    let (mcp, _) = root_in(&user);
+
+    for (name, says) in [("deploy-key", "use it"), ("theirs", "another name")] {
+        let refused = ask(&mcp, name, "to deploy");
+        assert!(refused.error, "{}", refused.text);
+        assert!(refused.text.starts_with("refused:"), "{}", refused.text);
+        assert!(refused.text.contains(name), "{}", refused.text);
+        assert!(refused.text.contains(says), "{}", refused.text);
+        // Another project's entry is not described to this one.
+        assert!(!refused.text.contains("project other"), "{}", refused.text);
+    }
     assert!(asks(&user).is_empty());
 }
 
@@ -221,7 +316,11 @@ fn the_ask_for_an_entry_has_no_field_for_a_secret() {
     let properties = tool["inputSchema"]["properties"].as_object().unwrap();
     let mut fields: Vec<&str> = properties.keys().map(String::as_str).collect();
     fields.sort();
-    assert_eq!(fields, ["action", "name", "why"], "{tool}");
+    assert_eq!(
+        fields,
+        ["action", "for", "name", "project", "url", "username", "why"],
+        "{tool}"
+    );
 
     // An agent that tries to give one anyway is refused, and nothing keeps it.
     let refused = mcp.call(
@@ -240,14 +339,14 @@ fn the_ask_for_an_entry_has_no_field_for_a_secret() {
 }
 
 #[test]
-fn a_second_ask_joins_the_open_request() {
+fn a_second_ask_for_the_same_name_joins_the_first() {
     let user = User::with_fake_agent().with_fake_acli();
     project(&user, "jira-time");
     let (first, one) = root_in(&user);
     let (second, two) = root_in(&user);
 
-    assert!(!ask(&first, "jira-time", "to log time on ABC-1").error);
-    let joined = ask(&second, "jira-time", "to log time on ABC-2");
+    assert!(!ask(&first, "staging-login", "to sign in to staging").error);
+    let joined = ask(&second, "staging-login", "to test the checkout");
     assert!(!joined.error, "{}", joined.text);
     assert!(joined.text.contains("joins"), "{}", joined.text);
     let open = asks(&user);
@@ -263,7 +362,7 @@ fn a_second_ask_joins_the_open_request() {
 }
 
 #[test]
-fn a_dismissed_entry_is_not_offered_again_until_its_setting_changes() {
+fn a_dismissed_name_may_be_asked_again() {
     let user = User::with_fake_agent().with_fake_acli();
     project(&user, "jira-time");
     let (mcp, _) = root_in(&user);
@@ -272,22 +371,15 @@ fn a_dismissed_entry_is_not_offered_again_until_its_setting_changes() {
     let number = asks(&user)[0]["ask"].as_u64().unwrap();
     user.call("vault.ask_dismiss", json!({"ask": number}))
         .unwrap();
+    assert!(asks(&user).is_empty());
 
-    // Not offered by the refusal, and refused when asked.
+    // Still offered by the refusal, and asked again: the ask only opens the user's own form.
     let said = mcp.call(
         "tickets",
         json!({"action": "log_time", "ticket": "ABC-1", "duration": "1h"}),
     );
-    assert!(!said.text.contains("action: \"ask\""), "{}", said.text);
-    let refused = ask(&mcp, "jira-time", "to log time, again");
-    assert!(refused.error, "{}", refused.text);
-    assert!(refused.text.contains("dismissed"), "{}", refused.text);
-    assert!(asks(&user).is_empty());
-
-    // The user changes the setting that names it: it may be asked for again.
-    tracker(&user, "jira-worklog");
-    tracker(&user, "jira-time");
-    let again = ask(&mcp, "jira-time", "to log time, the setting changed");
+    assert!(said.text.contains("action: \"ask\""), "{}", said.text);
+    let again = ask(&mcp, "jira-time", "to log time, again");
     assert!(!again.error, "{}", again.text);
     assert_eq!(asks(&user).len(), 1);
 }
@@ -303,7 +395,7 @@ fn other_project(user: &User) {
         .unwrap();
 }
 
-fn entry(user: &User, name: &str) -> Value {
+fn entry_of(user: &User, name: &str) -> Value {
     user.call("vault.list", json!({})).unwrap()["entries"]
         .as_array()
         .unwrap()
@@ -314,86 +406,21 @@ fn entry(user: &User, name: &str) -> Value {
 }
 
 #[test]
-fn a_set_from_an_ask_never_moves_another_project_s_entry() {
-    let user = User::with_fake_agent().with_fake_acli();
-    project(&user, "jira-time");
-    other_project(&user);
-    user.call(
-        "vault.set",
-        json!({"name": "jira-time", "secret": "the-other-projects-secret", "project": "other"}),
-    )
-    .unwrap();
-    let (mcp, _) = root_in(&user);
-
-    // The name belongs to another project: `app` sees no such entry, so it is still a need.
-    assert!(!ask(&mcp, "jira-time", "to log time").error);
-    let open = asks(&user);
-    assert_eq!(open.len(), 1, "{open:?}");
-    let sentence = "`jira-time` is used by the project other: choose another name";
-    assert_eq!(open[0]["taken"], sentence, "the card says it: {}", open[0]);
-    let number = open[0]["ask"].as_u64().unwrap();
-
-    // Set is refused with that sentence, however it is asked, and moves nothing.
-    for params in [
-        json!({"ask": number, "secret": SECRET, "username": ACCOUNT}),
-        json!({"ask": number, "secret": SECRET, "username": ACCOUNT, "name": "jira-time"}),
-    ] {
-        let (_, refused) = user.call("vault.ask_set", params).unwrap_err();
-        assert!(refused.contains(sentence), "{refused}");
-        assert!(!refused.contains(SECRET), "{refused}");
-        assert_eq!(entry(&user, "jira-time")["project"], "other");
-        assert_eq!(asks(&user).len(), 1, "still open");
-    }
-}
-
-#[test]
-fn a_set_from_an_ask_under_another_name_keeps_the_other_entry_and_tells_the_agent() {
-    let user = User::with_fake_agent().with_fake_acli();
-    project(&user, "jira-time");
-    other_project(&user);
-    user.call(
-        "vault.set",
-        json!({"name": "jira-time", "secret": "the-other-projects-secret", "project": "other"}),
-    )
-    .unwrap();
-    let (mcp, agent) = root_in(&user);
-    assert!(!ask(&mcp, "jira-time", "to log time").error);
-    let number = asks(&user)[0]["ask"].as_u64().unwrap();
-
-    user.call(
-        "vault.ask_set",
-        json!({"ask": number, "secret": SECRET, "username": ACCOUNT, "name": "app-jira-time"}),
-    )
-    .unwrap();
-
-    assert_eq!(entry(&user, "jira-time")["project"], "other");
-    let mine = entry(&user, "app-jira-time");
-    assert_eq!(mine["project"], "app");
-    assert_eq!(mine["username"], ACCOUNT);
-    assert!(asks(&user).is_empty(), "answered, not open");
-    // The setting that names the entry is not the card's to change.
-    let body = told(&user, number, &agent);
-    for said in ["`app-jira-time`", "instead of `jira-time`", "setting"] {
-        assert!(body.contains(said), "{said} is not said: {body}");
-    }
-    assert!(!body.contains(SECRET), "{body}");
-}
-
-#[test]
 fn an_entry_made_from_a_feature_is_bound_to_it() {
     let user = User::with_fake_agent().with_fake_acli();
     project(&user, "jira-time");
     let (mcp, _) = root_in(&user);
     assert!(!ask(&mcp, "jira-time", "to log time").error);
-    let number = asks(&user)[0]["ask"].as_u64().unwrap();
+    let prefilled = asks(&user)[0]["for"].clone();
 
-    // The card of the worklog's request makes the entry the worklog's.
+    // The form the worklog's request opens makes the entry the worklog's.
     user.call(
-        "vault.ask_set",
-        json!({"ask": number, "secret": SECRET, "username": ACCOUNT}),
+        "vault.set",
+        json!({"name": "jira-time", "secret": SECRET, "username": ACCOUNT, "project": "app",
+            "for": prefilled}),
     )
     .unwrap();
-    assert_eq!(entry(&user, "jira-time")["for"], "worklog:app");
+    assert_eq!(entry_of(&user, "jira-time")["for"], "worklog:app");
 
     // So does a set from a feature's own screen, which says what it is for.
     user.call(
@@ -401,7 +428,10 @@ fn an_entry_made_from_a_feature_is_bound_to_it() {
         json!({"name": "almanac-token", "secret": "s3cret-of-almanac", "for": "connection:almanac"}),
     )
     .unwrap();
-    assert_eq!(entry(&user, "almanac-token")["for"], "connection:almanac");
+    assert_eq!(
+        entry_of(&user, "almanac-token")["for"],
+        "connection:almanac"
+    );
 
     // Replacing its secret from the Vault page, which names no use, keeps the binding; another
     // use is refused, naming the one it has.
@@ -411,7 +441,7 @@ fn an_entry_made_from_a_feature_is_bound_to_it() {
             "project": "app"}),
     )
     .unwrap();
-    assert_eq!(entry(&user, "jira-time")["for"], "worklog:app");
+    assert_eq!(entry_of(&user, "jira-time")["for"], "worklog:app");
     let (_, refused) = user
         .call(
             "vault.set",
@@ -424,4 +454,289 @@ fn an_entry_made_from_a_feature_is_bound_to_it() {
         "{refused}"
     );
     assert!(!refused.contains("an0ther-w0rklog-t0ken"), "{refused}");
+}
+
+/// The connection `name` declared on the fake MCP server, never reviewed: it exists, and gives
+/// no tool.
+fn connection(user: &User, name: &str) {
+    let fake = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-mcp");
+    assert!(fake.exists(), "`cargo build -p flottille-fake-mcp` first");
+    let script: PathBuf = user.path(&format!("{name}-script.json"));
+    std::fs::write(
+        &script,
+        json!({"server": {"name": name, "version": "1.0.0"}, "tools": []}).to_string(),
+    )
+    .unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    user.call(
+        "connection.add",
+        json!({"name": name, "about": format!("The {name} of the tests."),
+            "command": [fake, "--script", script]}),
+    )
+    .unwrap();
+}
+
+/// The text of the inbox entry of the request for `name`.
+fn inbox_text(user: &User, name: &str) -> String {
+    let inbox = user.call("inbox.list", json!({})).unwrap();
+    inbox["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "vault")
+        .filter_map(|e| e["text"].as_str())
+        .find(|text| text.contains(name))
+        .unwrap_or_else(|| panic!("no inbox entry for {name}: {inbox}"))
+        .to_owned()
+}
+
+#[test]
+fn a_look_alike_host_is_shown_in_ascii() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    let (mcp, _) = root_in(&user);
+
+    // A Cyrillic "а" in the place of a Latin "a": the host is said as the network reads it.
+    let answer = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "bank-login", "why": "to sign in to the bank",
+            "url": "https://b\u{0430}nk.example/login"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let request = asks(&user)[0].clone();
+    assert_eq!(request["host"], "xn--bnk-6cd.example", "{request}");
+    let said = inbox_text(&user, "bank-login");
+    assert!(said.contains("xn--bnk-6cd.example"), "{said}");
+}
+
+#[test]
+fn an_ask_for_a_url_login_would_refuse_is_refused() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    let (mcp, _) = root_in(&user);
+
+    for (url, says) in [
+        ("http://intranet.example.test/login", "in clear"),
+        ("ftp://files.example.com/", "no web address"),
+        ("https://*.example.com/login", "no web address"),
+        ("not a url at all", "no web address"),
+    ] {
+        let refused = mcp.call(
+            "vault",
+            json!({"action": "ask", "name": "odd-login", "why": "to sign in", "url": url}),
+        );
+        assert!(refused.error, "{url}: {}", refused.text);
+        assert!(refused.text.starts_with("refused:"), "{}", refused.text);
+        assert!(refused.text.contains(says), "{url}: {}", refused.text);
+    }
+    assert!(asks(&user).is_empty());
+    // This machine over plain http is where a secret may go.
+    let local = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "local-login", "why": "to sign in",
+            "url": "http://localhost:3000/login"}),
+    );
+    assert!(!local.error, "{}", local.text);
+    assert_eq!(asks(&user)[0]["host"], "localhost");
+}
+
+#[test]
+fn an_ask_bound_to_a_missing_connection_is_refused() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    connection(&user, "browser");
+    let (mcp, _) = root_in(&user);
+
+    let refused = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "shop-test", "why": "to sign in to the shop",
+            "url": "https://shop.example.com/login", "for": "connection:nowhere"}),
+    );
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused.text.contains("no connection nowhere"),
+        "{}",
+        refused.text
+    );
+    assert!(asks(&user).is_empty());
+    let asked = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "shop-test", "why": "to sign in to the shop",
+            "url": "https://shop.example.com/login", "for": "connection:browser"}),
+    );
+    assert!(!asked.error, "{}", asked.text);
+}
+
+#[test]
+fn a_connection_entry_on_plain_http_to_another_machine_is_refused_at_save() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    const TYPED: &str = "s3cret-of-the-intranet";
+
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "intranet-test", "secret": TYPED,
+                "url": "http://intranet.example.test/login", "for": "connection:browser"}),
+        )
+        .unwrap_err();
+    for says in ["intranet.example.test", "in clear", "https"] {
+        assert!(refused.contains(says), "{says}: {refused}");
+    }
+    assert!(!refused.contains(TYPED), "{refused}");
+    assert!(
+        user.call("vault.list", json!({})).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // Its https address is kept; replacing it with plain http, the binding kept, is refused too.
+    user.call(
+        "vault.set",
+        json!({"name": "intranet-test", "secret": TYPED,
+            "url": "https://intranet.example.test/login", "for": "connection:browser"}),
+    )
+    .unwrap();
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "intranet-test", "secret": TYPED,
+                "url": "http://intranet.example.test/login"}),
+        )
+        .unwrap_err();
+    assert!(refused.contains("in clear"), "{refused}");
+    assert_eq!(
+        entry_of(&user, "intranet-test")["url"],
+        "https://intranet.example.test/login"
+    );
+    // This machine over plain http, and an entry bound to no connection, are saved.
+    user.call(
+        "vault.set",
+        json!({"name": "local-test", "secret": TYPED, "url": "http://localhost:3000/login",
+            "for": "connection:browser"}),
+    )
+    .unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "plain-test", "secret": TYPED,
+            "url": "http://intranet.example.test/login"}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_ask_of_another_project_does_not_join() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    other_project(&user);
+    // An entry every project sees: the agents of both have the tool.
+    user.call(
+        "vault.set",
+        json!({"name": "deploy-key", "secret": "d3ploy-s3cret-key"}),
+    )
+    .unwrap();
+    let (app, _) = root_in(&user);
+    let (other, theirs) = root_of(&user, "other");
+
+    // A request of the project app alone: another project's agent is told to choose another
+    // name, and learns nothing of it.
+    assert!(!ask(&app, "staging-login", "to sign in to staging").error);
+    let refused = ask(&other, "staging-login", "to sign in to staging too");
+    assert!(refused.error, "{}", refused.text);
+    assert!(refused.text.contains("another name"), "{}", refused.text);
+    assert!(!refused.text.contains("app"), "{}", refused.text);
+    let open = asks(&user);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0]["joined"], json!([]), "{open:?}");
+
+    // A request of every project's is joined by another project's agent...
+    let every = app.call(
+        "vault",
+        json!({"action": "ask", "name": "shared-login", "why": "to sign in",
+            "project": "every"}),
+    );
+    assert!(!every.error, "{}", every.text);
+    let joined = ask(&other, "shared-login", "to sign in too");
+    assert!(!joined.error, "{}", joined.text);
+    assert!(joined.text.contains("joins"), "{}", joined.text);
+    let shared = asks(&user)
+        .into_iter()
+        .find(|ask| ask["name"] == "shared-login")
+        .unwrap();
+    let number = shared["ask"].as_u64().unwrap();
+    let asker = shared["agent"].as_str().unwrap().to_owned();
+
+    // ...but once the user keeps the entry to the project app, only the agents that see it are
+    // told it is set.
+    user.call(
+        "vault.set",
+        json!({"name": "shared-login", "secret": SECRET, "project": "app"}),
+    )
+    .unwrap();
+    let body = told(&user, number, &asker);
+    assert!(body.contains("the user set the vault entry"), "{body}");
+    let theirs = format!("vault-ask-{number}-{theirs}");
+    assert!(
+        store(&user).delivery(&theirs).unwrap().is_none(),
+        "the other project's agent is told of an entry it cannot see"
+    );
+}
+
+#[test]
+fn a_worklog_entry_asked_is_refused_at_save_without_its_username() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    let (mcp, _) = root_in(&user);
+    assert!(!ask(&mcp, "jira-time", "to log time").error);
+
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "jira-time", "secret": SECRET, "project": "app",
+                "for": "worklog:app"}),
+        )
+        .unwrap_err();
+    assert!(refused.contains("username"), "{refused}");
+    assert!(!refused.contains(SECRET), "{refused}");
+    assert_eq!(asks(&user).len(), 1, "still open");
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": SECRET, "username": ACCOUNT, "project": "app",
+            "for": "worklog:app"}),
+    )
+    .unwrap();
+    assert!(asks(&user).is_empty());
+}
+
+#[test]
+fn the_inbox_entry_says_the_host_and_every_project() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    let (mcp, _) = root_in(&user);
+
+    let asked = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "shared-login", "why": "to sign in to staging",
+            "url": "https://staging.example.com:8443/login", "project": "every"}),
+    );
+    assert!(!asked.error, "{}", asked.text);
+    assert!(!ask(&mcp, "app-login", "to sign in to the app").error);
+
+    let every = inbox_text(&user, "shared-login");
+    for says in [
+        "staging.example.com",
+        "every project",
+        "to sign in to staging",
+    ] {
+        assert!(every.contains(says), "{says}: {every}");
+    }
+    assert!(!every.contains("8443"), "{every}");
+    let own = inbox_text(&user, "app-login");
+    assert!(own.contains("the project app"), "{own}");
+    assert!(!own.contains("every project"), "{own}");
 }
