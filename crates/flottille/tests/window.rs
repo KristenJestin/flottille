@@ -1302,7 +1302,10 @@ fn typing_in_the_composer_does_not_redraw_the_page(cx: &mut TestAppContext) {
     for (grown, before) in cards_grown.iter().zip(&cards_before) {
         assert!(grown <= &(before + 1), "{grown} after {before}");
     }
-    assert!(composer_grown <= composer_before + 2);
+    assert!(
+        composer_grown <= composer_before + 2,
+        "DIAG {composer_grown} after {composer_before}"
+    );
     cx.simulate_input(" and every other detail of it");
 
     let field = composer.read_with(cx, |c, cx| c.field().read(cx).value().to_string());
@@ -8249,6 +8252,21 @@ fn reply_open(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<Reply
         .expect("the session's composer")
 }
 
+/// The labels of the chips in the reply's text, in order.
+fn chips_of(reply: &Entity<Reply>, cx: &mut VisualTestContext) -> Vec<String> {
+    reply.read_with(cx, |r, cx| {
+        r.tokens()
+            .read(cx)
+            .value(cx)
+            .into_iter()
+            .filter_map(|piece| match piece {
+                gpui_design_system::Piece::Token(token) => Some(token.look.label.to_string()),
+                gpui_design_system::Piece::Text(_) => None,
+            })
+            .collect()
+    })
+}
+
 /// The names the `/` list offers now.
 fn slash_offered(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
     let reply = reply_open(shell, cx);
@@ -8552,11 +8570,9 @@ fn the_command_list_opens_on_the_word_at_the_cursor(cx: &mut TestAppContext) {
         "the word at the cursor is completed"
     );
     assert_eq!(prompts(&user).len(), sent, "picking sends nothing");
-    // The field cannot colour a range: the command shows as a chip under it.
-    cx.update(|window, _| {
-        assert!(window.try_find("slash-list").is_none());
-        assert!(window.find("reply-command-open-prs").visible());
-    });
+    // The command is a chip in the text, where it was typed (#846).
+    cx.update(|window, _| assert!(window.try_find("slash-list").is_none()));
+    assert_eq!(chips_of(&reply, cx), ["/open-prs"]);
 
     // A word in the middle: the list opens on it, and only it is completed.
     reply.update_in(cx, |r, window, cx| {
@@ -8574,10 +8590,7 @@ fn the_command_list_opens_on_the_word_at_the_cursor(cx: &mut TestAppContext) {
     settle(cx);
     assert_eq!(value(cx), "first /close then the rest");
     assert_eq!(reply.read_with(cx, |r, cx| r.commands_used(cx)), ["close"]);
-    cx.update(|window, _| {
-        assert!(window.find("reply-command-close").visible());
-        assert!(window.try_find("reply-command-open-prs").is_none());
-    });
+    assert_eq!(chips_of(&reply, cx), ["/close"]);
 
     // A word that is not a `/` word at the cursor leaves the list closed.
     reply.update_in(cx, |r, _, cx| r.typed_at("see /usr/bin here", 2, cx));
@@ -8604,7 +8617,7 @@ fn a_message_put_back_in_the_field_shows_its_command_chips_before_a_slash_is_typ
     settle(cx);
 
     assert_eq!(reply.read_with(cx, |r, cx| r.commands_used(cx)), ["close"]);
-    cx.update(|window, _| assert!(window.find("reply-command-close").visible()));
+    assert_eq!(chips_of(&reply, cx), ["/close"]);
 }
 
 #[gpui_kit::test]

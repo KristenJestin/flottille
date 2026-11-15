@@ -242,8 +242,8 @@ fn an_image_pasted_on_the_project_page_shows_its_thumbnail(cx: &mut TestAppConte
     );
     assert_eq!(
         composer.read_with(cx, |c, cx| c.field().read(cx).value().to_string()),
-        "",
-        "the field took no text"
+        "Image 1",
+        "the field took no text, only the picture's chip (#773)"
     );
 }
 
@@ -360,4 +360,63 @@ fn a_picture_for_a_provider_that_takes_none_is_a_toast_on_the_project_page(
         "keep this text"
     );
     settle(cx);
+}
+
+/// #773 in the project page's composer: a picture pasted is a chip where the caret was, and the
+/// first prompt reads it there.
+#[gpui_kit::test]
+fn a_picture_pasted_on_the_project_page_is_a_chip_where_it_was_put(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, composer, cx) = open_atlas(&user, cx);
+
+    type_task("compare ", cx);
+    paste(
+        ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, png_of(8, 8))),
+        cx,
+    );
+    cx.simulate_input(" with the spec");
+    settle(cx);
+    let chips: Vec<String> = composer.read_with(cx, |c, cx| {
+        c.tokens()
+            .read(cx)
+            .value(cx)
+            .into_iter()
+            .map(|piece| match piece {
+                gpui_design_system::Piece::Text(text) => format!("text:{text}"),
+                gpui_design_system::Piece::Token(token) => format!("chip:{}", token.look.label),
+            })
+            .collect()
+    });
+    assert_eq!(
+        chips,
+        ["text:compare ", "chip:Image 1", "text: with the spec"]
+    );
+    assert!(composer.read_with(cx, |c, cx| c.has_chip(0, cx)));
+    cx.update(|window, cx| window.click("send", cx));
+
+    eventually("the agent got its first prompt", || {
+        !user.received_requests("session/prompt").is_empty()
+    });
+    let prompt = user.received_requests("session/prompt")[0]["params"]["prompt"].clone();
+    let kinds: Vec<&str> = prompt
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["text", "image", "text"], "{prompt}");
+    assert!(
+        prompt[0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("compare [Image 1: image.png]"),
+        "{prompt}"
+    );
+    assert!(
+        prompt[2]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with(" with the spec"),
+        "{prompt}"
+    );
 }

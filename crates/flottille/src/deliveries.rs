@@ -439,6 +439,9 @@ pub struct Prompt {
     pub text: String,
     /// Names of files of the agent's folder of images.
     pub images: Vec<String>,
+    /// For each image, the byte of `text` its block goes after: the end of its marker
+    /// (`[Image 1: photo.png]`), where it was put in its message.
+    pub places: Vec<usize>,
     /// For each delivery taken, in order, what was typed and the commands it used (`null` for one
     /// sent as written); `null` when none used a command. The window shows the typed text.
     pub typed: Value,
@@ -508,16 +511,46 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     } else {
         Value::Null
     };
+    let (mut text, mut places) = (String::new(), Vec::new());
+    for (at, delivery) in taken.iter().enumerate() {
+        if at > 0 {
+            text.push_str("\n\n");
+        }
+        let (rendered, ends) = placed(delivery);
+        places.extend(ends.into_iter().map(|end| text.len() + end));
+        text.push_str(&rendered);
+    }
     Some(Prompt {
         deliveries: taken.iter().map(|d| d.id.clone()).collect(),
         images: taken.iter().flat_map(|d| d.images.clone()).collect(),
+        places,
         typed,
-        text: taken
-            .into_iter()
-            .map(render)
-            .collect::<Vec<_>>()
-            .join("\n\n"),
+        text,
     })
+}
+
+/// A delivery as the agent reads it, and where each of its images goes: image `k` after the first
+/// marker numbered `k` (a copy of a marker is text). An image without one (a client that does not
+/// place its pictures, a marker taken out by hand) is marked after the text, and goes there.
+fn placed(delivery: &Delivery) -> (String, Vec<usize>) {
+    use flottille_core::images::{marker, markers};
+    let mut text = render(delivery);
+    if delivery.images.is_empty() {
+        return (text, Vec::new());
+    }
+    let found = markers(&text);
+    let mut ends = Vec::new();
+    for (at, name) in delivery.images.iter().enumerate() {
+        match found.iter().find(|found| found.number == at + 1) {
+            Some(found) => ends.push(found.range.end),
+            None => {
+                text.push_str(if text.ends_with('\n') { "\n" } else { "\n\n" });
+                text.push_str(&marker(at + 1, name));
+                ends.push(text.len());
+            }
+        }
+    }
+    (text, ends)
 }
 
 /// Most images one message carries, and the biggest one: `flottille_core::images` says, so that
@@ -679,6 +712,17 @@ mod tests {
             typed: None,
             commands: Vec::new(),
         }
+    }
+
+    #[test]
+    fn each_image_goes_after_its_marker_and_one_without_after_the_text() {
+        let mut d = delivery("this one [Image 1: a.png] fine, this one [Image 2: b.png] overflows");
+        d.images = vec!["1-0.png".into(), "1-1.png".into(), "1-2.png".into()];
+        let (text, ends) = placed(&d);
+        assert_eq!(text[..ends[0]].rsplit(' ').next(), Some("a.png]"));
+        assert_eq!(&text[ends[1]..ends[1] + 10], " overflows");
+        assert!(text.ends_with("overflows\n\n[Image 3: 1-2.png]"), "{text}");
+        assert_eq!(ends[2], text.len());
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! The vault in Settings (`docs/vault.md`): the user's secrets, kept by the keyring, that agents
 //! use through Flottille's tools and never see. The page lists the entries' metadata; a secret is
 //! typed in a masked field, sent to the daemon (`vault.set`) and cleared from the field at once,
-//! and never shown again: replacing an entry means typing its secret anew. The window writes
-//! nothing itself, and shows the list the daemon gives next.
+//! and never shown again: editing an entry keeps its secret unless a new one is typed. The window
+//! writes nothing itself, and shows the list the daemon gives next.
 
 use std::collections::HashMap;
 
@@ -32,8 +32,10 @@ pub const USAGE: &str = "An agent names an entry; Flottille puts the secret wher
                          project's tracker and a connection pick theirs here.";
 
 /// What the dialog says of the secret, under its field.
-pub const SECRET_HINT: &str = "Kept by your keyring and never shown again, here or anywhere. \
-                               Replacing the entry means typing it again.";
+pub const SECRET_HINT: &str = "Kept by your keyring and never shown again, here or anywhere.";
+
+/// What it says of the secret of an entry that exists.
+pub const KEEP_SECRET_HINT: &str = "Leave empty to keep the current secret";
 
 /// What the form says of an entry of every project, opened from one project's Vault tab.
 pub const EVERY_PROJECT_NOTE: &str = "This entry is every project's: changing it changes it \
@@ -72,7 +74,7 @@ impl VaultEntry {
 #[derive(Clone, Debug, PartialEq)]
 enum Form {
     Closed,
-    /// A new entry, or the one named replaced whole.
+    /// A new entry, or the one named edited.
     Editing(Option<String>),
 }
 
@@ -88,7 +90,7 @@ struct Fields {
 #[derive(Clone, Debug, PartialEq)]
 enum Writing {
     Added(String),
-    Replaced(String),
+    Saved(String),
     Removed(String),
 }
 
@@ -124,6 +126,24 @@ pub struct VaultSection {
     /// The entry the confirmation names, kept while it fades away.
     asked: String,
     _subscriptions: Vec<Subscription>,
+}
+
+/// One `label: value` line of the form's facts, said to the screen reader as one.
+fn line(
+    id: &'static str,
+    label: &'static str,
+    value: SharedString,
+    mute: gpui_kit::Hsla,
+) -> gpui_kit::AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .gap(space::SM)
+        .aria_label(SharedString::from(format!("{label}: {value}")))
+        .child(div().text_color(mute).child(label))
+        .child(div().min_w_0().child(value))
+        .test_support()
+        .into_any_element()
 }
 
 /// An entry's row, as Settings' Vault and a project's Vault tab draw it: its name, its project
@@ -200,6 +220,15 @@ impl VaultSection {
 
     pub fn is_confirming(&self) -> bool {
         self.confirming.is_some()
+    }
+
+    /// The dialog's title, `None` while it is closed.
+    pub fn form_title(&self) -> Option<String> {
+        match &self.form {
+            Form::Closed => None,
+            Form::Editing(Some(name)) => Some(format!("Edit {name}")),
+            Form::Editing(None) => Some("New entry".to_owned()),
+        }
     }
 
     pub fn form_error(&self) -> Option<&str> {
@@ -349,7 +378,7 @@ impl VaultSection {
         }
     }
 
-    /// "Replace": the dialog on the entry's metadata, its secret to type again.
+    /// "Edit": the dialog on the entry's metadata, its secret left empty to keep it.
     pub fn replace(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let entry = self
             .listed
@@ -434,7 +463,7 @@ impl VaultSection {
         cx.notify();
     }
 
-    /// Saves the dialog: a new entry, or the one replaced.
+    /// Saves the dialog: a new entry, or the one edited.
     pub fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Form::Editing(original) = self.form.clone() else {
             return;
@@ -449,14 +478,15 @@ impl VaultSection {
         let name = original.clone().unwrap_or_else(|| value(&fields.name));
         // The secret as typed: spaces may be part of it.
         let secret = fields.secret.read(cx).value().to_string();
-        if name.is_empty() || secret.is_empty() {
+        if name.is_empty() || (original.is_none() && secret.is_empty()) {
             self.form_error = Some("An entry needs a name and a secret.".into());
             cx.notify();
             return;
         }
         let write = VaultWrite::Set {
             name: name.clone(),
-            secret,
+            // An empty one on an entry that exists is the one it has, kept.
+            secret: Some(secret).filter(|secret| !secret.is_empty()),
             description: value(&fields.description),
             url: value(&fields.url),
             username: value(&fields.username),
@@ -464,7 +494,7 @@ impl VaultSection {
             bound: self.bound.clone(),
         };
         let writing = match original {
-            Some(_) => Writing::Replaced(name),
+            Some(_) => Writing::Saved(name),
             None => Writing::Added(name),
         };
         self.clear_secret(window, cx);
@@ -502,9 +532,7 @@ impl VaultSection {
                 let said = match writing {
                     Some(Writing::Added(name)) => Toast::success(format!("Entry {name} added"))
                         .detail("Its secret is in your keyring."),
-                    Some(Writing::Replaced(name)) => {
-                        Toast::success(format!("Entry {name} replaced"))
-                    }
+                    Some(Writing::Saved(name)) => Toast::success(format!("Entry {name} saved")),
                     Some(Writing::Removed(name)) => Toast::success(format!("Entry {name} removed"))
                         .detail("Its secret is gone from your keyring."),
                     None => Toast::success("Vault saved"),
@@ -527,7 +555,7 @@ impl VaultSection {
             let (to_replace, to_remove) = (name.to_owned(), name.to_owned());
             menu.entry(
                 format!("replace-vault-{name}"),
-                "Replace",
+                "Edit",
                 None,
                 move |window, cx| {
                     replace
@@ -643,8 +671,8 @@ impl VaultSection {
             })
     }
 
-    /// What a new entry is bound to, and where its secret goes, said in the dialog, with the way
-    /// to bind it to no use; it folds away once the binding is removed.
+    /// What a new entry is bound to, said in the dialog, with the way to bind it to no use; it
+    /// folds away once the binding is removed.
     fn binding(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let mute = palette(cx).mute;
         let used = self
@@ -652,40 +680,14 @@ impl VaultSection {
             .as_deref()
             .map(|bound| flottille_core::vault::use_said(bound).unwrap_or_else(|| bound.to_owned()))
             .map(SharedString::from);
-        let url = self
-            .fields
-            .as_ref()
-            .map(|fields| fields.url.read(cx).value().trim().to_owned());
-        let host = self
-            .host
-            .clone()
-            .filter(|(_, asked)| url.as_deref() == Some(asked.trim()))
-            .map(|(host, _)| SharedString::from(host));
         let this = cx.entity().downgrade();
         let saving = self.saving;
-        let line = move |id: &'static str, label: &'static str, value: SharedString| {
-            div()
-                .id(id)
-                .flex()
-                .gap(space::SM)
-                .aria_label(SharedString::from(format!("{label}: {value}")))
-                .child(div().text_color(mute).child(label))
-                .child(div().min_w_0().child(value))
-                .test_support()
-                .into_any_element()
-        };
         presence_of("vault-binding-block", used, move |used| {
             div()
                 .id("vault-binding")
                 .flex()
                 .flex_col()
-                .child(line("vault-binding-for", "For", used))
-                .child(
-                    presence_of("vault-binding-host-block", host, move |host| {
-                        line("vault-binding-host", "Goes to", host)
-                    })
-                    .space(space::XS),
-                )
+                .child(line("vault-binding-for", "For", used, mute))
                 .child(spaced(
                     space::SM,
                     Button::quiet("vault-binding-remove", "Remove the binding")
@@ -703,14 +705,31 @@ impl VaultSection {
         .space(space::LG)
     }
 
+    /// Where the secret goes, as the daemon read the URL asked (what a connection's login would
+    /// use), under the URL's field whether the entry is bound or not: the URL's text can read
+    /// like another host. It folds away once the URL is no longer the one asked.
+    fn goes_to(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mute = palette(cx).mute;
+        let url = self
+            .fields
+            .as_ref()
+            .map(|fields| fields.url.read(cx).value().trim().to_owned());
+        let host = self
+            .host
+            .clone()
+            .filter(|(_, asked)| url.as_deref() == Some(asked.trim()))
+            .map(|(host, _)| SharedString::from(host));
+        presence_of("vault-goes-to-block", host, move |host| {
+            line("vault-goes-to", "Goes to", host, mute)
+        })
+        .space(space::XS)
+    }
+
     fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
         let this = cx.entity().downgrade();
         let open = self.form != Form::Closed;
-        let title = match &self.form {
-            Form::Editing(Some(name)) => format!("Replace {name}"),
-            _ => "New entry".to_owned(),
-        };
+        let title = self.form_title().unwrap_or_else(|| "New entry".to_owned());
         let modal = Modal::new("vault-modal", title)
             .open(open)
             .on_close(move |window, cx| {
@@ -721,6 +740,7 @@ impl VaultSection {
         };
         let select = self.project_select(cx);
         let binding = self.binding(cx);
+        let goes_to = self.goes_to(cx);
         let error = problem_line("vault-error", self.form_error.clone(), space::LG, cx);
         let fields = self.fields.as_ref().expect("made when the form opens");
         let description = Field::new(
@@ -759,17 +779,27 @@ impl VaultSection {
                     "Secret",
                     boxed("vault-secret", Input::new(&fields.secret), cx),
                 )
-                .hint(SECRET_HINT),
+                .hint(if original.is_some() {
+                    KEEP_SECRET_HINT
+                } else {
+                    SECRET_HINT
+                }),
             ))
             .child(spaced(space::LG, description))
             .child(spaced(
                 space::LG,
-                Field::new(
-                    "vault-url-field",
-                    "URL",
-                    boxed("vault-url", Input::new(&fields.url), cx),
-                )
-                .optional(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        Field::new(
+                            "vault-url-field",
+                            "URL",
+                            boxed("vault-url", Input::new(&fields.url), cx),
+                        )
+                        .optional(),
+                    )
+                    .child(goes_to),
             ))
             .child(spaced(
                 space::LG,
@@ -821,7 +851,7 @@ impl VaultSection {
             .action(
                 Button::primary(
                     "save-vault-entry",
-                    if original.is_some() { "Replace" } else { "Add" },
+                    if original.is_some() { "Save" } else { "Add" },
                 )
                 .disabled(self.saving)
                 .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),

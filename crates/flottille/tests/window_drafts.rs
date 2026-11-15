@@ -244,7 +244,7 @@ fn the_mark_goes_once_the_draft_is_cleared(cx: &mut TestAppContext) {
 
     // The picture removed: the text still holds the mark.
     open(&a, &shell, cx);
-    reply_of(&shell, &a, cx).update(cx, |reply, cx| reply.detach(0, cx));
+    reply_of(&shell, &a, cx).update_in(cx, |reply, window, cx| reply.detach(0, window, cx));
     open(&b, &shell, cx);
     assert!(marked(&a, cx), "the text is still unsent");
 
