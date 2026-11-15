@@ -8,8 +8,9 @@ app) reads and answers the sessions of every machine of the user. It is the mile
 `v0.4 - Remote` (`docs/design.md` §12, §13).
 
 **Status: the design of v0.4, decided with the maintainer on 2026-11-12, 2026-11-13 and 2026-11-14.** Nothing
-here is built but the keys, and the member list, the invitation code and the four words as data
-and their checks (`crates/flottille-link`), and the hub's state and its rules, without the network
+here is built but the keys, the member list, the invitation code and the four words as data
+and their checks, and the link between two machines with its version check (`crates/flottille-link`,
+`crates/flottille/src/link.rs`), and the hub's state and its rules, without the network
 it will serve on (`crates/flottille-hub`). What is decided is said as such; the defaults taken are in "Defaults taken, to
 confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
@@ -44,8 +45,8 @@ devices does not go through it.
 | Member list | The list of the user's members, each entry signed by the member that added it. Every device keeps a copy and checks every signature itself. |
 | Role | What a member may do, signed when it is added: `runner`, `controller` or `viewer` ("Roles"). |
 | Runner | A member that may run agents: a computer, a headless server. |
-| Hub | `flottille-hub`, the one program the user runs for all their devices, wherever they like: it holds the member list, the invitations and the presence, and relays what cannot go direct. It sees only ciphertext of what it relays, and cannot add a member. |
-| Link | Flottille's encrypted connection between two devices, peer to peer: direct when it can be, through the hub's relay otherwise. |
+| Hub | `flottille-hub`, the one program the user runs for all their devices, wherever they like: it holds the member list, the invitations and the presence, and cannot add a member. It relays nothing ("The transport"). |
+| Link | Flottille's encrypted connection between two devices, peer to peer, at an address the user arranged them to reach each other by. |
 | Invitation | What a member opens to add a device: a token the hub gives, valid 5 minutes, once. |
 | Tunnel | A TCP connection carried over the link, from a client's local port to a run's port on a machine. |
 
@@ -155,7 +156,34 @@ a hole punched through NAT, a tailnet address) and falls back to a relay that se
 the relay can be self-hosted, inside the hub; it runs on Linux, macOS later, and Android; it
 multiplexes streams (requests, events, a git transfer and tunnels at once on one link).
 
-**The candidate is iroh**, to be proved by a spike before anything is built on it (#839). iroh is
+**Decided by the maintainer on 2026-11-15, replacing what follows: Flottille handles no network
+channel.** No relay of any kind, no NAT traversal, no hole punching, no address discovery service.
+Two devices must be able to reach each other, however the user arranges it (a LAN, a VPN, a public
+address, a tunnel of their own): that is the user's business, not Flottille's. An endpoint listens
+on the address it is configured with (`[remote] listen` in `daemon.toml`, an IP address and a port,
+every interface on port 7447 by default), and a device dials the addresses it knows for a key.
+Where this document says the hub relays, it no longer does.
+
+**The transport built** (#811) is QUIC (`quinn`), whose TLS 1.3 runs on the devices' own Ed25519
+keys sent as raw public keys (RFC 7250, `rustls`): the dialler checks the other side holds the very
+key it dialled, the listener reads the key the dialler proved and refuses it unless trusted, with a
+sentence (`refused: this machine's key is not one of the user's`). Both libraries were in the
+lock already, their default features off. iroh, the candidate below, was not kept: its NAT
+traversal cannot be turned off (its QUIC settings enforce a minimum of traversal addresses, and its
+endpoint runs the hole punching), and its relay, DNS and network-watching crates come with it
+whatever is turned off. Only `crates/flottille-link/src/transport.rs` names the libraries: the
+daemon, the clients, the hub and the mobile core see Flottille's types (an endpoint, a link, the
+two kinds of traffic), so that a change of transport changes that file.
+
+On a link, each message goes on a QUIC stream of its own, one JSON frame one way and its answer
+(`{"ok": …}` or `{"refused": "…"}`) the other; the first stream is the version handshake ("The
+version"). The protocol names are `flottille-machine` and `flottille-client`; a message of the
+other kind is refused by the receiver, the link going on (`a machine's message is not taken on a
+client link`).
+
+What was written before the decision, kept for its reasons:
+
+**The candidate was iroh**, to be proved by a spike before anything is built on it (#839). iroh is
 Rust and QUIC; an endpoint's id is its Ed25519 public key; it punches holes; its relay
 (`iroh-relay`) can be embedded in the hub; version 1.0 has official Kotlin bindings and is used on
 Android by Delta Chat and by an app that drives coding agents from a phone. The alternatives weighed:
@@ -174,8 +202,8 @@ address", "a relay", "a stream". The crate that holds it, `flottille-link`, hide
 the daemon, the clients, the hub and the mobile core, so that a later change of transport changes
 one crate. Whatever is chosen is a dependency of weight, said in its pull request.
 
-**Paths.** A device's addresses are what the transport finds (its interfaces, a public address seen
-from outside), plus the addresses the user declares by hand (`flottille remote address add
+**Paths.** A device's addresses are the one its link listens on (its interfaces' when it listens on
+all of them), plus the addresses the user declares by hand (`flottille remote address add
 100.64.0.7`, Settings, Machines): a tailnet address, a DNS name, a forwarded port. Each device tells
 the hub its addresses whenever they change, and the hub tells the other members; members linked to
 each other tell each other too, so that two devices that have linked once can link again without the
@@ -238,7 +266,7 @@ docker compose and a systemd unit. One hub serves one user.
   it.
 - **The addresses** of the members, as they tell it, to help two devices find each other.
 
-**What it relays**: the link's encrypted bytes between two members that cannot reach each other
+**What it relays**: nothing, since 2026-11-15 ("The transport"). Before: the link's encrypted bytes between two members that cannot reach each other
 directly (a phone on 4G and a computer behind a NAT where no hole can be punched), and nothing else.
 It serves only the keys of the member list: a hub on a public address carries only the user's
 traffic. It keeps nothing of what it relays: no message, no queue, no content.
@@ -399,6 +427,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `call` | One of the tree's tools aimed at a session it started: `agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`. Judged as on one machine. |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"). |
+| `addresses` | Every address the sender may be reached at now: kept for it, so that the two link again without the hub ("The transport"). |
 
 Nothing else: no user method, no `approval.approve`, no `agent.mode`, no `agent.send` as the user, no
 change of the member list (those go to the hub, signed by a device). A machine that forwards a
@@ -637,8 +666,8 @@ repository layout and CI by paths. This milestone builds on it.
 
 As everywhere (`AGENTS.md`, "Testing"): no real agent, no real configuration, no real keyring, no
 network but loopback. A hub and two (or three) daemons in one test, each with its own temporary
-`HOME` and XDG folders and its own in-memory keyring, on `127.0.0.1`, with no discovery; the relay
-is tested by blocking the direct path in the test. Fake agents, throwaway repositories. A machine
+`HOME` and XDG folders and its own in-memory keyring, on `127.0.0.1`, with no discovery and no
+relay. Fake agents, throwaway repositories. A machine
 "off" is a daemon stopped and started again on the same folders; a hub "down" the same. The Android
 app is tested with its unit and Compose tests, and on an emulator in CI; the Doze proof is done once
 on a real phone, by hand, and reported.
@@ -680,6 +709,21 @@ on a real phone, by hand, and reported.
 - A launch an agent aims at a runner that cannot take it is refused, naming the runners that could;
   the agent's tool description lists no machine.
 - A notification waits 30 seconds and is dropped when a client had an input in the last 2 minutes.
+
+- The link listens on every interface, port 7447, when `[remote] listen` says nothing; an address
+  declared without a port takes the link's. The machines a daemon trusts, and the addresses it
+  knows them at, are in `remote/peers.json` (`{"machines": [{"name", "key", "addresses"}]}`),
+  which the hub will keep (#820) and a test writes until then; the addresses declared by hand in
+  `remote/addresses.json`. Both are read at every round (each second): the daemon dials each
+  machine it trusts and is not linked to, waiting longer after each failure (5 seconds at most).
+- Two machines linked tell each other their addresses at once, then whenever they change (a
+  machine message `{"machine": {"addresses": […]}}`); the one told keeps them in `peers.json` in
+  place of those it had, 64 at most, so that the two link again without the hub.
+- The version handshake is the first stream of a link: the dialler sends its hello, the other
+  answers its own, and each chooses or refuses by itself; the dialler closes a refused link. A
+  link that hears nothing for 15 seconds is lost (each side says something every 5).
+- Until requests from another machine's clients are served (#813), a `client` link is made and
+  every request on it refused (`requests from another machine's clients are not served yet`).
 
 - A key file holds the 32 bytes of the private key, nothing else; it is made under a temporary
   name with `O_EXCL`, synced, then linked into place, so that two clients making the device key at
@@ -788,7 +832,9 @@ on a real phone, by hand, and reported.
 
 ## Open questions
 
-1. **The transport**: the hub and its relay are decided; iroh is the candidate, to be proved by the
+1. **The transport**: decided on 2026-11-15, QUIC between the devices' keys, with no relay, no NAT
+   traversal and no discovery ("The transport"); what follows is the question as it was:
+   the hub and its relay are decided; iroh is the candidate, to be proved by the
    spike (#839), rust-libp2p the second choice. The design asks only for the needs listed in "The
    transport".
 2. **A headless server's keyring**: sharing vault entries needs one; whether Flottille offers a
