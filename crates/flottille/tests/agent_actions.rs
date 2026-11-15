@@ -463,7 +463,8 @@ fn an_agent_s_workspace_starts_from_the_base_it_names() {
     // The same on agent_launch with new_workspace.
     done(mcp.call(
         "agent_launch",
-        json!({"title": "fix", "brief": "HANG", "new_workspace": "launched", "base": "release"}),
+        json!({"kind": "handed", "title": "fix", "brief": "HANG", "new_workspace": "launched",
+            "base": "release"}),
     ));
     assert_eq!(base_of(&user, "launched", 0)["branch"], "release");
 }
