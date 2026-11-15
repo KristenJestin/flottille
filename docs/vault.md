@@ -142,8 +142,8 @@ an entry to the vault, not a request with rules of its own.
   asked (and an inbox entry, which names the host and whose entry it is, the project's or every
   project's): the entry's name, the host of its URL **on a line of its own** (where the secret
   will go: the agent chose it; the daemon's reading, never the window's), what it is for, its use,
-  its project and the agent's reason, with **Add to the vault** and **Dismiss** (disabled while
-  its call runs). Add to the vault opens Settings, Vault's form of a new entry, prefilled with all
+  its project and the agent's reason, with **New entry** and **Dismiss** (disabled while
+  its call runs). New entry opens Settings, Vault's form of a new entry, prefilled with all
   of it, the agent's reason under what it is for, and what it will be bound to ("For …") with the
   host its secret goes to ("Goes to …", while the URL is the one asked) and **Remove the
   binding**: the user changes any field, types the secret and saves, with the checks of that form

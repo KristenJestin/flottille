@@ -303,7 +303,7 @@ fn the_card_of_a_vault_ask_opens_the_vault_form_prefilled(cx: &mut TestAppContex
     );
     assert_eq!(
         label(format!("row-{at}-vault-ask-add"), cx).as_deref(),
-        Some("Add to the vault")
+        Some("New entry")
     );
     assert_eq!(
         label(format!("row-{at}-vault-ask-dismiss"), cx).as_deref(),

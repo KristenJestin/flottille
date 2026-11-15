@@ -2,7 +2,7 @@
 //! agent needs an entry the vault lacks and asked the user to add it. The card says what was
 //! prefilled (by the agent, or by the feature that names the entry), the host the secret will go
 //! to on its own line (the daemon's reading of the URL, a login's, never the window's), and the
-//! agent's reason. It holds no field: "Add to the vault" opens
+//! agent's reason. It holds no field: "New entry" opens
 //! Settings, Vault's own form of a new entry, prefilled, where the user changes what they want and
 //! types the secret; Dismiss closes the request. It folds away once the daemon says the request
 //! was answered.
@@ -109,16 +109,14 @@ pub fn card(
                 }),
         )
         .child(
-            Button::primary(id("vault-ask-add"), "Add to the vault").on_click(
-                move |_, window, cx| {
-                    let (entry, why, host) = (entry.clone(), why.clone(), host.clone());
-                    shell
-                        .update(cx, |shell, cx| {
-                            shell.add_asked_vault_entry(entry, why, host, window, cx)
-                        })
-                        .ok();
-                },
-            ),
+            Button::primary(id("vault-ask-add"), "New entry").on_click(move |_, window, cx| {
+                let (entry, why, host) = (entry.clone(), why.clone(), host.clone());
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.add_asked_vault_entry(entry, why, host, window, cx)
+                    })
+                    .ok();
+            }),
         );
     let card = Card::new()
         .title(SharedString::from(format!("{me} asks for a vault entry")))
