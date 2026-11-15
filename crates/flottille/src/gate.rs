@@ -641,10 +641,11 @@ pub fn too_long(key: &str, text: &Value) -> Option<Verdict> {
 fn untexted(tool: &str, action: &str, args: &Value, keys: &[&str]) -> Result<(), Verdict> {
     for key in keys {
         if args.get(*key).is_some_and(|text| !text.is_null()) {
-            let takers = match *key {
-                "title" => "edit and create",
-                "comment" => "close and reopen",
-                "message" => "a merge by squash",
+            let takers = match (*key, tool) {
+                ("title", _) => "edit and create",
+                ("comment", _) => "close and reopen",
+                ("message", _) => "a merge by squash",
+                (_, "forge") => "create, comment, edit, reply and review",
                 _ => "create, comment and edit",
             };
             return Err(Verdict::Deny(format!(
