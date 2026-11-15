@@ -803,6 +803,9 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
         env.insert(name.into(), empty.into());
     }
     configure(env, "core.hooksPath", "/dev/null");
+    // The session bus leads to the keyring, where the vault is. The system bus's address is
+    // kept: it holds no secret of the user's, and its socket is at a fixed path anyway.
+    env.remove(&OsString::from("DBUS_SESSION_BUS_ADDRESS"));
     if !lift {
         configure(
             env,
@@ -881,7 +884,9 @@ fn start(
         )
         .stderr(writer)
         .kill_on_drop(true);
-    let spawned = crate::children::spawn(crate::children::in_own_session(&mut command));
+    let spawned = crate::children::spawn(crate::landlock::confined(
+        crate::children::in_own_session(&mut command),
+    ));
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
     let child = spawned.map_err(|e| format!("cannot run {}: {e}", words[0]))?;
@@ -2304,6 +2309,11 @@ mod tests {
             ("GH_TOKEN", "ghp_x"),
             ("GIT_CONFIG_COUNT", "2"),
             ("PATH", "/bin"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+            (
+                "DBUS_SYSTEM_BUS_ADDRESS",
+                "unix:path=/run/dbus/system_bus_socket",
+            ),
         ]
         .into_iter()
         .map(|(k, v)| (k.into(), v.into()))
@@ -2320,6 +2330,11 @@ mod tests {
         assert_eq!(get("GIT_CONFIG_VALUE_2"), "/dev/null");
         assert!(!env.contains_key(&OsString::from("GIT_CONFIG_KEY_3")));
         assert_eq!(get("PATH"), "/bin");
+        assert!(!env.contains_key(&OsString::from("DBUS_SESSION_BUS_ADDRESS")));
+        assert_eq!(
+            get("DBUS_SYSTEM_BUS_ADDRESS"),
+            "unix:path=/run/dbus/system_bus_socket"
+        );
     }
 
     #[test]

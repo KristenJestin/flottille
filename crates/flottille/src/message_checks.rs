@@ -652,7 +652,7 @@ pub(crate) async fn run_check(at: &Where<'_>, line: &str, check: &Check<'_>) -> 
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    let child = crate::children::spawn(&mut command)
+    let child = crate::children::spawn(crate::landlock::confined(&mut command))
         .map_err(|e| not_run(format!("cannot run {}: {e}", words[0])))?;
     // Its whole group goes once it ended, was stopped at its limit, or its call was dropped:
     // `kill_on_drop` alone stops only its first process.

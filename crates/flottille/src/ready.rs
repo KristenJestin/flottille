@@ -200,7 +200,9 @@ fn spawn(
         .stdout(output())
         .stderr(output())
         .kill_on_drop(true);
-    crate::children::spawn(crate::children::in_own_session(&mut command))
+    crate::children::spawn(crate::landlock::confined(crate::children::in_own_session(
+        &mut command,
+    )))
 }
 
 /// Whether the line exits with 0 within the probe's limit; killed past it.
