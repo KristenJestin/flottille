@@ -183,6 +183,10 @@ reaches no session bus:
   links aside, which lead to where their target is ruled). It gets `no_new_privs` with it, so a
   setuid program it starts gains nothing.
 
+The daemon's own runtime folder is denied with the rest: a `flottille daemon stop` run for an
+agent cannot read the daemon's lock, and refuses itself when the daemon does not answer, as a
+client started by an agent does.
+
 The gaps, where the platform does not allow more:
 
 - Landlock denies **connecting** to a socket by its path from its ninth ABI only (the right
@@ -194,7 +198,10 @@ The gaps, where the platform does not allow more:
   not kept out;
 - a process cannot create an entry directly in a folder on the way to a runtime folder (`/`,
   `/run`, `/run/user`): they get no rule of their own, only their entries do; and an entry
-  created there after the process started is denied to it.
+  created there after the process started is denied to it. A rule on such a folder would hold
+  for the runtime folder under it too, since Landlock grants by hierarchy and denies nothing. The
+  user cannot write in these folders anyway; a runtime folder set in one the user writes to (an
+  `XDG_RUNTIME_DIR` in `/tmp`) takes that folder's new entries from what the daemon runs.
 
 ## The tests' keyring
 
