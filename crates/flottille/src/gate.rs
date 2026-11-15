@@ -8012,14 +8012,19 @@ mod tests {
         ] {
             refused_for_the_keys(&fixture, &line);
         }
-        // A wrapper's folder beside the keys: what is read there holds none of them.
+        // A wrapper's folder beside the keys: what is read there holds none of them. (`env`'s
+        // folder in Flottille's own is refused all the same, as a word of a program that may
+        // write.)
         for line in [
             format!("env -C {logs} grep -r x"),
             format!("env -C {logs} grep -r x ."),
             format!("git -C {logs} grep --no-index x"),
         ] {
             let verdict = fixture.run(&line);
-            assert!(!denied(&verdict), "{line}: {verdict:?}");
+            assert!(
+                !matches!(&verdict, Verdict::Deny(why) if why.contains("Flottille's keys")),
+                "{line}: {verdict:?}"
+            );
         }
     }
 
