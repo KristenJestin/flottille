@@ -1380,3 +1380,42 @@ fn the_search_filters_by_key_and_title(cx: &mut TestAppContext) {
     assert_eq!(keys(&items, cx).len(), 40);
     assert_eq!(label(cx, "project-items-count").as_deref(), Some("40 open"));
 }
+
+/// How far below the title the description of an item that shows no fact starts, as the detail
+/// drew it before blocks held their own space (`origin/dev`, #884).
+const DESCRIPTION_BELOW_TITLE: f32 = 60.;
+
+#[gpui_kit::test]
+fn a_detail_that_shows_no_fact_keeps_its_description_where_it_was(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    let mut ticket = issue(5, "Users cannot sign in", "OPEN", OLD);
+    ticket["body"] = json!("They land on a blank page.");
+    ticket["author"] = Value::Null;
+    ticket["assignees"] = json!([]);
+    user.gh_script(json!({
+        "user": {"login": "someone"},
+        "issues": {"acme/api": {"5": ticket}}
+    }));
+    declare(&user, &["api"], true);
+    refresh(&user);
+    let (shell, items, cx) = open_page(&user, cx);
+    click(cx, "project-tabs-tickets");
+    // Nobody's ticket is listed with mine only off.
+    click(cx, "project-items-mine");
+    settle(cx);
+
+    open_detail(&shell, &items, cx, "5");
+
+    assert!(!present(cx, "item-detail-author"));
+    assert!(!present(cx, "item-detail-assignees"));
+    assert!(!present(cx, "item-detail-branches"));
+    assert!(!present(cx, "item-detail-labels"));
+    let below =
+        bounds(cx, "item-detail-description").top() - bounds(cx, "item-detail-title").bottom();
+    assert_eq!(
+        f32::from(below),
+        DESCRIPTION_BELOW_TITLE,
+        "an empty column of facts takes no room: the description starts where it did"
+    );
+}

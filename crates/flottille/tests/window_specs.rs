@@ -1350,3 +1350,36 @@ fn the_guard_waits_for_a_spec_written_after_the_list_opened(cx: &mut TestAppCont
         .unwrap();
     guard::assert_stays_inside(&shell, cx, format!("spec-{late}"));
 }
+
+/// What `spec-sessions` is taller than its header and its sentence, with no session to list, as
+/// the page drew it before blocks held their own space (`origin/dev`, #884).
+const EMPTY_SESSIONS_BELOW_SENTENCE: f32 = 0.;
+
+#[gpui_kit::test]
+fn a_sessions_section_with_no_session_ends_under_its_sentence(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    let (spec, _writer, _mcp) = new_spec(&user);
+    let connection = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+        .execute(
+            "UPDATE ext_specs_specs SET writer = NULL WHERE id = ?1",
+            [spec],
+        )
+        .unwrap();
+
+    let (shell, cx) = window(&user, cx);
+    open_spec(&shell, cx, spec);
+    at_rest(cx);
+
+    assert!(!found(cx, "spec-sessions-list"), "no session to list");
+    let below =
+        bounds(cx, "spec-sessions-box").bottom() - bounds(cx, "spec-sessions-sentence").bottom();
+    assert_eq!(
+        f32::from(below),
+        EMPTY_SESSIONS_BELOW_SENTENCE,
+        "blocks that are all folded take no room in their section"
+    );
+}
