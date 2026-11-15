@@ -949,7 +949,7 @@ fn a_creation_allowed_after_a_restart_is_checked_against_its_card() {
 }
 
 /// What the fake `acli` answers of a work item of `ABC` in the version `version`.
-fn work_item(key: &str, version: &str) -> Value {
+fn version_item(key: &str, version: &str) -> Value {
     json!({"key": key, "self": format!("https://{SITE}/rest/api/3/issue/1"),
         "fields": {"summary": format!("Work {key}"),
             "status": {"name": "Building", "statusCategory": {"key": "indeterminate"}},
@@ -965,8 +965,8 @@ fn two_unreleased_versions() -> Value {
             {"id": "10002", "name": "2.5", "released": false, "releaseDate": "2026-12-20"}
         ]},
         "items": {
-            "ABC-1": work_item("ABC-1", "2.4"),
-            "ABC-2": work_item("ABC-2", "2.5"),
+            "ABC-1": version_item("ABC-1", "2.4"),
+            "ABC-2": version_item("ABC-2", "2.5"),
         }
     })
 }
