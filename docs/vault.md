@@ -35,6 +35,15 @@ its entries under the old name, seen by no agent, until they are set again with 
 project removed and added again under the same name sees them again. The window keeps naming an
 entry's project when no project of that name exists.
 
+An entry's `url` binds it to a site, and only the host of that site counts: the port and the path
+are left out, so `https://app.example.test:8443/api` binds the host `app.example.test`, and so does
+`https://app.example.test/`. The scheme is not compared, but it decides whether there is a host at
+all: `https`, or `http` on this machine, does; `http` to any other host does not. A subdomain is
+another host (`api.app.example.test` is not `app.example.test`). For a connection an agent proposes,
+a header takes an entry only on its host (`docs/extensions.md`, "Connections"), so two services on
+the same host can both be given the same entry, whatever their ports and paths: the binding does not
+tell them apart. The user's own form binds an entry to any host.
+
 ## Bound to one use
 
 An entry made for one precise feature is that feature's alone. `for` names it:
