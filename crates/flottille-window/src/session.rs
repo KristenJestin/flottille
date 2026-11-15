@@ -527,7 +527,7 @@ impl SessionPage {
 
     /// What the root's events say of its prompt cache: expired, the composer offers to compact
     /// before sending, until a turn starts or the agent is compacted.
-    fn cache_news(&mut self, event: &flottille_core::protocol::Event, cx: &mut Context<Self>) {
+    fn cache_news(&mut self, event: &flottille_protocol::Event, cx: &mut Context<Self>) {
         if event.data["agent"].as_str() != Some(self.opened.id.as_str()) {
             return;
         }
@@ -543,7 +543,7 @@ impl SessionPage {
 
     /// What the root's events say of the messages being sent: one taken back leaves, one that
     /// will never be read (its agent ended) stays, refused with why.
-    fn sending_left(&mut self, event: &flottille_core::protocol::Event, cx: &mut Context<Self>) {
+    fn sending_left(&mut self, event: &flottille_protocol::Event, cx: &mut Context<Self>) {
         let data = &event.data;
         let reason = data["reason"].as_str().unwrap_or_default();
         let ids = || -> Vec<String> {
@@ -1465,7 +1465,7 @@ impl SessionPage {
     }
 
     /// A decision on a request, read from the shown agent's events.
-    fn note_decision(&mut self, event: &flottille_core::protocol::Event) {
+    fn note_decision(&mut self, event: &flottille_protocol::Event) {
         let decision = match event.name.as_str() {
             "approval.decided" => event.data["decision"].as_str(),
             "approval.cancelled" => Some("cancelled"),
@@ -2411,7 +2411,7 @@ impl SessionPage {
 
 /// What a link read of the shown agent's conversation, to make its rows again.
 struct Read<'a> {
-    events: &'a [flottille_core::protocol::Event],
+    events: &'a [flottille_protocol::Event],
     /// Older events were left out.
     earlier: bool,
     /// The requests that reached the user, each `(when it was asked, its number)`.

@@ -5,13 +5,13 @@
 //! [`Update`]s; it never waits on the socket.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use flottille_core::protocol::{Event, Message, Request};
+use flottille_client::Connection;
+use flottille_protocol::Event;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
@@ -334,7 +334,7 @@ fn follow(
                     reads.start(connect, updates);
                 }
                 // Events that came while it read are queued: they make it stale again.
-                while let Some(event) = conn.queued.pop() {
+                while let Some(event) = conn.queued() {
                     mark(&event, &mut stale, &mut providers);
                 }
             }
@@ -650,13 +650,7 @@ fn needing_the_user(conn: &mut Conn) -> Result<(HashSet<String>, Questions)> {
 
 /// One connection: requests answered in turn, events kept aside meanwhile.
 pub(crate) struct Conn {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
-    next_id: u64,
-    /// The start of a line a timeout cut short, kept as bytes: a cut can fall inside a character.
-    partial: Vec<u8>,
-    /// Events that came while a request waited for its answer, the newest first.
-    queued: Vec<Event>,
+    link: Connection<UnixStream>,
     /// Where the link's own connection says when it asked what it waits for (`Seen::asking`).
     asking: Option<Arc<AtomicU64>>,
 }
@@ -665,11 +659,7 @@ impl Conn {
     pub(crate) fn new(stream: UnixStream) -> std::io::Result<Conn> {
         stream.set_read_timeout(None)?;
         Ok(Conn {
-            reader: BufReader::new(stream.try_clone()?),
-            writer: stream,
-            next_id: 1,
-            partial: Vec::new(),
-            queued: Vec::new(),
+            link: Connection::new(stream),
             asking: None,
         })
     }
@@ -698,19 +688,19 @@ impl Conn {
         params: Value,
         bound: Duration,
     ) -> Result<std::result::Result<Value, String>> {
-        self.ask_until(method, params, Some((Instant::now() + bound, bound)))
+        self.ask_until(method, params, Some(bound))
     }
 
     fn ask_until(
         &mut self,
         method: &str,
         params: Value,
-        deadline: Option<(Instant, Duration)>,
+        bound: Option<Duration>,
     ) -> Result<std::result::Result<Value, String>> {
         if let Some(asking) = &self.asking {
             asking.store(now_ms(), Ordering::SeqCst);
         }
-        let answer = self.answer_of(method, params, deadline);
+        let answer = self.answer_of(method, params, bound);
         if let Some(asking) = &self.asking {
             asking.store(0, Ordering::SeqCst);
         }
@@ -721,10 +711,8 @@ impl Conn {
         &mut self,
         method: &str,
         params: Value,
-        deadline: Option<(Instant, Duration)>,
+        bound: Option<Duration>,
     ) -> Result<std::result::Result<Value, String>> {
-        let id = self.next_id.to_string();
-        self.next_id += 1;
         let params = match params {
             Value::Object(mut map) => {
                 map.retain(|_, value| !value.is_null());
@@ -732,89 +720,40 @@ impl Conn {
             }
             other => other,
         };
-        let request = Request {
-            id: id.clone(),
-            method: method.to_owned(),
-            params,
+        let answer = match bound {
+            None => self.link.ask(method, params),
+            Some(bound) => self.link.ask_within(method, params, bound),
         };
-        let mut line = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-        line.push('\n');
-        self.writer
-            .write_all(line.as_bytes())
-            .map_err(|e| format!("the link to Flottille: {e}"))?;
-        loop {
-            let message = match deadline {
-                None => self.read(None)?.ok_or("Flottille closed the connection")?,
-                Some((at, bound)) => {
-                    let left = at.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        return Err(format!(
-                            "Flottille did not answer {method} within {}",
-                            spoken(bound)
-                        ));
-                    }
-                    match self.read(Some(left))? {
-                        Some(message) => message,
-                        None => continue,
-                    }
-                }
-            };
-            if let Some(event) = message.event {
-                self.queued.insert(0, event);
-                continue;
-            }
-            if message.id.as_deref() != Some(&id) {
-                continue;
-            }
-            if let Some(error) = message.error {
-                return Ok(Err(error.message));
-            }
-            return Ok(Ok(message.result.unwrap_or(Value::Null)));
+        match answer {
+            Ok(answer) => Ok(answer.map_err(|error| error.message)),
+            Err(flottille_client::Error::TimedOut) => Err(format!(
+                "Flottille did not answer {method} within {}",
+                spoken(bound.unwrap_or_default())
+            )),
+            Err(error) => Err(said(error)),
         }
     }
 
     /// The next event, waiting at most `wait` (`None`: as long as it takes); `None` when none
     /// came in time.
     pub(crate) fn next_event(&mut self, wait: Option<Duration>) -> Result<Option<Event>> {
-        if let Some(event) = self.queued.pop() {
-            return Ok(Some(event));
-        }
-        let deadline = wait.map(|wait| Instant::now() + wait);
-        loop {
-            let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-            if left == Some(Duration::ZERO) {
-                return Ok(None);
-            }
-            match self.read(left)? {
-                Some(Message {
-                    event: Some(event), ..
-                }) => return Ok(Some(event)),
-                Some(_) => {}
-                None if left.is_some() => return Ok(None),
-                None => return Err("Flottille closed the connection".into()),
-            }
-        }
+        self.link.next_event(wait).map_err(said)
     }
 
-    /// The next message; `None` at the end of the stream, or when `wait` ran out.
-    fn read(&mut self, wait: Option<Duration>) -> Result<Option<Message>> {
-        self.writer
-            .set_read_timeout(wait)
-            .map_err(|e| e.to_string())?;
-        let read = self.reader.read_until(b'\n', &mut self.partial);
-        let _ = self.writer.set_read_timeout(None);
-        match read {
-            Ok(0) if wait.is_some() => Err("Flottille closed the connection".into()),
-            Ok(0) => Ok(None),
-            Ok(_) if !self.partial.ends_with(b"\n") => Ok(None),
-            Ok(_) => {
-                let line = std::mem::take(&mut self.partial);
-                serde_json::from_slice(&line)
-                    .map(Some)
-                    .map_err(|e| format!("Flottille sent a line that is not a message: {e}"))
-            }
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => Ok(None),
-            Err(e) => Err(format!("the link to Flottille: {e}")),
+    /// The next event that came while a request waited for its answer, without reading.
+    fn queued(&mut self) -> Option<Event> {
+        self.link.queued()
+    }
+}
+
+/// What went wrong with the connection, as the window says it.
+fn said(error: flottille_client::Error) -> String {
+    match error {
+        flottille_client::Error::Io(error) => format!("the link to Flottille: {error}"),
+        flottille_client::Error::Closed => "Flottille closed the connection".into(),
+        flottille_client::Error::TimedOut => "Flottille did not answer in time".into(),
+        flottille_client::Error::NotAMessage(error) => {
+            format!("Flottille sent a line that is not a message: {error}")
         }
     }
 }

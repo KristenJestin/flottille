@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 use flottille_core::paths::Paths;
+use flottille_core::protocol::WatchParams;
 use serde_json::{Map, Value, json};
 
 use crate::client::Client;
@@ -271,7 +272,7 @@ const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(310);
 /// daemon to say how it ended. The events are watched before it begins: none is missed.
 fn login(paths: &Paths, name: &str, no_browser: bool) -> Result<ExitCode> {
     let mut watcher = Client::connect_or_start(paths)?;
-    watcher.request("events.watch", json!({}))?;
+    watcher.watch(WatchParams::default())?;
     let mut client = Client::connect_or_start(paths)?;
     let answer = client.request("connection.login", json!({"name": name}))?;
     let url = answer["url"].as_str().ok_or("the daemon gave no address")?;
