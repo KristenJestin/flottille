@@ -224,6 +224,9 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
         && std::env::var_os("FLOTTILLE_TEST_HOLD").is_some()
     {
         let asked: Advance = serde_json::from_value(params)?;
+        // Said before it holds, with no await between: once a test reads it, the runtime runs
+        // nothing else, not even an accept.
+        eprintln!("flottille daemon: test.hold: the runtime is held");
         daemon.hold_store(Duration::from_millis(asked.ms));
         return Ok(json!({}));
     }
