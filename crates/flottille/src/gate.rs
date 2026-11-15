@@ -8169,12 +8169,37 @@ mod tests {
         assert!(!why.contains("fake-login-bytes"), "{line}: {why}");
     }
 
+    /// Every login's place of the home, each with invented bytes: a file where the place is one,
+    /// a file in it where it is a folder.
+    fn with_every_login(home: &Path) -> Vec<&'static str> {
+        const FILES: [&str; 7] = [
+            ".docker/config.json",
+            ".netrc",
+            ".npmrc",
+            ".pypirc",
+            ".git-credentials",
+            ".claude.json",
+            ".mcp.json",
+        ];
+        let places: Vec<&str> = SENSITIVE.iter().chain(&AGENT_FOLDERS).copied().collect();
+        for place in &places {
+            let path = home.join(place);
+            let file = if FILES.contains(place) {
+                path
+            } else {
+                path.join("login")
+            };
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "fake-login-bytes\n").unwrap();
+        }
+        places
+    }
+
     #[test]
     fn a_recursive_read_of_a_folder_that_holds_a_login_s_place_is_refused() {
         let fixture = Fixture::workspace();
         let home = fixture.grant.place.home.clone().unwrap();
-        with_logins(&home);
-        for (place, _) in FAKE_LOGINS {
+        for place in with_every_login(&home) {
             let parent = home.join(place).parent().unwrap().to_owned();
             let p = parent.display();
             for line in [

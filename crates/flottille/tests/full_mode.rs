@@ -1470,12 +1470,28 @@ fn a_workspace_setup_line_that_writes_an_agent_folder_is_put_back_and_told() {
     assert!(text.contains(".claude/settings.json"), "{text}");
 }
 
-/// Fake logins in the throwaway home, invented bytes: their places, and the file in each.
-const LOGINS: [(&str, &str); 4] = [
-    (".ssh", "id_ed25519"),
-    (".aws", "credentials"),
-    (".config/gh", "hosts.yml"),
-    (".claude", ".credentials.json"),
+/// Every login's place of the home (the gate's `SENSITIVE` and the agents' folders), and whether
+/// it is a file rather than a folder.
+const LOGINS: [(&str, bool); 19] = [
+    (".ssh", false),
+    (".gnupg", false),
+    (".aws", false),
+    (".azure", false),
+    (".config/gcloud", false),
+    (".kube", false),
+    (".docker/config.json", true),
+    (".config/gh", false),
+    (".netrc", true),
+    (".npmrc", true),
+    (".pypirc", true),
+    (".git-credentials", true),
+    (".local/share/keyrings", false),
+    ("Library/Keychains", false),
+    (".local/share/opencode", false),
+    (".claude", false),
+    (".claude.json", true),
+    (".codex", false),
+    (".mcp.json", true),
 ];
 
 #[test]
@@ -1485,10 +1501,11 @@ fn a_recursive_read_of_a_folder_holding_a_login_s_place_is_refused_in_every_mode
         .with_fake_escalation();
     let (id, mcp, _) = session(&user);
     let home = user.path("home");
-    for (place, file) in LOGINS {
-        let folder = home.join(place);
-        std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(folder.join(file), format!("fake-login-{file}\n")).unwrap();
+    for (place, is_file) in LOGINS {
+        let path = home.join(place);
+        let file = if is_file { path } else { path.join("login") };
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "fake-login-bytes\n").unwrap();
     }
 
     for mode in ["ask", "auto", "full"] {
