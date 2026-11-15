@@ -301,6 +301,11 @@ impl Attachments {
                 if let Some(at) = self.images.iter().position(|a| a.id == id) {
                     self.gone.push(self.images.remove(at));
                     cx.notify();
+                    // The text's change may have come before its picture left (an undo, a redo,
+                    // a cut): the chips after it are numbered again now.
+                    if let Some(field) = self.field.clone() {
+                        self.follow_chips(&field, cx);
+                    }
                 }
             }
             TokenEvent::Added(id) => {
