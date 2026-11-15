@@ -1293,7 +1293,11 @@ way in:
   agent's request sets no `sites`), and **part of what trust is given to**, as the command and
   the variables are: the user's own edit (`connection edit`, the window) stops the running server
   at once and is given again at once by the rule of an edit, the next start writing the new list,
-  while an edit of `sites` made in the file waits for its review. The file is written when
+  while an edit of `sites` made in the file waits for its review. **One list serves every entry
+  bound to the connection**, the entries' hosts and the `sites` alike: a host one entry's sign-in
+  needs is allowed in the login of every other, so the password of an entry whose site redirects
+  to another entry's sign-on host reaches that host. Entries whose sign-ins must not share their
+  hosts go in connections of their own. The file is written when
   a login runs, and tool calls read it when they run: an entry bound after the server started is
   in the list from the next of either. **An entry whose URL host holds a comma, a `*`, a space or
   starts with `-` is no usable site** (agent-browser reads the list by commas and `*` as a
