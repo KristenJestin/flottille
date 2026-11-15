@@ -721,14 +721,18 @@ on a real phone, by hand, and reported.
   socket until it dials, and links to every machine that listens. Reversible: listening on
   `0.0.0.0:7447` by default again is one line. An address declared without a port takes the link's,
   7447 when it listens nowhere. A link that came in is asked to prove its address (a QUIC retry),
-  takes at most 5 seconds to finish its TLS, 16 at once, each apart, so that one that stalls holds
-  no other back. The machines a daemon trusts, and the addresses it knows them at, are in
-  `remote/peers.json` (`{"machines": [{"name", "key", "addresses", "told"}]}`),
+  takes at most 5 seconds to finish its TLS, 16 at once and 2 from one host (an IPv4 address, an
+  IPv6 /64), each apart; one that finds no place free is refused at once, and dials again, so that
+  a host that stalls its handshakes holds no other back. Whether a key is trusted is said after its
+  TLS, so that the other side is told why it is refused, by the peers' file as last read (read
+  again only when it changed since); a key refused is said in the log once a minute at most. The
+  machines a daemon trusts, and the addresses it knows them at, are in `remote/peers.json` (`{"machines": [{"name", "key", "addresses", "told"}]}`),
   which the hub will keep (#820) and a test writes until then; the addresses declared by hand in
   `remote/addresses.json`. Both are read at every round (each second): the daemon dials each
   machine it trusts and is not linked to, waiting longer after each failure (5 seconds at most).
   A file caught half written, or broken by hand, leaves the last one read whole in use (said once
-  in the log), and a told address is not written over it.
+  in the log), and a told address is not written over it, nor over a file another hand changed
+  while it was being updated (read again, once).
 - Two machines that dial each other at once each hold two links: both keep the one the machine of
   the lower key dialled, and close the other (`linked already`).
 - Two machines linked tell each other their addresses at once, then whenever they change (a
