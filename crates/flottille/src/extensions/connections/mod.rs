@@ -127,6 +127,9 @@ const DESCRIPTION_CHARS: usize = 1_200;
 const HELP_CHARS: usize = 4_000;
 /// The longest server name or version a cut-off says.
 const SERVER_CHARS: usize = 100;
+/// The longest why a server could not start a connection says: its exit and the last lines of
+/// its error output, each cut at `SERVER_CHARS`.
+const START_CHARS: usize = 400;
 /// What `help` with `for` names for the server's instructions: no action is named so.
 const INSTRUCTIONS: &str = "@instructions";
 /// The action answered by Flottille from the pin, never by the server.
@@ -582,8 +585,13 @@ impl Listing {
 /// A server's own words where the daemon says them in a line (a cut-off, why it failed, its
 /// log), already masked: cut at `SERVER_CHARS`.
 fn short(text: &str) -> String {
-    match text.chars().count() > SERVER_CHARS {
-        true => format!("{}…", text.chars().take(SERVER_CHARS).collect::<String>()),
+    short_to(text, SERVER_CHARS)
+}
+
+/// `text` cut at `limit` characters.
+fn short_to(text: &str, limit: usize) -> String {
+    match text.chars().count() > limit {
+        true => format!("{}…", text.chars().take(limit).collect::<String>()),
         false => text.to_owned(),
     }
 }

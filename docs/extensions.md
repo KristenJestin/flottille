@@ -948,8 +948,12 @@ Calls to one connection run one at a time, in order: a browser or a desktop has 
 has 120 seconds, then it is cancelled and answers `the call failed: …`. The server starts at the
 first call, stays while a session of any project runs and for ten minutes after, and its whole
 process group is stopped then, with the daemon, and when the connection is turned off. A server that
-fails to start answers `the call failed: the connection could not start: <the first line of its
-error output, masked>`, and is tried again at the next call, never in the background.
+fails to start answers `the call failed: the connection could not start: <what happened to it>`,
+and is tried again at the next call, never in the background. What happened is how its process
+ended (`the server exited with 2`, `the server was killed by signal 9`, `the server closed its
+streams but is still running`, `it did not answer within 30 seconds`, or the program not found as
+the system says it) and the last three lines of its error output, masked, each cut at 100
+characters, the whole at 400.
 
 **The server's `instructions`** (the text of its MCP `initialize` result, which many servers use to
 say how to use them) are a third party's text like the actions' descriptions, and are kept with
@@ -1173,8 +1177,8 @@ instructions and the texts of the actions it announces too (a server may echo wh
 with): they are masked before they are pinned, stored or shown. A server's
 own words in a failure (an error result, a JSON-RPC error, its first error line) are framed as a
 result is, and a cut-off says its name and version masked and cut at 100 characters. So is why it
-failed to start (its first error line, or the error), in `failing`, `connection.changed` and the
-review's error, and why its tools could not be listed, in the daemon's log: masked first, then cut,
+failed to start (how it ended and the last lines of its error output, or the error), in `failing`,
+`connection.changed` and the review's error, and why its tools could not be listed, in the daemon's log: masked first, then cut,
 so that no secret is cut in two.
 
 **As built (#851).** One function, `pin_at_once`, runs `connection.review` and then
