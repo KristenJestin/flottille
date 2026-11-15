@@ -1525,7 +1525,7 @@ Each method answers `not-found` when the agent does not exist.
 
 #### `agent.start`
 
-`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "gate_mode"?, "role"?, "message", "images"?}`.
+`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "gate_mode"?, "role"?, "message", "images"?, "texts"?}`.
 Creates a root agent in the project folder or the workspace, and gives it its first message:
 `{"agent", "after"}`. `gate_mode` is the session's mode (`ask`, `auto` or `full`, `docs/design.md`
 §7.1), `auto` when left out: it is the root's before its first message is given, so that the
@@ -1556,7 +1556,7 @@ A message `/name rest`, where name is one of the project's commands, is sent as 
 
 #### `agent.send`
 
-`{"agent", "message", "images"?, "compact"?}`. Gives the agent a message (a `user` delivery), played after the turn that
+`{"agent", "message", "images"?, "texts"?, "compact"?}`. Gives the agent a message (a `user` delivery), played after the turn that
 runs if one does, starting its process again when it was released: `{"agent", "after",
 "delivery"}`. `delivery` is the id of the delivery stored for the message: its `delivery.queued`
 event (numbered after `after`), then `delivery.sent` when a prompt takes it (`docs/events.md`), name
@@ -1594,6 +1594,18 @@ agent turns out to take no images, none is sent and the text of the turn ends wi
 `[image <name> is missing]` in the text. Merged queued messages make one prompt of 20 images and
 10 MiB at most (the first message is always whole); the others wait for the next turn. The
 images of an agent go with it: when it ends for good, or 7 days after a root that can be resumed.
+
+`texts` is a list of `{"name", "text"}`: a long text pasted in the window's composer (more than
+4,000 characters or more than 80 lines), attached as a file instead of filling the message. The
+message marks each one by `[Pasted text N: <name>]`, `N` counted from 1 in the message (the k-th
+text takes the first marker numbered k; a text without one is marked after the text). The daemon
+masks the text as it masks every delivered text, writes it whole, never cut, as
+`<stamp>-text-<n>.txt` in the agent's folder beside its images, and says in the message, in the
+marker's place, where the agent reads it with its own read tool: `[Pasted text N: <name> · <bytes>
+bytes · read it at <path>]` (the `delivery` and the `agent.prompted` event keep the message so).
+A message carries 20 texts at most, 5 MiB each (`refused` for more, an empty text, or one too
+big); a text with no marker is marked after the message; with texts, the message may be empty. The
+files go with the images of the agent. `agent.start` takes `texts` as it takes `images`.
 
 #### `agent.answer`
 
@@ -1636,7 +1648,8 @@ waiting messages, which stay queued in their order. Refused and not found as `ag
 #### `agent.image`
 
 `{"agent", "name"}`. An image of the agent's, by a name `agent.prompted` gave: `{"mime", "data"}`.
-`not-found` when there is none.
+`not-found` when there is none. A pasted text of the agent's (`agent.send`, `texts`) is given the
+same way, by the file name its marker ends in: `{"mime": "text/plain", "data"}`.
 
 #### `agent.cancel`
 
