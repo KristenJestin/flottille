@@ -377,14 +377,15 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
              without masking ordinary words"
         )));
     }
-    if let Some(project) = &asked.project {
-        crate::projects::load_project(daemon, project)?;
-    }
     let given = |text: Option<String>| {
         text.map(|text| text.trim().to_owned())
             .filter(|t| !t.is_empty())
     };
+    // Trimmed first: an empty project is every project's, which no project has to load.
     let project = given(asked.project);
+    if let Some(project) = &project {
+        crate::projects::load_project(daemon, project)?;
+    }
     let existing = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
