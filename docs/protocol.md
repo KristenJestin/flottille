@@ -784,6 +784,10 @@ and the findings it delivers are told to the session (`docs/tools.md`, "Review")
   check's own instructions, which that check's agent reads after the shared guidance, in a block of
   its own. A check's instructions that cannot be read whole fail that check alone: `run_pass`
   refuses it, saying it did not run and naming the file, never its content.
+- `autosubscriptions.events {project}`: `{"project", "subjects": {"created_pull",
+  "branch_pull", "ticket"}}`, the events each subject of the automatic subscriptions subscribes a
+  session of the project to now, Settings' value or the project's own; each empty while they are
+  off there (`docs/extensions.md`, "Automatic subscriptions").
 
 ### The appearance methods
 

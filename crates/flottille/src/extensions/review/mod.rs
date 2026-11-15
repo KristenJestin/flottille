@@ -1214,20 +1214,22 @@ fn pull_opened(daemon: &Arc<Daemon>, data: &Value) {
         kind: Some("pull".to_owned()),
         ..Default::default()
     };
-    let Some(head) = daemon
+    let Some(pull) = daemon
         .read(|store| store.items(project, &filter))
         .ok()
         .into_iter()
         .flatten()
         .find(|pull| pull.key == key && data["repository"] == pull.repository.as_str())
-        .and_then(|pull| pull.details["head"].as_str().map(str::to_owned))
     else {
         return;
     };
     let Ok(workspaces) = daemon.read(|store| store.workspaces(Some(project))) else {
         return;
     };
-    let Some(workspace) = workspaces.into_iter().find(|w| w.branch == head) else {
+    let Some(workspace) = crate::forge::workspaces_of(&pull, workspaces)
+        .into_iter()
+        .next()
+    else {
         return;
     };
     let sessions: Vec<Agent> = daemon

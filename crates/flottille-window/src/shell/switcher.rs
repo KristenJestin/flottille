@@ -808,6 +808,11 @@ impl Render for Switcher {
             self.list.sync(items, at, reduce);
             if let Some(key) = self.scroll_to.take() {
                 self.bring_into_sight(&key);
+                // Rows that left still fold away above it: its place moves until they are gone,
+                // so it is brought into sight again at each frame until then.
+                if self.list.rows().any(|row| row.placement.is_gone()) {
+                    self.scroll_to = Some(key);
+                }
             }
         }
         let this = cx.entity().downgrade();

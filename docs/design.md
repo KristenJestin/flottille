@@ -421,8 +421,12 @@ review) subscribes to it instead of reading again and again. Four parts, each it
 - **A subscription** is (agent, source, target, the events chosen, whose events count, a
   deadline when the agent gave one), stored, so that it survives a restart of the daemon; nothing that happened meanwhile
   is lost, since the next round compares with what the store kept
-  (`crates/flottille/src/subscriptions.rs`). The agent subscribes itself (`forge` `subscribe`,
-  `tickets` `subscribe`, `wake`, `docs/tools.md`); nothing subscribes it.
+  (`crates/flottille/src/subscriptions.rs`). What subscribes an agent is the agent itself
+  (`forge` `subscribe`, `tickets` `subscribe`, `wake`, `docs/tools.md`), or, for a session, the
+  automatic subscriptions the user set in Settings and per project (`docs/extensions.md`,
+  "Automatic subscriptions"): a pull request it opens, its own opened another way, the ticket it
+  works on, each with the events chosen, from people only, said where it starts; a `subscribe` of
+  its own replaces one. Nothing else subscribes it, and never a child nor an extension's agent.
 - **Until the target ends.** Each read that holds events the subscription waits for is
   delivered, every such event of that read in one delivery, and the subscription goes on: the
   agent subscribes once, and never renews it nor adds a timed wake "as a safety net". Since it
