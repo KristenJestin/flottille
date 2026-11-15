@@ -1272,9 +1272,10 @@ way in:
 - **The session is kept to the entries' sites.** While the adapter applies and the connection has
   an entry bound with a usable web address, the configuration Flottille writes holds
   `"allowedDomains": [<hosts>]`: the exact hosts of the entries bound to this connection, sorted,
-  from their URLs (a port and a path are left out). agent-browser then blocks page loads,
-  sub-resources, WebSocket, EventSource and `sendBeacon` to any other domain and turns WebRTC off,
-  and keeps the restriction on the navigation of `auth login`. So a page that redirects the login
+  from their URLs (a port and a path are left out; an entry on plain `http` to another machine has
+  none, below). agent-browser then blocks page loads, sub-resources, WebSocket, EventSource and
+  `sendBeacon` to any other domain and turns WebRTC off, and keeps the restriction on the
+  navigation of `auth login`. So a page that redirects the login
   elsewhere, or another tab that navigates the login tab to another domain, no longer reaches a
   form of another site. **It is the file and not the flag `--allowed-domains`**: agent-browser's
   MCP tool calls run in child processes that load only the `--config` file (the flags after `mcp`
@@ -1346,9 +1347,12 @@ way in:
   choosing, even on the entry's site, could redirect the fill elsewhere (`/go?to=…`). An entry
   without a URL, or whose URL is no web address (`http` or `https` with a host), is refused (said
   in the error and in `help`): without one, agent-browser would fill the page that is open, which
-  the agent chose. Under the connection's turn, the settings and the adapter are read again: a
-  login whose adapter no longer applies (the version moved after the call was
-  routed) is refused. Flottille runs agent-browser's
+  the agent chose. **An entry bound to plain `http` on another machine** is refused too, naming the
+  entry and its host, in the error and in the review: its password would travel in clear, and the
+  user binds it to its `https` address instead. `http` on this machine (`localhost`, a loopback
+  address) signs in, as a connection's secrets may go there (`vault.md`). Under the connection's
+  turn, the settings and the adapter are read again: a login whose adapter no longer applies (the
+  version moved after the call was routed) is refused. Flottille runs agent-browser's
   command line itself, without a shell, under the connection's one-call-at-a-time turn: the words
   of the server's command before its `mcp` (global options kept), then `--config <the file>
   auth login <entry> --credential-provider flottille --item <entry> --url <url>` (two words, as

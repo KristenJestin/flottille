@@ -5401,6 +5401,94 @@ fn a_site_added_in_the_file_waits_for_a_review() {
 }
 
 #[test]
+fn an_entry_bound_to_plain_http_on_another_host_is_refused_for_a_sign_in() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "intranet-test", "secret": "s3cret-of-the-intranet", "username": "tester",
+            "url": "http://intranet.example.test/login", "for": "connection:browser"}),
+    )
+    .unwrap();
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "intranet-test"}}),
+    ));
+    // The entry and its host, why (in clear) and what to do (its https address), never its secret.
+    for word in [
+        "intranet-test",
+        "intranet.example.test",
+        "in clear",
+        "https",
+    ] {
+        assert!(said.contains(word), "{word}: {said}");
+    }
+    assert!(!said.contains("s3cret"), "{said}");
+    assert!(logged(&user, "browser", "login").is_empty());
+    assert!(form(&user).is_none());
+    // The review says it too.
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let said = review["adapter"]["said"].as_str().unwrap();
+    for word in ["intranet-test", "intranet.example.test", "in clear"] {
+        assert!(said.contains(word), "{word}: {review}");
+    }
+    assert!(!review.to_string().contains("s3cret"), "{review}");
+    // Its host is none of the browser's sites; the https entry still signs in.
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let login = logged(&user, "browser", "login");
+    assert_eq!(allowed(&login[0]), Some(json!(["shop.example.com"])));
+}
+
+#[test]
+fn an_entry_bound_to_plain_http_on_this_machine_signs_in() {
+    for (url, host) in [
+        ("http://localhost:3000/login", "localhost"),
+        ("http://127.0.0.1:3000/login", "127.0.0.1"),
+    ] {
+        let user = user();
+        browser(&user, &agent_browser("0.43.0"), json!({}));
+        let (_, mcp) = signed_up(&user);
+        user.call(
+            "vault.set",
+            json!({"name": "local-test", "secret": "s3cret-of-this-machine", "username": "tester",
+                "url": url, "for": "connection:browser"}),
+        )
+        .unwrap();
+        done(mcp.call(
+            "conn_browser",
+            json!({"action": "login", "arguments": {"entry": "local-test"}}),
+        ));
+        let login = logged(&user, "browser", "login");
+        let args = login[0]["args"].to_string();
+        assert!(
+            args.contains(&format!("\"--url\",\"{url}\"")),
+            "{url}: {args}"
+        );
+        assert_eq!(
+            allowed(&login[0]),
+            Some(json!([host, "shop.example.com"])),
+            "{url}"
+        );
+        let review = user
+            .call("connection.review", json!({"name": "browser"}))
+            .unwrap();
+        assert!(
+            !review["adapter"]["said"]
+                .as_str()
+                .unwrap()
+                .contains("in clear"),
+            "{url}: {review}"
+        );
+    }
+}
+
+#[test]
 fn an_entry_whose_host_is_no_usable_site_is_refused() {
     for url in [
         "https://shop.example.com,evil.example.net/login",

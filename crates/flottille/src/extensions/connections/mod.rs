@@ -1903,7 +1903,15 @@ async fn review(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
     let row = row(daemon, &name);
     let config = adapters::config_of(daemon, &name);
     let sites = adapters::sites(daemon, &declaration);
-    Ok(diff(&declaration, &row, &listing, &config, &sites))
+    let in_clear = adapters::in_clear_entries(daemon, &declaration);
+    Ok(diff(
+        &declaration,
+        &row,
+        &listing,
+        &config,
+        &sites,
+        &in_clear,
+    ))
 }
 
 /// The review: the pin against what the server announces now, each action whole where it is new,
@@ -1916,6 +1924,7 @@ fn diff(
     now: &Listing,
     config: &std::path::Path,
     sites: &[String],
+    in_clear: &[String],
 ) -> Value {
     let empty = Listing::default();
     let pin = row.pin.as_ref().unwrap_or(&empty);
@@ -1972,19 +1981,20 @@ fn diff(
         "actions": actions,
         "refused": now.refused,
         "limits": limits,
-        "adapter": adapter_said(declaration, now, &proposed, config, sites),
+        "adapter": adapter_said(declaration, now, &proposed, config, sites, in_clear),
     })
 }
 
 /// What the review says of the adapter of the server it shows: that it applies and what it
 /// changes, with what Accept would pin; that this version has none; or nothing, for a server no
-/// adapter knows.
+/// adapter knows. `in_clear` says why login is refused with an entry bound to plain http.
 fn adapter_said(
     declaration: &Declaration,
     now: &Listing,
     proposed: &BTreeMap<String, String>,
     config: &std::path::Path,
     sites: &[String],
+    in_clear: &[String],
 ) -> Value {
     match adapters::of(&now.server) {
         adapters::Found::Applies(adapter) => {
@@ -2008,6 +2018,9 @@ fn adapter_said(
                     .or_else(|| adapter.own_config(words, &declaration.env))
                     .or_else(|| adapter.sends_elsewhere(words, &declaration.env))
             {
+                said.push_str(&format!(" {why}."));
+            }
+            for why in in_clear {
                 said.push_str(&format!(" {why}."));
             }
             json!({"name": adapter.server, "range": adapter.range, "applies": true,

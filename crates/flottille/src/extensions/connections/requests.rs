@@ -225,17 +225,26 @@ fn host_of(text: &str) -> Option<String> {
         false => url::Url::parse(&format!("https://{text}")),
     }
     .ok()?;
-    let local = match url.host()? {
-        url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
-        url::Host::Ipv4(address) => address.is_loopback(),
-        url::Host::Ipv6(address) => address.is_loopback(),
-    };
-    match url.scheme() {
-        "https" => {}
-        "http" if local => {}
-        _ => return None,
+    if !carries_secrets(&url) {
+        return None;
     }
     Some(url.host_str()?.to_ascii_lowercase())
+}
+
+/// Whether a secret may go to `url`: over `https`, or `http` on this machine (`localhost`, a
+/// loopback address); plain `http` to another host would carry it in clear.
+pub(super) fn carries_secrets(url: &url::Url) -> bool {
+    let local = match url.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => return false,
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" => local,
+        _ => false,
+    }
 }
 
 /// The host a connection sends its headers to; none for a command.

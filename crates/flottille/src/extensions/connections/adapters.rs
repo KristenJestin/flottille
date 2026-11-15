@@ -490,16 +490,53 @@ pub fn config_of(daemon: &Daemon, name: &str) -> PathBuf {
     config_file(&folder(daemon, name))
 }
 
-/// The site an entry's URL gives, its host: none for a URL that is no web address, nor for a host
-/// that would not be one entry of the list agent-browser reads (it separates them with commas,
-/// reads `*` as a wildcard, and a leading `-` or a space would make it an option or two words).
+/// The site an entry's URL gives, its host: none for a URL that is no web address a password may
+/// be typed into (`https`, or `http` on this machine, as a connection's secrets go), nor for a
+/// host that would not be one entry of the list agent-browser reads (it separates them with
+/// commas, reads `*` as a wildcard, and a leading `-` or a space would make it an option or two
+/// words).
 fn site(text: &str) -> Option<String> {
     let url = url::Url::parse(text).ok()?;
     let host = url.host_str()?;
-    let usable = matches!(url.scheme(), "http" | "https")
+    let usable = super::requests::carries_secrets(&url)
         && !host.starts_with('-')
         && !host.contains(|c: char| c == ',' || c == '*' || c.is_whitespace());
     usable.then(|| host.to_owned())
+}
+
+/// The host of `text` when it is plain `http` to another machine, where a sign-in's password
+/// would travel in clear.
+fn in_clear(text: &str) -> Option<String> {
+    let url = url::Url::parse(text).ok()?;
+    if url.scheme() != "http" || super::requests::carries_secrets(&url) {
+        return None;
+    }
+    url.host_str().map(str::to_owned)
+}
+
+/// Why login is refused with the vault entry `entry`, bound to plain `http` on `host`.
+fn in_clear_refused(entry: &str, host: &str) -> String {
+    format!(
+        "login is refused with the vault entry {entry}: its URL is plain http to {host}, another \
+         machine, so its password would travel in clear, and the browser is not kept to that \
+         site. The user binds the entry to its https address in Settings, Vault"
+    )
+}
+
+/// Why login is refused, for the review, with each vault entry bound to the connection on plain
+/// `http` to another machine.
+pub fn in_clear_entries(daemon: &Daemon, declaration: &Declaration) -> Vec<String> {
+    let this = uses::connection(&declaration.name);
+    daemon
+        .read(|store| store.vault_entries())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry.bound.as_deref() == Some(&this))
+        .filter_map(|entry| {
+            let host = in_clear(entry.url.as_deref()?)?;
+            Some(in_clear_refused(&entry.name, &host))
+        })
+        .collect()
 }
 
 /// Whether `host` is one site of the list agent-browser reads, written as a URL's host is.
@@ -654,6 +691,9 @@ pub async fn perform(
              Vault"
         ));
     };
+    if let Some(host) = in_clear(&url) {
+        return Outcome::Refused(format!("refused: {}", in_clear_refused(&entry, &host)));
+    }
     if site(&url).is_none() {
         return Outcome::Refused(format!(
             "refused: the URL of the vault entry {entry} has a host that cannot be one of the \
@@ -1179,6 +1219,33 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["agent-browser.json"], "no temporary file is left");
+    }
+
+    #[test]
+    fn a_site_is_https_or_http_on_this_machine() {
+        assert_eq!(
+            site("https://shop.example.com/login").as_deref(),
+            Some("shop.example.com")
+        );
+        assert_eq!(
+            site("http://localhost:3000/login").as_deref(),
+            Some("localhost")
+        );
+        assert_eq!(site("http://127.0.0.1:3000").as_deref(), Some("127.0.0.1"));
+        assert_eq!(site("http://[::1]:3000").as_deref(), Some("[::1]"));
+        // Plain http to another machine would carry a sign-in's password in clear.
+        assert_eq!(site("http://intranet.example.test/login"), None);
+        assert_eq!(
+            in_clear("http://intranet.example.test/login").as_deref(),
+            Some("intranet.example.test")
+        );
+        for url in [
+            "https://intranet.example.test/login",
+            "http://localhost:3000/login",
+            "file:///etc/hosts",
+        ] {
+            assert_eq!(in_clear(url), None, "{url}");
+        }
     }
 
     #[test]
