@@ -325,9 +325,10 @@ cannot change it.
 | `controller` | a phone, a laptop without agents | drive without running: read, send messages, answer questions and permission requests, start and stop sessions on a runner, switch the mode, open tunnels, invite and remove devices. The default for a phone |
 | `viewer` | a device the user lends, or trusts less | read only: the machines, the sessions, the conversations, the requests, never an answer |
 
-- **A runner refuses a request a role does not allow**, before anything else, saying which role
-  allows it (`refused: pixel may only view: a controller or a runner may answer a request`). Every
-  method of `protocol.md` is in one of two classes, `read` or `drive`; a `viewer` may only `read`.
+- **A runner refuses a request a role does not allow**, once its signature is checked and before it
+  serves it, saying which role allows it (`refused: pixel may only view: a controller or a runner
+  may answer a request`). Every method of `protocol.md` is in one of two classes, `read` or `drive`;
+  a `viewer` may only `read`.
 - **A runner advertises live to its peers**, over the link: its projects, the agent CLIs installed
   and signed in (their login files checked for presence only, never read: `AGENTS.md`), and its
   free slots (the project caps minus what runs). It sends it again when it changes.
@@ -350,10 +351,10 @@ speak two.
 
 - A request for another machine carries `machine` and a signature: `{"id", "machine", "signed":
   {"device", "nonce", "at", "method", "params"}, "sig"}`. The client crate makes it; the local
-  daemon carries it. The receiving daemon checks the device is a member, that its role allows the
-  method ("Roles"), the signature, the time (within 5 minutes of its clock) and that the nonce was
-  not seen in that window, then serves the request as one from a local client, the device known:
-  its log and its events name it.
+  daemon carries it. The receiving daemon checks the device is a member, the signature, the time
+  (within 5 minutes of its clock) and that the nonce was not seen in that window, then that its
+  role allows the method ("Roles"), and serves the request as one from a local client, the device
+  known: its log and its events name it.
 - **What the user sends to a machine that is off is refused**, never kept: a message, an answer to a
   request, a new session. The client says so, with since when (`server is offline since 22:14`). A
   message kept would arrive hours later, after the user forgot it.
@@ -705,6 +706,37 @@ on a real phone, by hand, and reported.
   a short hub URL, and the QR holds the same text. The token is 16 bytes.
 - The four words are BIP-39's English list (MIT licence), drawn from the first 44 bits of a
   SHA-256 of the two keys and the token.
+
+- What a request's signature covers is a fixed encoding that starts with `flottille-request-v1`
+  and a zero byte (`crates/flottille-link/src/request.rs`), never a member change's: `id`,
+  `machine`, `device`, `nonce`, `at` and `method`, then `params`. `machine` and `id` sit outside
+  `signed` in the JSON and are signed all the same: a request signed for one machine is refused by
+  another, and its answer cannot be sent under another id. `machine` is the target's name; a name
+  freed by a removal and taken within five minutes by a new member could take a request meant for
+  the old one: accepted.
+- `params` travels as the JSON text the client wrote, in a string; the receiver checks the
+  signature over those very bytes, then parses them, so that no side serialises JSON again. `at` is
+  in milliseconds since the Unix epoch, `nonce` 16 random bytes in hexadecimal.
+- A request is checked in this order: it is a request (else refused before anything), for this
+  machine; its device is a member and the signature is the device's; its time; its nonce; its
+  device's role, then its nonce is remembered. Until the signature passes, every refusal is one
+  sentence that names nothing of the list (`refused: this request is not signed by a member`), so
+  that a sender with no member's key learns no name and no role. A method the catalogue lacks is
+  refused, whoever asks. What a refusal shows of the sender's text (a machine's name, a method, a
+  parse error) is cut to 64 characters, its control and invisible characters replaced.
+- A request is refused when its time is more than five minutes from the receiver's clock, either
+  way, or before the receiving daemon started: the nonces it remembers are in memory only, one
+  memory for all its links, and a restart would otherwise let a request be served again. A sender
+  whose clock is behind is refused for at most five minutes after a restart
+  (`refused: this request was signed before this machine started: send it again`). Keeping the
+  nonces in the store is left to the daemon's wiring (#813).
+- The receiver forgets a nonce once it leaves the window of the latest time its clock gave, and
+  keeps at most 4096 per device: past that, the device's requests are refused until the oldest
+  leave the window, never forgotten early. The time check reads the clock as it is now, so that a
+  clock read far ahead once locks no device out; a clock set back by more than five minutes may
+  then let a forgotten request in again: accepted.
+- A field of a request longer than 4 GB, more than its length prefix says, is neither signed nor
+  taken.
 
 - The hub's state is one JSON file, `hub.json`, written whole and renamed into place, beside its
   key: no database. The invitations and their join requests are kept in memory: a hub started

@@ -2382,6 +2382,7 @@ name = "flottille-link"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "flottille-protocol",
  "getrandom 0.3.4",
  "libc",
  "serde",
