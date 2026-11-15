@@ -2320,6 +2320,39 @@ fn remind_integrated(daemon: &Arc<Daemon>, agent: &Agent) {
     });
 }
 
+/// The led sessions whose check found the forge asked too recently, and when it may be asked
+/// again: checked then by the sweep, since neither of the two may end a turn before.
+static CAPPED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// From the sweep: the led sessions whose capped check may run again are checked, a turn ending
+/// or not.
+pub fn remind_integrated_due(daemon: &Arc<Daemon>) {
+    let now = now_ms();
+    let mut due = Vec::new();
+    CAPPED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|id, until| {
+            let over = *until <= now;
+            if over {
+                due.push(id.clone());
+            }
+            !over
+        });
+    if due.is_empty() {
+        return;
+    }
+    let daemon = daemon.clone();
+    tokio::spawn(async move {
+        for id in due {
+            if let Ok(Some(session)) = daemon.read(|store| store.agent(&id)) {
+                remind_once(&daemon, &session).await;
+            }
+        }
+    });
+}
+
 async fn remind_once(daemon: &Arc<Daemon>, session: &Agent) {
     let (Some(pilot), Some(workspace)) = (&session.launched_by, &session.workspace) else {
         return;
@@ -2338,9 +2371,16 @@ async fn remind_once(daemon: &Arc<Daemon>, session: &Agent) {
     if !idle || !reported {
         return;
     }
-    let Some(branch) = crate::workspaces::integrated(daemon, &session.project, workspace).await
-    else {
-        return;
+    let branch = match crate::workspaces::integrated(daemon, &session.project, workspace).await {
+        Ok(Some(branch)) => branch,
+        Ok(None) => return,
+        Err(until) => {
+            CAPPED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session.id.clone(), until);
+            return;
+        }
     };
     deliveries::deliver(
         daemon,
