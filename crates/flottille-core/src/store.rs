@@ -731,7 +731,7 @@ const MIGRATIONS: &[&str] = &[
 ",
     "
     -- A pull request an agent opened with `forge create`, until the rounds see it open or it is
-    -- too old (`docs/extensions.md`, \"Automatic subscriptions\"): what tells it from one opened
+    -- too old (Automatic subscriptions, #793): what tells it from one opened
     -- another way, across a restart of the daemon.
     CREATE TABLE opened_pulls (
         id         INTEGER PRIMARY KEY,
