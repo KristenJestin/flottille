@@ -322,3 +322,55 @@ fn an_agent_reading_or_writing_the_remote_folder_is_refused_in_every_mode() {
     assert!(!read.error, "{}", read.text);
     assert!(read.text.contains("the remote's notes"), "{}", read.text);
 }
+
+#[test]
+fn a_recursive_read_of_a_folder_above_the_keys_is_refused_in_every_mode() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_escalation();
+    remote_on(&user);
+    let (id, mcp, place) = session(&user);
+    let state = user.path("state/flottille");
+    // A link the agent could make in its place, to the folder above the keys.
+    std::os::unix::fs::symlink(&state, place.join("st")).unwrap();
+    let s = state.display();
+    let up = user.path("state");
+    let up = up.display();
+    let lines = [
+        format!("grep -ra x {s}"),
+        format!("grep -r -a x {up}"),
+        format!("grep -R x {s}/remote/.."),
+        format!("rg -uu -a x {s}"),
+        format!("rg -a x /proc/self/root{s}"),
+        "grep -ra x st".to_owned(),
+        format!("diff -r -a {s} ."),
+        format!("git -C {s} grep --no-index -a x"),
+        format!("find {s} -type f -exec cat {{}} +"),
+        format!("tar cf - {s}"),
+        format!("cp -r {s} copy"),
+    ];
+    for mode in ["ask", "auto", "full"] {
+        let output = user.run(&["agent", "mode", &id, mode]);
+        assert!(output.status.success(), "{output:?}");
+        for line in &lines {
+            let what = format!("{mode}: {line}");
+            let said = refused(&what, mcp.call("run", json!({ "line": line })));
+            assert!(said.contains("Flottille's keys"), "{what}: {said}");
+            assert!(said.contains("remote/"), "{what}: {said}");
+        }
+        assert!(
+            user.call("approval.list", json!({})).unwrap()["requests"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{mode}: a call was held"
+        );
+    }
+    assert!(!place.join("copy").exists());
+    assert!(user.escalations().is_empty());
+
+    // A listing shows names, never a byte: in Full, it runs.
+    let listed = mcp.call("run", json!({"line": format!("ls {s}")}));
+    assert!(!listed.error, "{}", listed.text);
+    assert!(listed.text.contains("remote"), "{}", listed.text);
+}

@@ -1081,6 +1081,9 @@ fn run(call: &Call) -> Verdict {
             return Verdict::Deny(why);
         }
     }
+    if let Some(why) = reads_the_keys(call, &layers) {
+        return Verdict::Deny(why);
+    }
     let home = call.grant.place.home.as_deref();
     let main = call.grant.place.workspace.is_none();
     let mut found = Found::default();
@@ -2149,14 +2152,7 @@ fn walks_secrets(call: &Call, layer: &[String]) -> Option<String> {
             .any(|word| names.iter().any(|name| abbreviates(word, name, 4)))
     };
     let walks = match program {
-        "grep" | "egrep" | "fgrep" => {
-            short(&['r', 'R'])
-                || long(&["recursive", "dereference-recursive"])
-                || args.windows(2).any(|w| w[0] == "-d" && w[1] == "recurse")
-                || args
-                    .iter()
-                    .any(|w| w == "-drecurse" || w == "--directories=recurse")
-        }
+        "grep" | "egrep" | "fgrep" => greps_recursively(args),
         "rg" => {
             short(&['u', '.', 'L'])
                 || long(&["unrestricted", "hidden", "follow"])
@@ -2199,6 +2195,119 @@ fn walks_secrets(call: &Call, layer: &[String]) -> Option<String> {
                 } else {
                     &folder.shown
                 }
+            ));
+        }
+    }
+    None
+}
+
+/// Whether a `grep`'s options make it read every file below the folders it names.
+fn greps_recursively(args: &[String]) -> bool {
+    shorts(args).any(|word| word[1..].contains(['r', 'R']))
+        || args.iter().any(|word| {
+            abbreviates(word, "recursive", 4) || abbreviates(word, "dereference-recursive", 4)
+        })
+        || args.windows(2).any(|w| w[0] == "-d" && w[1] == "recurse")
+        || args
+            .iter()
+            .any(|w| w == "-drecurse" || w == "--directories=recurse")
+}
+
+/// Whether a layer's program reads every file below the folders it names, or below the folder it
+/// runs in when it names none, and whether its first word that is not an option is a pattern
+/// rather than a folder. A listing (`ls -R`, `find` and `fd` without a program to run, `tree`,
+/// `du`) shows names, never a byte, and is not one.
+fn reads_every_file(layer: &[String]) -> Option<bool> {
+    let program = base(&layer[0]);
+    let args = &layer[1..];
+    let short = |letters: &[char]| shorts(args).any(|word| word[1..].contains(letters));
+    let long = |names: &[&str]| {
+        args.iter()
+            .any(|word| names.iter().any(|name| abbreviates(word, name, 3)))
+    };
+    match program {
+        "grep" | "egrep" | "fgrep" if greps_recursively(args) => Some(true),
+        "rg" | "ag" | "ack" => Some(true),
+        "fd" if executed(layer).is_some() => Some(true),
+        "find" if executed(layer).is_some() => Some(false),
+        "diff" if short(&['r']) || long(&["recursive"]) => Some(false),
+        "cp" if short(&['r', 'R', 'a']) || long(&["recursive", "archive"]) => Some(false),
+        "zip" if short(&['r']) || long(&["recurse-paths"]) => Some(false),
+        "tar" | "rsync" => Some(false),
+        "git" => {
+            let (at, _) = git_globals(args);
+            let rest = args.get(at + 1..).unwrap_or_default();
+            let any = |names: &[&str]| rest.iter().any(|w| names.contains(&w.as_str()));
+            match args.get(at).map(String::as_str) {
+                Some("grep") if any(&["--no-index", "--untracked"]) => Some(false),
+                Some("diff") if any(&["--no-index"]) => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The refusal of a line that reads every file below a folder holding Flottille's keys folder
+/// (`keys`), in every mode: what it prints or copies holds the keys' bytes. The folder may be one
+/// it names (through a link, `..` or `/proc/self/root` too), or the one it runs in.
+fn reads_the_keys(call: &Call, layers: &[Vec<String>]) -> Option<String> {
+    let from = call.paths.first()?;
+    let place = &call.grant.place;
+    let keys: Vec<PathBuf> = own_folders(call.own)
+        .iter()
+        .map(|own| own.join(crate::remote::FOLDER))
+        .collect();
+    let holds = |folder: &Resolved| {
+        seen(folder)
+            .iter()
+            .any(|path| keys.iter().any(|keys| keys.starts_with(path)))
+    };
+    for layer in layers {
+        let Some(pattern) = reads_every_file(layer) else {
+            continue;
+        };
+        let mut pattern = pattern
+            && !layer[1..].iter().any(|word| {
+                ["-e", "-f", "--regexp", "--file"]
+                    .iter()
+                    .any(|option| word == option || word.starts_with(&format!("{option}=")))
+            });
+        let mut named = false;
+        let mut found = None;
+        for whole in &layer[1..] {
+            if pattern && !whole.starts_with('-') {
+                // Checked all the same: only a folder it names keeps the run's own from counting.
+                pattern = false;
+                let folder = place.resolve(&from.path, whole);
+                if found.is_none() && holds(&folder) {
+                    found = Some(folder);
+                }
+                continue;
+            }
+            for word in named_paths(whole) {
+                let folder = place.resolve(&from.path, word);
+                named |= std::fs::symlink_metadata(&folder.path).is_ok();
+                if found.is_none() && holds(&folder) {
+                    found = Some(folder);
+                }
+            }
+        }
+        if found.is_none() && !named && holds(from) {
+            found = Some(from.clone());
+        }
+        if let Some(folder) = found {
+            return Some(format!(
+                "refused: {} reads every file below {}, which holds Flottille's keys, its {}/ \
+                 folder, a login's place: an agent never reads nor writes a login, in any mode; \
+                 name the folders to read, without it; nothing was done",
+                shown_words(layer),
+                if folder.shown.is_empty() {
+                    "the place's folder"
+                } else {
+                    &folder.shown
+                },
+                crate::remote::FOLDER
             ));
         }
     }
@@ -7574,6 +7683,112 @@ mod tests {
             "git log -1 :/release",
         ] {
             assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+    }
+
+    /// Flottille's state folder at `state`, one of its own, holding its keys folder `remote/`.
+    fn with_keys(fixture: &mut Fixture, state: PathBuf) -> PathBuf {
+        std::fs::create_dir_all(state.join("remote")).unwrap();
+        std::fs::create_dir_all(state.join("logs")).unwrap();
+        std::fs::write(state.join("remote/machine.key"), [7u8; 32]).unwrap();
+        fixture.own.push(state.clone());
+        state
+    }
+
+    fn refused_for_the_keys(fixture: &Fixture, line: &str) {
+        let verdict = fixture.run(line);
+        assert!(denied(&verdict), "{line}: {verdict:?}");
+        let Verdict::Deny(why) = verdict else {
+            unreachable!()
+        };
+        assert!(why.contains("Flottille's keys"), "{line}: {why}");
+        assert!(why.contains("in any mode"), "{line}: {why}");
+    }
+
+    #[test]
+    fn a_recursive_read_of_a_folder_above_the_keys_is_refused() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let state = with_keys(&mut fixture, base.join("xdg/state/flottille"));
+        std::os::unix::fs::symlink(&state, fixture.root.join("st")).unwrap();
+        let s = state.display();
+        let up = base.join("xdg/state");
+        let up = up.display();
+        for line in [
+            format!("grep -ra needle {s}"),
+            format!("grep -r -a needle {up}"),
+            format!("grep -R needle {s}/remote/.."),
+            format!("grep -R needle {s}/logs/.."),
+            format!("grep --recursive needle {s}"),
+            format!("grep -d recurse needle {s}"),
+            format!("egrep -r needle {s}"),
+            format!("rg needle {s}"),
+            format!("rg -uu -a needle {s}"),
+            format!("rg needle /proc/self/root{s}"),
+            format!("grep -r needle /proc/self/root{up}"),
+            "grep -r needle st".into(),
+            "rg -a needle st/".into(),
+            format!("diff -r {s} src"),
+            format!("diff --recursive -a src {s}"),
+            format!("git grep --no-index needle {s}"),
+            format!("git -C {s} grep --no-index needle"),
+            format!("git diff --no-index {s} src"),
+            format!("find {s} -type f -exec cat {{}} +"),
+            format!("fd . {s} -x cat"),
+            format!("tar cf - {s}"),
+            format!("tar -C {up} -c flottille"),
+            format!("cp -r {s} copy"),
+            format!("cp -a {s} copy"),
+            format!("rsync -a {s} copy"),
+            format!("zip -r keys.zip {s}"),
+            format!("nice grep -r needle {s}"),
+        ] {
+            refused_for_the_keys(&fixture, &line);
+        }
+        // Names, never a byte: a listing of the folder, and a read of a folder beside the keys.
+        for line in [
+            format!("ls {s}"),
+            format!("ls -laR {s}"),
+            format!("find {s}"),
+            format!("du -a {s}"),
+            format!("tree {s}"),
+            format!("grep -r needle {s}/logs"),
+            format!("rg needle {s}/logs"),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(!denied(&verdict), "{line}: {verdict:?}");
+        }
+        for tool in ["fs_list", "search"] {
+            let verdict = fixture.file(tool, &state.display().to_string());
+            assert!(!denied(&verdict), "{tool}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_recursive_read_of_the_run_s_folder_above_the_keys_is_refused() {
+        // A project in the home folder: its place holds Flottille's state folder.
+        let mut fixture = Fixture::workspace();
+        let state = fixture.root.join(".local/state/flottille");
+        with_keys(&mut fixture, state);
+        for line in [
+            "grep -r needle",
+            "grep -rn needle .",
+            "rg needle",
+            "rg -uu -a needle .",
+            "grep -r needle .local",
+            "find -type f -exec cat {} +",
+            "tar cf - .",
+        ] {
+            refused_for_the_keys(&fixture, line);
+        }
+        for line in [
+            "grep -r needle src",
+            "rg needle src",
+            "ls -R",
+            "ls .local/state/flottille",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(!denied(&verdict), "{line}: {verdict:?}");
         }
     }
 }
