@@ -256,12 +256,23 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
 
 /// Whether an agent may name `entry`: one of the vault, or, on a secret line of a URL's requests
 /// (`to_make`), one the user is to make before they accept (`waits`), whose name is an entry's and
-/// nothing the masking takes for a secret. A command's variables name entries that exist.
+/// nothing that looks like a secret. A command's variables name entries that exist.
 fn nameable(entries: &[flottille_core::vault::Entry], entry: &str, to_make: bool) -> bool {
     entries.iter().any(|known| known.name == entry)
         || (to_make
             && flottille_core::project::valid_name(entry)
+            && !random_like(entry)
             && flottille_core::secrets::mask(entry, &std::env::vars_os().collect()) == entry)
+}
+
+/// The most characters a word of a name to make has between `-`, `_` and `.`: a longer one is
+/// taken for a secret written where a name goes (a 40-character hexadecimal token), which the
+/// user would otherwise be asked to save under it, in clear in the file and the vault's list.
+const NAME_WORD: usize = 19;
+
+fn random_like(name: &str) -> bool {
+    name.split(['-', '_', '.'])
+        .any(|word| word.chars().count() > NAME_WORD)
 }
 
 /// The vault entries a declaration names that the vault does not hold yet.
