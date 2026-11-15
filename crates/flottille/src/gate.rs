@@ -2922,9 +2922,13 @@ pub struct Git {
     /// change where git commits.
     pub variables: Vec<String>,
     /// Why the gate cannot tell the folder it works in, when it cannot: a program it does not
-    /// know runs it (`pnpm -C dir exec git`), or one that moves to another folder first (`find
-    /// -execdir`, `fd --base-directory`).
+    /// know runs it (`pnpm -C dir exec git`), one that moves to another folder first (`find
+    /// -execdir`, `fd --base-directory`), or one that hands it words of its own choosing (`find
+    /// -exec`, `fd -x`, `xargs`).
     pub astray: Option<String>,
+    /// Whether its command is not on the line but filled in by the program that runs it: none
+    /// (`xargs git`), or one made of that program's placeholders (`fd -x git {}`).
+    pub hidden: bool,
 }
 
 /// Each git command a line run in `from` runs, at any of its layers, for the project's message
@@ -2948,20 +2952,34 @@ pub fn gits(place: &place::Place, from: &Path, words: &[String]) -> Vec<Git> {
         let own = layer.iter().take_while(|word| assignment(word)).count();
         for (at, suffix) in suffixes(layer) {
             let args = &suffix[1..];
-            if base(&suffix[0]) != "git" || args.get(git_globals(args).0).is_none() {
+            if base(&suffix[0]) != "git" {
                 continue;
             }
-            let astray = match at == own {
-                true => astray.clone(),
-                false => astray
-                    .clone()
-                    .or_else(|| Some(format!("`{}`", base(&layer[0])))),
+            let command = args.get(git_globals(args).0);
+            // A program around git that fills words in may give it its command (`xargs git`).
+            let (astray, hidden) = match (at == own, &astray, command) {
+                (true, Some((why, marks)), command) => (
+                    Some(why.clone()),
+                    command.is_none_or(|command| marks.iter().any(|mark| command.contains(mark))),
+                ),
+                (_, _, None) => continue,
+                (true, None, Some(_)) => (None, false),
+                (false, astray, Some(_)) => {
+                    (
+                        Some(astray.as_ref().map_or_else(
+                            || format!("`{}`", base(&layer[0])),
+                            |(why, _)| why.clone(),
+                        )),
+                        false,
+                    )
+                }
             };
             found.push(Git {
                 words: suffix.to_vec(),
                 folder: moved(place, start, suffix).path,
                 variables: variables.clone(),
                 astray,
+                hidden,
             });
         }
     }
@@ -2981,16 +2999,21 @@ fn git_variables(layer: &[String]) -> Vec<String> {
         .iter()
         .filter(|word| assignment(word))
         .filter_map(|word| word.split_once('=').map(|(name, _)| name))
-        .filter(|name| name.starts_with("GIT_"))
+        // Who wrote and who made the commit cannot change where git commits.
+        .filter(|name| {
+            name.starts_with("GIT_")
+                && !name.starts_with("GIT_AUTHOR_")
+                && !name.starts_with("GIT_COMMITTER_")
+        })
         .map(str::to_owned)
         .collect()
 }
 
 /// For each layer of `lines`, in the same order, why the folder its program runs in cannot be
-/// told when a program around it moves to a folder of its own choosing first (`find -execdir`,
-/// `fd --base-directory`), as `folders` follows its wrappers and the lines run.
-fn astray(layers: &[Vec<String>]) -> Vec<Option<String>> {
-    let mut astray: Vec<Option<String>> = vec![None];
+/// told when a program around it chooses it or its words (`moves_itself`), and that program's
+/// placeholders, as `folders` follows its wrappers and the lines run.
+fn astray(layers: &[Vec<String>]) -> Vec<Option<(String, Vec<String>)>> {
+    let mut astray: Vec<Option<(String, Vec<String>)>> = vec![None];
     let mut runners = std::collections::VecDeque::new();
     for (at, layer) in layers
         .iter()
@@ -2999,9 +3022,9 @@ fn astray(layers: &[Vec<String>]) -> Vec<Option<String>> {
     {
         let here = astray[at].clone().or_else(|| moves_itself(layer));
         let lines = executed(layer).map_or(0, |(_, lines)| lines.len());
-        runners.extend(std::iter::repeat_n(here, lines));
+        runners.extend(std::iter::repeat_n(here.clone(), lines));
         astray.push(if matches!(inner(layer), Ok(Some(_))) {
-            astray[at].clone()
+            here
         } else {
             runners.pop_front().flatten()
         });
@@ -3009,21 +3032,82 @@ fn astray(layers: &[Vec<String>]) -> Vec<Option<String>> {
     astray
 }
 
-/// A program that runs lines in a folder it moves to: `find -execdir` (each found file's),
-/// `fd --base-directory`.
-fn moves_itself(layer: &[String]) -> Option<String> {
+/// A program that runs lines in a folder it moves to (`find -execdir`, `fd --base-directory`),
+/// or with words it fills in, where a folder or a command may be (`find -exec`, `fd -x`,
+/// `xargs`, `pnpm exec -c`): who, and the placeholders it fills in.
+fn moves_itself(layer: &[String]) -> Option<(String, Vec<String>)> {
+    let program = base(&layer[0]);
     let args = &layer[1..];
-    match base(&layer[0]) {
+    let marks = |marks: &[&str]| marks.iter().map(|mark| (*mark).to_owned()).collect();
+    match program {
         "find" => args
             .iter()
-            .find(|word| *word == "-execdir" || *word == "-okdir")
-            .map(|word| format!("`find {word}`")),
-        "fd" => args
+            .find(|word| ["-exec", "-execdir", "-ok", "-okdir"].contains(&word.as_str()))
+            .map(|word| (format!("`find {word}`"), marks(&["{}"]))),
+        "fd" if args
             .iter()
-            .any(|word| word == "--base-directory" || word.starts_with("--base-directory="))
-            .then(|| "`fd --base-directory`".to_owned()),
+            .any(|word| word == "--base-directory" || word.starts_with("--base-directory=")) =>
+        {
+            Some(("`fd --base-directory`".to_owned(), marks(&FD_PLACEHOLDERS)))
+        }
+        "fd" => executed(layer).map(|_| ("`fd`".to_owned(), marks(&FD_PLACEHOLDERS))),
+        "xargs" => {
+            let end = skip(args, &XARGS_VALUED, false);
+            let mut words = args[..end].iter();
+            let mut replaced = Vec::new();
+            while let Some(word) = words.next() {
+                let word = word.as_str();
+                if word == "-I" {
+                    replaced.extend(words.next().cloned());
+                } else if word == "-i" || word == "--replace" {
+                    replaced.push("{}".to_owned());
+                } else if let Some(mark) = word
+                    .strip_prefix("-I")
+                    .or_else(|| word.strip_prefix("-i"))
+                    .or_else(|| word.strip_prefix("--replace="))
+                {
+                    replaced.push(mark.to_owned());
+                }
+            }
+            Some(("`xargs`".to_owned(), replaced))
+        }
+        "pnpm" | "yarn" => exec_options(args)
+            .and_then(|(_, plain, _)| (!plain).then(|| (format!("`{program}`"), Vec::new()))),
         _ => None,
     }
+}
+
+/// The placeholders `fd -x` fills with what it found.
+const FD_PLACEHOLDERS: [&str; 5] = ["{}", "{/}", "{//}", "{.}", "{/.}"];
+
+/// The options of `pnpm exec` (`yarn exec`, `dlx`), after its command: where the program it runs
+/// starts, whether they only name a package (`--package`), and whether they run a line through a
+/// shell (`-c`, `--shell-mode`).
+fn exec_options(args: &[String]) -> Option<(usize, bool, bool)> {
+    if !args.first().is_some_and(|w| w == "dlx" || w == "exec") {
+        return None;
+    }
+    let start = 1 + skip(
+        &args[1..],
+        &["--package", "-C", "--dir", "--cwd", "--filter", "-F"],
+        false,
+    );
+    let mut options = args[1..start].iter();
+    let (mut plain, mut shell) = (true, false);
+    while let Some(word) = options.next() {
+        match word.as_str() {
+            "--package" => {
+                options.next();
+            }
+            "--" => {}
+            "-c" | "--shell-mode" => {
+                (plain, shell) = (false, true);
+            }
+            word if word.starts_with("--package=") => {}
+            _ => plain = false,
+        }
+    }
+    Some((start, plain, shell))
 }
 
 /// Whether the line's own program is git pushing, with no wrapper around it: the push the gate
@@ -3424,27 +3508,7 @@ fn inner(words: &[String]) -> Result<Option<Vec<String>>, String> {
             &["-i", "-o", "-e", "--input", "--output", "--error"],
             false,
         )),
-        "xargs" => from(skip(
-            args,
-            &[
-                "-a",
-                "--arg-file",
-                "-d",
-                "--delimiter",
-                "-E",
-                "-I",
-                "-L",
-                "--max-lines",
-                "-n",
-                "--max-args",
-                "-P",
-                "--max-procs",
-                "-s",
-                "--max-chars",
-                "--process-slot-var",
-            ],
-            false,
-        )),
+        "xargs" => from(skip(args, &XARGS_VALUED, false)),
         "npx" => {
             for (at, word) in args.iter().enumerate() {
                 if word == "-c" || word == "--call" {
@@ -3456,9 +3520,15 @@ fn inner(words: &[String]) -> Result<Option<Vec<String>>, String> {
             }
             from(skip(args, &["-p", "--package"], false))
         }
-        "pnpm" | "yarn" if args.first().is_some_and(|w| w == "dlx" || w == "exec") => {
-            from(1 + skip(&args[1..], &["--package"], false))
-        }
+        // An option but `--package` may move it or hand its program words, so the program is
+        // its own (`moves_itself`); the line of `-c` is read, as the shell it runs would.
+        "pnpm" | "yarn" => match exec_options(args) {
+            Some((start, _, true)) if start < args.len() => {
+                return split(program, Some(&args[start..].join(" ")), &[]);
+            }
+            Some((start, true, _)) => from(start),
+            _ => None,
+        },
         "bunx" => from(skip(args, &["-p", "--package"], false)),
         "uvx" => from(skip(
             args,
@@ -3503,6 +3573,25 @@ fn inner(words: &[String]) -> Result<Option<Vec<String>>, String> {
         _ => None,
     })
 }
+
+/// The options of `xargs` that take the next word.
+const XARGS_VALUED: [&str; 15] = [
+    "-a",
+    "--arg-file",
+    "-d",
+    "--delimiter",
+    "-E",
+    "-I",
+    "-L",
+    "--max-lines",
+    "-n",
+    "--max-args",
+    "-P",
+    "--max-procs",
+    "-s",
+    "--max-chars",
+    "--process-slot-var",
+];
 
 /// The options of `sudo` that take the next word.
 const SUDO_VALUED: [&str; 21] = [

@@ -59,6 +59,12 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
         // What makes the gate unsure of the repository git commits in: refused for a commit, and
         // for an alias, which may be read from another repository than the one git reads.
         let doubt = doubt(&git);
+        // Its command is not on the line: it may be a commit.
+        if git.hidden
+            && let Some(doubt) = &doubt
+        {
+            return Err(doubt.clone());
+        }
         let words = match (
             unaliased(git.words.clone(), &git.folder, &env).await,
             &doubt,
@@ -81,9 +87,19 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
         let (common, top) = repository_at(&git.folder, &env).await.map_err(unknown)?;
         let Some(path) = commons
             .iter()
-            .find(|(_, dir)| *dir == common)
+            .find(|(_, dir)| dir.as_ref() == Ok(&common))
             .map(|(path, _)| *path)
         else {
+            // It may be the repository git cannot read, whose checks would not run.
+            let unread = commons.iter().find_map(|(path, dir)| {
+                let checked = project.repositories.iter().any(|repository| {
+                    repository.path == *path && !repository.commit_checks.is_empty()
+                });
+                dir.as_ref().err().filter(|_| checked)
+            });
+            if let Some(why) = unread {
+                return Err(unknown(why.clone()));
+            }
             continue;
         };
         let Some(checks) = project
@@ -221,14 +237,13 @@ async fn repository_at(folder: &Path, env: &Env) -> Result<(PathBuf, PathBuf), S
     }
 }
 
-/// The common folder of each repository of the place, as `repository_at` says it: none for one
-/// git cannot read.
-async fn common_dirs<'a>(place: &'a Place, env: &Env) -> Vec<(&'a str, PathBuf)> {
+/// The common folder of each repository of the place, as `repository_at` says it, or why git
+/// cannot read it.
+async fn common_dirs<'a>(place: &'a Place, env: &Env) -> Vec<(&'a str, Result<PathBuf, String>)> {
     let mut commons = Vec::new();
     for (path, root) in &place.repositories {
-        if let Ok((common, _)) = repository_at(root, env).await {
-            commons.push((path.as_str(), common));
-        }
+        let common = repository_at(root, env).await.map(|(common, _)| common);
+        commons.push((path.as_str(), common));
     }
     commons
 }
