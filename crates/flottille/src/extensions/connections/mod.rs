@@ -166,7 +166,7 @@ pub struct Declaration {
 /// A vault entry a URL connection's requests carry, and where.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Secret {
-    pub place: Place,
+    pub place: Carried,
     /// The header's, the query parameter's or the cookie's name; empty for basic authentication.
     pub name: String,
     /// Written before the secret in a header (`Bearer `).
@@ -175,7 +175,7 @@ pub struct Secret {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Place {
+pub enum Carried {
     Header,
     Query,
     Cookie,
@@ -183,34 +183,39 @@ pub enum Place {
     Basic,
 }
 
-impl Place {
+impl Carried {
     const WORDS: [&str; 4] = ["header", "query", "cookie", "basic"];
 
     pub fn word(self) -> &'static str {
         match self {
-            Place::Header => "header",
-            Place::Query => "query",
-            Place::Cookie => "cookie",
-            Place::Basic => "basic",
+            Carried::Header => "header",
+            Carried::Query => "query",
+            Carried::Cookie => "cookie",
+            Carried::Basic => "basic",
         }
     }
 
-    fn of(word: &str) -> Option<Place> {
-        [Place::Header, Place::Query, Place::Cookie, Place::Basic]
-            .into_iter()
-            .find(|place| place.word() == word)
+    fn of(word: &str) -> Option<Carried> {
+        [
+            Carried::Header,
+            Carried::Query,
+            Carried::Cookie,
+            Carried::Basic,
+        ]
+        .into_iter()
+        .find(|place| place.word() == word)
     }
 }
 
 impl Secret {
     /// A line of the old `headers`, which `json` writes back there.
     fn plain_header(&self) -> bool {
-        self.place == Place::Header && self.prefix.is_empty()
+        self.place == Carried::Header && self.prefix.is_empty()
     }
 
     fn json(&self) -> Value {
         let mut line = json!({"in": self.place.word()});
-        if self.place != Place::Basic {
+        if self.place != Carried::Basic {
             line["name"] = json!(self.name);
         }
         if !self.prefix.is_empty() {
@@ -223,10 +228,10 @@ impl Secret {
     /// What the review and the card say of it.
     pub fn said(&self) -> String {
         match self.place {
-            Place::Header => format!("the header {}", self.name),
-            Place::Query => format!("the query parameter {}", self.name),
-            Place::Cookie => format!("the cookie {}", self.name),
-            Place::Basic => "basic authentication".to_owned(),
+            Carried::Header => format!("the header {}", self.name),
+            Carried::Query => format!("the query parameter {}", self.name),
+            Carried::Cookie => format!("the cookie {}", self.name),
+            Carried::Basic => "basic authentication".to_owned(),
         }
     }
 }
@@ -260,8 +265,8 @@ fn secrets_of(value: &Value, at: &str) -> std::result::Result<Vec<Secret>, Strin
         };
         let place = text("in")?
             .as_deref()
-            .and_then(Place::of)
-            .ok_or_else(|| format!("{at}.in: must be one of {}", Place::WORDS.join(", ")))?;
+            .and_then(Carried::of)
+            .ok_or_else(|| format!("{at}.in: must be one of {}", Carried::WORDS.join(", ")))?;
         let entry = text("entry")?
             .filter(|entry| !entry.is_empty())
             .ok_or_else(|| {
@@ -269,10 +274,10 @@ fn secrets_of(value: &Value, at: &str) -> std::result::Result<Vec<Secret>, Strin
             })?;
         let name = text("name")?.unwrap_or_default();
         let named_ok = match place {
-            Place::Basic => name.is_empty(),
-            Place::Header => http::HeaderName::from_bytes(name.as_bytes()).is_ok(),
-            Place::Query => !name.is_empty() && !name.chars().any(char::is_control),
-            Place::Cookie => {
+            Carried::Basic => name.is_empty(),
+            Carried::Header => http::HeaderName::from_bytes(name.as_bytes()).is_ok(),
+            Carried::Query => !name.is_empty() && !name.chars().any(char::is_control),
+            Carried::Cookie => {
                 !name.is_empty()
                     && name
                         .chars()
@@ -281,13 +286,13 @@ fn secrets_of(value: &Value, at: &str) -> std::result::Result<Vec<Secret>, Strin
         };
         if !named_ok {
             return Err(match place {
-                Place::Basic => format!("{at}.name: basic authentication takes no name"),
+                Carried::Basic => format!("{at}.name: basic authentication takes no name"),
                 _ => format!("{at}.name: not a {}'s name: {name:?}", place.word()),
             });
         }
         let prefix = text("prefix")?.unwrap_or_default();
         if !prefix.is_empty()
-            && (place != Place::Header || prefix.chars().any(|c| c.is_control() || !c.is_ascii()))
+            && (place != Carried::Header || prefix.chars().any(|c| c.is_control() || !c.is_ascii()))
         {
             return Err(format!(
                 "{at}.prefix: only a header takes a prefix, on one line, as \"Bearer \""
@@ -428,29 +433,30 @@ impl Declaration {
         let mut secrets: Vec<Secret> = headers
             .into_iter()
             .map(|(name, entry)| Secret {
-                place: Place::Header,
+                place: Carried::Header,
                 name,
                 prefix: String::new(),
                 entry,
             })
             .collect();
         if let Some(value) = table.get("secrets") {
-            if matches!(reach, Reach::Command(_)) {
+            let lines = secrets_of(value, at)?;
+            if !lines.is_empty() && matches!(reach, Reach::Command(_)) {
                 return Err(format!(
                     "{at}.secrets: only a url takes secrets; a command takes env"
                 ));
             }
-            secrets.extend(secrets_of(value, at)?);
+            secrets.extend(lines);
         }
         for (n, secret) in secrets.iter().enumerate() {
             let same = |other: &Secret| {
                 other.place == secret.place && other.name.eq_ignore_ascii_case(&secret.name)
             };
             let authorization = |other: &Secret| {
-                other.place == Place::Header && other.name.eq_ignore_ascii_case("authorization")
+                other.place == Carried::Header && other.name.eq_ignore_ascii_case("authorization")
             };
             if secrets[..n].iter().any(same)
-                || (secret.place == Place::Basic && secrets.iter().any(authorization))
+                || (secret.place == Carried::Basic && secrets.iter().any(authorization))
             {
                 return Err(format!(
                     "{at}.secrets: {} is given twice (basic authentication is the Authorization \
@@ -2502,11 +2508,74 @@ mod tests {
                 json!({"name": "a", "about": "a", "command": "x mcp"}),
                 "command",
             ),
+            (
+                json!({"name": "a", "about": "a", "command": ["x"],
+                    "secrets": [{"in": "query", "name": "t", "entry": "e"}]}),
+                "only a url takes secrets",
+            ),
+            (
+                json!({"name": "a", "about": "a", "url": "https://x.example",
+                    "secrets": [{"in": "body", "name": "t", "entry": "e"}]}),
+                "secrets[0].in",
+            ),
+            (
+                json!({"name": "a", "about": "a", "url": "https://x.example",
+                    "secrets": [{"in": "basic", "name": "t", "entry": "e"}]}),
+                "basic authentication takes no name",
+            ),
+            (
+                json!({"name": "a", "about": "a", "url": "https://x.example",
+                    "secrets": [{"in": "query", "name": "t", "prefix": "Bearer ", "entry": "e"}]}),
+                "only a header takes a prefix",
+            ),
+            (
+                json!({"name": "a", "about": "a", "url": "https://x.example",
+                    "secrets": [{"in": "cookie", "name": "t", "secret": "s3cret"}]}),
+                "unknown key",
+            ),
+            (
+                json!({"name": "a", "about": "a", "url": "https://x.example",
+                    "headers": {"Authorization": {"vault": "e"}},
+                    "secrets": [{"in": "basic", "entry": "f"}]}),
+                "given twice",
+            ),
         ] {
             let refused = parse(table).unwrap_err();
             assert!(refused.contains(says), "{refused}");
             assert!(refused.starts_with("connections.server[0]"), "{refused}");
         }
+    }
+
+    #[test]
+    fn secret_lines_are_written_back_where_they_were_read() {
+        let declared = parse(
+            json!({"name": "a", "about": "a", "url": "https://x.example",
+            "headers": {"X-Key": {"vault": "k"}},
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "t"}, {"in": "basic", "entry": "b"}]}),
+        )
+        .unwrap();
+        assert_eq!(declared.secrets.len(), 3);
+        let json = declared.json();
+        assert_eq!(json["headers"], json!({"X-Key": {"vault": "k"}}));
+        assert_eq!(
+            json["secrets"],
+            json!([{"in": "header", "name": "Authorization", "prefix": "Bearer ", "entry": "t"},
+                {"in": "basic", "entry": "b"}])
+        );
+        assert_eq!(parse(json).unwrap(), declared);
+        // A declaration of headers alone keeps the digest it was pinned for.
+        let old = parse(
+            json!({"name": "a", "about": "a", "url": "https://x.example",
+            "headers": {"X-Key": {"vault": "k"}}}),
+        )
+        .unwrap();
+        let trusted = json!({"reach": {"url": "https://x.example"}, "env": {},
+            "headers": {"X-Key": "k"}, "only": {}});
+        assert_eq!(
+            old.digest(),
+            crate::files::sha256(trusted.to_string().as_bytes())
+        );
     }
 
     #[test]

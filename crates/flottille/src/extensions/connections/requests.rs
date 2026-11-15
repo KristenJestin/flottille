@@ -206,11 +206,12 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
             ("secrets", Value::Array(lines)) => {
                 for (n, line) in lines.iter().enumerate() {
                     let entry = line["entry"].as_str().unwrap_or_default();
-                    if !entries.iter().any(|known| known.name == entry) {
+                    if !nameable(&entries, entry) {
                         // The value is not said back: it may be a secret written where a name goes.
                         return Err(format!(
-                            "secrets[{n}].entry: names no vault entry: a secret is never written \
-                             here, only the name of an entry the vault list gives"
+                            "secrets[{n}].entry: not a vault entry's name: a secret is never \
+                             written here, only the name of an entry the vault list gives or of \
+                             one the user is to make"
                         ));
                     }
                 }
@@ -229,11 +230,12 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
                     let entry = entry.as_str().ok_or_else(|| {
                         format!("{key}.{variable}: must name a vault entry, a text")
                     })?;
-                    if !entries.iter().any(|known| known.name == entry) {
+                    if !nameable(&entries, entry) {
                         // The value is not said back: it may be a secret written where a name goes.
                         return Err(format!(
-                            "{key}.{variable}: names no vault entry: a secret is never written \
-                             here, only the name of an entry the vault list gives"
+                            "{key}.{variable}: not a vault entry's name: a secret is never \
+                             written here, only the name of an entry the vault list gives or of \
+                             one the user is to make"
                         ));
                     }
                     named.insert(variable.clone(), json!({"vault": entry}));
@@ -250,6 +252,48 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
         params.insert(key.clone(), value);
     }
     Ok(params)
+}
+
+/// Whether an agent may name `entry`: one of the vault, or one the user is to make before they
+/// accept (`waits`), whose name is an entry's and nothing the masking takes for a secret.
+fn nameable(entries: &[flottille_core::vault::Entry], entry: &str) -> bool {
+    entries.iter().any(|known| known.name == entry)
+        || (flottille_core::project::valid_name(entry)
+            && flottille_core::secrets::mask(entry, &std::env::vars_os().collect()) == entry)
+}
+
+/// The vault entries a declaration names that the vault does not hold yet.
+fn missing(daemon: &Daemon, declaration: &Declaration) -> Vec<String> {
+    let entries = daemon
+        .read(|store| store.vault_entries())
+        .unwrap_or_default();
+    let mut missing: Vec<String> = declaration
+        .entries()
+        .filter(|entry| !entries.iter().any(|known| &&known.name == entry))
+        .cloned()
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+/// Why the user's Accept of an agent's request waits: a vault entry it names does not exist yet.
+/// The request stays held; once the entry is saved, the checks of an entry apply to it.
+pub fn waits(daemon: &Daemon, args: &Value) -> Option<String> {
+    if !matches!(args["action"].as_str(), Some("add" | "edit")) {
+        return None;
+    }
+    let after = proposal(daemon, args).ok()?.after?;
+    let missing = missing(daemon, &after);
+    (!missing.is_empty()).then(|| {
+        format!(
+            "Accept waits for the vault entr{} {}: save {} in the vault (New entry…), then \
+             accept",
+            if missing.len() == 1 { "y" } else { "ies" },
+            missing.join(", "),
+            if missing.len() == 1 { "it" } else { "them" },
+        )
+    })
 }
 
 /// The host an address names, as a connection's URL or a vault entry's `url` gives it: over
@@ -315,6 +359,10 @@ fn headers_checked(
             continue;
         }
         let (said, entry) = (secret.said(), &secret.entry);
+        // An entry still to make is checked once it exists, before the user's Accept.
+        if !entries.iter().any(|known| &known.name == entry) {
+            continue;
+        }
         let entry_host = entries
             .iter()
             .find(|known| &known.name == entry)
@@ -356,7 +404,7 @@ fn secrets(daemon: &Daemon, declaration: &Declaration) -> Value {
         .chain(declaration.secrets.iter().map(|secret| {
             // A header's key is the one `headers` always had.
             let key = match secret.place {
-                super::Place::Header => "headers",
+                super::Carried::Header => "headers",
                 place => place.word(),
             };
             (key, secret.name.clone(), &secret.entry)
@@ -368,8 +416,9 @@ fn secrets(daemon: &Daemon, declaration: &Declaration) -> Value {
             .and_then(|known| known.url.as_deref())
             .and_then(host_of);
         let differs = host.is_none() || entry_host != host;
+        let missing = !entries.iter().any(|known| &known.name == entry);
         secrets.push(json!({"key": key, "name": name, "entry": entry,
-            "entry_host": entry_host, "host": host, "differs": differs}));
+            "entry_host": entry_host, "host": host, "differs": differs, "missing": missing}));
     }
     Value::Array(secrets)
 }
@@ -939,6 +988,7 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
             .map_or(json!([]), |shown| secrets(daemon, shown)),
         "current": current,
         "why": null,
+        "waits": waits(daemon, args),
     }))
 }
 

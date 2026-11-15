@@ -46,6 +46,11 @@ pub fn family_says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<Stri
     connections::requests::says(daemon, root, args)
 }
 
+/// Why the user's Accept of a held `connections` call waits: an entry it names is still missing.
+pub fn family_waits(daemon: &Daemon, args: &Value) -> Option<String> {
+    connections::requests::waits(daemon, args)
+}
+
 /// A `connections` call performed: a read, or a write the user accepted, `approved` being the
 /// words the user read on its card, masked for `place`.
 pub async fn family_call(

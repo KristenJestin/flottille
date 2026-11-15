@@ -1402,6 +1402,7 @@ impl ConnectionsSection {
                 }
                 if editing {
                     params["headers"] = json!({});
+                    params["secrets"] = json!([]);
                 }
             }
             Reach::Url => {

@@ -394,7 +394,7 @@ async fn carried(
     ),
     String,
 > {
-    use super::Place;
+    use super::Carried;
     use base64::Engine;
     let mut headers = HashMap::new();
     let mut cookies = Vec::new();
@@ -410,9 +410,9 @@ async fn carried(
     for line in &declaration.secrets {
         let secret = crate::vault::every_project_s(daemon, &declaration.name, &line.entry).await?;
         match line.place {
-            Place::Header => header(&line.name, format!("{}{secret}", line.prefix), &line.entry)?,
-            Place::Cookie => cookies.push(format!("{}={secret}", line.name)),
-            Place::Basic => {
+            Carried::Header => header(&line.name, format!("{}{secret}", line.prefix), &line.entry)?,
+            Carried::Cookie => cookies.push(format!("{}={secret}", line.name)),
+            Carried::Basic => {
                 let username = daemon
                     .read(|store| store.vault_entries())
                     .map_err(|error| error.to_string())?
@@ -430,7 +430,7 @@ async fn carried(
                 flottille_core::secrets::add_vault_value(&pair);
                 header("authorization", format!("Basic {pair}"), &line.entry)?;
             }
-            Place::Query => {
+            Carried::Query => {
                 // As the URL carries it, masked too wherever it is said.
                 let encoded: String =
                     url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
