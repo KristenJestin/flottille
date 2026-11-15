@@ -429,7 +429,7 @@ fn a_pasted_image_is_a_thumbnail_with_a_remove_button_and_goes_as_an_image_block
     paste(clipboard_png(), cx);
     assert_eq!(attachments(&reply, cx), 1);
 
-    // Sent with a message: an image block after the text.
+    // Sent with a message: an image block where its chip is, the text typed after it after.
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("what is this?");
     reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
@@ -451,8 +451,10 @@ fn a_pasted_image_is_a_thumbnail_with_a_remove_button_and_goes_as_an_image_block
         prompt[0]["text"]
             .as_str()
             .unwrap()
-            .contains("what is this?")
+            .ends_with("[Image 1: image.png]"),
+        "{prompt}"
     );
+    assert_eq!(prompt[2]["text"], "what is this?", "{prompt}");
     assert_eq!(prompt[1]["type"], "image");
     assert_eq!(prompt[1]["mimeType"], "image/png");
     {
@@ -574,8 +576,8 @@ fn a_clipboard_with_an_image_and_its_url_attaches_the_image_and_pastes_no_text(
     assert_eq!(attachments(&reply, cx), 1, "the image wins over the text");
     assert_eq!(
         reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
-        "keep this",
-        "and the text is not pasted"
+        "keep thisImage 1",
+        "and the text is not pasted: the field holds the picture's chip (#773)"
     );
 
     // A clipboard with text only still goes to the field.
@@ -583,7 +585,7 @@ fn a_clipboard_with_an_image_and_its_url_attaches_the_image_and_pastes_no_text(
     assert_eq!(attachments(&reply, cx), 1);
     assert_eq!(
         reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
-        "keep this and more"
+        "keep thisImage 1 and more"
     );
 }
 
@@ -651,12 +653,14 @@ fn a_pasted_picture_is_drawn_inside_its_bubble_above_the_text(cx: &mut TestAppCo
 
     paste(clipboard_png(), cx);
     cx.update(|window, cx| window.click("reply-field", cx));
-    cx.simulate_input("look at this");
+    cx.simulate_input(" look at this");
     reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    // The picture's chip went first, as its marker (#773).
     until(&shell, cx, "the message carries its picture", |cx| {
-        blocks(&page, cx).iter().any(
-            |b| matches!(b, Block::Message { images, text, .. } if images.len() == 1 && text == "look at this"),
-        )
+        blocks(&page, cx).iter().any(|b| {
+            matches!(b, Block::Message { images, text, .. }
+                if images.len() == 1 && text == "[Image 1: image.png] look at this")
+        })
     });
     settle(cx);
 

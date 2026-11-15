@@ -26,7 +26,9 @@ use gpui_kit::{
 use serde_json::{Map, Value, json};
 
 use crate::actions::Command;
-use crate::commands::{boxed, line_field, perform_later, problem_line};
+use crate::commands::{
+    boxed, line_field, perform_later, problem_line, section_blocks, spaced, stack,
+};
 use crate::shell::Shell;
 use crate::vault::{VaultEntry, VaultSection};
 
@@ -1138,6 +1140,13 @@ impl ConnectionsSection {
         }
         toast(shown, cx);
         self.read(cx);
+        // The review that waited for it reads the server again by itself.
+        if said == "signed_in" && self.review_open && self.review.as_ref().is_some_and(|r| {
+            r.name == name
+                && matches!(&r.answer, Some(Err(why)) if flottille_core::vault::asks_sign_in(why))
+        }) {
+            self.open_review(name, cx);
+        }
         cx.notify();
     }
 
@@ -1235,10 +1244,11 @@ impl ConnectionsSection {
                 self.new_site(Some(host), window, cx);
             }
         }
-        // The rows the dialog opens with are there at once.
-        self.variable_rows = Listing::default();
-        self.limit_rows = Listing::default();
-        self.site_rows = Listing::default();
+        // The rows the dialog opens with are there at once, at rest: a plain list plays the
+        // entrance of every row on its first sync. Rows added afterwards still unfold.
+        self.variable_rows = Listing::default().at_rest();
+        self.limit_rows = Listing::default().at_rest();
+        self.site_rows = Listing::default().at_rest();
         self.form = Form::Editing(server.map(|s| s.name.clone()));
         self.form_error = None;
         self.saving = false;
@@ -1511,12 +1521,14 @@ impl ConnectionsSection {
             picked: BTreeSet::new(),
             opened: HashSet::new(),
             folded: HashSet::new(),
-            rows: Grouped::new("connection-review-row"),
-            changes: Listing::default(),
+            rows: Grouped::new("connection-review-row").at_rest(),
+            changes: Listing::default().at_rest(),
             found: Found::default(),
             folding: HashMap::new(),
         });
         self.review_open = true;
+        // The entry a refused header names is listed by the time its dialog is asked for.
+        self.vault.update(cx, |vault, cx| vault.read(cx));
         self.ask(
             "connection.review",
             json!({"name": name}),
@@ -1525,6 +1537,23 @@ impl ConnectionsSection {
             },
             cx,
         );
+        cx.notify();
+    }
+
+    /// "Edit entry": the review closes, and the vault's dialog opens on the entry, its secret to
+    /// type again. The review is opened again from the row once it is replaced.
+    fn edit_entry(&mut self, entry: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.review_open = false;
+        let entry = entry.to_owned();
+        // After this update: the shell opens Settings, which holds this section.
+        let shell = self.shell.clone();
+        window.defer(cx, move |window, cx| {
+            shell
+                .update(cx, |shell, cx| {
+                    shell.replace_vault_entry(&entry, window, cx)
+                })
+                .ok();
+        });
         cx.notify();
     }
 
@@ -2020,65 +2049,78 @@ impl ConnectionsSection {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(space::LG)
             .child(
-                Field::new("connection-name-field", "Name", name)
-                    .hint("Lower-case letters, digits and _; its tool is conn_ and this name."),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::LG)
+                    .child(
+                        Field::new("connection-name-field", "Name", name).hint(
+                            "Lower-case letters, digits and _; its tool is conn_ and this name.",
+                        ),
+                    )
+                    .child(Field::new(
+                        "connection-about-field",
+                        "What it is for",
+                        boxed("connection-about", Input::new(&fields.about), cx),
+                    ))
+                    .child(Field::new(
+                        "connection-reach-field",
+                        "How it is reached",
+                        reach,
+                    )),
             )
-            .child(Field::new(
-                "connection-about-field",
-                "What it is for",
-                boxed("connection-about", Input::new(&fields.about), cx),
-            ))
-            .child(Field::new(
-                "connection-reach-field",
-                "How it is reached",
-                reach,
-            ))
             .child(
                 presence(
                     "connection-command-block",
                     self.reach == Reach::Command,
                     command,
                 )
-                .gap(space::LG),
+                .space(space::LG),
             )
-            .child(presence("connection-url-block", self.reach == Reach::Url, url).gap(space::LG))
-            .child(
-                Field::new(
-                    "connection-variables-field",
-                    variables_label,
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_start()
-                        .child(div().w_full().child(variables))
-                        .child(div().pt(space::SM).child(new_variable)),
-                )
-                .optional()
-                .hint(VARIABLES_HINT),
-            )
-            .child(
-                Field::new(
-                    "connection-limits-field",
-                    "Limits on arguments",
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_start()
-                        .child(div().w_full().child(limits))
-                        .child(div().pt(space::SM).child(new_limit)),
-                )
-                .optional()
-                .hint(LIMITS_HINT),
-            )
+            .child(presence("connection-url-block", self.reach == Reach::Url, url).space(space::LG))
+            .child(spaced(
+                space::LG,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::LG)
+                    .child(
+                        Field::new(
+                            "connection-variables-field",
+                            variables_label,
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_start()
+                                .child(div().w_full().child(variables))
+                                .child(div().pt(space::SM).child(new_variable)),
+                        )
+                        .optional()
+                        .hint(VARIABLES_HINT),
+                    )
+                    .child(
+                        Field::new(
+                            "connection-limits-field",
+                            "Limits on arguments",
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_start()
+                                .child(div().w_full().child(limits))
+                                .child(div().pt(space::SM).child(new_limit)),
+                        )
+                        .optional()
+                        .hint(LIMITS_HINT),
+                    ),
+            ))
             .child(
                 presence(
                     "connection-sites-block",
                     self.reach == Reach::Command,
                     sites,
                 )
-                .gap(space::LG),
+                .space(space::LG),
             )
             .child(
                 presence(
@@ -2592,7 +2634,7 @@ impl ConnectionsSection {
                     .into_any_element()
             },
         )
-        .gap(space::MD);
+        .space(space::MD);
 
         let limits = diff.limits.iter().map(|limit| {
             let LimitCover {
@@ -2631,23 +2673,23 @@ impl ConnectionsSection {
                 .child(SharedString::from(said))
                 .test_support()
         });
-        div()
-            .flex()
-            .flex_col()
-            .gap(space::MD)
-            .child(self.instructions_row(diff, review, cx))
-            .children(changes)
-            .child(listed)
+        stack(space::MD)
+            .child(spaced(space::MD, self.instructions_row(diff, review, cx)))
+            .children(changes.map(|changes| spaced(space::MD, changes)))
+            .child(spaced(space::MD, listed))
             .child(none)
             .children((!diff.limits.is_empty()).then(|| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .child(heading("connection-review-limits-title", "Its limits"))
-                    .children(limits)
+                spaced(
+                    space::MD,
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(space::SM)
+                        .child(heading("connection-review-limits-title", "Its limits"))
+                        .children(limits),
+                )
             }))
-            .children(refused)
+            .children(refused.map(|refused| spaced(space::MD, refused)))
             .into_any_element()
     }
 
@@ -2824,8 +2866,8 @@ impl ConnectionsSection {
     }
 
     /// What Flottille's adapter is to this server, in sight above the bar: that it applies (its
-    /// name and range), and why `login` is refused while an action outside its list is on, which
-    /// the user reads before Accept. What it changed unfolds under it.
+    /// name and range), and why `login` would be refused, which the user reads before Accept.
+    /// What it changed unfolds under it.
     fn adapter_block(
         &self,
         adapter: &AdapterSaid,
@@ -3069,6 +3111,45 @@ impl ConnectionsSection {
                     true,
                 )
             }
+            Some(Err(why)) if flottille_core::vault::refused_entry(why) => (
+                // The server refused what the user's entries gave it: the way out is an entry.
+                Some(
+                    "Its server refused what it was given, so there is nothing to read yet."
+                        .to_owned(),
+                ),
+                div()
+                    .id("connection-review-needs-entry")
+                    .aria_label(SharedString::from(why.clone()))
+                    .text_size(px(12.5))
+                    .text_color(p.wait)
+                    .child(SharedString::from(why.clone()))
+                    .test_support()
+                    .into_any_element(),
+                None,
+                None,
+                false,
+            ),
+            Some(Err(why)) if flottille_core::vault::asks_sign_in(why) => {
+                // A state, in the attention tone, not an error: the way out is a button.
+                let name = review.name.clone();
+                (
+                    Some("Its server asks you to sign in before it can be read.".to_owned()),
+                    div()
+                        .id("connection-review-needs-sign-in")
+                        .aria_label(SharedString::from(format!("{name} needs a sign-in")))
+                        .text_size(px(12.5))
+                        .text_color(p.wait)
+                        .child(SharedString::from(format!(
+                            "Sign in to {name}: this review reads its server again by itself, \
+                             and shows its actions."
+                        )))
+                        .test_support()
+                        .into_any_element(),
+                    None,
+                    None,
+                    false,
+                )
+            }
             Some(Err(why)) => (
                 Some("Its server did not start, so there is nothing to read yet.".to_owned()),
                 div()
@@ -3093,6 +3174,22 @@ impl ConnectionsSection {
             cx,
         );
         let accepting = review.accepting;
+        let signing = self.signing.contains(&review.name);
+        let sign_in = match &answer {
+            Some(Err(why)) if flottille_core::vault::asks_sign_in(why) => Some(review.name.clone()),
+            _ => None,
+        };
+        let entries: Vec<String> = match &answer {
+            Some(Err(why)) if flottille_core::vault::refused_entry(why) => {
+                let mut kept: Vec<String> = self
+                    .server(&review.name)
+                    .map(|server| server.headers.values().cloned().collect())
+                    .unwrap_or_default();
+                kept.dedup();
+                kept
+            }
+            _ => Vec::new(),
+        };
         review.answer = answer;
         self.review = Some(review);
         let body = div()
@@ -3100,7 +3197,6 @@ impl ConnectionsSection {
             .w_full()
             .flex()
             .flex_col()
-            .gap(space::MD)
             .child(awaiting(
                 "connection-review-waiting",
                 pending,
@@ -3120,6 +3216,34 @@ impl ConnectionsSection {
         }
         if let Some(sentence) = sentence {
             modal = modal.sentence(sentence);
+        }
+        if let Some(name) = sign_in {
+            modal = modal.action(
+                Button::primary("connection-review-sign-in", "Sign in")
+                    .leading(Icon::Lucide("log-in"))
+                    .disabled(signing)
+                    .on_click(cx.listener(move |this, _, _, cx| this.sign_in(&name, cx))),
+            );
+        }
+        let several = entries.len() > 1;
+        for entry in entries {
+            let (label, id) = match several {
+                true => (
+                    format!("Edit {entry}"),
+                    format!("connection-review-edit-{entry}"),
+                ),
+                false => (
+                    "Edit entry".to_owned(),
+                    "connection-review-edit-entry".to_owned(),
+                ),
+            };
+            modal = modal.action(
+                Button::primary(SharedString::from(id), SharedString::from(label))
+                    .leading(Icon::Lucide("key-round"))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.edit_entry(&entry, window, cx)),
+                    ),
+            );
         }
         if ready {
             modal = modal.action(
@@ -3167,20 +3291,26 @@ impl Render for ConnectionsSection {
                     .leading(Icon::Plus)
                     .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
             )
-            .child(presence("connection-list-block", count > 0, list).gap(space::MD))
-            .child(
-                presence(
-                    "no-connection-block",
-                    empty,
-                    EmptyLine::new("no-connection", Icon::Lucide("plug"), EMPTY),
-                )
-                .gap(space::MD),
-            )
-            .child(problem_line(
-                "connection-problem",
-                self.problem.clone(),
+            .child(section_blocks(
+                "connection-blocks",
+                count > 0 || empty || self.problem.is_some(),
                 space::MD,
-                cx,
+                stack(space::MD)
+                    .child(presence("connection-list-block", count > 0, list).space(space::MD))
+                    .child(
+                        presence(
+                            "no-connection-block",
+                            empty,
+                            EmptyLine::new("no-connection", Icon::Lucide("plug"), EMPTY),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(problem_line(
+                        "connection-problem",
+                        self.problem.clone(),
+                        space::MD,
+                        cx,
+                    )),
             ));
         div()
             .text_color(p.text)

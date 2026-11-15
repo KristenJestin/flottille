@@ -333,15 +333,16 @@ secret.
 
 ### `vault.asked`, `vault.ask_joined`, `vault.ask_answered`
 
-An agent asked the user for a vault entry a feature of Flottille names and that is missing
-(`vault {action: "ask"}`, `docs/vault.md`, "Asking the user for an entry"), an event of that
-agent. `vault.asked` opens the request, numbered by its `seq`: `agent`, `project`, `name`, `why`
-(the agent's reason), and what Flottille prefilled, `description` and `takes_username`, and
-`taken` when another project already uses the name (the sentence the request is refused with).
-`vault.ask_joined` is another agent's ask while it is open: `agent`, `ask` (the request's
-number), `project`, `name`, `why`. `vault.ask_answered`, an event of the agent that opened it,
-closes it: `ask`, `project`, `name`, `entry` (the entry set, which is not `name` when the user
-chose another), `outcome` (`set` or `dismissed`). Never a secret.
+An agent asked the user to add a vault entry (`vault {action: "ask"}`, `docs/vault.md`, "Asking
+the user for an entry"), an event of that agent. `vault.asked` opens the request, numbered by its
+`seq`: `agent`, `project` (the agent's), `name`, `why` (the agent's reason), and what prefills the
+form of a new entry: `description` (a feature's, else `null`), `url`, `host` (where the secret
+goes, the daemon's reading of `url` as a connection's login reads it, in ASCII; `null` without a
+`url`), `username`, `for` (the use, or `null`), `every` (every project's entry) and
+`takes_username`. `vault.ask_joined` is another
+agent's ask while it is open: `agent`, `ask` (the request's number), `project`, `name`, `why`.
+`vault.ask_answered`, an event of the agent that opened it, closes it: `ask`, `project`, `name`,
+`outcome` (`set` or `dismissed`). Never a secret.
 
 ### `workspace.created`
 
@@ -557,7 +558,7 @@ A turn starts with this message.
 |---|---|
 | `agent` | |
 | `text` | The message. |
-| `images` | The names of the images that went with it, when some did (`agent.image` gives each back). An image that did not go is said in `text` instead. |
+| `images` | The names of the images that went with it, when some did (`agent.image` gives each back), in the order of their markers in `text` (`[Image N: <name>]`, `docs/protocol.md` `agent.send`): the agent read each one right after its marker. An image that did not go is said in `text` instead. |
 | `deliveries` | The ids of the deliveries the message is made of, in order: one per delivery of `text` (the id `agent.send` answered for a message of the user). An event written before it was kept has none. A delivery that only gives a new session the conversation again after a compaction (its brief, the summary, the latest messages, or the handoff) has an id ending in `-replay` (`brief-<agent>-<epoch>-replay`): it is part of the compaction, not something anyone said, and a reader that shows what was sent leaves its section of `text` out. |
 | `typed` | When a delivery of the message used commands (`docs/commands.md`): one entry per delivery of `text`, in order, `{"text", "commands"}` for one that used commands (what was typed, masked, and the names of the commands in the order of their first use), `null` for the others. Left out when none did; an event written before it was kept has none. |
 

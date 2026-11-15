@@ -969,20 +969,15 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
 }
 
 /// Writes the agent `made` made.
-pub fn write_new(daemon: &Daemon, agent: &Agent) -> Result<(), Failure> {
+pub fn write_new(daemon: &Arc<Daemon>, agent: &Agent) -> Result<(), Failure> {
+    let data = json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
+        "folder": agent.folder, "provider": agent.provider, "model": agent.chosen.model,
+        "role": agent.role, "parent": agent.parent, "depth": agent.depth, "title": agent.title});
     daemon.write(|store| {
-        let event = store.create_agent(
-            agent,
-            (
-                "agent.created",
-                json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
-                    "folder": agent.folder, "provider": agent.provider, "model": agent.chosen.model,
-                    "role": agent.role, "parent": agent.parent, "depth": agent.depth,
-                    "title": agent.title}),
-            ),
-        )?;
+        let event = store.create_agent(agent, ("agent.created", data.clone()))?;
         Ok(((), event))
     })?;
+    crate::extensions::heard(daemon, &[("agent.created", data)]);
     Ok(())
 }
 
@@ -1264,11 +1259,12 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
 }
 
 /// The tools of an agent of `project`, a root or a child at `depth`, as its provider names them:
-/// what its role has in the project as it is now, whether the project sees an entry of the vault,
-/// and what the extensions active there give it. An agent an extension launched (`launched`, the
-/// extension and the kind of its agent) has a worker's tools whatever its depth, without `ask`,
-/// whose answer would come from an agent that has no tool to give it, and the extension's: never
-/// an `agent_*` tool nor `approval_answer`.
+/// what its role has in the project as it is now, whether the project sees an entry of the vault
+/// (or the agent has a connection whose login may ask for one), and what the extensions active
+/// there give it. An agent an extension launched (`launched`, the extension and the kind of its
+/// agent) has a worker's tools whatever its depth, without `ask`, whose answer would come from an
+/// agent that has no tool to give it, and the extension's: never an `agent_*` tool nor
+/// `approval_answer`.
 pub fn tools_of(
     daemon: &Daemon,
     provider: &Provider,
@@ -1278,6 +1274,12 @@ pub fn tools_of(
     vault: bool,
     launched: Option<(&str, &str)>,
 ) -> Vec<String> {
+    let given = crate::extensions::tools_for(daemon, project, root, launched);
+    // A connection's login takes an entry the user may have yet to add: its agent may ask for it.
+    let vault = vault
+        || given
+            .iter()
+            .any(|tool| crate::extensions::logs_in(daemon, tool));
     let mut tools = provider.tools(
         root && launched.is_none(),
         depth >= DEPTH_LIMIT || launched.is_some(),
@@ -1290,7 +1292,7 @@ pub fn tools_of(
         tools.retain(|tool| *tool != ask);
     }
     tools.extend(
-        crate::extensions::tools_for(daemon, project, root, launched)
+        given
             .into_iter()
             .map(|tool| format!("{}{tool}", provider.tool_prefix)),
     );
@@ -1924,6 +1926,8 @@ fn renew(
             return false;
         }
     };
+    // The new session has seen no page of any file: what the old one was shown is not before it.
+    daemon.mcp.kept.compacted(id);
     // No process runs here: the old session is over, and nothing will load it.
     if let Some((provider, native)) = replaced {
         (provider.forget_session)(&daemon.paths, &native);
@@ -2000,6 +2004,9 @@ pub fn change(
     });
     if let Err(error) = result {
         eprintln!("flottille daemon: agent {id}: {error}");
+    }
+    if state.is_final() {
+        daemon.mcp.kept.ended(id);
     }
 }
 
@@ -2143,8 +2150,9 @@ impl Drop for Recorder {
 }
 
 impl Recorder {
-    fn record(&self, name: &str, data: Value, activity: bool) {
-        record(&self.daemon, &self.agent, name, data, activity);
+    fn record(&self, name: &str, mut data: Value, activity: bool) {
+        data["agent"] = self.agent.as_str().into();
+        self.daemon.say(&self.agent, name, data, activity);
     }
 
     /// The model the agent's process runs, as it reported it at its start.
@@ -2272,6 +2280,18 @@ impl acp::Events for Recorder {
             }
         } else {
             self.said();
+        }
+        if name == "agent.compacted" {
+            self.daemon.mcp.kept.compacted(&self.agent);
+        }
+        if name == "agent.tool_call"
+            && data["update"] == false
+            && let Some(id) = data["id"].as_str()
+        {
+            self.daemon
+                .mcp
+                .kept
+                .called(&self.daemon.paths, &self.agent, id);
         }
         self.record(name, data, activity);
         if name == "agent.compacted" {

@@ -200,7 +200,10 @@ Replaces Flottille with the latest build of a channel (`docs/releases.md`): the 
 last, not the highest version. `--channel stable`, `beta` or `alpha` moves to that channel, and with
 `--channel alpha`, `--branch <name>` names the branch (by default the one last chosen, else the
 one this build came from); the channel last chosen is remembered, so a plain `flottille update`
-stays on it (by default the channel this build is on; a local build takes stable).
+stays on it (by default the channel this build is on; a local build takes stable). `--channel`
+offers no rc and no next, so a build of one of those lines that chose a channel goes back to its
+line by deleting `update-channel.json` in `$XDG_STATE_HOME/flottille/` (`~/.local/state/flottille/`
+by default).
 `--version <X.Y.Z[-pre]>` installs that release exactly, of any channel (not with `--channel`
 or `--branch`), and is refused with the nearest published versions when it does not exist. The
 archive's SHA-256 sum is checked before anything is replaced. It refuses while the daemon runs:
@@ -674,6 +677,21 @@ the standard input is a terminal: never an argument, which the shell's history a
 list would keep (`printf %s "$TOKEN" | flottille vault set jira`). Refused for an empty or short
 secret (6 characters at least), a name that is not letters, digits, `.`, `_` and `-`, or an
 unknown project. `--json` prints `vault.set`.
+
+### `flottille vault edit <name>`
+
+Changes what an entry says, with `--description <line>`, `--url <url>`, `--username <login>` and
+`--project <project>`: each flag given replaces its value, and each flag left out keeps the
+entry's. An empty value clears it, so `--project ""` makes the entry every project's again. The
+secret and the use the entry is bound to (`--for`) are kept as they are; the command never reads
+a secret. To replace the secret, use `vault set`, which reads it from the standard input, so that
+it never reaches the shell's history: `printf %s "$TOKEN" | flottille vault set jira`. Refused
+for an entry the vault does not hold. `--json` prints `vault.set`.
+
+```
+$ flottille vault edit jira --url https://tracker.example.org
+Changed jira; its secret is kept as it was.
+```
 
 ### `flottille vault remove <name>`
 

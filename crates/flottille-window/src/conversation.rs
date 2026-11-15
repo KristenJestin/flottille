@@ -29,8 +29,6 @@ pub const FULL: &str = "Full mode";
 pub struct Commanded {
     /// The commands' names, in the order of their first use.
     pub names: Vec<String>,
-    /// What the agent received: the commands' text with the message marked at its end.
-    pub received: String,
 }
 
 /// What one row of the conversation shows.
@@ -43,8 +41,7 @@ pub enum Block {
         from: String,
         text: String,
         images: Vec<String>,
-        /// For a message that used commands: `text` is what was typed, and this what it used
-        /// and what the agent received for it.
+        /// For a message that used commands: `text` is what was typed, and this what it used.
         commands: Option<Commanded>,
     },
     /// A message between two sessions (`session_send`): one `peer` wrote to this agent, or one
@@ -119,9 +116,9 @@ pub enum Block {
         text: String,
         moved: bool,
     },
-    /// The agent asked the user for a vault entry a feature of Flottille names and that is
-    /// missing (`vault.asked`): what Flottille prefilled and the agent's reason. `open` until the
-    /// daemon says it was answered (`vault.ask_answered`).
+    /// The agent asked the user for a vault entry (`vault.asked`): what it, or the feature that
+    /// names the entry, prefilled, and its reason. `open` until the daemon says it was answered
+    /// (`vault.ask_answered`).
     VaultAsk(VaultAsk),
     /// A command's result.
     Command(CommandCard),
@@ -138,12 +135,18 @@ pub struct VaultAsk {
     /// The number of its `vault.asked` event: the request's number.
     pub seq: u64,
     pub name: String,
+    /// The project of the agent that asked.
     pub project: String,
-    pub description: String,
-    pub takes_username: bool,
-    /// Why the name cannot be set for the project, as the daemon refuses with it: another
-    /// project uses it.
-    pub taken: Option<String>,
+    /// The entry is every project's, not that project's alone.
+    pub every: bool,
+    pub description: Option<String>,
+    /// The address the agent gave.
+    pub url: Option<String>,
+    /// The host the secret goes to, as the daemon reads `url` (the way a login does).
+    pub host: Option<String>,
+    pub username: Option<String>,
+    /// The one use it is for.
+    pub bound: Option<String>,
     pub why: String,
     pub open: bool,
 }
@@ -855,14 +858,14 @@ impl Conversation {
                     }
                     let said = changes.len();
                     let rows = self.blocks.len();
-                    changes.extend(self.deliver(&kind, body.clone()));
+                    changes.extend(self.deliver(&kind, body));
                     if self.blocks.len() > rows
                         && let Some(last) = self.deliveries.last_mut()
                     {
                         *last = delivery(at);
                     }
-                    // A message that used commands shows what was typed; what the agent received
-                    // unfolds under it. The daemon says which, one entry per delivery.
+                    // A message that used commands shows what was typed. The daemon says which, one
+                    // entry per delivery.
                     let entry = &data["typed"][at];
                     if changes.len() > said
                         && let Some(typed) = entry["text"].as_str()
@@ -876,7 +879,6 @@ impl Conversation {
                                 .flatten()
                                 .filter_map(|name| name.as_str().map(str::to_owned))
                                 .collect(),
-                            received: body,
                         });
                     }
                 }
@@ -1035,9 +1037,12 @@ impl Conversation {
                     seq: event.seq,
                     name: text("name"),
                     project: text("project"),
-                    description: text("description"),
-                    takes_username: data["takes_username"] == true,
-                    taken: data["taken"].as_str().map(str::to_owned),
+                    every: data["every"] == true,
+                    description: data["description"].as_str().map(str::to_owned),
+                    url: data["url"].as_str().map(str::to_owned),
+                    host: data["host"].as_str().map(str::to_owned),
+                    username: data["username"].as_str().map(str::to_owned),
+                    bound: data["for"].as_str().map(str::to_owned),
                     why: text("why"),
                     open: true,
                 })));

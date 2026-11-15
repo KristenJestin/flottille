@@ -163,6 +163,10 @@ impl std::ops::DerefMut for Spawned {
 /// A throwaway user: its own home and XDG folders, and the daemon it starts, stopped on drop.
 pub struct User {
     dir: TempDir,
+    /// The runtime folder, `runtime` in `dir` by a symbolic link. A real one's parent is a
+    /// folder nothing writes into (`/run/user`), and what the daemon runs may create nothing
+    /// there (`docs/vault.md`, "The runtime folder"): `dir` is where the tests' programs write.
+    _runtime: TempDir,
     /// More variables for every command, and so for the daemon the first one starts.
     env: Vec<(String, String)>,
     /// True once the user is dropped, its daemon stopped and its folder about to go: a client the
@@ -181,14 +185,20 @@ impl User {
             .prefix("flottille-test")
             .tempdir()
             .unwrap();
-        for sub in ["home", "runtime", "state", "config", "data"] {
+        for sub in ["home", "state", "config", "data"] {
             std::fs::DirBuilder::new()
                 .mode(0o700)
                 .create(dir.path().join(sub))
                 .unwrap();
         }
+        let runtime = tempfile::Builder::new()
+            .prefix("flottille-runtime")
+            .tempdir()
+            .unwrap();
+        std::os::unix::fs::symlink(runtime.path(), dir.path().join("runtime")).unwrap();
         let mut user = User {
             dir,
+            _runtime: runtime,
             env: Vec::new(),
             closed: Arc::new(Mutex::new(false)),
             reaper: None,
@@ -941,11 +951,16 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("XDG_DATA_HOME", dir.join("data"))
         // Codex's machine settings are the test's own, not the machine's `/etc/codex`.
         .env("FLOTTILLE_CODEX_MACHINE_SETTINGS", dir.join("etc-codex"))
-        // No way to the machine's own session: its bus, its tmux server.
+        // No way to the machine's own session: its tmux server.
         .env("TMUX_TMPDIR", dir.join("runtime"))
+        // A session bus of the test's own, where a machine's is: the daemon keeps it from what
+        // it runs (`docs/vault.md`), not the harness.
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", dir.join("runtime/bus").display()),
+        )
         // No round of the items unless a test asks for it (`with_fetcher`).
         .env("FLOTTILLE_TEST_NO_FETCH", "1")
-        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .env_remove("TMUX");
     // No sign-in of the machine: a provider is signed in only where a test says so, and the
     // daemon picks no Auto judge on the strength of the developer's own.
@@ -1180,4 +1195,18 @@ pub fn bkt_pipeline(result: &str, seconds: u64) -> Value {
     }
     json!({"build_number": 1, "state": {"name": "COMPLETED", "result": {"name": result}},
         "target": {"ref": {"name": "main"}}, "created_on": stamp(0), "completed_on": stamp(seconds)})
+}
+
+/// The ABI of the kernel's Landlock, 0 where it has none.
+pub fn landlock_abi() -> i64 {
+    // SAFETY: with a null attribute and the version flag, the call only returns a number.
+    unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<u8>(),
+            0usize,
+            1u32,
+        )
+    }
+    .max(0)
 }

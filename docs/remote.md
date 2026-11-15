@@ -7,7 +7,7 @@ computer when the computer is on again. Every client (the window, the command li
 app) reads and answers the sessions of every machine of the user. It is the milestone
 `v0.4 - Remote` (`docs/design.md` §12, §13).
 
-**Status: the design of v0.4, decided with the maintainer on 2026-11-12, 2026-11-13 and 2026-11-14.** Nothing
+**Status: the design of v0.4, decided with the maintainer on 2026-11-12, 2026-11-13, 2026-11-14 and 2026-11-15.** Nothing
 here is built but the keys, and the member list, the invitation code and the four words as data
 and their checks (`crates/flottille-link`), and the hub's state and its rules, without the network
 it will serve on (`crates/flottille-hub`). What is decided is said as such; the defaults taken are in "Defaults taken, to
@@ -15,7 +15,8 @@ confirm"; what is open is in "Open questions". It replaces the proposal of 2026-
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
 third party. The user runs one small program of Flottille's, the hub; the data between their
-devices does not go through it.
+devices does not go through it. Flottille also handles no network channel: the only thing it asks
+is that two devices can reach each other ("The transport").
 
 ## The cases it serves
 
@@ -44,8 +45,8 @@ devices does not go through it.
 | Member list | The list of the user's members, each entry signed by the member that added it. Every device keeps a copy and checks every signature itself. |
 | Role | What a member may do, signed when it is added: `runner`, `controller` or `viewer` ("Roles"). |
 | Runner | A member that may run agents: a computer, a headless server. |
-| Hub | `flottille-hub`, the one program the user runs for all their devices, wherever they like: it holds the member list, the invitations and the presence, and relays what cannot go direct. It sees only ciphertext of what it relays, and cannot add a member. |
-| Link | Flottille's encrypted connection between two devices, peer to peer: direct when it can be, through the hub's relay otherwise. |
+| Hub | `flottille-hub`, the one program the user runs for all their devices, wherever they like: it holds the member list, the invitations, the presence and the members' addresses. A control plane only: it never carries a link's bytes, and it cannot add a member. |
+| Link | Flottille's encrypted connection between two devices, peer to peer and always direct: one dials an address the other listens on. |
 | Invitation | What a member opens to add a device: a token the hub gives, valid 5 minutes, once. |
 | Tunnel | A TCP connection carried over the link, from a client's local port to a run's port on a machine. |
 
@@ -55,16 +56,20 @@ window, the command line, the tools and the docs.
 
 ## What is decided
 
-1. **Generic.** No dependency on Tailscale, on one network or on a service of a third party.
-   Identity and transport are Flottille's own. A tailnet address is one more direct path, found or
-   declared by hand like a LAN or public address.
-2. **A hub, the user's own.** One `flottille-hub` per user, self-hosted: a control plane (the
-   members, the invitations, the presence, the signed member list) and a relay, in one binary. No
-   public hub and no public relay by default.
-3. **Peer to peer, end to end.** The data between two devices goes over a link encrypted and
-   authenticated by their keys, direct when it can be. The hub relays only what cannot go direct,
-   and sees only ciphertext. **No queue on the hub**: what waits for a machine that is off waits on
-   the machine that sends it.
+1. **Generic, and no network channel of its own.** No dependency on Tailscale, on one network or
+   on a service of a third party. Identity and the link are Flottille's own; the network under
+   them is the user's. Whether they have a LAN, a VPN, Tailscale, a VPS or a public address is not
+   Flottille's concern: the one thing it asks is that two devices can reach each other. A tailnet
+   address is one more address, told by the hub or given by the user like a LAN or public one.
+2. **A hub, the user's own.** One `flottille-hub` per user, self-hosted, a control plane only: the
+   members, the invitations, the presence, the addresses, the signed member list. **No relay**
+   anywhere (not in the hub, not hosted, not public) and no public hub by default.
+3. **Peer to peer, direct, end to end.** The data between two devices goes over a link, encrypted
+   and authenticated by their keys, from one device to an address the other listens on. **The hub
+   never carries a link's bytes**, and Flottille does no NAT traversal, no hole punching, no port
+   mapping and runs no address discovery service. Two devices that cannot reach each other say so
+   plainly ("Paths"); the fix is the user's network. **No queue on the hub**: what waits for a
+   machine that is off waits on the machine that sends it.
 4. **The hub cannot add a member.** Every addition, removal and role is signed by a member; every
    device keeps the member list and checks each signature itself. A compromised hub can refuse
    service, not let a device in.
@@ -111,12 +116,12 @@ window, the command line, the tools and the docs.
 ## Architecture
 
 ```
-                         hub (the user's own: members, invitations, presence, relay)
-                        ╱        │         ╲        control: every device keeps a session to it
-                       ╱         │          ╲       relay: only ciphertext, only when not direct
+                         hub (the user's own: members, invitations, presence, addresses)
+                        ╱        │         ╲        control only: every device keeps a session to it
+                       ╱         │          ╲       it never carries a link's bytes
   phone (app + Rust core)        │           machine "server" (daemon, agents)
            ╲                     │                ╱
-            ╲── link, peer to peer, end to end ──╱
+            ╲─ link: direct, end to end ─╱
                                  │
                        machine "pc" (daemon, agents)
                                  ▲ local socket
@@ -126,17 +131,19 @@ window, the command line, the tools and the docs.
 - **The hub** is reached by every device at a URL the user gives once (with the hub's key, so that
   a device knows it reached its own hub). Each device keeps a control session to it: it receives
   the member list and its changes, the invitations to answer, the presence of the user's clients,
-  and the addresses of the other members. The hub forwards a link's bytes between two devices that
-  cannot reach each other directly; it never terminates a link.
-- **Each machine's daemon holds one link endpoint** and listens on it beside its Unix socket. The
-  local socket is unchanged, with its refusal of a client an agent started (`protocol.md`,
+  and the addresses of the other members. The hub carries no link's bytes: it neither forwards nor
+  terminates a link.
+- **Each machine's daemon holds one link endpoint** and listens on it beside its Unix socket, on the
+  addresses it is configured with ("Paths"). The local socket is unchanged, with its refusal of a client an agent started (`protocol.md`,
   "Transport").
 - **The window and the command line reach another machine through their own machine's daemon**: a
   request names `machine`, is signed with the device key by the client, and the local daemon
   carries it over its link to that machine and carries the answers and events back. The local
   daemon cannot forge a request: it does not hold the device key.
 - **The phone holds its own endpoint**, whose key is its device key, and links to each machine. It
-  links only while the app is in the foreground; a push wakes it otherwise ("Notifications").
+  links only while the app is in the foreground; a push wakes it otherwise ("Notifications"). A
+  phone on a mobile network has no address a machine can dial: it dials, and what a machine sends
+  it travels over the link the phone opened.
 - **Two kinds of traffic on a link**, kept apart by the link's protocol name (ALPN or its
   equivalent): `client`, the user's requests (the methods of `protocol.md`, each signed by a
   device), and `machine`, the closed set of messages one machine sends another for its agents
@@ -144,42 +151,50 @@ window, the command line, the tools and the docs.
 - **The protocol is the daemon's** (`protocol.md`), unchanged in its framing: the same requests,
   answers and events, numbered, resumed with `events.watch {after}`. It was written for this.
 - **When the hub is down**, links already open go on, and devices that know each other's addresses
-  link directly; what needs the hub (an invitation, a change of the member list, the relay,
-  presence) waits for it, and the clients say so (`the hub is unreachable since 22:14`).
+  link directly; what needs the hub (an invitation, a change of the member list, the
+  addresses of a device that moved, presence) waits for it, and the clients say so (`the hub is
+  unreachable since 22:14`).
 
 ## The transport
 
-What Flottille needs of it: a device's identity is its public key; the channel between two keys is
-encrypted end to end; it connects directly over every path that exists (same LAN, a public address,
-a hole punched through NAT, a tailnet address) and falls back to a relay that sees only ciphertext;
-the relay can be self-hosted, inside the hub; it runs on Linux, macOS later, and Android; it
-multiplexes streams (requests, events, a git transfer and tunnels at once on one link).
+Flottille handles no network channel. What it needs of the transport is stated here, and the
+library that gives it is chosen in #811 and hidden in `flottille-link`:
 
-**The candidate is iroh**, to be proved by a spike before anything is built on it (#839). iroh is
-Rust and QUIC; an endpoint's id is its Ed25519 public key; it punches holes; its relay
-(`iroh-relay`) can be embedded in the hub; version 1.0 has official Kotlin bindings and is used on
-Android by Delta Chat and by an app that drives coding agents from a phone. The alternatives weighed:
+- **a device's identity is its public key**: a link is to a key, and a device that does not present
+  the key it was dialed for is refused;
+- **encrypted end to end and authenticated by the devices' keys**, on both sides, with nothing
+  between the two devices that can read or change it;
+- **direct to a known address**: a device listens on the addresses it is configured with (by
+  default every interface, one port) and a peer dials an address it knows for that key, told by the
+  hub or given by the user ("Paths"); nothing else is tried: no relay, no NAT traversal, no hole
+  punching, no port mapping (UPnP, NAT-PMP, PCP), no address discovery service, and no server of a
+  third party in the path;
+- **streams**: requests, events, a git transfer and tunnels at once on one link, kept apart;
+- **it runs** on Linux, macOS later, and Android.
 
-| | Identity = key | End to end | Direct + NAT | Own relay | Android | Notes |
-|---|---|---|---|---|---|---|
-| iroh | yes | yes (QUIC TLS on raw keys) | yes | `iroh-relay` | yes, in production | a dependency of weight (QUIC stack, DNS, port mapping); its default discovery uses n0's servers and is turned off here (the hub gives the addresses); a known Android issue on 4G with segmentation offload, worked around by turning it off on the phone |
-| rust-libp2p (QUIC, hole punching, circuit relay) | yes | yes (Noise/TLS) | yes | yes | possible, less proven | larger and more general (DHT, pubsub), little gain for a few devices; the second choice if the spike fails |
-| QUIC (quinn) + Flottille's own NAT traversal and relay | to build | to build | to build | to build | yes | what iroh already is, without its years of fixes |
-| WebSocket over TLS to a relay (the 2026-11-03 proposal) | to build | needs a second layer (Noise) | no | yes | yes | every byte through the relay, no direct path |
-| WireGuard in user space | yes | yes | partly | no | conflicts with the system VPN slot | needs a network stack of its own in the process |
-| Tailscale / tsnet | Tailscale's | yes | yes | DERP | yes | a dependency on one network and its coordination server: rejected (decision 1) |
+**How it came to this.** iroh was first the candidate, for its NAT traversal and its relay; the
+maintainer decided on 2026-11-15 that both are out of scope (decision 1), which also ended the
+spike #839. Whether the library stays iroh, with its relays and its discovery turned off, or
+becomes plain QUIC with pinned keys is decided in #811. Tailscale and tsnet stay rejected (decision
+1). The rest of this document is written against the needs above, not one library: "an endpoint",
+"an address", "a stream". `flottille-link` hides the library from the daemon, the clients, the hub
+and the mobile core, so that a later change of transport changes one crate. Whatever is chosen is a
+dependency of weight, said in its pull request.
 
-The rest of this document is written against these needs, not one library: "an endpoint", "an
-address", "a relay", "a stream". The crate that holds it, `flottille-link`, hides the library from
-the daemon, the clients, the hub and the mobile core, so that a later change of transport changes
-one crate. Whatever is chosen is a dependency of weight, said in its pull request.
+**Paths.** A device listens on the addresses it is configured with, in the daemon's remote
+configuration (by default all its interfaces, on one port). It tells the hub those addresses
+whenever they change, and the hub tells the other members; the user may also give an address by
+hand (`flottille remote address add 100.64.0.7`, Settings, Machines): a tailnet address, a DNS name,
+a forwarded port, a public address. Members linked to each other tell each other too, so that two
+devices that have linked once can link again without the hub. A peer dials the addresses it knows
+for a key, whoever told it; the hub's list is a help, not a path.
 
-**Paths.** A device's addresses are what the transport finds (its interfaces, a public address seen
-from outside), plus the addresses the user declares by hand (`flottille remote address add
-100.64.0.7`, Settings, Machines): a tailnet address, a DNS name, a forwarded port. Each device tells
-the hub its addresses whenever they change, and the hub tells the other members; members linked to
-each other tell each other too, so that two devices that have linked once can link again without the
-hub. No discovery service of a third party is used.
+**Two devices that cannot reach each other say so plainly**, on both sides and in the clients: which
+address was tried, from where, and how it failed (`server is unreachable: tried 192.0.2.10:7421
+from pc, no answer in 10 s`). Flottille does not work around it: the fix is the user's network (a
+firewall rule, a forwarded port, a VPN, another address). A device no one can dial (a phone on a
+mobile network) still links to every device it can dial, and what they send it travels over that
+link.
 
 ## Identity and keys
 
@@ -238,15 +253,15 @@ docker compose and a systemd unit. One hub serves one user.
   it.
 - **The addresses** of the members, as they tell it, to help two devices find each other.
 
-**What it relays**: the link's encrypted bytes between two members that cannot reach each other
-directly (a phone on 4G and a computer behind a NAT where no hole can be punched), and nothing else.
-It serves only the keys of the member list: a hub on a public address carries only the user's
-traffic. It keeps nothing of what it relays: no message, no queue, no content.
+**What it never does**: carry a link's bytes. It is a control plane: devices link to each other
+directly ("The transport"), so it keeps no message, no queue and no content of what they say, and
+there is no relay in it, hosted or public.
 
-**What it sees**: which keys talk, when, from which IP addresses, and how many bytes; the member
-list (names, keys, roles, never a secret); the presence. Never what the devices say to each other.
+**What it sees**: which keys connect to it, when, from which IP addresses; the member list (names,
+keys, roles, never a secret); the presence; the addresses members tell it. It does not see which
+devices link to each other, nor what they say.
 
-**Its configuration**: a listen address, TLS (a certificate given, ACME, or plain behind a reverse
+**Its configuration**: a listen address (a device must be able to reach it, like any other), TLS (a certificate given, ACME, or plain behind a reverse
 proxy), a state folder. The hub URL is given to every device at join, in the invitation.
 
 **Its state folder** is `--state <dir>`, `$XDG_STATE_HOME/flottille-hub` by default, made 700. It
@@ -538,8 +553,8 @@ and removes its workspace as today, through `call`.
   mark, so rows never jump between groups. **Machines**: their state, their agents, their slots.
   The app opens on Needs you; a notification opens its session.
 - **The link lives only while the app is in the foreground** (Android limits background sync to a few
-  hours a day); a push wakes it otherwise. On the phone, segmentation offload is turned off if the
-  transport has it (the iroh issue above).
+  hours a day); a push wakes it otherwise. A known problem of the transport's library on mobile
+  networks is worked around inside `flottille-link`, never in the screens.
 - **First thing proven**, before the screens: answering Allow or Deny from a notification while the
   app is killed and the phone in Doze, which needs the link opened, the request signed and answered
   within the few seconds Android gives.
@@ -618,7 +633,7 @@ One monorepo. The crates and folders this milestone adds:
 | `crates/flottille-protocol` | Typed requests, answers and events; serde only (from the preparation). |
 | `crates/flottille-client` | Connect, request, resume `events.watch {after}`; used by the command line, the window and the mobile core (from the preparation). |
 | `crates/flottille-link` | Identity, keys, the member list and its checks, joining, the transport, signing and checking requests. |
-| `crates/flottille-hub` | The hub's binary (control plane and relay), its `Dockerfile` and a compose example. |
+| `crates/flottille-hub` | The hub's binary (control plane only), its `Dockerfile` and a compose example. |
 | `crates/flottille-mobile` | The mobile core, a UniFFI library. |
 | `apps/android/` | The Android app (Gradle). |
 | `site/` | The showcase site, coming. |
@@ -637,8 +652,8 @@ repository layout and CI by paths. This milestone builds on it.
 
 As everywhere (`AGENTS.md`, "Testing"): no real agent, no real configuration, no real keyring, no
 network but loopback. A hub and two (or three) daemons in one test, each with its own temporary
-`HOME` and XDG folders and its own in-memory keyring, on `127.0.0.1`, with no discovery; the relay
-is tested by blocking the direct path in the test. Fake agents, throwaway repositories. A machine
+`HOME` and XDG folders and its own in-memory keyring, on `127.0.0.1`, with no discovery; two devices
+that cannot reach each other are tested with an address nobody listens on. Fake agents, throwaway repositories. A machine
 "off" is a daemon stopped and started again on the same folders; a hub "down" the same. The Android
 app is tested with its unit and Compose tests, and on an emulator in CI; the Doze proof is done once
 on a real phone, by hand, and reported.
@@ -788,9 +803,9 @@ on a real phone, by hand, and reported.
 
 ## Open questions
 
-1. **The transport**: the hub and its relay are decided; iroh is the candidate, to be proved by the
-   spike (#839), rust-libp2p the second choice. The design asks only for the needs listed in "The
-   transport".
+1. **The transport's library**: iroh with its relays and discovery off, or plain QUIC with pinned
+   keys, chosen in #811. The design asks only for the needs listed in "The transport"; there is no
+   relay and no NAT traversal to choose for.
 2. **A headless server's keyring**: sharing vault entries needs one; whether Flottille offers a
    keyring of its own there, or the user installs a Secret Service.
 3. **A controller's rights**: whether a `controller` may switch a tree to Full, or answer a base

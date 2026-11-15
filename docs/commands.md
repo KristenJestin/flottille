@@ -135,9 +135,10 @@ instructions are given for it unless the message also used `/deploy`.
 
 The daemon keeps both texts with the message (`docs/events.md`, `agent.prompted`): what the agent
 received, and what was typed with the names of the commands it used. Both are masked. The window
-shows the typed text, each command as a chip, and what the agent received in a fold, "What the
-agent received", closed at first; the queued message shows the typed text too, and taking it back
-(`agent.unqueue`) gives the typed text back. The judge reads the recorded names, never the text: it
+shows the typed text and nothing else, each command as the same chip as in the composer (the kit's
+`TokenText`); what the agent received is not drawn, and stays in the event (`agent read --json`).
+The queued message shows the typed text too, and taking it back (`agent.unqueue`) gives the typed
+text back. The judge reads the recorded names, never the text: it
 is shown what the user typed as their words and what the agent received as the project's text,
 apart.
 

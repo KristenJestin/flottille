@@ -29,11 +29,11 @@ use gpui_design_system::card::Block as CardBlock;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{HOVER, Motion, PANEL};
 use gpui_design_system::{
-    Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette,
-    PulsingLabel, Side, Skeleton, Toast, Type, awaiting, changed, changing, enter, fade,
-    fold_frame, follow_theme, hoverable, icon, palette, path_line, presence, presence_of,
-    section_label, selectable, space, text_region, tint, tipped_when_cut, toast, toggle_id,
-    turning,
+    Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette, Piece,
+    PulsingLabel, Side, Skeleton, Toast, TokenEvent, TokenField, TokenText, Type, awaiting,
+    changed, changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line,
+    presence, presence_of, section_label, selectable, space, text_region, tint, tipped_when_cut,
+    toast, toggle_id, turning,
 };
 use gpui_kit::base::input::{
     Escape, Input, InputEvent, InputState, MoveDown, MoveUp, TextareaState,
@@ -52,7 +52,7 @@ use gpui_kit::{
 
 use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer, RunFrom};
 use crate::attachments::{Attachments, STILL_SCALING};
-use crate::commands::CommandInfo;
+use crate::commands::{CommandInfo, spaced};
 use crate::conversation::{
     Activity, Block, COMPACTED_KIND, COMPACTION_FAILED_KIND, Call, CallState, Change, Conversation,
     DiffLine, Ending, STARTED_SESSION_KIND, Summary, TIME_LOGGING_KIND, USER, VaultAsk,
@@ -1795,26 +1795,6 @@ impl SessionPage {
         let answer = self.ask_dock.read(cx).card(seq, cx).cloned();
         if let Some(answer) = answer {
             answer.update(cx, |answer, cx| answer.answered(refused, cx));
-        }
-    }
-
-    /// What the daemon answered to the answer of the request `ask` for a vault entry.
-    pub fn vault_answered(
-        &mut self,
-        ask: u64,
-        refused: Option<String>,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let rows = self.conversation.read(cx).rows.clone();
-        let fields = rows.iter().find_map(|row| {
-            let row = row.read(cx);
-            matches!(&*row.block, Block::VaultAsk(a) if a.seq == ask)
-                .then(|| row.vault_ask.clone())
-                .flatten()
-        });
-        if let Some(fields) = fields {
-            fields.update(cx, |fields, cx| fields.answered(refused, cx));
         }
     }
 
@@ -4118,9 +4098,9 @@ pub struct Row {
     parsed: usize,
     /// Where a selection begun in its text stays: see [`MarkdownPiece`].
     scope: TextSelectionScopeId,
-    /// What the agent received for a message that used commands, selectable as the message is: the
-    /// text it was made from, and its view.
-    received: Option<(String, MarkdownText)>,
+    /// A user's message with chips (its pictures where they were put, its commands): drawn as
+    /// the composer drew them, in place of its Markdown.
+    pieces: Option<Vec<Piece>>,
     thinking: Option<(Entity<PulsingLabel>, Entity<ThinkingTimer>)>,
     calls: Vec<(Entity<Status>, Entity<StateIcon>)>,
     sub_agents: Vec<SubAgent>,
@@ -4129,8 +4109,6 @@ pub struct Row {
     pills: HashMap<String, Entity<Pill>>,
     /// Its question waits for the user's answer, as the daemon says: its card shows.
     asking: bool,
-    /// The fields of its request for a vault entry, made when the card first shows.
-    vault_ask: Option<Entity<crate::vault_ask::VaultAskBox>>,
     /// It is a message the user sent from the composer: being sent, refused, or recorded since.
     sent: Option<Sent>,
     /// The lines of a card of links, and the pictures among them.
@@ -4198,7 +4176,7 @@ impl Row {
                 markdown: Vec::new(),
                 parsed: 0,
                 scope: TextSelectionScopeId::new(),
-                received: None,
+                pieces: None,
                 thinking: None,
                 calls: Vec::new(),
                 sub_agents,
@@ -4206,7 +4184,6 @@ impl Row {
                 icons: HashMap::new(),
                 pills: HashMap::new(),
                 asking,
-                vault_ask: None,
                 sent: None,
                 links: LinksCard::default(),
                 renders: 0,
@@ -4571,29 +4548,32 @@ impl Row {
             let muted = matches!(block, Block::Thought { .. });
             self.set_markdown(text, muted, false, cx);
         }
-        // The user's own message is selectable like a reply: the same view, fed what was typed,
-        // each command in it a chip.
+        // The user's own message is selectable like a reply: the same view, fed what was typed.
+        // One with chips (a picture where it was put, a command) shows them as the composer did,
+        // and nothing of what the agent received for a command (#846).
         match &block {
-            Block::Message { text, commands, .. } => {
-                let chips = commands
-                    .as_ref()
-                    .map(|commanded| command_chips(text, &commanded.names))
-                    .unwrap_or_default();
-                self.set_markdown(
-                    &typed_with_chips(text, &chips),
-                    false,
-                    !chips.is_empty(),
-                    cx,
+            Block::Message {
+                text,
+                commands,
+                images,
+                ..
+            } => {
+                let names: &[String] = commands.as_ref().map_or(&[][..], |c| c.names.as_slice());
+                // A marker typed by hand, with no picture of its place, stays text.
+                let pieces = crate::tokens::pieces_of(
+                    text,
+                    |name| names.iter().any(|known| known == name),
+                    |at, found| {
+                        (at < images.len()).then(|| {
+                            gpui_design_system::Token::new(
+                                format!("picture-{at}"),
+                                crate::tokens::picture_look(found.number, &found.name, None),
+                            )
+                        })
+                    },
                 );
-                self.received = commands
-                    .as_ref()
-                    .map(|commanded| match self.received.take() {
-                        Some((seen, view)) if seen == commanded.received => (seen, view),
-                        _ => (
-                            commanded.received.clone(),
-                            MarkdownText::quiet(&as_typed(&commanded.received), cx),
-                        ),
-                    });
+                self.pieces = crate::tokens::has_tokens(&pieces).then_some(pieces);
+                self.set_markdown(&as_typed(text), false, false, cx);
             }
             Block::Relayed { text, .. } => self.set_markdown(&as_typed(text), false, false, cx),
             _ => {}
@@ -4766,15 +4746,7 @@ fn sub_agents_said(agents: &[SubAgent], cx: &App) -> (String, usize) {
 /// keeps its break and its indentation. An address the renderer links by itself is left as typed:
 /// an escape inside it would be drawn, backslash and all.
 fn as_typed(text: &str) -> String {
-    typed_with_chips(text, &[])
-}
-
-/// [`as_typed`], each of `chips` (byte ranges of `text`, the commands it used) drawn as inline
-/// code, which the message's view styles as the accent's chip: its characters are the command's,
-/// nothing in it is escaped.
-fn typed_with_chips(text: &str, chips: &[std::ops::Range<usize>]) -> String {
     let line = |line: &str| {
-        let base = line.as_ptr() as usize - text.as_ptr() as usize;
         let indent = line.len() - line.trim_start_matches(' ').len();
         let mut out = "\u{a0}".repeat(indent);
         let line = &line[indent..];
@@ -4782,16 +4754,6 @@ fn typed_with_chips(text: &str, chips: &[std::ops::Range<usize>]) -> String {
         let mut previous = None;
         while at < line.len() {
             let ahead = &line[at..];
-            let here = base + indent + at;
-            if let Some(chip) = chips
-                .iter()
-                .find(|chip| chip.start == here && !text[(*chip).clone()].contains('`'))
-            {
-                out.push_str(&format!("`{}`", &text[chip.clone()]));
-                at += chip.len();
-                previous = Some('`');
-                continue;
-            }
             if let Some(length) = address(previous, ahead) {
                 out.push_str(&ahead[..length]);
                 at += length;
@@ -5154,63 +5116,6 @@ pub fn command_chips(text: &str, names: &[String]) -> Vec<std::ops::Range<usize>
         .collect()
 }
 
-/// The line that says the agent received more than was typed.
-pub const RECEIVED: &str = "What the agent received";
-
-impl Row {
-    /// Under a message that used commands: "What the agent received", which unfolds into it.
-    fn render_received(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let p = palette(cx);
-        let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
-        let turn = turning(id("received-toggle"), self.open, window, cx);
-        div()
-            .id(id("received-part"))
-            .flex()
-            .flex_col()
-            .px(space::SM)
-            .child(hoverable(
-                div()
-                    .id(id("received-toggle"))
-                    .flex()
-                    .items_center()
-                    .gap(space::SM)
-                    .cursor_pointer()
-                    .text_size(px(12.5))
-                    .aria_label(RECEIVED)
-                    .aria_expanded(self.open)
-                    .child(RECEIVED)
-                    .child(
-                        icon(Icon::Chevron).size(px(12.)).with_transformation(
-                            Transformation::rotate(radians(-FRAC_PI_2 * turn)),
-                        ),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open = !this.open;
-                        cx.notify();
-                    })),
-                move |d, t| d.text_color(mix(p.faint, p.mute, t)),
-            ))
-            .child(presence(
-                id("received"),
-                self.open,
-                div()
-                    .id(id("received-text"))
-                    .pt(space::SM)
-                    .mono(12.)
-                    .when_some(self.received.as_ref(), |d, (received, _)| {
-                        d.aria_label(SharedString::from(received.clone()))
-                    })
-                    .children(
-                        self.received
-                            .as_ref()
-                            .map(|(_, view)| view.view(id("received-region"))),
-                    )
-                    .test_support(),
-            ))
-            .into_any_element()
-    }
-}
-
 impl Render for Row {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
@@ -5228,12 +5133,7 @@ impl Render for Row {
         // The row's own block, not a copy of it.
         let block = self.block.clone();
         match &*block {
-            Block::Message {
-                text,
-                images,
-                commands,
-                ..
-            } => {
+            Block::Message { text, images, .. } => {
                 let page = self.page.upgrade();
                 let pictures: Vec<Option<Arc<gpui_kit::Image>>> = match &self.sent {
                     Some(sent) if !sent.images.is_empty() => {
@@ -5266,6 +5166,34 @@ impl Render for Row {
                     )
                 });
                 let lines = self.sent_lines(window, cx);
+                // A picture's chip opens it large, among the pictures read, as its thumbnail does.
+                let chipped = self.pieces.clone().map(|pieces| {
+                    let viewer = page.as_ref().map(|page| page.read(cx).viewer.clone());
+                    let pictures = pictures.clone();
+                    TokenText::new(
+                        SharedString::from(match pending {
+                            Some(key) => format!("pending-{key}-message-tokens"),
+                            None => format!("row-{}-message-tokens", self.at),
+                        }),
+                        pieces,
+                    )
+                    .on_token_click(move |id, _, cx| {
+                        let Some(at) = id
+                            .strip_prefix("picture-")
+                            .and_then(|at| at.parse::<usize>().ok())
+                            .filter(|at| pictures.get(*at).is_some_and(Option::is_some))
+                        else {
+                            return;
+                        };
+                        let loaded: Vec<Arc<gpui_kit::Image>> =
+                            pictures.iter().flatten().cloned().collect();
+                        let place = pictures[..at].iter().flatten().count();
+                        if let Some(viewer) = &viewer {
+                            viewer.update(cx, |viewer, cx| viewer.show(loaded, place, cx));
+                        }
+                    })
+                    .into_any_element()
+                });
                 let message = div()
                     .id(id("message"))
                     .w_full()
@@ -5315,15 +5243,18 @@ impl Render for Row {
                                         .px(space::SM)
                                         .py(space::XS)
                                         .when(quiet < 1.0, |d| d.opacity(quiet))
-                                        .child(markdown_view(
-                                            id("message-region"),
-                                            &self.markdown,
-                                            self.scope,
-                                        ))
+                                        .child(match chipped {
+                                            Some(chipped) => chipped,
+                                            None => markdown_view(
+                                                id("message-region"),
+                                                &self.markdown,
+                                                self.scope,
+                                            )
+                                            .into_any_element(),
+                                        })
                                         .test_support(),
                                 )
                             })
-                            .children(commands.as_ref().map(|_| self.render_received(window, cx)))
                             .test_support(),
                     )
                     .children(lines)
@@ -5429,7 +5360,6 @@ impl Render for Row {
                     .max_w(px(540.))
                     .flex()
                     .flex_col()
-                    .gap(space::XS)
                     .border_1()
                     .border_color(p.line2)
                     .rounded_tl(px(14.))
@@ -5442,10 +5372,9 @@ impl Render for Row {
                 // Another session's message is folded to its first line and who sent it, until a
                 // click opens it: a report can be long. What this one sent is its own words.
                 let bubble = match sent {
-                    true => bubble.child(from).child(markdown_view(
-                        id("relayed-region"),
-                        &self.markdown,
-                        self.scope,
+                    true => bubble.child(from).child(spaced(
+                        space::XS,
+                        markdown_view(id("relayed-region"), &self.markdown, self.scope),
                     )),
                     false => {
                         let turn = turning(id("relayed-toggle"), self.open, window, cx);
@@ -5495,7 +5424,7 @@ impl Render for Row {
                                         .child(first)
                                         .test_support(),
                                 )
-                                .gap(space::XS),
+                                .space(space::XS),
                             )
                             .child(
                                 presence(
@@ -5510,7 +5439,7 @@ impl Render for Row {
                                         ))
                                         .test_support(),
                                 )
-                                .gap(space::XS),
+                                .space(space::XS),
                             )
                     }
                 };
@@ -6319,7 +6248,7 @@ impl Render for Row {
                 ..
             } => self.render_question(*seq, questions, answers.as_deref(), window, cx),
             Block::Asked { moved, .. } => self.render_asked(*moved, cx),
-            Block::VaultAsk(ask) => self.render_vault_ask(ask.clone(), window, cx),
+            Block::VaultAsk(ask) => self.render_vault_ask(ask.clone(), cx),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
             Block::Command(result) => {
@@ -6372,7 +6301,8 @@ impl Row {
             None => format!("Request #{number}"),
         };
         let page = self.page.clone();
-        let ink = if card.base { p.fail } else { p.wait };
+        let tones = crate::waiting::held_tones(p);
+        let ink = tones.ink;
         let line = div()
             .id(ElementId::Name(format!("approval-line-{number}").into()))
             .h(px(34.))
@@ -6412,7 +6342,7 @@ impl Row {
                 page.update(cx, |page, cx| page.reveal_waiting(number, cx))
                     .ok();
             });
-        let edge = if card.base { p.fail } else { p.wait_line };
+        let edge = tones.line_edge;
         let waiting = hoverable(line, move |d, t| {
             d.bg(p.hover.opacity(t))
                 .border_color(mix(p.line, edge, t))
@@ -6422,7 +6352,7 @@ impl Row {
             .id(ElementId::Name(format!("approval-record-{number}").into()))
             .aria_label(SharedString::from(record.clone().unwrap_or_default()))
             .mono(12.)
-            .text_color(p.faint)
+            .text_color(crate::waiting::record_ink(card.decision.as_deref(), p))
             .child(SharedString::from(record.clone().unwrap_or_default()))
             .test_support();
         // The waiting line folds away and the record unfolds in its place.
@@ -6491,40 +6421,15 @@ impl Row {
         presence(id("asked"), !moved, card).into_any_element()
     }
 
-    /// The agent's request for a vault entry: what Flottille prefilled, the agent's reason, and
-    /// the masked field of the secret; it folds away once answered.
-    fn render_vault_ask(
-        &mut self,
-        ask: VaultAsk,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let fields = match &self.vault_ask {
-            Some(fields) => fields.clone(),
-            None => {
-                let Some((session, shell)) = self.page.upgrade().map(|page| {
-                    let page = page.read(cx);
-                    (page.id().to_owned(), page.shell.clone())
-                }) else {
-                    return div().into_any_element();
-                };
-                let at = self.at;
-                let made = ask.clone();
-                let fields = cx.new(|cx| {
-                    crate::vault_ask::VaultAskBox::new(at, made, session, shell, window, cx)
-                });
-                self.vault_ask = Some(fields.clone());
-                fields
-            }
+    /// The agent's request for a vault entry: what was prefilled, where the secret goes, the
+    /// agent's reason, and the way in to the vault's form; it folds away once answered.
+    fn render_vault_ask(&mut self, ask: VaultAsk, cx: &mut Context<Self>) -> AnyElement {
+        let Some(shell) = self.page.upgrade().map(|page| page.read(cx).shell.clone()) else {
+            return div().into_any_element();
         };
         let when = SharedString::from(self.when.map(clock).unwrap_or_default());
         let title = gpui_design_system::quoted_title(&self.title(cx));
-        crate::vault_ask::card(self.at, &title, when, &ask, fields, cx)
-    }
-
-    /// The fields of its request for a vault entry, once its card showed.
-    pub fn vault_ask(&self) -> Option<&Entity<crate::vault_ask::VaultAskBox>> {
-        self.vault_ask.as_ref()
+        crate::vault_ask::card(self.at, &title, when, &ask, shell, cx)
     }
 
     /// An ask of the agent to the user: while it waits, one line where it was asked, its card
@@ -8253,7 +8158,6 @@ impl Render for SessionRail {
                     ))
                     .flex()
                     .flex_col()
-                    .gap(space::XS)
                     .px(space::XS)
                     .py(space::XS)
                     .aria_label(SharedString::from(format!("Repository {name}")))
@@ -8340,7 +8244,7 @@ impl Render for SessionRail {
                                 )
                             },
                         )
-                        .gap(space::XS),
+                        .space(space::XS),
                     )
                     .test_support()
                     .into_any_element(),
@@ -9083,8 +8987,8 @@ pub fn pending_part(key: u64, part: &str) -> ElementId {
 
 /// The composer of a session: it writes to the root agent, and only to it. A word at the cursor
 /// that starts with `/` lists the project's commands: picking one completes it into `/name `, and
-/// the daemon sends the instructions of each command the message uses with it. The field cannot
-/// colour a range, so the commands the message uses show as chips under it.
+/// the daemon sends the instructions of each command the message uses with it. Each command the
+/// message uses is a chip in the text, where it was typed, as each picture is (#773, #846).
 pub struct Reply {
     shell: WeakEntity<Shell>,
     /// The root agent: fixed when the composer is made, the only agent it writes to.
@@ -9097,8 +9001,6 @@ pub struct Reply {
     slash: Option<String>,
     /// Where that word is in the message, its `/` included: what picking a command replaces.
     slash_at: std::ops::Range<usize>,
-    /// The commands the message uses, as chips under the field.
-    chips: Listing<String>,
     /// The rows of the `/` list, which unfold as a command matches and fold away as it does not.
     /// Kept as they were while the list closes, so that it folds away with its rows.
     slash_rows: Listing<(String, String)>,
@@ -9110,7 +9012,12 @@ pub struct Reply {
     review: bool,
     /// What the window knows of the parts of Flottille the user can turn off.
     extensions: WeakEntity<crate::extensions::Registry>,
+    /// The field: its text, and the chips of its commands and its pictures.
+    tokens: Entity<TokenField>,
+    /// Its text, as `tokens` edits it.
     field: Entity<TextareaState>,
+    /// A message was put back: its commands become chips once they are known.
+    rechip: bool,
     options: Entity<SessionOptions>,
     /// What the root does while its turn runs, in the bar under the field.
     status_line: Entity<StatusLine>,
@@ -9162,40 +9069,46 @@ impl Reply {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let field = cx.new(|cx| {
-            let mut field = TextareaState::new(window, cx)
-                .auto_grow(1, REPLY_MAX_ROWS)
-                .submit_on_enter(true)
-                .placeholder(REPLY_PLACEHOLDER);
-            follow_theme(&mut field, cx);
-            field
+        let tokens = cx.new(|cx| TokenField::new("reply-text", window, cx));
+        let field = tokens.read(cx).input().clone();
+        field.update(cx, |field, cx| {
+            field.set_auto_grow(1, REPLY_MAX_ROWS, cx);
+            field.set_submit_on_enter(true, cx);
+            field.set_placeholder(REPLY_PLACEHOLDER, window, cx);
         });
-        let subscriptions = vec![cx.subscribe_in(
-            &field,
-            window,
-            |this, field, event, window, cx| match event {
-                InputEvent::Change => {
-                    let text = field.read(cx).value().to_string();
-                    let has_text = !text.trim().is_empty();
-                    if this.has_text != has_text {
-                        this.has_text = has_text;
+        let subscriptions = vec![
+            cx.subscribe(&tokens, |this: &mut Self, _, event: &TokenEvent, cx| {
+                this.attached.chip_changed(event, cx)
+            }),
+            cx.subscribe_in(
+                &field,
+                window,
+                |this, field, event, window, cx| match event {
+                    InputEvent::Change => {
+                        let text = field.read(cx).value().to_string();
+                        let has_text = !text.trim().is_empty();
+                        if this.has_text != has_text {
+                            this.has_text = has_text;
+                            cx.notify();
+                        }
+                        let cursor = field.read(cx).cursor();
+                        this.typed_at(&text, cursor, cx);
+                        this.attached.follow(window, cx);
+                        this.chip_commands(false, window, cx);
+                    }
+                    InputEvent::PressEnter { shift: false, .. } => this.enter(window, cx),
+                    InputEvent::Focus if !this.focused => {
+                        this.focused = true;
                         cx.notify();
                     }
-                    let cursor = field.read(cx).cursor();
-                    this.typed_at(&text, cursor, cx);
-                }
-                InputEvent::PressEnter { shift: false, .. } => this.enter(window, cx),
-                InputEvent::Focus if !this.focused => {
-                    this.focused = true;
-                    cx.notify();
-                }
-                InputEvent::Blur if this.focused => {
-                    this.focused = false;
-                    cx.notify();
-                }
-                _ => {}
-            },
-        )];
+                    InputEvent::Blur if this.focused => {
+                        this.focused = false;
+                        cx.notify();
+                    }
+                    _ => {}
+                },
+            ),
+        ];
         let mode = cx.new(|_| ModeSwitch::new(shell.clone(), session.clone()));
         let options = cx.new(|_| SessionOptions::new(shell.clone(), session.clone()));
         let reply = Self {
@@ -9205,13 +9118,15 @@ impl Reply {
             commands: None,
             slash: None,
             slash_at: 0..0,
-            chips: Listing::default(),
             slash_rows: Listing::default(),
             highlighted: 0,
             dismissed: false,
             review: false,
             extensions: WeakEntity::new_invalid(),
+            attached: Attachments::new(tokens.clone()),
+            tokens,
             field,
+            rechip: false,
             options,
             status_line: cx.new(|_| StatusLine::new()),
             stayed: None,
@@ -9231,7 +9146,6 @@ impl Reply {
             quota_pending: None,
             left: HashMap::new(),
             activity: None,
-            attached: Attachments::default(),
             renders: 0,
             _subscriptions: subscriptions,
         };
@@ -9249,6 +9163,31 @@ impl Reply {
         &self.field
     }
 
+    /// The field with its chips.
+    pub fn tokens(&self) -> &Entity<TokenField> {
+        &self.tokens
+    }
+
+    /// The chip of the picture `at` (in the order of [`Reply::attachments`]) is in the text.
+    pub fn has_chip(&self, at: usize, cx: &App) -> bool {
+        self.attached.has_chip(at, cx)
+    }
+
+    /// Makes a chip of each command the text names (`all`: the word at the caret too).
+    fn chip_commands(&mut self, all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(commands) = &self.commands else {
+            return;
+        };
+        let names: Vec<String> = commands.iter().map(|c| c.name.clone()).collect();
+        crate::tokens::chip_commands(
+            &self.tokens,
+            |name| names.iter().any(|known| known == name),
+            all,
+            window,
+            cx,
+        );
+    }
+
     /// The provider shown and the model and effort pickers under the field.
     pub fn options(&self) -> &Entity<SessionOptions> {
         &self.options
@@ -9264,7 +9203,7 @@ impl Reply {
     }
 
     /// The pictures that go with the next message.
-    pub fn attachments(&self) -> &[Arc<gpui_kit::Image>] {
+    pub fn attachments(&self) -> Vec<Arc<gpui_kit::Image>> {
         self.attached.pictures()
     }
 
@@ -9327,8 +9266,8 @@ impl Reply {
         self.attached.attach_file(path, cx, Self::attached_of);
     }
 
-    pub fn detach(&mut self, at: usize, cx: &mut Context<Self>) {
-        self.attached.detach(at, cx);
+    pub fn detach(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.attached.detach(at, window, cx);
     }
 
     /// The root runs a turn.
@@ -9636,7 +9575,17 @@ impl Reply {
         let end = text[cursor..]
             .find(char::is_whitespace)
             .map_or(text.len(), |at| cursor + at);
-        let slash = text[start..end].strip_prefix('/').map(str::to_owned);
+        // A command's chip is a command already: it opens no list.
+        let chipped = self
+            .field
+            .read(cx)
+            .tokens()
+            .iter()
+            .any(|span| span.range().start < end.max(start + 1) && start < span.range().end);
+        let slash = text[start..end]
+            .strip_prefix('/')
+            .filter(|_| !chipped)
+            .map(str::to_owned);
         self.slash_at = start..end;
         // `/review` is offered while Review is on in the project. Not read through the shell,
         // which may be the one setting the text.
@@ -9683,6 +9632,8 @@ impl Reply {
         {
             self.commands = Some(list.clone());
             self.highlighted = 0;
+            // The commands of a message put back become chips once they are known.
+            self.rechip = true;
             cx.notify();
         }
     }
@@ -9722,48 +9673,52 @@ impl Reply {
         self.has_text = true;
         let now = self.field.read(cx).value().to_string();
         let at = self.slash_at.start.min(now.len())..self.slash_at.end.min(now.len());
-        let (before, mut after) = (&now[..at.start], &now[at.end..]);
-        if entered {
-            after = after.strip_prefix('\n').unwrap_or(after);
-        }
-        if name == crate::extensions::review::COMMAND && self.review {
-            let text = format!("{before}{}", after.trim_start());
-            self.has_text = !text.trim().is_empty();
+        let after = &now[at.end..];
+        // The line break Enter put after the word goes.
+        let broken = entered && after.starts_with('\n');
+        let after = if broken { &after[1..] } else { after };
+        if (name == crate::extensions::review::COMMAND && self.review) || name == RELOAD_COMMAND {
+            // Done at once: its word leaves the message, and the spaces after it.
+            let spaces = after.len() - after.trim_start().len();
+            let end = at.end + usize::from(broken) + spaces;
             self.field.update(cx, |field, cx| {
-                field.set_value(text.as_str(), window, cx);
-                field.set_selected_range(before.len()..before.len(), cx);
+                field.set_selected_range(at.start..end, cx);
+                field.replace("", window, cx);
             });
-            crate::extensions::review::start(&self.shell, &self.session, cx);
+            self.has_text = !self.field.read(cx).value().trim().is_empty();
+            if name == RELOAD_COMMAND {
+                let command = Command::ReloadTools {
+                    session: self.session.clone(),
+                };
+                self.shell
+                    .update(cx, |shell, _| shell.perform(command))
+                    .ok();
+            } else {
+                crate::extensions::review::start(&self.shell, &self.session, cx);
+            }
             cx.notify();
             return;
         }
-        if name == RELOAD_COMMAND {
-            let text = format!("{before}{}", after.trim_start());
-            self.has_text = !text.trim().is_empty();
+        if broken {
             self.field.update(cx, |field, cx| {
-                field.set_value(text.as_str(), window, cx);
-                field.set_selected_range(before.len()..before.len(), cx);
+                field.set_selected_range(at.end..at.end + 1, cx);
+                field.replace("", window, cx);
             });
-            let command = Command::ReloadTools {
-                session: self.session.clone(),
-            };
-            self.shell
-                .update(cx, |shell, _| shell.perform(command))
-                .ok();
-            cx.notify();
-            return;
         }
-        let space = if after.starts_with(char::is_whitespace) {
-            ""
-        } else {
-            " "
-        };
-        let text = format!("{before}/{name}{space}{after}");
-        let cursor = before.len() + name.len() + 2;
-        self.field.update(cx, |field, cx| {
-            field.set_value(text.as_str(), window, cx);
-            field.set_selected_range(cursor..cursor, cx);
+        // The word becomes the command's chip, a space after it for what it is about.
+        self.field
+            .update(cx, |field, cx| field.set_selected_range(at.clone(), cx));
+        self.tokens.update(cx, |field, cx| {
+            field.insert(crate::tokens::command(name), window, cx).ok()
         });
+        if !after.starts_with(char::is_whitespace) {
+            self.field
+                .update(cx, |field, cx| field.insert(" ", window, cx));
+        } else {
+            let caret = at.start + name.len() + 2;
+            self.field
+                .update(cx, |field, cx| field.set_selected_range(caret..caret, cx));
+        }
         cx.notify();
     }
 
@@ -9783,57 +9738,6 @@ impl Reply {
             }
         }
         used
-    }
-
-    /// The chips of the commands the message uses, under the field: each one comes and goes as
-    /// the message gains or loses it, the line with the first and the last.
-    fn render_chips(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let used = self.commands_used(cx);
-        let now = cx.background_executor().now();
-        self.chips.sync(
-            used.iter().map(|name| (name.clone(), name.clone())),
-            now,
-            cx.reduce_motion(),
-        );
-        let p = palette(cx);
-        let chips: Vec<AnyElement> = self
-            .chips
-            .rows()
-            .map(|row| {
-                let name = row.value.clone();
-                gpui_design_system::Item::new(
-                    ElementId::Name(format!("reply-command-item-{name}").into()),
-                    row.placement,
-                    div()
-                        .id(ElementId::Name(format!("reply-command-{name}").into()))
-                        .flex_none()
-                        .px(space::SM)
-                        .rounded(px(6.))
-                        .bg(p.acc.opacity(0.14))
-                        .text_color(p.acc)
-                        .font_weight(gpui_kit::FontWeight::MEDIUM)
-                        .text_size(px(12.5))
-                        .aria_label(SharedString::from(format!("/{name}")))
-                        .child(format!("/{name}"))
-                        .test_support(),
-                )
-                .into_any_element()
-            })
-            .collect();
-        presence(
-            "reply-commands",
-            !used.is_empty(),
-            div()
-                .id("reply-commands-line")
-                .flex()
-                .flex_wrap()
-                .gap(space::XS)
-                .pt(space::SM)
-                .px(space::XS)
-                .children(chips)
-                .test_support(),
-        )
-        .into_any_element()
     }
 
     /// The `/` list, over the composer: the commands offered. It unfolds when it opens and folds
@@ -9920,6 +9824,8 @@ impl Reply {
             .shadow_lg()
             .flex()
             .flex_col()
+            // The rows are `Item`s, which fold the gap of this column: it keeps it, and the labels
+            // and the note borrow it (`KEPT` in `tests/a_block_has_its_own_space.rs`).
             .gap(space::XS)
             .child(
                 presence(
@@ -9954,8 +9860,8 @@ impl Reply {
     /// Sends what the field holds to the root agent: it leaves the composer at once and shows as
     /// a message being sent until the daemon records it.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let typed = self.field.read(cx).value().to_string();
-        let message = typed.trim().to_owned();
+        // Each picture's chip goes as its marker, where the agent finds it (#773).
+        let message = self.attached.message(cx).trim().to_owned();
         if self.sending {
             return;
         }
@@ -9978,8 +9884,8 @@ impl Reply {
             since: None,
         });
         self.has_text = false;
-        self.field
-            .update(cx, |field, cx| field.set_value("", window, cx));
+        self.tokens
+            .update(cx, |field, cx| field.set_value(Vec::new(), window, cx).ok());
         self.typed("", cx);
         self.ask(key, cx);
     }
@@ -10064,21 +9970,34 @@ impl Reply {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let typed = self.field.read(cx).value().to_string();
-        let joined = if typed.trim().is_empty() {
-            text.to_owned()
+        // Its pictures' markers become their chips again, its commands once they are known.
+        let restored = self.attached.restore_with(text, pictures, cx);
+        let mut pieces = self.tokens.read(cx).value(cx);
+        if crate::tokens::sent_text(&pieces, |_| None)
+            .trim()
+            .is_empty()
+        {
+            pieces = restored;
         } else {
-            format!("{}\n{text}", typed.trim_end())
-        };
-        self.has_text = !joined.trim().is_empty();
+            if let Some(Piece::Text(last)) = pieces.last_mut() {
+                *last = last.trim_end().to_owned().into();
+            }
+            pieces.push(Piece::Text("\n".into()));
+            pieces.extend(restored);
+        }
+        self.tokens
+            .update(cx, |field, cx| field.set_value(pieces, window, cx).ok());
+        let joined = self.field.read(cx).value().to_string();
+        let end = joined.len();
         self.field
-            .update(cx, |field, cx| field.set_value(joined.clone(), window, cx));
+            .update(cx, |field, cx| field.set_selected_range(end..end, cx));
+        self.has_text = !joined.trim().is_empty();
         self.typed(&joined, cx);
         // Put back by code, not typed: a message that ends with a command is not asking for the
         // list, and Enter sends it.
         self.dismissed = self.slash.is_some();
+        self.rechip = true;
         self.list_commands(cx);
-        self.attached.restore(pictures, cx, Self::attached_of);
         let focus = self.field.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         cx.notify();
@@ -10173,11 +10092,15 @@ impl Render for Reply {
             window,
             cx,
         );
-        let strip = self
-            .attached
-            .strip(window, cx, |this, at, cx| this.detach(at, cx));
+        self.attached.place(window, cx);
+        if self.rechip && self.commands.is_some() {
+            self.rechip = false;
+            self.chip_commands(true, window, cx);
+        }
+        let strip = self.attached.strip(window, cx, |this, at, window, cx| {
+            this.detach(at, window, cx)
+        });
         let slash = self.render_slash(cx);
-        let chips = self.render_chips(cx);
         Attachments::taken_by(div().id("reply").relative().w_full(), cx, Self::attached_of)
             // While the `/` list is open, the arrows move in it and Escape closes it, before the
             // field takes them.
@@ -10230,14 +10153,13 @@ impl Render for Reply {
                     .text_size(px(14.))
                     .line_height(px(21.))
                     .cursor_text()
-                    .child(self.field.clone())
+                    .child(self.tokens.clone())
                     .on_click(cx.listener(|this, _, window, cx| {
                         let focus = this.field.read(cx).focus_handle(cx);
                         window.focus(&focus, cx);
                     }))
                     .test_support(),
             )
-            .child(chips)
             .child(
                 div()
                     .flex()
@@ -10497,19 +10419,6 @@ mod tests {
             "xhttps://a\\.b\\-c",
             "a word that ends in a scheme is no address"
         );
-    }
-
-    #[test]
-    fn a_command_is_inline_code_in_the_text_as_typed_and_the_rest_keeps_its_marks() {
-        let text = "check\n\n- one /open-prs\n- two\n\n```\nlet a = 1;\n``` then /ship";
-        let chips = command_chips(text, &["open-prs".into(), "ship".into()]);
-        assert_eq!(chips.len(), 2);
-
-        assert_eq!(
-            typed_with_chips(text, &chips),
-            "check\n\n\\- one `/open-prs`\\\n\\- two\n\n\\`\\`\\`\\\nlet a = 1;\\\n\\`\\`\\` then `/ship`",
-        );
-        assert_eq!(typed_with_chips(text, &[]), as_typed(text));
     }
 
     fn agent(parent: Option<&str>, state: &str) -> TreeAgent {

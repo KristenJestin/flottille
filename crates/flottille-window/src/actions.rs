@@ -167,6 +167,10 @@ pub enum Command {
     ToolResultsSet {
         limit: Option<usize>,
     },
+    /// Chooses whether `fs_read` says a file is unchanged (`tool_results.set`).
+    UnchangedSet {
+        unchanged: bool,
+    },
     /// After how many days an inactive session is ended (`sessions.show`).
     SessionsRead,
     /// Chooses it (`sessions.set`): `None` is off.
@@ -342,11 +346,9 @@ pub enum Command {
     Vault,
     /// An entry set or removed (`vault.set`, `vault.remove`).
     VaultWrite(VaultWrite),
-    /// The user's answer to the request `ask` for a vault entry, from its card in `session`.
-    VaultAnswer {
-        session: String,
+    /// The card of the request `ask` for a vault entry dismissed.
+    VaultDismiss {
         ask: u64,
-        answer: VaultAnswer,
     },
     /// The project's skills.
     Skills {
@@ -636,10 +638,10 @@ pub enum SkillWrite {
 /// A change to the vault, as the daemon takes it.
 #[derive(Clone, PartialEq)]
 pub enum VaultWrite {
-    /// A new entry, or one replaced whole.
+    /// A new entry, or one edited: without a secret, the one the keyring holds is kept.
     Set {
         name: String,
-        secret: String,
+        secret: Option<String>,
         description: String,
         url: String,
         username: String,
@@ -653,29 +655,6 @@ pub enum VaultWrite {
         /// The user confirmed what stops working without it.
         confirmed: bool,
     },
-}
-
-/// The answer a card gives to a request for a vault entry.
-#[derive(Clone, PartialEq)]
-pub enum VaultAnswer {
-    /// The secret typed, the username when the entry takes one, and another name for the entry
-    /// when the one asked is used by another project.
-    Set {
-        secret: String,
-        username: String,
-        name: Option<String>,
-    },
-    Dismiss,
-}
-
-/// What a debug line may say of an answer: never its secret.
-impl std::fmt::Debug for VaultAnswer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            VaultAnswer::Set { .. } => f.write_str("Set"),
-            VaultAnswer::Dismiss => f.write_str("Dismiss"),
-        }
-    }
 }
 
 /// What a debug line may say of a write: never its secret.
@@ -987,11 +966,11 @@ pub enum Outcome {
         then: crate::extensions::Then,
         answer: Result<Value, String>,
     },
-    /// The limit of tool results as the daemon says it (`None` is Off), after a read (`written`
-    /// false) or a choice.
+    /// The limit of tool results as the daemon says it (`None` is Off) and whether a file is said
+    /// unchanged, after a read (`written` false) or a choice.
     ToolResults {
         written: bool,
-        shown: Result<Option<usize>, String>,
+        shown: Result<(Option<usize>, bool), String>,
     },
     /// After how many days an inactive session is ended as the daemon says it (`None` is off),
     /// and whether a session is resumed at its quota's reset, after a read (`written` none) or a
@@ -1149,10 +1128,8 @@ pub enum Outcome {
         key: u64,
         answer: Result<crate::session::Accepted, String>,
     },
-    /// The answer to the request `ask` for a vault entry was taken, or refused with why (never
-    /// holding the secret: the daemon masks it).
-    VaultAnswered {
-        session: String,
+    /// The dismissal of a request for a vault entry was taken, or refused with why.
+    VaultDismissed {
         ask: u64,
         refused: Option<String>,
     },
@@ -1650,17 +1627,26 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let answer = answer(ask_alone(connect, &method, params, bounds.quick));
             Outcome::Asked { then, answer }
         }
-        Command::ToolResultsRead | Command::ToolResultsSet { .. } => {
+        Command::ToolResultsRead
+        | Command::ToolResultsSet { .. }
+        | Command::UnchangedSet { .. } => {
             let (method, params, written) = match command {
                 Command::ToolResultsSet { limit } => (
                     "tool_results.set",
                     json!({"limit": limit.map_or(json!("off"), |l| json!(l))}),
                     true,
                 ),
+                Command::UnchangedSet { unchanged } => {
+                    ("tool_results.set", json!({"unchanged": unchanged}), true)
+                }
                 _ => ("tool_results.show", json!({}), false),
             };
-            let shown = answer(ask_alone(connect, method, params, bounds.quick))
-                .map(|shown| shown["limit"].as_u64().map(|limit| limit as usize));
+            let shown = answer(ask_alone(connect, method, params, bounds.quick)).map(|shown| {
+                (
+                    shown["limit"].as_u64().map(|limit| limit as usize),
+                    shown["unchanged"] == true,
+                )
+            });
             Outcome::ToolResults { written, shown }
         }
         Command::SessionsRead | Command::SessionsSet { .. } | Command::ResumeSet { .. } => {
@@ -1990,31 +1976,17 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::VaultWritten { refused }
         }
-        Command::VaultAnswer {
-            session,
-            ask,
-            answer,
-        } => {
-            let (method, params) = match answer {
-                VaultAnswer::Set {
-                    secret,
-                    username,
-                    name,
-                } => (
-                    "vault.ask_set",
-                    json!({"ask": ask, "secret": secret, "username": username, "name": name}),
-                ),
-                VaultAnswer::Dismiss => ("vault.ask_dismiss", json!({"ask": ask})),
-            };
-            let refused = match ask_alone(connect, method, params, bounds.quick) {
+        Command::VaultDismiss { ask } => {
+            let refused = match ask_alone(
+                connect,
+                "vault.ask_dismiss",
+                json!({"ask": ask}),
+                bounds.quick,
+            ) {
                 Ok(Ok(_)) => None,
                 Ok(Err(why)) | Err(why) => Some(why),
             };
-            Outcome::VaultAnswered {
-                session,
-                ask,
-                refused,
-            }
+            Outcome::VaultDismissed { ask, refused }
         }
         Command::CommandWrite { project, write } => {
             let (method, params) = command_write(&project, write);

@@ -39,6 +39,7 @@ mod inbox;
 mod inbox_command;
 mod items;
 mod judge;
+mod landlock;
 mod leaves;
 mod locks;
 mod mcp;

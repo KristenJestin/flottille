@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 use super::{Registry, Then as Asked};
 use crate::actions::Command;
-use crate::commands::{menu_of, perform_later};
+use crate::commands::{menu_of, perform_later, section_blocks, spaced, stack};
 use crate::project_settings::{field_frame, styled_input};
 use crate::shell::{Selection, Shell};
 
@@ -2130,7 +2130,6 @@ impl Render for SpecPage {
         let gestures = div()
             .flex()
             .flex_col()
-            .gap(space::SM)
             .child(
                 div()
                     .flex()
@@ -2155,7 +2154,7 @@ impl Render for SpecPage {
                             .into_any_element()
                     },
                 )
-                .gap(space::SM),
+                .space(space::SM),
             );
         // The ticket, in the mode "the ticket is the spec": what its last write became, and the
         // user's choice when someone changed it since Flottille last read it.
@@ -2188,10 +2187,7 @@ impl Render for SpecPage {
                     .ok();
                 }
             });
-        let ticket = div()
-            .flex()
-            .flex_col()
-            .gap(space::SM)
+        let ticket = stack(space::SM)
             .child(
                 presence_of(
                     "spec-ticket-said-block",
@@ -2210,7 +2206,7 @@ impl Render for SpecPage {
                         .into_any_element()
                     },
                 )
-                .gap(space::SM),
+                .space(space::SM),
             )
             .child(
                 presence(
@@ -2223,7 +2219,7 @@ impl Render for SpecPage {
                         .child(take)
                         .child(overwrite),
                 )
-                .gap(space::SM),
+                .space(space::SM),
             );
         // The questions: the open ones, each answered in one click; the spec's own open ones.
         let listed: Vec<(String, Question, gpui_design_system::Placement)> = self
@@ -2260,14 +2256,19 @@ impl Render for SpecPage {
         let questions = Section::new("spec-questions", "Questions")
             .count(open.to_string())
             .sentence("What only you can decide. Each answer becomes a decision of the spec.")
-            .child(div().flex().flex_col().children(cards))
             .child(
-                presence(
-                    "spec-own-questions-block",
-                    !own_questions.is_empty(),
-                    block(own_questions),
-                )
-                .gap(space::MD),
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().flex().flex_col().children(cards))
+                    .child(
+                        presence(
+                            "spec-own-questions-block",
+                            !own_questions.is_empty(),
+                            block(own_questions),
+                        )
+                        .space(space::MD),
+                    ),
             );
         let problem = Section::new("spec-problem", "Problem")
             .sentence("Why, in a few lines.")
@@ -2304,14 +2305,17 @@ impl Render for SpecPage {
             .count(behaviour_count.to_string())
             .sentence("Each one sentence that can be checked.")
             .child(
-                presence(
-                    "spec-behaviour-none-block",
-                    spec.as_ref().is_some_and(|spec| spec.behaviour.is_empty()),
-                    paragraph("spec-behaviour-none", "", cx),
-                )
-                .gap(space::MD),
-            )
-            .child(div().flex().flex_col().children(lines));
+                stack(space::MD)
+                    .child(
+                        presence(
+                            "spec-behaviour-none-block",
+                            spec.as_ref().is_some_and(|spec| spec.behaviour.is_empty()),
+                            paragraph("spec-behaviour-none", "", cx),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(spaced(space::MD, div().flex().flex_col().children(lines))),
+            );
         let rows: Vec<(String, Decision, gpui_design_system::Placement)> = self
             .decisions
             .rows()
@@ -2353,14 +2357,20 @@ impl Render for SpecPage {
             .count(decision_count.to_string())
             .sentence("Each with the question it answered and the options set aside.")
             .child(
-                presence(
-                    "spec-decisions-none-block",
-                    spec.as_ref().is_some_and(|spec| spec.decisions.is_empty()),
-                    paragraph("spec-decisions-none", "", cx),
-                )
-                .gap(space::MD),
-            )
-            .child(div().flex().flex_col().children(decision_lines));
+                stack(space::MD)
+                    .child(
+                        presence(
+                            "spec-decisions-none-block",
+                            spec.as_ref().is_some_and(|spec| spec.decisions.is_empty()),
+                            paragraph("spec-decisions-none", "", cx),
+                        )
+                        .space(space::MD),
+                    )
+                    .child(spaced(
+                        space::MD,
+                        div().flex().flex_col().children(decision_lines),
+                    )),
+            );
         // The amendments: the pending ones, each accepted or refused in one click, folding away
         // once answered; the refused ones folded under their own line.
         let rows: Vec<(String, Amendment, gpui_design_system::Placement)> = self
@@ -2421,22 +2431,27 @@ impl Render for SpecPage {
                 "What the session developing the spec proposes from what you decided. Accepted, \
                  it is part of the spec, marked as decided during development.",
             )
-            .child(div().flex().flex_col().children(cards))
             .child(
-                presence(
-                    "spec-amendments-refused-block",
-                    !refused.is_empty(),
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(refused_toggle)
-                        .child(presence(
-                            "spec-amendments-refused",
-                            self.refused_open,
-                            div().pt(space::SM).child(block(refused_lines)),
-                        )),
-                )
-                .gap(space::MD),
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().flex().flex_col().children(cards))
+                    .child(
+                        presence(
+                            "spec-amendments-refused-block",
+                            !refused.is_empty(),
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(refused_toggle)
+                                .child(presence(
+                                    "spec-amendments-refused",
+                                    self.refused_open,
+                                    div().pt(space::SM).child(block(refused_lines)),
+                                )),
+                        )
+                        .space(space::MD),
+                    ),
             );
         let outside: Vec<AnyElement> = spec
             .as_ref()
@@ -2519,9 +2534,8 @@ impl Render for SpecPage {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(space::MD)
                     .child(paragraph("spec-departures-text", &departures_text, cx))
-                    .child(presence("spec-departures-post-block", offered, post).gap(space::MD))
+                    .child(presence("spec-departures-post-block", offered, post).space(space::MD))
                     .child(
                         presence_of("spec-departures-posted-block", posted_said, move |said| {
                             div()
@@ -2533,7 +2547,7 @@ impl Render for SpecPage {
                                 .test_support()
                                 .into_any_element()
                         })
-                        .gap(space::MD),
+                        .space(space::MD),
                     ),
             );
         let writer = spec.as_ref().and_then(|spec| spec.writer.clone());
@@ -2568,17 +2582,24 @@ impl Render for SpecPage {
                 })
                 .collect();
             let count = rows.len();
-            Section::new("spec-sessions", "Sessions")
+            let section = Section::new("spec-sessions", "Sessions")
                 .count(count.to_string())
                 .sentence("The sessions that worked on the spec; each opens its conversation.")
-                .child(
-                    presence(
-                        "spec-sessions-block",
-                        count > 0,
-                        ListCard::new("spec-sessions-list").rows(rows),
-                    )
-                    .gap(space::MD),
-                )
+                .child(section_blocks(
+                    "spec-sessions-blocks",
+                    count > 0,
+                    space::MD,
+                    stack(space::MD).child(
+                        presence(
+                            "spec-sessions-block",
+                            count > 0,
+                            ListCard::new("spec-sessions-list").rows(rows),
+                        )
+                        .space(space::MD),
+                    ),
+                ));
+            // Its own box, which the tests measure: the section's root is not an element they find.
+            div().id("spec-sessions-box").child(section).test_support()
         };
         let overwrite_confirm = Confirm::new(
             "spec-ticket-confirm",
@@ -2643,17 +2664,21 @@ impl Render for SpecPage {
             .pb(space::XXXL)
             .flex()
             .flex_col()
-            .gap(space::XXL)
             .child(enter(
                 key("header"),
                 0,
                 div()
                     .flex()
                     .flex_col()
-                    .gap(space::LG)
-                    .child(header)
-                    .child(gestures)
-                    .child(ticket)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(space::LG)
+                            .child(header)
+                            .child(gestures)
+                            .child(ticket),
+                    )
                     .child(
                         presence_of("spec-failed-block", failed, move |why| {
                             div()
@@ -2665,7 +2690,7 @@ impl Render for SpecPage {
                                 .test_support()
                                 .into_any_element()
                         })
-                        .gap(space::LG),
+                        .space(space::LG),
                     ),
             ))
             .child(
@@ -2674,7 +2699,7 @@ impl Render for SpecPage {
                     open > 0 || !self.questions.is_empty(),
                     enter(key("questions"), 1, questions),
                 )
-                .gap(space::XXL),
+                .space(space::XXL),
             )
             .child(
                 presence(
@@ -2682,7 +2707,7 @@ impl Render for SpecPage {
                     has_amendments,
                     enter(key("amendments"), 1, amendments),
                 )
-                .gap(space::XXL),
+                .space(space::XXL),
             )
             .child(
                 presence(
@@ -2690,7 +2715,7 @@ impl Render for SpecPage {
                     !self.findings.is_empty(),
                     enter(key("findings"), 1, findings_section(&self.findings, p)),
                 )
-                .gap(space::XXL),
+                .space(space::XXL),
             )
             .child(
                 presence(
@@ -2699,30 +2724,35 @@ impl Render for SpecPage {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(space::XXL)
-                        .child(enter(key("problem"), 2, problem))
-                        .child(enter(key("behaviour"), 3, behaviour))
-                        .child(enter(key("decisions"), 4, decisions))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(space::XXL)
+                                .child(enter(key("problem"), 2, problem))
+                                .child(enter(key("behaviour"), 3, behaviour))
+                                .child(enter(key("decisions"), 4, decisions)),
+                        )
                         .child(
                             presence(
                                 "spec-out-of-scope-block",
                                 has_outside,
                                 enter(key("out-of-scope"), 5, outside),
                             )
-                            .gap(space::XXL),
+                            .space(space::XXL),
                         )
-                        .child(enter(key("found"), 6, found))
+                        .child(spaced(space::XXL, enter(key("found"), 6, found)))
                         .child(
                             presence(
                                 "spec-departures-section-block",
                                 has_departures,
                                 enter(key("departures"), 6, departures),
                             )
-                            .gap(space::XXL),
+                            .space(space::XXL),
                         )
-                        .child(enter(key("sessions"), 7, sessions)),
+                        .child(spaced(space::XXL, enter(key("sessions"), 7, sessions))),
                 )
-                .gap(space::XXL),
+                .space(space::XXL),
             );
         div()
             .id("spec-page")

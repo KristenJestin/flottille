@@ -2312,7 +2312,7 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
         ],
         false,
     );
-    // An action outside the list the adapter lets stay on beside login, turned on.
+    // An action that reads the page, turned on: login stays offered beside it.
     user.call(
         "connection.accept",
         json!({"name": "browser", "actions": {"agent_browser_get_attr": "judged"}}),
@@ -2321,16 +2321,13 @@ fn the_review_says_an_adapter_applies_and_why_an_action_stays_off(cx: &mut TestA
     let (shell, cx) = window(&user, cx);
     open_the_review(&shell, cx, "browser", "connection-review-adapter");
 
-    // That it applies, and why login is refused: said above the bar, before Accept.
+    // That it applies: said above the bar, before Accept, and login is refused for no action.
     let said = label(cx, "connection-review-adapter").unwrap();
     assert!(
         said.contains("Flottille's adapter for agent-browser 0.43.x applies"),
         "{said}"
     );
-    assert!(
-        said.contains("login is refused while agent_browser_get_attr is on"),
-        "{said}"
-    );
+    assert!(!said.contains("login is refused while"), "{said}");
     assert!(
         visible(cx, "connection-review-left"),
         "the bar is under the adapter's sentence"
@@ -2951,4 +2948,569 @@ fn a_browser_that_could_not_be_shown_says_why_under_its_switch(cx: &mut TestAppC
     click(cx, "connection-headed");
     settle(cx);
     assert!(!visible(cx, "connection-headed-why"));
+}
+
+// ── A review that needs a sign-in ────────────────────────────────────────────────────────────
+
+/// The review of `notes`, behind its authorization server and not signed in, opened from its row.
+fn review_of_unsigned<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    &'a mut VisualTestContext,
+    common::Spawned,
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    turn_on(user);
+    let (server, url) = protected_server(user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url}),
+    )
+    .unwrap();
+    let (shell, cx) = window(user, cx);
+    let opened = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    {
+        let opened = opened.clone();
+        shell.update(cx, |s, _| {
+            s.set_opener(Arc::new(move |path: &Path| {
+                opened.lock().unwrap().push(path.display().to_string());
+            }))
+        });
+    }
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-notes"));
+    click(cx, "connection-more-notes");
+    click(cx, "review-connection-notes");
+    until(&shell, cx, "what the review says", |cx| {
+        present(cx, "connection-review-sign-in") || present(cx, "connection-review-error")
+    });
+    settle(cx);
+    (shell, cx, server, opened)
+}
+
+#[gpui_kit::test]
+fn a_review_that_needs_a_sign_in_offers_the_button(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, cx, mut server, _) = review_of_unsigned(&user, cx);
+    assert!(
+        present(cx, "connection-review-sign-in"),
+        "the review offers Sign in"
+    );
+    assert_eq!(
+        label(cx, "connection-review-sign-in").as_deref(),
+        Some("Sign in")
+    );
+    // A state, not an error: the error line is not drawn, and there is nothing to accept yet.
+    assert!(!present(cx, "connection-review-error"));
+    assert!(present(cx, "connection-review-needs-sign-in"));
+    assert!(!present(cx, "accept-connection"));
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[gpui_kit::test]
+fn signing_in_from_the_review_reads_the_server_and_shows_its_actions(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx, mut server, opened) = review_of_unsigned(&user, cx);
+    click(cx, "connection-review-sign-in");
+    until(&shell, cx, "the browser is opened on the sign-in", |_| {
+        !opened.lock().unwrap().is_empty()
+    });
+    let address = opened.lock().unwrap()[0].clone();
+    assert!(address.contains("/as/authorize"), "{address}");
+    let (status, location) = browse(&address);
+    assert_eq!(status, 302);
+    let (status, _) = browse(&location.unwrap());
+    assert_eq!(status, 200);
+    // Nobody presses anything more: the review reads the server again and shows what it announces.
+    // The server is given at once once signed in, so its actions are the pinned ones: the review
+    // is ready when it can be accepted, whatever group each row is in.
+    until(&shell, cx, "the actions of the server", |cx| {
+        present(cx, "accept-connection")
+    });
+    settle(cx);
+    assert!(present(cx, "connection-review-server"));
+    assert!(!present(cx, "connection-review-sign-in"));
+    assert!(!present(cx, "connection-review-needs-sign-in"));
+    assert!(present(cx, "accept-connection"));
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[gpui_kit::test]
+fn no_window_message_tells_the_user_to_run_connection_login(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx, mut server, _) = review_of_unsigned(&user, cx);
+    let section = section(&shell, cx);
+    for said in ["signed_out", "sign_in_failed", "tokens_unsaved"] {
+        cx.update(|_, cx| {
+            section.update(cx, |s, cx| {
+                s.sign_in_said(said, "notes", Some("the vault said no".into()), cx)
+            })
+        });
+        settle(cx);
+    }
+    let toasts: Vec<String> = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|t| format!("{} {:?}", t.title(), t.second_line()))
+            .collect()
+    });
+    let said = format!("{}\n{}", everything_said(cx), toasts.join("\n"));
+    assert!(!said.contains("connection login"), "{said}");
+    assert!(!said.contains("flottille connection"), "{said}");
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+#[gpui_kit::test]
+fn a_401_with_a_header_from_the_vault_names_the_entry_not_a_sign_in(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "hippo-token", "secret": SECRET, "description": "Hippo's token"}),
+    )
+    .unwrap();
+    let (mut server, url) = protected_server(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url,
+            "headers": {"Authorization": {"vault": "hippo-token"}}}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-notes"));
+    click(cx, "connection-more-notes");
+    click(cx, "review-connection-notes");
+    until(&shell, cx, "what the review says", |cx| {
+        present(cx, "connection-review-edit-entry") || present(cx, "connection-review-sign-in")
+    });
+    settle(cx);
+    // The server refused what it was given: the entry is named, never its value, and the way out
+    // is the entry, not a sign-in.
+    assert!(!present(cx, "connection-review-sign-in"));
+    assert!(!present(cx, "connection-review-error"));
+    assert_eq!(
+        label(cx, "connection-review-edit-entry").as_deref(),
+        Some("Edit entry")
+    );
+    let said = label(cx, "connection-review-needs-entry").unwrap_or_default();
+    assert!(
+        said.contains("Authorization") && said.contains("hippo-token"),
+        "{said}"
+    );
+    let all = everything_said(cx);
+    assert!(!all.contains(SECRET), "{all}");
+    assert!(!all.contains("connection login"), "{all}");
+    assert!(!all.contains("sign in"), "{all}");
+    // Edit entry opens the entry's dialog in the vault, its secret to type again.
+    click(cx, "connection-review-edit-entry");
+    let vault = shell.read_with(cx, |s, cx| {
+        s.main()
+            .read(cx)
+            .settings_page()
+            .map(|page| page.read(cx).vault().clone())
+            .unwrap()
+    });
+    until(&shell, cx, "the entry's dialog", |cx| {
+        vault.read_with(cx, |v, _| v.is_open())
+    });
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+// ── The review opens at rest (#954) ──────────────────────────────────────────────────────────
+
+/// The user of a re-review: `driftbrowser` pinned with settings, then announcing one more tool,
+/// one fewer and a few changed, so that "What changed" and the unchanged line both show.
+fn rereview_user() -> User {
+    let user = user();
+    turn_on(&user);
+    connect(
+        &user,
+        "driftbrowser",
+        &driftbrowser(),
+        json!({"browser_snapshot": "passes", "browser_upload": "asked"}),
+    );
+    let mut now = driftbrowser();
+    now["server"]["version"] = json!("0.10.0");
+    let tools = now["tools"].as_array_mut().unwrap();
+    tools.retain(|t| t["name"] != "browser_pdf");
+    for tool in tools.iter_mut() {
+        if tool["name"] == "browser_click" {
+            tool["description"] = json!("Click an element, then snapshot.");
+        }
+    }
+    tools.push(
+        json!({"name": "browser_wait_for_text", "description": "Wait until a text appears.",
+        "inputSchema": {"type": "object", "properties": {}}}),
+    );
+    write_script(&user, "driftbrowser", &now);
+    user
+}
+
+/// What the window drew from the click on Review of `name` until the data was drawn and for two
+/// panels after it, one frame (16 ms) at a time.
+struct Opening {
+    /// Per frame before the data: whether the loading state was drawn.
+    loading: Vec<bool>,
+    /// Per frame from the one with the data: whether the loading state was still drawn.
+    skeleton: Vec<bool>,
+    /// Per frame from the one with the data: the height drawn of each of the `watched` ids.
+    heights: Vec<Vec<f32>>,
+    /// Per frame from the one with the data: the height drawn of each of the `hidden` ids.
+    hidden: Vec<Vec<f32>>,
+}
+
+fn open_frame_by_frame(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    name: &str,
+    ready: &str,
+    watched: &[&str],
+    hidden: &[&str],
+) -> Opening {
+    open_page(shell, cx);
+    until(shell, cx, "its row", |cx| {
+        visible(cx, &format!("connection-{name}"))
+    });
+    click(cx, &format!("connection-more-{name}"));
+    click(cx, &format!("review-connection-{name}"));
+    let mut opening = Opening {
+        loading: Vec::new(),
+        skeleton: Vec::new(),
+        heights: Vec::new(),
+        hidden: Vec::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut frames_after = 0;
+    while frames_after * 16 < 2 * PANEL.as_millis() as u64 {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let skeleton = present(cx, "connection-review-skeleton-0");
+        if !present(cx, ready) {
+            assert!(Instant::now() < deadline, "the data never came");
+            opening.loading.push(skeleton);
+            std::thread::sleep(Duration::from_millis(25));
+            continue;
+        }
+        frames_after += 1;
+        opening.skeleton.push(skeleton);
+        opening
+            .heights
+            .push(watched.iter().map(|id| height(cx, id)).collect());
+        opening
+            .hidden
+            .push(hidden.iter().map(|id| height(cx, id)).collect());
+    }
+    opening
+}
+
+/// Whether every column of `frames` is the same height on each frame: nothing folds or unfolds.
+fn steady(ids: &[&str], frames: &[Vec<f32>]) -> Result<(), String> {
+    let last = frames.last().expect("a frame with the data");
+    for (at, frame) in frames.iter().enumerate() {
+        for (id, (seen, rest)) in ids.iter().zip(frame.iter().zip(last)) {
+            if (seen - rest).abs() > 0.5 {
+                return Err(format!(
+                    "{id} is {seen}px high on frame {at} and {rest}px at rest"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Frames asked for over a second of the clock once everything settled.
+fn frames_asked_at_rest(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> usize {
+    let mut asked = 0;
+    for _ in 0..60 {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        asked += cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    asked
+}
+
+#[gpui_kit::test]
+fn the_review_opens_in_its_resting_state(cx: &mut TestAppContext) {
+    let user = rereview_user();
+    let (shell, cx) = window(&user, cx);
+    let watched = [
+        "connection-review-changes",
+        "connection-review-change-browser_click",
+        "connection-review-change-browser_wait_for_text",
+        "connection-review-change-browser_pdf",
+        "connection-review-unchanged",
+    ];
+    let hidden = [
+        "connection-review-unchanged-body",
+        "connection-review-none-block",
+        "connection-review-row-1-browser_snapshot",
+        "connection-review-row-2-browser_upload",
+    ];
+    let opening = open_frame_by_frame(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-change-browser_click",
+        &watched,
+        &hidden,
+    );
+    // The first frame with the data is the resting state: the unchanged group is closed on it and
+    // on every frame after, and no block folds or unfolds.
+    for (at, frame) in opening.hidden.iter().enumerate() {
+        assert!(
+            frame.iter().all(|h| *h == 0.),
+            "frame {at}: the unchanged group and the empty blocks have no height: {frame:?}"
+        );
+    }
+    steady(&watched, &opening.heights).unwrap();
+    assert!(
+        opening.heights[0].iter().all(|h| *h > 0.),
+        "the first frame draws the rows: {:?}",
+        opening.heights[0]
+    );
+    // Then the window draws no frame and asks for none.
+    settle(cx);
+    assert_eq!(frames_asked_at_rest(&shell, cx), 0);
+}
+
+#[gpui_kit::test]
+fn a_first_review_opens_in_its_resting_state_too(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "almanac");
+    write_script(&user, "almanac", &almanac());
+    let (shell, cx) = window(&user, cx);
+    let watched = [
+        "connection-review-group-judged",
+        "connection-review-row-3-search",
+        "connection-review-row-3-write",
+        "connection-review-row-3-open",
+    ];
+    let opening = open_frame_by_frame(
+        &shell,
+        cx,
+        "almanac",
+        "connection-review-row-3-search",
+        &watched,
+        &["connection-review-none-block"],
+    );
+    steady(&watched, &opening.heights).unwrap();
+    assert!(opening.heights[0].iter().all(|h| *h > 0.));
+    assert!(opening.hidden.iter().flatten().all(|h| *h == 0.));
+    settle(cx);
+    assert_eq!(frames_asked_at_rest(&shell, cx), 0);
+}
+
+#[gpui_kit::test]
+fn opening_a_group_of_the_review_still_unfolds_it(cx: &mut TestAppContext) {
+    let user = rereview_user();
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-change-browser_click",
+    );
+    assert_eq!(height(cx, "connection-review-unchanged-body"), 0.);
+    press(cx, "connection-review-unchanged");
+    a_third_later(cx);
+    let moving = height(cx, "connection-review-unchanged-body");
+    settle(cx);
+    let open = height(cx, "connection-review-unchanged-body");
+    assert!(open > 0., "the group is open");
+    assert!(
+        moving > 0. && moving < open,
+        "it unfolds over a panel: {moving}px of {open}px a third in"
+    );
+    // And "What changed" still folds on its header: its body, which clips the rows, is neither at
+    // its full height nor gone a third in (a row's own frame keeps its height while it clips).
+    let whole = height(cx, "connection-review-changes-body");
+    assert!(whole > 0., "the group is open");
+    press(cx, "connection-review-changes");
+    a_third_later(cx);
+    let folding = height(cx, "connection-review-changes-body");
+    assert!(
+        0. < folding && folding < whole,
+        "the group folds over a panel: {folding}px of {whole}px a third in"
+    );
+}
+
+#[gpui_kit::test]
+fn a_review_whose_server_is_asked_shows_one_loading_state_then_fades_to_its_content(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "almanac");
+    // The server is slow to list its tools, so that frames are drawn while it is asked.
+    let mut slow = almanac();
+    slow["list_sleep_ms"] = json!(500);
+    write_script(&user, "almanac", &slow);
+    let (shell, cx) = window(&user, cx);
+    let watched = [
+        "connection-review-group-judged",
+        "connection-review-row-3-search",
+    ];
+    let opening = open_frame_by_frame(
+        &shell,
+        cx,
+        "almanac",
+        "connection-review-row-3-search",
+        &watched,
+        &[],
+    );
+    // One loading state while the server is asked, from the first frame to the data.
+    assert!(!opening.loading.is_empty(), "the server was asked");
+    assert!(
+        opening.loading.iter().all(|shown| *shown),
+        "{:?}",
+        opening.loading
+    );
+    // Its replacement is one fade: the loading state leaves once, never comes back, and the
+    // blocks of the content are at their size throughout.
+    let gone = opening.skeleton.iter().position(|shown| !shown);
+    assert!(gone.is_some(), "the loading state is gone after two panels");
+    assert!(
+        opening.skeleton[gone.unwrap()..].iter().all(|shown| !shown),
+        "{:?}",
+        opening.skeleton
+    );
+    steady(&watched, &opening.heights).unwrap();
+}
+
+/// The heights drawn now of the rows of the form's three lists (the elements that clip them as
+/// they unfold), by the keys the form gave them: only those that are drawn.
+fn form_rows(cx: &mut VisualTestContext) -> Vec<(String, f32)> {
+    let mut rows = Vec::new();
+    for kind in ["variable", "limit", "site"] {
+        for key in 1..=16 {
+            let id = format!("connection-{kind}-item-{key}");
+            if present(cx, &id) {
+                rows.push((id.clone(), height(cx, &id)));
+            }
+        }
+    }
+    rows
+}
+
+#[gpui_kit::test]
+fn the_connection_form_opens_in_its_resting_state(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "browser-token", "secret": SECRET, "description": "The browser's token"}),
+    )
+    .unwrap();
+    agent_browser(&user, &["agent_browser_click"], false);
+    let token = json!({"vault": "browser-token"});
+    user.call(
+        "connection.edit",
+        json!({"name": "browser",
+            "env": {"BROWSER_TOKEN": token, "BROWSER_KEY": token, "BROWSER_SEAT": token},
+            "only": {"url": ["https://shop.example.com"], "app": ["gedit"]},
+            "sites": ["sso.example.com", "id.example.org"]}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| {
+        visible(cx, "connection-browser")
+    });
+    click(cx, "connection-more-browser");
+    press(cx, "edit-connection-browser");
+
+    // What the window draws from the click on Edit, a frame (16 ms) at a time, until the dialog
+    // and its fade are done: every row of the three lists is at its height whenever it is drawn.
+    let mut frames = Vec::new();
+    for _ in 0..(2 * PANEL.as_millis() as u64 / 16) {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        frames.push(form_rows(cx));
+    }
+    let rest = frames.last().unwrap().clone();
+    assert_eq!(rest.len(), 7, "3 variables, 2 limits, 2 sites: {rest:?}");
+    for (id, rest) in &rest {
+        assert!(*rest > 0., "{id} is drawn at rest");
+    }
+    for (at, frame) in frames.iter().enumerate() {
+        for (id, seen) in frame {
+            let rest = rest.iter().find(|(other, _)| other == id).unwrap().1;
+            assert!(
+                (seen - rest).abs() < 0.5,
+                "{id} is {seen}px high on frame {at} and {rest}px at rest"
+            );
+        }
+    }
+
+    // A row added once the form is open still unfolds.
+    press(cx, "connection-new-variable");
+    a_third_later(cx);
+    let arriving = form_rows(cx)
+        .into_iter()
+        .filter(|(id, _)| id.starts_with("connection-variable-item-"))
+        .filter(|(id, _)| !rest.iter().any(|(old, _)| old == id))
+        .collect::<Vec<_>>();
+    assert_eq!(arriving.len(), 1, "one new variable row: {arriving:?}");
+    let moving = arriving[0].1;
+    let whole = rest
+        .iter()
+        .find(|(id, _)| id.starts_with("connection-variable-item-"))
+        .unwrap()
+        .1;
+    assert!(
+        0. < moving && moving < whole,
+        "a row added after the form opened unfolds: {moving}px of {whole}px a third in"
+    );
+}
+
+#[gpui_kit::test]
+fn a_row_that_moves_after_the_review_opened_still_unfolds(cx: &mut TestAppContext) {
+    let user = rereview_user();
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-change-browser_click",
+    );
+    // The unchanged group holds its rows (browser_snapshot is "passes", browser_upload "asked"):
+    // open it, then give browser_open another setting, so that it reaches a group that has no
+    // rest of its own: a slot that is new after the review opened.
+    press(cx, "connection-review-unchanged");
+    settle(cx);
+    let row = row_of(cx, "browser_open");
+    assert_eq!(group_of(cx, "browser_open"), Some("judged"));
+    let whole = height(cx, &row);
+    assert!(whole > 0.);
+    click_pill(cx, &row, "off");
+    a_third_later(cx);
+    let arriving = height(cx, "connection-review-row-2-browser_open");
+    assert!(
+        0. < arriving && arriving < whole,
+        "it unfolds in its new group over a panel's time: {arriving}px of {whole}px"
+    );
+    settle(cx);
+    assert_eq!(group_of(cx, "browser_open"), Some("off"));
+    let rest = height(cx, "connection-review-row-2-browser_open");
+    assert!(
+        (rest - whole).abs() < 0.5,
+        "{rest}px at rest, {whole}px before"
+    );
 }

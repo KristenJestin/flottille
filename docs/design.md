@@ -421,8 +421,12 @@ review) subscribes to it instead of reading again and again. Four parts, each it
 - **A subscription** is (agent, source, target, the events chosen, whose events count, a
   deadline when the agent gave one), stored, so that it survives a restart of the daemon; nothing that happened meanwhile
   is lost, since the next round compares with what the store kept
-  (`crates/flottille/src/subscriptions.rs`). The agent subscribes itself (`forge` `subscribe`,
-  `tickets` `subscribe`, `wake`, `docs/tools.md`); nothing subscribes it.
+  (`crates/flottille/src/subscriptions.rs`). What subscribes an agent is the agent itself
+  (`forge` `subscribe`, `tickets` `subscribe`, `wake`, `docs/tools.md`), or, for a session, the
+  automatic subscriptions the user set in Settings and per project (`docs/extensions.md`,
+  "Automatic subscriptions"): a pull request it opens, its own opened another way, the ticket it
+  works on, each with the events chosen, from people only, said where it starts; a `subscribe` of
+  its own replaces one. Nothing else subscribes it, and never a child nor an extension's agent.
 - **Until the target ends.** Each read that holds events the subscription waits for is
   delivered, every such event of that read in one delivery, and the subscription goes on: the
   agent subscribes once, and never renews it nor adds a timed wake "as a safety net". Since it
@@ -1144,7 +1148,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its tickets and its open questions, with "New spec"; a spec's page shows the spec, its
   questions each answered in one click, Ready and Back to draft, and the sessions that worked on
   it (`docs/extensions.md`, "Specs");
-  the project's Settings, in five tabs (`reference/gpui.md`, rule 13), opening on the first.
+  the project's Settings, in six tabs (`reference/gpui.md`, rule 13), opening on the first.
   **Repositories** holds its **Repositories** (a count; "The git repositories of the project. Each
   workspace gets its own copy of each.", or for a project of one, "The project folder is the
   repository."): each a row with **Starts from** (`develop, then main`), **Remote** (`origin ·
@@ -1183,7 +1187,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   (`projects.md`). **Features** holds the same list as Settings', of the features that touch a
   project (Specs, Review, later the handbook): each row opens its page, with the project's switch
   and the values a project may set, each offering As in Settings first (`reference/gpui.md`, rule
-  14); a feature off in Settings is a faded row whose line, Off in Settings, is a link. A field saved
+  14); a feature off in Settings is a faded row whose line, Off in Settings, is a link. **Vault**
+  (the last of the six, Usage later) lists the entries the project sees, its own first, then every
+  project's marked "Every project", each the row of Settings, Vault (its name, its project, what
+  it is for, never a value; one list pattern), with **New entry**, which opens Settings, Vault's
+  own dialog with "Seen by agents of" set to the project (still changeable), and a click on a row,
+  which edits the entry in that same dialog (an entry of every project says so on it); closed, the
+  dialog brings the window back to this tab. The list follows the vault's changes live, its rows
+  unfolding and folding away, and an empty list says so. A field saved
   on its own shows its Save only once it changed (rule 4);
 - Settings, in tabs by subject (`reference/gpui.md`, rule 13): **Agents**, **Approvals**,
   **Features**, **Vault** and **General**, one shown at a time, as in a project's settings. It
@@ -1304,17 +1315,29 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   about ten and then scrolls, and takes pictures (pasted from the clipboard, dropped from a file or
   picked with Attach: thumbnails with a remove button, sent with the message as ACP image blocks,
   stored in Flottille's data folder so the conversation shows them again; said in one sentence and
-  left out when the session's agent takes none). A click on a picture, in a message or in the
+  left out when the session's agent takes none). A picture is also a chip in the text where it was
+  put, at the caret (an image glyph, `Image 1`, its name and size), the same number on its
+  thumbnail, numbered from 1 in the order of the chips: removing the chip removes the picture, the
+  thumbnail's remove button removes the chip, and an undo or a paste of the chip within the
+  composer brings the picture back. The message is sent with each chip as its marker,
+  `[Image 1: photo.png]`, and the agent reads each picture right after its marker (the ACP blocks
+  interleave: text, image, text); a message in the conversation, and one that waits, shows the
+  chips in its text, a click on a picture's chip opening it as its thumbnail does. A draft keeps
+  its chips (the composer of a session lives as long as the window), and a message taken back
+  comes back with them, its markers read back as chips. The same holds in the project page's
+  composer. A click on a picture, in a message or in the
   composer, opens it in the large modal: at its own size, scaled down to fit the window and never
   up, with the arrows (keys and buttons, "2 of 3") through the message's pictures; what the root does while a turn runs (`Thinking…`,
   `Writing…`, `Running <tool>…`) is said in the same bar, where the words cross-fade as they change,
   and goes with the turn. A running agent is
   drawn by its icon alone, in the tree and in the rail: no text badge, nothing in the header. In the
   composer, a word at the cursor that starts with `/`, anywhere in the message, lists the project's
-  commands, filtered as the user types: picking one completes that word into `/name `, and sending
+  commands, filtered as the user types: picking one completes that word into `/name `, a chip in
+  the text (the kit's `TokenField`: the caret steps over it, Backspace or Delete takes it whole; a
+  `/name` typed by hand becomes one once its word is finished), and sending
   it sends the commands' instructions with the message as it was written (a `/word` that names none
-  is sent as text); the message and the queued message show what the user typed, each command as a
-  chip, what the agent received in a fold; the header says the session's title and its place,
+  is sent as text); the message and the queued message show what the user typed, each command as
+  the same chip, and nothing of what the agent received (`agent read --json` keeps it); the header says the session's title and its place,
   and no state; a rail with, from its top, the session's tree of agents (each row with the share
   of its context the agent used, a percentage beside a thin bar, at the right of the name's line so that the second line has the whole row's width and is cut, with its whole text in a tooltip, only when it cannot fit; the session's own
   agent says only what it runs on, the others their name over their model, their effort (by name, `Sonnet 5.5 · medium`) and what they do; a review is one such row, `Review, round 1` over `3/4 checks · 2 findings`, with a chevron at its right end that folds its checks and its findings, unfolded while it runs and folded once it is done; the composer's bar does not say
@@ -1332,7 +1355,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   as many lines as it takes, its class
   and the judge's reason, or the first reason it was held, on one line, "Details" unfolding the
   rest (why it was held, one sentence for each reason, and for a base card the sentence that says
-  why it always comes back), and Deny and Allow; a base card stands apart, in the alarm colour;
+  why it always comes back), and Deny and Allow; a base card stands apart by its "Always asks" tag and its still dot, in the attention tone like the others: a request that waits is never drawn as an error, and a denied one is recorded in the error ink;
   an answered card leaves). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
@@ -1421,8 +1444,10 @@ to the front.
 ## 12. Later: remote
 
 Designed for, not built before the milestone "Remote": the user's machines and devices, members
-of their own hub (the signed member list, invitations, presence, and a relay for what cannot go
-direct), linked peer to peer by their own keys over an end-to-end encrypted transport, each with a
+of their own hub (a control plane: the signed member list, invitations, presence and addresses;
+it never carries a link's bytes), linked peer to peer, directly, by their own keys over an
+end-to-end encrypted transport, over whatever network the user has (Flottille handles no network
+channel: no relay, no NAT traversal), each with a
 role (`runner`, `controller`, `viewer`); sessions started on another machine through the same
 `agent_launch`, the code sent over Flottille's own link and the new commits brought back, with the
 tree spanning machines through deliveries; a native Android app, tunnels to a run's port, and

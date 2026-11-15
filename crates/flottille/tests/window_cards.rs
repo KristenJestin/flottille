@@ -347,7 +347,8 @@ fn a_long_vault_request_stays_inside_its_card(cx: &mut TestAppContext) {
         vec![(
             "vault.asked",
             json!({"name": UNBROKEN, "project": UNBROKEN, "description": SPACED, "why": format!("{UNBROKEN} {SPACED}"),
-                "takes_username": true}),
+                "url": format!("https://{UNBROKEN}.example.com/"),
+                "host": format!("{UNBROKEN}.example.com"), "takes_username": true}),
         )],
         cx,
     );

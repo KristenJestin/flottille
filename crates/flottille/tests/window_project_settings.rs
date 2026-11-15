@@ -933,3 +933,62 @@ fn a_project_s_rules_show_no_save_at_rest_and_one_once_they_are_changed(cx: &mut
         "and folds away once set back"
     );
 }
+
+#[gpui_kit::test]
+fn a_project_overrides_a_subject_and_goes_back_to_settings(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let (shell, cx) = window(&user, cx);
+    open_features(&user, &shell, cx);
+    until(&shell, cx, "the automatic subscriptions are a row", |cx| {
+        visible(cx, "project-features-autosubscriptions")
+    });
+    click(cx, "project-features-autosubscriptions");
+    until(&shell, cx, "its page is in", |cx| {
+        visible(cx, "project-autosubscriptions-setting-ticket-commented")
+    });
+    settle(cx);
+    assert!(!present(cx, "project-autosubscriptions-setting-ticket-set"));
+
+    // The project's own events, said set here.
+    click(cx, "project-autosubscriptions-setting-ticket-commented");
+    until(&shell, cx, "the project has its own events", |_| {
+        listed(&user, "autosubscriptions")["projects"][0]["settings"]["ticket"]
+            == json!(["commented"])
+    });
+    until(&shell, cx, "the dot is shown", |cx| {
+        settle(cx);
+        visible(cx, "project-autosubscriptions-setting-ticket-set")
+    });
+    assert_eq!(
+        label(cx, "project-autosubscriptions-setting-ticket-set").as_deref(),
+        Some("set here")
+    );
+    // Settings keep theirs.
+    assert!(
+        listed(&user, "autosubscriptions")["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["key"] == "ticket" && s["value"] == json!([]) && s["set"] == false)
+    );
+
+    // And back to Settings' value, the dot fading away.
+    click(cx, "project-autosubscriptions-setting-ticket-reset");
+    until(&shell, cx, "the project goes back to Settings", |_| {
+        listed(&user, "autosubscriptions")["projects"][0]["settings"]
+            .get("ticket")
+            .is_none_or(Value::is_null)
+    });
+    until(&shell, cx, "the dot goes", |cx| {
+        settle(cx);
+        !present(cx, "project-autosubscriptions-setting-ticket-set")
+            && !present(cx, "project-autosubscriptions-setting-ticket-reset")
+    });
+    settle(cx);
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves at rest"
+    );
+}

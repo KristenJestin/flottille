@@ -94,6 +94,7 @@
 //! |---|---|
 //! | `{"say": "text"}` | an `agent_message_chunk` |
 //! | `{"say": "text", "message": "m1"}` | the same, its `messageId` `m1`: the chunks that share one belong to one message |
+//! | `{"say_clock": true}` | an `agent_message_chunk` of the wall clock in milliseconds since the epoch and a space, as it is sent: a measure of how long a piece takes to the store |
 //! | `{"say_variable": "NAME"}` | the value of that variable of its environment, in three `agent_message_chunk`s |
 //! | `{"update": {…}}` | that session update, as it is |
 //! | `{"recall": true}` | an `agent_message_chunk` saying what the user said earlier in this session (`earlier you said: a | b`): the proof that a session kept its history |
@@ -542,6 +543,12 @@ impl Agent {
             }
             if let Some(text) = step["say"].as_str() {
                 self.say(session, text, step["message"].as_str());
+            } else if step["say_clock"] == true {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                self.say(session, &format!("{now} "), None);
             } else if let Some(name) = step["say_variable"].as_str() {
                 let value: Vec<char> = std::env::var(name).unwrap_or_default().chars().collect();
                 let third = value.len().div_ceil(3).max(1);

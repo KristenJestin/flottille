@@ -7,8 +7,8 @@ Every branch that matters publishes its own build, with a version that says wher
 |---|---|---|---|
 | `main` | stable | `0.3.0` | a GitHub release, tagged `v0.3.0` |
 | `dev` | beta | `0.3.0-beta.12` | a pre-release, tagged `v0.3.0-beta.12` |
-| `stable/X.Y` | none: its builds install by `--version` | `0.3.2-rc.1`, then `0.3.2` | a pre-release per push, tagged `v0.3.2-rc.1`; its release, marked latest when above the latest (see "Stable lines") |
-| `next/X.Y` | none: its builds install by `--version` | `0.5.0-next.7` | a pre-release per push and per merge of dev, tagged `v0.5.0-next.7` (see "The next version") |
+| `stable/X.Y` | rc (`install.sh` offers none: its builds install by `--version`) | `0.3.2-rc.1`, then `0.3.2` | a pre-release per push, tagged `v0.3.2-rc.1`; its release, marked latest when above the latest (see "Stable lines") |
+| `next/X.Y` | next (`install.sh` offers none: its builds install by `--version`) | `0.5.0-next.7` | a pre-release per push and per merge of dev, tagged `v0.5.0-next.7` (see "The next version") |
 | `feat/*`, `fix/*` | alpha | `0.3.0-alpha.feat-46-packages.4` | a pre-release per push, tagged `v0.3.0-alpha.feat-46-packages.4` like a beta, all deleted with the branch |
 
 Nothing is published anywhere but GitHub's releases of the repository. **Releases are immutable**
@@ -20,7 +20,8 @@ line's (a release candidate), `-next.N` the next version's. The beta channel (`i
 --channel beta`, `flottille update --channel beta`) reads `-beta.` only, as it always did, so a
 line's build never takes it over; and two lines never publish the same version. There is no
 channel for `-rc.` and `-next.` (none for now): each is installed by its version
-(`--version 0.5.0-next.7`).
+(`--version 0.5.0-next.7`). Their binaries say their own channel, `rc` or `next`, and
+`flottille update` with no flag stays on the line (see "Updating").
 
 ## Releasing
 
@@ -140,7 +141,8 @@ for HEAD and its branch by default):
 `Cargo.toml` keeps its own version; CI gives the computed one to the build
 (`FLOTTILLE_BUILD_VERSION`, `FLOTTILLE_BUILD_CHANNEL`, `FLOTTILLE_BUILD_BRANCH`, read by
 `crates/flottille/build.rs`). `flottille --version` says the version, the channel and the commit:
-`flottille 0.3.0-beta.12 (beta, 3f2a9c1d7b44)`. A build CI did not make is `local`:
+`flottille 0.3.0-beta.12 (beta, 3f2a9c1d7b44)`; a build of `stable/X.Y` says `rc`
+(`flottille 0.3.2-rc.1 (rc, …)`), a build of `next/X.Y` says `next`. A build CI did not make is `local`:
 `flottille 0.1.0 (local, 3f2a9c1d7b44)`.
 
 ## What CI publishes
@@ -356,7 +358,12 @@ entry and the icons: to remove Flottille by hand, delete `flottille` and `flot` 
 [--force]` replaces the binary it runs from with the channel's latest build (the most recently
 published, see "Installing"; an alpha's, the highest version of its branch): by default the channel last chosen with `--channel` (and, for alpha,
 its branch), else the one it was built on (a `local` build takes stable) and the branch it was
-built from; `--branch` goes with `--channel alpha` only. It reads the releases as `install.sh` does, with the user's own `curl`
+built from. A build of a line stays on it: an `rc` build takes the next rc of its line, then that
+line's stable release, and later its next fix's rc; a `next` build takes the next `-next.N` of
+its line, then dev's betas from that version on once the line is merged into dev (a beta of
+the line is not "older" than its last next, though it sorts below it); a build of a line reads the releases page by
+page, 100 at a time, until the page of its own version (at most ten pages), as dev's betas fill the first ones. `--channel` (stable, beta
+or alpha) leaves the line, and is remembered as ever; `--branch` goes with `--channel alpha` only. It reads the releases as `install.sh` does, with the user's own `curl`
 spawned without a shell, checks the archive's SHA-256 sum (a wrong one replaces nothing), unpacks
 it with `tar` in a folder beside the binary and renames the new binary over the old one: the file
 is the old one or the new one, never half of one.
@@ -370,7 +377,10 @@ is the old one or the new one, never half of one.
   update succeeds, in `$XDG_STATE_HOME/flottille/update-channel.json`: it is Flottille's own
   memory, not a setting, so it is not in the configuration. A plain `flottille update` stays on it,
   so `--channel alpha --branch feat/specs` then `--channel beta` goes there and back. `install.sh`
-  does not write it: after installing another channel by hand, say `--channel` once.
+  does not write it: after installing another channel by hand, say `--channel` once. A choice
+  remembered wins over the build's line, and `--channel` offers no rc and no next: to follow the
+  line again, delete `$XDG_STATE_HOME/flottille/update-channel.json` (`~/.local/state/flottille/`
+  when `XDG_STATE_HOME` is not set).
 - **`--version <X.Y.Z[-pre]>` installs that release exactly**, of any channel, as `install.sh
   --version` does, and goes without `--channel` and `--branch`. A version that does not exist is
   refused with the nearest published ones, and nothing is downloaded. It does not touch the

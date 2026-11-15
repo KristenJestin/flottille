@@ -1463,6 +1463,94 @@ fn the_window_draws_no_frame_at_rest_on_connections_page_and_its_review(cx: &mut
     assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the review");
 }
 
+/// #773 and #846: the composer holding a picture's chip and a command's, and a message that shows
+/// its chips in the conversation, at rest.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_with_chips_in_the_composer_and_a_message(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    let id = idle_session(&user);
+    user.call(
+        "command.add",
+        json!({"project": "app", "name": "ship", "description": "Ship it",
+            "instructions": "Push the branch."}),
+    )
+    .unwrap();
+    let mut picture = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(8, 8, image::Rgb([200, 80, 40]))
+        .write_to(&mut picture, image::ImageFormat::Png)
+        .unwrap();
+    let picture = picture.into_inner();
+    let data = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(&picture)
+    };
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "see [Image 1: a.png] then /ship",
+            "images": [{"mime": "image/png", "data": data}]}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the message shows with its picture", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|page| {
+                page.read(cx)
+                    .conversation()
+                    .read(cx)
+                    .blocks()
+                    .iter()
+                    .any(|b| {
+                        matches!(b, flottille_window::conversation::Block::Message { images, .. }
+                        if images.len() == 1)
+                    })
+            })
+        })
+    });
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&id).cloned())
+        .expect("the session has a composer");
+    until(&shell, cx, "the composer knows the commands", |cx| {
+        reply.read_with(cx, |r, _| r.knows_commands())
+    });
+    reply.update_in(cx, |reply, window, cx| {
+        reply.restore("/ship ", Vec::new(), window, cx)
+    });
+    reply.update_in(cx, |reply, _, cx| {
+        reply.attach(
+            gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, picture.clone()),
+            cx,
+        )
+    });
+    until(&shell, cx, "both chips are in the composer", |cx| {
+        reply.read_with(cx, |r, cx| {
+            r.tokens()
+                .read(cx)
+                .value(cx)
+                .iter()
+                .filter(|p| matches!(p, gpui_design_system::Piece::Token(_)))
+                .count()
+                == 2
+        })
+    });
+    // The caret blinks in a field that has the focus: the page at rest has none.
+    cx.update(|window, cx| window.blur(cx));
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
 #[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_project_s_progress_with_a_milestone_unfolded(
     cx: &mut TestAppContext,
