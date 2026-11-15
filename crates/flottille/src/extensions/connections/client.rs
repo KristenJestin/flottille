@@ -428,7 +428,7 @@ async fn start_with(
                 .map_err(|error| error.to_string())?;
             let options = match adapter {
                 Some(adapter) => {
-                    let sites = super::adapters::kept_to(daemon, adapter, &declaration.name, words);
+                    let sites = super::adapters::kept_to(daemon, adapter, declaration);
                     super::adapters::start_options(&folder, &sites)?
                 }
                 None => Vec::new(),

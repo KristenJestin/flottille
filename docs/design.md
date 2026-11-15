@@ -368,8 +368,8 @@ says its pull request is merged and the branch is no further than the commit it 
 branch it aimed at is the base), or it has none and the branch is contained in the base the
 workspace started from. A pull request open, a draft or closed, commits made after the merge, or
 a forge that cannot be read, is not integrated; the forge is asked at most once every five
-minutes for a session, and a check that came sooner runs again once they are over, a turn ending
-or not.
+minutes for a session, and a check that came sooner, or found the work not integrated yet (a pull
+request merged later), runs again once they are over, a turn ending or not, while both stay idle.
 
 ### 5.3 What the parent is told
 
