@@ -1242,22 +1242,42 @@ way in:
   `_auth_show`, `_auth_delete`, `agent_browser_set_credentials` (a password as an argument), its
   plugins `agent_browser_plugin_add`, `_plugin_list`, `_plugin_run`, `_plugin_show` (they run
   commands with its credential providers) and `agent_browser_with_login`, whatever the user set.
+  So are `agent_browser_connect` and `agent_browser_state_load`: they bring a browser, or a
+  session, that someone else controls, and a login would type into it (the start options `--cdp`
+  and `--state` already make `login` refused, below).
 - **`login` is offered beside every other action**, as agent-browser's own login restricts
   nothing after it: what keeps the secret is that it never reaches the model's context (Flottille's
   own `auth login` run fills it), the masking of the outputs, and the session kept to the entries'
   sites (below). The actions that run a script in the page, which no gate can judge, are **off at
-  the first pin** (`eval`, `wait_for_function`, `add_init_script`, `batch`, which runs the others),
-  the user's to turn on; every other action is judged at the first pin, as any server's.
+  the first pin**: `eval`, `wait_for_function`, `add_init_script`, `batch` and `flow_run` (which
+  run or replay the others), `network_route` (which serves a body of its own for the page's
+  requests) and `chat` (agent-browser's own model, through an external gateway). So are those that
+  write the page's traffic to a file, which no masking reaches: `network_har_start`,
+  `network_har_stop`, `trace_start`, `trace_stop`. Both are the user's to turn on; every other
+  action is judged at the first pin, as any server's. A connection accepted with one of the first
+  on (`eval`) gets `login` beside it with no new review: the review says so (`agent_browser_eval
+  is on: a page script can read what login types`).
+- **A `url` is a web address.** While the adapter applies, a call whose `url` argument is not
+  `http` or `https` with a host is refused before the server sees it (`open`, `tab_new`,
+  `pushstate`, any action taking one): a `javascript:` or a `data:` URL runs in the page that is
+  open, the login form among them, and a `file:` one reads this machine. `wait_for_url` and
+  `network_route` are left out: their `url` is a pattern matched against an address, never opened.
 - **Every output of the connection's tools is masked** for the vault's secrets, those of the
   entries bound to it among them, before the agent, the store or a log sees it (`docs/vault.md`),
-  raw and in the forms a page shows a typed secret in: an address (a form sent with GET, encoded)
-  and HTML (escaped).
-- **What stays possible**, as agent-browser's own docs leave it to its policies: a page script
-  can copy a field into what another action reads, a show-password toggle shows the secret on a
-  screenshot (pixels are not masked), a selector can test a field's `value` attribute one guess at
-  a time, and an action that reads the page (`snapshot`, `get_value`, `eval`…) right after a login
-  may see the secret in a form other than those masked. Each call of these actions is judged by
-  the gate, which is what stands against them; the user turns off what they do not want.
+  raw and in the forms a page shows a typed secret in: an address (a form sent with GET, encoded),
+  HTML (escaped as a text, as an attribute, or with all five of `&<>"'`), JSON (escaped), and, for
+  an entry with a username, `<username>:<secret>` in base64 (an `Authorization: Basic` header).
+- **What stays possible**, as agent-browser's own docs leave it to its policies. Handled: a
+  `javascript:` or `data:` URL (refused, above), a script-running action (off at the first pin),
+  another browser or a saved session (`connect`, `state_load`, `--cdp`, `--state`: off, or
+  `login` refused), a HAR or a trace (off at the first pin). Left: a page script can copy a field
+  into what another action reads, a show-password toggle shows the secret on a screenshot (pixels
+  are not masked), a selector can test a field's `value` attribute one guess at a time, an action
+  that reads the page (`snapshot`, `get_value`, `eval`…) right after a login may see the secret in
+  a form other than those masked, and **a page saved to a file** (`pdf`, `download`, a HAR or a
+  trace the user turned on) is not masked: Flottille masks what the tools answer, not the files
+  the browser writes. Each call of these actions is judged by the gate, which is what stands
+  against them; the user turns off what they do not want.
 - **The session is kept to the entries' sites.** While the adapter applies and the connection has
   an entry bound with a usable web address, the configuration Flottille writes holds
   `"allowedDomains": [<hosts>]`: the exact hosts of the entries bound to this connection, sorted,
